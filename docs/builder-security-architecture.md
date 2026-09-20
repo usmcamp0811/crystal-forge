@@ -32,7 +32,7 @@ This is the most reliable path because:
 | Strategy | Builder needs Git? | Builder needs Attic before build? | Build-plan integrity check | Best for |
 |---|---|---|---|---|
 | `source_re_evaluate_verified` + `server_bundled_archive` | No | No | ✅ `derivation_mismatch` | Recommended default |
-| `source_re_evaluate_verified` + `local_git_worktree` | Yes | No | ✅ `derivation_mismatch` | Colocated / internal |
+| `source_re_evaluate_verified` + `local_git_worktree` | Not supported by contract v1 | No | N/A | Reserved |
 | `server_derivation` | No | No | ❌ Server-trusted only | Simplest path |
 
 ---
@@ -113,11 +113,14 @@ graph TB
 | Auth outbound | Ed25519 verification of builder requests; OIDC for human users |
 | Network exposure | HTTPS API (configurable port, typically 443/8443) |
 | Secrets held | Flake Git credentials (SSH keys / netrc); OIDC client secrets; DB password |
-| Evaluator | `nix-eval-jobs` runs on the server with impure mode for remote flake refs |
+| Evaluator | `nix-eval-jobs` evaluates a verified Nix store source in pure mode with explicit IFD policy |
 | Source mirroring | Server maintains bare Git mirrors at `source_archive_root/mirrors/` |
-| Source archives | Per-job tar.gz archives at `source_archive_root/archives/jobs/<job_id>.tar.gz` |
+| Source artifacts | Canonical tracked-tree tar files at `source_archive_root/artifacts/<mirror_id>/<commit>.tar` |
 
-**The server is the only component that touches Git remotes or repository credentials.** Builders receive pre-packaged artifacts.
+**The server is the only component that touches private Git remotes or
+repository credentials.** Credentials apply only to mirror fetches. The server
+exports the tracked commit tree before Nix store ingestion, so credentials and
+Git worktree metadata cannot enter the authorized source NAR.
 
 ### 3.2 Crystal Forge Builder
 
@@ -172,15 +175,15 @@ sequenceDiagram
     alt ServerBundledArchive mode
         Server->>GitCache: git clone --bare / git fetch<br/>(server uses stored SSH key or netrc)
         GitCache-->>Server: 
-        Note over Server: server: tar czf archive, sha256sum<br/>save to source_archive_root/archives/&lt;job_id&gt;.tar.gz
+        Note over Server: publish canonical tracked-tree tar and identity<br/>before the build job becomes claimable
     end
 
     Server-->>Builder: 200 OK — Job Manifest<br/>{job_id, drv_path, source_identity,<br/>archive_url, archive_sha256, expected_drv_path}
 
     Builder->>Server: 3. GET /builders/:id/jobs/:jid/source-archive<br/>Ed25519-signed
-    Server-->>Builder: 200 OK — streaming tar.gz<br/>(ReaderStream, no full archive in server RAM)
+    Server-->>Builder: 200 OK — streaming canonical tar<br/>(ReaderStream, no full artifact in server RAM)
 
-    Note over Builder: verify SHA-256<br/>extract to job-scoped mirror<br/>git worktree add
+    Note over Builder: enforce authorized size and SHA-256<br/>bounded extraction<br/>Nix store ingestion
 
     Builder->>Server: 4. POST /builders/:id/jobs/:jid/publish-derivation-closure<br/>Ed25519-signed
     Server->>GitCache: nix copy --to &lt;cache&gt;<br/>(server pushes .drv closure to cache)
@@ -205,7 +208,7 @@ sequenceDiagram
     participant S as CF Server
     participant B as Builder Host
 
-    Note over S: 1. Evaluate flake (server-side):<br/>nix eval --impure ...<br/>#nixosConfigurations.host.system.build.toplevel.drvPath
+    Note over S: 1. Materialize verified commit tree in Nix store.<br/>Evaluate pure with explicit IFD and no lock mutation.<br/>#nixosConfigurations.host.system.build.toplevel.drvPath
 
     S->>B: 2. Job manifest<br/>{drv_path, execution_strategy, source_input_delivery}
 
@@ -269,13 +272,13 @@ sequenceDiagram
     participant S as CF Server
     participant B as Builder Host
 
-    Git-->>S: clone/fetch top-level repo<br/>(server uses stored SSH key from DB)
-    Note over S: generate tar.gz of bare mirror<br/>sha256sum<br/>save to archives/jobs/&lt;job_id&gt;.tar.gz
+    Git-->>S: fetch top-level repo into bare mirror<br/>(server uses stored SSH key from DB)
+    Note over S: load and digest-check the artifact<br/>published during authoritative evaluation
     S->>B: job manifest (job_id, archive_url, sha256)
     B->>S: GET /source-archive (authenticated, streaming)
-    S-->>B: streaming tar.gz
+    S-->>B: streaming canonical tracked-tree tar
 
-    Note over B: verify sha256<br/>extract to mirrors/server-bundled/<br/>&lt;job_id&gt;/&lt;mirror_id&gt;.git<br/>git worktree add<br/>nix eval (local)<br/>compare .drvPath<br/>nix-store --realise
+    Note over B: enforce authorized size and sha256<br/>extract tracked tree safely<br/>verify lock and NAR hashes<br/>nix eval (pure)<br/>compare .drvPath<br/>nix-store --realise
     B-->>S: POST /complete<br/>{output_path, cache_pushed}
 ```
 
@@ -292,7 +295,7 @@ sequenceDiagram
     participant B as Builder Host
 
     S->>B: job manifest (repo_url, commit_hash, expected_drv_path)
-    Note over B: git clone --bare &lt;repo_url&gt;<br/>(only if mirror doesn't exist)<br/>git fetch +refs/*:refs/*<br/>git worktree add --detach &lt;commit&gt;<br/>nix eval (local worktree)<br/>compare .drvPath to expected<br/>nix-store --realise
+    Note over S: contract version 1 rejects local_git_worktree<br/>before claiming a job
     B-->>S: report complete
 ```
 
@@ -359,10 +362,10 @@ The builder private key authorizes exactly:
 | **Builder → Server** *(all requests)* | Ed25519 signature (public key material, not secret), Builder ID (UUID, not secret), Session ID (process-lifetime, not a credential), Timestamp, Request body (job poll: strategy list; complete: store path, cache reference) |
 | **Builder → Server** *(log streaming)* | Build log text (stdout/stderr of nix build), CPU/RAM metrics, WebSocket or HTTP POST |
 | **Server → Builder** *(next-job response)* | Job manifest: job_id, derivation name, drv_path, execution strategy, source identity (repo URL, commit hash, mirror_id), archive_url (relative path), archive_sha256, expected_drv_path. **NOTE:** No repository credentials. No DB passwords. archive_url is a CF server path, not a Git URL. When remote builder-side cache push is enabled, this response may include narrowly scoped cache push config/credentials for the selected cache destination. |
-| **Server → Builder** *(source-archive)* | Binary tar.gz of bare Git mirror (top-level repo only). Streamed per-job; per-chunk RAM on server is bounded. Builder verifies sha256 before unpacking. |
+| **Server → Builder** *(source-archive)* | Canonical uncompressed tracked-tree tar used by authoritative evaluation. The builder enforces the manifest size and SHA-256 before bounded safe extraction. |
 | **Server → Builder** *(drv manifest)* | `GET /derivation-manifest` — JSON list of store paths (sorted, deduplicated requisite closure of the job's persisted drv_path). Server-computed, not builder-supplied. Used as authorization baseline for delta. |
 | **Server → Builder** *(drv archive)* | nix-store export binary format (full OR delta subset). **PREFERRED:** `POST /derivation-archive` with JSON `{"paths": [missing...]}` — server validates each requested path against the authorized manifest; 403 if any path is NOT in the manifest. Streams nix-store --export for exactly the validated subset. **FALLBACK:** `GET /derivation-archive` — streams full recursive closure (for servers that do not support the delta protocol). Both paths are streamed per argv chunk; no full-closure server buffer. |
-| **Server → Git** *(mirror clone)* | SSH private key (from DB, used by server only). Applied via `GIT_SSH_COMMAND` env var to git process. Never leaves server; never sent to builder. |
+| **Server → Git** *(explicit mirror fetch)* | SSH private key (from DB, used by server only). Applied via `GIT_SSH_COMMAND` env var to the fetch process. The mirror stores no remote URL. The key never leaves the server and is never sent to a builder. |
 | **Server → Cache** *(push)* | `nix copy --to <attic/S3 endpoint>`. Attic token / AWS credentials remain server-held for server-side cache push worker flows. Builders may separately receive short-scoped cache push credentials only for builder-side cache push jobs when trusted HTTPS forwarding is verified. |
 | **Builder → Cache** *(optional push)* | `attic push` or equivalent cache push command using credential-bearing cache config from the signed next-job response. Only used when builder-side cache push is enabled and credential transport is explicitly allowed. |
 | **Builder → Cache** *(substituter pull)* | Standard Nix substituter pulls (narinfo / .nar). Cache URL + optional auth token (configured on builder). Builder only pulls paths listed in job manifest. |
@@ -381,23 +384,9 @@ graph LR
     ROOT --> PUB["builder-api.pub"]
     PUB_NOTE["Corresponding public key (registered with server)"]
     
-    ROOT --> MIRRORS["flake-mirrors/ <br/>(LocalGitWorktree mode only)"]
-    MIRRORS --> MID["&lt;mirror_id&gt;.git/ <br/>Shared across jobs for same repo"]
-    MID --> BARE1["(bare git repo)"]
-    
-    ROOT --> BUNDLED["flake-mirrors/server-bundled/ <br/>(ServerBundledArchive mode)"]
-    BUNDLED --> JID["&lt;job_id&gt;/ <br/>Created per job, deleted on job cleanup"]
-    JID --> MID2["&lt;mirror_id&gt;.git/ <br/>Extracted from server-provided tar.gz"]
-    MID2 --> BARE2["(bare git repo)"]
-    
-    ROOT --> WT["flake-worktrees/ <br/>Per-job git worktrees (both modes)"]
-    WT --> MID3["&lt;mirror_id&gt;/"]
-    MID3 --> CHASH["&lt;commit_hash&gt;/"]
-    CHASH --> JID2["&lt;job_id&gt;/ <br/>Detached worktree, deleted on job cleanup"]
-    JID2 --> SRC["(nix flake source tree)"]
-    
-    ROOT --> ARCHIVES["source-archives/ <br/>Temp location during ServerBundledArchive download"]
-    ARCHIVES --> TMP["source-archive-&lt;job_id&gt;.tar.gz.tmp <br/>Written then extracted, deleted"]
+    ROOT --> WORK["flake-worktrees/ <br/>Temporary contract-v1 workspace"]
+    WORK --> TMP[".tmp*/source.tar <br/>Exact streamed artifact bytes"]
+    TMP --> TREE["tree/ <br/>Bounded validated extraction"]
 
     style ROOT fill:#f0f0f0,stroke:#333
     style KEY fill:#e8e8ff,stroke:#333
@@ -405,10 +394,8 @@ graph LR
 ```
 
 **Cleanup guarantees:**
-- Per-job worktrees are removed via `git worktree remove --force` after the build completes or fails.
-- Per-job server-bundled mirror dirs (`server-bundled/<job_id>/`) are deleted after worktree removal.
-- Temp archive files are deleted immediately after extraction regardless of success or failure.
-- Server-side job-scoped archives (`archives/jobs/<job_id>.tar.gz`) are deleted on job `complete`, `fail`, cancellation finalization, or claimed-job requeue after manifest/source/cache-config preparation errors via `cleanup_source_archive()`.
+- Builder temporary artifacts and extracted trees are removed when verification completes or fails.
+- Canonical server artifacts are content-bound publication records. Job completion and failure do not delete them. Retention is a server maintenance concern, not part of job finalization.
 
 ---
 
@@ -478,7 +465,7 @@ If an attacker compromises a builder host and exfiltrates everything on it, they
 | `builder-api.key` | Can impersonate the builder: claim jobs, complete/fail them. **Cannot** access other builders' jobs, the database, or deployment credentials. |
 | Per-job cache push credentials (conditional) | Can push to the configured cache destination within the permissions granted by the cache token/key. Only present when builder-side cache push is enabled and trusted HTTPS forwarding is configured. |
 | Nix build artifacts in `/nix/store` | Build outputs that were already pushed to the cache. |
-| Job-scoped source archive (if present during extraction) | A tar.gz of the top-level flake repo at one specific commit, already public via Git. |
+| Temporary source artifact (during extraction) | The canonical tracked tree for one exact commit. It contains no `.git` directory or repository remote configuration. |
 | Build log content | Text output from `nix build` of potentially sensitive derivations. |
 | Nix store paths from job manifest | The `.drv` path and output path for the current job. |
 
@@ -498,10 +485,17 @@ If an attacker injects a malicious job into the queue (requires compromising the
 
 1. Accept the job manifest.
 2. Download the source archive URL listed in the manifest.
-3. Evaluate `nix eval` against the source archive.
-4. Compare the evaluated `.drvPath` against the server-provided `expected_drv_path`.
+3. Verify the commit, lock digest, canonical source NAR, and evaluator contract.
+   The contract includes the probed Nix version, `builtins.currentSystem`,
+   purity, lock mutation, IFD, and source materialization schema. The server
+   rejects a mismatched polling capability before queue lookup or claim.
+4. Evaluate the verified store source in pure mode.
+5. Compare the evaluated `.drvPath` against the server-provided `expected_drv_path`.
 
-**Step 4 is the critical defense for `SourceReEvaluateVerified`.** A manipulated source that evaluates to a different `.drvPath` than the server recorded will cause a `derivation_mismatch` failure before any build starts. The build plan cannot be altered without invalidating the derivation identity check.
+**Steps 3 and 5 are the critical defenses for
+`SourceReEvaluateVerified`.** Source or evaluator incompatibility fails before
+evaluation or build. A different build plan causes `derivation_mismatch` before
+any build starts.
 
 For `ServerDerivation`, the `.drv` itself arrives from the server. A malicious `.drv` injected at queue time would build and report whatever the injected derivation produces.
 
@@ -521,8 +515,10 @@ When a build cannot proceed safely, the builder reports a specific failure phase
 
 | Phase | Trigger | Job State |
 |---|---|---|
-| `source_fetch` | Archive download failed, SHA-256 mismatch, tar extraction error, `git clone`/`fetch` failed | `failed` or retry |
+| `source_fetch` | Artifact download or transient local I/O failed | `failed` or retry |
+| `source_identity_mismatch` | Artifact digest, format, extraction safety, lock digest, store name, or NAR identity differs | `failed` (no build) |
 | `source_input_availability` | Required source inputs not available | `failed` or retry |
+| `evaluator_incompatible` | Contract version, Nix version, evaluator system, purity, lock mutation, IFD, or source schema differs | Released to `queued` for another compatible builder; retry budget unchanged |
 | `evaluation` | `nix eval .drvPath` failed on builder (timeout, eval error) | `failed` or retry |
 | `derivation_mismatch` | Builder-evaluated `.drvPath` ≠ server-expected `.drvPath` | `failed` (no retry — policy violation) |
 | `path_materialization` | `.drv` not available locally after delta manifest/archive or full archive download | `failed` or retry |
@@ -547,9 +543,8 @@ source_archive_root              = "/var/lib/crystal-forge/source-archives"
 # /etc/crystal-forge/builder.toml
 [builder]
 supported_execution_strategies = ["server_derivation", "source_re_evaluate_verified"]
-source_mirror_root              = "/var/lib/crystal-forge/flake-mirrors"
 source_worktree_root            = "/var/lib/crystal-forge/flake-worktrees"
-cleanup_source_worktrees        = true
+allow_import_from_derivation    = true
 
 # No git credentials on the builder. Server holds all repo credentials.
 ```
@@ -569,7 +564,7 @@ cleanup_source_worktrees        = true
 # /etc/crystal-forge/server.toml
 [server]
 remote_build_execution_strategy = "server_derivation"
-# source_delivery_mode defaults to local_git_worktree (ignored for server_derivation)
+# evaluator contract version 1 requires server_bundled_archive
 
 # /etc/crystal-forge/builder.toml
 [builder]

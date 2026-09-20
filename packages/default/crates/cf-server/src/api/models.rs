@@ -126,6 +126,8 @@ pub enum CveSeverity {
     High,
     Medium,
     Low,
+    /// Reports that no normalized CVSS severity is available.
+    Unknown,
 }
 
 /// Pipeline stage for a NixOS system's build/deploy lifecycle.
@@ -317,6 +319,10 @@ pub struct ScanningStatsResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanningQueueItemResponse {
+    /// Identifies the exact derivation represented by the row.
+    pub derivation_id: i32,
+    /// Is `true` when the derivation has a built store path that can be scanned.
+    pub rescan_eligible: bool,
     /// `None` when the system is deployed but has never been scanned.
     pub scan_id: Option<Uuid>,
     pub hostname: String,
@@ -332,12 +338,12 @@ pub struct ScanningQueueItemResponse {
     pub freshness: String,
     /// True when this is the latest scan row for its derivation.
     pub is_current: bool,
-    /// True when this derivation's commit is the latest known commit for its flake.
+    /// True when this derivation's commit is position-0 in the ready branch
+    /// snapshot for its flake.
     #[serde(default)]
     pub is_latest_per_flake: bool,
-    /// What triggered the scan. Not yet tracked in the schema; always `None`
-    /// until a trigger source column is added (tracked as follow-up).
-    pub trigger: Option<String>,
+    /// Identifies the persisted source that created the latest scan lifecycle.
+    pub source_trigger: Option<String>,
 }
 
 /// Paginated deployed configurations response (AC #37).
@@ -369,6 +375,8 @@ pub struct ScanningSystemsItemResponse {
     pub unscanned: i64,
     pub current_crit: i64,
     pub current_high: i64,
+    /// Identifies the derivation in the system's latest reported store path.
+    pub current_derivation_id: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -378,6 +386,48 @@ pub struct ScanningActivityItemResponse {
     pub event: String,
     pub detail: String,
     pub status: String,
+}
+
+/// Returns bounded operational diagnostics for one exact CVE scan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanningScanDetailResponse {
+    /// Exact scan identity requested by the administrator.
+    pub scan_id: Uuid,
+    /// Current scan lifecycle status.
+    pub status: String,
+    /// Scanner implementation name recorded on the scan.
+    pub scanner_name: String,
+    /// Scanner version recorded for the execution, when available.
+    pub scanner_version: Option<String>,
+    /// Durable trigger provenance for the scan.
+    pub source_trigger: String,
+    /// Chronologically ordered diagnostic events, bounded by the API limit.
+    pub events: Vec<ScanningScanDiagnosticEventResponse>,
+    /// Is `true` when more persisted events exist than this fixed response.
+    pub truncated: bool,
+}
+
+/// Describes one immutable execution-attempt diagnostic event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanningScanDiagnosticEventResponse {
+    /// Immutable database identity used for stable client row identity.
+    pub id: i64,
+    /// Immutable execution token for the attempt that produced the event.
+    pub execution_id: Uuid,
+    /// One-based attempt number recorded when the event was persisted.
+    pub attempt_number: i32,
+    /// Time at which the worker observed the event.
+    pub occurred_at: DateTime<Utc>,
+    /// Normalized event severity.
+    pub level: String,
+    /// Normalized component that produced the event.
+    pub source: String,
+    /// Lifecycle or output event kind.
+    pub event_type: String,
+    /// Redacted bounded diagnostic text.
+    pub message: String,
+    /// Is `true` when output was omitted at a capture or persistence bound.
+    pub truncated: bool,
 }
 
 /// A single CVE row for dashboard drill-down views.
@@ -414,6 +464,213 @@ pub struct SystemVulnerability {
     pub justification_reason: Option<String>,
     #[serde(default)]
     pub justification_updated_at: Option<DateTime<Utc>>,
+    /// Provides bounded server-issued exact-evidence remediation context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<crate::models::poam::CvePoamRelationship>,
+}
+
+/// Identifies one stable system CVE inventory row.
+///
+/// Package version and observed derivation path are evidence context. They are
+/// not part of this identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveInventoryRowIdentity {
+    /// Gives the canonical CVE identifier.
+    pub canonical_cve_id: String,
+    /// Gives the canonical package name.
+    pub canonical_package_name: String,
+}
+
+/// Contains one vulnerability from a bounded system inventory page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemCveInventoryVulnerability {
+    /// Gives the stable row identity used by pagination and remediation lookup.
+    pub stable_identity: SystemCveInventoryRowIdentity,
+    /// Gives the canonical CVE identifier.
+    pub cve_id: String,
+    /// Gives the canonical package name independent of scanner display text.
+    pub canonical_package_name: String,
+    /// Gives the normalized CVSS severity.
+    pub severity: CveSeverity,
+    /// Gives the current CVSS v3 score when available.
+    pub cvss_score: Option<f64>,
+    /// Gives the current CVE description.
+    pub description: String,
+    /// Gives the package name emitted by the selected evidence source.
+    pub package_name: String,
+    /// Gives the installed version emitted by the selected evidence source.
+    pub installed_version: String,
+    /// Gives the known fixed version when available.
+    pub fixed_version: Option<String>,
+    /// Gives the selected scan completion time when available.
+    pub first_seen: Option<DateTime<Utc>>,
+    /// Gives the CVE publication time when available.
+    pub published_at: Option<DateTime<Utc>>,
+    /// Gives the truthful fix status, either `open` or `fix_available`.
+    pub status: String,
+    /// Gives the applicable justification category when present.
+    pub justification_category: Option<String>,
+    /// Gives the applicable justification reason when present.
+    pub justification_reason: Option<String>,
+    /// Gives the applicable justification update time when present.
+    pub justification_updated_at: Option<DateTime<Utc>>,
+    /// Provides exact remediation context only for an exact row on this page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<crate::models::poam::CvePoamRelationship>,
+}
+
+/// Identifies the evidence authority used for a system CVE inventory read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemCveInventoryAuthority {
+    /// Uses immutable schema-1 observations for the exact deployed generation.
+    #[default]
+    Exact,
+    /// Uses the latest completed legacy scan selected by the bounded legacy view.
+    Legacy,
+    /// Reports that no completed scan is usable for inventory display.
+    NoScan,
+}
+
+/// Reports the first prerequisite that prevented exact CVE authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExactCveAuthorityFailureReason {
+    /// The latest system state has no usable generation or store path.
+    MissingCurrentGeneration,
+    /// The agent did not verify that the generation owns the current store path.
+    CurrentStoreMismatch,
+    /// No retained snapshot binds the latest reported generation.
+    RetainedGenerationUnavailable,
+    /// The retained generation binds a different store path.
+    RetainedStoreMismatch,
+    /// The retained generation lineage is not verified.
+    LineageUnverified,
+    /// The retained evaluation snapshot is missing or unavailable.
+    SnapshotUnavailable,
+    /// The retained evaluation snapshot uses an unsupported integrity version.
+    SnapshotUnsupported,
+    /// The retained generation does not bind a matching NixOS derivation.
+    ExactDerivationUnavailable,
+    /// The exact derivation has no completed schema-1 CVE scan.
+    NoSchema1CurrentScan,
+}
+
+/// Gives provenance for the scan selected by a system inventory read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveInventorySource {
+    /// Identifies the selected scan.
+    pub scan_id: Uuid,
+    /// Gives the scanner implementation name recorded at completion.
+    pub scanner_name: String,
+    /// Gives the scanner implementation version when the scan recorded one.
+    pub scanner_version: Option<String>,
+    /// Gives the real scan completion time.
+    pub completed_at: DateTime<Utc>,
+}
+
+/// Counts severities over the same filtered scope as inventory totals.
+///
+/// The counts include the active severity filter. They are not an
+/// own-filter-excluding facet.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveInventorySeverityCounts {
+    /// Counts critical findings.
+    pub critical: i64,
+    /// Counts high findings.
+    pub high: i64,
+    /// Counts medium findings.
+    pub medium: i64,
+    /// Counts low findings.
+    pub low: i64,
+    /// Counts findings without a CVSS severity.
+    pub unknown: i64,
+}
+
+/// Contains authoritative totals for the complete filtered inventory source.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveInventoryMetadata {
+    /// Counts stable CVE and canonical-package identities.
+    pub total_findings: i64,
+    /// Counts distinct canonical CVE identifiers.
+    pub total_cves: i64,
+    /// Counts distinct canonical package names.
+    pub total_packages: i64,
+    /// Counts severities over the same active filter scope.
+    pub severity: SystemCveInventorySeverityCounts,
+}
+
+/// Defines bounded filters and keyset position for a system inventory read.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SystemCveInventoryParams {
+    /// Limits the page to 1 through 500 rows. The default is 100 rows.
+    pub limit: Option<u16>,
+    /// Continues after an opaque server-issued cursor.
+    pub after: Option<String>,
+    /// Searches canonical CVE, canonical package, observed package, and version.
+    /// The normalized search is limited to 200 Unicode scalar values.
+    pub q: Option<String>,
+    /// Selects comma-separated severities from critical, high, medium, low, and
+    /// unknown.
+    pub severity: Option<String>,
+    /// Selects comma-separated truthful fix states from open and fix_available.
+    pub status: Option<String>,
+}
+
+/// Returns one complete non-unioned CVE inventory source for a system.
+///
+/// `Exact` takes precedence even when `vulnerabilities` is empty. `Legacy`
+/// rows never contain server-issued exact remediation context. Inventory
+/// authority does not redefine the ordinary system justification API. `NoScan`
+/// has no source and no rows. The legacy endpoint returns at most 1,000 rows and
+/// returns HTTP 400 when the complete inventory exceeds that bound. For client
+/// compatibility, the legacy handler maps unknown source severities to `low`
+/// before it constructs this DTO.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemCveInventoryResponse {
+    /// Identifies the authority selected for this response.
+    pub authority: SystemCveInventoryAuthority,
+    /// Reports why exact authority was unavailable for a fallback response.
+    pub exact_authority_failure: Option<ExactCveAuthorityFailureReason>,
+    /// Gives the selected scan provenance, including for a clean scan.
+    pub source: Option<SystemCveInventorySource>,
+    /// Contains all findings from only the selected source.
+    pub vulnerabilities: Vec<SystemVulnerability>,
+}
+
+/// Returns one bounded page from a non-unioned system CVE inventory source.
+///
+/// Exact authority takes precedence over legacy evidence, including for a
+/// clean exact scan. The response metadata covers the complete filtered scope.
+/// Clients must restart from the first page after an `inventory_changed`
+/// conflict.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemCveInventoryPageResponse {
+    /// Identifies the authority selected for this response.
+    pub authority: SystemCveInventoryAuthority,
+    /// Reports why exact authority was unavailable for a fallback response.
+    pub exact_authority_failure: Option<ExactCveAuthorityFailureReason>,
+    /// Gives the selected scan provenance, including for a clean scan.
+    pub source: Option<SystemCveInventorySource>,
+    /// Contains findings from only the selected source and current page.
+    pub vulnerabilities: Vec<SystemCveInventoryVulnerability>,
+    /// Gives complete filtered-scope totals independent of the current page.
+    pub metadata: SystemCveInventoryMetadata,
+    /// Identifies the selected inventory and mutable membership dimensions.
+    ///
+    /// This opaque revision detects changes to ordering, filters, or totals
+    /// between page requests. Live remediation context does not invalidate the
+    /// inventory revision. The revision is not an authorization credential.
+    pub inventory_revision: String,
+    /// Reports whether another keyset page exists.
+    pub has_more: bool,
+    /// Continues this exact system, source, and normalized filter selection.
+    ///
+    /// The cursor is opaque but not an authorization credential. The server
+    /// first authorizes the requested system, then validates cursor version and
+    /// binding. Malformed cursors return 400. A changed system, authority,
+    /// source, or filter binding returns `inventory_changed` with status 409.
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -453,6 +710,10 @@ pub struct CveListItem {
     pub fixed_version: Option<String>,
     pub fix_status: String,
     pub affected_count: i64,
+    /// Counts affected systems backed by exact immutable observations.
+    pub exact_affected_count: i64,
+    /// Counts affected systems visible only through legacy scan inventory.
+    pub legacy_affected_count: i64,
     pub affected_environments: Option<Vec<String>>,
     pub first_seen: Option<DateTime<Utc>>,
     pub last_seen: Option<DateTime<Utc>>,
@@ -500,18 +761,262 @@ pub struct CveDetail {
     pub fix_status: String,
 }
 
-/// System affected by a CVE (for drawer detail view).
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct CveAffectedSystemDetail {
+/// Reports the fleet triage rollup for one exact CVE and package identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetCveTriageRollup {
+    /// Every currently affected visible environment has no active disposition.
+    Outstanding,
+    /// Every currently affected visible environment has accepted risk.
+    Accepted,
+    /// Every currently affected visible environment has scheduled remediation.
+    Scheduled,
+    /// Affected environments have different states or include OPEN.
+    Partial,
+}
+
+/// Identifies the authenticated actor retained with a disposition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveDispositionActor {
+    /// Identifies the actor account.
+    pub user_id: Uuid,
+    /// Gives the current safe account display label.
+    pub display: String,
+}
+
+/// Reports the active POA&M metadata required to preserve scheduled ownership.
+///
+/// The assignee retains its stable typed identity and display snapshot.
+/// `available` indicates current catalog eligibility only. A false value or a
+/// compatibility assignee does not remove the historical assignment and does
+/// not grant authorization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduledPoamMetadata {
+    /// Identifies the POA&M by its stable UUID.
+    pub id: Uuid,
+    /// Gives the stable operator-facing POA&M identifier.
+    pub human_id: String,
+    /// Gives the exact persisted remediation title.
+    pub title: String,
+    /// Gives the exact persisted remediation plan.
+    pub plan: String,
+    /// Gives the exact persisted target completion date.
+    pub target_date: chrono::NaiveDate,
+    /// Gives the exact persisted remediation risk.
+    pub risk: crate::models::poam::PoamRisk,
+    /// Reports the typed or compatibility assignee without authorization data.
+    pub assignee: crate::models::poam::PoamAssigneeView,
+}
+
+/// Reports the active disposition for one environment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CveEnvironmentDisposition {
+    /// Records accepted risk without claiming remediation or verification PASS.
+    Accepted {
+        /// Gives the required operator justification.
+        justification: String,
+        /// Gives the optional date for risk review.
+        review_date: Option<chrono::NaiveDate>,
+        /// Identifies the authenticated actor that accepted risk.
+        actor: CveDispositionActor,
+        /// Records when the actor accepted risk.
+        accepted_at: DateTime<Utc>,
+    },
+    /// Records coherent remediation scheduling through one active POA&M.
+    Scheduled {
+        /// Identifies the POA&M that owns the exact subjects.
+        poam_id: Uuid,
+        /// Gives the complete active POA&M metadata for compatible reuse.
+        ///
+        /// The server uses `None` only while it validates a persisted scheduled
+        /// disposition. An emitted scheduled disposition always contains
+        /// `Some` metadata.
+        poam: Option<ScheduledPoamMetadata>,
+        /// Identifies the authenticated actor that scheduled remediation.
+        actor: CveDispositionActor,
+        /// Records when the actor scheduled remediation.
+        scheduled_at: DateTime<Utc>,
+    },
+}
+
+/// Reports one currently affected environment in the fleet CVE drawer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveAffectedEnvironment {
+    /// Identifies the environment used by triage actions.
+    pub environment_id: Uuid,
+    /// Gives the visible environment name.
+    pub environment_name: String,
+    /// Counts all displayed affected systems in this environment.
+    pub affected_system_count: i64,
+    /// Counts systems backed by exact immutable subjects.
+    pub exact_affected_system_count: i64,
+    /// Counts systems visible only through legacy inventory.
+    pub legacy_affected_system_count: i64,
+    /// Lists the bounded affected systems for drawer presentation.
+    pub systems: Vec<CveAffectedSystemDetail>,
+    /// Gives the current disposition. `None` means OPEN.
+    pub disposition: Option<CveEnvironmentDisposition>,
+}
+
+/// Provides the bounded inventory drawer for one CVE/package identity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FleetCveDetail {
+    /// Gives advisory metadata retained by the existing CVE detail contract.
+    pub cve: CveDetail,
+    /// Gives the canonical package identity selected by this drawer.
+    pub canonical_package_name: String,
+    /// Gives the disposition rollup for visible exact subjects only.
+    pub rollup: FleetCveTriageRollup,
+    /// Counts all visible affected systems.
+    pub affected_system_count: i64,
+    /// Counts visible systems backed by exact immutable subjects.
+    pub exact_affected_system_count: i64,
+    /// Counts exact systems assigned to environments and eligible for mutation.
+    pub exact_mutation_target_count: i64,
+    /// Counts visible systems backed only by legacy inventory.
+    pub legacy_affected_system_count: i64,
+    /// Counts visible active systems without a usable completed scan.
+    pub no_scan_system_count: i64,
+    /// Counts affected systems that an Admin can see without an environment.
+    pub unassigned_affected_system_count: i64,
+    /// Lists bounded affected systems that have no environment.
+    pub unassigned_systems: Vec<CveAffectedSystemDetail>,
+    /// Lists visible affected environments in deterministic order.
+    pub environments: Vec<CveAffectedEnvironment>,
+}
+
+/// Selects one atomic action for an affected environment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum CveEnvironmentTriageAction {
+    /// Removes the active disposition and leaves the environment OPEN.
+    LeaveOpen {
+        /// Identifies the affected environment.
+        environment_id: Uuid,
+    },
+    /// Accepts risk for the environment without creating remediation evidence.
+    AcceptRisk {
+        /// Identifies the affected environment.
+        environment_id: Uuid,
+        /// Gives the required acceptance justification.
+        justification: String,
+        /// Gives an optional risk review date.
+        review_date: Option<chrono::NaiveDate>,
+    },
+    /// Schedules every current exact subject in the environment on one POA&M.
+    SchedulePatch {
+        /// Identifies the affected environment.
+        environment_id: Uuid,
+    },
+}
+
+impl CveEnvironmentTriageAction {
+    /// Returns the stable environment identity selected by the action.
+    pub fn environment_id(&self) -> Uuid {
+        match self {
+            Self::LeaveOpen { environment_id }
+            | Self::AcceptRisk { environment_id, .. }
+            | Self::SchedulePatch { environment_id } => *environment_id,
+        }
+    }
+}
+
+/// Supplies POA&M metadata when any environment schedules patching.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FleetCvePoamRequest {
+    /// Gives the remediation title.
+    pub title: String,
+    /// Gives the remediation plan.
+    pub plan: String,
+    /// Selects one server-validated typed assignee.
+    pub assignee: crate::models::poam::PoamAssigneeRequest,
+    /// Gives the operator-selected target date.
+    pub target_date: chrono::NaiveDate,
+    /// Gives the operator-selected remediation risk.
+    pub risk: crate::models::poam::PoamRisk,
+    /// Requests the standard patch milestones for a newly created POA&M.
+    #[serde(default = "default_true_value")]
+    pub default_milestones: bool,
+}
+
+fn default_true_value() -> bool {
+    true
+}
+
+/// Applies environment actions for one exact CVE/package identity atomically.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FleetCveTriageRequest {
+    /// Gives the canonical package identity. The browser does not send hosts.
+    pub canonical_package_name: String,
+    /// Gives one action for each selected environment.
+    pub actions: Vec<CveEnvironmentTriageAction>,
+    /// Supplies one POA&M payload when at least one action schedules patching.
+    pub poam: Option<FleetCvePoamRequest>,
+}
+
+/// Identifies one bounded subject involved in a scheduling conflict.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveTriageConflictSubject {
+    /// Identifies the affected system.
     pub system_id: Uuid,
+    /// Gives the visible hostname.
     pub hostname: String,
+    /// Identifies the system environment.
+    pub environment_id: Uuid,
+    /// Identifies the conflicting active POA&M when one exists.
+    pub poam_id: Option<Uuid>,
+}
+
+/// Reports the result of one atomic fleet triage mutation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FleetCveTriageResponse {
+    /// Gives transaction-owned detail for exact mutation subjects only.
+    ///
+    /// Clients must refetch the fleet inventory endpoint to restore legacy and
+    /// unassigned display rows after a successful mutation.
+    pub detail: FleetCveDetail,
+    /// Identifies the evidence scope represented by `detail`.
+    pub detail_scope: FleetCveMutationDetailScope,
+    /// Identifies the created or reused POA&M when patching was scheduled.
+    pub poam_id: Option<Uuid>,
+    /// Indicates that all scheduled subjects already used a compatible POA&M.
+    pub poam_reused: bool,
+}
+
+/// Identifies the intentionally narrow detail returned by fleet CVE mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetCveMutationDetailScope {
+    /// Contains only exact environment-assigned mutation subjects.
+    ExactMutationSubjects,
+}
+
+/// System affected by a CVE (for drawer detail view).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveAffectedSystemDetail {
+    /// Identifies the affected managed system.
+    pub system_id: Uuid,
+    /// Gives the system hostname.
+    pub hostname: String,
+    /// Identifies the visible environment when one is assigned.
+    pub environment_id: Option<Uuid>,
+    /// Gives the visible environment name when one is assigned.
     pub environment: Option<String>,
+    /// Gives the latest reported primary IP address when available.
     pub primary_ip_address: Option<String>,
+    /// Gives the managed flake name when one is assigned.
     pub flake_name: Option<String>,
+    /// Identifies the managed flake when one is assigned.
     pub flake_id: Option<i32>,
+    /// Gives the selected revision when the read resolves one.
     pub commit_hash: Option<String>,
+    /// Gives the system deployment-policy identifier.
     pub deployment_policy: String,
+    /// Gives the package version observed by the selected inventory source.
     pub current_package_version: Option<String>,
+    /// Identifies whether the displayed finding is exact or display-only.
+    pub inventory_authority: SystemCveInventoryAuthority,
 }
 
 /// CVE justification (triage) record.
@@ -549,6 +1054,12 @@ pub struct CveFleetStats {
     pub fixable: i64,
     pub environments_affected: i64,
     pub systems_affected: i64,
+    /// Counts distinct affected systems with at least one exact finding.
+    pub exact_systems_affected: i64,
+    /// Counts distinct affected systems with at least one legacy-only finding.
+    pub legacy_systems_affected: i64,
+    /// Counts visible active systems without a usable completed scan.
+    pub no_scan_systems: i64,
     pub outstanding: i64,
     pub accepted: i64,
     pub scheduled: i64,
@@ -679,11 +1190,12 @@ pub struct BuildQueueItem {
     #[serde(default)]
     pub system_id: Option<uuid::Uuid>,
 
-    /// Stable flake identity used for latest-per-flake grouping.
+    /// Stable flake identity used for branch-snapshot latest matching.
     #[serde(default)]
     pub flake_id: Option<i32>,
 
-    /// True when this is the newest item in its active/history domain for its flake.
+    /// True when this build's commit is position-0 in the ready branch snapshot
+    /// for its flake. Multiple build rows can be true for one commit.
     #[serde(default)]
     pub is_latest_per_flake: bool,
 
@@ -709,6 +1221,12 @@ pub struct BuildQueueItem {
     pub parent_job_id: Option<uuid::Uuid>,
     #[serde(default)]
     pub root_job_id: Option<uuid::Uuid>,
+    /// Database commit identity used for same-revision recovery actions.
+    #[serde(default)]
+    pub commit_id: Option<i32>,
+    /// Server-owned terminal failure code, when an operator action depends on it.
+    #[serde(default)]
+    pub server_failure_code: Option<String>,
     #[serde(default)]
     pub available_at: Option<DateTime<Utc>>,
     /// When the build started (None if still queued).
@@ -2312,33 +2830,136 @@ pub struct SystemRollbackRequest {
     pub target_commit: String,
 }
 
-/// Request payload for rolling a system back to a specific deployed store path.
+/// Request payload for rolling a system back to an exactly retained generation artifact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemRollbackGenerationRequest {
-    pub store_path: String,
+    /// Durable retained generation-artifact identity preferred by new clients.
+    #[serde(default)]
+    pub generation_snapshot_id: Option<Uuid>,
+    /// System-local retained generation identity.
+    #[serde(default)]
+    pub generation: Option<i32>,
+    /// Optional legacy narrowing hint. This field cannot authorize rollback by itself.
+    #[serde(default)]
+    pub store_path: Option<String>,
+}
+
+/// Selects how a manual deployment request treats an `auto_latest` policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualDeploymentAction {
+    /// Preserves the pre-TASK-440 omitted field for manual and pinned systems.
+    /// An `auto_latest` system must select an explicit action.
+    #[default]
+    Legacy,
+    /// Deploys under the system's current manual or pinned policy.
+    Deploy,
+    /// Deploys once without changing the persisted `auto_latest` policy.
+    ContinueAutoLatest,
+    /// Persists the manual policy before it attempts to deploy.
+    ConvertToManual,
 }
 
 /// Request payload for deploying a system with a specific commit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploySystemRequest {
+    /// Full SHA-1 or SHA-256 commit identity to deploy.
     pub commit_sha: String,
+    /// Specifies how the request handles an `auto_latest` system.
+    #[serde(default)]
+    pub action: ManualDeploymentAction,
+    /// Stable retry identity. New clients must reuse this UUID until completion.
+    ///
+    /// When omitted, the server derives an identity that replays pending and
+    /// terminal results for 24 hours. A request after that window can redeploy
+    /// the same target. Reusing an explicit UUID with another system, commit,
+    /// or action returns a typed conflict before policy conversion.
+    #[serde(default)]
+    pub request_id: Option<Uuid>,
 }
 
-/// Response containing available commits for deployment.
+/// Reports the persisted deployment policy after a manual deployment request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualDeploymentPolicyState {
+    /// The system remains on automatic latest-commit deployment.
+    AutoLatest,
+    /// The system uses manual deployment.
+    Manual,
+    /// The system remains pinned.
+    Pinned,
+}
+
+/// Reports whether an `auto_latest` to manual conversion occurred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualDeploymentConversionState {
+    /// The request did not ask to change the persisted policy.
+    NotRequested,
+    /// The request changed the persisted policy to manual.
+    Converted,
+    /// A prior request already changed the persisted policy to manual.
+    AlreadyManual,
+}
+
+/// Reports whether the deployment attempt created or reused pending work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualDeploymentRequestState {
+    /// The request created a pending deployment.
+    Queued,
+    /// The target already had an active pending deployment.
+    AlreadyQueued,
+    /// The deployment could not be queued.
+    Failed,
+    /// The request ID was already bound to a different commit or action.
+    Conflict,
+}
+
+/// Describes the persisted policy and deployment result independently.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManualDeploymentResponse {
+    /// Legacy response status retained for deployed clients.
+    pub status: String,
+    /// Persisted policy after this request.
+    pub policy: ManualDeploymentPolicyState,
+    /// Policy conversion result for this request.
+    pub conversion: ManualDeploymentConversionState,
+    /// Pending deployment result for this request.
+    pub deployment: ManualDeploymentRequestState,
+    /// Existing or newly created pending deployment identity.
+    pub deployment_id: Option<Uuid>,
+    /// Human-readable result that does not hide partial success.
+    pub message: String,
+}
+
+/// Contains tracked commits and the observational current revision.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemCommitsResponse {
+    /// Tracked commits in stable newest-first order.
     pub commits: Vec<CommitInfo>,
+    /// Full tracked SHA mapped to the current observation, when unambiguous.
+    ///
+    /// This field is observational and does not grant deployment or rollback authority.
     pub current_commit: Option<String>,
 }
 
-/// Information about a commit available for deployment.
+/// Describes one tracked commit and its Config observation prerequisite state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitInfo {
+    /// Full immutable commit SHA.
     pub sha: String,
+    /// Display-only abbreviated SHA.
     pub short_sha: String,
+    /// Commit message.
     pub message: String,
+    /// Commit author.
     pub author: String,
+    /// RFC 3339 commit timestamp.
     pub timestamp: String,
+    /// Indicates that exact targeted Config observations can start for this commit.
+    #[serde(default)]
+    pub config_inspectable: bool,
 }
 
 /// Response containing available generations for rollback.
@@ -2351,11 +2972,22 @@ pub struct SystemGenerationsResponse {
 /// Information about a NixOS generation available for rollback.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemGeneration {
+    /// System-local NixOS generation number.
     pub generation: i32,
+    /// First observed store path, when the agent reported one.
     pub store_path: Option<String>,
+    /// Full producing commit identity, when derivation lineage is available.
     pub commit_hash: Option<String>,
+    /// Time when the server first observed this generation.
     pub timestamp: DateTime<Utc>,
+    /// True when this generation is the latest agent-reported generation.
     pub is_current: bool,
+    /// Durable retained generation identity accepted by the rollback endpoint.
+    #[serde(default)]
+    pub generation_snapshot_id: Option<Uuid>,
+    /// True only when exact retained artifact and derivation lineage can resolve rollback.
+    #[serde(default)]
+    pub rollback_eligible: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3209,6 +3841,34 @@ pub struct ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_cve_inventory_page_serializes_pagination_contract() {
+        let response = SystemCveInventoryPageResponse {
+            authority: SystemCveInventoryAuthority::NoScan,
+            exact_authority_failure: Some(ExactCveAuthorityFailureReason::MissingCurrentGeneration),
+            source: None,
+            vulnerabilities: Vec::new(),
+            metadata: SystemCveInventoryMetadata::default(),
+            inventory_revision: "revision".into(),
+            has_more: false,
+            next_cursor: None,
+        };
+        let json = serde_json::to_value(response).expect("inventory response should serialize");
+        assert_eq!(json["authority"], "no_scan");
+        assert!(json["vulnerabilities"].is_array());
+        assert_eq!(json["metadata"]["total_findings"], 0);
+        assert_eq!(json["has_more"], false);
+        assert!(json["next_cursor"].is_null());
+
+        let identity = serde_json::to_value(SystemCveInventoryRowIdentity {
+            canonical_cve_id: "CVE-2099-0001".into(),
+            canonical_package_name: "openssl".into(),
+        })
+        .expect("stable identity should serialize");
+        assert_eq!(identity["canonical_cve_id"], "CVE-2099-0001");
+        assert_eq!(identity["canonical_package_name"], "openssl");
+    }
 
     #[test]
     fn cache_health_omits_unavailable_capacity() {

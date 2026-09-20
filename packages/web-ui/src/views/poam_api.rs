@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::api::client::{ApiClientError, base_url, send_request_with_csrf};
+use crate::api::client::{ApiClientError, base_url, encode_uri_component, send_request_with_csrf};
+use crate::api::models::{CveAffectedSystemDetail, CveDetail};
 pub use crate::api::models::{FindingObservationReference, FindingObservationSource};
 
 const PAGE_SIZE: i64 = 100;
@@ -52,10 +53,343 @@ impl PoamStatus {
         }
     }
 
+    /// Returns the stable lifecycle description for status controls.
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Open => "Deficiency acknowledged; remediation not started.",
+            Self::InProgress => "Remediation work underway.",
+            Self::Blocked => {
+                "Remediation cannot proceed because a dependency or decision is pending."
+            }
+            Self::AwaitingVerification => {
+                "Work reported complete; waiting on a passing Crystal Forge evaluation."
+            }
+            Self::Completed => "Remediation verified by a passing evaluation and closed.",
+        }
+    }
+
     /// Returns whether this state permits an active remediation relationship.
     pub const fn is_active(self) -> bool {
         !matches!(self, Self::Completed)
     }
+}
+
+/// Selects a server-validated POA&M assignee.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PoamAssigneeRequest {
+    /// Assigns an active Crystal Forge user by stable UUID.
+    User {
+        /// Identifies the user.
+        user_id: Uuid,
+    },
+    /// Assigns a currently configured normalized OIDC group.
+    OidcGroup {
+        /// Gives the group name for server normalization and validation.
+        group_name: String,
+    },
+    /// Clears the assignment.
+    Unassigned,
+}
+
+/// Reports the typed or historical assignee for one POA&M.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PoamAssigneeView {
+    /// Reports a user identity and its server-resolved display snapshot.
+    User {
+        /// Identifies the assigned user.
+        user_id: Uuid,
+        /// Contains the display label captured at assignment time.
+        display: String,
+        /// Indicates whether the user remains eligible for new assignments.
+        available: bool,
+    },
+    /// Reports an OIDC group and its normalized display snapshot.
+    OidcGroup {
+        /// Contains the normalized configured group name.
+        group_name: String,
+        /// Contains the display label captured at assignment time.
+        display: String,
+        /// Indicates whether the group remains configured.
+        available: bool,
+    },
+    /// Reports an unassigned POA&M.
+    Unassigned,
+    /// Reports preserved compatibility owner text with no inferred identity.
+    Legacy {
+        /// Contains the historical owner snapshot.
+        display: String,
+    },
+}
+
+/// Identifies one active user available for POA&M assignment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoamAssigneePerson {
+    /// Identifies the user.
+    pub user_id: Uuid,
+    /// Contains the server-resolved safe display label.
+    pub label: String,
+}
+
+/// Identifies one configured OIDC group available for POA&M assignment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoamAssigneeGroup {
+    /// Contains the normalized configured group name.
+    pub group_name: String,
+}
+
+/// Contains the bounded catalog available to POA&M mutators.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoamAssigneeCatalog {
+    /// Lists active Crystal Forge users in deterministic display order.
+    pub people: Vec<PoamAssigneePerson>,
+    /// Lists configured normalized OIDC groups in deterministic name order.
+    pub groups: Vec<PoamAssigneeGroup>,
+}
+
+/// Reports the disposition rollup for one exact CVE and package identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetCveTriageRollup {
+    /// Indicates that all visible affected environments remain open.
+    Outstanding,
+    /// Indicates that all visible affected environments accepted risk.
+    Accepted,
+    /// Indicates that all visible affected environments scheduled remediation.
+    Scheduled,
+    /// Indicates that visible affected environments have mixed dispositions.
+    Partial,
+}
+
+/// Identifies the authenticated actor retained with a fleet disposition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CveDispositionActor {
+    /// Identifies the actor account.
+    pub user_id: Uuid,
+    /// Gives the server-provided safe actor label.
+    pub display: String,
+}
+
+/// Reports the active POA&M metadata needed to preserve scheduled ownership.
+///
+/// `available` on a typed assignee reports current catalog eligibility. The
+/// server can also return unavailable or compatibility assignees to preserve
+/// historical ownership without treating the assignee as authorization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduledPoamMetadata {
+    /// Identifies the POA&M by stable UUID.
+    pub id: Uuid,
+    /// Gives the stable operator-facing POA&M identifier.
+    pub human_id: String,
+    /// Gives the exact persisted remediation title.
+    pub title: String,
+    /// Gives the exact persisted remediation plan.
+    pub plan: String,
+    /// Gives the exact persisted target completion date.
+    pub target_date: NaiveDate,
+    /// Gives the exact persisted remediation risk.
+    pub risk: PoamRisk,
+    /// Reports the typed or compatibility assignee snapshot.
+    pub assignee: PoamAssigneeView,
+}
+
+/// Reports the active disposition for one affected environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CveEnvironmentDisposition {
+    /// Records accepted risk without remediation or verification semantics.
+    Accepted {
+        /// Gives the required environment-specific rationale.
+        justification: String,
+        /// Gives the optional date on which risk must be reviewed.
+        review_date: Option<NaiveDate>,
+        /// Identifies the actor who accepted risk.
+        actor: CveDispositionActor,
+        /// Records when the actor accepted risk.
+        accepted_at: DateTime<Utc>,
+    },
+    /// Records remediation scheduling through one active POA&M.
+    Scheduled {
+        /// Identifies the POA&M that owns the exact subjects.
+        poam_id: Uuid,
+        /// Gives metadata for compatible reuse when supplied by a new server.
+        #[serde(default)]
+        poam: Option<ScheduledPoamMetadata>,
+        /// Identifies the actor who scheduled remediation.
+        actor: CveDispositionActor,
+        /// Records when the actor scheduled remediation.
+        scheduled_at: DateTime<Utc>,
+    },
+}
+
+/// Reports one visible environment affected by a CVE/package inventory row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveAffectedEnvironment {
+    /// Identifies the environment for a triage intention.
+    pub environment_id: Uuid,
+    /// Gives the visible environment name.
+    pub environment_name: String,
+    /// Counts all displayed affected systems in this environment.
+    pub affected_system_count: i64,
+    /// Counts systems backed by exact immutable subjects.
+    #[serde(default)]
+    pub exact_affected_system_count: i64,
+    /// Counts systems visible only through legacy inventory.
+    #[serde(default)]
+    pub legacy_affected_system_count: i64,
+    /// Lists the bounded server-resolved host details.
+    #[serde(default)]
+    pub systems: Vec<CveAffectedSystemDetail>,
+    /// Gives the current disposition. `None` means OPEN.
+    #[serde(default)]
+    pub disposition: Option<CveEnvironmentDisposition>,
+}
+
+/// Provides read-only fleet inventory for one CVE/package identity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetCveDetail {
+    /// Gives advisory metadata for the canonical CVE.
+    pub cve: CveDetail,
+    /// Gives the canonical package identity selected by the server.
+    pub canonical_package_name: String,
+    /// Gives the disposition rollup for visible exact subjects only.
+    pub rollup: FleetCveTriageRollup,
+    /// Counts all visible affected systems.
+    pub affected_system_count: i64,
+    /// Counts visible systems backed by exact immutable subjects.
+    #[serde(default)]
+    pub exact_affected_system_count: i64,
+    /// Counts exact systems assigned to environments and eligible for mutation.
+    #[serde(default)]
+    pub exact_mutation_target_count: i64,
+    /// Counts visible systems backed only by legacy inventory.
+    #[serde(default)]
+    pub legacy_affected_system_count: i64,
+    /// Counts visible active systems without a usable completed scan.
+    #[serde(default)]
+    pub no_scan_system_count: i64,
+    /// Counts affected systems visible to an Admin without an environment.
+    #[serde(default)]
+    pub unassigned_affected_system_count: i64,
+    /// Lists bounded affected systems that have no environment.
+    #[serde(default)]
+    pub unassigned_systems: Vec<CveAffectedSystemDetail>,
+    /// Lists visible affected environments in server order.
+    #[serde(default)]
+    pub environments: Vec<CveAffectedEnvironment>,
+}
+
+impl FleetCveDetail {
+    // COMPATIBILITY: Servers from before inventory-authority rollout emitted
+    // exact-only rows without the additive authority counters.
+    fn normalize_inventory_counts(&mut self) {
+        if self.exact_affected_system_count == 0
+            && self.legacy_affected_system_count == 0
+            && self.affected_system_count > 0
+        {
+            self.exact_affected_system_count = self.affected_system_count;
+        }
+        for environment in &mut self.environments {
+            if environment.exact_affected_system_count == 0
+                && environment.legacy_affected_system_count == 0
+                && environment.affected_system_count > 0
+            {
+                environment.exact_affected_system_count = environment.affected_system_count;
+            }
+        }
+        if self.exact_mutation_target_count == 0 {
+            self.exact_mutation_target_count = self
+                .environments
+                .iter()
+                .map(|environment| environment.exact_affected_system_count)
+                .sum();
+        }
+    }
+}
+
+/// Selects one atomic action for an affected environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum CveEnvironmentTriageAction {
+    /// Removes an active disposition and leaves the environment open.
+    LeaveOpen {
+        /// Identifies the affected environment.
+        environment_id: Uuid,
+    },
+    /// Accepts risk without creating remediation or PASS evidence.
+    AcceptRisk {
+        /// Identifies the affected environment.
+        environment_id: Uuid,
+        /// Gives the required environment-specific rationale.
+        justification: String,
+        /// Gives the optional risk review date.
+        review_date: Option<NaiveDate>,
+    },
+    /// Schedules every current exact subject in the environment.
+    SchedulePatch {
+        /// Identifies the affected environment.
+        environment_id: Uuid,
+    },
+}
+
+/// Supplies shared POA&M metadata when any environment schedules patching.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetCvePoamRequest {
+    /// Gives the remediation title.
+    pub title: String,
+    /// Gives the required remediation plan.
+    pub plan: String,
+    /// Selects one server-validated typed assignee.
+    pub assignee: PoamAssigneeRequest,
+    /// Gives the target completion date.
+    pub target_date: NaiveDate,
+    /// Gives the remediation risk category.
+    pub risk: PoamRisk,
+    /// Requests the standard vulnerability milestones.
+    #[serde(default = "fleet_cve_default_milestones")]
+    pub default_milestones: bool,
+}
+
+fn fleet_cve_default_milestones() -> bool {
+    true
+}
+
+/// Applies a complete environment-intention map for one exact fleet subject.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetCveTriageRequest {
+    /// Gives the canonical package identity. The request contains no host IDs.
+    pub canonical_package_name: String,
+    /// Gives one intention for each visible affected environment.
+    pub actions: Vec<CveEnvironmentTriageAction>,
+    /// Supplies shared POA&M metadata exactly when patching is scheduled.
+    #[serde(default)]
+    pub poam: Option<FleetCvePoamRequest>,
+}
+
+/// Reports the exact-subject result of an atomic fleet triage mutation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetCveTriageResponse {
+    /// Gives transaction-owned exact mutation subjects, not mixed inventory.
+    pub detail: FleetCveDetail,
+    /// Identifies the intentionally narrow evidence scope of `detail`.
+    #[serde(default)]
+    pub detail_scope: FleetCveMutationDetailScope,
+    /// Identifies the created or reused POA&M when remediation was scheduled.
+    #[serde(default)]
+    pub poam_id: Option<Uuid>,
+    /// Indicates whether the server reused a compatible active POA&M.
+    #[serde(default)]
+    pub poam_reused: bool,
+}
+
+/// Identifies the evidence scope returned by a fleet CVE mutation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetCveMutationDetailScope {
+    /// Contains only exact environment-assigned mutation subjects.
+    #[default]
+    ExactMutationSubjects,
 }
 
 /// Represents the persisted POA&M risk category.
@@ -202,8 +536,13 @@ pub struct PoamSummary {
     pub title: String,
     /// Contains the remediation plan text.
     pub plan: String,
-    /// Contains the responsible owner label.
+    /// Contains the free-form compatibility owner for legacy clients.
+    ///
+    /// The production UI sends an empty string and uses `assignee`.
     pub owner: String,
+    /// Contains typed assignee metadata when the server supports it.
+    #[serde(default)]
+    pub assignee: Option<PoamAssigneeView>,
     /// Contains the planned completion date when one is set.
     pub target_date: Option<NaiveDate>,
     /// Contains the persisted risk category.
@@ -216,6 +555,9 @@ pub struct PoamSummary {
     pub overdue: bool,
     /// Counts active findings, or the closure finding set for a completed plan.
     pub finding_count: i64,
+    /// Counts exact-CVE findings without changing policy finding semantics.
+    #[serde(default)]
+    pub cve_finding_count: i64,
     /// Records when the plan was created.
     pub created_at: DateTime<Utc>,
     /// Records when the plan last changed.
@@ -224,6 +566,55 @@ pub struct PoamSummary {
     pub closed_at: Option<DateTime<Utc>>,
     /// Identifies the verification attempt that authorized closure.
     pub closure_attempt_id: Option<Uuid>,
+}
+
+/// Identifies one immutable occurrence in current exact-CVE scan evidence.
+///
+/// The client treats this server-issued value as opaque mutation context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CveObservationReference {
+    /// Identifies the affected system.
+    pub system_id: Uuid,
+    /// Identifies the authoritative completed scan.
+    pub scan_id: Uuid,
+    /// Contains the exact occurrence derivation path.
+    pub occurrence_derivation_path: String,
+    /// Contains the canonical CVE identifier.
+    pub canonical_cve_id: String,
+    /// Contains the canonical package pname.
+    pub canonical_package_name: String,
+}
+
+/// Describes active and historical remediation for one exact-CVE occurrence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CvePoamRelationship {
+    /// Identifies the stable finding after materialization.
+    #[serde(default)]
+    pub cve_finding_id: Option<Uuid>,
+    /// Contains opaque server-issued mutation context.
+    pub observation: CveObservationReference,
+    /// Contains the scanner-observed package name.
+    pub observed_package_name: String,
+    /// Contains the scanner-observed installed version.
+    pub observed_package_version: String,
+    /// Indicates that scanner evidence whitelisted the occurrence.
+    #[serde(default)]
+    pub is_whitelisted: bool,
+    /// Indicates that a current justification applies independently.
+    #[serde(default)]
+    pub is_justified: bool,
+    /// Contains the only active remediation when present.
+    #[serde(default)]
+    pub active_poam: Option<PoamSummary>,
+    /// Contains inactive historical remediations.
+    #[serde(default)]
+    pub historical_poams: Vec<PoamSummary>,
+    /// Indicates that another historical page exists.
+    #[serde(default)]
+    pub historical_has_more: bool,
+    /// Selects the next historical page.
+    #[serde(default)]
+    pub historical_next_offset: Option<i64>,
 }
 
 /// Contains authoritative fleet-visible POA&M dashboard counts.
@@ -448,6 +839,105 @@ pub struct VerificationAttemptView {
     pub attempted_at: DateTime<Utc>,
     /// Contains the immutable finding results from this attempt.
     pub items: Vec<VerificationItemView>,
+    /// Contains immutable exact-CVE results without changing `items` semantics.
+    #[serde(default)]
+    pub cve_items: Vec<CveVerificationItemView>,
+}
+
+/// Describes one immutable exact-CVE verification result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CveVerificationItemView {
+    /// Identifies the containing verification attempt.
+    pub attempt_id: Uuid,
+    /// Identifies the stable exact-CVE finding.
+    pub cve_finding_id: Uuid,
+    /// Identifies the affected system.
+    pub system_id: Uuid,
+    /// Contains the canonical CVE identifier.
+    pub canonical_cve_id: String,
+    /// Contains the canonical package pname.
+    pub canonical_package_name: String,
+    /// Contains the exact-CVE result label supplied by the server.
+    pub result: String,
+    /// Identifies the authoritative scan when present.
+    pub scan_id: Option<Uuid>,
+    /// Identifies the scanned derivation when present.
+    pub scan_derivation_id: Option<i32>,
+    /// Records when the scan completed.
+    pub scan_completed_at: Option<DateTime<Utc>>,
+    /// Contains the verified deployed store path.
+    pub target_store_path: Option<String>,
+    /// Indicates whether the exact occurrence remained present.
+    pub occurrence_present: bool,
+    /// Contains the exact occurrence path when present.
+    pub occurrence_derivation_path: Option<String>,
+    /// Contains the package version observed by the cited scan.
+    pub observed_package_version: Option<String>,
+    /// Records when verification observed this result.
+    pub observed_at: DateTime<Utc>,
+    /// Explains the result.
+    pub detail: String,
+}
+
+/// Describes one exact-CVE finding link and its current evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CveFindingView {
+    /// Identifies the stable exact-CVE finding.
+    pub id: Uuid,
+    /// Identifies the affected system.
+    pub system_id: Uuid,
+    /// Contains the system hostname.
+    pub hostname: String,
+    /// Identifies the system environment when assigned.
+    pub environment_id: Option<Uuid>,
+    /// Contains the canonical CVE identifier.
+    pub canonical_cve_id: String,
+    /// Contains the canonical package pname.
+    pub canonical_package_name: String,
+    /// Identifies this POA&M link.
+    pub link_id: Uuid,
+    /// Records when the finding was linked.
+    pub linked_at: DateTime<Utc>,
+    /// Identifies the linking user.
+    pub linked_by: Uuid,
+    /// Records when this link retired.
+    pub retired_at: Option<DateTime<Utc>>,
+    /// Identifies the retiring user.
+    pub retired_by: Option<Uuid>,
+    /// Explains link retirement.
+    pub retirement_reason: Option<String>,
+    /// Indicates whether this link participates in current remediation.
+    pub link_active: bool,
+    /// Identifies the immutable scan captured when the finding was linked.
+    #[serde(default)]
+    pub baseline_scan_id: Option<Uuid>,
+    /// Records when the immutable baseline scan completed.
+    #[serde(default)]
+    pub baseline_scan_completed_at: Option<DateTime<Utc>>,
+    /// Gives the retained deployed generation captured at link time.
+    #[serde(default)]
+    pub baseline_generation: Option<i32>,
+    /// Gives the retained deployed store path captured at link time.
+    #[serde(default)]
+    pub baseline_target_store_path: Option<String>,
+    /// Gives the exact immutable package occurrence captured at link time.
+    #[serde(default)]
+    pub baseline_occurrence_derivation_path: Option<String>,
+    /// Gives the scanner-observed package version captured at link time.
+    #[serde(default)]
+    pub baseline_observed_package_version: Option<String>,
+    /// Identifies the current deployed derivation when resolvable.
+    pub current_derivation_id: Option<i32>,
+    /// Contains the current deployed store path when resolvable.
+    pub current_target_store_path: Option<String>,
+    /// Identifies the current exact scan when resolvable.
+    pub current_scan_id: Option<Uuid>,
+    /// Contains the current exact occurrence path when present.
+    pub current_occurrence_derivation_path: Option<String>,
+    /// Contains the current observed installed version when present.
+    pub current_observed_package_version: Option<String>,
+    /// Contains the server-normalized exact-CVE resolution state.
+    pub resolution_state: String,
 }
 
 /// Describes one durable POA&M activity event.
@@ -475,6 +965,9 @@ pub struct PoamDetail {
     pub poam: PoamSummary,
     /// Contains the selected page of linked findings.
     pub findings: Vec<FindingView>,
+    /// Contains exact-CVE links without changing policy finding semantics.
+    #[serde(default)]
+    pub cve_findings: Vec<CveFindingView>,
     /// Indicates that an older findings page is available.
     pub findings_has_more: bool,
     /// Selects the next older findings page.
@@ -495,6 +988,38 @@ pub struct PoamDetail {
     pub activity_has_more: bool,
     /// Selects the next older activity page.
     pub activity_next_cursor: Option<HistoryCursor>,
+}
+
+/// Requests creation from one server-issued current exact-CVE occurrence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateCvePoamRequest {
+    /// Contains opaque exact-evidence mutation context.
+    pub observation: CveObservationReference,
+    /// Contains the remediation title.
+    pub title: String,
+    /// Contains the remediation plan.
+    pub plan: String,
+    /// Preserves the legacy owner field; typed clients send an empty value.
+    pub owner: String,
+    /// Selects a typed assignee.
+    pub assignee: Option<PoamAssigneeRequest>,
+    /// Sets the planned completion date.
+    pub target_date: Option<NaiveDate>,
+    /// Sets the remediation risk.
+    pub risk: PoamRisk,
+    /// Requests server-standard milestones.
+    pub default_milestones: bool,
+    /// Adds immutable assignment references.
+    pub assignment_version_ids: Vec<Uuid>,
+}
+
+/// Requests unlinking or linking current exact-CVE evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddCveFindingRequest {
+    /// Requires the current POA&M revision.
+    pub revision: i64,
+    /// Contains opaque server-issued exact evidence.
+    pub observation: CveObservationReference,
 }
 
 /// Describes a server-confirmed finding that can be linked to a POA&M.
@@ -694,6 +1219,9 @@ pub struct CreatePoamRequest {
     pub plan: String,
     /// Contains the responsible owner label.
     pub owner: String,
+    /// Selects a typed assignee for the production UI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<PoamAssigneeRequest>,
     /// Sets the planned completion date when provided.
     pub target_date: Option<NaiveDate>,
     /// Sets the persisted remediation risk.
@@ -713,8 +1241,13 @@ pub struct UpdatePoamRequest {
     pub title: Option<String>,
     /// Replaces the remediation plan when present.
     pub plan: Option<String>,
-    /// Replaces the owner label when present.
+    /// Replaces the free-form compatibility owner when present.
+    ///
+    /// This field cannot be combined with `assignee`.
     pub owner: Option<String>,
+    /// Replaces or clears the typed assignee when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<PoamAssigneeRequest>,
     /// Preserves, clears, or sets the target date through nested option semantics.
     pub target_date: Option<Option<NaiveDate>>,
     /// Replaces the risk category when present.
@@ -1077,6 +1610,65 @@ pub async fn fetch_poam(id: Uuid, query: &PoamDetailQuery) -> Result<PoamDetail,
     .await
 }
 
+/// Fetches the bounded People and Groups catalog for POA&M assignment.
+///
+/// # Errors
+///
+/// Returns [`PoamApiError`] when transport fails, the caller cannot mutate
+/// POA&Ms, or the response cannot be decoded.
+pub async fn fetch_assignee_catalog() -> Result<PoamAssigneeCatalog, PoamApiError> {
+    request(
+        "GET",
+        &format!("{}/poams/assignees", base_url()),
+        None::<&()>,
+    )
+    .await
+}
+
+/// Fetches authoritative fleet detail for one exact canonical CVE/package pair.
+///
+/// # Errors
+///
+/// Returns [`PoamApiError`] when the subject is not visible, authorization
+/// fails, transport fails, or the response does not match the API contract.
+pub async fn fetch_fleet_cve_detail(
+    cve_id: &str,
+    package: &str,
+) -> Result<FleetCveDetail, PoamApiError> {
+    let url = format!(
+        "{}/cves/{}/fleet?package={}",
+        base_url(),
+        encode_uri_component(cve_id),
+        encode_uri_component(package)
+    );
+    let mut detail = request::<FleetCveDetail, ()>("GET", &url, None).await?;
+    detail.normalize_inventory_counts();
+    Ok(detail)
+}
+
+/// Applies one atomic fleet triage request for an exact CVE/package pair.
+///
+/// # Errors
+///
+/// Returns [`PoamApiError`] for validation, authorization, stale evidence,
+/// active-remediation conflicts, transport failures, or invalid responses.
+pub async fn triage_fleet_cve(
+    cve_id: &str,
+    body: &FleetCveTriageRequest,
+) -> Result<FleetCveTriageResponse, PoamApiError> {
+    let response: FleetCveTriageResponse = request(
+        "POST",
+        &format!(
+            "{}/cves/{}/triage",
+            base_url(),
+            encode_uri_component(cve_id)
+        ),
+        Some(body),
+    )
+    .await?;
+    Ok(response)
+}
+
 macro_rules! poam_body_mutation {
     ($name:ident, $method:literal, $suffix:literal, $request:ty, $response:ty) => {
         #[doc = concat!("Sends the `", stringify!($name), "` POA&M mutation.")]
@@ -1110,12 +1702,29 @@ pub async fn create_poam(body: &CreatePoamRequest) -> Result<PoamDetail, PoamApi
     request("POST", &format!("{}/poams", base_url()), Some(body)).await
 }
 
+/// Creates a POA&M for one server-issued exact-CVE occurrence.
+///
+/// # Errors
+///
+/// Returns [`PoamApiError`] when transport, validation, authorization, current
+/// evidence reconciliation, or response decoding fails.
+pub async fn create_cve_poam(body: &CreateCvePoamRequest) -> Result<PoamDetail, PoamApiError> {
+    request("POST", &format!("{}/poams/cves", base_url()), Some(body)).await
+}
+
 poam_body_mutation!(update_poam, "PATCH", "", UpdatePoamRequest, PoamDetail);
 poam_body_mutation!(
     transition_poam,
     "POST",
     "/transition",
     TransitionPoamRequest,
+    PoamDetail
+);
+poam_body_mutation!(
+    link_poam_cve_finding,
+    "POST",
+    "/cve-findings",
+    AddCveFindingRequest,
     PoamDetail
 );
 poam_body_mutation!(add_poam_note, "POST", "/notes", AddNoteRequest, PoamDetail);
@@ -1204,6 +1813,20 @@ pub async fn unlink_poam_finding(
     revision: i64,
 ) -> Result<PoamDetail, PoamApiError> {
     revision_delete(format!("/poams/{id}/findings/{finding_id}"), revision).await
+}
+
+/// Retires one exact-CVE finding relationship using optimistic concurrency.
+///
+/// # Errors
+///
+/// Returns [`PoamApiError`] when transport fails, the server rejects the
+/// revision or mutation, or decoding fails.
+pub async fn unlink_poam_cve_finding(
+    id: Uuid,
+    finding_id: Uuid,
+    revision: i64,
+) -> Result<PoamDetail, PoamApiError> {
+    revision_delete(format!("/poams/{id}/cve-findings/{finding_id}"), revision).await
 }
 
 /// Removes one assignment reference using optimistic concurrency.
@@ -1550,6 +2173,21 @@ pub async fn assignment_relationships(
 mod tests {
     use super::*;
 
+    #[test]
+    fn scheduled_poam_metadata_is_additive_for_rolling_compatibility() {
+        let raw = r#"{
+          "state":"scheduled",
+          "poam_id":"00000000-0000-0000-0000-000000000001",
+          "actor":{"user_id":"00000000-0000-0000-0000-000000000002","display":"Operator"},
+          "scheduled_at":"2026-09-13T12:00:00Z"
+        }"#;
+        let disposition: CveEnvironmentDisposition = serde_json::from_str(raw).unwrap();
+        assert!(matches!(
+            disposition,
+            CveEnvironmentDisposition::Scheduled { poam: None, .. }
+        ));
+    }
+
     fn summary(id: u128) -> PoamSummary {
         PoamSummary {
             id: Uuid::from_u128(id),
@@ -1557,12 +2195,14 @@ mod tests {
             title: format!("POA&M {id}"),
             plan: "Plan".to_string(),
             owner: "Owner".to_string(),
+            assignee: None,
             target_date: None,
             risk: PoamRisk::Medium,
             status: PoamStatus::Completed,
             revision: 1,
             overdue: false,
             finding_count: 1,
+            cve_finding_count: 0,
             created_at: DateTime::from_timestamp(1, 0).unwrap(),
             updated_at: DateTime::from_timestamp(id as i64, 0).unwrap(),
             closed_at: None,
@@ -1580,6 +2220,10 @@ mod tests {
         assert!(!PoamStatus::Completed.is_active());
         assert_eq!(PoamRisk::High.label(), "High");
         assert_eq!(PoamRisk::High.category_label(), "CAT I");
+        assert_eq!(
+            PoamStatus::AwaitingVerification.description(),
+            "Work reported complete; waiting on a passing Crystal Forge evaluation."
+        );
         assert_eq!(PoamRisk::Medium.category_label(), "CAT II");
         assert_eq!(PoamRisk::Low.category_label(), "CAT III");
     }
@@ -1596,6 +2240,86 @@ mod tests {
         );
         assert!(VerificationResult::Pass.is_accepted());
         assert!(!VerificationResult::Stale.is_accepted());
+    }
+
+    #[test]
+    fn fleet_detail_accepts_additive_environment_rollout_fields() {
+        let mut detail: FleetCveDetail = serde_json::from_value(serde_json::json!({
+            "cve": {
+                "cve_id": "CVE-2026-1000",
+                "cvss_v3_score": 8.1,
+                "severity": "high",
+                "title": "Test vulnerability",
+                "cvss_vector": null,
+                "cwe_id": null,
+                "published_date": null,
+                "modified_date": null,
+                "exploited": false,
+                "package_name": "openssl",
+                "installed_version": "3.4.1",
+                "fixed_version": "3.4.2",
+                "detection_method": "vulnix",
+                "fix_status": "fix_available"
+            },
+            "canonical_package_name": "openssl",
+            "rollup": "outstanding",
+            "affected_system_count": 1,
+            "environments": [{
+                "environment_id": Uuid::from_u128(1),
+                "environment_name": "Production",
+                "affected_system_count": 1,
+                "future_server_field": { "ignored": true }
+            }],
+            "future_top_level_field": "ignored"
+        }))
+        .unwrap();
+
+        assert_eq!(detail.environments[0].disposition, None);
+        assert!(detail.environments[0].systems.is_empty());
+        detail.normalize_inventory_counts();
+        assert_eq!(detail.exact_affected_system_count, 1);
+        assert_eq!(detail.legacy_affected_system_count, 0);
+        assert_eq!(detail.exact_mutation_target_count, 1);
+        assert_eq!(detail.environments[0].exact_affected_system_count, 1);
+
+        detail.environments.clear();
+        detail.exact_mutation_target_count = 0;
+        detail.normalize_inventory_counts();
+        assert_eq!(detail.exact_affected_system_count, 1);
+        assert_eq!(detail.exact_mutation_target_count, 0);
+    }
+
+    #[test]
+    fn cve_finding_accepts_payloads_without_additive_baseline_fields() {
+        let finding: CveFindingView = serde_json::from_value(serde_json::json!({
+            "id": Uuid::from_u128(1),
+            "system_id": Uuid::from_u128(2),
+            "hostname": "legacy-host",
+            "environment_id": null,
+            "canonical_cve_id": "CVE-2026-1001",
+            "canonical_package_name": "openssl",
+            "link_id": Uuid::from_u128(3),
+            "linked_at": "2026-09-01T12:00:00Z",
+            "linked_by": Uuid::from_u128(4),
+            "retired_at": null,
+            "retired_by": null,
+            "retirement_reason": null,
+            "link_active": true,
+            "current_derivation_id": null,
+            "current_target_store_path": null,
+            "current_scan_id": null,
+            "current_occurrence_derivation_path": null,
+            "current_observed_package_version": null,
+            "resolution_state": "open"
+        }))
+        .unwrap();
+
+        assert!(finding.baseline_scan_id.is_none());
+        assert!(finding.baseline_scan_completed_at.is_none());
+        assert!(finding.baseline_generation.is_none());
+        assert!(finding.baseline_target_store_path.is_none());
+        assert!(finding.baseline_occurrence_derivation_path.is_none());
+        assert!(finding.baseline_observed_package_version.is_none());
     }
 
     #[test]
@@ -1937,5 +2661,70 @@ mod tests {
         let value = serde_json::to_value(request).unwrap();
         assert_eq!(value["revision"], 7);
         assert!(value["target_date"].is_null());
+    }
+
+    #[test]
+    fn typed_assignee_requests_do_not_accept_display_labels() {
+        let user_id = Uuid::from_u128(44);
+        let value = serde_json::to_value(PoamAssigneeRequest::User { user_id }).unwrap();
+        assert_eq!(value["kind"], "user");
+        assert_eq!(value["user_id"], user_id.to_string());
+        assert!(value.get("display").is_none());
+
+        let group = serde_json::to_value(PoamAssigneeRequest::OidcGroup {
+            group_name: "Team:Compliance".into(),
+        })
+        .unwrap();
+        assert_eq!(group["kind"], "oidc_group");
+        assert!(group.get("label").is_none());
+
+        let create = serde_json::to_value(CreatePoamRequest {
+            assessment_id: Some(Uuid::from_u128(45)),
+            finding_id: None,
+            observation: None,
+            title: "Remediate finding".into(),
+            plan: String::new(),
+            owner: String::new(),
+            assignee: Some(PoamAssigneeRequest::User { user_id }),
+            target_date: None,
+            risk: PoamRisk::Medium,
+            default_milestones: true,
+            assignment_version_ids: vec![],
+        })
+        .unwrap();
+        assert_eq!(create["owner"], "");
+        assert_eq!(create["assignee"]["user_id"], user_id.to_string());
+        assert!(create["assignee"].get("display").is_none());
+    }
+
+    #[test]
+    fn exact_cve_creation_serializes_opaque_observation_without_scan_derivation() {
+        let observation = CveObservationReference {
+            system_id: Uuid::from_u128(1),
+            scan_id: Uuid::from_u128(2),
+            occurrence_derivation_path: "/nix/store/opaque-occurrence".into(),
+            canonical_cve_id: "CVE-2026-1000".into(),
+            canonical_package_name: "openssl".into(),
+        };
+        let value = serde_json::to_value(CreateCvePoamRequest {
+            observation: observation.clone(),
+            title: "Patch openssl".into(),
+            plan: "Deploy the fixed package and scan again.".into(),
+            owner: String::new(),
+            assignee: Some(PoamAssigneeRequest::Unassigned),
+            target_date: None,
+            risk: PoamRisk::High,
+            default_milestones: true,
+            assignment_version_ids: vec![],
+        })
+        .unwrap();
+
+        assert_eq!(
+            value["observation"],
+            serde_json::to_value(observation).unwrap()
+        );
+        assert!(value.get("finding_id").is_none());
+        assert!(value.get("assessment_id").is_none());
+        assert!(value.get("scan_derivation_id").is_none());
     }
 }

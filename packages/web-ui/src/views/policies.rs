@@ -1496,11 +1496,12 @@ pub fn PolicyDrawer(
                 }
                 div { style: "display: flex; gap: 6px; align-items: center;",
                     button {
-                        class: "btn btn-ghost focus-ring xs",
+                        class: "btn-icon focus-ring",
                         aria_pressed: expanded(),
-                        title: if expanded() { "Restore policy drawer width" } else { "Expand policy drawer" },
+                        aria_label: if expanded() { "Restore policy drawer" } else { "Expand policy drawer" },
+                        title: if expanded() { "Restore policy drawer" } else { "Expand policy drawer" },
                         onclick: move |_| expanded.toggle(),
-                        if expanded() { "Restore" } else { "Expand" }
+                        Icon { name: if expanded() { IconName::Minimize } else { IconName::Maximize }, size: 15 }
                     }
                     if !is_core && is_editable {
                         button {
@@ -1524,6 +1525,7 @@ pub fn PolicyDrawer(
                         {
                             let vid = version_id.unwrap();
                             let pid = policy.id;
+                            let expected_semantic_digest = displayed_policy.semantic_digest.clone();
                             rsx! {
                                 if let Some(status) = action_status.read().as_ref() {
                                     span { class: "chip chip-info", style: "font-size:10px;", "{status}" }
@@ -1555,8 +1557,14 @@ pub fn PolicyDrawer(
                                             move |_| {
                                                 busy.set(true);
                                                 let v = vid;
+                                                let expected_semantic_digest = expected_semantic_digest.clone();
                                                 spawn(async move {
-                                                    match crate::api::client::publish_policy_version(&v).await {
+                                                    match crate::api::client::publish_policy_version(
+                                                        &v,
+                                                        &crate::api::models::PublishPolicyVersionRequest {
+                                                            expected_semantic_digest,
+                                                        },
+                                                    ).await {
                                                         Ok(_) => { busy.set(false); action_status.set(Some("Published".into())); }
                                                         Err(e) => { busy.set(false); action_status.set(Some(format!("Error: {e}"))); }
                                                     }
@@ -1575,7 +1583,10 @@ pub fn PolicyDrawer(
                                             move |_| {
                                                 busy.set(true);
                                                 spawn(async move {
-                                                    match crate::api::client::create_policy_draft(&pid).await {
+                                                    match crate::api::client::create_policy_draft(
+                                                        &pid,
+                                                        &crate::api::models::CreatePolicyDraftRequest { new_version: None },
+                                                    ).await {
                                                         Ok(_) => { busy.set(false); action_status.set(Some("Draft created".into())); }
                                                         Err(e) => { busy.set(false); action_status.set(Some(format!("Error: {e}"))); }
                                                     }
@@ -1782,7 +1793,7 @@ pub fn PolicyDrawer(
                                         for system in usage.systems.iter() {
                                             {
                                                 let environment = system.environment.as_deref().unwrap_or("No environment");
-                                                rsx! { Link { key: "{system.bundle_version_id}-{system.system_id}", class: "policy-revision-row focus-ring", to: Route::SystemDetailView { id: system.system_id.to_string(), tab: String::new(), poam: String::new() },
+                                                rsx! { Link { key: "{system.bundle_version_id}-{system.system_id}", class: "policy-revision-row focus-ring", to: Route::SystemDetailView { id: system.system_id.to_string(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new() },
                                                     div {
                                                         div { class: "mono", style: "font-weight:700;", "{system.hostname}" }
                                                         div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:3px;", "{environment} · {system.bundle_name} rev {system.bundle_version}" }
@@ -2514,6 +2525,55 @@ mod catalog_scaling_tests {
                 .count()
                 >= 2
         );
+    }
+
+    #[test]
+    fn tray_expand_controls_are_icon_only_and_accessibly_named() {
+        let policy = include_str!("policies.rs");
+        let bundle = include_str!("compliance.rs");
+        let evidence = include_str!("../components/compliance/mod.rs");
+        let poam = include_str!("../components/poam/mod.rs");
+        let icon = include_str!("../components/icon.rs");
+
+        for (source, label, expanded_class) in [
+            (policy, "policy drawer", "policy-drawer-expanded"),
+            (
+                bundle,
+                "compliance bundle drawer",
+                "compliance-drawer-expanded",
+            ),
+            (
+                evidence,
+                "compliance evidence drawer",
+                "compliance-drawer-expanded",
+            ),
+            (poam, "POA&M detail", "poam-tray-expanded"),
+        ] {
+            assert!(source.contains("class: \"btn-icon focus-ring\""), "{label}");
+            assert!(source.contains(&format!("\"Expand {label}\"")), "{label}");
+            assert!(source.contains(&format!("\"Restore {label}\"")), "{label}");
+            assert!(source.contains("aria_pressed:"), "{label}");
+            assert!(source.contains("expanded.toggle()"), "{label}");
+            assert!(source.contains("IconName::Maximize"), "{label}");
+            assert!(source.contains("IconName::Minimize"), "{label}");
+            assert!(source.contains(expanded_class), "{label}");
+        }
+        assert!(icon.contains("IconName::Maximize =>"));
+        assert!(icon.contains("IconName::Minimize =>"));
+    }
+
+    #[test]
+    fn accepted_policy_draft_action_sends_the_json_dto() {
+        let view = include_str!("policies.rs");
+        let client = include_str!("../api/client.rs");
+
+        assert!(view.contains("CreatePolicyDraftRequest { new_version: None }"));
+        assert!(client.contains("request: &CreatePolicyDraftRequest"));
+        assert!(client.contains("Result<CreatePolicyDraftResponse, ApiClientError>"));
+        assert!(client.contains("send_json_with_csrf(\"POST\", &url, Some(request)).await"));
+        assert!(!client.contains(
+            "send_json_with_csrf(\"POST\", &url, None::<&()>).await\n}\n\n/// Trust or reject a bundle version"
+        ));
     }
 
     #[test]

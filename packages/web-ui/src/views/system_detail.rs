@@ -11,34 +11,45 @@ use dioxus::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use js_sys::Object;
 use serde_json::Value as JsonValue;
+use std::collections::HashSet;
 #[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
 use uuid::Uuid;
+use wasm_bindgen::JsCast;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsValue;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::closure::Closure;
-#[cfg(target_arch = "wasm32")]
-use wasm_bindgen::{JsCast, JsValue};
 
 use crate::api::client::{
     ApiClientError, fetch_compliance_system_evidence, fetch_flake_timeline_for_tray,
-    fetch_system_assignments, fetch_system_compliance_bundles, fetch_system_cve_scan_eligibility,
-    fetch_system_cves, fetch_system_hardening, fetch_system_hardening_justifications,
+    fetch_system_assignments, fetch_system_compliance_bundles, fetch_system_cve_inventory,
+    fetch_system_cve_scan_eligibility, fetch_system_evaluated_options,
+    fetch_system_evaluation_module_sources, fetch_system_evaluation_summary,
+    fetch_system_hardening, fetch_system_hardening_justifications,
     fetch_system_hardening_scan_eligibility, get_system_deployment_progress,
-    request_system_generation_rollback, request_system_rollback, request_system_sync,
-    save_system_hardening_justification,
+    queue_system_config_inspection, request_system_generation_rollback, request_system_rollback,
+    request_system_sync, save_system_hardening_justification,
     verify_generation_closure as verify_generation_closure_request,
 };
 use crate::api::models::{
-    BuildStatus, CommitInfo, ComplianceEvidenceResponse, CveScanEligibilityResponse,
-    DeploymentLogEntry, DeploymentStatus, FlakeSummary, HardeningJustificationResponse,
-    HardeningScanEligibilityResponse, HardeningServiceResultResponse, HealthStatus, LogLevel,
-    SaveHardeningJustificationRequest, SystemAgentEvent, SystemCommitHistory,
-    SystemComplianceBundle, SystemDeploymentProgress, SystemDetail, SystemGeneration,
-    SystemHistoryEntry, SystemRollbackGenerationRequest, SystemRollbackRequest,
-    SystemVulnerability, VerifyGenerationClosureRequest,
+    AgentFingerprintStatus, BuildStatus, CommitInfo, ComplianceEvidenceResponse,
+    CveScanEligibilityResponse, DeploySystemRequest, DeploymentLogEntry, DeploymentStatus,
+    EvaluatedOption, EvaluatedOptionFilter, EvaluatedOptionRow, EvaluatedOptionsPage,
+    EvaluatedOptionsRequest, EvaluationDrift, EvaluationModuleSourcesPage, EvaluationModuleSummary,
+    FlakeSummary, HardeningJustificationResponse, HardeningScanEligibilityResponse,
+    HardeningServiceResultResponse, HealthStatus, LogLevel, ManualDeploymentAction,
+    ManualDeploymentConversionState, ManualDeploymentPolicyState, ManualDeploymentRequestState,
+    OptionChangeKind, OptionDefinitionProvenance, OptionInventoryState, SafeOptionValue,
+    SaveHardeningJustificationRequest, SelectedEvaluationSummary, SevenDayDriftStatus,
+    SnapshotLifecycle, SnapshotRevisionMode, SystemAgentEvent, SystemCommitHistory,
+    SystemComplianceBundle, SystemCveInventoryAuthority, SystemCveInventoryPageResponse,
+    SystemDeploymentProgress, SystemDetail, SystemGeneration, SystemHistoryEntry,
+    SystemRollbackGenerationRequest, SystemRollbackRequest, SystemVulnerability,
+    TrackedFlakeIdentity, TypedOptionDiff, VerifyGenerationClosureRequest,
 };
 use crate::components::compliance::EvidenceDrawer;
-use crate::components::cve::CvesTab;
+use crate::components::cve::{CveInventoryPaginationState, CvesTab};
 use crate::components::dialog_focus::{
     DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel,
 };
@@ -50,14 +61,20 @@ use crate::components::notifications::Toast;
 use crate::components::poam::{
     AssignmentVersionCandidate, FindingPoamEvent, PoamDetailHost, PoamFilter, SystemPoamSection,
 };
+use crate::components::system::config_explorer::ConfigExplorer;
 use crate::components::system::{
-    EditSystemModal, PendingDeployBanner, deployment_state_label, environment_style, format_uptime,
+    AutoLatestDeployEvent, AutoLatestDeployPrompt, AutoLatestDeployState, EditSystemModal,
+    PendingDeployBanner, deployment_request_for_target, deployment_state_label, environment_style,
+    format_uptime, reduce_auto_latest_deploy_state,
 };
 use crate::routes::Route;
 use crate::state::{
     app_state::AppState,
     auth,
-    navigation_focus::{FocusTarget, NavigationFocus},
+    navigation_focus::{
+        ConfigRevision, FocusTarget, NavigationFocus, SystemDetailNavigation, SystemDetailTab,
+        current_query, update_query,
+    },
 };
 use crate::systems::adapter::{
     deploy_system_via_api, fetch_system_commits_via_api, load_system_agent_events_with_fallback,
@@ -124,7 +141,7 @@ const POLICY_JSON_SAMPLE: &str = r#"[
 /// renders as a real empty/error state (TASK-353 review).
 #[derive(Debug, Clone, PartialEq)]
 struct VulnerabilitiesLoad {
-    items: Vec<SystemVulnerability>,
+    inventory: Option<SystemCveInventoryPageResponse>,
     error: Option<String>,
     redirect_to_login: bool,
 }
@@ -154,6 +171,49 @@ impl Tab {
             Self::Compliance => "Compliance",
         }
     }
+
+    fn navigation_tab(self) -> SystemDetailTab {
+        match self {
+            Self::Overview => SystemDetailTab::Overview,
+            Self::Deploy => SystemDetailTab::Deploy,
+            Self::History => SystemDetailTab::History,
+            Self::Logs => SystemDetailTab::Logs,
+            Self::Config => SystemDetailTab::Config,
+            Self::Cves => SystemDetailTab::Cves,
+            Self::Hardening => SystemDetailTab::Hardening,
+            Self::Compliance => SystemDetailTab::Compliance,
+        }
+    }
+
+    fn from_navigation(tab: SystemDetailTab) -> Self {
+        match tab {
+            SystemDetailTab::Overview => Self::Overview,
+            SystemDetailTab::Deploy => Self::Deploy,
+            SystemDetailTab::History => Self::History,
+            SystemDetailTab::Logs => Self::Logs,
+            SystemDetailTab::Config => Self::Config,
+            SystemDetailTab::Cves => Self::Cves,
+            SystemDetailTab::Hardening => Self::Hardening,
+            SystemDetailTab::Compliance => Self::Compliance,
+        }
+    }
+}
+
+fn navigate_system_detail_tab(
+    mut active_tab: Signal<Tab>,
+    mut navigation_state: Signal<SystemDetailNavigation>,
+    tab: Tab,
+    push: bool,
+) {
+    let mut next = navigation_state.read().clone();
+    next.tab = tab.navigation_tab();
+    if tab != Tab::Deploy {
+        next.deploy_generation = None;
+    }
+    let query = next.to_query(&current_query());
+    active_tab.set(tab);
+    navigation_state.set(next);
+    update_query(&query, push);
 }
 
 fn derived_fqdn(hostname: &str, environment: Option<&str>) -> String {
@@ -400,7 +460,16 @@ struct FlakeCommitPeekState {
 /// compliance, finding, and remediation identity remain server-authoritative;
 /// the view owns only transient presentation and form state.
 #[component]
-pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
+pub fn SystemDetailView(
+    id: String,
+    tab: String,
+    poam: String,
+    config_mode: String,
+    revision: String,
+    generation: String,
+    deploy_generation: String,
+) -> Element {
+    let _route_owned_config_context = (config_mode, revision, generation, deploy_generation);
     let nav = navigator();
     let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
     let mut breadcrumb_override = use_context::<Signal<Option<(String, String)>>>();
@@ -414,21 +483,26 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
     // (and any tab-specific data loading it triggers) would flash briefly before the
     // effect ever fires, and on the WASM target the effect was observed to land too
     // late to reliably override the initial tab.
-    let initial_route_tab = tab_from_route(&tab, &current_system_detail_query());
-    let mut active_tab = use_signal(|| initial_route_tab);
-    let mut observed_route_tab = use_signal(|| tab.clone());
-    // Router prop updates rerender this component but do not recreate signals.
-    // Reconcile only when the route-owned value changes so local tab clicks,
-    // which update browser history directly, are not reverted.
-    if observed_route_tab.peek().as_str() != tab {
-        observed_route_tab.set(tab.clone());
-        active_tab.set(tab_from_route(&tab, &current_system_detail_query()));
+    let mut initial_query = current_query();
+    if initial_query.is_empty() {
+        initial_query = query_with_parameter("", "tab", Some(&tab));
+        initial_query = query_with_parameter(&initial_query, "poam", Some(&poam));
     }
+    let initial_navigation = SystemDetailNavigation::from_query(&initial_query);
+    let mut navigation_state = use_signal(|| initial_navigation.clone());
+    let mut active_tab = use_signal(|| Tab::from_navigation(initial_navigation.tab));
+    let initial_cve_poam = (active_tab() == Tab::Cves)
+        .then(|| query_value(&initial_query, "poam"))
+        .flatten()
+        .and_then(|value| Uuid::parse_str(&value).ok());
+    let mut cve_poam = use_signal(|| initial_cve_poam);
     #[cfg(target_arch = "wasm32")]
     {
         let popstate_listener = use_hook(|| {
             let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
-                active_tab.set(tab_from_query(&current_system_detail_query()));
+                let next = SystemDetailNavigation::from_query(&current_query());
+                active_tab.set(Tab::from_navigation(next.tab));
+                navigation_state.set(next);
             });
             if let Some(window) = web_sys::window() {
                 let _ = window.add_event_listener_with_callback(
@@ -475,10 +549,14 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
     // Toast notification state
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None); // (message, is_success)
     let mut deploy_action_notice: Signal<Option<(String, bool)>> = use_signal(|| None);
+    let mut persisted_deploy_policy: Signal<Option<ManualDeploymentPolicyState>> =
+        use_signal(|| None);
+    let mut deploy_retry_request: Signal<Option<DeploySystemRequest>> = use_signal(|| None);
     let mut flake_commit_peek: Signal<Option<FlakeCommitPeekState>> = use_signal(|| None);
     let mut flake_commit_peek_reload = use_signal(|| 0_u64);
     // Reload nonce for system detail — incremented after edit-save to re-fetch the system.
     let mut detail_reload = use_signal(|| 0_u64);
+    let mut cve_pagination = use_signal(CveInventoryPaginationState::default);
 
     // Live clock tick for relative timers/heartbeat countdowns while page is open.
     let mut now_tick = use_signal(Utc::now);
@@ -522,32 +600,39 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
             // render fake vulnerabilities (TASK-353 review).
             let Ok(system_id) = Uuid::parse_str(&id) else {
                 return VulnerabilitiesLoad {
-                    items: Vec::new(),
+                    inventory: None,
                     error: Some("Invalid system identifier.".to_string()),
                     redirect_to_login: false,
                 };
             };
 
-            match fetch_system_cves(&system_id).await {
-                Ok(items) => VulnerabilitiesLoad {
-                    items,
+            match fetch_system_cve_inventory(&system_id, None).await {
+                Ok(inventory) => VulnerabilitiesLoad {
+                    inventory: Some(inventory),
                     error: None,
                     redirect_to_login: false,
                 },
                 Err(ApiClientError::Status {
                     code: 401 | 403, ..
                 }) => VulnerabilitiesLoad {
-                    items: Vec::new(),
+                    inventory: None,
                     error: None,
                     redirect_to_login: true,
                 },
                 Err(err) => VulnerabilitiesLoad {
-                    items: Vec::new(),
+                    inventory: None,
                     error: Some(format!("Unable to load vulnerabilities: {err}")),
                     redirect_to_login: false,
                 },
             }
         }
+    });
+    let vulnerabilities_resource_for_state = vulnerabilities_resource.clone();
+    use_effect(move || {
+        let Some(load) = vulnerabilities_resource_for_state.read().as_ref().cloned() else {
+            return;
+        };
+        cve_pagination.write().reset(load.inventory);
     });
 
     let mut deployment_progress_poll_tick = use_signal(|| 0_u64);
@@ -780,7 +865,7 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
             div {
                 class: "space-y-4",
                 Link {
-                    to: crate::routes::Route::SystemsView {},
+                    to: crate::routes::Route::SystemsView { query: String::new() },
                     class: "inline-flex items-center gap-1 text-sm {theme::text::SECONDARY} hover:text-white transition-colors",
                     "← Back to Systems"
                 }
@@ -815,12 +900,14 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
         .clone()
         .flatten();
     let history_commit_history = map_history_entries_to_commit_history(&history_entries);
-    let deploy_commit_history = commits_resource
-        .read_unchecked()
-        .clone()
-        .flatten()
+    let commits_response = commits_resource.read_unchecked().clone().flatten();
+    let observational_current_commit = commits_response
+        .as_ref()
+        .and_then(|response| response.current_commit.clone());
+    let deploy_commit_history = commits_response
+        .as_ref()
         .map(|response| {
-            map_commit_infos_to_commit_history(&response.commits, response.current_commit)
+            map_commit_infos_to_commit_history(&response.commits, response.current_commit.clone())
         })
         .filter(|commits| !commits.is_empty())
         .unwrap_or_else(|| history_commit_history.clone());
@@ -829,11 +916,11 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
     } else {
         history_entries.clone()
     };
-    let overview_current_commit = deploy_commit_history
-        .iter()
-        .find(|commit| commit.is_current)
-        .cloned()
-        .or_else(|| deploy_commit_history.first().cloned());
+    let overview_current_commit = observational_current_timeline_commit(
+        &deploy_commit_history,
+        observational_current_commit.as_deref(),
+    )
+    .cloned();
     // Raw commit list for the Edit modal's pinned-commit picker. This comes from the
     // real `/systems/:id/commits` endpoint when available, so the pinned picker is wired
     // to authoritative data rather than mocked.
@@ -857,7 +944,7 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
         .read_unchecked()
         .clone()
         .unwrap_or_else(|| VulnerabilitiesLoad {
-            items: Vec::new(),
+            inventory: None,
             error: None,
             redirect_to_login: false,
         });
@@ -871,7 +958,11 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
         };
     }
     let vulnerabilities_loading = vulnerabilities_resource.read_unchecked().is_none();
-    let vulnerabilities = vulnerabilities_load.items.clone();
+    let cve_inventory = cve_pagination.read().inventory.clone();
+    let vulnerabilities = cve_inventory
+        .as_ref()
+        .map(|inventory| inventory.vulnerabilities.clone())
+        .unwrap_or_default();
     let vulnerabilities_error = vulnerabilities_load.error.clone();
     let deployment_logs = map_agent_events_to_logs(
         agent_events_resource
@@ -898,6 +989,7 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
 
     let auth_context = app_state.read().auth.clone();
     let can_mutate = auth::can_mutate_systems(&auth_context);
+    let can_start_config_observations = auth::is_admin(&auth_context);
     let cve_scan_eligible = scan_eligibility
         .as_ref()
         .map(|item| item.eligible)
@@ -1012,7 +1104,7 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                 button {
                     class: "sd-back focus-ring",
                     onclick: move |_| {
-                        nav.push(Route::SystemsView {});
+                        nav.push(Route::SystemsView { query: String::new() });
                     },
                     "aria-label": "Back to systems",
                     Icon { name: IconName::ArrowLeft, size: 14 }
@@ -1057,13 +1149,6 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                         class: "sd-head-actions",
                         button {
                             class: "btn btn-ghost focus-ring",
-                            disabled: !can_mutate,
-                            onclick: move |_| show_generation_rollback_modal.set(true),
-                            Icon { name: IconName::Rollback, size: 14 }
-                            "Rollback"
-                        }
-                        button {
-                            class: "btn btn-ghost focus-ring",
                             onclick: move |_| show_ssh_modal.set(true),
                             Icon { name: IconName::Terminal, size: 14 }
                             "SSH"
@@ -1077,13 +1162,6 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                             },
                             Icon { name: IconName::Gear, size: 14 }
                             "Edit"
-                        }
-                        button {
-                            class: "btn btn-primary focus-ring",
-                            disabled: !can_mutate,
-                            onclick: move |_| active_tab.set(Tab::Deploy),
-                            Icon { name: IconName::Deploy, size: 14 }
-                            "Deploy"
                         }
                     }
                 }
@@ -1109,7 +1187,14 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                     .unwrap_or(0.0);
                 let uptime_str = format_uptime(system.hardware.uptime_secs.unwrap_or(0));
                 let kernel_str = system.kernel.clone().unwrap_or_else(|| "unknown".to_string());
-                let policy_str = system.deployment_policy.clone();
+                let policy_str = persisted_deploy_policy()
+                    .map(|policy| match policy {
+                        ManualDeploymentPolicyState::AutoLatest => "auto_latest",
+                        ManualDeploymentPolicyState::Manual => "manual",
+                        ManualDeploymentPolicyState::Pinned => "pinned",
+                    })
+                    .unwrap_or(&system.deployment_policy)
+                    .to_string();
                 let env_str = environment.clone();
                 let generation_text = system
                     .generation
@@ -1200,7 +1285,7 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                             - now.signed_duration_since(dt).num_seconds() as f64
                     }),
                     on_dismiss: move |_| deployment_progress_poll_tick.set(deployment_progress_poll_tick() + 1),
-                    on_view_logs: move |_| active_tab.set(Tab::Logs),
+                    on_view_logs: move |_| navigate_system_detail_tab(active_tab, navigation_state, Tab::Logs, true),
                 }
             }
 
@@ -1209,7 +1294,24 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                 "data-testid": "system-detail-tabs",
                 class: "sd-tabs",
                 role: "tablist",
-                for tab in DETAIL_TAB_ORDER {
+                "aria-label": "System detail sections",
+                onkeydown: move |event| {
+                    let current = DETAIL_TAB_ORDER
+                        .iter()
+                        .position(|tab| tab == &*active_tab.read())
+                        .unwrap_or_default();
+                    let next = match event.key() {
+                        Key::ArrowRight => (current + 1) % DETAIL_TAB_ORDER.len(),
+                        Key::ArrowLeft => (current + DETAIL_TAB_ORDER.len() - 1) % DETAIL_TAB_ORDER.len(),
+                        Key::Home => 0,
+                        Key::End => DETAIL_TAB_ORDER.len() - 1,
+                        _ => return,
+                    };
+                    event.prevent_default();
+                    navigate_system_detail_tab(active_tab, navigation_state, DETAIL_TAB_ORDER[next], true);
+                    focus_dialog_by_id(&format!("system-tab-{next}"));
+                },
+                for (tab_index, tab) in DETAIL_TAB_ORDER.into_iter().enumerate() {
                     {
                         let is_active = *active_tab.read() == tab;
                         let tab_class = if is_active {
@@ -1223,14 +1325,11 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                                 class: "{tab_class}",
                                 role: "tab",
                                 "aria-selected": "{is_active}",
+                                "aria-controls": "system-tab-panel",
+                                id: "system-tab-{tab_index}",
+                                tabindex: if is_active { "0" } else { "-1" },
                                 onclick: move |_| {
-                                    active_tab.set(tab);
-                                    let query = query_with_parameter(
-                                        &current_system_detail_query(),
-                                        "tab",
-                                        Some(tab_query_value(tab)),
-                                    );
-                                    sync_system_detail_query(&query, false);
+                                    navigate_system_detail_tab(active_tab, navigation_state, tab, true);
                                 },
                                 // Tab icons use the shared Icon component at size 13,
                                 // matching the CrystalForgelatest design icon contract.
@@ -1260,6 +1359,8 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
             // Tab content
             div {
                 class: "sd-body",
+                id: "system-tab-panel",
+                role: "tabpanel",
                 match *active_tab.read() {
                     Tab::Overview => rsx! {
                         OverviewTab {
@@ -1268,8 +1369,8 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                             current_commit: overview_current_commit.clone(),
                             target_store_path: deployment_progress.as_ref().map(|progress| progress.target_store_path.clone()),
                             history_entries: effective_history_entries.clone(),
-                            on_open_cves: move |_| active_tab.set(Tab::Cves),
-                            on_view_history: move |_| active_tab.set(Tab::History),
+                            on_open_cves: move |_| navigate_system_detail_tab(active_tab, navigation_state, Tab::Cves, true),
+                            on_view_history: move |_| navigate_system_detail_tab(active_tab, navigation_state, Tab::History, true),
                             on_open_flake_commit: on_open_flake_commit,
                         }
                     },
@@ -1279,8 +1380,11 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                             commits: deploy_commit_history.clone(),
                             generations: generations_result.generations.clone(),
                             current_generation: generations_result.current_generation,
+                            initial_generation: navigation_state.read().deploy_generation,
                             allow_mutations: can_mutate,
-                            deploy_notice: deploy_action_notice.read().clone(),
+                            deploy_notice: deploy_action_notice,
+                            persisted_policy: persisted_deploy_policy(),
+                            retry_request: deploy_retry_request(),
                             on_clear_deploy_notice: move |_| deploy_action_notice.set(None),
                             on_open_flake_commit: on_open_flake_commit,
                             on_deploy_commit: {
@@ -1288,29 +1392,36 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                                 let hostname = system.hostname.clone();
                                 let toast_message = toast_message.clone();
                                 let mut deploy_action_notice = deploy_action_notice.clone();
-                                move |commit_sha: String| {
+                                let mut persisted_deploy_policy = persisted_deploy_policy;
+                                move |request: DeploySystemRequest| {
                                     let hostname = hostname.clone();
                                     let toast_message = toast_message.clone();
                                     let mut deploy_action_notice = deploy_action_notice.clone();
+                                    let mut persisted_deploy_policy = persisted_deploy_policy;
+                                    deploy_retry_request.set(Some(request.clone()));
                                     deploy_action_notice.set(Some((
                                         format!(
                                             "Requesting deployment of {} to {}…",
                                             hostname,
-                                            commit_sha.chars().take(7).collect::<String>()
+                                            request.commit_sha.chars().take(7).collect::<String>()
                                         ),
                                         true,
                                     )));
                                     spawn(async move {
-                                        let (message, success) = match deploy_system_via_api(system_id, commit_sha.clone()).await {
-                                            Ok(response) if !response.trim().is_empty() => (response, true),
-                                            Ok(_) => (
-                                                format!(
-                                                    "Requested deployment of {} to {}",
-                                                    hostname,
-                                                    commit_sha.chars().take(7).collect::<String>()
-                                                ),
-                                                true,
-                                            ),
+                                        let (message, success) = match deploy_system_via_api(system_id, &request).await {
+                                            Ok(response) => {
+                                                persisted_deploy_policy.set(Some(response.policy));
+                                                let success = response.deployment != ManualDeploymentRequestState::Failed;
+                                                let conversion_persisted = matches!(
+                                                    response.conversion,
+                                                    ManualDeploymentConversionState::Converted
+                                                        | ManualDeploymentConversionState::AlreadyManual
+                                                );
+                                                if success || !conversion_persisted {
+                                                    deploy_retry_request.set(None);
+                                                }
+                                                (response.message, success)
+                                            }
                                             Err(error) => (
                                                 format!("Deploy request failed for {}: {}", hostname, error),
                                                 false,
@@ -1326,7 +1437,7 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                                 let hostname = system.hostname.clone();
                                 let toast_message = toast_message.clone();
                                 let mut deploy_action_notice = deploy_action_notice.clone();
-                                move |store_path: String| {
+                                move |generation: SystemGeneration| {
                                     let hostname = hostname.clone();
                                     let toast_message = toast_message.clone();
                                     let mut deploy_action_notice = deploy_action_notice.clone();
@@ -1338,7 +1449,9 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                                         let (message, success) = match request_system_generation_rollback(
                                             &system_id,
                                             &SystemRollbackGenerationRequest {
-                                                store_path: store_path.clone(),
+                                                generation_snapshot_id: generation.generation_snapshot_id,
+                                                generation: Some(generation.generation),
+                                                store_path: generation.store_path.clone(),
                                             },
                                         )
                                         .await
@@ -1369,32 +1482,89 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                         HistoryTab {
                             entries: effective_history_entries.clone(),
                             commits: deploy_commit_history.clone(),
+                            generations: generations_result.generations.clone(),
                             current_generation: system.generation,
                             deployment_policy: system.deployment_policy.clone(),
                             allow_mutations: can_mutate,
-                            on_rollback: move |commit| {
-                                rollback_target.set(Some(commit));
-                                show_rollback_dialog.set(true);
+                            on_rollback: move |generation| {
+                                let mut next = navigation_state.read().clone();
+                                next.tab = SystemDetailTab::Deploy;
+                                next.deploy_generation = Some(generation);
+                                let query = next.to_query(&current_query());
+                                navigation_state.set(next);
+                                active_tab.set(Tab::Deploy);
+                                update_query(&query, true);
                             },
                             on_view_logs: move |event_id: String| {
                                 // Record the jump target with a fresh nonce, then switch to Logs.
                                 let nonce = chrono::Utc::now().timestamp_millis() as u64;
                                 log_jump_target.set(Some((event_id, nonce)));
-                                active_tab.set(Tab::Logs);
+                                navigate_system_detail_tab(active_tab, navigation_state, Tab::Logs, true);
                             },
                         }
                     },
                     Tab::Cves => rsx! {
                         CvesTab {
                             system_id: system.id,
-                            cve_counts: system.cve_counts.clone(),
+                            hostname: system.hostname.clone(),
                             vulnerabilities: vulnerabilities.clone(),
+                            inventory_metadata: cve_inventory
+                                .as_ref()
+                                .map(|inventory| inventory.metadata.clone())
+                                .unwrap_or_default(),
+                            inventory_authority: cve_inventory
+                                .as_ref()
+                                .map(|inventory| inventory.authority),
+                            inventory_source: cve_inventory
+                                .as_ref()
+                                .and_then(|inventory| inventory.source.clone()),
+                            exact_authority_failure: cve_inventory
+                                .as_ref()
+                                .and_then(|inventory| inventory.exact_authority_failure),
                             allow_mutations: can_mutate,
                             loading: vulnerabilities_loading,
                             error: vulnerabilities_error.clone(),
+                            has_more: cve_inventory
+                                .as_ref()
+                                .is_some_and(|inventory| inventory.has_more),
+                            continuation_loading: cve_pagination.read().continuation_loading,
+                            continuation_error: cve_pagination.read().continuation_error.clone(),
+                            on_load_more: move |_| {
+                                let Some(request) = cve_pagination.write().begin_continuation() else {
+                                    return;
+                                };
+                                let cursor = request.cursor.clone();
+                                spawn(async move {
+                                    match fetch_system_cve_inventory(&system.id, Some(&cursor)).await {
+                                        Ok(page) => {
+                                            let source_matches = cve_pagination
+                                                .write()
+                                                .complete_continuation(&request, page);
+                                            if !source_matches {
+                                                cve_pagination.write().reset(None);
+                                                vulnerabilities_resource.restart();
+                                            }
+                                        }
+                                        Err(ApiClientError::Status { code: 409, .. }) => {
+                                            cve_pagination.write().reset(None);
+                                            vulnerabilities_resource.restart();
+                                        }
+                                        Err(error) => cve_pagination.write().fail_continuation(
+                                            &request,
+                                            error.to_string(),
+                                        ),
+                                    }
+                                });
+                            },
                             on_saved: move |_| {
+                                cve_pagination.write().reset(None);
                                 vulnerabilities_resource.restart();
-                            }
+                            },
+                            on_open_poam: move |poam_id| {
+                                cve_poam.set(Some(poam_id));
+                                let query = query_with_parameter(&current_system_detail_query(), "poam", Some(&poam_id.to_string()));
+                                sync_system_detail_query(&query, true);
+                            },
                         }
                     },
                     Tab::Hardening => rsx! {
@@ -1417,7 +1587,24 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                         }
                     },
                     Tab::Config => rsx! {
-                        ConfigTab { system: system.clone() }
+                        ConfigTab {
+                            key: "{navigation_state.read().config_revision:?}-{observational_current_commit.as_deref().unwrap_or_default()}-{generations_result.generations.len()}",
+                            system: system.clone(),
+                            commits: deploy_commit_history.clone(),
+                            generations: generations_result.generations.clone(),
+                            current_commit: observational_current_commit.clone(),
+                            revision: navigation_state.read().config_revision.clone(),
+                            allow_config_observations: can_start_config_observations,
+                            on_open_flake_commit: on_open_flake_commit,
+                            on_revision_change: move |revision: ConfigRevision| {
+                                let mut next = navigation_state.read().clone();
+                                next.tab = SystemDetailTab::Config;
+                                next.config_revision = revision;
+                                let query = next.to_query(&current_query());
+                                navigation_state.set(next);
+                                update_query(&query, true);
+                            },
+                        }
                     },
                     Tab::Compliance => rsx! {
                         ComplianceTab {
@@ -1439,6 +1626,25 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
             }
         }
 
+        PoamDetailHost {
+            poam_id: cve_poam(),
+            viewer: !auth::is_operator_or_above(&auth_context),
+            on_close: move |_| {
+                cve_poam.set(None);
+                let query = query_with_parameter(&current_system_detail_query(), "poam", None);
+                sync_system_detail_query(&query, false);
+            },
+            on_open_finding: move |_| {},
+            on_open_cve_finding: move |finding: poam_api::CveFindingView| {
+                if finding.system_id == system.id {
+                    cve_poam.set(None);
+                    let query = query_with_parameter(&current_system_detail_query(), "poam", None);
+                    sync_system_detail_query(&query, false);
+                    navigate_system_detail_tab(active_tab, navigation_state, Tab::Cves, false);
+                }
+            },
+        }
+
         if let Some(peek) = current_flake_peek.clone() {
             FlakeTrayNew {
                 commits: peek_commits.clone(),
@@ -1448,6 +1654,7 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                 is_admin: false,
                 focus_sha: Some(peek.focus_sha.clone()),
                 focus_meta: Some(peek.focus_meta.clone()),
+                initial_pane: crate::state::navigation_focus::FlakePane::Commits,
                 flake: peek.flake.clone(),
                 on_edit: move |_| {},
                 on_sync: move |_| flake_commit_peek_reload.set(flake_commit_peek_reload() + 1),
@@ -1457,6 +1664,7 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                         false,
                     )));
                 },
+                on_navigation_change: move |_| {},
                 on_close: move |_| flake_commit_peek.set(None),
                 on_open_evaluation: move |focus: NavigationFocus| {
                     navigation_focus.set(Some(focus));
@@ -1474,7 +1682,7 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                         status: focus.status,
                         policy_name: None,
                     }));
-                    nav.push(Route::SystemsView {});
+                    nav.push(Route::SystemsView { query: String::new() });
                 },
             }
         }
@@ -1546,7 +1754,7 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                                         true,
                                     )));
                                     // Navigate back to systems list
-                                    nav.push(Route::SystemsView {});
+                                    nav.push(Route::SystemsView { query: String::new() });
                                 }
                                 Err(error) => {
                                     remove_in_progress.set(false);
@@ -1578,7 +1786,7 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                     let system_id = system.id;
                     let hostname = system.hostname.clone();
                     let toast_message = toast_message.clone();
-                    move |store_path: String| {
+                    move |generation: SystemGeneration| {
                         show_generation_rollback_modal.set(false);
                         let hostname = hostname.clone();
                         let toast_message = toast_message.clone();
@@ -1586,7 +1794,9 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                             let message = match request_system_generation_rollback(
                                 &system_id,
                                 &SystemRollbackGenerationRequest {
-                                    store_path: store_path.clone(),
+                                    generation_snapshot_id: generation.generation_snapshot_id,
+                                    generation: Some(generation.generation),
+                                    store_path: generation.store_path.clone(),
                                 },
                             )
                             .await
@@ -1600,7 +1810,7 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                             };
                             let success = !message.to_ascii_lowercase().contains("failed");
                             if success {
-                                active_tab.set(Tab::Overview);
+                                navigate_system_detail_tab(active_tab, navigation_state, Tab::Overview, true);
                                 deployment_progress_poll_tick.set(deployment_progress_poll_tick() + 1);
                             }
                             let _ = dispatch_sync_notification(message, success, toast_message).await;
@@ -2400,18 +2610,11 @@ fn GenerationRollbackModal(
     generations: Vec<SystemGeneration>,
     current_generation: Option<i32>,
     on_close: EventHandler<()>,
-    on_confirm: EventHandler<String>,
+    on_confirm: EventHandler<SystemGeneration>,
 ) -> Element {
     let rollback_candidates = generations
         .iter()
-        .filter(|generation| {
-            !generation.is_current
-                && generation
-                    .store_path
-                    .as_ref()
-                    .map(|path| !path.is_empty())
-                    .unwrap_or(false)
-        })
+        .filter(|generation| !generation.is_current && generation.rollback_eligible)
         .cloned()
         .collect::<Vec<_>>();
     let mut selected_generation = use_signal(|| {
@@ -2425,7 +2628,10 @@ fn GenerationRollbackModal(
             .find(|item| item.generation == generation_number)
             .cloned()
     });
-    let selected_store_path = selected.as_ref().and_then(|item| item.store_path.clone());
+    let selected_store_path_label = selected
+        .as_ref()
+        .and_then(|item| item.store_path.clone())
+        .unwrap_or_else(|| "Resolved from retained artifact".to_string());
     let environment_name = environment.unwrap_or_else(|| "unknown".to_string());
     let is_production = matches!(
         environment_name.to_ascii_lowercase().as_str(),
@@ -2433,7 +2639,7 @@ fn GenerationRollbackModal(
     );
     let mut confirm_text = use_signal(String::new);
     let confirm_enabled =
-        selected_store_path.is_some() && (!is_production || *confirm_text.read() == hostname);
+        selected.is_some() && (!is_production || *confirm_text.read() == hostname);
 
     rsx! {
         div { class: "modal-backdrop", onclick: move |_| on_close.call(()),
@@ -2456,7 +2662,7 @@ fn GenerationRollbackModal(
                     if rollback_candidates.is_empty() {
                         div { class: "empty", style: "margin:0;",
                             h3 { "No rollback generations available" }
-                            div { "This host has no prior generation with a recorded store path." }
+                            div { "This host has no prior generation with retained rollback lineage." }
                         }
                     } else {
                         div { class: "sd-commit-list", style: "max-height:280px;",
@@ -2495,7 +2701,7 @@ fn GenerationRollbackModal(
                                 dt { "Target" } dd { class: "mono", "{hostname}" }
                                 dt { "To" } dd { class: "mono", "gen #{selected.generation}" }
                                 dt { "Store path" }
-                                dd { class: "mono", style: "font-size:11px;white-space:normal;word-break:break-all;", "{selected.store_path.clone().unwrap_or_default()}" }
+                                dd { class: "mono", style: "font-size:11px;white-space:normal;word-break:break-all;", "{selected_store_path_label}" }
                             }
                         }
 
@@ -2519,8 +2725,8 @@ fn GenerationRollbackModal(
                         class: "btn btn-primary focus-ring",
                         disabled: !confirm_enabled,
                         onclick: move |_| {
-                            if let Some(store_path) = selected_store_path.clone() {
-                                on_confirm.call(store_path);
+                            if let Some(selected) = selected.clone() {
+                                on_confirm.call(selected);
                             }
                         },
                         Icon { name: IconName::Rollback, size: 13 }
@@ -2754,19 +2960,16 @@ fn OverviewTab(
         .as_ref()
         .map(|f| f.name.clone())
         .unwrap_or_else(|| "unknown".to_string());
-    let flake_commit = current_commit
-        .as_ref()
-        .map(|commit| commit.hash.clone())
-        .or_else(|| system.flake.as_ref().and_then(|f| f.latest_commit.clone()))
-        .unwrap_or_else(|| "unknown".to_string());
-    let flake_commit_short = if flake_commit == "unknown" {
-        flake_commit.clone()
-    } else {
-        flake_commit.chars().take(8).collect::<String>()
-    };
+    let flake_commit = overview_commit_identity(current_commit.as_ref()).map(str::to_string);
+    let flake_commit_short = flake_commit
+        .as_deref()
+        .map(|commit| commit.chars().take(8).collect::<String>())
+        .unwrap_or_else(|| "unmapped".to_string());
     let flake_commit_for_open = flake_commit.clone();
     let flake_commit_for_label = flake_commit_short.clone();
-    let flake_commit_for_title = flake_commit.clone();
+    let flake_commit_for_title = flake_commit
+        .clone()
+        .unwrap_or_else(|| "unmapped current commit".to_string());
     let flake_summary_for_commit = system.flake.clone();
     let nixos_version = system
         .nixos_version
@@ -2804,7 +3007,7 @@ fn OverviewTab(
     } else {
         "Server can reach the agent directly (LAN/routable/VPN)"
     };
-    let branch_text = "main".to_string();
+    let branch_text = "unavailable".to_string();
     let generation_text = system
         .generation
         .map(|generation| format!("#{generation}"))
@@ -2825,6 +3028,7 @@ fn OverviewTab(
         .as_ref()
         .map(|commit| commit.message.clone())
         .unwrap_or_else(|| "No commit message available".to_string());
+    let commit_message_for_open = commit_message_text.clone();
 
     let critical = system.cve_counts.critical;
     let high = system.cve_counts.high;
@@ -2878,17 +3082,21 @@ fn OverviewTab(
                 div {
                     class: "sd-card-head",
                     h2 { "Currently deployed" }
-                    span {
-                        class: "chip chip-healthy",
-                        svg {
-                            class: "w-3 h-3",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            view_box: "0 0 24 24",
-                            path { d: "M5 12l5 5L20 7" }
+                    if current_commit.is_some() {
+                        span {
+                            class: "chip chip-healthy",
+                            svg {
+                                class: "w-3 h-3",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path { d: "M5 12l5 5L20 7" }
+                            }
+                            "up-to-date"
                         }
-                        "up-to-date"
+                    } else {
+                        span { class: "chip chip-warning", "identity unavailable" }
                     }
                 }
                 dl {
@@ -2897,23 +3105,30 @@ fn OverviewTab(
                     dt { "Branch" } dd { class: "mono", "{branch_text}" }
                     dt { "Commit" }
                     dd { class: "mono",
-                        button {
-                            class: "tl-commit-link mono focus-ring",
-                            title: "Open this commit in Flakes",
-                            onclick: move |_| {
-                                if let (Some(flake), false) = (flake_summary_for_commit.clone(), flake_commit_for_open == "unknown") {
-                                    on_open_flake_commit.call(FlakeCommitPeekTarget {
-                                        flake,
-                                        sha: flake_commit_for_open.clone(),
-                                        meta: CommitFocusMeta {
-                                            msg: Some(commit_message_text.clone()),
-                                            author: current_commit.as_ref().map(|commit| commit.author.clone()),
-                                            at: current_commit.as_ref().map(|commit| commit.committed_at.format("%Y-%m-%d %H:%M UTC").to_string()),
-                                        },
-                                    });
-                                }
-                            },
-                            "{flake_commit_for_label}"
+                        if flake_commit_for_open.is_some() {
+                            button {
+                                class: "tl-commit-link mono focus-ring",
+                                title: "Open this commit in Flakes",
+                                onclick: move |_| {
+                                    if let (Some(flake), Some(sha)) = (flake_summary_for_commit.clone(), flake_commit_for_open.clone()) {
+                                        on_open_flake_commit.call(FlakeCommitPeekTarget {
+                                            flake,
+                                            sha,
+                                            meta: CommitFocusMeta {
+                                                msg: Some(commit_message_for_open.clone()),
+                                                author: current_commit.as_ref().map(|commit| commit.author.clone()),
+                                                at: current_commit.as_ref().map(|commit| commit.committed_at.format("%Y-%m-%d %H:%M UTC").to_string()),
+                                            },
+                                        });
+                                    }
+                                },
+                                "{flake_commit_for_label}"
+                            }
+                        } else {
+                            span {
+                                title: "The current deployed commit identity is unavailable",
+                                "{flake_commit_for_label}"
+                            }
                         }
                         span { style: "margin:0 6px; color:var(--cf-text-muted);", "build" }
                         button {
@@ -2934,7 +3149,16 @@ fn OverviewTab(
                         class: "mono",
                         style: "font-size:11px; white-space:normal; word-break:break-all; line-height:1.4;",
                         title: "{store_path_text}",
-                        "{store_path_text}"
+                        button {
+                            class: "tl-commit-link mono focus-ring",
+                            title: "Open the current evaluation",
+                            onclick: move |_| {
+                                if let Some(window) = web_sys::window() {
+                                    let _ = window.location().set_href(&format!("/systems/{}?tab=config", system.id));
+                                }
+                            },
+                            "{store_path_text}"
+                        }
                     }
                     if let Some(target_store_path_text) = target_store_path_text {
                         dt { style: "color:#fbbf24;", "Target" }
@@ -3139,7 +3363,7 @@ fn OverviewTab(
                                         class: "sd-tag-label focus-ring",
                                         title: "Filter fleet by #{tag_for_filter}",
                                         onclick: move |_| {
-                                            nav.push(Route::SystemsView {});
+                                            nav.push(Route::SystemsView { query: String::new() });
                                         },
                                         "#{tag}"
                                     }
@@ -3235,12 +3459,15 @@ fn DeployTab(
     commits: Vec<SystemCommitHistory>,
     generations: Vec<SystemGeneration>,
     current_generation: Option<i32>,
+    initial_generation: Option<i32>,
     allow_mutations: bool,
-    deploy_notice: Option<(String, bool)>,
+    deploy_notice: Signal<Option<(String, bool)>>,
+    persisted_policy: Option<ManualDeploymentPolicyState>,
+    retry_request: Option<DeploySystemRequest>,
     on_clear_deploy_notice: EventHandler<()>,
     on_open_flake_commit: EventHandler<FlakeCommitPeekTarget>,
-    on_deploy_commit: EventHandler<String>,
-    on_deploy_generation: EventHandler<String>,
+    on_deploy_commit: EventHandler<DeploySystemRequest>,
+    on_deploy_generation: EventHandler<SystemGeneration>,
 ) -> Element {
     let flake_name = system
         .flake
@@ -3263,11 +3490,35 @@ fn DeployTab(
         .or_else(|| generations.first())
         .map(|g| g.generation);
 
-    let mut mode = use_signal(|| "commit".to_string());
+    let initial_selected_generation = initial_generation
+        .filter(|target| generations.iter().any(|item| item.generation == *target))
+        .or(default_generation);
+    let mut mode = use_signal(|| {
+        if initial_generation.is_some() {
+            "generation".to_string()
+        } else {
+            "commit".to_string()
+        }
+    });
     let mut selected_commit = use_signal(|| default_commit);
-    let mut selected_generation: Signal<Option<i32>> = use_signal(|| default_generation);
+    let mut selected_generation: Signal<Option<i32>> = use_signal(|| initial_selected_generation);
     let mut show_diff = use_signal(|| false);
     let mut verify_notice = use_signal(|| None::<String>);
+    let mut auto_latest_state = use_signal(|| AutoLatestDeployState::Closed);
+    {
+        use_effect(move || {
+            if matches!(
+                auto_latest_state(),
+                AutoLatestDeployState::Submitting { .. }
+            ) && deploy_notice
+                .read()
+                .as_ref()
+                .is_some_and(|(message, _)| !message.starts_with("Requesting deployment"))
+            {
+                auto_latest_state.set(AutoLatestDeployState::Closed);
+            }
+        });
+    }
 
     let displayed_commits = {
         use std::collections::HashSet;
@@ -3279,6 +3530,7 @@ fn DeployTab(
             .cloned()
             .collect::<Vec<_>>()
     };
+    let deploy_notice_value = deploy_notice.read().clone();
 
     let selected_commit_data = displayed_commits
         .iter()
@@ -3301,7 +3553,17 @@ fn DeployTab(
         .unwrap_or_else(|| "unknown".to_string());
     let from_short = from_commit.chars().take(7).collect::<String>();
 
-    let policy_name = system.deployment_policy.clone();
+    let policy_name = persisted_policy
+        .map(|policy| match policy {
+            ManualDeploymentPolicyState::AutoLatest => "auto_latest",
+            ManualDeploymentPolicyState::Manual => "manual",
+            ManualDeploymentPolicyState::Pinned => "pinned",
+        })
+        .unwrap_or(&system.deployment_policy)
+        .to_string();
+    let is_auto_latest = policy_name == "auto_latest";
+    let retry_request_for_button = retry_request.clone();
+    let retry_request_for_prompt = retry_request.clone();
 
     rsx! {
         div {
@@ -3309,7 +3571,7 @@ fn DeployTab(
 
         // Deploy gate panel — policy evaluation for the selected target.
         DeployGatePanel {
-            deployment_policy: system.deployment_policy.clone(),
+            deployment_policy: policy_name.clone(),
             cve_critical: system.cve_counts.critical,
         }
 
@@ -3346,7 +3608,7 @@ fn DeployTab(
                                 view_box: "0 0 24 24",
                                 path { d: "M7 7h10M7 12h10M7 17h10M4 7h.01M4 12h.01M4 17h.01" }
                             }
-                            " Commit"
+                            " New commit"
                         }
                         button {
                             class: if mode() == "generation" { "active" } else { "" },
@@ -3364,7 +3626,7 @@ fn DeployTab(
                                 view_box: "0 0 24 24",
                                 path { d: "M3 12a9 9 0 1018 0 9 9 0 10-18 0m9-5v5l3 3" }
                             }
-                            " Generation"
+                            " Previous generation"
                         }
                     }
                 }
@@ -3579,7 +3841,7 @@ fn DeployTab(
                     // Determine what to deploy (generation or commit)
                     if mode() == "generation" {
                         if let Some(generation_data) = selected_generation_data {
-                        let can_rollback = generation_data.store_path.is_some();
+                        let can_rollback = generation_data.rollback_eligible;
                         let gen_num = generation_data.generation;
                         let store_path_full = generation_data.store_path.clone().unwrap_or_default();
                         let deploy_label = if allow_mutations {
@@ -3589,8 +3851,8 @@ fn DeployTab(
                         };
                         let policy_for_callout = policy_name.clone();
                         let current_gen_display = current_generation.map(|g| format!("gen #{}", g)).unwrap_or_else(|| "—".to_string());
-                        let store_path_for_deploy = generation_data.store_path.clone().unwrap_or_default();
-                        let verify_store_path = store_path_for_deploy.clone();
+                        let generation_for_deploy = generation_data.clone();
+                        let verify_store_path = store_path_full.clone();
                         let commit_full = generation_data
                             .commit_hash
                             .clone()
@@ -3718,13 +3980,13 @@ fn DeployTab(
                                 button {
                                     class: "btn btn-primary focus-ring",
                                     disabled: !allow_mutations || !can_rollback,
-                                    onclick: move |_| on_deploy_generation.call(store_path_for_deploy.clone()),
+                                    onclick: move |_| on_deploy_generation.call(generation_for_deploy.clone()),
                                     Icon { name: IconName::Rollback, size: 13 }
                                     "{deploy_label}"
                                 }
                             }
 
-                            if let Some((message, is_success)) = deploy_notice.as_ref() {
+                            if let Some((message, is_success)) = deploy_notice_value.as_ref() {
                                 div {
                                     class: if *is_success { "sd-callout sd-callout-info" } else { "sd-callout sd-callout-danger" },
                                     span {
@@ -3851,13 +4113,32 @@ fn DeployTab(
                                 button {
                                     class: "btn btn-primary focus-ring",
                                     disabled: !allow_mutations,
-                                    onclick: move |_| on_deploy_commit.call(commit_sha_for_deploy.clone()),
+                                    onclick: move |_| {
+                                        on_clear_deploy_notice.call(());
+                                        if let Some(retry) = retry_request_for_button
+                                            .as_ref()
+                                            .filter(|request| request.commit_sha == commit_sha_for_deploy)
+                                        {
+                                            on_deploy_commit.call(retry.clone());
+                                        } else if is_auto_latest {
+                                            auto_latest_state.set(reduce_auto_latest_deploy_state(
+                                                &auto_latest_state(),
+                                                AutoLatestDeployEvent::Open(commit_sha_for_deploy.clone()),
+                                            ));
+                                        } else {
+                                            on_deploy_commit.call(deployment_request_for_target(
+                                                &commit_sha_for_deploy,
+                                                ManualDeploymentAction::Deploy,
+                                                None,
+                                            ));
+                                        }
+                                    },
                                     Icon { name: IconName::Deploy, size: 13 }
                                     "{deploy_label}"
                                 }
                             }
 
-                            if let Some((message, is_success)) = deploy_notice.as_ref() {
+                            if let Some((message, is_success)) = deploy_notice_value.as_ref() {
                                 div {
                                     class: if *is_success { "sd-callout sd-callout-info" } else { "sd-callout sd-callout-danger" },
                                     span {
@@ -3881,6 +4162,41 @@ fn DeployTab(
                         }
                     }
                 }
+            }
+        }
+        if let AutoLatestDeployState::Confirming { commit_sha }
+        | AutoLatestDeployState::Submitting { commit_sha, .. } = auto_latest_state() {
+            AutoLatestDeployPrompt {
+                commit_sha,
+                submitting: matches!(auto_latest_state(), AutoLatestDeployState::Submitting { .. }),
+                submitting_action: match auto_latest_state() {
+                    AutoLatestDeployState::Submitting { action, .. } => Some(action),
+                    _ => None,
+                },
+                on_cancel: move |_| {
+                    auto_latest_state.set(reduce_auto_latest_deploy_state(
+                        &auto_latest_state(),
+                        AutoLatestDeployEvent::Cancel,
+                    ));
+                },
+                on_submit: move |action| {
+                    let next = reduce_auto_latest_deploy_state(
+                        &auto_latest_state(),
+                        AutoLatestDeployEvent::Submit(action),
+                    );
+                    let AutoLatestDeployState::Submitting { commit_sha, action } = next else {
+                        return;
+                    };
+                    auto_latest_state.set(AutoLatestDeployState::Submitting {
+                        commit_sha: commit_sha.clone(),
+                        action,
+                    });
+                    on_deploy_commit.call(deployment_request_for_target(
+                        &commit_sha,
+                        action,
+                        retry_request_for_prompt.as_ref(),
+                    ));
+                },
             }
         }
         }
@@ -4655,76 +4971,1918 @@ fn download_text_file(content: &str, filename: &str) {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct ConfigSourceTarget {
+    // SECURITY: These fields are evaluator provenance only. The UI must not
+    // infer or reconstruct source text from the safe option value.
+    source_path: Option<String>,
+    source_input: Option<String>,
+    source_revision: Option<String>,
+    safe_value: Option<JsonValue>,
+    status_label: String,
+    priority: Option<i64>,
+    winner_note: Option<String>,
+    tracked_flake: Option<TrackedFlakeIdentity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ModuleSourcesScope {
+    revision: String,
+    mode: SnapshotRevisionMode,
+    generation: Option<i32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ConfigRefreshScope {
+    selection: ModuleSourcesScope,
+    generation: u64,
+}
+
+fn config_selection_is_historical(
+    selection: &ConfigRevision,
+    current_generation: Option<i32>,
+) -> bool {
+    match selection {
+        ConfigRevision::Current => false,
+        // An explicit commit selection is historical inspection context even
+        // when its SHA matches the observational current-revision mapping.
+        ConfigRevision::Commit(_) => true,
+        ConfigRevision::Generation(generation) => Some(*generation) != current_generation,
+    }
+}
+
+fn selected_config_revision(
+    selection: &ConfigRevision,
+    current_commit: Option<&str>,
+    generations: &[SystemGeneration],
+) -> Option<String> {
+    match selection {
+        ConfigRevision::Commit(sha) => Some(sha.clone()),
+        ConfigRevision::Generation(generation) => generations
+            .iter()
+            .find(|item| item.generation == *generation)
+            .and_then(|item| item.commit_hash.clone()),
+        ConfigRevision::Current => current_commit.map(str::to_string),
+    }
+}
+
+fn config_observation_request_allowed(
+    selection: &ConfigRevision,
+    selected_revision: Option<&str>,
+    selected_commit_inspectable: bool,
+    is_admin: bool,
+) -> bool {
+    is_admin
+        && selected_revision.is_some()
+        && selected_commit_inspectable
+        && !matches!(selection, ConfigRevision::Generation(_))
+}
+
+fn observational_current_timeline_commit<'a>(
+    commits: &'a [SystemCommitHistory],
+    current_commit: Option<&str>,
+) -> Option<&'a SystemCommitHistory> {
+    let current_commit = current_commit?;
+    commits.iter().find(|commit| commit.hash == current_commit)
+}
+
+fn overview_commit_identity(current_commit: Option<&SystemCommitHistory>) -> Option<&str> {
+    current_commit.map(|commit| commit.hash.as_str())
+}
+
+fn newest_config_inspectable_commit(
+    commits: &[SystemCommitHistory],
+) -> Option<&SystemCommitHistory> {
+    commits.iter().find(|commit| commit.config_inspectable)
+}
+
+fn unavailable_generation_commit(
+    mode: SnapshotRevisionMode,
+    selected_generation: Option<i32>,
+    lifecycle: Option<SnapshotLifecycle>,
+    generations: &[SystemGeneration],
+) -> Option<String> {
+    if mode != SnapshotRevisionMode::Generation || lifecycle != Some(SnapshotLifecycle::Unavailable)
+    {
+        return None;
+    }
+    let selected_generation = selected_generation?;
+    generations
+        .iter()
+        .find(|generation| generation.generation == selected_generation)
+        .and_then(|generation| generation.commit_hash.as_deref())
+        .filter(|sha| {
+            matches!(sha.len(), 40 | 64) && sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        .map(str::to_string)
+}
+
+const SOURCE_TEXT_UNAVAILABLE_MESSAGE: &str = "Crystal Forge retained the authoritative winning or overridden definition provenance, not arbitrary Nix source text. Source text can contain secrets, so no source code is inferred from the persisted safe value.";
+const SOURCE_PATH_UNAVAILABLE_LABEL: &str = "Source path unavailable";
+
+fn refresh_scope_is_current(
+    active_selection: Option<&ModuleSourcesScope>,
+    refresh_generation: u64,
+    request_scope: &ConfigRefreshScope,
+) -> bool {
+    active_selection == Some(&request_scope.selection)
+        && refresh_generation == request_scope.generation
+}
+
+fn bump_refresh_generation(mut refresh_generation: Signal<u64>) {
+    let next = (*refresh_generation.peek()).saturating_add(1);
+    refresh_generation.set(next);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ModuleSourceCollection {
+    scope: ModuleSourcesScope,
+    snapshot_token: Option<String>,
+    lifecycle: SnapshotLifecycle,
+    option_inventory_state: OptionInventoryState,
+    error: Option<String>,
+    total: i64,
+    next_offset: i64,
+    limit: i64,
+    sources: Vec<EvaluationModuleSummary>,
+}
+
+fn module_source_key(
+    source: &EvaluationModuleSummary,
+) -> (Option<String>, Option<String>, Option<String>) {
+    (
+        source.source_input.clone(),
+        source.source_revision.clone(),
+        source.source_path.clone(),
+    )
+}
+
+fn module_source_collection_from_page(
+    scope: ModuleSourcesScope,
+    mut page: EvaluationModuleSourcesPage,
+) -> Result<ModuleSourceCollection, String> {
+    if page.revision != scope.revision || page.generation != scope.generation || page.offset != 0 {
+        return Err("The module-source response does not match the selected revision.".into());
+    }
+    if page.lifecycle == SnapshotLifecycle::Available && page.snapshot_token.is_none() {
+        return Err("The module-source response did not include a snapshot token.".into());
+    }
+    let raw_len = i64::try_from(page.sources.len()).unwrap_or(i64::MAX);
+    let mut seen = HashSet::new();
+    page.sources
+        .retain(|source| seen.insert(module_source_key(source)));
+    Ok(ModuleSourceCollection {
+        scope,
+        snapshot_token: page.snapshot_token,
+        lifecycle: page.lifecycle,
+        option_inventory_state: page.option_inventory_state,
+        error: page.error,
+        total: page.total,
+        next_offset: page.offset.saturating_add(raw_len),
+        limit: page.limit,
+        sources: page.sources,
+    })
+}
+
+fn merge_module_source_page(
+    mut accumulated: ModuleSourceCollection,
+    page: EvaluationModuleSourcesPage,
+) -> Result<ModuleSourceCollection, String> {
+    if accumulated.lifecycle != SnapshotLifecycle::Available
+        || page.lifecycle != SnapshotLifecycle::Available
+        || page.revision != accumulated.scope.revision
+        || page.generation != accumulated.scope.generation
+        || page.snapshot_token != accumulated.snapshot_token
+        || page.option_inventory_state != accumulated.option_inventory_state
+        || page.total != accumulated.total
+        || page.offset != accumulated.next_offset
+    {
+        return Err("The module-source snapshot changed. Retry from the current revision.".into());
+    }
+    let raw_len = i64::try_from(page.sources.len()).unwrap_or(i64::MAX);
+    let mut seen = accumulated
+        .sources
+        .iter()
+        .map(module_source_key)
+        .collect::<HashSet<_>>();
+    accumulated.sources.extend(
+        page.sources
+            .into_iter()
+            .filter(|source| seen.insert(module_source_key(source))),
+    );
+    accumulated.next_offset = page.offset.saturating_add(raw_len);
+    accumulated.limit = page.limit;
+    accumulated.error = page.error;
+    Ok(accumulated)
+}
+
+fn source_target_from_definition(definition: OptionDefinitionProvenance) -> ConfigSourceTarget {
+    let status_label = definition.status.clone().unwrap_or_else(|| {
+        if definition.winning {
+            "Winning definition"
+        } else {
+            "Definition"
+        }
+        .into()
+    });
+    ConfigSourceTarget {
+        source_path: definition.source_path,
+        source_input: definition.source_input,
+        source_revision: definition.source_revision,
+        safe_value: definition.value,
+        status_label,
+        priority: definition.priority,
+        winner_note: definition.winner_note,
+        tracked_flake: definition.tracked_flake,
+    }
+}
+
+fn source_target_from_module(module: EvaluationModuleSummary) -> ConfigSourceTarget {
+    ConfigSourceTarget {
+        source_path: module.source_path,
+        source_input: module.source_input,
+        source_revision: module.source_revision,
+        safe_value: None,
+        status_label: format!(
+            "{} winning of {} definitions",
+            module.won_count, module.defined_count
+        ),
+        priority: None,
+        winner_note: None,
+        tracked_flake: module.tracked_flake,
+    }
+}
+
+fn fitted_config_page_size(
+    side_height: f64,
+    table_chrome: f64,
+    header_height: f64,
+    row_height: f64,
+    previous: i64,
+) -> i64 {
+    if !side_height.is_finite()
+        || !table_chrome.is_finite()
+        || !header_height.is_finite()
+        || !row_height.is_finite()
+        || row_height < 18.0
+    {
+        return previous;
+    }
+    let measured = ((side_height - table_chrome - header_height) / row_height).floor() as i64;
+    let next = measured.clamp(10, 80);
+    if (next - previous).abs() <= 1 {
+        previous
+    } else {
+        next
+    }
+}
+
+fn natural_config_side_height(card_bounds: &[(f64, f64)]) -> Option<f64> {
+    let mut height = 0.0;
+    let mut previous_bottom: Option<f64> = None;
+    for &(top, bottom) in card_bounds {
+        if !top.is_finite() || !bottom.is_finite() || bottom < top {
+            return None;
+        }
+        if let Some(previous_bottom) = previous_bottom {
+            height += (top - previous_bottom).max(0.0);
+        }
+        height += bottom - top;
+        previous_bottom = Some(bottom);
+    }
+    (!card_bounds.is_empty()).then_some(height)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn measure_config_page_size(
+    card_id: &str,
+    table_id: &str,
+    side_id: &str,
+    mut page_size: Signal<i64>,
+    mut offset: Signal<i64>,
+) {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let (Some(card), Some(table_wrap), Some(side)) = (
+        document.get_element_by_id(card_id),
+        document.get_element_by_id(table_id),
+        document.get_element_by_id(side_id),
+    ) else {
+        return;
+    };
+    let header_height = table_wrap
+        .query_selector("thead")
+        .ok()
+        .flatten()
+        .map(|element| element.get_bounding_client_rect().height())
+        .unwrap_or(32.0);
+    let row_height = table_wrap
+        .query_selector("tbody tr.cfg-row")
+        .ok()
+        .flatten()
+        .map(|element| element.get_bounding_client_rect().height())
+        .unwrap_or(34.0);
+    let cards = side.query_selector_all(":scope > .sd-card").ok();
+    // INVARIANT: Grid stretch can make the side wrapper as tall as the options
+    // card. Only natural child heights and the rendered gaps between them define
+    // the row budget.
+    let side_height = cards
+        .map(|cards| {
+            (0..cards.length())
+                .filter_map(|index| cards.item(index))
+                .filter_map(|node| node.dyn_into::<web_sys::Element>().ok())
+                .map(|card| {
+                    let bounds = card.get_bounding_client_rect();
+                    (bounds.top(), bounds.bottom())
+                })
+                .collect::<Vec<_>>()
+        })
+        .and_then(|bounds| natural_config_side_height(&bounds));
+    let Some(side_height) = side_height else {
+        return;
+    };
+    let table_chrome =
+        table_wrap.get_bounding_client_rect().top() - card.get_bounding_client_rect().top();
+    let previous = *page_size.peek();
+    let next = fitted_config_page_size(
+        side_height,
+        table_chrome,
+        header_height,
+        row_height,
+        previous,
+    );
+    if next != previous {
+        page_size.set(next);
+        offset.set(0);
+    }
+}
+
 #[component]
-fn ConfigTab(system: SystemDetail) -> Element {
+fn ConfigTab(
+    system: SystemDetail,
+    commits: Vec<SystemCommitHistory>,
+    generations: Vec<SystemGeneration>,
+    current_commit: Option<String>,
+    revision: ConfigRevision,
+    allow_config_observations: bool,
+    on_revision_change: EventHandler<ConfigRevision>,
+    on_open_flake_commit: EventHandler<FlakeCommitPeekTarget>,
+) -> Element {
+    const MODULE_PAGE_SIZE: i64 = 40;
+    let card_id = format!("config-options-card-{}", system.id);
+    let table_id = format!("config-options-table-{}", system.id);
+    let side_id = format!("config-summary-side-{}", system.id);
+    let mut page_size = use_signal(|| 24_i64);
+    let mut search = use_signal(String::new);
+    let mut debounced_search = use_signal(String::new);
+    let mut filter = use_signal(|| EvaluatedOptionFilter::All);
+    let mut offset = use_signal(|| 0_i64);
+    let mut expanded = use_signal(|| None::<String>);
+    let mut source = use_signal(|| None::<ConfigSourceTarget>);
+    let mut options = use_signal(|| None::<Result<EvaluatedOptionsPage, ApiClientError>>);
+    let mut loading_options = use_signal(|| false);
+    let mut request_sequence = use_signal(|| 0_u64);
+    let mut debounce_sequence = use_signal(|| 0_u64);
+    let mut refresh_generation = use_signal(|| 0_u64);
+    let mut active_selection = use_signal(|| None::<ModuleSourcesScope>);
+    let mut queueing_scope = use_signal(|| None::<ConfigRefreshScope>);
+    let mut inspection_prerequisite = use_signal(|| None::<String>);
+    let mut poll_scheduled_scope = use_signal(|| None::<ConfigRefreshScope>);
+    let mut summary = use_signal(|| None::<Result<SelectedEvaluationSummary, ApiClientError>>);
+    let mut loading_summary = use_signal(|| false);
+    let mut summary_request_sequence = use_signal(|| 0_u64);
+    let mut module_sources = use_signal(|| None::<ModuleSourceCollection>);
+    let mut module_initial_error = use_signal(|| None::<String>);
+    let mut module_continuation_error = use_signal(|| None::<String>);
+    let mut module_loading = use_signal(|| false);
+    let mut module_loading_more = use_signal(|| false);
+    let mut module_request_sequence = use_signal(|| 0_u64);
+    let mut module_scope = use_signal(|| None::<ModuleSourcesScope>);
+    let mut config_snapshot_token = use_signal(|| None::<String>);
+    let mut inspected_commit = use_signal(|| None::<String>);
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        let resize_card_id = card_id.clone();
+        let resize_table_id = table_id.clone();
+        let resize_side_id = side_id.clone();
+        let resize_listener = use_hook(move || {
+            let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+                measure_config_page_size(
+                    &resize_card_id,
+                    &resize_table_id,
+                    &resize_side_id,
+                    page_size,
+                    offset,
+                );
+            });
+            if let Some(window) = web_sys::window() {
+                let _ = window
+                    .add_event_listener_with_callback("resize", callback.as_ref().unchecked_ref());
+            }
+            Rc::new(callback)
+        });
+        let listener_for_drop = resize_listener.clone();
+        use_drop(move || {
+            if let Some(window) = web_sys::window() {
+                let _ = window.remove_event_listener_with_callback(
+                    "resize",
+                    listener_for_drop.as_ref().as_ref().unchecked_ref(),
+                );
+            }
+        });
+    }
+
+    let selected_mode = if matches!(revision, ConfigRevision::Commit(_)) {
+        SnapshotRevisionMode::Commit
+    } else {
+        SnapshotRevisionMode::Generation
+    };
+    let selected_generation = match revision {
+        ConfigRevision::Generation(value) => Some(value),
+        ConfigRevision::Current => system.generation,
+        ConfigRevision::Commit(_) => None,
+    };
+    let selected_revision =
+        selected_config_revision(&revision, current_commit.as_deref(), &generations);
+    let revision_known = match &revision {
+        ConfigRevision::Current => selected_revision.is_some(),
+        ConfigRevision::Generation(value) => {
+            generations.iter().any(|item| item.generation == *value)
+        }
+        ConfigRevision::Commit(sha) => commits.iter().any(|item| item.hash == *sha),
+    };
+    let current_generation = generations
+        .iter()
+        .find(|item| item.is_current || Some(item.generation) == system.generation)
+        .map(|item| item.generation)
+        .or(system.generation);
+    let is_historical = config_selection_is_historical(&revision, current_generation);
+    let deployed_here = selected_revision.as_ref().is_some_and(|sha| {
+        generations
+            .iter()
+            .any(|generation| generation.commit_hash.as_ref() == Some(sha))
+    });
+    let selected_commit_message = selected_revision.as_ref().and_then(|sha| {
+        commits
+            .iter()
+            .find(|commit| commit.hash == *sha)
+            .map(|commit| commit.message.clone())
+    });
+    let selected_commit_inspectable = selected_revision.as_ref().is_some_and(|sha| {
+        commits
+            .iter()
+            .any(|commit| commit.hash == *sha && commit.config_inspectable)
+    });
+    let config_observation_allowed = config_observation_request_allowed(
+        &revision,
+        selected_revision.as_deref(),
+        selected_commit_inspectable,
+        allow_config_observations,
+    );
+    let selected_module_scope = selected_revision
+        .clone()
+        .map(|revision| ModuleSourcesScope {
+            revision,
+            mode: selected_mode,
+            generation: selected_generation,
+        });
+
+    {
+        let next_selection = selected_module_scope.clone();
+        use_effect(move || {
+            if active_selection.peek().as_ref() == next_selection.as_ref() {
+                return;
+            }
+            active_selection.set(next_selection.clone());
+            bump_refresh_generation(refresh_generation);
+            search.set(String::new());
+            debounced_search.set(String::new());
+            filter.set(EvaluatedOptionFilter::All);
+            offset.set(0);
+            expanded.set(None);
+            source.set(None);
+            options.set(None);
+            summary.set(None);
+            module_sources.set(None);
+            module_initial_error.set(None);
+            module_continuation_error.set(None);
+            module_loading_more.set(false);
+            config_snapshot_token.set(None);
+            queueing_scope.set(None);
+            inspection_prerequisite.set(None);
+        });
+    }
+
+    {
+        use_effect(move || {
+            let query = search.read().clone();
+            let sequence = *debounce_sequence.peek() + 1;
+            debounce_sequence.set(sequence);
+            spawn(async move {
+                gloo_timers::future::TimeoutFuture::new(220).await;
+                if *debounce_sequence.peek() == sequence {
+                    if debounced_search.peek().as_str() != query {
+                        debounced_search.set(query);
+                        offset.set(0);
+                    }
+                }
+            });
+        });
+    }
+
+    {
+        let request_scope = selected_module_scope.clone();
+        let system_id = system.id;
+        use_effect(move || {
+            let search_text = debounced_search.read().clone();
+            let Some(scope) = request_scope.clone() else {
+                loading_options.set(false);
+                options.set(None);
+                return;
+            };
+            let certified_inventory_complete = options
+                .peek()
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .is_some_and(|page| {
+                    page.revision == scope.revision
+                        && page.generation == scope.generation
+                        && page.option_inventory_state == OptionInventoryState::Complete
+                });
+            if !certified_inventory_complete && !search_text.is_empty() {
+                // Partial and unavailable search are local to identities already
+                // observed by the Explorer. They do not issue a certified-data query.
+                loading_options.set(false);
+                return;
+            }
+            let active_filter = *filter.read();
+            let request_offset = *offset.read();
+            let request_limit = *page_size.read();
+            let request_generation = *refresh_generation.read();
+            let request_snapshot_token = config_snapshot_token.read().clone();
+            let sequence = *request_sequence.peek() + 1;
+            request_sequence.set(sequence);
+            loading_options.set(true);
+            let request_search = search_text.clone();
+            spawn(async move {
+                let result = fetch_system_evaluated_options(
+                    &system_id,
+                    &EvaluatedOptionsRequest {
+                        revision: scope.revision.clone(),
+                        generation: scope.generation,
+                        mode: scope.mode,
+                        search: request_search.clone(),
+                        filter: active_filter,
+                        limit: request_limit,
+                        offset: request_offset,
+                        snapshot_token: request_snapshot_token.clone(),
+                    },
+                )
+                .await;
+                // CONCURRENCY: A slower prior search must not replace newer results.
+                if *request_sequence.peek() == sequence
+                    && *refresh_generation.peek() == request_generation
+                    && active_selection.peek().as_ref() == Some(&scope)
+                    && debounced_search.peek().as_str() == request_search
+                    && search.peek().as_str() == request_search
+                    && *filter.peek() == active_filter
+                    && *offset.peek() == request_offset
+                    && *page_size.peek() == request_limit
+                {
+                    loading_options.set(false);
+                    match result {
+                        Err(ApiClientError::Status { code: 409, .. }) => {
+                            // CONCURRENCY: A token conflict means that one Config
+                            // surface selected a different immutable artifact or
+                            // baseline. Discard every surface before restarting.
+                            config_snapshot_token.set(None);
+                            options.set(None);
+                            summary.set(None);
+                            module_sources.set(None);
+                            offset.set(0);
+                            refresh_generation.set(request_generation.saturating_add(1));
+                        }
+                        Ok(page) if page.lifecycle == SnapshotLifecycle::Available => {
+                            let Some(page_token) = page.snapshot_token.clone() else {
+                                options.set(Some(Err(ApiClientError::Deserialize(
+                                    "available evaluated-options response omitted snapshot_token"
+                                        .to_string(),
+                                ))));
+                                return;
+                            };
+                            if config_snapshot_token
+                                .peek()
+                                .as_deref()
+                                .is_some_and(|current| current != page_token)
+                            {
+                                config_snapshot_token.set(None);
+                                options.set(None);
+                                summary.set(None);
+                                module_sources.set(None);
+                                offset.set(0);
+                                refresh_generation.set(request_generation.saturating_add(1));
+                            } else {
+                                if config_snapshot_token.peek().is_none() {
+                                    config_snapshot_token.set(Some(page_token));
+                                }
+                                options.set(Some(Ok(page)));
+                            }
+                        }
+                        other => options.set(Some(other)),
+                    }
+                }
+            });
+        });
+    }
+
+    {
+        let request_scope = selected_module_scope.clone();
+        let system_id = system.id;
+        use_effect(move || {
+            let request_generation = *refresh_generation.read();
+            let request_snapshot_token = config_snapshot_token.read().clone();
+            let sequence = *module_request_sequence.peek() + 1;
+            module_request_sequence.set(sequence);
+            module_scope.set(request_scope.clone());
+            module_sources.set(None);
+            module_initial_error.set(None);
+            module_continuation_error.set(None);
+            module_loading_more.set(false);
+            let Some(scope) = request_scope.clone() else {
+                module_loading.set(false);
+                return;
+            };
+            module_loading.set(true);
+            spawn(async move {
+                let result = fetch_system_evaluation_module_sources(
+                    &system_id,
+                    &scope.revision,
+                    scope.generation,
+                    scope.mode,
+                    MODULE_PAGE_SIZE,
+                    0,
+                    request_snapshot_token.as_deref(),
+                )
+                .await;
+                // CONCURRENCY: Only the request for the current exact selection may
+                // clear loading state or install the first page.
+                if *module_request_sequence.peek() != sequence
+                    || *refresh_generation.peek() != request_generation
+                    || active_selection.peek().as_ref() != Some(&scope)
+                    || module_scope.peek().as_ref() != Some(&scope)
+                {
+                    return;
+                }
+                module_loading.set(false);
+                match result {
+                    Ok(page) => {
+                        if page.lifecycle == SnapshotLifecycle::Available
+                            && page.snapshot_token.as_deref().is_some_and(|token| {
+                                config_snapshot_token
+                                    .peek()
+                                    .as_deref()
+                                    .is_some_and(|current| current != token)
+                            })
+                        {
+                            config_snapshot_token.set(None);
+                            options.set(None);
+                            summary.set(None);
+                            module_sources.set(None);
+                            offset.set(0);
+                            refresh_generation.set(request_generation.saturating_add(1));
+                            return;
+                        }
+                        if page.lifecycle == SnapshotLifecycle::Available {
+                            let Some(page_token) = page.snapshot_token.clone() else {
+                                module_initial_error.set(Some(
+                                    "Available module-source response omitted snapshot_token"
+                                        .to_string(),
+                                ));
+                                return;
+                            };
+                            if config_snapshot_token.peek().is_none() {
+                                config_snapshot_token.set(Some(page_token));
+                            }
+                        }
+                        match module_source_collection_from_page(scope, page) {
+                            Ok(collection) => module_sources.set(Some(collection)),
+                            Err(error) => module_initial_error.set(Some(error)),
+                        }
+                    }
+                    Err(ApiClientError::Status { code: 409, .. }) => {
+                        config_snapshot_token.set(None);
+                        options.set(None);
+                        summary.set(None);
+                        module_sources.set(None);
+                        offset.set(0);
+                        refresh_generation.set(request_generation.saturating_add(1));
+                    }
+                    Err(error) => module_initial_error.set(Some(snapshot_request_error(&error))),
+                }
+            });
+        });
+    }
+
+    {
+        let request_scope = selected_module_scope.clone();
+        let system_id = system.id;
+        use_effect(move || {
+            let request_generation = *refresh_generation.read();
+            let request_snapshot_token = config_snapshot_token.read().clone();
+            let sequence = *summary_request_sequence.peek() + 1;
+            summary_request_sequence.set(sequence);
+            summary.set(None);
+            let Some(scope) = request_scope.clone() else {
+                loading_summary.set(false);
+                return;
+            };
+            loading_summary.set(true);
+            spawn(async move {
+                let result = fetch_system_evaluation_summary(
+                    &system_id,
+                    &scope.revision,
+                    scope.generation,
+                    scope.mode,
+                    request_snapshot_token.as_deref(),
+                )
+                .await;
+                if *summary_request_sequence.peek() == sequence
+                    && *refresh_generation.peek() == request_generation
+                    && active_selection.peek().as_ref() == Some(&scope)
+                {
+                    loading_summary.set(false);
+                    match result {
+                        Err(ApiClientError::Status { code: 409, .. }) => {
+                            config_snapshot_token.set(None);
+                            options.set(None);
+                            summary.set(None);
+                            module_sources.set(None);
+                            offset.set(0);
+                            refresh_generation.set(request_generation.saturating_add(1));
+                        }
+                        Ok(value) if value.lifecycle == SnapshotLifecycle::Available => {
+                            let Some(summary_token) = value.snapshot_token.clone() else {
+                                summary.set(Some(Err(ApiClientError::Deserialize(
+                                    "available evaluation-summary response omitted snapshot_token"
+                                        .to_string(),
+                                ))));
+                                return;
+                            };
+                            if config_snapshot_token
+                                .peek()
+                                .as_deref()
+                                .is_some_and(|current| current != summary_token)
+                            {
+                                config_snapshot_token.set(None);
+                                options.set(None);
+                                summary.set(None);
+                                module_sources.set(None);
+                                offset.set(0);
+                                refresh_generation.set(request_generation.saturating_add(1));
+                            } else {
+                                if config_snapshot_token.peek().is_none() {
+                                    config_snapshot_token.set(Some(summary_token));
+                                }
+                                summary.set(Some(Ok(value)));
+                            }
+                        }
+                        other => summary.set(Some(other)),
+                    }
+                }
+            });
+        });
+    }
+
+    let loaded_response = options
+        .read()
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .cloned();
+    let response = visible_config_response(
+        loaded_response.clone(),
+        selected_revision.as_deref(),
+        selected_generation,
+    );
+    let load_error = (!loading_options())
+        .then(|| {
+            options
+                .read()
+                .as_ref()
+                .and_then(|result| result.as_ref().err())
+                .map(snapshot_request_error)
+        })
+        .flatten();
+    let summary_response = summary
+        .read()
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .cloned()
+        .filter(|value| {
+            Some(value.revision.as_str()) == selected_revision.as_deref()
+                && value.generation == selected_generation
+        });
+    let summary_error = (!loading_summary())
+        .then(|| {
+            summary
+                .read()
+                .as_ref()
+                .and_then(|result| result.as_ref().err())
+                .map(snapshot_request_error)
+        })
+        .flatten();
+    let counts = response
+        .as_ref()
+        .map(|value| value.counts.clone())
+        .unwrap_or_default();
+    let total = response.as_ref().map(|value| value.total).unwrap_or(0);
+    let page_offset = response
+        .as_ref()
+        .map(|value| value.offset)
+        .unwrap_or(*offset.read());
+    let range_start = if total == 0 { 0 } else { page_offset + 1 };
+    let active_page_size = *page_size.read();
+    let range_end = (page_offset + active_page_size).min(total);
+    let lifecycle = response.as_ref().map(|value| value.lifecycle);
+    let module_lifecycle_hint = module_sources
+        .read()
+        .as_ref()
+        .map(|collection| collection.lifecycle);
+    let unavailable_generation_commit = unavailable_generation_commit(
+        selected_mode,
+        selected_generation,
+        lifecycle.or(module_lifecycle_hint),
+        &generations,
+    );
+    let show_commit_inspection = selected_mode == SnapshotRevisionMode::Commit
+        && lifecycle == Some(SnapshotLifecycle::Available)
+        && inspected_commit.read().as_deref() == selected_revision.as_deref();
+    let comparison_available = response
+        .as_ref()
+        .is_some_and(|value| value.comparison_available);
+    let option_inventory_state = response
+        .as_ref()
+        .map(|value| value.option_inventory_state)
+        .or_else(|| {
+            summary_response
+                .as_ref()
+                .map(|value| value.option_inventory_state)
+        })
+        .unwrap_or(OptionInventoryState::Unavailable);
+    let option_inventory_partial = option_inventory_state == OptionInventoryState::Partial;
+    let option_inventory_notice = response.as_ref().and_then(|value| {
+        (value.option_inventory_state == OptionInventoryState::Partial).then(|| {
+            let paths = value
+                .option_inventory_diagnostics
+                .iter()
+                .take(3)
+                .map(|diagnostic| diagnostic.path_components.join("."))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let diagnostic_count = value.option_inventory_diagnostics.len();
+            let prefix_label = if diagnostic_count == 1 {
+                "prefix"
+            } else {
+                "prefixes"
+            };
+            let displayed_detail = if diagnostic_count > 3 {
+                format!(" Showing first 3: {paths}.")
+            } else {
+                format!(": {paths}.")
+            };
+            let omitted = if value.option_inventory_diagnostics_truncated {
+                " Additional unreadable prefixes were omitted by inspection."
+            } else {
+                ""
+            };
+            format!(
+                "This inventory is partial. Counts include observed options only; Changed and drift are unavailable. Recorded {diagnostic_count} unreadable {prefix_label}{displayed_detail}{omitted}",
+            )
+        })
+    });
+    let baseline = response
+        .as_ref()
+        .and_then(|value| value.baseline_revision.clone());
+    let baseline_generation = response
+        .as_ref()
+        .and_then(|value| value.baseline_generation);
+    let comparison_baseline = match selected_mode {
+        SnapshotRevisionMode::Generation => {
+            baseline_generation.map(|value| format!("generation #{value}"))
+        }
+        SnapshotRevisionMode::Commit => baseline.as_deref().map(short_revision),
+    };
+    let explorer_scope_key = format!(
+        "{}:{}:{}",
+        if selected_mode == SnapshotRevisionMode::Commit {
+            "commit"
+        } else {
+            "generation"
+        },
+        selected_revision.as_deref().unwrap_or("none"),
+        selected_generation
+            .map(|value| value.to_string())
+            .unwrap_or_default()
+    );
     let flake_name = system
         .flake
         .as_ref()
-        .map(|f| f.name.clone())
-        .unwrap_or_else(|| "unknown".to_string());
-    let nixos_version = system
-        .nixos_version
+        .map(|flake| flake.name.as_str())
+        .unwrap_or("untracked");
+    let config_name = system
+        .system_configuration_name
+        .as_deref()
+        .unwrap_or(&system.hostname);
+    let selected_revision_label = selected_revision
+        .as_deref()
+        .map(short_revision)
+        .unwrap_or_else(|| "no commit".to_string());
+    let evaluation_duration_label = summary_response
+        .as_ref()
+        .and_then(|value| value.evaluation_duration_ms)
+        .map(|duration| format!("{duration} ms"))
+        .unwrap_or_else(|| "unavailable".into());
+    let completed_label = summary_response
+        .as_ref()
+        .and_then(|value| value.completed_at)
+        .map(|completed| completed.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|| "unavailable".into());
+    let selected_store_path = summary_response
+        .as_ref()
+        .and_then(|value| value.selected_store_path.clone());
+    let running_store_path = summary_response
+        .as_ref()
+        .and_then(|value| value.running_store_path.clone());
+    let selected_store_label = selected_store_path.as_deref().unwrap_or("unavailable");
+    let running_store_label = running_store_path.as_deref().unwrap_or("unavailable");
+    let summary_lifecycle = summary_response.as_ref().map(|value| value.lifecycle);
+    let summary_pending =
+        selected_revision.is_some() && (loading_summary() || summary.read().is_none());
+    let summary_available =
+        !loading_summary() && summary_lifecycle == Some(SnapshotLifecycle::Available);
+    let summary_inventory_partial = summary_response
+        .as_ref()
+        .is_some_and(|value| value.option_inventory_state == OptionInventoryState::Partial);
+    let option_total_label = summary_response
+        .as_ref()
+        .filter(|_| summary_available)
+        .map(|value| value.option_total.to_string())
+        .unwrap_or_else(|| "unavailable".into());
+    let closure_package_label = summary_response
+        .as_ref()
+        .and_then(|value| value.closure_package_count)
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "unavailable".into());
+    let closure_size_label = summary_response
+        .as_ref()
+        .and_then(|value| value.closure_size_bytes)
+        .map(format_byte_count)
+        .unwrap_or_else(|| "unavailable".into());
+    let host_delta_label = summary_response
+        .as_ref()
+        .and_then(|value| value.host_delta_count)
+        .map(|count| format!("{count} rows"))
+        .unwrap_or_else(|| "unavailable".into());
+    let drift = summary_response
+        .as_ref()
+        .map(|value| value.drift)
+        .unwrap_or(EvaluationDrift::Unavailable);
+    let agent_fingerprint_label = match summary_response
+        .as_ref()
+        .map(|value| value.agent_fingerprint)
+        .unwrap_or(AgentFingerprintStatus::Unavailable)
+    {
+        AgentFingerprintStatus::Matches => "matches",
+        AgentFingerprintStatus::Differs => "differs",
+        AgentFingerprintStatus::Unavailable => "unavailable",
+    };
+    let seven_day_drift = summary_response
+        .as_ref()
+        .map(|value| value.seven_day_drift)
+        .unwrap_or(SevenDayDriftStatus::InsufficientCoverage);
+    let module_collection = module_sources
+        .read()
         .clone()
-        .unwrap_or_else(|| "unknown".to_string());
-    let kernel = system
-        .kernel
-        .clone()
-        .unwrap_or_else(|| "unknown".to_string());
-    let store_path_text = system
-        .current_store_path
-        .clone()
-        .unwrap_or_else(|| "unknown".to_string());
-    rsx! {
-        div {
-            class: "sd-grid sd-grid-config",
-            section {
-                class: "card sd-card",
-                div {
-                    class: "sd-card-head",
-                    h2 { "Rendered module" }
-                    span { class: "sd-card-meta mono", "{flake_name}#nixosConfigurations.{system.hostname}" }
+        .filter(|collection| selected_module_scope.as_ref() == Some(&collection.scope));
+    let module_loaded = module_collection
+        .as_ref()
+        .map(|collection| collection.sources.len())
+        .unwrap_or_default();
+    let module_total = module_collection
+        .as_ref()
+        .map(|collection| collection.total)
+        .unwrap_or_default();
+    let module_lifecycle = module_collection
+        .as_ref()
+        .map(|collection| collection.lifecycle);
+    let module_inventory_partial = module_collection.as_ref().is_some_and(|collection| {
+        collection.option_inventory_state == OptionInventoryState::Partial
+    });
+    let module_total_mismatch = summary_response
+        .as_ref()
+        .filter(|_| summary_available && module_lifecycle == Some(SnapshotLifecycle::Available))
+        .is_some_and(|value| value.module_source_total != module_total);
+    let module_has_more = module_collection.as_ref().is_some_and(|collection| {
+        collection.lifecycle == SnapshotLifecycle::Available
+            && collection.next_offset < collection.total
+    });
+    #[cfg(target_arch = "wasm32")]
+    {
+        let measure_card_id = card_id.clone();
+        let measure_table_id = table_id.clone();
+        let measure_side_id = side_id.clone();
+        use_effect(move || {
+            let _content_shape = (
+                loading_summary(),
+                module_loading(),
+                module_loaded,
+                module_total,
+                summary_lifecycle,
+                seven_day_drift,
+            );
+            measure_config_page_size(
+                &measure_card_id,
+                &measure_table_id,
+                &measure_side_id,
+                page_size,
+                offset,
+            );
+            let delayed_card_id = measure_card_id.clone();
+            let delayed_table_id = measure_table_id.clone();
+            let delayed_side_id = measure_side_id.clone();
+            spawn(async move {
+                gloo_timers::future::TimeoutFuture::new(220).await;
+                measure_config_page_size(
+                    &delayed_card_id,
+                    &delayed_table_id,
+                    &delayed_side_id,
+                    page_size,
+                    offset,
+                );
+            });
+        });
+    }
+    {
+        use_effect(move || {
+            let options_pending = options
+                .read()
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .is_some_and(|page| {
+                    matches!(
+                        page.lifecycle,
+                        SnapshotLifecycle::Queued | SnapshotLifecycle::Running
+                    )
+                });
+            let summary_pending = summary
+                .read()
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .is_some_and(|value| {
+                    matches!(
+                        value.lifecycle,
+                        SnapshotLifecycle::Queued | SnapshotLifecycle::Running
+                    )
+                });
+            let modules_pending = module_sources.read().as_ref().is_some_and(|value| {
+                matches!(
+                    value.lifecycle,
+                    SnapshotLifecycle::Queued | SnapshotLifecycle::Running
+                )
+            });
+            if !options_pending && !summary_pending && !modules_pending {
+                poll_scheduled_scope.set(None);
+                return;
+            }
+            let Some(selection) = active_selection.read().clone() else {
+                return;
+            };
+            let poll_scope = ConfigRefreshScope {
+                selection,
+                generation: *refresh_generation.read(),
+            };
+            if poll_scheduled_scope.peek().as_ref() == Some(&poll_scope) {
+                return;
+            }
+            poll_scheduled_scope.set(Some(poll_scope.clone()));
+            spawn(async move {
+                gloo_timers::future::TimeoutFuture::new(3_000).await;
+                if poll_scheduled_scope.peek().as_ref() != Some(&poll_scope) {
+                    return;
                 }
-                pre {
-                    class: "sd-nix",
-                    "# host: {system.hostname}\n# flake: {flake_name}\n# deploymentPolicy: {system.deployment_policy}\n\n{{ config, pkgs, ... }}:\n{{\n  networking.hostName = \"{system.hostname}\";\n  system.stateVersion = \"{nixos_version}\";\n  boot.kernelPackages = pkgs.linuxPackages; # {kernel}\n}}"
+                poll_scheduled_scope.set(None);
+                if refresh_scope_is_current(
+                    active_selection.peek().as_ref(),
+                    *refresh_generation.peek(),
+                    &poll_scope,
+                ) {
+                    refresh_generation.set(poll_scope.generation.saturating_add(1));
+                }
+            });
+        });
+    }
+    let load_more_module_sources = {
+        let system_id = system.id;
+        move |_| {
+            let Some(scope) = module_scope.peek().clone() else {
+                return;
+            };
+            let Some(current) = module_sources.peek().clone() else {
+                return;
+            };
+            let request_offset = current.next_offset;
+            let snapshot_token = current.snapshot_token.clone();
+            let request_generation = *refresh_generation.peek();
+            let sequence = *module_request_sequence.peek() + 1;
+            module_request_sequence.set(sequence);
+            module_loading_more.set(true);
+            module_continuation_error.set(None);
+            spawn(async move {
+                let result = fetch_system_evaluation_module_sources(
+                    &system_id,
+                    &scope.revision,
+                    scope.generation,
+                    scope.mode,
+                    MODULE_PAGE_SIZE,
+                    request_offset,
+                    snapshot_token.as_deref(),
+                )
+                .await;
+                // CONCURRENCY: A response cannot mutate a newer selection or clear
+                // that selection's continuation loading state.
+                if *module_request_sequence.peek() != sequence
+                    || *refresh_generation.peek() != request_generation
+                    || active_selection.peek().as_ref() != Some(&scope)
+                    || module_scope.peek().as_ref() != Some(&scope)
+                {
+                    return;
+                }
+                module_loading_more.set(false);
+                match result {
+                    Ok(page) if page.lifecycle != SnapshotLifecycle::Available => {
+                        let message = format!(
+                            "{}: {}",
+                            snapshot_lifecycle_label(page.lifecycle),
+                            snapshot_lifecycle_message(page.lifecycle, page.error.as_deref())
+                        );
+                        module_continuation_error.set(Some(message));
+                    }
+                    Ok(page) => {
+                        let Some(accumulated) = module_sources.peek().clone() else {
+                            return;
+                        };
+                        match merge_module_source_page(accumulated, page) {
+                            Ok(merged) => module_sources.set(Some(merged)),
+                            Err(error) => module_continuation_error.set(Some(error)),
+                        }
+                    }
+                    Err(ApiClientError::Status { code: 409, .. }) => {
+                        // CONCURRENCY: A continuation token identifies one immutable
+                        // snapshot version. Discard that version's rows and restart at
+                        // page zero instead of retrying a token that can never succeed.
+                        config_snapshot_token.set(None);
+                        options.set(None);
+                        summary.set(None);
+                        module_sources.set(None);
+                        module_continuation_error.set(None);
+                        offset.set(0);
+                        refresh_generation.set(request_generation.saturating_add(1));
+                    }
+                    Err(error) => {
+                        module_continuation_error.set(Some(snapshot_request_error(&error)))
+                    }
+                }
+            });
+        }
+    };
+    let commit_for_mode_switch =
+        newest_config_inspectable_commit(&commits).map(|commit| commit.hash.clone());
+    let selected_revision_for_inventory = selected_revision.clone();
+    let inventory_selection = selected_module_scope.clone();
+
+    rsx! {
+        section { class: "card cfgx",
+            div { class: "cfgx-top",
+                div { class: "cfgx-target", span { class: "cfgx-target-label", "TARGET" } span { class: "mono cfgx-target-path", "{flake_name}#nixosConfigurations.{config_name}.config" } }
+                div { class: "cfgx-top-r",
+                    div { class: "cfgx-rev",
+                        div { class: "seg xs",
+                            button { class: if selected_mode == SnapshotRevisionMode::Generation { "active focus-ring" } else { "focus-ring" }, "aria-pressed": selected_mode == SnapshotRevisionMode::Generation, onclick: move |_| on_revision_change.call(ConfigRevision::Current), "Generations" }
+                            button { class: if selected_mode == SnapshotRevisionMode::Commit { "active focus-ring" } else { "focus-ring" }, "aria-pressed": selected_mode == SnapshotRevisionMode::Commit, disabled: commit_for_mode_switch.is_none(), onclick: move |_| { if let Some(commit) = commit_for_mode_switch.clone() { on_revision_change.call(ConfigRevision::Commit(commit)); } }, "Commits" }
+                        }
+                        if selected_mode == SnapshotRevisionMode::Generation {
+                            select { class: "cfgx-select focus-ring", value: selected_generation.map(|value| value.to_string()).unwrap_or_default(), onchange: move |event| { if let Ok(generation) = event.value().parse::<i32>() { on_revision_change.call(ConfigRevision::Generation(generation)); } },
+                                for generation in &generations {
+                                    {
+                                        let current = if generation.is_current { " (current)" } else { "" };
+                                        let commit = generation.commit_hash.as_deref().map(short_revision).unwrap_or_else(|| "no commit".into());
+                                        rsx! { option { value: "{generation.generation}", disabled: generation.commit_hash.is_none(), "gen #{generation.generation}{current} · {commit}" } }
+                                    }
+                                }
+                            }
+                        } else {
+                            select { class: "cfgx-select focus-ring", value: selected_revision.clone().unwrap_or_default(), onchange: move |event| on_revision_change.call(ConfigRevision::Commit(event.value())),
+                                if let ConfigRevision::Commit(sha) = &revision { if !revision_known { option { value: "{sha}", "{short_revision(sha)} · linked revision" } } }
+                                for commit in &commits {
+                                    {
+                                        let deployed = if commit.is_current { " (deployed)" } else { "" };
+                                        let short = short_revision(&commit.hash);
+                                        rsx! { option { value: "{commit.hash}", disabled: !commit.config_inspectable, "{short}{deployed} · {commit.message}" } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    span { class: "cfgx-obs", title: "Observational only. Deployment gating uses the policy evaluator, which evaluates this configuration independently — an Explorer cache hit never substitutes for an authoritative policy evaluation.", "OBSERVATIONAL" }
                 }
             }
-            section {
-                class: "card sd-card",
-                div {
-                    class: "sd-card-head",
-                    h2 { "Drift" }
-                    span {
-                        class: "chip chip-healthy",
-                        svg {
-                            class: "w-3 h-3",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            view_box: "0 0 24 24",
-                            path { d: "M5 12l5 5L20 7" }
-                        }
-                        "in sync"
+            if matches!(revision, ConfigRevision::Current) && selected_revision.is_none() {
+                div { class: "cfgx-hist", role: "status",
+                    Icon { name: IconName::Warn, size: 12 }
+                    div { "The current generation/store is not linked unambiguously to a tracked commit. Generation Config evidence remains available independently." }
+                    if let Some(commit) = commit_for_mode_switch.clone() {
+                        button { class: "cfgx-link focus-ring", onclick: move |_| on_revision_change.call(ConfigRevision::Commit(commit.clone())), "inspect newest eligible commit" }
+                    } else {
+                        span { " No tracked commit currently satisfies Config inspection prerequisites." }
                     }
                 }
-                div { class: "sd-drift-row", span { class: "sd-drift-label", "Evaluated config" }, span { class: "sd-drift-val mono", "{store_path_text}" } }
-                div { class: "sd-drift-row", span { class: "sd-drift-label", "Running config" }, span { class: "sd-drift-val mono", "{store_path_text}" } }
-                div { class: "sd-drift-row", span { class: "sd-drift-label", "Agent fingerprint" }, span { class: "sd-drift-val", "matches" } }
-                div {
-                    class: "sd-callout sd-callout-info",
-                    style: "margin-top: 14px;",
-                    svg {
-                        class: "w-3 h-3",
-                        fill: "none",
-                        stroke: "currentColor",
-                        stroke_width: "2",
-                        view_box: "0 0 24 24",
-                        path { d: "M5 12l5 5L20 7" }
+            }
+            if is_historical {
+                div { class: "cfgx-hist", Icon { name: IconName::Clock, size: 12 }
+                    div { "Inspecting historical configuration " span { class: "mono", title: selected_revision.clone().unwrap_or_default(), "{selected_revision_label}" } if selected_mode == SnapshotRevisionMode::Commit && revision_known && !deployed_here { " (never deployed here)" } ". This is not the running state." }
+                    button { class: "cfgx-link focus-ring", onclick: move |_| on_revision_change.call(ConfigRevision::Current), "back to current" }
+                }
+            }
+            ConfigExplorer {
+                key: "{explorer_scope_key}",
+                system_id: system.id,
+                revision: selected_revision.clone(),
+                scoped_enabled: config_observation_allowed,
+                disabled_reason: if matches!(revision, ConfigRevision::Generation(_)) { "Lazy observations are commit-scoped. Certified retained-generation evidence remains selected so a new commit observation is not mislabeled as historical generation data.".to_string() } else if selected_revision.is_none() { "An unambiguous full tracked commit is required before lazy Config observations can start.".to_string() } else if !selected_commit_inspectable { "This commit does not have a completed NixOS derivation with a nonempty carrier for the system's exact flake and configuration.".to_string() } else { "Administrator eligibility is required to start a lazy Config observation.".to_string() },
+                target: format!("{}#nixosConfigurations.{}.config @ {}", flake_name, config_name, selected_revision.as_deref().unwrap_or("no commit")),
+                primary_lifecycle: lifecycle.unwrap_or(SnapshotLifecycle::Unavailable),
+                evaluation_time: evaluation_duration_label.clone(),
+                package_count: closure_package_label.clone(),
+                closure_size: closure_size_label.clone(),
+                carrier: selected_store_path.as_deref().map(short_source_path).unwrap_or_else(|| "unavailable".to_string()),
+                inventory_label: match option_inventory_state { OptionInventoryState::Complete => format!("{} options", counts.all), OptionInventoryState::Partial => "partial".to_string(), OptionInventoryState::Unavailable => summary_lifecycle_short(lifecycle.unwrap_or(SnapshotLifecycle::Unavailable)).to_string() },
+                inventory_state: option_inventory_state,
+                inventory_request_allowed: selected_mode == SnapshotRevisionMode::Commit && config_observation_allowed && queueing_scope.read().is_none() && !loading_options() && matches!(lifecycle, Some(SnapshotLifecycle::Available | SnapshotLifecycle::Unavailable | SnapshotLifecycle::Failed)) && option_inventory_state != OptionInventoryState::Complete,
+                inventory_request_error: inspection_prerequisite.read().clone(),
+                comparison_ready: lifecycle == Some(SnapshotLifecycle::Available) && option_inventory_state == OptionInventoryState::Complete && comparison_available,
+                search,
+                search_rows: response.as_ref().map(|value| value.options.clone()).unwrap_or_default(),
+                search_total: total,
+                search_offset: *offset.read(),
+                search_limit: *page_size.read(),
+                search_filter: *filter.read(),
+                search_counts: counts.clone(),
+                search_loading: loading_options(),
+                search_error: load_error.clone(),
+                comparison_baseline,
+                certified_sources: module_collection.as_ref().map(|collection| collection.sources.clone()).unwrap_or_default(),
+                certified_sources_complete: module_collection.as_ref().is_some_and(|collection| collection.lifecycle == SnapshotLifecycle::Available && collection.option_inventory_state == OptionInventoryState::Complete && collection.next_offset >= collection.total),
+                certified_sources_has_more: module_has_more,
+                certified_sources_loading_more: module_loading() || *module_loading_more.read(),
+                certified_sources_error: module_initial_error.read().clone().or_else(|| module_continuation_error.read().clone()),
+                on_search_offset: move |next: i64| offset.set(next.max(0)),
+                on_search_filter: move |next| { filter.set(next); offset.set(0); },
+                on_load_more_sources: load_more_module_sources,
+                on_open_definition: move |definition| source.set(Some(source_target_from_definition(definition))),
+                on_open_source: move |module| source.set(Some(source_target_from_module(module))),
+                on_request_inventory: move |_| {
+                    let Some(revision) = selected_revision_for_inventory.clone() else { return; };
+                    let Some(selection) = inventory_selection.clone() else { return; };
+                    if !config_observation_allowed || queueing_scope.peek().is_some() { return; }
+                    let request_scope = ConfigRefreshScope {
+                        selection,
+                        generation: *refresh_generation.peek(),
+                    };
+                    queueing_scope.set(Some(request_scope.clone()));
+                    inspection_prerequisite.set(None);
+                    spawn(async move {
+                        let result = queue_system_config_inspection(&system.id, &revision).await;
+                        if !refresh_scope_is_current(
+                            active_selection.peek().as_ref(),
+                            *refresh_generation.peek(),
+                            &request_scope,
+                        ) || queueing_scope.peek().as_ref() != Some(&request_scope) {
+                            return;
+                        }
+                        queueing_scope.set(None);
+                        match result {
+                            Ok(_) => { inspected_commit.set(Some(revision)); bump_refresh_generation(refresh_generation); }
+                            Err(crate::api::client::QueueConfigInspectionError::Prerequisite(message)) => inspection_prerequisite.set(Some(message)),
+                            Err(crate::api::client::QueueConfigInspectionError::Request(error)) => options.set(Some(Err(error))),
+                        }
+                    });
+                },
+            }
+        }
+        if let Some(target) = source.read().clone() {
+            ConfigSourceTray { target, on_open_flake_commit, on_close: move |_| source.set(None) }
+        }
+    }
+}
+
+fn visible_config_response(
+    response: Option<EvaluatedOptionsPage>,
+    revision: Option<&str>,
+    generation: Option<i32>,
+) -> Option<EvaluatedOptionsPage> {
+    response
+        .filter(|page| Some(page.revision.as_str()) == revision && page.generation == generation)
+}
+
+#[component]
+fn ConfigState(kind: &'static str, message: String) -> Element {
+    let role = if kind == "failed" { "alert" } else { "status" };
+    rsx! { div { class: "cfg-state cfg-state-{kind}", role, p { "{message}" } } }
+}
+
+#[component]
+fn ConfigSummaryLifecycleState(
+    surface: &'static str,
+    lifecycle: SnapshotLifecycle,
+    error: Option<String>,
+) -> Element {
+    let label = summary_lifecycle_short(lifecycle);
+    let message = snapshot_lifecycle_message(lifecycle, error.as_deref());
+    if lifecycle == SnapshotLifecycle::Failed {
+        rsx! { div { class: "cfg-summary-state cfg-summary-error", role: "alert", strong { "{surface} {label}" } p { "{message}" } } }
+    } else {
+        rsx! { div { class: "cfg-summary-state", role: "status", strong { "{surface} {label}" } p { "{message}" } } }
+    }
+}
+
+#[component]
+fn ConfigOptionRows(
+    row: EvaluatedOptionRow,
+    open: bool,
+    baseline: Option<String>,
+    baseline_generation: Option<i32>,
+    comparison_mode: SnapshotRevisionMode,
+    on_toggle: EventHandler<String>,
+    on_source: EventHandler<OptionDefinitionProvenance>,
+) -> Element {
+    let displayed_option = row.option.as_ref().or(row.before.as_ref());
+    let Some(displayed_option) = displayed_option else {
+        return rsx! {};
+    };
+    let removed = row.option.is_none();
+    let value = if removed {
+        "Removed".to_string()
+    } else {
+        render_safe_option_value(&displayed_option.value)
+    };
+    let winning = displayed_option
+        .definitions
+        .iter()
+        .find(|definition| definition.winning);
+    let source_label = winning
+        .and_then(|definition| definition.source_path.as_deref())
+        .or_else(|| winning.map(|_| SOURCE_PATH_UNAVAILABLE_LABEL))
+        .unwrap_or("No provenance");
+    let source_display = short_source_path(source_label);
+    let source_available = winning.is_some_and(|definition| {
+        definition.source_path.is_some() || definition.tracked_flake.is_some()
+    });
+    let declared_type_label = displayed_option
+        .declared_type
+        .as_deref()
+        .unwrap_or("Declared type unavailable");
+    let source_input_label = winning
+        .and_then(|definition| definition.source_input.as_deref())
+        .unwrap_or("untracked");
+    let option_path = displayed_option.path.clone();
+    let option_path_for_key = displayed_option.path.clone();
+    let change_kind = row.diff.as_ref().map(|diff| diff.kind);
+    rsx! {
+        tr {
+            class: if open { "cfg-row open" } else { "cfg-row" },
+            td { button {
+                class: "cfg-opt cfg-row-toggle focus-ring",
+                "aria-expanded": open,
+                onclick: move |_| on_toggle.call(option_path.clone()),
+                onkeydown: move |event| if event.key() == Key::Character(" ".to_string()) { event.prevent_default(); on_toggle.call(option_path_for_key.clone()); },
+                span { class: if open { "cfg-caret open" } else { "cfg-caret" }, Icon { name: IconName::ChevronRight, size: 11 } }
+                span { class: "mono cfg-path", title: "{displayed_option.path}", "{displayed_option.path}" }
+                if change_kind == Some(OptionChangeKind::Added) { span { class: "cfg-tag cfg-tag-added", "added" } }
+                if row.changed == Some(true) && change_kind.is_none_or(|kind| kind == OptionChangeKind::Modified) { span { class: "cfg-tag cfg-tag-changed", "changed" } }
+                if removed { span { class: "cfg-tag cfg-tag-removed", "removed" } }
+            } }
+            td { span { class: if !removed && matches!(displayed_option.value, SafeOptionValue::Failed(_)) { "mono cfg-val cfg-val-err" } else { "mono cfg-val" }, title: "{value}", "{value}" } }
+            td {
+                if let Some(definition) = winning {
+                    button {
+                        class: "cfg-src focus-ring",
+                        title: "{source_label}",
+                        disabled: !source_available,
+                        onclick: { let definition = definition.clone(); move |event| { event.stop_propagation(); on_source.call(definition.clone()); } },
+                        span { class: "cfg-input", "{source_input_label}" }
+                        span { class: "mono", title: "{source_label}", "{source_display}" }
+                        if displayed_option.overridden == Some(true) { span { class: "cfg-defcount", "{displayed_option.definitions.len()} defs" } }
+                        if displayed_option.overridden.is_none() { span { class: "cfg-defcount", "Override status unavailable" } }
                     }
-                    div { "No configuration drift detected in the last 7 days." }
+                } else { span { class: "fx-dim", "No provenance" } }
+            }
+        }
+        if open {
+            tr { class: "cfg-detail-row", td { colspan: "3",
+                div { class: "cfg-detail",
+                    div { class: "cfg-detail-row",
+                        span { class: "cfg-detail-label", "Type" }
+                        if let Some(error) = &displayed_option.metadata_error {
+                            span { class: "mono cfg-detail-v cfg-val-err", "Metadata unavailable ({error.code}): {error.message}" }
+                        } else {
+                            span { class: "mono cfg-detail-v", "{declared_type_label}" }
+                        }
+                    }
+                    div { class: "cfg-detail-row",
+                        span { class: "cfg-detail-label", "Comparison" }
+                        ConfigValueDiff {
+                            before: row.before.clone(),
+                            after: row.option.clone(),
+                            changed: row.changed,
+                            diff: row.diff.clone(),
+                            baseline,
+                            baseline_generation,
+                            comparison_mode,
+                        }
+                    }
+                    div { class: "cfg-detail-row",
+                        span { class: "cfg-detail-label", "Definitions" }
+                        div { class: "cfg-defs",
+                            for definition in &displayed_option.definitions {
+                                {
+                                    let input_label = definition.source_input.as_deref().unwrap_or("untracked");
+                                    let status_label = definition.status.as_deref().unwrap_or(if definition.winning { "winning" } else { "definition" });
+                                    let source_path_label = definition.source_path.as_deref().unwrap_or(SOURCE_PATH_UNAVAILABLE_LABEL);
+                                    let source_available = definition.source_path.is_some()
+                                        || definition.tracked_flake.is_some();
+                                    rsx! { button {
+                                        class: if definition.winning { "cfg-def win focus-ring" } else { "cfg-def focus-ring" },
+                                        title: "{source_path_label}",
+                                        disabled: !source_available,
+                                        onclick: { let definition = definition.clone(); move |event| { event.stop_propagation(); on_source.call(definition.clone()); } },
+                                        Icon { name: if definition.winning { IconName::Check } else { IconName::X }, size: 11 }
+                                        span { class: "cfg-input", "{input_label}" }
+                                        span { class: "mono cfg-def-file", "{source_path_label}" }
+                                        if let Some(revision) = &definition.source_revision { span { class: "mono cfg-def-note", "{short_revision(revision)}" } }
+                                        span { class: "cfg-def-note", "{status_label}" }
+                                        if let Some(priority) = definition.priority { span { class: "cfg-def-note mono", "priority {priority}" } }
+                                        if let Some(note) = &definition.winner_note { span { class: "cfg-def-note", "{note}" } }
+                                    } }
+                                }
+                            }
+                            if displayed_option.overridden.is_none() { span { class: "fx-dim", "Definition provenance and override status are unavailable." } }
+                            else if displayed_option.definitions.is_empty() { span { class: "fx-dim", "No definition provenance was emitted." } }
+                        }
+                    }
+                    if let Some(before) = row.before.as_ref().filter(|_| row.option.is_some() && row.changed == Some(true)) {
+                        div { class: "cfg-detail-row",
+                            span { class: "cfg-detail-label", "Before definitions" }
+                            div { class: "cfg-defs",
+                                for definition in &before.definitions {
+                                    {
+                                        let input_label = definition.source_input.as_deref().unwrap_or("untracked");
+                                        let status_label = definition.status.as_deref().unwrap_or(if definition.winning { "winning" } else { "definition" });
+                                        let source_path_label = definition.source_path.as_deref().unwrap_or(SOURCE_PATH_UNAVAILABLE_LABEL);
+                                        let source_available = definition.source_path.is_some()
+                                            || definition.tracked_flake.is_some();
+                                        rsx! { button {
+                                            class: if definition.winning { "cfg-def win focus-ring" } else { "cfg-def focus-ring" },
+                                            title: "{source_path_label}",
+                                            disabled: !source_available,
+                                            onclick: { let definition = definition.clone(); move |event| { event.stop_propagation(); on_source.call(definition.clone()); } },
+                                            Icon { name: if definition.winning { IconName::Check } else { IconName::X }, size: 11 }
+                                            span { class: "cfg-input", "{input_label}" }
+                                            span { class: "mono cfg-def-file", "{source_path_label}" }
+                                            if let Some(revision) = &definition.source_revision { span { class: "mono cfg-def-note", "{short_revision(revision)}" } }
+                                            span { class: "cfg-def-note", "{status_label}" }
+                                            if let Some(priority) = definition.priority { span { class: "cfg-def-note mono", "priority {priority}" } }
+                                            if let Some(note) = &definition.winner_note { span { class: "cfg-def-note", "{note}" } }
+                                        } }
+                                    }
+                                }
+                                if before.overridden.is_none() { span { class: "fx-dim", "Baseline definition provenance and override status are unavailable." } }
+                                else if before.definitions.is_empty() { span { class: "fx-dim", "No baseline definition provenance was emitted." } }
+                            }
+                        }
+                    }
+                }
+            } }
+        }
+    }
+}
+
+#[component]
+fn ConfigValueDiff(
+    before: Option<EvaluatedOption>,
+    after: Option<EvaluatedOption>,
+    changed: Option<bool>,
+    diff: Option<TypedOptionDiff>,
+    baseline: Option<String>,
+    baseline_generation: Option<i32>,
+    comparison_mode: SnapshotRevisionMode,
+) -> Element {
+    let before_text = before
+        .as_ref()
+        .map(|value| render_safe_option_value(&value.value));
+    let after_text = after
+        .as_ref()
+        .map(|value| render_safe_option_value(&value.value));
+    let baseline_label = match comparison_mode {
+        SnapshotRevisionMode::Generation => baseline_generation
+            .map(|generation| format!("generation #{generation}"))
+            .unwrap_or_else(|| "preceding retained generation".to_string()),
+        SnapshotRevisionMode::Commit => baseline
+            .as_deref()
+            .map(short_revision)
+            .unwrap_or_else(|| "first parent".to_string()),
+    };
+    let baseline_title = match (comparison_mode, baseline_generation, baseline.as_deref()) {
+        (SnapshotRevisionMode::Generation, Some(generation), Some(revision)) => {
+            format!("Generation #{generation} at {revision}")
+        }
+        (SnapshotRevisionMode::Generation, Some(generation), None) => {
+            format!("Generation #{generation}")
+        }
+        (SnapshotRevisionMode::Commit, _, Some(revision)) => {
+            format!("Git first parent {revision}")
+        }
+        (SnapshotRevisionMode::Commit, _, None) => "Git first parent".to_string(),
+        (SnapshotRevisionMode::Generation, None, Some(revision)) => {
+            format!("Preceding retained generation at {revision}")
+        }
+        (SnapshotRevisionMode::Generation, None, None) => {
+            "Preceding retained generation".to_string()
+        }
+    };
+    let unchanged_packages = match (before.as_ref(), after.as_ref()) {
+        (Some(before), Some(after)) => {
+            let before = package_identities(&before.value);
+            let after = package_identities(&after.value);
+            before.intersection(&after).count()
+        }
+        _ => 0,
+    };
+    let unchanged_package_label = format!(
+        "{unchanged_packages} package{} unchanged",
+        if unchanged_packages == 1 { "" } else { "s" }
+    );
+    rsx! { div { class: "cfg-diff",
+        if changed.is_none() {
+            div { class: "cfg-diff-line cfg-diff-opaque", "No comparison is available." }
+        } else if changed == Some(false) {
+            div { class: "cfg-diff-line cfg-diff-opaque", title: "{baseline_title}", "Unchanged vs {baseline_label}." }
+        } else if let Some(diff) = diff {
+            div { class: "cfg-diff-note", title: "{baseline_title}", "Compared with {baseline_label}." }
+            if diff.kind == OptionChangeKind::Removed { div { class: "cfg-diff-line cfg-diff-from", "Option removed" } }
+            else if diff.kind == OptionChangeKind::Added { div { class: "cfg-diff-line cfg-diff-to", "Option added" } }
+            if diff.value_kind == "failed" {
+                div { class: "cfg-diff-line cfg-diff-err", "Evaluation result changed; the safe diagnostic is shown in the value." }
+            } else if diff.value_kind == "opaque" {
+                div { class: "cfg-diff-line cfg-diff-opaque", "Opaque values changed; no unsupported detail was inferred." }
+            } else {
+                for removed in &diff.removed { div { class: "cfg-diff-line cfg-diff-from mono", "- {render_typed_diff_value(removed)}" } }
+                for added in &diff.added { div { class: "cfg-diff-line cfg-diff-to mono", "+ {render_typed_diff_value(added)}" } }
+                if diff.value_kind == "package" && unchanged_packages > 0 { div { class: "cfg-diff-note", "{unchanged_package_label}" } }
+            }
+        } else {
+            div { class: "cfg-diff-note", title: "{baseline_title}", "Compared with {baseline_label}." }
+            if let Some(before_text) = before_text { div { class: "cfg-diff-line cfg-diff-from mono", "- {before_text}" } }
+            if let Some(after_text) = after_text { div { class: "cfg-diff-line cfg-diff-to mono", "+ {after_text}" } }
+        }
+    } }
+}
+
+fn option_row_path(row: &EvaluatedOptionRow) -> &str {
+    row.option
+        .as_ref()
+        .or(row.before.as_ref())
+        .map(|option| option.path.as_str())
+        .unwrap_or("unknown-option")
+}
+
+fn render_typed_diff_value(value: &JsonValue) -> String {
+    serde_json::from_value::<SafeOptionValue>(value.clone())
+        .map(|value| render_safe_option_value(&value))
+        .unwrap_or_else(|_| render_json_value(value))
+}
+
+fn package_identities(value: &SafeOptionValue) -> HashSet<String> {
+    match value {
+        SafeOptionValue::Package(package) => {
+            let identity = package
+                .name
+                .as_ref()
+                .or(package.pname.as_ref())
+                .map(String::as_str)
+                .unwrap_or("package");
+            [package
+                .version
+                .as_ref()
+                .map(|version| format!("{identity}-{version}"))
+                .unwrap_or_else(|| identity.to_string())]
+            .into_iter()
+            .collect()
+        }
+        SafeOptionValue::List(values) => values
+            .iter()
+            .flat_map(package_identities)
+            .collect::<HashSet<_>>(),
+        _ => HashSet::new(),
+    }
+}
+
+#[component]
+fn ConfigSourceTray(
+    target: ConfigSourceTarget,
+    on_open_flake_commit: EventHandler<FlakeCommitPeekTarget>,
+    on_close: EventHandler<()>,
+) -> Element {
+    const SOURCE_TRAY_ID: &str = "config-source-tray";
+    let external_unregistered = target
+        .source_input
+        .as_deref()
+        .is_some_and(|input| input != "self");
+    let input_label = target
+        .source_input
+        .as_deref()
+        .unwrap_or("untracked")
+        .to_string();
+    let revision_label = target
+        .source_revision
+        .as_deref()
+        .unwrap_or("unavailable")
+        .to_string();
+    let source_path_label = target
+        .source_path
+        .as_deref()
+        .unwrap_or(SOURCE_PATH_UNAVAILABLE_LABEL)
+        .to_string();
+    let safe_value = target
+        .safe_value
+        .as_ref()
+        .map(render_json_value)
+        .unwrap_or_else(|| "unavailable".into());
+    let opener = use_hook(|| {
+        web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.active_element())
+            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+    });
+    let opener_for_drop = opener.clone();
+    use_drop(move || {
+        if let Some(opener) = opener_for_drop.as_ref() {
+            let _ = opener.focus();
+        }
+    });
+    use_effect(move || focus_dialog_by_id(SOURCE_TRAY_ID));
+    rsx! {
+        div { class: "fl-tray-backdrop", onclick: move |_| on_close.call(()) }
+        aside {
+            class: "fl-tray cfg-source-tray",
+            id: SOURCE_TRAY_ID,
+            role: "dialog",
+            "aria-modal": "true",
+            "aria-label": "Module source details",
+            tabindex: "0",
+            onkeydown: move |event| {
+                if event.key() == Key::Escape { event.prevent_default(); on_close.call(()); }
+                else { trap_local_dialog_focus(&event, SOURCE_TRAY_ID); }
+            },
+            header { class: "fl-tray-head",
+                div { style: "min-width:0", div { class: "fl-tray-title mono cfg-tray-title", title: "{source_path_label}", "{source_path_label}" } div { class: "fl-tray-sub", "{input_label} @ {revision_label} · read-only provenance" } }
+                div { style: "display:flex;gap:6px",
+                    if let Some(identity) = target.tracked_flake.clone() {
+                        button {
+                            class: "btn btn-ghost focus-ring xs",
+                            onclick: move |_| on_open_flake_commit.call(FlakeCommitPeekTarget {
+                                flake: FlakeSummary {
+                                    id: identity.flake_id,
+                                    name: identity.flake_name.clone(),
+                                    repo_url: identity.repo_url.clone(),
+                                    latest_commit: Some(identity.revision.clone()),
+                                },
+                                sha: identity.revision.clone(),
+                                meta: CommitFocusMeta::default(),
+                            }),
+                            "Open in Flakes"
+                        }
+                    } else if external_unregistered {
+                        button { class: "btn btn-ghost xs", disabled: true, title: "No visible active registered flake exactly matches this input source and revision", "External source unavailable" }
+                    } else { button { class: "btn btn-ghost xs", disabled: true, "Not tracked" } }
+                    button { class: "btn-icon focus-ring", "aria-label": "Close module source details", onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } }
+                }
+            }
+            div { class: "fl-tray-body cfg-source-body",
+                div { class: "cfg-tray-col",
+                    div { class: "sd-callout sd-callout-info",
+                        div {
+                            strong { "Locked source provenance" }
+                            div { "This metadata identifies the locked input and revision used by the cached evaluation. Browsing does not reconstruct source for this host." }
+                        }
+                    }
+                    dl { class: "cfg-source-provenance",
+                        div { dt { "Input" } dd { class: "mono", "{input_label}" } }
+                        div { dt { "Locked revision" } dd { class: "mono", "{revision_label}" } }
+                        div { dt { "Binding path / location" } dd { class: "mono", "{source_path_label}" } }
+                        div { dt { "Definition state" } dd { "{target.status_label}" } }
+                        if let Some(priority) = target.priority { div { dt { "Priority" } dd { class: "mono", "{priority}" } } }
+                        if target.safe_value.is_some() { div { dt { "Persisted safe value" } dd { class: "mono", "{safe_value}" } } }
+                    }
+                    div { class: "cfg-source-unavailable", role: "status",
+                        strong { "Source text unavailable (read-only provenance)" }
+                        p { "{SOURCE_TEXT_UNAVAILABLE_MESSAGE}" }
+                    }
+                    if let Some(note) = &target.winner_note { div { class: "cfg-source-note", strong { "Winner note" } p { "{note}" } } }
                 }
             }
         }
+    }
+}
+
+fn focus_dialog_by_id(id: &str) {
+    if let Some(element) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id(id))
+        .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+        let _ = element.focus();
+    }
+}
+
+fn trap_local_dialog_focus(event: &KeyboardEvent, id: &str) {
+    if event.key() != Key::Tab {
+        return;
+    }
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let Some(dialog) = document.get_element_by_id(id) else {
+        return;
+    };
+    let Ok(nodes) = dialog.query_selector_all(
+        "button:not([disabled]), [href], input, select, [tabindex]:not([tabindex='-1'])",
+    ) else {
+        return;
+    };
+    let focusable = (0..nodes.length())
+        .filter_map(|index| nodes.item(index))
+        .filter_map(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
+        .collect::<Vec<_>>();
+    let (Some(first), Some(last)) = (focusable.first(), focusable.last()) else {
+        return;
+    };
+    let active = document.active_element();
+    if event.modifiers().shift() && active.as_ref() == Some(first.as_ref()) {
+        event.prevent_default();
+        let _ = last.focus();
+    } else if !event.modifiers().shift() && active.as_ref() == Some(last.as_ref()) {
+        event.prevent_default();
+        let _ = first.focus();
+    }
+}
+
+fn short_revision(revision: &str) -> String {
+    revision.chars().take(7).collect()
+}
+
+fn short_source_path(path: &str) -> String {
+    path.strip_suffix("/default.nix")
+        .or_else(|| path.strip_suffix(".nix"))
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn format_byte_count(bytes: i64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+fn optional_count_label(count: Option<i64>) -> String {
+    count
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".into())
+}
+
+fn snapshot_lifecycle_label(lifecycle: SnapshotLifecycle) -> &'static str {
+    match lifecycle {
+        SnapshotLifecycle::Queued => "Configuration evidence queued",
+        SnapshotLifecycle::Running => "Configuration evidence in progress",
+        SnapshotLifecycle::Failed => "Evaluation failed",
+        SnapshotLifecycle::Available => "Available",
+        SnapshotLifecycle::Unavailable => "Snapshot unavailable",
+    }
+}
+
+fn snapshot_lifecycle_class(lifecycle: SnapshotLifecycle) -> &'static str {
+    match lifecycle {
+        SnapshotLifecycle::Queued | SnapshotLifecycle::Running => "pending",
+        SnapshotLifecycle::Failed => "failed",
+        SnapshotLifecycle::Available => "available",
+        SnapshotLifecycle::Unavailable => "unavailable",
+    }
+}
+
+fn summary_lifecycle_short(lifecycle: SnapshotLifecycle) -> &'static str {
+    match lifecycle {
+        SnapshotLifecycle::Queued => "queued",
+        SnapshotLifecycle::Running => "running",
+        SnapshotLifecycle::Failed => "failed",
+        SnapshotLifecycle::Available => "available",
+        SnapshotLifecycle::Unavailable => "unavailable",
+    }
+}
+
+fn snapshot_lifecycle_chip(lifecycle: SnapshotLifecycle) -> &'static str {
+    match lifecycle {
+        SnapshotLifecycle::Queued | SnapshotLifecycle::Running => "info",
+        SnapshotLifecycle::Failed => "critical",
+        SnapshotLifecycle::Available => "healthy",
+        SnapshotLifecycle::Unavailable => "unknown",
+    }
+}
+
+fn snapshot_lifecycle_message(lifecycle: SnapshotLifecycle, error: Option<&str>) -> String {
+    match lifecycle {
+        SnapshotLifecycle::Queued => {
+            "Configuration evidence is waiting to be prepared for this revision.".into()
+        }
+        SnapshotLifecycle::Running => {
+            "Configuration evidence is still being prepared for this revision.".into()
+        }
+        SnapshotLifecycle::Failed => error
+            .unwrap_or("Evaluation failed without a persisted diagnostic.")
+            .into(),
+        SnapshotLifecycle::Available => "The cached snapshot is available.".into(),
+        SnapshotLifecycle::Unavailable => {
+            "No reusable snapshot exists. Use the explicit action to request evaluation.".into()
+        }
+    }
+}
+
+fn snapshot_request_error(error: &ApiClientError) -> String {
+    match error {
+        ApiClientError::Status { code: 401, .. } => {
+            "Sign in again to view this evaluation snapshot.".into()
+        }
+        ApiClientError::Status {
+            code: 403 | 404, ..
+        } => "This evaluation snapshot is unavailable or you do not have access.".into(),
+        _ => format!("The evaluation snapshot request failed: {error}"),
+    }
+}
+
+fn render_safe_option_value(value: &SafeOptionValue) -> String {
+    match value {
+        SafeOptionValue::Scalar(value) => render_json_value(value),
+        SafeOptionValue::Package(package) => {
+            let identity = package
+                .name
+                .as_ref()
+                .or(package.pname.as_ref())
+                .map(String::as_str)
+                .unwrap_or("package");
+            package
+                .version
+                .as_ref()
+                .map(|version| format!("{identity}-{version}"))
+                .unwrap_or_else(|| identity.to_string())
+        }
+        SafeOptionValue::List(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(render_safe_option_value)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        SafeOptionValue::AttributeSet(values) | SafeOptionValue::Submodule(values) => {
+            render_json_value(&JsonValue::Object(values.clone()))
+        }
+        SafeOptionValue::Opaque { type_name } => format!("<{type_name}: opaque>"),
+        SafeOptionValue::Failed(error) => format!("not evaluated: {}", error.message),
+    }
+}
+
+fn render_json_value(value: &JsonValue) -> String {
+    match value {
+        JsonValue::String(value) => format!("\"{value}\""),
+        _ => serde_json::to_string(value).unwrap_or_else(|_| "<unavailable>".into()),
     }
 }
 
@@ -5291,14 +7449,24 @@ mod fold_tests {
 fn HistoryTab(
     entries: Vec<SystemHistoryEntry>,
     commits: Vec<SystemCommitHistory>,
+    generations: Vec<SystemGeneration>,
     current_generation: Option<i32>,
     deployment_policy: String,
     allow_mutations: bool,
-    on_rollback: EventHandler<SystemCommitHistory>,
+    on_rollback: EventHandler<i32>,
     on_view_logs: EventHandler<String>,
 ) -> Element {
     let events = build_history_events(&entries, &commits, current_generation);
     let items = fold_restart_clusters(&events);
+    let rollback_generations = generations
+        .iter()
+        .filter(|generation| {
+            generation.rollback_eligible
+                && !generation.is_current
+                && generation.generation_snapshot_id.is_some()
+        })
+        .map(|generation| generation.generation)
+        .collect::<HashSet<_>>();
 
     let deploy_count = events
         .iter()
@@ -5412,11 +7580,14 @@ fn HistoryTab(
                                             key: "{event.id}",
                                             event: event.clone(),
                                             allow_mutations,
+                                            rollback_eligible: event
+                                                .generation
+                                                .is_some_and(|generation| rollback_generations.contains(&generation)),
                                             on_rollback: {
-                                                let commit = event.commit.clone();
+                                                let generation = event.generation;
                                                 move |_| {
-                                                    if let Some(commit) = commit.clone() {
-                                                        on_rollback.call(commit);
+                                                    if let Some(generation) = generation {
+                                                        on_rollback.call(generation);
                                                     }
                                                 }
                                             },
@@ -5573,6 +7744,7 @@ fn RestartLine(event: HistoryEvent) -> Element {
 fn DeployRow(
     event: HistoryEvent,
     allow_mutations: bool,
+    rollback_eligible: bool,
     on_rollback: EventHandler<()>,
     on_view_logs: EventHandler<()>,
 ) -> Element {
@@ -5618,7 +7790,7 @@ fn DeployRow(
         .and_then(|p| p.rsplit('/').next())
         .map(|s| s.to_string());
     let when = relative_time(event.timestamp);
-    let can_rollback = allow_mutations && event.commit.is_some() && !failed;
+    let can_rollback = allow_mutations && rollback_eligible && !failed;
 
     rsx! {
         div { class: "tl-row",
@@ -8262,6 +10434,7 @@ fn map_history_entries_to_commit_history(
                 diff_summary: Some(status_fragments.join(" · ")),
                 flake_repo_url: entry.flake_repo_url.clone(),
                 config_identity,
+                config_inspectable: false,
             }
         })
         .collect()
@@ -8278,10 +10451,7 @@ fn map_commit_infos_to_commit_history(
             let committed_at = chrono::DateTime::parse_from_rfc3339(&commit.timestamp)
                 .map(|dt| dt.with_timezone(&Utc))
                 .unwrap_or_else(|_| Utc::now());
-            let is_current = current_commit
-                .as_ref()
-                .map(|current| current == &commit.sha || current == &commit.short_sha)
-                .unwrap_or(false);
+            let is_current = current_commit.as_ref() == Some(&commit.sha);
 
             SystemCommitHistory {
                 hash: commit.sha,
@@ -8296,6 +10466,7 @@ fn map_commit_infos_to_commit_history(
                 diff_summary: None,
                 flake_repo_url: None,
                 config_identity: None,
+                config_inspectable: commit.config_inspectable,
             }
         })
         .collect()
@@ -8381,12 +10552,138 @@ fn map_agent_events_to_logs(events: Vec<SystemAgentEvent>) -> Vec<DeploymentLogE
 #[cfg(test)]
 mod tests {
     use super::{
-        HistoryEventKind, Tab, build_history_events, classify_history_entry,
-        map_agent_events_to_logs, map_history_entries_to_commit_history, query_value,
-        query_with_parameter, tab_from_query, tab_from_route,
+        ConfigRevision, EvaluatedOptionsPage, HistoryEventKind, SafeOptionValue, SnapshotLifecycle,
+        SnapshotRevisionMode, Tab, build_history_events, classify_history_entry,
+        config_observation_request_allowed, config_selection_is_historical,
+        fitted_config_page_size, map_agent_events_to_logs, map_commit_infos_to_commit_history,
+        map_history_entries_to_commit_history, natural_config_side_height,
+        newest_config_inspectable_commit, observational_current_timeline_commit,
+        overview_commit_identity, package_identities, query_value, query_with_parameter,
+        render_safe_option_value, selected_config_revision, snapshot_lifecycle_label,
+        snapshot_lifecycle_message, tab_from_query, tab_from_route, unavailable_generation_commit,
+        visible_config_response,
     };
-    use crate::api::models::{SystemAgentEvent, SystemHistoryEntry};
+    use crate::api::models::{
+        AuthContext, AuthMode, AuthUser, CommitInfo, Role, SafeEvaluationError, SafePackageValue,
+        SystemAgentEvent, SystemCommitHistory, SystemGeneration, SystemHistoryEntry,
+    };
     use chrono::{Duration, Utc};
+
+    fn config_commit(hash: char, inspectable: bool) -> SystemCommitHistory {
+        SystemCommitHistory {
+            hash: hash.to_string().repeat(40),
+            message: "test".into(),
+            author: "test".into(),
+            committed_at: Utc::now(),
+            was_deployed: false,
+            deployed_at: None,
+            is_current: false,
+            is_ready_to_deploy: false,
+            build_status: None,
+            diff_summary: None,
+            flake_repo_url: None,
+            config_identity: None,
+            config_inspectable: inspectable,
+        }
+    }
+
+    #[test]
+    fn commit_mode_selects_the_newest_inspectable_commit() {
+        let commits = vec![config_commit('a', false), config_commit('b', true)];
+        assert_eq!(
+            newest_config_inspectable_commit(&commits).map(|commit| commit.hash.as_str()),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+        assert!(newest_config_inspectable_commit(&[config_commit('a', false)]).is_none());
+    }
+
+    #[test]
+    fn current_mapping_requires_the_full_sha_and_explicit_commit_stays_historical() {
+        let full_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let commits = [CommitInfo {
+            sha: full_sha.into(),
+            short_sha: "aaaaaaa".into(),
+            message: "test".into(),
+            author: "test".into(),
+            timestamp: Utc::now().to_rfc3339(),
+            config_inspectable: true,
+        }];
+        assert!(
+            !map_commit_infos_to_commit_history(&commits, Some("aaaaaaa".into()))[0].is_current
+        );
+        assert!(map_commit_infos_to_commit_history(&commits, Some(full_sha.into()))[0].is_current);
+        assert!(config_selection_is_historical(
+            &ConfigRevision::Commit(full_sha.into()),
+            Some(4),
+        ));
+    }
+
+    #[test]
+    fn current_selection_does_not_fall_back_to_generation_or_timeline_identity() {
+        let generation_sha = "b".repeat(40);
+        let generations = [SystemGeneration {
+            generation: 4,
+            store_path: Some("/nix/store/current-system".into()),
+            commit_hash: Some(generation_sha.clone()),
+            timestamp: Utc::now(),
+            is_current: true,
+            generation_snapshot_id: None,
+            rollback_eligible: false,
+        }];
+        let timeline = [config_commit('a', true)];
+
+        assert!(selected_config_revision(&ConfigRevision::Current, None, &generations).is_none());
+        assert_eq!(
+            selected_config_revision(&ConfigRevision::Generation(4), None, &generations).as_deref(),
+            Some(generation_sha.as_str())
+        );
+        assert!(observational_current_timeline_commit(&timeline, None).is_none());
+        assert!(observational_current_timeline_commit(&timeline, Some(&"c".repeat(40))).is_none());
+        assert!(overview_commit_identity(None).is_none());
+        assert_eq!(
+            overview_commit_identity(Some(&timeline[0])),
+            Some(timeline[0].hash.as_str())
+        );
+        assert!(!config_observation_request_allowed(
+            &ConfigRevision::Current,
+            None,
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn config_observation_controls_require_admin_without_changing_operator_mutations() {
+        let context = |role| {
+            Some(AuthContext {
+                is_authenticated: true,
+                user: Some(AuthUser {
+                    id: "test-user".into(),
+                    email: "test@example.com".into(),
+                    display_name: None,
+                }),
+                roles: vec![role],
+                auth_mode: AuthMode::Local,
+            })
+        };
+        let revision = "a".repeat(40);
+        let admin = context(Role::Admin);
+        let operator = context(Role::Operator);
+
+        assert!(config_observation_request_allowed(
+            &ConfigRevision::Current,
+            Some(&revision),
+            true,
+            crate::state::auth::is_admin(&admin),
+        ));
+        assert!(!config_observation_request_allowed(
+            &ConfigRevision::Current,
+            Some(&revision),
+            true,
+            crate::state::auth::is_admin(&operator),
+        ));
+        assert!(crate::state::auth::can_mutate_systems(&operator));
+    }
 
     #[test]
     fn system_detail_tab_query_parsing_is_exact_and_covers_all_tabs() {
@@ -8683,5 +10980,201 @@ mod tests {
         let entry = history_entry("cf_deployment", "crystal-forge", "cf_deployment");
 
         assert_eq!(classify_history_entry(&entry), HistoryEventKind::Deploy);
+    }
+
+    #[test]
+    fn typed_option_renderer_never_fabricates_failed_or_opaque_values() {
+        assert_eq!(
+            render_safe_option_value(&SafeOptionValue::Scalar(serde_json::json!(true))),
+            "true"
+        );
+        assert_eq!(
+            render_safe_option_value(&SafeOptionValue::Package(SafePackageValue {
+                name: Some("curl".into()),
+                pname: Some("curl".into()),
+                version: Some("8.0".into()),
+                output_path: None,
+            })),
+            "curl-8.0"
+        );
+        assert_eq!(
+            render_safe_option_value(&SafeOptionValue::Opaque {
+                type_name: "lambda".into()
+            }),
+            "<lambda: opaque>"
+        );
+        assert_eq!(
+            render_safe_option_value(&SafeOptionValue::Failed(SafeEvaluationError {
+                code: "not_evaluated".into(),
+                message: "access denied".into(),
+            })),
+            "not evaluated: access denied"
+        );
+    }
+
+    #[test]
+    fn lifecycle_copy_distinguishes_unavailable_pending_and_failed() {
+        assert!(
+            snapshot_lifecycle_message(SnapshotLifecycle::Unavailable, None)
+                .contains("No reusable")
+        );
+        assert_eq!(
+            snapshot_lifecycle_label(SnapshotLifecycle::Queued),
+            "Configuration evidence queued"
+        );
+        assert_eq!(
+            snapshot_lifecycle_message(SnapshotLifecycle::Queued, None),
+            "Configuration evidence is waiting to be prepared for this revision."
+        );
+        assert_eq!(
+            snapshot_lifecycle_label(SnapshotLifecycle::Running),
+            "Configuration evidence in progress"
+        );
+        assert_eq!(
+            snapshot_lifecycle_message(SnapshotLifecycle::Running, None),
+            "Configuration evidence is still being prepared for this revision."
+        );
+        assert_eq!(
+            snapshot_lifecycle_message(SnapshotLifecycle::Failed, Some("safe error")),
+            "safe error"
+        );
+    }
+
+    #[test]
+    fn only_unavailable_generation_with_full_commit_offers_commit_inspection() {
+        let full_sha = "abcdef0123456789abcdef0123456789abcdef01";
+        let generation = SystemGeneration {
+            generation: 73,
+            store_path: None,
+            commit_hash: Some(full_sha.to_string()),
+            timestamp: Utc::now(),
+            is_current: false,
+            generation_snapshot_id: None,
+            rollback_eligible: false,
+        };
+
+        assert_eq!(
+            unavailable_generation_commit(
+                SnapshotRevisionMode::Generation,
+                Some(73),
+                Some(SnapshotLifecycle::Unavailable),
+                std::slice::from_ref(&generation),
+            )
+            .as_deref(),
+            Some(full_sha)
+        );
+        assert_eq!(
+            unavailable_generation_commit(
+                SnapshotRevisionMode::Commit,
+                None,
+                Some(SnapshotLifecycle::Unavailable),
+                std::slice::from_ref(&generation),
+            ),
+            None
+        );
+        assert_eq!(
+            unavailable_generation_commit(
+                SnapshotRevisionMode::Generation,
+                Some(73),
+                Some(SnapshotLifecycle::Available),
+                std::slice::from_ref(&generation),
+            ),
+            None
+        );
+
+        let mut abbreviated = generation;
+        abbreviated.commit_hash = Some("abcdef0".to_string());
+        assert_eq!(
+            unavailable_generation_commit(
+                SnapshotRevisionMode::Generation,
+                Some(73),
+                Some(SnapshotLifecycle::Unavailable),
+                &[abbreviated],
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn config_page_sizing_clamps_and_uses_one_row_hysteresis() {
+        assert_eq!(fitted_config_page_size(900.0, 100.0, 32.0, 32.0, 24), 24);
+        assert_eq!(fitted_config_page_size(932.0, 100.0, 32.0, 32.0, 24), 24);
+        assert_eq!(fitted_config_page_size(996.0, 100.0, 32.0, 32.0, 24), 27);
+        assert_eq!(fitted_config_page_size(100.0, 100.0, 32.0, 32.0, 24), 10);
+        assert_eq!(fitted_config_page_size(9_000.0, 0.0, 32.0, 32.0, 24), 80);
+        assert_eq!(fitted_config_page_size(f64::NAN, 0.0, 32.0, 32.0, 24), 24);
+    }
+
+    #[test]
+    fn config_page_sizing_uses_natural_card_heights_and_actual_gaps() {
+        let bounds = [(10.0, 210.0), (224.0, 424.0), (438.0, 638.0)];
+        assert_eq!(natural_config_side_height(&bounds), Some(628.0));
+        assert_eq!(fitted_config_page_size(628.0, 100.0, 32.0, 32.0, 24), 15);
+
+        assert_eq!(natural_config_side_height(&[]), None);
+        assert_eq!(natural_config_side_height(&[(20.0, 10.0)]), None);
+    }
+
+    #[test]
+    fn package_identity_intersection_can_report_unchanged_packages() {
+        let packages = SafeOptionValue::List(vec![
+            SafeOptionValue::Package(SafePackageValue {
+                name: Some("curl".into()),
+                pname: Some("curl".into()),
+                version: Some("8.0".into()),
+                output_path: None,
+            }),
+            SafeOptionValue::Package(SafePackageValue {
+                name: Some("git".into()),
+                pname: Some("git".into()),
+                version: Some("2.0".into()),
+                output_path: None,
+            }),
+        ]);
+        assert_eq!(
+            package_identities(&packages),
+            ["curl-8.0".to_string(), "git-2.0".to_string()]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[test]
+    fn config_response_is_visible_only_for_the_selected_scope() {
+        let page: EvaluatedOptionsPage = serde_json::from_value(serde_json::json!({
+            "lifecycle": "available",
+            "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "generation": null,
+            "generation_snapshot_id": null,
+            "baseline_revision": null,
+            "comparison_available": false,
+            "error": null,
+            "module_count": 14,
+            "evaluation_duration_ms": 845,
+            "counts": {"all": 38, "overridden": 1, "changed": null},
+            "total": 38,
+            "offset": 0,
+            "limit": 24,
+            "options": []
+        }))
+        .expect("evaluated options page");
+
+        assert_eq!(
+            visible_config_response(
+                Some(page.clone()),
+                Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                None,
+            ),
+            Some(page.clone())
+        );
+        assert_eq!(
+            visible_config_response(
+                Some(page),
+                Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+                None,
+            ),
+            None
+        );
+        assert_eq!(visible_config_response(None, None, None), None);
     }
 }

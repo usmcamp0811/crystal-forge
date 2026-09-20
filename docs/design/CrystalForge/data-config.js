@@ -61,6 +61,54 @@
     { path: "nixos/modules/security/audit.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
     { path: "nixos/modules/config/users-groups.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
     { path: "nixos/modules/virtualisation/amazon-image.nix", kind: "nixpkgs", input: "unstable", rev: "nixos-unstable" },
+    { path: "nixos/modules/services/web-servers/nginx/default.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/services/databases/postgresql.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/services/databases/redis.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/services/monitoring/grafana.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/services/monitoring/prometheus/default.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/services/networking/chrony.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/services/networking/resolved.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/services/networking/timesyncd.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/services/networking/firewalld.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/services/networking/haproxy.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/services/security/fail2ban.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/services/logging/logrotate.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/services/logging/vector.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/services/scheduling/cron.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/services/system/dbus.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/services/system/journald.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/services/hardware/udev.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/security/auditd.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/programs/bash/bash.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/programs/zsh/zsh.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/programs/git.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/programs/vim.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/programs/tmux.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/programs/gnupg.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/programs/ssh.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/programs/less.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/programs/nano.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/programs/htop.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/system/boot/kernel.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/system/boot/systemd.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/system/boot/loader/systemd-boot/systemd-boot.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/system/etc/etc.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/tasks/network-interfaces.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/config/nix.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/config/i18n.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/config/fonts/fontconfig.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/config/fonts/packages.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/config/xdg/portal.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/config/zram.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/config/power-management.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/hardware/all-firmware.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/hardware/cpu/intel-microcode.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/hardware/graphics.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/services/hardware/bluetooth.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/virtualisation/docker.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/virtualisation/podman/default.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/virtualisation/libvirtd.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
+    { path: "nixos/modules/misc/documentation.nix", kind: "nixpkgs", input: "nixpkgs", rev: "release-26.05" },
     { path: "modules/nixos/system/default.nix", kind: "self", input: "self", rev: null },
     { path: "modules/nixos/system/networking/default.nix", kind: "self", input: "self", rev: null },
     { path: "modules/nixos/system/zfs/default.nix", kind: "self", input: "self", rev: null },
@@ -99,11 +147,16 @@
     const r = rngFor("cf-base-optionset");
     const out = [];
     const push = (path, value, type) => {
-      // A minority of options are defined by more than one module; the first
-      // entry wins, matching the module system's priority merge.
+      /* A minority of options carry more than one definition. What happens
+         then is decided by the option's type (see mergeModeFor), not by this
+         ordering. A small slice of definitions have no usable location at all
+         — inline modules (imports = [ { config = ...; } ]) and generated
+         modules give the module system no _file — and real Nix reports those
+         as «unknown-file» rather than inventing a path. */
       const n = r() < 0.18 ? 2 : 1;
       const defs = [];
       for (let i = 0; i < n; i++) {
+        if (r() < 0.012) { defs.push("«unknown-file»"); continue; }
         let m = pick(r, MODULES).path;
         if (defs.includes(m)) m = MODULES[(MODULES.findIndex(x => x.path === m) + 3) % MODULES.length].path;
         defs.push(m);
@@ -288,20 +341,50 @@
     }));
   }
 
-  const decorate = (o) => ({
-    path: o.path, value: o.value, type: o.type,
-    kind: valueKind(o.type),
-    elements: o.elements || null,   // package/list options: structured, not text
-    evalError: o.evalError || null, // tryEval failure, surfaced not hidden
-    source: o.defs[0],
-    sourceInput: (MOD[o.defs[0]] || {}).input || "self",
-    overridden: o.defs.length > 1,
-    defs: o.defs.map((f, i) => {
-      const m = MOD[f] || { input: "self", rev: null };
-      return { file: f, input: m.input, rev: m.rev, winning: i === 0,
-        note: i === 0 ? (o.defs.length > 1 ? "highest priority" : "only definition") : "overridden" };
-    }),
-  });
+  /* How the module system combines multiple definitions depends entirely on
+     the option's TYPE, not on any ordering:
+       - listOf / attrsOf / lines  -> every definition CONTRIBUTES (merge)
+       - scalars (bool, str, int)  -> priority SELECTS one; mkForce/mkOverride
+                                      displaces the others (override)
+     Reporting a single "winner" for a merged type would be fabricated. */
+  function mergeModeFor(type) {
+    if (/^(list of|attrs of)/.test(type)) return "merge";
+    if (/lines|commas|separated/.test(type)) return "merge";
+    if (/submodule/.test(type)) return "merge";
+    return "override";
+  }
+  const decorate = (o) => {
+    const mode = mergeModeFor(o.type);
+    const multi = o.defs.length > 1;
+    return {
+      path: o.path, value: o.value, type: o.type,
+      kind: valueKind(o.type),
+      elements: o.elements || null,   // package/list options: structured, not text
+      evalError: o.evalError || null, // tryEval failure, surfaced not hidden
+      source: o.defs[0],
+        sourceInput: o.defs[0] === "«unknown-file»" ? null : ((MOD[o.defs[0]] || {}).input || "self"),
+      mergeMode: mode,
+      // Only meaningful for override-typed options with more than one definition.
+      overridden: mode === "override" && multi,
+      mergeNote: !multi
+        ? "single definition"
+        : mode === "merge"
+          ? `merged — all ${o.defs.length} definitions contribute`
+          : `overridden — priority selects 1 of ${o.defs.length}`,
+      defs: o.defs.map((f, i) => {
+        const m = MOD[f] || { input: "self", rev: null };
+        const unknown = f === "«unknown-file»";
+        return {
+          file: f, input: unknown ? null : m.input, rev: unknown ? null : m.rev, unknown,
+          // 'winning' only has meaning under override semantics.
+          winning: mode === "override" && i === 0,
+          note: !multi ? "only definition"
+            : mode === "merge" ? "contributes"
+            : i === 0 ? "selected (mkForce)" : "displaced by higher priority",
+        };
+      }),
+    };
+  };
 
   /* Per-host index. Holds the overlay and a merged path list — NOT a copy of
      the base rows. The base array is shared by reference across every system,
@@ -325,15 +408,27 @@
     ).map(decorate);
     merged.sort((a, b) => a.path.localeCompare(b.path));
 
+    /* Definition sources are FILES, not logical modules: the module system
+       records a file per definition (_file / definitionsWithLocations) and has
+       no key that reunites a module split across several files. Each row is
+       therefore one file and a count of definitions it contributes to this
+       host — no won/lost ratio, which is only defined for override-typed
+       options. */
     const modules = MODULES.map(m => ({
       ...m,
       label: m.path.replace(/\/default\.nix$/, "").replace(/\.nix$/, ""),
-      sets: 0, wins: 0,
+      defCount: 0, mergedInto: 0, overrideWins: 0, overrideLost: 0,
     }));
     const byPath = {}; modules.forEach(m => { byPath[m.path] = m; });
     merged.forEach(o => {
-      o.defs.forEach(d => { if (byPath[d.file]) byPath[d.file].sets++; });
-      if (byPath[o.source]) byPath[o.source].wins++;
+      o.defs.forEach(d => {
+        const m = byPath[d.file];
+        if (!m) return;
+        m.defCount++;
+        if (o.mergeMode === "merge") m.mergedInto++;
+        else if (d.winning) m.overrideWins++;
+        else m.overrideLost++;
+      });
     });
 
     // Diff vs the previously deployed generation. Server-computed in reality:
@@ -393,7 +488,8 @@
     const closureMib = 1100 + Math.floor(r() * 900);
     const idx = {
       merged, changed, changedMap, prevGen, rev: at,
-      modules: modules.filter(m => m.sets > 0),
+      configuredPaths: overlayPaths,
+      sources: modules.filter(m => m.defCount > 0),
       counts: { all: merged.length, overridden: merged.filter(o => o.overridden).length, changed: changed.length },
       facts: {
         drv: `/nix/store/${Array.from({ length: 32 }, () => "0123456789abcdfghijklmnpqrsvwxyz"[Math.floor(r() * 32)]).join("")}-nixos-system-${sys.hostname}-${sys.nixosVersion || "25.05"}`,
@@ -406,11 +502,60 @@
         deltaRows: overlay.length,
       },
     };
+    // ── Lazy tree index (Config Explorer) ──────────────────────────────────
+    // Built once per (host, rev) alongside the merged list above, but exposed
+    // to the client only through prefix-scoped, per-node async calls — the
+    // client never receives this whole structure at once. One branch is
+    // simulated as poisoned so failure containment is visible without a real
+    // Nix crash: `crystal-forge.stig.active` never resolves.
+    function tokenize(p) { return p.match(/"[^"]*"|[^.]+/g) || [p]; }
+    const tree = { name: "", path: "", isLeaf: false, children: {} };
+    merged.forEach(o => {
+      const tokens = tokenize(o.path);
+      let node = tree, acc = "";
+      tokens.forEach((tok, i) => {
+        acc = acc ? acc + "." + tok : tok;
+        if (!node.children[tok]) node.children[tok] = { name: tok, path: acc, isLeaf: false, children: {} };
+        node = node.children[tok];
+        if (i === tokens.length - 1) { node.isLeaf = true; node.option = o; }
+      });
+    });
+    (function countUp(node) {
+      if (node.isLeaf) {
+        node.optionCount = 1;
+        node.overriddenCount = node.option.overridden ? 1 : 0;
+        node.changedCount = changedMap[node.option.path] ? 1 : 0;
+        return;
+      }
+      let oc = 0, ov = 0, cc = 0;
+      Object.values(node.children).forEach(c => { countUp(c); oc += c.optionCount; ov += c.overriddenCount; cc += c.changedCount; });
+      node.optionCount = oc; node.overriddenCount = ov; node.changedCount = cc;
+    })(tree);
+    const failedPrefixes = new Set();
+    if (tree.children["crystal-forge"] && tree.children["crystal-forge"].children.stig) {
+      const stig = tree.children["crystal-forge"].children.stig;
+      stig.children.active = { name: "active", path: "crystal-forge.stig.active", isLeaf: false, children: {}, optionCount: 0, overriddenCount: 0, changedCount: 0 };
+      failedPrefixes.add("crystal-forge.stig.active");
+    }
+    idx.tree = tree;
+    idx.failedPrefixes = failedPrefixes;
     _hosts[key] = idx;
     return idx;
   }
 
+  function navigateTree(root, prefix) {
+    if (!prefix) return root;
+    let node = root;
+    for (const tok of (prefix.match(/"[^"]*"|[^.]+/g) || [prefix])) {
+      node = node.children[tok];
+      if (!node) return null;
+    }
+    return node;
+  }
+
   const wait = (ms) => new Promise(res => setTimeout(res, ms));
+  const _inventory = {};
+  const invKey = (sys, rev) => `${sys.id}|${rev || sys.commit}`;
 
   /* ── The client-facing API ───────────────────────────────────────────────
      Every method is async and returns only what a page needs. `query` is the
@@ -420,13 +565,22 @@
     async summary(sys, rev) {
       const idx = hostIndex(sys, rev);
       await wait(60 + Math.random() * 90);
-      return { facts: idx.facts, modules: idx.modules, prevGen: idx.prevGen, counts: idx.counts, rev: idx.rev };
+      return { facts: idx.facts, sources: idx.sources, prevGen: idx.prevGen, counts: idx.counts, rev: idx.rev };
     },
-    async query(sys, { q = "", filter = "all", offset = 0, limit = 60, rev = null } = {}) {
+    /* `scope` is the honest half of search. A null scope means the caller holds
+       a complete certified inventory and may search the whole corpus. An array
+       means the caller has only lazy Explorer observations, and the search is
+       restricted to the prefixes actually inspected — a partial result is never
+       returned as if it were a full-corpus search. */
+    async query(sys, { q = "", filter = "all", offset = 0, limit = 60, rev = null, scope = null } = {}) {
       const idx = hostIndex(sys, rev);
       await wait(90 + Math.random() * 120); // stand-in for the round trip
       const needle = q.trim().toLowerCase();
       let rows = idx.merged;
+      if (Array.isArray(scope)) {
+        if (!scope.length) return { total: 0, offset, limit, rows: [], counts: idx.counts, scoped: true };
+        rows = rows.filter(o => scope.some(p => o.path === p || o.path.startsWith(p + ".")));
+      }
       if (filter === "overridden") rows = rows.filter(o => o.overridden);
       else if (filter === "changed") rows = rows.filter(o => idx.changedMap[o.path]);
       // Rows whose value has no text form (package, function, unevaluated) must
@@ -446,7 +600,128 @@
         limit,
         rows: rows.slice(offset, offset + limit).map(o => ({ ...o, change: idx.changedMap[o.path] || null })),
         counts: idx.counts,
+        scoped: Array.isArray(scope),
       };
+    },
+    /* Phase 1/2: shallow root, then scoped prefix expansion. Never returns the
+       whole tree — one prefix's direct children, or a local failure that
+       leaves siblings untouched. */
+    async treeChildren(sys, rev, prefix = "") {
+      const idx = hostIndex(sys, rev);
+      await wait(110 + Math.random() * 150);
+      if (idx.failedPrefixes.has(prefix)) {
+        return { status: "failed", error: "evaluation error: infinite recursion encountered (while evaluating crystal-forge.stig.active)", children: [] };
+      }
+      const node = navigateTree(idx.tree, prefix);
+      if (!node) return { status: "failed", error: "path not found", children: [] };
+      // Cheap tree identity only: name, path, leaf/branch, local failure. A
+      // subtree's aggregate option/changed count requires walking every
+      // descendant, which is exactly the corpus crawl this API avoids — so it
+      // is only attached when a certified inventory already paid that cost.
+      const inv = _inventory[invKey(sys, rev)];
+      const knowCounts = !!inv && inv.state === "succeeded";
+      const children = Object.values(node.children)
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map(c => ({
+          name: c.name, path: c.path, isLeaf: c.isLeaf,
+          failed: idx.failedPrefixes.has(c.path),
+          ...(knowCounts ? { optionCount: c.optionCount, changedCount: c.changedCount } : {}),
+        }));
+      return { status: "succeeded", children };
+    },
+    /* "Configured" view: options this host's own modules explicitly set, as
+       opposed to values inherited unchanged from the shared base. This is the
+       overlay computed when the delta was extracted at eval time — a lookup,
+       not a scan of the merged tree. */
+    async configured(sys, rev) {
+      const idx = hostIndex(sys, rev);
+      await wait(70 + Math.random() * 90);
+      const rows = idx.merged.filter(o => idx.configuredPaths.has(o.path));
+      return { total: rows.length, rows };
+    },
+    /* Phase 3: exact option detail, scoped to one path only. Deliberately does
+       NOT carry provenance — definitions cost more than the option itself, so
+       they are a separate, explicitly requested observation. */
+    async treeOption(sys, rev, path) {
+      const idx = hostIndex(sys, rev);
+      await wait(70 + Math.random() * 110);
+      const node = navigateTree(idx.tree, path);
+      if (!node || !node.isLeaf) return null;
+      const d = node.option; // already decorated when the index was built
+      return {
+        path: d.path, type: d.type, value: d.value, evalError: d.evalError,
+        // The FIRST definition's input only — cheap, since it's already on the
+        // decorated record built at index time. The full definitions list is
+        // provenance (Phase 4) and stays behind its own request below.
+        sourceInput: d.sourceInput,
+        overridden: d.overridden, defCount: d.defs.length,
+        mergeMode: d.mergeMode, mergeNote: d.mergeNote,
+        change: idx.changedMap[path] || null,
+      };
+    },
+    /* Phase 4: provenance for one selected option — definitions, winning module,
+       input and revision. Costs more than tree navigation, so it is never
+       bundled into Phase 2 or 3. */
+    async treeProvenance(sys, rev, path) {
+      const idx = hostIndex(sys, rev);
+      await wait(260 + Math.random() * 420);
+      const node = navigateTree(idx.tree, path);
+      if (!node || !node.isLeaf) return null;
+      const d = node.option; // already decorated when the index was built
+      return { defs: d.defs, source: d.source, sourceInput: d.sourceInput };
+    },
+    /* Reverse index: which options a given definition FILE sets on this host.
+       This is not free. Building it requires every option's
+       definitionsWithLocations, i.e. exactly the full-corpus crawl the
+       Explorer avoids — so it is only complete when a certified inventory
+       exists. Without one, the answer is restricted to prefixes already
+       inspected and is reported as such. It never claims to be the file's
+       full definition set. */
+    async sourceOptions(sys, rev, file, scope) {
+      const idx = hostIndex(sys, rev);
+      const inv = _inventory[invKey(sys, rev)];
+      const full = !!inv && inv.state === "succeeded";
+      await wait(full ? 40 : 120 + Math.random() * 160);
+      let rows = idx.merged.filter(o => o.defs.some(x => x.file === file));
+      if (!full) {
+        const pref = scope || [];
+        rows = rows.filter(o => pref.some(p => o.path === p || o.path.startsWith(p + ".")));
+      }
+      return {
+        file, complete: full, total: rows.length,
+        rows: rows.slice(0, 300).map(o => ({
+          path: o.path, value: o.value, evalError: o.evalError, sourceInput: o.sourceInput,
+          contributes: o.mergeMode === "merge",
+        })),
+      };
+    },
+    /* Optional complete inventory — explicit background enrichment, never
+       implied by opening the tab. Sync status read; async request kicks off a
+       queued -> running -> succeeded lifecycle with a live heartbeat, never a
+       fabricated percentage. */
+    inventoryStatus(sys, rev) {
+      return _inventory[invKey(sys, rev)] || { state: "not_requested" };
+    },
+    requestFullInventory(sys, rev) {
+      const k = invKey(sys, rev);
+      if (_inventory[k] && _inventory[k].state !== "not_requested") return _inventory[k].state;
+      // queued -> waiting_for_capacity -> running(+heartbeat) -> succeeded.
+      // Waiting for an evaluator slot is not running, and running carries a live
+      // heartbeat rather than a fabricated percentage of an unknown corpus.
+      _inventory[k] = { state: "queued", since: Date.now() };
+      setTimeout(() => { _inventory[k] = { state: "waiting_for_capacity", since: Date.now() }; }, 900);
+      setTimeout(() => {
+        _inventory[k] = { state: "running", phase: "inspecting_tree", since: Date.now(), heartbeat: Date.now() };
+        const hb = setInterval(() => {
+          const e = _inventory[k];
+          if (e && e.state === "running") e.heartbeat = Date.now(); else clearInterval(hb);
+        }, 900);
+        setTimeout(() => { const e = _inventory[k]; if (e && e.state === "running") e.phase = "finalizing"; }, 3400);
+        setTimeout(() => {
+          _inventory[k] = { state: "succeeded", completedAt: Date.now(), optionCount: hostIndex(sys, rev).merged.length };
+        }, 4600);
+      }, 2600);
+      return "queued";
     },
   };
 })();

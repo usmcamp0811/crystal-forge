@@ -78,6 +78,26 @@ pub(crate) fn DialogFocusRestore() -> Element {
     rsx! {}
 }
 
+/// Moves focus into a modal dialog once the dialog element exists.
+///
+/// The `autofocus` content attribute is only honored for elements that are
+/// present while a document performs its initial autofocus processing. A
+/// dialog mounted later keeps focus on whatever opened it, so a modal that
+/// declares `autofocus` alone never actually receives focus. Render this
+/// component inside the dialog subtree to focus the dialog's first enabled
+/// control after the dialog is inserted.
+///
+/// Render [`DialogFocusRestore`] in the same dialog to return focus to the
+/// opener on unmount. `DialogFocusRestore` captures the opener while the
+/// component renders, before this effect runs, so the two compose in any
+/// order.
+#[component]
+pub(crate) fn DialogInitialFocus(dialog_id: String) -> Element {
+    use_effect(move || focus_dialog_boundary(&dialog_id, DialogFocusBoundary::First));
+
+    rsx! {}
+}
+
 fn focus_dialog_boundary(dialog_id: &str, boundary: DialogFocusBoundary) {
     #[cfg(target_arch = "wasm32")]
     {

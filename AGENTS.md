@@ -2,6 +2,16 @@
 
 This file governs work performed by automated agents in this repository. Follow higher-priority platform and safety instructions first. When this file, an active task, and a user request disagree, stop before making changes and ask the user to resolve any conflict that materially affects scope or behavior.
 
+## Standing live-preview requirement
+
+For implementation that changes browser-visible behavior, the task owner MUST start a persistent live preview from the task worktree before UI edits. Give the user the verified browser URL as soon as the application is usable. Keep the preview current during implementation and available at handoff. Do not wait for a commit, an MR, deployment, or the full Web UI suite before showing the work.
+
+Read [docs/agent/live-preview.md](docs/agent/live-preview.md) before starting this workflow. It defines startup, process ownership, database isolation, backend restarts, stylesheet updates, and preview reporting. Use the existing Nix/Dioxus tooling. This requirement does not change branches, worktrees, task states, merge approval, or final verification.
+
+Use a task-owned preview database. The user's long-running development instance is valuable persistent data, not a disposable preview target. Do not point experimental servers, fixture seeding, migrations, or destructive tests at it. A local address, a development label, or an available backup does not grant permission.
+
+The task owner also owns the preview when work is delegated. Subagents must use that owner's preview arrangement or a separate verified environment. They must not start competing default-port stacks. If startup is blocked, report the exact blocker promptly. Continue bounded startup repair or independent non-UI work, not an entire unpreviewed UI implementation without the user's explicit exception.
+
 ## Start by classifying the request
 
 | Request                         | Backlog task                                      | Dedicated worktree | Repository writes                       |
@@ -28,6 +38,7 @@ Do not change files, backlog state, branches, or merge requests for a read-only 
 10. Ask before making a decision that materially changes public behavior, compatibility, persistence, security boundaries, architecture, or task scope.
 11. Don't rely on utilities to be installed like python or glab.. just use `nix run nixpkgs#glab` for these type of things
 12. Treat source documentation as part of correctness. A behavior change is incomplete when its affected contracts, invariants, rationale, failure behavior, or other required documentation are stale or missing.
+13. Keep a verified live preview available while implementing browser-visible changes. Follow [docs/agent/live-preview.md](docs/agent/live-preview.md); do not substitute screenshots or a finished MR for early interactive feedback.
 
 ## Repository architecture
 
@@ -74,6 +85,7 @@ Before the first implementation write:
 5. Verify the new worktree, branch, base, and status.
 6. Move the task to `In Progress` and add its lock.
 7. State a concise preflight containing the task, worktree, branch/base, intended scope, and verification plan.
+8. For browser-visible work, verify preview ownership and database isolation, start or resume the task preview, and publish its URL before UI edits. On a resumed task, reuse its verified session instead of creating a second stack.
 
 Do not pretend that `git status` in one worktree proves another worktree is clean. Exact commands and recovery rules are in [docs/agent/worktrees.md](docs/agent/worktrees.md).
 
@@ -260,6 +272,7 @@ If the repository already provides documentation lints or rustdoc checks, run th
 
 ### Dioxus/WASM
 
+- Keep the live preview current while editing. Check browser rendering, styles, API behavior, and the affected design sections after each coherent change. Restart the task backend when its code changes; frontend hot reload does not restart that backend.
 - Keep rendering code focused on presentation and event wiring.
 - Extract nontrivial state transitions and test them independently when practical.
 - Keep client DTOs aligned with the server contract, but do not duplicate server types when the UI intentionally needs a different representation.
@@ -278,6 +291,8 @@ See [docs/agent/database-safety.md](docs/agent/database-safety.md).
 ## Verification
 
 Choose the smallest set of commands that proves the acceptance criteria and protects affected interfaces. Prefer targeted checks during implementation and broader checks before review when risk warrants them.
+
+The persistent preview is the early UI feedback loop. Do not run the full `web-ui` VM suite or `nix flake check` merely to start or refresh it. Use focused checks during implementation. Required authoritative browser checks and MR screenshots remain final-review requirements; exact-head CI may provide that evidence when the task permits it. A preview screenshot is not evidence that the authoritative check passed.
 
 Use the exact package manifests and flake attributes applicable to the change. The baseline command matrix is in [docs/agent/verification.md](docs/agent/verification.md).
 
@@ -307,6 +322,7 @@ Before opening an MR:
 - Confirm only intended files changed and all intended new files are tracked.
 - Update SQLx metadata when applicable.
 - Add MR screenshots for user-visible UI changes.
+- For browser-visible work, report the current preview URL, process/session, backend freshness, data mode, and remaining gaps. Leave the preview available for user review unless the user requests shutdown or the task is being retired. Stop only task-owned processes before worktree removal.
 - Record out-of-scope discoveries as Backlog tasks.
 - Confirm source documentation and technical prose satisfy the documentation standard above; undocumented required semantics or stale documentation block review.
 
@@ -323,5 +339,7 @@ Be precise and concise. Distinguish among:
 - pushed to a branch;
 - open for review;
 - merged and complete.
+
+For browser-visible work, include `Preview: ready | rebuilding | blocked | stopped` in meaningful progress reports and handoff. When ready, include the URL and review path. State when the browser still shows the last successful build. Preview health does not change the backlog task status or establish merge readiness.
 
 Never fabricate command output, test results, task state, commits, pushes, MR state, or screenshots.

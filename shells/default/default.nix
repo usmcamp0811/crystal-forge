@@ -117,6 +117,7 @@ in mkShell {
     postgresql
     sqlx-cli
     vulnix
+    pkgs.nix-eval-jobs.nix # Nix CLI linked against the evaluator's Nix version
     nix-eval-jobs # Required for commit evaluation
     python3
     python3Packages.pytest

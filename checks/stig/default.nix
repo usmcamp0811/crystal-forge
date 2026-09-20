@@ -257,8 +257,95 @@ let
         "t9b: STIG mkMerge config-level should merge blocks and beat conflict";
     in t9a && t9b;
 
+  # ── Test 10: Distinct controls own distinct tracking options ──────────────
+  # Config Inspector forces the complete option tree. Distinct controls must
+  # therefore declare child options instead of repeatedly declaring the shared
+  # active and inactive parents.
+  t10 =
+    let
+      result = evalStig [
+        ({ config, ... }: mkStigModule {
+          inherit config;
+          name = "firstControl";
+          srgList = [ "SRG-FIRST" ];
+          cciList = [ "CCI-FIRST" ];
+          stigConfig = {};
+        })
+        ({ config, ... }: mkStigModule {
+          inherit config;
+          name = "secondControl";
+          srgList = [ "SRG-SECOND" ];
+          cciList = [ "CCI-SECOND" ];
+          stigConfig = {};
+        })
+        ({ config, ... }: mkStigModule {
+          inherit config;
+          name = "disabledControl";
+          srgList = [ "SRG-DISABLED" ];
+          cciList = [ "CCI-DISABLED" ];
+          stigConfig = {};
+        })
+        {
+          crystal-forge.stig.disabledControl = {
+            enable = false;
+            justification = [ "Regression fixture" ];
+          };
+        }
+      ];
+      stigOptions = result.options.crystal-forge.stig;
+      stigConfig = result.config.crystal-forge.stig;
+    in
+      assert' (builtins.deepSeq result.options (
+        !(stigOptions.active ? _type)
+        && !(stigOptions.inactive ? _type)
+        && stigOptions.active.firstControl._type == "option"
+        && stigOptions.active.secondControl._type == "option"
+        && stigOptions.inactive.disabledControl._type == "option"
+      )) "t10: distinct controls should declare unique tracking child options"
+      && assert' (builtins.deepSeq result.config (
+        builtins.attrNames stigConfig.active == [ "firstControl" "secondControl" ]
+        && builtins.attrNames stigConfig.inactive == [ "disabledControl" ]
+        && stigConfig.active.firstControl == {
+          srg = [ "SRG-FIRST" ];
+          cci = [ "CCI-FIRST" ];
+          config = {};
+        }
+        && stigConfig.active.secondControl == {
+          srg = [ "SRG-SECOND" ];
+          cci = [ "CCI-SECOND" ];
+          config = {};
+        }
+        && stigConfig.inactive.disabledControl == {
+          srg = [ "SRG-DISABLED" ];
+          cci = [ "CCI-DISABLED" ];
+          justification = [ "Regression fixture" ];
+          config = {};
+        }
+      )) "t10: active and inactive tracking data should preserve control semantics";
+
+  # ── Test 11: Identical control names remain declaration conflicts ─────────
+  t11 =
+    let
+      result = evalStig [
+        ({ config, ... }: mkStigModule {
+          inherit config;
+          name = "duplicateControl";
+          srgList = [ "SRG-FIRST" ];
+          stigConfig = {};
+        })
+        ({ config, ... }: mkStigModule {
+          inherit config;
+          name = "duplicateControl";
+          srgList = [ "SRG-SECOND" ];
+          stigConfig = {};
+        })
+      ];
+      forced = builtins.tryEval (builtins.deepSeq result.options true);
+    in assert' (!forced.success)
+      "t11: duplicate control names should retain their option declaration conflict";
+
   # ── Run all tests ─────────────────────────────────────────────────────────
-  allPassed = t1 && t2 && t3 && t4 && t5 && t6 && t7 && t8 && t9;
+  allPassed = t1 && t2 && t3 && t4 && t5 && t6 && t7 && t8 && t9 && t10 && t11;
 in
 pkgs.runCommand "stig-unit-tests" {} ''
   ${lib.optionalString allPassed "echo 'All mkStigModule unit tests passed'"}

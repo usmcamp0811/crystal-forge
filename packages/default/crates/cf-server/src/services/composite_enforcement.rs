@@ -8,8 +8,10 @@
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
+use crate::compliance::canonical::semantic_digest;
 use crate::compliance::resolver::{
     AssignmentMode, EffectivePolicySet, ResolutionOutcome, resolve_system_effective_policies_in_tx,
 };
@@ -67,13 +69,70 @@ struct LatestScan {
     composite_phase_order: i64,
 }
 
+/// Holds one enforced composite policy's current authorization identity.
 #[derive(Debug)]
-struct PolicyContext {
-    lineage_id: Uuid,
-    version_id: Uuid,
+pub(crate) struct PolicyContext {
+    /// Identifies the stable policy lineage.
+    pub(crate) lineage_id: Uuid,
+    /// Identifies the exact effective policy version.
+    pub(crate) version_id: Uuid,
     config: CompositePolicyConfig,
     config_json: serde_json::Value,
     config_digest: String,
+}
+
+/// Identifies one persisted composite assessment without loading its evidence.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct PersistedAssessmentIdentity {
+    /// Identifies the assessment row.
+    pub(crate) id: Uuid,
+    /// Identifies the stable policy lineage assessed by the row.
+    pub(crate) policy_lineage_id: Uuid,
+    /// Identifies the exact policy version assessed by the row.
+    pub(crate) policy_version_id: Uuid,
+    /// Identifies the effective policy set used when the row was written.
+    pub(crate) effective_set_digest: String,
+    /// Identifies the effective composite configuration.
+    pub(crate) effective_config_digest: String,
+    /// Contains the effective composite configuration.
+    pub(crate) effective_config: serde_json::Value,
+}
+
+/// Identifies one persisted constituent rule result for compatibility checks.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct PersistedRuleIdentity {
+    /// Identifies the parent assessment.
+    pub(crate) assessment_id: Uuid,
+    /// Identifies the rule within the policy version.
+    pub(crate) rule_id: Uuid,
+    /// Specifies the rule's position in the immutable composite configuration.
+    pub(crate) ordinal: i32,
+    /// Specifies the persisted rule kind.
+    pub(crate) kind: String,
+    /// Specifies the lifecycle phase that produced the result.
+    pub(crate) phase: String,
+    /// Specifies the normalized rule outcome.
+    pub(crate) outcome: String,
+    /// Indicates whether the persisted outcome blocks deployment.
+    pub(crate) blocking: bool,
+}
+
+/// Classifies a compatible assessment group by its persisted digest scheme.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CompatibleAssessmentSet {
+    /// Contains assessment IDs written with the canonical authorization digest.
+    Canonical(Vec<Uuid>),
+    /// Contains assessment IDs written with one pre-canonical complete digest.
+    Legacy(Vec<Uuid>),
+}
+
+impl CompatibleAssessmentSet {
+    /// Returns the assessment IDs in the compatible group.
+    pub(crate) fn ids(&self) -> &[Uuid] {
+        match self {
+            Self::Canonical(ids) | Self::Legacy(ids) => ids,
+        }
+    }
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -85,9 +144,17 @@ struct PersistedRule {
 }
 
 enum AuthorizationAction<'a> {
-    Check { expected_derivation_id: Option<i32> },
-    SetDesired { source: &'a str },
-    ClaimDelivery { expected_target: &'a str },
+    Check {
+        expected_derivation_id: Option<i32>,
+    },
+    SetDesired {
+        source: &'a str,
+        evaluation_snapshot_id: Option<Uuid>,
+        expected_derivation_id: Option<i32>,
+    },
+    ClaimDelivery {
+        expected_target: &'a str,
+    },
 }
 
 fn outcome_str(outcome: EnforcementOutcome) -> &'static str {
@@ -398,7 +465,6 @@ pub(crate) async fn fail_eval_passed_attempt_in_tx(
     .bind(failure_class)
     .execute(&mut **tx)
     .await?;
-
     let assessment_ids: Vec<Uuid> = sqlx::query_scalar(
         r#"
         UPDATE composite_policy_rule_results rule_result
@@ -610,7 +676,12 @@ fn expected_phase(rule: &CompositeRuleKind) -> EnforcementPhase {
     }
 }
 
-fn policy_contexts(resolved: &EffectivePolicySet) -> Result<Vec<PolicyContext>> {
+/// Returns the current enforced composite policy contexts.
+///
+/// # Errors
+///
+/// Returns an error when an effective composite configuration is invalid.
+pub(crate) fn policy_contexts(resolved: &EffectivePolicySet) -> Result<Vec<PolicyContext>> {
     resolved
         .policies
         .iter()
@@ -632,6 +703,130 @@ fn policy_contexts(resolved: &EffectivePolicySet) -> Result<Vec<PolicyContext>> 
             })
         })
         .collect()
+}
+
+fn valid_semantic_digest(digest: &str) -> bool {
+    digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn assessment_group_matches(
+    policies: &[PolicyContext],
+    assessments: &[&PersistedAssessmentIdentity],
+    rules: &[PersistedRuleIdentity],
+) -> Option<Vec<Uuid>> {
+    if assessments.len() != policies.len() {
+        return None;
+    }
+    let mut ids = Vec::with_capacity(policies.len());
+    for policy in policies {
+        let matches = assessments
+            .iter()
+            .filter(|assessment| {
+                assessment.policy_lineage_id == policy.lineage_id
+                    && assessment.policy_version_id == policy.version_id
+                    && assessment.effective_config_digest == policy.config_digest
+                    && assessment.effective_config == policy.config_json
+            })
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return None;
+        }
+        let assessment = matches[0];
+        let assessment_rules = rules
+            .iter()
+            .filter(|rule| rule.assessment_id == assessment.id)
+            .collect::<Vec<_>>();
+        if assessment_rules.len() != policy.config.rules.len() {
+            return None;
+        }
+        for (ordinal, expected) in policy.config.rules.iter().enumerate() {
+            let phase = phase_str(expected_phase(&expected.rule));
+            let matches = assessment_rules.iter().filter(|rule| {
+                rule.rule_id == expected.id
+                    && rule.ordinal == ordinal as i32
+                    && rule.kind == expected.rule.kind()
+                    && rule.phase == phase
+                    && matches!(
+                        rule.outcome.as_str(),
+                        "pass" | "fail" | "error" | "not_checked"
+                    )
+                    && rule.blocking == (rule.outcome != "pass")
+            });
+            if matches.count() != 1 {
+                return None;
+            }
+        }
+        ids.push(assessment.id);
+    }
+    ids.sort_unstable();
+    Some(ids)
+}
+
+/// Selects canonical or structurally exact pre-canonical composite evidence.
+///
+/// Canonical evidence is preferred. A legacy digest is accepted only when one
+/// unambiguous digest group exactly represents every current enforced
+/// composite policy and all required rule rows. The digest value alone never
+/// authorizes legacy evidence.
+pub(crate) fn select_compatible_assessment_set(
+    policies: &[PolicyContext],
+    canonical_digest: &str,
+    assessments: &[PersistedAssessmentIdentity],
+    rules: &[PersistedRuleIdentity],
+) -> Option<CompatibleAssessmentSet> {
+    let mut by_digest = std::collections::BTreeMap::<&str, Vec<_>>::new();
+    for assessment in assessments {
+        by_digest
+            .entry(&assessment.effective_set_digest)
+            .or_default()
+            .push(assessment);
+    }
+    if let Some(group) = by_digest.get(canonical_digest)
+        && let Some(ids) = assessment_group_matches(policies, group, rules)
+    {
+        return Some(CompatibleAssessmentSet::Canonical(ids));
+    }
+
+    let mut compatible_legacy = by_digest
+        .into_iter()
+        .filter(|(digest, _)| *digest != canonical_digest && valid_semantic_digest(digest))
+        .filter_map(|(_, group)| assessment_group_matches(policies, &group, rules))
+        .collect::<Vec<_>>();
+    if compatible_legacy.len() == 1 {
+        Some(CompatibleAssessmentSet::Legacy(compatible_legacy.pop()?))
+    } else {
+        None
+    }
+}
+
+/// Returns the canonical semantics that can affect composite authorization.
+///
+/// The resolver's complete digest remains authoritative for compliance
+/// evidence. Composite deployment authorization uses this narrower digest so
+/// report-only and non-composite assignments cannot stale enforced assessment
+/// evidence.
+pub(crate) fn enforce_composite_authorization_digest(resolved: &EffectivePolicySet) -> String {
+    let mut policies = resolved
+        .policies
+        .iter()
+        .filter(|policy| {
+            policy.policy_type == "composite"
+                && matches!(policy.effective_mode, AssignmentMode::Enforce)
+        })
+        .map(|policy| {
+            serde_json::json!({
+                "policy_version_id": policy.policy_version_id,
+                "effective_config": policy.effective_config,
+                "effective_mode": "enforce",
+            })
+        })
+        .collect::<Vec<_>>();
+    policies.sort_by(|left, right| {
+        left["policy_version_id"]
+            .as_str()
+            .cmp(&right["policy_version_id"].as_str())
+    });
+    semantic_digest(&serde_json::Value::Array(policies))
 }
 
 fn evaluation_outcomes(
@@ -1101,6 +1296,7 @@ pub async fn persist_evaluation_assessments_in_tx(
     resolved: &EffectivePolicySet,
 ) -> Result<()> {
     let policies = policy_contexts(resolved)?;
+    let authorization_digest = enforce_composite_authorization_digest(resolved);
     // CONCURRENCY: Assessment triggers acquire per-finding keys. Acquire the
     // system sentinel first so trigger locks preserve the global lock order.
     lock_poam_system_key_tx(tx, system_id).await?;
@@ -1116,7 +1312,7 @@ pub async fn persist_evaluation_assessments_in_tx(
         system_id,
         derivation_id,
         target_store_path,
-        &resolved.effective_set_digest,
+        &authorization_digest,
         &policies,
     )
     .await?;
@@ -1202,8 +1398,10 @@ pub async fn persist_scan_phase(pool: &PgPool, scan_id: Uuid) -> Result<()> {
 /// Locks all POA&M finding keys affected by one derivation.
 ///
 /// Callers must retain the transaction until the related evidence mutation is
-/// complete. The function uses the common derivation, system, and finding lock
-/// order used by assessment and POA&M writers.
+/// complete. `extra_canonical_cve_ids` contains canonical IDs that the caller
+/// parsed but has not persisted yet. The function locks their union with
+/// persisted IDs before it discovers or locks any system, policy, or exact
+/// finding key.
 ///
 /// # Errors
 ///
@@ -1212,8 +1410,53 @@ pub async fn persist_scan_phase(pool: &PgPool, scan_id: Uuid) -> Result<()> {
 pub(crate) async fn lock_poam_findings_for_derivation_tx(
     tx: &mut Transaction<'_, Postgres>,
     derivation_id: i32,
+    extra_canonical_cve_ids: &[String],
 ) -> Result<()> {
+    // CONCURRENCY: Infrastructure derivation locks precede the exact-CVE lock
+    // hierarchy. State ingestion uses the same prerequisite order.
     lock_poam_derivation_key_tx(tx, derivation_id).await?;
+    // COMPATIBILITY: Current writers can run while the additive exact-CVE
+    // migration is pending. Only inspect exact tables after they exist.
+    let exact_cve_schema_exists: bool =
+        sqlx::query_scalar("SELECT to_regclass('public.poam_cve_findings') IS NOT NULL")
+            .fetch_one(&mut **tx)
+            .await?;
+    if exact_cve_schema_exists {
+        // CONCURRENCY: Canonical CVE keys are the first exact-CVE lock level.
+        // Existing findings cover lifecycle writers; sealed observations cover
+        // scan publication and verification even before a finding exists.
+        sqlx::query(
+            r#"SELECT lock_poam_cve_key(key.canonical_cve_id)
+               FROM (
+                  SELECT unnest($2::text[]) AS canonical_cve_id
+                  UNION
+                  SELECT canonical_cve_id FROM poam_cve_findings
+                 WHERE system_id IN (
+                   SELECT system.id FROM derivations derivation
+                   JOIN systems system ON true
+                   JOIN LATERAL (
+                     SELECT state.store_path FROM system_states state
+                     WHERE state.hostname=system.hostname
+                       AND state.store_path IS NOT NULL
+                       AND btrim(state.store_path)<>''
+                     ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
+                   ) deployed ON deployed.store_path=COALESCE(
+                     derivation.store_path,derivation.expected_store_path)
+                   WHERE derivation.id=$1)
+                 UNION
+                 SELECT observation.canonical_cve_id
+                 FROM cve_scans scan
+                 JOIN cve_scan_vulnerability_observations observation
+                   ON observation.scan_id=scan.id
+                 WHERE scan.derivation_id=$1
+                 ORDER BY canonical_cve_id
+               ) key"#,
+        )
+        .bind(derivation_id)
+        .bind(extra_canonical_cve_ids)
+        .execute(&mut **tx)
+        .await?;
+    }
     // CONCURRENCY: Legacy policies have no composite assessment rows. Include
     // findings for systems that currently deploy this derivation so legacy Nix
     // results and CVE scans use the same commit boundary as POA&M actions.
@@ -1271,6 +1514,31 @@ pub(crate) async fn lock_poam_findings_for_derivation_tx(
     .bind(derivation_id)
     .execute(&mut **tx)
     .await?;
+    if exact_cve_schema_exists {
+        sqlx::query(
+        r#"SELECT lock_poam_cve_finding_key(key.system_id,key.canonical_cve_id,key.canonical_package_name)
+           FROM (
+             SELECT finding.system_id,finding.canonical_cve_id,
+                    finding.canonical_package_name
+             FROM derivations derivation
+             JOIN systems system ON true
+             JOIN LATERAL (
+               SELECT state.store_path FROM system_states state
+               WHERE state.hostname=system.hostname AND state.store_path IS NOT NULL
+                 AND btrim(state.store_path)<>''
+               ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
+             ) deployed ON deployed.store_path=COALESCE(
+               derivation.store_path,derivation.expected_store_path)
+             JOIN poam_cve_findings finding ON finding.system_id=system.id
+             WHERE derivation.id=$1
+             ORDER BY finding.system_id,finding.canonical_cve_id,
+                      finding.canonical_package_name
+           ) key"#,
+        )
+        .bind(derivation_id)
+        .execute(&mut **tx)
+        .await?;
+    }
     Ok(())
 }
 
@@ -1354,6 +1622,22 @@ pub(crate) async fn lock_poam_findings_for_system_tx(
     // CONCURRENCY: All callers acquire these stable finding keys before system,
     // assessment, or rule row locks. POA&M actions use the same key order, so an
     // action observes either the complete old state or the complete new state.
+    let exact_cve_schema_exists: bool =
+        sqlx::query_scalar("SELECT to_regclass('public.poam_cve_findings') IS NOT NULL")
+            .fetch_one(&mut **tx)
+            .await?;
+    if exact_cve_schema_exists {
+        // CONCURRENCY: Acquire every canonical CVE key before the system
+        // sentinel. Policy and exact keys follow as separate sorted levels.
+        sqlx::query(
+            r#"SELECT lock_poam_cve_key(canonical_cve_id)
+               FROM (SELECT DISTINCT canonical_cve_id FROM poam_cve_findings
+                     WHERE system_id=$1 ORDER BY canonical_cve_id) key"#,
+        )
+        .bind(system_id)
+        .execute(&mut **tx)
+        .await?;
+    }
     lock_poam_system_key_tx(tx, system_id).await?;
     sqlx::query(
         r#"SELECT lock_poam_finding_key(key.system_id,key.policy_lineage_id)
@@ -1365,6 +1649,73 @@ pub(crate) async fn lock_poam_findings_for_system_tx(
            ) key"#,
     )
     .bind(system_id)
+    .execute(&mut **tx)
+    .await?;
+    if exact_cve_schema_exists {
+        sqlx::query(
+            r#"SELECT lock_poam_cve_finding_key(
+              finding.system_id,finding.canonical_cve_id,
+              finding.canonical_package_name)
+           FROM poam_cve_findings finding
+           WHERE finding.system_id=$1
+           ORDER BY finding.system_id,finding.canonical_cve_id,
+                    finding.canonical_package_name"#,
+        )
+        .bind(system_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Locks one canonical CVE scope for a sorted set of systems.
+///
+/// The function acquires the canonical CVE key, every system sentinel, every
+/// policy finding key, and every matching exact-CVE finding key as separate
+/// ordered levels. Callers must acquire no key from a later level first.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot enumerate or acquire the locks.
+pub(crate) async fn lock_poam_cve_scope_for_systems_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    cve_id: &str,
+    system_ids: &[Uuid],
+) -> Result<()> {
+    sqlx::query("SELECT lock_poam_cve_key($1)")
+        .bind(cve_id)
+        .execute(&mut **tx)
+        .await?;
+    let system_ids = system_ids.iter().copied().collect::<BTreeSet<_>>();
+    for system_id in &system_ids {
+        lock_poam_system_key_tx(tx, *system_id).await?;
+    }
+    let system_ids = system_ids.into_iter().collect::<Vec<_>>();
+    sqlx::query(
+        r#"SELECT lock_poam_finding_key(key.system_id,key.policy_lineage_id)
+           FROM (
+             SELECT finding.system_id,finding.policy_lineage_id
+             FROM poam_findings finding WHERE finding.system_id=ANY($1)
+             ORDER BY finding.system_id,finding.policy_lineage_id
+           ) key"#,
+    )
+    .bind(&system_ids)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r#"SELECT lock_poam_cve_finding_key(
+                    key.system_id,key.canonical_cve_id,key.canonical_package_name)
+           FROM (
+             SELECT finding.system_id,finding.canonical_cve_id,
+                    finding.canonical_package_name
+             FROM poam_cve_findings finding
+             WHERE finding.system_id=ANY($1) AND finding.canonical_cve_id=$2
+             ORDER BY finding.system_id,finding.canonical_cve_id,
+                      finding.canonical_package_name
+           ) key"#,
+    )
+    .bind(&system_ids)
+    .bind(cve_id)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -1403,7 +1754,7 @@ pub(crate) async fn persist_scan_phase_in_tx(
     if newest_id != Some(scan.id) {
         return Ok(());
     }
-    lock_poam_findings_for_derivation_tx(tx, scan.derivation_id).await?;
+    lock_poam_findings_for_derivation_tx(tx, scan.derivation_id, &[]).await?;
     let assessments = sqlx::query_as::<_, (Uuid, serde_json::Value)>(
         r#"
         SELECT assessment.id, assessment.effective_config
@@ -1445,10 +1796,20 @@ async fn authorize_target_at(
     now: DateTime<Utc>,
     action: AuthorizationAction<'_>,
 ) -> Result<TargetDeliveryAuthorization> {
+    let constrained_derivation_id = match &action {
+        AuthorizationAction::SetDesired {
+            expected_derivation_id,
+            ..
+        } => *expected_derivation_id,
+        AuthorizationAction::Check { .. } | AuthorizationAction::ClaimDelivery { .. } => None,
+    };
     let mut tx = pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
         .execute(&mut *tx)
         .await?;
+    // CONCURRENCY: This global lock precedes every POA&M, system, deployment,
+    // and snapshot row lock used by deployment and agent-ingestion paths.
+    crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx).await?;
     // Closure uses this same deterministic key order. Acquire it before the
     // system, assessment, or rule rows so neither path can invert lock order.
     lock_poam_system_key_tx(&mut tx, system_id).await?;
@@ -1481,9 +1842,9 @@ async fn authorize_target_at(
         }
     }
 
-    let exact_target = sqlx::query_as::<_, (i32, String)>(
+    let exact_target = sqlx::query_as::<_, (i32, String, i32, String)>(
         r#"
-        SELECT d.id, d.store_path
+        SELECT d.id, d.store_path, c.id, d.derivation_name
         FROM systems s
         JOIN commits c ON c.flake_id = s.flake_id
         JOIN derivations d ON d.commit_id = c.id
@@ -1503,6 +1864,7 @@ async fn authorize_target_at(
           )
           AND ((LEFT($2, 11) = '/nix/store/' AND d.store_path = $2)
             OR (LEFT($2, 11) <> '/nix/store/' AND LOWER(c.git_commit_hash) = LOWER($2)))
+          AND ($3::integer IS NULL OR d.id = $3)
         ORDER BY d.id DESC
         LIMIT 1
         FOR SHARE OF d, c
@@ -1510,6 +1872,7 @@ async fn authorize_target_at(
     )
     .bind(system_id)
     .bind(target)
+    .bind(constrained_derivation_id)
     .fetch_optional(&mut *tx)
     .await?;
 
@@ -1525,6 +1888,7 @@ async fn authorize_target_at(
         ),
     };
     let policies = policy_contexts(&resolved)?;
+    let authorization_digest = enforce_composite_authorization_digest(&resolved);
     let exact_target = match exact_target {
         Some(exact_target) => exact_target,
         None if policies.is_empty()
@@ -1622,7 +1986,7 @@ async fn authorize_target_at(
                     },
                 });
             }
-            (-1, target.to_string())
+            (-1, target.to_string(), -1, String::new())
         }
         None => {
             bail!("Composite authorization could not resolve exact system target {target:?}")
@@ -1670,36 +2034,55 @@ async fn authorize_target_at(
     let mut assessment_ids = Vec::new();
     let mut configs_by_assessment = std::collections::HashMap::new();
     if !policies.is_empty() {
-        let version_ids = policies.iter().map(|p| p.version_id).collect::<Vec<_>>();
-        let assessments = sqlx::query_as::<_, (Uuid, Uuid, String, serde_json::Value)>(
+        let assessments = sqlx::query_as::<_, PersistedAssessmentIdentity>(
             r#"
-            SELECT id, policy_version_id, effective_config_digest, effective_config
+            SELECT id, policy_lineage_id, policy_version_id, effective_set_digest,
+                   effective_config_digest, effective_config
             FROM composite_policy_assessments
             WHERE system_id = $1 AND derivation_id = $2 AND target_store_path = $3
-              AND effective_set_digest = $4 AND policy_version_id = ANY($5)
             FOR UPDATE
             "#,
         )
         .bind(system_id)
         .bind(exact_target.0)
         .bind(&exact_target.1)
-        .bind(&resolved.effective_set_digest)
-        .bind(&version_ids)
         .fetch_all(&mut *tx)
         .await?;
-        if assessments.len() != policies.len() {
+        let candidate_ids = assessments
+            .iter()
+            .map(|assessment| assessment.id)
+            .collect::<Vec<_>>();
+        let rule_identities = sqlx::query_as::<_, PersistedRuleIdentity>(
+            r#"
+            SELECT assessment_id, rule_id, ordinal, kind, phase, outcome, blocking
+            FROM composite_policy_rule_results
+            WHERE assessment_id = ANY($1)
+            ORDER BY assessment_id, ordinal
+            FOR UPDATE
+            "#,
+        )
+        .bind(&candidate_ids)
+        .fetch_all(&mut *tx)
+        .await?;
+        let Some(compatible) = select_compatible_assessment_set(
+            &policies,
+            &authorization_digest,
+            &assessments,
+            &rule_identities,
+        ) else {
             bail!("Exact current composite assessments are incomplete or stale");
-        }
-        for (assessment_id, version_id, digest, config_json) in assessments {
+        };
+        assessment_ids.extend_from_slice(compatible.ids());
+        for assessment_id in &assessment_ids {
+            let assessment = assessments
+                .iter()
+                .find(|assessment| assessment.id == *assessment_id)
+                .context("Compatible composite assessment disappeared")?;
             let policy = policies
                 .iter()
-                .find(|policy| policy.version_id == version_id)
+                .find(|policy| policy.version_id == assessment.policy_version_id)
                 .context("Assessment references a non-effective policy version")?;
-            if digest != policy.config_digest || config_json != policy.config_json {
-                bail!("Composite assessment effective config is stale");
-            }
-            assessment_ids.push(assessment_id);
-            configs_by_assessment.insert(assessment_id, &policy.config);
+            configs_by_assessment.insert(*assessment_id, &policy.config);
         }
     }
 
@@ -1785,7 +2168,40 @@ async fn authorize_target_at(
     if authorization.allowed() {
         match action {
             AuthorizationAction::Check { .. } => {}
-            AuthorizationAction::SetDesired { source } => {
+            AuthorizationAction::SetDesired {
+                source,
+                evaluation_snapshot_id,
+                ..
+            } => {
+                let bound_snapshot_id: Option<Uuid> = if exact_target.0 == -1 {
+                    None
+                } else {
+                    sqlx::query_scalar(
+                        r#"
+                    SELECT snapshot.id
+                    FROM evaluation_snapshots snapshot
+                    LEFT JOIN evaluation_snapshot_selections selection
+                      ON selection.current_snapshot_id = snapshot.id
+                     AND selection.commit_id = snapshot.commit_id
+                     AND selection.configuration_name = snapshot.configuration_name
+                    WHERE snapshot.commit_id = $1
+                      AND snapshot.configuration_name = $2
+                       AND snapshot.lifecycle = 'available'
+                       AND snapshot.integrity_version = 1
+                      AND (($3::uuid IS NOT NULL AND snapshot.id = $3)
+                        OR ($3::uuid IS NULL AND selection.current_snapshot_id IS NOT NULL))
+                    LIMIT 1
+                    "#,
+                    )
+                    .bind(exact_target.2)
+                    .bind(&exact_target.3)
+                    .bind(evaluation_snapshot_id)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                };
+                if evaluation_snapshot_id.is_some() && bound_snapshot_id != evaluation_snapshot_id {
+                    bail!("Retained deployment artifact does not match the exact target lineage");
+                }
                 sqlx::query(
                     "UPDATE systems SET desired_target = $1, desired_target_set_at = NOW(), updated_at = NOW() WHERE id = $2",
                 )
@@ -1793,8 +2209,60 @@ async fn authorize_target_at(
                 .bind(system_id)
                 .execute(&mut *tx)
                 .await?;
-                set_pending_deployment_target_tx(&mut tx, system_id, Some(&exact_target.1), source)
+                // IDENTITY: Equal store paths can come from different commits.
+                // End incompatible pending work before the generic target helper
+                // performs its path-based deduplication.
+                if exact_target.0 != -1 {
+                    sqlx::query(
+                        "UPDATE pending_system_deployments
+                         SET status = 'superseded', completed_at = NOW()
+                         WHERE system_id = $1 AND target_store_path = $2 AND status = 'pending'
+                           AND (requested_commit_id IS DISTINCT FROM $3
+                             OR requested_derivation_id IS DISTINCT FROM $5
+                             OR ($4::uuid IS NOT NULL
+                                AND evaluation_snapshot_id IS DISTINCT FROM $4))",
+                    )
+                    .bind(system_id)
+                    .bind(&exact_target.1)
+                    .bind(exact_target.2)
+                    .bind(bound_snapshot_id)
+                    .bind(exact_target.0)
+                    .execute(&mut *tx)
                     .await?;
+                }
+                let deployment_id = set_pending_deployment_target_tx(
+                    &mut tx,
+                    system_id,
+                    Some(&exact_target.1),
+                    source,
+                )
+                .await?
+                .context("authorized deployment target did not create or reuse pending work")?;
+                if exact_target.0 != -1 {
+                    let bound = sqlx::query(
+                        "UPDATE pending_system_deployments
+                         SET requested_commit_id = $2, evaluation_snapshot_id = $3,
+                             requested_derivation_id = $4
+                         WHERE id = $1
+                           AND (requested_commit_id IS NULL OR requested_commit_id = $2)
+                           AND (evaluation_snapshot_id IS NULL OR evaluation_snapshot_id = $3)
+                           AND (requested_derivation_id IS NULL OR requested_derivation_id = $4)",
+                    )
+                    .bind(deployment_id)
+                    .bind(exact_target.2)
+                    .bind(bound_snapshot_id)
+                    .bind(exact_target.0)
+                    .execute(&mut *tx)
+                    .await?;
+                    if bound.rows_affected() != 1 {
+                        bail!("Pending deployment already has different immutable lineage");
+                    }
+                    crate::queries::evaluation_snapshots::retain_bound_deployment_observations_tx(
+                        &mut tx,
+                        deployment_id,
+                    )
+                    .await?;
+                }
             }
             AuthorizationAction::ClaimDelivery { expected_target } => {
                 // Upgrade bridge: only targets captured by migration may gain a
@@ -1901,7 +2369,44 @@ pub async fn authorize_and_set_system_target(
         system_id,
         target,
         Utc::now(),
-        AuthorizationAction::SetDesired { source },
+        AuthorizationAction::SetDesired {
+            source,
+            evaluation_snapshot_id: None,
+            expected_derivation_id: None,
+        },
+    )
+    .await?
+    .authorization)
+}
+
+/// Authorizes and sets a desired target with an exact retained artifact.
+///
+/// The artifact and derivation must match the retained NixOS lineage. The
+/// pending deployment stores the immutable artifact and commit identities so
+/// later agent generation ingestion does not consult the current selector.
+///
+/// # Errors
+///
+/// Returns an error when authorization fails, the artifact lineage differs
+/// from the target, or PostgreSQL cannot commit the guarded update.
+pub async fn authorize_and_set_system_target_with_artifact(
+    pool: &PgPool,
+    system_id: Uuid,
+    target: &str,
+    source: &str,
+    evaluation_snapshot_id: Uuid,
+    derivation_id: i32,
+) -> Result<CompositeAuthorization> {
+    Ok(authorize_target_at(
+        pool,
+        system_id,
+        target,
+        Utc::now(),
+        AuthorizationAction::SetDesired {
+            source,
+            evaluation_snapshot_id: Some(evaluation_snapshot_id),
+            expected_derivation_id: Some(derivation_id),
+        },
     )
     .await?
     .authorization)
@@ -1982,6 +2487,9 @@ pub async fn authorize_deployment(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compliance::resolver::{
+        AssignmentTarget, EffectivePolicy, EffectivePolicySource, PolicySpecificity,
+    };
     use crate::models::deployment_policies::{CveBlockRuleConfig, TimeWindowRuleConfig};
     use chrono::TimeZone;
 
@@ -1999,6 +2507,257 @@ mod tests {
             completed_at: Some(Utc.timestamp_opt(1_700_000_100, 0).single().unwrap()),
             composite_phase_order: 1,
         }
+    }
+
+    fn resolved_policy_set(policies: Vec<EffectivePolicy>) -> EffectivePolicySet {
+        EffectivePolicySet {
+            bundle_version_id: Uuid::from_u128(100),
+            assignment_id: None,
+            target: AssignmentTarget::System {
+                system_id: Uuid::from_u128(101),
+            },
+            policies,
+            effective_set_digest: "complete-compliance-digest".to_string(),
+            warnings: Vec::new(),
+        }
+    }
+
+    fn effective_policy(
+        version_id: u128,
+        policy_type: &str,
+        mode: AssignmentMode,
+        config: serde_json::Value,
+    ) -> EffectivePolicy {
+        EffectivePolicy {
+            policy_version_id: Uuid::from_u128(version_id),
+            policy_lineage_id: Uuid::from_u128(version_id + 100),
+            policy_type: policy_type.to_string(),
+            source: EffectivePolicySource::LegacyDirect,
+            specificity: PolicySpecificity::System,
+            baseline_order: None,
+            addition_order: None,
+            overrides: Vec::new(),
+            effective_config: config,
+            assignment_mode: mode.clone(),
+            effective_mode: mode,
+            provenance: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn composite_authorization_digest_ignores_report_only_and_non_composite_policies() {
+        let enforce = effective_policy(
+            1,
+            "composite",
+            AssignmentMode::Enforce,
+            serde_json::json!({"schema_version": 1, "rules": [{"kind": "eval_passed"}]}),
+        );
+        let baseline = resolved_policy_set(vec![enforce.clone()]);
+        let mut with_report_only = resolved_policy_set(vec![
+            enforce.clone(),
+            effective_policy(
+                2,
+                "composite",
+                AssignmentMode::ReportOnly,
+                serde_json::json!({"schema_version": 1, "rules": [{"kind": "custom_eval"}]}),
+            ),
+        ]);
+        with_report_only.effective_set_digest = "changed-complete-compliance-digest".to_string();
+        let with_non_composite = resolved_policy_set(vec![
+            enforce.clone(),
+            effective_policy(
+                3,
+                "custom_check",
+                AssignmentMode::Enforce,
+                serde_json::json!({"expression": "false"}),
+            ),
+        ]);
+        let changed_enforce = resolved_policy_set(vec![effective_policy(
+            1,
+            "composite",
+            AssignmentMode::Enforce,
+            serde_json::json!({"schema_version": 1, "rules": [{"kind": "custom_eval"}]}),
+        )]);
+
+        let digest = enforce_composite_authorization_digest(&baseline);
+        assert_eq!(
+            digest,
+            enforce_composite_authorization_digest(&with_report_only)
+        );
+        assert_eq!(
+            digest,
+            enforce_composite_authorization_digest(&with_non_composite)
+        );
+        assert_ne!(
+            digest,
+            enforce_composite_authorization_digest(&changed_enforce)
+        );
+        assert_ne!(
+            baseline.effective_set_digest,
+            with_report_only.effective_set_digest
+        );
+    }
+
+    #[test]
+    fn legacy_assessment_compatibility_requires_one_exact_policy_and_rule_set() {
+        let enforce = effective_policy(
+            1,
+            "composite",
+            AssignmentMode::Enforce,
+            serde_json::json!({
+                "schema_version": 1,
+                "mode": "all",
+                "rules": [{
+                    "id": "41000000-0000-0000-0000-000000000001",
+                    "kind": "eval_passed",
+                    "config": {}
+                }]
+            }),
+        );
+        let baseline = resolved_policy_set(vec![enforce.clone()]);
+        let policies = policy_contexts(&baseline).unwrap();
+        let assessment_id = Uuid::from_u128(200);
+        let legacy_digest = "a".repeat(64);
+        let assessments = vec![PersistedAssessmentIdentity {
+            id: assessment_id,
+            policy_lineage_id: enforce.policy_lineage_id,
+            policy_version_id: enforce.policy_version_id,
+            effective_set_digest: legacy_digest,
+            effective_config_digest: policies[0].config_digest.clone(),
+            effective_config: enforce.effective_config.clone(),
+        }];
+        let rules = vec![PersistedRuleIdentity {
+            assessment_id,
+            rule_id: policies[0].config.rules[0].id,
+            ordinal: 0,
+            kind: "eval_passed".to_string(),
+            phase: "evaluation".to_string(),
+            outcome: "pass".to_string(),
+            blocking: false,
+        }];
+        let canonical = enforce_composite_authorization_digest(&baseline);
+        assert!(matches!(
+            select_compatible_assessment_set(&policies, &canonical, &assessments, &rules),
+            Some(CompatibleAssessmentSet::Legacy(ids)) if ids == vec![assessment_id]
+        ));
+
+        let removed_policy = effective_policy(
+            2,
+            "composite",
+            AssignmentMode::Enforce,
+            serde_json::json!({
+                "schema_version": 1,
+                "mode": "all",
+                "rules": [{
+                    "id": "42000000-0000-0000-0000-000000000001",
+                    "kind": "eval_passed",
+                    "config": {}
+                }]
+            }),
+        );
+        let removed_context = policy_contexts(&resolved_policy_set(vec![removed_policy.clone()]))
+            .unwrap()
+            .pop()
+            .unwrap();
+        let removed_assessment_id = Uuid::from_u128(202);
+        let mut group_with_removed_policy = assessments.clone();
+        group_with_removed_policy.push(PersistedAssessmentIdentity {
+            id: removed_assessment_id,
+            policy_lineage_id: removed_policy.policy_lineage_id,
+            policy_version_id: removed_policy.policy_version_id,
+            effective_set_digest: assessments[0].effective_set_digest.clone(),
+            effective_config_digest: removed_context.config_digest,
+            effective_config: removed_policy.effective_config,
+        });
+        let mut rules_with_removed_policy = rules.clone();
+        rules_with_removed_policy.push(PersistedRuleIdentity {
+            assessment_id: removed_assessment_id,
+            rule_id: removed_context.config.rules[0].id,
+            ordinal: 0,
+            kind: "eval_passed".to_string(),
+            phase: "evaluation".to_string(),
+            outcome: "pass".to_string(),
+            blocking: false,
+        });
+        assert!(
+            select_compatible_assessment_set(
+                &policies,
+                &canonical,
+                &group_with_removed_policy,
+                &rules_with_removed_policy,
+            )
+            .is_none(),
+            "a removed or newly report-only policy must remain visible as an extra legacy row"
+        );
+
+        let with_report_only = resolved_policy_set(vec![
+            enforce.clone(),
+            effective_policy(
+                2,
+                "custom_check",
+                AssignmentMode::ReportOnly,
+                serde_json::json!({"expression": "false"}),
+            ),
+        ]);
+        assert!(matches!(
+            select_compatible_assessment_set(
+                &policy_contexts(&with_report_only).unwrap(),
+                &enforce_composite_authorization_digest(&with_report_only),
+                &assessments,
+                &rules,
+            ),
+            Some(CompatibleAssessmentSet::Legacy(_))
+        ));
+
+        let changed_enforce = resolved_policy_set(vec![effective_policy(
+            1,
+            "composite",
+            AssignmentMode::Enforce,
+            serde_json::json!({
+                "schema_version": 1,
+                "mode": "all",
+                "rules": [{
+                    "id": "41000000-0000-0000-0000-000000000001",
+                    "kind": "custom_eval",
+                    "config": {"expression": "true", "message": "changed"}
+                }]
+            }),
+        )]);
+        assert!(
+            select_compatible_assessment_set(
+                &policy_contexts(&changed_enforce).unwrap(),
+                &enforce_composite_authorization_digest(&changed_enforce),
+                &assessments,
+                &rules,
+            )
+            .is_none()
+        );
+
+        assert!(
+            select_compatible_assessment_set(&policies, &canonical, &assessments, &[]).is_none()
+        );
+
+        let mut ambiguous = assessments.clone();
+        let mut second = assessments[0].clone();
+        second.id = Uuid::from_u128(201);
+        second.effective_set_digest = "b".repeat(64);
+        ambiguous.push(second.clone());
+        let mut ambiguous_rules = rules.clone();
+        ambiguous_rules.push(PersistedRuleIdentity {
+            assessment_id: second.id,
+            ..rules[0].clone()
+        });
+        assert!(
+            select_compatible_assessment_set(&policies, &canonical, &ambiguous, &ambiguous_rules,)
+                .is_none()
+        );
+
+        let mut malformed_digest = assessments.clone();
+        malformed_digest[0].effective_set_digest = "arbitrary".to_string();
+        assert!(
+            select_compatible_assessment_set(&policies, &canonical, &malformed_digest, &rules)
+                .is_none()
+        );
     }
 
     #[test]

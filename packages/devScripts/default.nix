@@ -13,6 +13,9 @@ let
   oidc_client_secret = "dev-only-secret";
   grafana_port = 3446;
   pgweb_port = 12084;
+  # Keep development evaluator behavior equal to the packaged services. The
+  # nix-eval-jobs passthru provides the Nix CLI built from the same libraries.
+  evaluatorNix = pkgs.nix-eval-jobs.nix;
 
   # Internal (local) issuer for health checks
   oidc_issuer_internal =
@@ -261,7 +264,7 @@ let
 
   runServer = pkgs.writeShellApplication {
     name = "run-server";
-    runtimeInputs = [ pkgs.nix pkgs.git pkgs.vulnix pkgs.coreutils ];
+    runtimeInputs = [ evaluatorNix pkgs.git pkgs.vulnix pkgs.coreutils ];
     text = ''
       CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
       export CRYSTAL_FORGE_CONFIG
@@ -343,7 +346,7 @@ let
 
   runBuilder = pkgs.writeShellApplication {
     name = "run-builder";
-    runtimeInputs = [ pkgs.nix pkgs.coreutils ];
+    runtimeInputs = [ evaluatorNix pkgs.vulnix pkgs.coreutils ];
     text = ''
       CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
       export CRYSTAL_FORGE_CONFIG
@@ -365,7 +368,7 @@ let
   # Mock variants that use pre-populated config template
   runServerMock = pkgs.writeShellApplication {
     name = "run-server-mock";
-    runtimeInputs = [ pkgs.nix pkgs.git pkgs.vulnix pkgs.coreutils ];
+    runtimeInputs = [ evaluatorNix pkgs.git pkgs.vulnix pkgs.coreutils ];
     text = ''
       CRYSTAL_FORGE_CONFIG="$(${generateConfigMock}/bin/generate-config)"
       export CRYSTAL_FORGE_CONFIG
@@ -636,6 +639,7 @@ let
       nodejs
       playwright-driver
       playwright-test
+      postgresql
     ];
     text = ''
       export NODE_PATH="${pkgs.playwright-test}/lib/node_modules"
@@ -646,7 +650,7 @@ let
 
   runBuilderMock = pkgs.writeShellApplication {
     name = "run-builder-mock";
-    runtimeInputs = [ pkgs.nix pkgs.coreutils ];
+    runtimeInputs = [ pkgs.nix pkgs.vulnix pkgs.coreutils ];
     text = ''
       CRYSTAL_FORGE_CONFIG="$(${generateConfigMock}/bin/generate-config)"
       export CRYSTAL_FORGE_CONFIG
@@ -808,6 +812,9 @@ let
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           --lib queries::cve_scans::tests::concurrent_workers_each_claim_distinct_queued_scans
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          --lib queries::cve_scan_leases::tests::remote_lease_claim_heartbeat_validation_and_clean_completion
         DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           --lib queries::cve_scans_tests::create_cve_scan_reuses_existing_active_scan
@@ -1073,7 +1080,7 @@ let
 
   startBuilderApi = pkgs.writeShellApplication {
     name = "start-builder-api";
-    runtimeInputs = with pkgs; [ nix python3 coreutils hostname ];
+    runtimeInputs = with pkgs; [ nix vulnix python3 coreutils hostname ];
     text = ''
       set -euo pipefail
 

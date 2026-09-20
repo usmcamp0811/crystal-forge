@@ -8,8 +8,8 @@ use tracing::error;
 
 use crate::api::models::{
     ScanSchedulePolicyResponse, ScanningActivityItemResponse, ScanningDeployedResponse,
-    ScanningQueueItemResponse, ScanningStatsResponse, ScanningSystemsItemResponse,
-    UpdateScanSchedulePolicyRequest,
+    ScanningQueueItemResponse, ScanningScanDetailResponse, ScanningScanDiagnosticEventResponse,
+    ScanningStatsResponse, ScanningSystemsItemResponse, UpdateScanSchedulePolicyRequest,
 };
 use crate::handlers::api::rbac::require_admin;
 use crate::queries::scanning::{
@@ -90,6 +90,8 @@ fn scan_queue_row_to_response(
     r: crate::queries::scanning::ScanQueueRow,
 ) -> ScanningQueueItemResponse {
     ScanningQueueItemResponse {
+        derivation_id: r.derivation_id,
+        rescan_eligible: r.rescan_eligible,
         scan_id: r.scan_id, // Option<Uuid>: None for never-scanned deployed configs
         hostname: r.hostname,
         flake_name: r.flake_name,
@@ -103,7 +105,7 @@ fn scan_queue_row_to_response(
         freshness: r.freshness,
         is_current: r.is_current,
         is_latest_per_flake: r.is_latest_per_flake,
-        trigger: None,
+        source_trigger: r.source_trigger,
     }
 }
 
@@ -172,6 +174,7 @@ pub async fn get_scanning_systems(
                         unscanned: r.unscanned,
                         current_crit: r.current_crit,
                         current_high: r.current_high,
+                        current_derivation_id: r.current_derivation_id,
                     })
                     .collect::<Vec<_>>(),
             ),
@@ -239,6 +242,55 @@ pub async fn get_scanning_activity(
         Err(e) => {
             error!("scanning activity query failed: {e:#}");
             internal_error("Failed to load scanning activity")
+        }
+    }
+}
+
+/// Returns bounded redacted diagnostics for one exact scan.
+pub async fn get_scanning_scan_detail(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(scan_id): Path<uuid::Uuid>,
+) -> impl IntoResponse {
+    if require_admin(&pool, &headers).await.is_none() {
+        return forbidden_admin();
+    }
+    match crate::queries::cve_scan_diagnostics::get_scan_diagnostics(&pool, scan_id).await {
+        Ok(Some(detail)) => (
+            StatusCode::OK,
+            Json(ScanningScanDetailResponse {
+                scan_id,
+                status: detail.status,
+                scanner_name: detail.scanner_name,
+                scanner_version: detail.scanner_version,
+                source_trigger: detail.source_trigger,
+                events: detail
+                    .events
+                    .into_iter()
+                    .map(|event| ScanningScanDiagnosticEventResponse {
+                        id: event.id,
+                        execution_id: event.execution_id,
+                        attempt_number: event.attempt_number,
+                        occurred_at: event.occurred_at,
+                        level: event.level,
+                        source: event.source,
+                        event_type: event.event_type,
+                        message: event.message,
+                        truncated: event.truncated,
+                    })
+                    .collect(),
+                truncated: detail.truncated,
+            }),
+        )
+            .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "not_found", "message": "Scan not found" })),
+        )
+            .into_response(),
+        Err(error) => {
+            error!("scan diagnostic detail query failed: {error:#}");
+            internal_error("Failed to load scan diagnostics")
         }
     }
 }
@@ -474,6 +526,18 @@ mod tests {
         let response = get_scanning_schedule(State(lazy_pool()), HeaderMap::new())
             .await
             .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_scanning_scan_detail_requires_admin() {
+        let response = get_scanning_scan_detail(
+            State(lazy_pool()),
+            HeaderMap::new(),
+            Path(uuid::Uuid::nil()),
+        )
+        .await
+        .into_response();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 

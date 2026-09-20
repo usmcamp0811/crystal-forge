@@ -40,6 +40,9 @@ fn error_response(error: PoamError) -> Response {
         ),
         PoamError::Validation(code, message) => (StatusCode::BAD_REQUEST, code, message, None),
         PoamError::Conflict(code, message) => (StatusCode::CONFLICT, code, message, None),
+        PoamError::ConflictDetails(code, message, details) => {
+            (StatusCode::CONFLICT, code, message, Some(details))
+        }
         PoamError::Precondition(code, message, details) => {
             (StatusCode::PRECONDITION_FAILED, code, message, details)
         }
@@ -167,6 +170,25 @@ pub async fn list(
     }
 }
 
+/// Returns the bounded safe assignee catalog to a POA&M mutator.
+///
+/// Returns a structured error response when authentication, actor lookup,
+/// Operator/Admin authorization, or catalog loading fails.
+pub async fn assignee_catalog(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+) -> Response {
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    match poam::assignee_catalog(&pool, &actor).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
 /// Selects finding relationships and optional bounded history pages.
 ///
 /// Omitting both history fields selects the bounded compatibility page for
@@ -195,6 +217,24 @@ pub struct AssignmentRelationshipsQuery {
     pub history_limit: Option<i64>,
     /// Skips this many POA&Ms for each requested assignment version.
     pub history_offset: Option<i64>,
+}
+
+/// Selects exact-CVE relationships for one visible system.
+#[derive(Deserialize)]
+pub struct CveRelationshipsQuery {
+    /// Identifies the system whose current exact occurrences are requested.
+    pub system_id: Uuid,
+    /// Limits historical POA&Ms independently for each occurrence.
+    pub history_limit: Option<i64>,
+    /// Skips this many historical POA&Ms for each occurrence.
+    pub history_offset: Option<i64>,
+}
+
+/// Selects the canonical package identity for a fleet CVE drawer.
+#[derive(Deserialize)]
+pub struct FleetCveDetailQuery {
+    /// Gives the canonical package pname that completes exact subject identity.
+    pub package: String,
 }
 
 /// Selects a finding observation and page for compatible-POA&M search.
@@ -436,6 +476,101 @@ pub async fn assignment_relationships(
     }
 }
 
+/// Returns server-issued exact-CVE occurrence and remediation relationships.
+///
+/// Returns a structured error response when authentication, visibility,
+/// evidence resolution, pagination, or persistence loading fails.
+pub async fn cve_relationships(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    query: Result<Query<CveRelationshipsQuery>, QueryRejection>,
+) -> Response {
+    let query = match query_body(query, "invalid_query", "Malformed CVE relationship query") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    match poam::cve_relationships(
+        &pool,
+        &actor,
+        query.system_id,
+        query.history_limit,
+        query.history_offset,
+        &SystemClock,
+    )
+    .await
+    {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+/// Returns the visible exact and legacy fleet inventory for one CVE and package.
+///
+/// Returns a structured error response for malformed inputs, hidden scope,
+/// unavailable inventory, or persistence failures. Legacy rows are read-only;
+/// fleet mutations resolve exact evidence again in the mutation transaction.
+pub async fn fleet_cve_detail(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<String>, PathRejection>,
+    query: Result<Query<FleetCveDetailQuery>, QueryRejection>,
+) -> Response {
+    let cve_id = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let query = match query_body(query, "invalid_query", "Malformed fleet CVE detail query") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match poam::fleet_cve_inventory_detail(&pool, &actor, &cve_id, &query.package).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+/// Applies one atomic environment-scoped fleet CVE triage request.
+///
+/// Returns a structured error response for CSRF, authorization, exact-evidence,
+/// lifecycle, assignee, or bounded ownership conflicts.
+pub async fn triage_fleet_cve(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<String>, PathRejection>,
+    body: Result<Json<crate::api::models::FleetCveTriageRequest>, JsonRejection>,
+) -> Response {
+    let cve_id = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(response) = csrf(&headers) {
+        return response;
+    }
+    let body = match json_body(body, "Malformed fleet CVE triage request") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match poam::triage_fleet_cve(&pool, &actor, &cve_id, body, &SystemClock).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
 /// Returns one visible POA&M with requested bounded history pages.
 ///
 /// Returns a structured error response when authentication, path or query
@@ -498,6 +633,33 @@ pub async fn create(
     match poam::create(&pool, &actor, body, &SystemClock).await {
         Ok(v) => (StatusCode::CREATED, Json(v)).into_response(),
         Err(e) => error_response(e),
+    }
+}
+
+/// Creates a POA&M from a server-issued current exact-CVE occurrence.
+///
+/// Returns a structured error response when CSRF, authentication, body,
+/// authorization, current evidence, or atomic uniqueness validation fails.
+pub async fn create_cve(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    body: Result<Json<CreateCvePoamRequest>, JsonRejection>,
+) -> Response {
+    if let Err(error) = csrf(&headers) {
+        return error;
+    }
+    let body = match json_body(body, "Malformed exact-CVE POA&M request") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    match poam::create_cve(&pool, &actor, body, &SystemClock).await {
+        Ok(value) => (StatusCode::CREATED, Json(value)).into_response(),
+        Err(error) => error_response(error),
     }
 }
 /// Updates mutable fields on one POA&M.
@@ -756,6 +918,79 @@ pub async fn unlink_finding(
     match poam::unlink_finding(&pool, &actor, id, fid, body.revision, &SystemClock).await {
         Ok(v) => Json(v).into_response(),
         Err(e) => error_response(e),
+    }
+}
+
+/// Links a current exact-CVE occurrence to one exact-CVE POA&M.
+///
+/// Returns a structured error response when CSRF, authentication, revision,
+/// family compatibility, evidence, or persistence validation fails.
+pub async fn link_cve_finding(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+    body: Result<Json<AddCveFindingRequest>, JsonRejection>,
+) -> Response {
+    let id = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(error) = csrf(&headers) {
+        return error;
+    }
+    let body = match json_body(body, "Malformed exact-CVE link request") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    match poam::link_cve_finding(&pool, &actor, id, body, &SystemClock).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+/// Retires one active exact-CVE finding link.
+///
+/// Returns a structured error response when CSRF, authentication, revision,
+/// minimum-finding, visibility, or persistence validation fails.
+pub async fn unlink_cve_finding(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<(Uuid, Uuid)>, PathRejection>,
+    query: Result<Query<RevisionRequest>, QueryRejection>,
+) -> Response {
+    let (id, finding_id) = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(error) = csrf(&headers) {
+        return error;
+    }
+    let revision = match query_body(query, "invalid_revision", "Malformed POA&M revision") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    match poam::unlink_cve_finding(
+        &pool,
+        &actor,
+        id,
+        finding_id,
+        revision.revision,
+        &SystemClock,
+    )
+    .await
+    {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error_response(error),
     }
 }
 /// Links an immutable assignment version to one POA&M.

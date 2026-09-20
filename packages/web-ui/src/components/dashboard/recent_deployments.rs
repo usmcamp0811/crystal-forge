@@ -76,7 +76,7 @@ pub fn RecentDeploymentRow(deployment: RecentDeployment) -> Element {
     rsx! {
         Link {
             class: "flex items-center justify-between p-3 rounded-lg {theme::surface::SUBTLE_BG} transition {theme::interactive::HOVER_BG} hover:border {theme::surface::CARD_BORDER}",
-            to: crate::routes::Route::SystemsView {},
+            to: crate::routes::Route::SystemsView { query: String::new() },
             div {
                 class: "flex items-center gap-3 min-w-0 flex-1",
                 // Status indicator dot

@@ -21,9 +21,10 @@ use crate::models::user_notifications::UserNotificationPreferences;
 use crate::queries::admin::insert_admin_audit_event;
 use crate::queries::auth_identity::get_user_by_id;
 use crate::queries::user_notifications::{
-    dismiss_notification, get_notification_preferences as query_notification_preferences,
-    list_notifications, mark_all_notifications_read, mark_notification_read,
-    unread_notification_count, update_notification_preferences,
+    dismiss_all_notifications, dismiss_notification,
+    get_notification_preferences as query_notification_preferences, list_notifications,
+    mark_all_notifications_read, mark_notification_read, unread_notification_count,
+    update_notification_preferences,
 };
 use cf_config::config::{
     notification_provider_endpoint_allowed, notification_public_base_url_allowed,
@@ -223,6 +224,26 @@ pub async fn read_all_notifications(
     match mark_all_notifications_read(&pool, user.user_id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(err) => server_error(err, "notifications_mark_all_read_failed"),
+    }
+}
+
+/// Dismisses the current user's visible notification feed.
+///
+/// Requires the same session and CSRF protections as single-notification
+/// dismissal. The query captures its own execution-time cutoff so arrivals
+/// after the action starts remain available to the user.
+pub async fn dismiss_all_notifications_handler(
+    RequireAuth(user): RequireAuth,
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = validate_csrf(&headers) {
+        return err.into_response();
+    }
+
+    match dismiss_all_notifications(&pool, user.user_id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(err) => server_error(err, "notifications_dismiss_all_failed"),
     }
 }
 

@@ -83,6 +83,46 @@ baseline. Same-version contributions are deduplicated. Different versions of
 one policy lineage at the same specificity produce a typed conflict; the server
 does not silently choose the newest version.
 
+At runtime, native policy versions in the `nix-evaluation` or `multi-phase`
+execution phase run during Nix evaluation when their parsed policy has a Nix
+check. Both `enforce` and `report_only` assignments produce outcomes and retain
+failure evidence. An `enforce` failure blocks only when the policy or rule is
+intrinsically strict. A `report_only` failure never blocks and does not change
+the intrinsic `strict` value stored with the result. The result's `blocking`
+field records the exact effective decision after assignment mode, top-level
+strictness, and constituent-rule strictness are applied. Unbound, opaque,
+manual, external, and non-Nix-phase policy versions do not enter
+`nix-eval-jobs`.
+The unconditional `cfAgentEnabled` gate remains blocking independently of
+assignment mode.
+
+An invalid or unsupported `report_only` implementation is not executable. The
+server records a structured warning with its system, configuration, policy
+version, and policy type, and excludes the implementation from evaluator
+evidence. Its deterministic invalid-implementation identity still participates
+in shared-configuration conflict detection. An invalid `enforce`
+implementation continues to fail closed.
+
+Legacy custom checks retain their boolean result format in `enforce` mode. In
+`report_only` mode, the evaluator contains thrown and non-boolean expressions
+with `builtins.tryEval`. The persisted result has `passed: false`,
+`blocking: false`, and an `evaluation_error` detail. The evaluator does not
+convert an evaluation error to a pass. Before evaluation, the server reserves
+all built-in, stable policy, composite-rule, and configured `enforce` result
+keys for the complete assignment slice. It then allocates UUID-based
+`report_only` custom-check keys with deterministic suffixes when necessary.
+This allocation preserves existing `enforce` keys and prevents a report-only
+result from colliding with another evaluator field.
+
+Composite deployment authorization uses a canonical digest of enforced
+composite policy versions and their effective configurations. The complete
+effective-set digest remains the compliance evidence identity. A report-only or
+non-composite assignment change does not stale an enforced composite deployment
+assessment. Assessments written before this digest split remain valid only when
+one complete legacy digest group exactly matches every current enforced
+composite policy version, effective configuration, and ordered rule result.
+Ambiguous, incomplete, malformed, or mismatched legacy groups remain stale.
+
 Use `POST /api/v1/compliance/assignments/preview` before saving when a preview is
 needed. Effective policies are available from:
 

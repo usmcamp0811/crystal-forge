@@ -1507,8 +1507,8 @@ pub async fn create_bundle(
     write_bundle_version_digest(&mut tx, bundle_id, &canonical).await?;
     refresh_bundle_requirement_digest(&mut tx, draft_version_id).await?;
 
-    // Write assignment overlay digests for all new environment assignments
-    // (created by trigger; still have assignment_overlay_digest = 'pending').
+    // Refresh any explicit assignment overlays that already target this draft.
+    // Environment membership does not create authoritative assignments.
     let assignment_ids: Vec<Uuid> = sqlx::query_scalar(
         r#"
         SELECT id FROM compliance_bundle_assignments
@@ -1896,8 +1896,7 @@ pub async fn update_bundle(
     write_bundle_version_digest(&mut tx, bundle_id, &canonical).await?;
     refresh_bundle_requirement_digest(&mut tx, draft_version_id).await?;
 
-    // Write assignment effective-set digests for ALL assignments on this draft
-    // version (both pre-existing and newly created by the trigger). (P1 #1)
+    // Write effective-set digests for all explicit assignments on this draft.
     let assignment_ids: Vec<Uuid> = sqlx::query_scalar(
         r#"
         SELECT id FROM compliance_bundle_assignments
@@ -2121,6 +2120,8 @@ async fn list_explicit_bundle_version_system_rows(
     bundle_id: Uuid,
     bundle_version_id: Uuid,
 ) -> Result<Vec<SystemRow>> {
+    // INVARIANT: The immutable current version must belong to the same
+    // assignment lineage. Do not trust a cross-lineage current-version pointer.
     Ok(sqlx::query_as::<_, SystemRow>(
         r#"
         SELECT DISTINCT v.id, v.hostname, v.environment, v.health_status,
@@ -2131,6 +2132,7 @@ async fn list_explicit_bundle_version_system_rows(
           ON a.bundle_id = $1 AND a.active
         JOIN compliance_bundle_assignment_versions av
           ON av.id = a.current_version_id
+         AND av.assignment_id = a.id
          AND av.bundle_version_id = $2
          AND (
              (a.scope_type = 'system' AND a.system_id = v.id)
@@ -2228,20 +2230,29 @@ pub async fn list_bundle_systems_for_version(
         .map(|(effective, policy)| (effective.policy_version_id, policy))
         .collect();
 
-    // Load assessment context for all systems in one batch
+    // INVARIANT: Prefer the retained generation's derivation identity. Legacy
+    // deployments without a retained binding can fall back only within the
+    // system's exact flake and configuration lineage.
     let contexts: std::collections::HashMap<Uuid, AssessmentContext> = {
         let context_rows: Vec<(Uuid, i32, String, Value)> = sqlx::query_as(
             r#"
             SELECT s.id, d.id AS derivation_id, deployed.store_path, d.policy_results
             FROM systems s
             JOIN LATERAL (
-                SELECT ss.store_path
+                SELECT ss.store_path, ss.generation
                 FROM system_states ss
                 WHERE ss.hostname = s.hostname
                 ORDER BY ss.timestamp DESC, ss.id DESC
                 LIMIT 1
             ) deployed ON true
+            LEFT JOIN evaluation_generation_snapshots retained
+              ON retained.system_id = s.id
+             AND retained.generation = deployed.generation
+             AND retained.source_store_path = deployed.store_path
             JOIN derivations d ON COALESCE(d.store_path, d.expected_store_path) = deployed.store_path
+              AND d.derivation_name = COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
+              AND (retained.derivation_id IS NULL OR d.id = retained.derivation_id)
+            JOIN commits c ON c.id = d.commit_id AND c.flake_id = s.flake_id
             WHERE s.id = ANY($1)
               AND d.derivation_type = 'nixos'
             ORDER BY s.id, d.completed_at DESC NULLS LAST, d.id DESC
@@ -2739,6 +2750,7 @@ pub async fn get_system_evidence(
     };
     let mut resolution_state: Option<String> = None;
     let mut current_effective_set_digest: Option<String> = None;
+    let mut current_assessment_digest: Option<String> = None;
     if let ResolutionOutcome::Resolved(effective) =
         resolve_system_effective_policies(pool, system_id).await?
     {
@@ -2762,6 +2774,16 @@ pub async fn get_system_evidence(
             .collect::<Vec<_>>();
         if !requested_policies.is_empty() {
             current_effective_set_digest = Some(effective.effective_set_digest.clone());
+            // COMPATIBILITY: Composite assessment persistence uses the
+            // enforced-composite authorization digest. The complete resolver
+            // digest remains authoritative for finding observations, but it
+            // can also include report-only or non-composite assignments that
+            // intentionally do not invalidate persisted enforcement evidence.
+            current_assessment_digest = Some(
+                crate::services::composite_enforcement::enforce_composite_authorization_digest(
+                    &effective,
+                ),
+            );
             policies = materialize_effective_policies(pool, &requested_policies).await?;
         } else if bundle_version_id.is_some() {
             resolution_state = Some("not_applicable".to_string());
@@ -2799,18 +2821,22 @@ pub async fn get_system_evidence(
         None => None,
     };
     let mut composite_results = match context.as_ref() {
-        Some(context) => match current_effective_set_digest.as_deref() {
-            Some(digest) => {
+        Some(context) => match (
+            current_assessment_digest.as_deref(),
+            current_effective_set_digest.as_deref(),
+        ) {
+            (Some(assessment_digest), Some(complete_digest)) => {
                 load_composite_assessment_results(
                     pool,
                     system.id,
                     context.derivation_id,
                     &context.target_store_path,
-                    digest,
+                    assessment_digest,
+                    complete_digest,
                 )
                 .await?
             }
-            None => HashMap::new(),
+            _ => HashMap::new(),
         },
         None => HashMap::new(),
     };
@@ -3118,9 +3144,10 @@ pub async fn load_assignment_metadata_for_systems(
         return Ok(std::collections::HashMap::new());
     }
 
-    // Single query to load effective assignments with metadata
     // System-scoped assignments take precedence over environment-scoped
-    // Uses DISTINCT ON to ensure each system gets only one assignment
+    // assignments. DISTINCT ON returns at most one assignment per system.
+    // INVARIANT: Each immutable current version must belong to the assignment
+    // lineage that references it.
     #[derive(sqlx::FromRow)]
     struct AssignmentRow {
         system_id: Uuid,
@@ -3145,7 +3172,9 @@ pub async fn load_assignment_metadata_for_systems(
             JOIN systems sys ON sys.id = rs.system_id
             JOIN compliance_bundle_assignments cba ON cba.system_id = sys.id 
                 AND cba.bundle_id = $1 AND cba.active = true AND cba.scope_type = 'system'
-            JOIN compliance_bundle_assignment_versions av ON av.id = cba.current_version_id
+            JOIN compliance_bundle_assignment_versions av
+              ON av.id = cba.current_version_id
+             AND av.assignment_id = cba.id
             
             UNION ALL
             
@@ -3160,7 +3189,9 @@ pub async fn load_assignment_metadata_for_systems(
             JOIN compliance_bundle_assignments cba ON cba.bundle_id = $1 
                 AND cba.active = true AND cba.scope_type = 'environment'
                 AND cba.environment_id = sys.environment_id
-            JOIN compliance_bundle_assignment_versions av ON av.id = cba.current_version_id
+            JOIN compliance_bundle_assignment_versions av
+              ON av.id = cba.current_version_id
+             AND av.assignment_id = cba.id
             WHERE NOT EXISTS (
                 -- Exclude if system already has a system-scoped assignment
                 SELECT 1 FROM compliance_bundle_assignments cba_sys
@@ -3179,10 +3210,12 @@ pub async fn load_assignment_metadata_for_systems(
     // Collect user IDs for batched lookup
     let user_ids: Vec<Uuid> = assignments.iter().filter_map(|a| a.created_by).collect();
 
-    // Batch load user names (email or name field)
+    // Resolve the actor label in one query. Usernames are the established
+    // human-readable identity, with email as the fallback.
     let users: std::collections::HashMap<Uuid, String> = if !user_ids.is_empty() {
         let user_rows: Vec<(Uuid, Option<String>)> = sqlx::query_as(
-            "SELECT id, COALESCE(name, email) AS display_name FROM users WHERE id = ANY($1)",
+            "SELECT id, COALESCE(NULLIF(BTRIM(username), ''), email) AS display_name \
+             FROM users WHERE id = ANY($1)",
         )
         .bind(&user_ids)
         .fetch_all(pool)
@@ -3842,18 +3875,27 @@ async fn effective_policy_rollups_with_evidence_batch(
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
+    // INVARIANT: This aggregate uses the same retained-generation preference
+    // and bounded legacy fallback as the detail evidence path.
     let context_rows: Vec<(Uuid, i32, String, Value)> = sqlx::query_as(
         r#"
         SELECT s.id, d.id AS derivation_id, deployed.store_path, d.policy_results
         FROM systems s
         JOIN LATERAL (
-            SELECT ss.store_path
+            SELECT ss.store_path, ss.generation
             FROM system_states ss
             WHERE ss.hostname = s.hostname
             ORDER BY ss.timestamp DESC, ss.id DESC
             LIMIT 1
         ) deployed ON true
+        LEFT JOIN evaluation_generation_snapshots retained
+          ON retained.system_id = s.id
+         AND retained.generation = deployed.generation
+         AND retained.source_store_path = deployed.store_path
         JOIN derivations d ON COALESCE(d.store_path, d.expected_store_path) = deployed.store_path
+          AND d.derivation_name = COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
+          AND (retained.derivation_id IS NULL OR d.id = retained.derivation_id)
+        JOIN commits c ON c.id = d.commit_id AND c.flake_id = s.flake_id
         WHERE s.id = ANY($1)
           AND d.derivation_type = 'nixos'
         ORDER BY s.id, d.completed_at DESC NULLS LAST, d.id DESC
@@ -4443,16 +4485,25 @@ async fn load_composite_assessment_results(
     system_id: Uuid,
     derivation_id: i32,
     target_store_path: &str,
-    effective_set_digest: &str,
+    assessment_digest: &str,
+    complete_digest: &str,
 ) -> Result<HashMap<Uuid, crate::api::models::CompositeAssessmentResult>> {
+    // COMPATIBILITY: Current persistence writes the enforced-composite
+    // authorization digest. Assessments written before that split use the
+    // complete resolver digest. Prefer the current identity and accept the
+    // exact legacy identity only for the same system, derivation, and target.
     let rows = sqlx::query_as::<_, CompositeAssessmentResultRow>(
         r#"
         WITH exact AS (
-            SELECT id, policy_version_id, target_store_path, effective_set_digest,
+            SELECT DISTINCT ON (policy_version_id)
+                   id, policy_version_id, target_store_path, effective_set_digest,
                    effective_config_digest, effective_config
             FROM composite_policy_assessments
             WHERE system_id = $1 AND derivation_id = $2
-              AND target_store_path = $3 AND effective_set_digest = $4
+              AND target_store_path = $3
+              AND effective_set_digest IN ($4, $5)
+            ORDER BY policy_version_id, (effective_set_digest = $4) DESC,
+                     updated_at DESC, id DESC
         )
         SELECT exact.id AS assessment_id,
                exact.policy_version_id,
@@ -4482,7 +4533,8 @@ async fn load_composite_assessment_results(
     .bind(system_id)
     .bind(derivation_id)
     .bind(target_store_path)
-    .bind(effective_set_digest)
+    .bind(assessment_digest)
+    .bind(complete_digest)
     .fetch_all(pool)
     .await?;
 
@@ -4588,18 +4640,28 @@ async fn load_current_eval_attempt_results(
 }
 
 async fn assessment_context(pool: &PgPool, system_id: Uuid) -> Result<Option<AssessmentContext>> {
+    // INVARIANT: A store path can occur in more than one lineage. Prefer the
+    // retained generation's exact derivation. Legacy deployments without that
+    // binding can fall back only within the system's flake and configuration.
     sqlx::query_as(
         r#"
         SELECT d.id AS derivation_id, deployed.store_path AS target_store_path, d.policy_results
         FROM systems s
         JOIN LATERAL (
-            SELECT ss.store_path
+            SELECT ss.store_path, ss.generation
             FROM system_states ss
             WHERE ss.hostname = s.hostname
             ORDER BY ss.timestamp DESC, ss.id DESC
             LIMIT 1
         ) deployed ON true
+        LEFT JOIN evaluation_generation_snapshots retained
+          ON retained.system_id = s.id
+         AND retained.generation = deployed.generation
+         AND retained.source_store_path = deployed.store_path
         JOIN derivations d ON COALESCE(d.store_path, d.expected_store_path) = deployed.store_path
+          AND d.derivation_name = COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
+          AND (retained.derivation_id IS NULL OR d.id = retained.derivation_id)
+        JOIN commits c ON c.id = d.commit_id AND c.flake_id = s.flake_id
         WHERE s.id = $1
           AND d.derivation_type = 'nixos'
         ORDER BY d.completed_at DESC NULLS LAST, d.id DESC

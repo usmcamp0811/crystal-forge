@@ -268,9 +268,12 @@ function poamCreate(draft) {
     plan: draft.plan || "",
     notes: draft.notes || "",
     findings: draft.findings || [],
+    cveRefs: draft.cveRefs || [],
     milestones: draft.milestones || [],
     activity: [{ at: POAM_TODAY, who: "you", text: draft.findings?.length
       ? `POA&M created from failing finding ${draft.findings.map(f => f.sysId).length > 1 ? `${draft.findings.length} findings` : poamFindingLabel(draft.findings[0])}.`
+      : draft.cveRefs?.length
+      ? `POA&M created from ${draft.cveRefs.length > 1 ? `${draft.cveRefs.length} CVEs` : draft.cveRefs[0].id} on ${draft.cveRefs[0].hostname}.`
       : "POA&M created." }],
   };
   POAMS.unshift(item);

@@ -1,14 +1,90 @@
 use crate::config::VulnixConfig;
+use crate::vulnix::process_group::{ScannerProcessGroup, isolate};
 use crate::vulnix::vulnix_parser::VulnixEntry;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use sqlx::PgPool;
-use std::process::Command;
+use std::process::Stdio;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command as AsyncCommand;
 use tracing::{error, info};
 
 /// Array of VulnixEntry - this is what vulnix outputs as JSON
 pub type VulnixScanOutput = Vec<VulnixEntry>;
+
+const SCANNER_STDOUT_LIMIT: usize = 8 * 1024 * 1024;
+const SCANNER_STDERR_LIMIT: usize = 64 * 1024;
+const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(1);
+
+/// Contains parsed evidence and bounded process diagnostics for one execution.
+#[derive(Debug)]
+pub struct VulnixScanExecution {
+    /// Parsed vulnerability evidence.
+    pub entries: VulnixScanOutput,
+    /// Raw bounded stderr. Callers must redact it before persistence or logging.
+    pub stderr: String,
+    /// Is `true` when stderr exceeded the retained byte bound.
+    pub stderr_truncated: bool,
+    /// Scanner process exit code, or `None` when terminated by a signal.
+    pub exit_code: Option<i32>,
+}
+
+/// Describes a failed local scanner execution and its bounded stderr.
+#[derive(Debug)]
+pub struct VulnixScanExecutionError {
+    error: anyhow::Error,
+    /// Raw bounded stderr. Callers must redact it before persistence or logging.
+    pub stderr: String,
+    /// Is `true` when stderr exceeded the retained byte bound.
+    pub stderr_truncated: bool,
+}
+
+impl VulnixScanExecutionError {
+    fn new(error: anyhow::Error) -> Self {
+        Self {
+            error,
+            stderr: String::new(),
+            stderr_truncated: false,
+        }
+    }
+
+    fn with_stderr(error: anyhow::Error, stderr: &[u8], stderr_truncated: bool) -> Self {
+        Self {
+            error,
+            stderr: String::from_utf8_lossy(stderr).into_owned(),
+            stderr_truncated,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_fixture(message: &str, stderr: &str, stderr_truncated: bool) -> Self {
+        Self::with_stderr(
+            anyhow!(message.to_string()),
+            stderr.as_bytes(),
+            stderr_truncated,
+        )
+    }
+}
+
+impl std::fmt::Display for VulnixScanExecutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for VulnixScanExecutionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.error.source()
+    }
+}
+
+impl From<anyhow::Error> for VulnixScanExecutionError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::new(error)
+    }
+}
 
 /// Interprets a finished vulnix process.
 ///
@@ -44,7 +120,17 @@ fn parse_successful_vulnix_output(
         // error, not malformed success output. Surfacing stderr keeps the
         // deriver-lookup and usage diagnostics that identify the real cause.
         Err(_) if exit_code == Some(2) => Err(vulnix_process_failure(exit_code, stderr)),
-        Err(error) => Err(anyhow!("Failed to parse vulnix JSON output: {error}")),
+        Err(error) => {
+            let stderr = stderr.trim();
+            let stderr = if stderr.is_empty() {
+                "vulnix produced no stderr output"
+            } else {
+                stderr
+            };
+            Err(anyhow!(
+                "Failed to parse vulnix JSON output: {error}; stderr: {stderr}"
+            ))
+        }
     }
 }
 
@@ -88,18 +174,14 @@ impl VulnixRunner {
 
     /// Check if vulnix is available on the system
     pub async fn check_vulnix_available() -> bool {
-        match Command::new("vulnix").arg("--version").output() {
-            Ok(output) => output.status.success(),
-            Err(_) => false,
-        }
+        Self::get_vulnix_version().await.is_ok()
     }
 
     /// Get vulnix version string
     pub async fn get_vulnix_version() -> Result<String> {
-        let output = AsyncCommand::new("vulnix")
-            .arg("--version")
-            .output()
-            .await?;
+        let mut command = AsyncCommand::new("vulnix");
+        command.arg("--version");
+        let output = run_scanner_command(command, Duration::from_secs(5)).await?;
 
         if output.status.success() {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -116,6 +198,38 @@ impl VulnixRunner {
         derivation_id: i32,
         vulnix_version: Option<String>,
     ) -> Result<VulnixScanOutput> {
+        Ok(self
+            .scan_derivation_with_diagnostics(pool, derivation_id, vulnix_version)
+            .await
+            .map_err(anyhow::Error::new)?
+            .entries)
+    }
+
+    /// Scans a derivation and returns bounded stderr with parsed evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when scanner identity, input availability, execution,
+    /// timeout, or JSON parsing fails.
+    pub async fn scan_derivation_with_diagnostics(
+        &self,
+        pool: &PgPool,
+        derivation_id: i32,
+        vulnix_version: Option<String>,
+    ) -> std::result::Result<VulnixScanExecution, VulnixScanExecutionError> {
+        let expected_version = vulnix_version.context("CVE scan has no probed vulnix identity")?;
+        let actual_version = Self::get_vulnix_version()
+            .await
+            .context("Failed to verify vulnix identity before execution")?;
+        if actual_version != expected_version {
+            return Err(anyhow!(
+                "Vulnix identity changed after scheduling: expected {:?}, found {:?}",
+                expected_version,
+                actual_version
+            )
+            .into());
+        }
+
         // Fetch store path in a separate scope so connection is released
         let store_path = {
             let derivation =
@@ -127,10 +241,7 @@ impl VulnixRunner {
 
         // Only scan if the path exists
         if !tokio::fs::try_exists(&store_path).await.unwrap_or(false) {
-            return Err(anyhow!(
-                "Derivation store_path does not exist: {}",
-                store_path
-            ));
+            return Err(anyhow!("Derivation store_path does not exist: {}", store_path).into());
         }
 
         info!(
@@ -140,10 +251,6 @@ impl VulnixRunner {
 
         // Build vulnix command
         let mut cmd = AsyncCommand::new("vulnix");
-        // Ownership heartbeats may cancel a scan if its lease is lost. Ensure
-        // dropping the command future terminates the child instead of leaving
-        // an unowned vulnix process running in the background.
-        cmd.kill_on_drop(true);
         cmd.arg("--json").arg(&store_path);
 
         if self.config.enable_whitelist {
@@ -164,8 +271,8 @@ impl VulnixRunner {
             .collect();
         info!("🔧 Executing command: {:?} {}", program, args_str.join(" "));
 
-        match tokio::time::timeout(self.config.timeout, cmd.output()).await {
-            Ok(Ok(output)) => {
+        match run_scanner_command(cmd, self.config.timeout).await {
+            Ok(output) => {
                 let stdout_msg = String::from_utf8_lossy(&output.stdout);
                 let stderr_msg = String::from_utf8_lossy(&output.stderr);
 
@@ -173,55 +280,57 @@ impl VulnixRunner {
                 info!("🔍 Stdout length: {} bytes", output.stdout.len());
                 info!("🔍 Stderr length: {} bytes", output.stderr.len());
 
-                // Log first and last 200 chars of stdout for debugging
-                if !stdout_msg.is_empty() {
-                    let stdout_preview = if stdout_msg.len() > 400 {
-                        format!(
-                            "{}...{}",
-                            &stdout_msg[..200],
-                            &stdout_msg[stdout_msg.len() - 200..]
-                        )
-                    } else {
-                        stdout_msg.to_string()
-                    };
-                    info!("🔍 Stdout preview: {}", stdout_preview.replace('\n', "\\n"));
-                }
-
-                // Always log stderr if present
-                if !stderr_msg.is_empty() {
-                    info!("🔍 Stderr content: {}", stderr_msg);
-                }
-
                 if matches!(output.status.code(), Some(0 | 2)) {
                     let vulnix_entries = parse_successful_vulnix_output(
                         output.status.code(),
                         &stdout_msg,
                         &stderr_msg,
-                    )?;
+                    )
+                    .map_err(|error| {
+                        VulnixScanExecutionError::with_stderr(
+                            error,
+                            &output.stderr,
+                            output.stderr_truncated,
+                        )
+                    })?;
                     info!(
                         "✅ Vulnix scan completed successfully with {} entries",
                         vulnix_entries.len()
                     );
-                    Ok(vulnix_entries)
+                    Ok(VulnixScanExecution {
+                        entries: vulnix_entries,
+                        stderr: stderr_msg.into_owned(),
+                        stderr_truncated: output.stderr_truncated,
+                        exit_code: output.status.code(),
+                    })
                 } else {
                     error!("❌ Vulnix scan failed with exit code: {}", output.status);
-                    error!("❌ stderr: {}", stderr_msg);
+                    error!(
+                        "❌ stderr: {}",
+                        crate::security::snapshot_redaction::redact_text(&stderr_msg)
+                    );
                     parse_successful_vulnix_output(output.status.code(), &stdout_msg, &stderr_msg)
+                        .map(|entries| VulnixScanExecution {
+                            entries,
+                            stderr: stderr_msg.into_owned(),
+                            stderr_truncated: output.stderr_truncated,
+                            exit_code: output.status.code(),
+                        })
+                        .map_err(|error| {
+                            VulnixScanExecutionError::with_stderr(
+                                error,
+                                &output.stderr,
+                                output.stderr_truncated,
+                            )
+                        })
                 }
             }
-            Ok(Err(e)) => {
-                error!("❌ Failed to execute vulnix command: {}", e);
-                Err(anyhow!("Failed to execute vulnix: {}", e))
-            }
-            Err(_) => {
+            Err(error) => {
                 error!(
-                    "❌ Vulnix scan timed out after {} seconds",
-                    self.config.timeout_seconds()
+                    "❌ Failed to execute vulnix command: {}",
+                    crate::security::snapshot_redaction::redact_text(&error.to_string())
                 );
-                Err(anyhow!(
-                    "Vulnix scan timed out after {} seconds",
-                    self.config.timeout_seconds()
-                ))
+                Err(error)
             }
         }
     }
@@ -238,6 +347,183 @@ impl VulnixRunner {
     }
 }
 
+/// Runs one vulnix command in an isolated process group.
+///
+/// Timeout and future cancellation terminate the complete group. The function
+/// Concurrent readers drain stdout and stderr while the child runs. A timeout
+/// kills and reaps the process group, then gives the readers one bounded grace
+/// period to publish bytes already emitted before it snapshots stderr.
+#[derive(Debug)]
+struct ScannerCommandOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    stderr_truncated: bool,
+}
+
+#[derive(Debug, Default)]
+struct BoundedOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+type SharedBoundedOutput = Arc<Mutex<BoundedOutput>>;
+
+fn bounded_output_snapshot(output: &SharedBoundedOutput) -> (Vec<u8>, bool) {
+    let output = output
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    (output.bytes.clone(), output.truncated)
+}
+
+async fn finish_output_reader(
+    task: &mut tokio::task::JoinHandle<std::io::Result<()>>,
+    output: &SharedBoundedOutput,
+    stream: &str,
+) -> Result<(Vec<u8>, bool)> {
+    task.await
+        .with_context(|| format!("vulnix {stream} reader task failed"))??;
+    Ok(bounded_output_snapshot(output))
+}
+
+async fn capture_terminated_output(
+    task: &mut tokio::task::JoinHandle<std::io::Result<()>>,
+    output: &SharedBoundedOutput,
+) -> (Vec<u8>, bool) {
+    if tokio::time::timeout(OUTPUT_DRAIN_GRACE, &mut *task)
+        .await
+        .is_err()
+    {
+        task.abort();
+    }
+    bounded_output_snapshot(output)
+}
+
+fn timeout_error(timeout: Duration, stderr_truncated: bool) -> anyhow::Error {
+    let truncation = if stderr_truncated {
+        " (stderr capture truncated)"
+    } else {
+        ""
+    };
+    anyhow!(
+        "vulnix timed out after {} seconds{truncation}",
+        timeout.as_secs()
+    )
+}
+
+async fn run_scanner_command(
+    mut command: AsyncCommand,
+    timeout: Duration,
+) -> std::result::Result<ScannerCommandOutput, VulnixScanExecutionError> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    isolate(&mut command);
+    let child = command.spawn().context("Failed to spawn vulnix")?;
+    let mut group = ScannerProcessGroup::new(child, "vulnix")?;
+    let stdout = group
+        .child_mut()
+        .stdout
+        .take()
+        .context("vulnix stdout was not piped")?;
+    let stderr = group
+        .child_mut()
+        .stderr
+        .take()
+        .context("vulnix stderr was not piped")?;
+    let stdout_output = Arc::new(Mutex::new(BoundedOutput::default()));
+    let stderr_output = Arc::new(Mutex::new(BoundedOutput::default()));
+    let mut stdout_task = tokio::spawn(read_bounded(
+        stdout,
+        SCANNER_STDOUT_LIMIT,
+        Arc::clone(&stdout_output),
+    ));
+    let mut stderr_task = tokio::spawn(read_bounded(
+        stderr,
+        SCANNER_STDERR_LIMIT,
+        Arc::clone(&stderr_output),
+    ));
+
+    let deadline = tokio::time::sleep(timeout);
+    tokio::pin!(deadline);
+    let status = tokio::select! {
+        status = group.wait() => status.context("Failed to wait for vulnix")?,
+        _ = &mut deadline => {
+            group.terminate().await;
+            stdout_task.abort();
+            let (stderr, stderr_truncated) =
+                capture_terminated_output(&mut stderr_task, &stderr_output).await;
+            return Err(VulnixScanExecutionError::with_stderr(
+                timeout_error(timeout, stderr_truncated),
+                &stderr,
+                stderr_truncated,
+            ));
+        }
+    };
+    let (stdout, stdout_truncated) = tokio::select! {
+        result = finish_output_reader(&mut stdout_task, &stdout_output, "stdout") => result?,
+        _ = &mut deadline => {
+            group.terminate().await;
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(anyhow!(
+                "vulnix output drain timed out after {} seconds",
+                timeout.as_secs()
+            )
+            .into());
+        }
+    };
+    let (stderr, stderr_truncated) = tokio::select! {
+        result = finish_output_reader(&mut stderr_task, &stderr_output, "stderr") => result?,
+        _ = &mut deadline => {
+            group.terminate().await;
+            stderr_task.abort();
+            return Err(anyhow!(
+                "vulnix output drain timed out after {} seconds",
+                timeout.as_secs()
+            )
+            .into());
+        }
+    };
+    if stdout_truncated {
+        group.terminate().await;
+        return Err(anyhow!("vulnix stdout exceeded {} bytes", SCANNER_STDOUT_LIMIT).into());
+    }
+    group.disarm();
+    Ok(ScannerCommandOutput {
+        status,
+        stdout,
+        stderr,
+        stderr_truncated,
+    })
+}
+
+async fn read_bounded<R: tokio::io::AsyncRead + Unpin>(
+    mut reader: R,
+    limit: usize,
+    output: SharedBoundedOutput,
+) -> std::io::Result<()> {
+    // Continue draining after the retained limit so a full child pipe cannot
+    // block process exit.
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = reader.read(&mut buffer).await?;
+        if count == 0 {
+            break;
+        }
+        let mut output = output
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let available = limit.saturating_sub(output.bytes.len());
+        output
+            .bytes
+            .extend_from_slice(&buffer[..count.min(available)]);
+        output.truncated |= count > available;
+    }
+    Ok(())
+}
+
 impl Default for VulnixRunner {
     fn default() -> Self {
         Self::new()
@@ -246,7 +532,38 @@ impl Default for VulnixRunner {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_successful_vulnix_output;
+    use super::{BoundedOutput, parse_successful_vulnix_output, read_bounded, run_scanner_command};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tokio::process::Command;
+
+    #[tokio::test]
+    async fn bounded_reader_drains_input_after_the_retained_limit() {
+        let input = vec![b'x'; 32];
+        let output = Arc::new(Mutex::new(BoundedOutput::default()));
+        read_bounded(std::io::Cursor::new(input), 8, Arc::clone(&output))
+            .await
+            .expect("bounded reader should drain an in-memory input");
+        let output = output.lock().expect("bounded output lock");
+        let retained = output.bytes.clone();
+        let truncated = output.truncated;
+        assert_eq!(retained, vec![b'x'; 8]);
+        assert!(truncated);
+    }
+
+    #[tokio::test]
+    async fn timeout_retains_stderr_emitted_before_termination() {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("printf 'local-timeout-secret' >&2; sleep 1");
+
+        let error = run_scanner_command(command, Duration::from_millis(50))
+            .await
+            .expect_err("fixture must time out");
+        assert!(error.to_string().contains("timed out"));
+        assert!(error.stderr.contains("local-timeout-secret"));
+    }
 
     #[test]
     fn nonzero_vulnix_exit_returns_stderr_without_parsing_json() {
@@ -260,6 +577,21 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("DeriverLookupError"));
         assert!(!message.contains("EOF while parsing"));
+    }
+
+    #[test]
+    fn successful_exit_parse_failure_retains_stderr() {
+        let error = parse_successful_vulnix_output(
+            Some(0),
+            "not-json",
+            "scanner emitted useful parse context",
+        )
+        .expect_err("malformed successful output must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("scanner emitted useful parse context")
+        );
     }
 
     #[test]

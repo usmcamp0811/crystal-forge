@@ -149,18 +149,17 @@ pub struct ServerConfig {
     #[serde(default = "default_heartbeat_interval_secs")]
     pub heartbeat_interval_secs: u64,
 
-    /// Root directory for caching bare Git mirrors used to generate source
-    /// archives for ServerBundledArchive delivery mode.
+    /// Root directory for canonical source mirrors, tracked-tree artifacts,
+    /// published identities, and cross-process locks.
     /// Default: /var/lib/crystal-forge/source-archives
     #[serde(default = "default_source_archive_root")]
     pub source_archive_root: PathBuf,
 
     /// Default source/input delivery mode for verified source re-evaluation.
-    /// - `local_git_worktree` (default): builder clones/fetches the repo directly
-    ///   and creates a local worktree.
-    /// - `server_bundled_archive`: server generates a tar archive of its bare
-    ///   mirror and serves it via an authenticated API endpoint. Builders do not
-    ///   need direct Git remote access.
+    /// Evaluator contract version 1 supports only `server_bundled_archive`. The
+    /// server publishes one uncompressed tracked-tree tar for the exact commit
+    /// and serves those bytes through an authenticated API endpoint. Builders
+    /// do not need direct Git remote access.
     #[serde(default = "default_source_delivery_mode")]
     pub source_delivery_mode: SourceInputDeliveryMode,
 
@@ -242,7 +241,7 @@ fn default_source_archive_root() -> PathBuf {
 }
 
 fn default_source_delivery_mode() -> SourceInputDeliveryMode {
-    SourceInputDeliveryMode::LocalGitWorktree
+    SourceInputDeliveryMode::ServerBundledArchive
 }
 
 fn default_notification_email_sender_name() -> String {
@@ -632,11 +631,11 @@ mod tests {
     }
 
     #[test]
-    fn source_delivery_mode_defaults_to_local_git_worktree() {
+    fn source_delivery_mode_defaults_to_server_bundled_archive() {
         let cfg = ServerConfig::default();
         assert_eq!(
             cfg.source_delivery_mode,
-            SourceInputDeliveryMode::LocalGitWorktree
+            SourceInputDeliveryMode::ServerBundledArchive
         );
     }
 }

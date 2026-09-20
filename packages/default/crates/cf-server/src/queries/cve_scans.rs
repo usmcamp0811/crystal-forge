@@ -3,7 +3,7 @@ use crate::derivations::{Derivation, DerivationType};
 use crate::models::cve_scans::{CveScan, ScanStatus};
 use crate::queries::attention;
 use crate::vulnix::vulnix_parser::{VulnixParser, VulnixScanOutput};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bigdecimal::BigDecimal;
 use bigdecimal::FromPrimitive;
 #[cfg(test)]
@@ -46,6 +46,17 @@ pub enum CreateCveScanOutcome {
     Existing(Uuid),
 }
 
+/// Reports the durable identity returned by an operator enqueue request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnqueueCveScanOutcome {
+    /// Identifies the pending or in-progress scan.
+    pub scan_id: Uuid,
+    /// Identifies the exact derivation requested by the caller.
+    pub derivation_id: i32,
+    /// Is `true` only when this request inserted the pending row.
+    pub created: bool,
+}
+
 impl CreateCveScanOutcome {
     /// Returns the new or existing scan identifier.
     pub fn id(self) -> Uuid {
@@ -63,6 +74,47 @@ impl CreateCveScanOutcome {
 
 fn truncate_for_varchar(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
+}
+
+/// Returns the canonical identifier accepted by exact CVE evidence storage.
+///
+/// Canonical identifiers use ASCII uppercase and the `CVE-YYYY-NNNN...`
+/// shape. The length limit matches the existing `cves.id` column.
+///
+/// # Errors
+///
+/// Returns an error when `value` is empty, malformed, non-ASCII, or too long
+/// for the existing CVE identity column.
+fn canonical_cve_id(value: &str) -> Result<String> {
+    let canonical = value.trim().to_ascii_uppercase();
+    let mut parts = canonical.split('-');
+    let prefix = parts.next();
+    let year = parts.next();
+    let sequence = parts.next();
+    let valid = canonical.len() <= 20
+        && prefix == Some("CVE")
+        && year
+            .is_some_and(|part| part.len() == 4 && part.bytes().all(|byte| byte.is_ascii_digit()))
+        && sequence
+            .is_some_and(|part| part.len() >= 4 && part.bytes().all(|byte| byte.is_ascii_digit()))
+        && parts.next().is_none();
+    if !valid {
+        anyhow::bail!("invalid CVE identifier from vulnix: {value:?}");
+    }
+    Ok(canonical)
+}
+
+/// Returns the trimmed package pname used as stable CVE finding identity.
+///
+/// # Errors
+///
+/// Returns an error when the scanner did not provide a package pname.
+fn canonical_cve_package_name(value: &str) -> Result<String> {
+    let canonical = value.trim();
+    if canonical.is_empty() {
+        anyhow::bail!("vulnix returned an empty package pname");
+    }
+    Ok(canonical.to_string())
 }
 
 /// Convert an execution UUID to a stable PostgreSQL advisory lock ID.
@@ -380,6 +432,7 @@ pub async fn create_cve_scan(
     crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
         &mut tx,
         derivation_id,
+        &[],
     )
     .await?;
 
@@ -550,6 +603,7 @@ async fn complete_cve_scan_for_owner(
     crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
         &mut tx,
         derivation_id,
+        &[],
     )
     .await?;
     let result = sqlx::query(
@@ -606,7 +660,7 @@ pub async fn mark_cve_scan_failed(
     target: &Derivation,
     error_message: &str,
 ) -> Result<()> {
-    mark_cve_scan_failed_for_owner(pool, scan_id, target, error_message, None).await
+    mark_cve_scan_failed_for_owner(pool, scan_id, target, error_message, None, None).await
 }
 
 /// Marks a token-owned CVE scan failed and recomputes composite enforcement.
@@ -622,7 +676,39 @@ pub async fn mark_cve_scan_failed_for_execution(
     error_message: &str,
     execution_id: Uuid,
 ) -> Result<()> {
-    mark_cve_scan_failed_for_owner(pool, scan_id, target, error_message, Some(execution_id)).await
+    mark_cve_scan_failed_for_owner(
+        pool,
+        scan_id,
+        target,
+        error_message,
+        Some(execution_id),
+        None,
+    )
+    .await
+}
+
+/// Marks a local execution failed and stores its redacted diagnostics atomically.
+///
+/// # Errors
+///
+/// Returns an error when execution ownership is stale or persistence fails.
+pub(crate) async fn mark_cve_scan_failed_with_diagnostics_for_execution(
+    pool: &PgPool,
+    scan_id: Uuid,
+    target: &Derivation,
+    error_message: &str,
+    execution_id: Uuid,
+    diagnostics: &[crate::queries::cve_scan_diagnostics::PreparedScanDiagnostic],
+) -> Result<()> {
+    mark_cve_scan_failed_for_owner(
+        pool,
+        scan_id,
+        target,
+        error_message,
+        Some(execution_id),
+        Some(diagnostics),
+    )
+    .await
 }
 
 async fn mark_cve_scan_failed_for_owner(
@@ -631,7 +717,9 @@ async fn mark_cve_scan_failed_for_owner(
     target: &Derivation,
     error_message: &str,
     execution_id: Option<Uuid>,
+    diagnostics: Option<&[crate::queries::cve_scan_diagnostics::PreparedScanDiagnostic]>,
 ) -> Result<()> {
+    let error_message = crate::security::snapshot_redaction::redact_text(error_message);
     // Create metadata with error details
     let metadata = serde_json::json!({
         "error": error_message,
@@ -641,16 +729,26 @@ async fn mark_cve_scan_failed_for_owner(
 
     let mut tx = pool.begin().await?;
     crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
-        &mut tx, target.id,
+        &mut tx,
+        target.id,
+        &[],
     )
     .await?;
+    if let (Some(execution_id), Some(diagnostics)) = (execution_id, diagnostics) {
+        crate::queries::cve_scan_diagnostics::append_local_diagnostics_tx(
+            &mut tx,
+            scan_id,
+            execution_id,
+            diagnostics,
+        )
+        .await?;
+    }
     let result = sqlx::query(
         r#"
         UPDATE cve_scans
         SET
             status = 'failed',
             completed_at = NOW(),
-            attempts = attempts + 1,
             scan_metadata = COALESCE(scan_metadata, '{}'::jsonb) || $2
         WHERE id = $1
           AND status = 'in_progress'
@@ -719,6 +817,7 @@ async fn mark_cve_scan_failed_by_id_for_owner(
     error_message: &str,
     execution_id: Option<Uuid>,
 ) -> Result<()> {
+    let error_message = crate::security::snapshot_redaction::redact_text(error_message);
     let metadata = serde_json::json!({
         "error": error_message,
         "derivation_id": derivation_id,
@@ -728,6 +827,7 @@ async fn mark_cve_scan_failed_by_id_for_owner(
     crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
         &mut tx,
         derivation_id,
+        &[],
     )
     .await?;
     let result = sqlx::query(
@@ -768,29 +868,50 @@ fn require_owned_transition(rows_affected: u64, scan_id: Uuid, transition: &str)
 
 /// Persists findings for a legacy tokenless scan and completes it atomically.
 ///
+/// The function writes immutable version-1 scan occurrences and the mutable
+/// `package_vulnerabilities` compatibility projection in one transaction. CVE
+/// IDs use trimmed ASCII uppercase, and package identity uses trimmed scanner
+/// pname. Existing version-0 scans are not used to infer occurrences.
+///
 /// # Errors
 ///
-/// Returns an error when the row is token-owned, is no longer active, input
-/// resolution fails, or transactional persistence fails.
+/// Returns an error when the row is token-owned, is no longer active, a CVE ID
+/// or package pname is invalid, input resolution fails, or transactional
+/// persistence fails. No output or schema-version transition commits after an
+/// error.
 pub async fn save_scan_results(
     pool: &PgPool,
     scan_id: Uuid,
     vulnix_results: &VulnixScanOutput,
     scan_duration_ms: Option<i32>,
 ) -> Result<()> {
-    save_scan_results_for_owner(pool, scan_id, vulnix_results, scan_duration_ms, None, None).await
+    save_scan_results_for_owner(
+        pool,
+        scan_id,
+        vulnix_results,
+        scan_duration_ms,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 /// Persists findings only while `execution_id` owns the active scan.
 ///
 /// The function takes the POA&M/composite derivation lock before completing the
-/// scan row. Findings, attention state, completion, and composite enforcement
-/// commit atomically.
+/// scan row. Immutable version-1 occurrences, compatibility findings, attention
+/// state, completion, and composite enforcement commit atomically.
 ///
 /// # Errors
 ///
-/// Returns an error when ownership is lost, input resolution fails, or
-/// transactional persistence fails.
+/// Returns an error when ownership is lost, a CVE ID or package pname is
+/// invalid, input resolution fails, or transactional persistence fails. No
+/// output or schema-version transition commits after an error.
 pub async fn save_scan_results_for_execution(
     pool: &PgPool,
     scan_id: Uuid,
@@ -804,7 +925,41 @@ pub async fn save_scan_results_for_execution(
         vulnix_results,
         scan_duration_ms,
         None,
+        None,
         Some(execution_id),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Persists local scan evidence and redacted diagnostics in one transaction.
+///
+/// # Errors
+///
+/// Returns an error when execution ownership is stale or persistence fails.
+pub(crate) async fn save_scan_results_with_diagnostics_for_execution(
+    pool: &PgPool,
+    scan_id: Uuid,
+    vulnix_results: &VulnixScanOutput,
+    scan_duration_ms: Option<i32>,
+    execution_id: Uuid,
+    diagnostics: &[crate::queries::cve_scan_diagnostics::PreparedScanDiagnostic],
+) -> Result<()> {
+    save_scan_results_for_owner(
+        pool,
+        scan_id,
+        vulnix_results,
+        scan_duration_ms,
+        None,
+        None,
+        Some(execution_id),
+        None,
+        None,
+        None,
+        Some(diagnostics),
     )
     .await
 }
@@ -823,7 +978,52 @@ pub(crate) async fn save_scan_results_with_store_path_override(
         vulnix_results,
         scan_duration_ms,
         store_path_override,
+        None,
         Some(execution_id),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Persists canonical remote evidence through the shared schema-1 transaction.
+///
+/// `store_paths` maps each package `.drv` identity to the exact output selected
+/// from its validated result entry. The result digest is sealed by the same
+/// update that transitions the scan to immutable evidence schema 1.
+/// `closure_provenance` records whether the server verified the package closure
+/// locally or retained the producing builder/session as an explicit unverified
+/// remote boundary.
+///
+/// # Errors
+///
+/// Returns an error when ownership is stale, a package output is missing, or
+/// canonical persistence fails.
+pub(crate) async fn save_remote_scan_results_for_execution(
+    pool: &PgPool,
+    scan_id: Uuid,
+    vulnix_results: &VulnixScanOutput,
+    scan_duration_ms: Option<i32>,
+    store_paths: &std::collections::HashMap<String, String>,
+    lease: cf_protocol::builder::CveScanLease,
+    result_digest_sha256: &str,
+    closure_provenance: &str,
+    diagnostics: &[crate::queries::cve_scan_diagnostics::PreparedScanDiagnostic],
+) -> Result<()> {
+    save_scan_results_for_owner(
+        pool,
+        scan_id,
+        vulnix_results,
+        scan_duration_ms,
+        None,
+        Some(store_paths),
+        Some(lease.execution_id),
+        Some(result_digest_sha256),
+        Some(lease),
+        Some(closure_provenance),
+        Some(diagnostics),
     )
     .await
 }
@@ -834,7 +1034,12 @@ async fn save_scan_results_for_owner(
     vulnix_results: &VulnixScanOutput,
     scan_duration_ms: Option<i32>,
     store_path_override: Option<&str>,
+    store_paths: Option<&std::collections::HashMap<String, String>>,
     execution_id: Option<Uuid>,
+    result_digest_sha256: Option<&str>,
+    remote_lease: Option<cf_protocol::builder::CveScanLease>,
+    closure_provenance: Option<&str>,
+    diagnostics: Option<&[crate::queries::cve_scan_diagnostics::PreparedScanDiagnostic]>,
 ) -> Result<()> {
     // Calculate statistics from vulnix results
     let stats = VulnixParser::calculate_stats(vulnix_results);
@@ -842,37 +1047,53 @@ async fn save_scan_results_for_owner(
     // --- Step 1: resolve all store paths outside the transaction ---
     // `nix-store --query --outputs` can be slow; holding a connection
     // while iterating them starves latency-sensitive API requests.
-    let mut resolved: Vec<(&crate::vulnix::vulnix_parser::VulnixEntry, String)> =
+    let mut resolved: Vec<(&crate::vulnix::vulnix_parser::VulnixEntry, String, String)> =
         Vec::with_capacity(vulnix_results.len());
     for entry in vulnix_results {
-        let store_path = match store_path_override {
-            Some(path) => path.to_string(),
-            None => get_store_path_from_drv(&entry.derivation).await?,
+        let canonical_pname = canonical_cve_package_name(&entry.pname)?;
+        if entry.name.trim().is_empty() {
+            anyhow::bail!("vulnix returned an empty full package name");
+        }
+        if entry.derivation.trim().is_empty() {
+            anyhow::bail!("vulnix returned an empty package derivation path");
+        }
+        let store_path = if let Some(paths) = store_paths {
+            paths
+                .get(&entry.derivation)
+                .cloned()
+                .with_context(|| format!("missing validated output for {}", entry.derivation))?
+        } else if let Some(path) = store_path_override {
+            path.to_string()
+        } else {
+            get_store_path_from_drv(&entry.derivation).await?
         };
         debug!(
             "CVE Scan Entry - name: '{}', pname: {:?}, version: {:?}, derivation: '{}', affected_by: {:?}",
             entry.name, entry.pname, entry.version, entry.derivation, entry.affected_by
         );
-        resolved.push((entry, store_path));
+        resolved.push((entry, store_path, canonical_pname));
     }
 
     // --- Step 2: build in-memory deduplicated arrays for bulk SQL ---
 
     // Package derivation arrays (one row per vulnix entry)
-    let pkg_names: Vec<&str> = resolved.iter().map(|(e, _)| e.name.as_str()).collect();
+    let pkg_names: Vec<&str> = resolved.iter().map(|(e, _, _)| e.name.as_str()).collect();
     let pkg_drv_paths: Vec<&str> = resolved
         .iter()
-        .map(|(e, _)| e.derivation.as_str())
+        .map(|(e, _, _)| e.derivation.as_str())
         .collect();
     let pkg_pnames: Vec<Option<&str>> = resolved
         .iter()
-        .map(|(e, _)| Some(e.pname.as_str()))
+        .map(|(_, _, pname)| Some(pname.as_str()))
         .collect();
     let pkg_versions: Vec<String> = resolved
         .iter()
-        .map(|(e, _)| truncate_for_varchar(&e.version, 100))
+        .map(|(e, _, _)| truncate_for_varchar(&e.version, 100))
         .collect();
-    let pkg_store_paths: Vec<&str> = resolved.iter().map(|(_, sp)| sp.as_str()).collect();
+    let pkg_store_paths: Vec<&str> = resolved
+        .iter()
+        .map(|(_, store_path, _)| store_path.as_str())
+        .collect();
 
     // Collect all (cve_id, cvss_score, is_whitelisted, whitelist_reason) tuples
     // deduplicated by cve_id — whitelisted status from any entry wins.
@@ -895,11 +1116,25 @@ async fn save_scan_results_for_owner(
     }
     let mut pkg_vulns: Vec<PkgVuln> = Vec::new();
 
-    for (entry, _) in &resolved {
-        for cve_id in &entry.affected_by {
+    #[derive(Debug)]
+    struct ScanObservation {
+        canonical_cve_id: String,
+        canonical_package_name: String,
+        observed_package_name: String,
+        observed_package_version: String,
+        observed_derivation_path: String,
+        is_affected: bool,
+        is_whitelisted: bool,
+        whitelist_reason: Option<String>,
+    }
+    let mut observations: HashMap<(String, String), ScanObservation> = HashMap::new();
+
+    for (entry, _, canonical_pname) in &resolved {
+        for raw_cve_id in &entry.affected_by {
+            let cve_id = canonical_cve_id(raw_cve_id)?;
             let cvss = entry
                 .cvssv3_basescore
-                .get(cve_id)
+                .get(raw_cve_id)
                 .copied()
                 .and_then(BigDecimal::from_f32);
             cve_map
@@ -920,11 +1155,38 @@ async fn save_scan_results_for_owner(
                 is_whitelisted: false,
                 whitelist_reason: None,
             });
+            let key = (entry.derivation.clone(), cve_id.clone());
+            if let Some(existing) = observations.get(&key) {
+                if existing.canonical_package_name != *canonical_pname
+                    || existing.observed_package_name != entry.name
+                    || existing.observed_package_version != entry.version
+                {
+                    anyhow::bail!(
+                        "vulnix returned conflicting package identity for derivation {:?}",
+                        entry.derivation
+                    );
+                }
+            } else {
+                observations.insert(
+                    key,
+                    ScanObservation {
+                        canonical_cve_id: cve_id,
+                        canonical_package_name: canonical_pname.clone(),
+                        observed_package_name: entry.name.clone(),
+                        observed_package_version: entry.version.clone(),
+                        observed_derivation_path: entry.derivation.clone(),
+                        is_affected: true,
+                        is_whitelisted: false,
+                        whitelist_reason: None,
+                    },
+                );
+            }
         }
-        for cve_id in &entry.whitelisted {
+        for raw_cve_id in &entry.whitelisted {
+            let cve_id = canonical_cve_id(raw_cve_id)?;
             let cvss = entry
                 .cvssv3_basescore
-                .get(cve_id)
+                .get(raw_cve_id)
                 .copied()
                 .and_then(BigDecimal::from_f32);
             cve_map
@@ -948,6 +1210,34 @@ async fn save_scan_results_for_owner(
                 is_whitelisted: true,
                 whitelist_reason: Some("vulnix whitelist".to_string()),
             });
+            let key = (entry.derivation.clone(), cve_id.clone());
+            if let Some(existing) = observations.get_mut(&key) {
+                if existing.canonical_package_name != *canonical_pname
+                    || existing.observed_package_name != entry.name
+                    || existing.observed_package_version != entry.version
+                {
+                    anyhow::bail!(
+                        "vulnix returned conflicting package identity for derivation {:?}",
+                        entry.derivation
+                    );
+                }
+                existing.is_whitelisted = true;
+                existing.whitelist_reason = Some("vulnix whitelist".to_string());
+            } else {
+                observations.insert(
+                    key,
+                    ScanObservation {
+                        canonical_cve_id: cve_id,
+                        canonical_package_name: canonical_pname.clone(),
+                        observed_package_name: entry.name.clone(),
+                        observed_package_version: entry.version.clone(),
+                        observed_derivation_path: entry.derivation.clone(),
+                        is_affected: false,
+                        is_whitelisted: true,
+                        whitelist_reason: Some("vulnix whitelist".to_string()),
+                    },
+                );
+            }
         }
     }
 
@@ -982,6 +1272,8 @@ async fn save_scan_results_for_owner(
         })
         .map(|(id, _)| id.clone())
         .collect();
+    let mut canonical_cve_ids = cve_map.keys().cloned().collect::<Vec<_>>();
+    canonical_cve_ids.sort();
 
     // Resolve the derivation without locking the scan row. Every CVE writer
     // must acquire the POA&M/composite lock before it mutates `cve_scans`.
@@ -997,46 +1289,11 @@ async fn save_scan_results_for_owner(
     crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
         &mut tx,
         derivation_id,
+        &canonical_cve_ids,
     )
     .await?;
 
-    // 3a. Mark scan complete
-    let completion = sqlx::query(
-        r#"
-        UPDATE cve_scans
-        SET
-            status = 'completed',
-            completed_at = NOW(),
-            total_packages = $2,
-            total_vulnerabilities = $3,
-            critical_count = $4,
-            high_count = $5,
-            medium_count = $6,
-            low_count = $7,
-            scan_duration_ms = $8
-        WHERE id = $1
-          AND status = 'in_progress'
-          AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_revoked_at')
-          AND (
-              ($9::uuid IS NULL AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_id'))
-              OR scan_metadata ->> 'execution_id' = $9::uuid::text
-          )
-        "#,
-    )
-    .bind(scan_id)
-    .bind(stats.total_packages as i32)
-    .bind(stats.total_vulnerabilities as i32)
-    .bind(stats.critical_count as i32)
-    .bind(stats.high_count as i32)
-    .bind(stats.medium_count as i32)
-    .bind(stats.low_count as i32)
-    .bind(scan_duration_ms)
-    .bind(execution_id)
-    .execute(&mut *tx)
-    .await?;
-    require_owned_transition(completion.rows_affected(), scan_id, "persist results")?;
-
-    // 3b. Bulk-insert new package derivations without rewriting unchanged rows.
+    // 3a. Bulk-insert new package derivations without rewriting unchanged rows.
     // Uses sqlx::query (not sqlx::query!) because UNNEST with multi-column SELECT
     // cannot be represented in the offline SQLx metadata cache.
     sqlx::query(
@@ -1085,7 +1342,7 @@ async fn save_scan_results_for_owner(
     // Fetch IDs for both newly inserted and pre-existing packages in one query.
     let pkg_rows = sqlx::query(
         r#"
-        SELECT id, derivation_name
+        SELECT id, derivation_name, derivation_path
         FROM derivations
         WHERE commit_id IS NULL
           AND derivation_type = 'package'
@@ -1096,16 +1353,18 @@ async fn save_scan_results_for_owner(
     .fetch_all(&mut *tx)
     .await?;
 
-    let mut name_to_id: HashMap<String, i32> = HashMap::with_capacity(pkg_rows.len());
+    let mut name_to_package: HashMap<String, (i32, Option<String>)> =
+        HashMap::with_capacity(pkg_rows.len());
     let mut pkg_drv_ids: Vec<i32> = Vec::with_capacity(pkg_rows.len());
     for row in pkg_rows {
         let id: i32 = row.get("id");
         let name: String = row.get("derivation_name");
-        name_to_id.insert(name, id);
+        let derivation_path: Option<String> = row.get("derivation_path");
+        name_to_package.insert(name, (id, derivation_path));
         pkg_drv_ids.push(id);
     }
 
-    // 3c. Bulk-insert scan_packages (ignore duplicates).
+    // 3b. Bulk-insert scan_packages (ignore duplicates).
     sqlx::query(
         r#"
         INSERT INTO scan_packages (scan_id, derivation_id, is_runtime_dependency, dependency_depth)
@@ -1119,7 +1378,7 @@ async fn save_scan_results_for_owner(
     .execute(&mut *tx)
     .await?;
 
-    // 3d. Bulk-upsert CVEs (skip unchanged rows with WHERE clause).
+    // 3c. Bulk-upsert CVEs (skip unchanged rows with WHERE clause).
     if !cve_map.is_empty() {
         let cve_ids: Vec<String> = cve_map.keys().cloned().collect();
         let cve_scores: Vec<Option<BigDecimal>> =
@@ -1141,6 +1400,80 @@ async fn save_scan_results_for_owner(
         .await?;
     }
 
+    // 3d. Append exact scan-scoped occurrences while the parent is active and
+    // unsealed. Completion below locks the same scan row and seals this set.
+    if !observations.is_empty() {
+        let mut observation_cve_ids = Vec::with_capacity(observations.len());
+        let mut observation_pnames = Vec::with_capacity(observations.len());
+        let mut observation_names = Vec::with_capacity(observations.len());
+        let mut observation_versions = Vec::with_capacity(observations.len());
+        let mut observation_drv_paths = Vec::with_capacity(observations.len());
+        let mut observation_affected = Vec::with_capacity(observations.len());
+        let mut observation_whitelisted = Vec::with_capacity(observations.len());
+        let mut observation_reasons = Vec::with_capacity(observations.len());
+
+        for observation in observations.values() {
+            observation_cve_ids.push(observation.canonical_cve_id.clone());
+            observation_pnames.push(observation.canonical_package_name.clone());
+            observation_names.push(observation.observed_package_name.clone());
+            observation_versions.push(observation.observed_package_version.clone());
+            observation_drv_paths.push(observation.observed_derivation_path.clone());
+            observation_affected.push(observation.is_affected);
+            observation_whitelisted.push(observation.is_whitelisted);
+            observation_reasons.push(observation.whitelist_reason.clone());
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO cve_scan_vulnerability_observations (
+                scan_id,
+                canonical_cve_id,
+                canonical_package_name,
+                observed_package_name,
+                observed_package_version,
+                observed_derivation_path,
+                is_affected,
+                is_whitelisted,
+                whitelist_reason,
+                detection_method
+            )
+            SELECT $1, cve_id, pname, package_name,
+                   package_version, derivation_path, is_affected, is_whitelisted,
+                   whitelist_reason, 'vulnix'
+            FROM UNNEST(
+                $2::text[],
+                $3::text[],
+                $4::text[],
+                $5::text[],
+                $6::text[],
+                $7::bool[],
+                $8::bool[],
+                $9::text[]
+            ) AS observation(
+                cve_id,
+                pname,
+                package_name,
+                package_version,
+                derivation_path,
+                is_affected,
+                is_whitelisted,
+                whitelist_reason
+            )
+            "#,
+        )
+        .bind(scan_id)
+        .bind(&observation_cve_ids)
+        .bind(&observation_pnames)
+        .bind(&observation_names)
+        .bind(&observation_versions)
+        .bind(&observation_drv_paths)
+        .bind(&observation_affected)
+        .bind(&observation_whitelisted)
+        .bind(&observation_reasons)
+        .execute(&mut *tx)
+        .await?;
+    }
+
     // 3e. Bulk-upsert package_vulnerabilities.
     if !pkg_vulns.is_empty() {
         let mut pv_drv_ids: Vec<i32> = Vec::with_capacity(pkg_vulns.len());
@@ -1149,8 +1482,8 @@ async fn save_scan_results_for_owner(
         let mut pv_reasons: Vec<Option<String>> = Vec::with_capacity(pkg_vulns.len());
 
         for pv in &pkg_vulns {
-            if let Some(&drv_id) = name_to_id.get(&pv.pkg_name) {
-                pv_drv_ids.push(drv_id);
+            if let Some((drv_id, _)) = name_to_package.get(&pv.pkg_name) {
+                pv_drv_ids.push(*drv_id);
                 pv_cve_ids.push(pv.cve_id.clone());
                 pv_whitelisted.push(pv.is_whitelisted);
                 pv_reasons.push(pv.whitelist_reason.clone());
@@ -1188,6 +1521,85 @@ async fn save_scan_results_for_owner(
             .await?;
         }
     }
+
+    if let (Some(diagnostics), Some(execution_id)) = (diagnostics, execution_id) {
+        if let Some(lease) = remote_lease {
+            crate::queries::cve_scan_diagnostics::append_remote_diagnostics_tx(
+                &mut tx,
+                lease,
+                diagnostics,
+            )
+            .await?;
+        } else {
+            crate::queries::cve_scan_diagnostics::append_local_diagnostics_tx(
+                &mut tx,
+                scan_id,
+                execution_id,
+                diagnostics,
+            )
+            .await?;
+        }
+    }
+
+    // 3f. Seal all output with the ownership CAS. A stale or revoked owner has
+    // performed no externally visible work because this error rolls back every
+    // preceding write in the transaction.
+    let completion = sqlx::query(
+        r#"
+        UPDATE cve_scans
+        SET
+            status = 'completed',
+            completed_at = NOW(),
+            total_packages = $2,
+            total_vulnerabilities = $3,
+            critical_count = $4,
+            high_count = $5,
+            medium_count = $6,
+            low_count = $7,
+            scan_duration_ms = $8,
+            evidence_schema_version = 1,
+            result_digest_sha256 = COALESCE($10, result_digest_sha256),
+            closure_provenance = COALESCE($13, closure_provenance),
+            execution_outcome = CASE WHEN $10::text IS NULL THEN execution_outcome ELSE 'completed' END
+        WHERE id = $1
+          AND status = 'in_progress'
+          AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_revoked_at')
+          AND (
+              ($9::uuid IS NULL AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_id'))
+              OR scan_metadata ->> 'execution_id' = $9::uuid::text
+              OR (execution_id = $9::uuid
+                  AND $10::text IS NOT NULL
+                  AND lease_builder_id = $11::uuid
+                  AND lease_builder_session_id = $12::uuid
+                  AND lease_expires_at > NOW()
+                  AND EXISTS (
+                      SELECT 1 FROM builders
+                      WHERE builders.id = lease_builder_id
+                        AND builders.current_session_id = lease_builder_session_id
+                        AND builders.enabled AND builders.registered
+                        AND builders.status = 'active'
+                        AND builders.cve_scanning_enabled
+                        AND builders.cve_scan_schema_version = 1
+                  ))
+          )
+        "#,
+    )
+    .bind(scan_id)
+    .bind(stats.total_packages as i32)
+    .bind(stats.total_vulnerabilities as i32)
+    .bind(stats.critical_count as i32)
+    .bind(stats.high_count as i32)
+    .bind(stats.medium_count as i32)
+    .bind(stats.low_count as i32)
+    .bind(scan_duration_ms)
+    .bind(execution_id)
+    .bind(result_digest_sha256)
+    .bind(remote_lease.map(|lease| lease.builder_id))
+    .bind(remote_lease.map(|lease| lease.builder_session_id))
+    .bind(closure_provenance)
+    .execute(&mut *tx)
+    .await?;
+    require_owned_transition(completion.rows_affected(), scan_id, "persist results")?;
 
     // Reconcile CVE attention for every critical CVE found in this scan,
     // AND any currently-open CVE that may have become stale due to this
@@ -1390,6 +1802,120 @@ pub async fn get_active_scan_for_derivation(
     .await?;
 
     Ok(row.map(|r| r.get::<Uuid, _>("id")))
+}
+
+/// Enqueues a manual scan for one exact NixOS derivation.
+///
+/// The function inserts a `pending` row for the existing worker to claim. It
+/// does not execute vulnix, schedule a build, or change deployment state. The
+/// active-scan unique index makes retries idempotent: a retry returns the scan
+/// ID that already owns the derivation's pending or in-progress slot.
+///
+/// # Returns
+///
+/// Returns `None` when `derivation_id` does not identify a built NixOS
+/// derivation. Otherwise, returns the new or reused durable scan identity.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot validate or enqueue the target.
+pub async fn enqueue_exact_cve_scan(
+    pool: &PgPool,
+    derivation_id: i32,
+    scanner_name: &str,
+    scanner_version: Option<String>,
+) -> Result<Option<EnqueueCveScanOutcome>> {
+    let mut tx = pool.begin().await?;
+    // CONCURRENCY: Use the established CVE writer lock before reading active
+    // state. Claim and terminal transitions take the same lock, so the active
+    // identity cannot disappear before this transaction returns it.
+    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+        &mut tx,
+        derivation_id,
+        &[],
+    )
+    .await?;
+
+    let eligible = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM derivations
+            WHERE id = $1
+              AND derivation_type = 'nixos'
+              AND store_path IS NOT NULL
+              AND BTRIM(store_path) <> ''
+        )
+        "#,
+    )
+    .bind(derivation_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !eligible {
+        tx.commit().await?;
+        return Ok(None);
+    }
+
+    let scan_id = Uuid::new_v4();
+    let inserted = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        INSERT INTO cve_scans (
+            id, derivation_id, scanner_name, scanner_version,
+            status, total_packages, total_vulnerabilities,
+            critical_count, high_count, medium_count, low_count,
+            attempts, source_trigger
+        ) VALUES (
+            $1, $2, $3, $4,
+            'pending', 0, 0,
+            0, 0, 0, 0,
+            0, 'manual'
+        )
+        ON CONFLICT (derivation_id) WHERE status IN ('pending', 'in_progress')
+        DO NOTHING
+        RETURNING id
+        "#,
+    )
+    .bind(scan_id)
+    .bind(derivation_id)
+    .bind(scanner_name)
+    .bind(scanner_version)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if let Some(scan_id) = inserted {
+        tx.commit().await?;
+        return Ok(Some(EnqueueCveScanOutcome {
+            scan_id,
+            derivation_id,
+            created: true,
+        }));
+    }
+
+    // A fleet insert does not take the writer lock, so the unique index can
+    // still win this race. Its worker cannot claim or complete the row while
+    // this transaction holds the lock.
+    let existing = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT id
+        FROM cve_scans
+        WHERE derivation_id = $1
+          AND status IN ('pending', 'in_progress')
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(derivation_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| {
+        anyhow::anyhow!("active CVE scan conflict disappeared for derivation {derivation_id}")
+    })?;
+    tx.commit().await?;
+    Ok(Some(EnqueueCveScanOutcome {
+        scan_id: existing,
+        derivation_id,
+        created: false,
+    }))
 }
 
 /// Resolves the preferred CVE scan target for one flake configuration.
@@ -1631,13 +2157,13 @@ pub async fn enqueue_fleet_cve_scans(
                 id, derivation_id, scanner_name, scanner_version,
                 status, total_packages, total_vulnerabilities,
                 critical_count, high_count, medium_count, low_count,
-                attempts
+                attempts, source_trigger
             )
             SELECT
                 gen_random_uuid(), t.derivation_id, $1, $2,
                 'pending', 0, 0,
                 0, 0, 0, 0,
-                0
+                0, 'fleet'
             FROM targets t
             ON CONFLICT (derivation_id) WHERE status IN ('pending', 'in_progress')
             DO NOTHING
@@ -1877,6 +2403,8 @@ pub async fn claim_queued_cve_scans(
         SELECT id, derivation_id
         FROM cve_scans
         WHERE status = 'pending'
+          AND (source_trigger <> 'post_build'
+               OR created_at < NOW() - INTERVAL '60 seconds')
         ORDER BY created_at ASC, id ASC
         LIMIT $1
         "#,
@@ -1899,6 +2427,7 @@ pub async fn claim_queued_cve_scans(
         crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
             &mut tx,
             derivation_id,
+            &[],
         )
         .await?;
 
@@ -2010,6 +2539,7 @@ pub async fn acknowledge_revoked_cve_scan_execution(
     crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
         &mut tx,
         derivation_id,
+        &[],
     )
     .await?;
     let result = sqlx::query(
@@ -2017,7 +2547,6 @@ pub async fn acknowledge_revoked_cve_scan_execution(
         UPDATE cve_scans
         SET status = 'failed',
             completed_at = NOW(),
-            attempts = attempts + 1,
             scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
                 || jsonb_build_object(
                     'stale_recovered_at', NOW(),
@@ -2199,6 +2728,7 @@ async fn recover_stale_scans_with_options(
         SELECT id, scan_metadata ->> 'execution_id' AS execution_id
         FROM cve_scans
         WHERE status = 'in_progress'
+          AND execution_id IS NULL
           AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_revoked_at')
           AND COALESCE(
                   (scan_metadata ->> 'execution_heartbeat_at')::timestamptz,
@@ -2299,6 +2829,7 @@ async fn recover_stale_scans_with_options(
         SELECT id, derivation_id, scan_metadata ->> 'execution_id' AS execution_id
         FROM cve_scans
         WHERE status = 'in_progress'
+          AND execution_id IS NULL
           AND (
               (
                   NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_id')
@@ -2357,6 +2888,7 @@ async fn recover_stale_scans_with_options(
         crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
             &mut tx,
             derivation_id,
+            &[],
         )
         .await?;
 
@@ -2368,7 +2900,6 @@ async fn recover_stale_scans_with_options(
             UPDATE cve_scans
             SET status = 'failed',
                 completed_at = NOW(),
-                attempts = attempts + 1,
                 scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
                     || jsonb_build_object(
                         'stale_recovered_at', NOW(),
@@ -2640,6 +3171,36 @@ mod tests {
     use crate::queries::flakes::insert_flake;
     use futures::FutureExt;
     use serial_test::serial;
+
+    #[test]
+    fn exact_cve_identity_is_trimmed_and_ascii_uppercase() {
+        assert_eq!(
+            canonical_cve_id("  cve-2026-0042  ").expect("valid CVE should canonicalize"),
+            "CVE-2026-0042"
+        );
+        assert_eq!(
+            canonical_cve_package_name("  openssl  ").expect("non-empty pname should canonicalize"),
+            "openssl"
+        );
+    }
+
+    #[test]
+    fn exact_cve_identity_rejects_ambiguous_values() {
+        for invalid in [
+            "",
+            "CVE-26-0042",
+            "CVE-2026-42",
+            "CVE-2026-0042-extra",
+            "CVE-2026-ABCD",
+            "CVE-2026-123456789012",
+        ] {
+            assert!(
+                canonical_cve_id(invalid).is_err(),
+                "{invalid:?} must not become exact evidence"
+            );
+        }
+        assert!(canonical_cve_package_name(" \t ").is_err());
+    }
 
     struct FleetFixture {
         flake_id: i32,
@@ -3059,6 +3620,75 @@ mod tests {
             .expect("unrelated derivation should be deleted");
         already_active.cleanup(&pool).await;
         available.cleanup(&pool).await;
+    }
+
+    /// Exact enqueue and terminal completion serialize on the derivation writer
+    /// lock and therefore produce a linearizable existing-or-created result.
+    #[tokio::test]
+    async fn exact_enqueue_serializes_with_concurrent_completion() {
+        let Ok(database_url) = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("dedicated CVE test database should be reachable");
+        let (derivation_id, _) = setup_test_derivation(&pool).await;
+        let scan_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO cve_scans (
+                id, derivation_id, scanner_name, status, attempts, source_trigger
+            ) VALUES ($1, $2, 'vulnix', 'in_progress', 1, 'manual')
+            "#,
+        )
+        .bind(scan_id)
+        .bind(derivation_id)
+        .execute(&pool)
+        .await
+        .expect("active scan should be inserted");
+
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let enqueue_pool = pool.clone();
+        let enqueue_barrier = barrier.clone();
+        let enqueue = async move {
+            enqueue_barrier.wait().await;
+            enqueue_exact_cve_scan(&enqueue_pool, derivation_id, "vulnix", None).await
+        };
+        let completion_pool = pool.clone();
+        let completion = async move {
+            barrier.wait().await;
+            complete_cve_scan(&completion_pool, scan_id, 0, 0, 0, 0, 0, 0, Some(1), None).await
+        };
+
+        let (enqueue_result, completion_result) = tokio::join!(enqueue, completion);
+        completion_result.expect("concurrent completion should succeed");
+        let outcome = enqueue_result
+            .expect("concurrent exact enqueue must not report a vanished conflict")
+            .expect("built derivation should remain eligible");
+        if outcome.created {
+            assert_ne!(outcome.scan_id, scan_id);
+        } else {
+            assert_eq!(outcome.scan_id, scan_id);
+        }
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM cve_scans WHERE derivation_id = $1 AND status IN ('pending', 'in_progress')",
+        )
+        .bind(derivation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("active scan count should load");
+        assert!(active_count <= 1, "at most one active scan may remain");
+
+        sqlx::query("DELETE FROM cve_scans WHERE derivation_id = $1")
+            .bind(derivation_id)
+            .execute(&pool)
+            .await
+            .expect("scan fixtures should be deleted");
+        sqlx::query("DELETE FROM derivations WHERE id = $1")
+            .bind(derivation_id)
+            .execute(&pool)
+            .await
+            .expect("derivation fixture should be deleted");
     }
 
     /// Two server processes racing to drain the same queue must not both own
@@ -3960,6 +4590,16 @@ mod tests {
         );
 
         let wrong_execution_id = Uuid::new_v4();
+        let stale_diagnostics = vec![
+            crate::queries::cve_scan_diagnostics::PreparedScanDiagnostic {
+                occurred_at: Utc::now(),
+                level: "error".to_string(),
+                source: "server".to_string(),
+                event_type: "attempt_failed".to_string(),
+                message: "stale owner diagnostic".to_string(),
+                truncated: false,
+            },
+        ];
         assert!(
             !heartbeat_cve_scan_execution(&pool, scan_id, wrong_execution_id)
                 .await
@@ -3990,6 +4630,7 @@ mod tests {
                 &derivation,
                 "wrong owner",
                 Some(wrong_execution_id),
+                Some(&stale_diagnostics),
             )
             .await
             .is_err(),
@@ -4108,7 +4749,12 @@ mod tests {
                 &entries,
                 Some(1),
                 Some(&format!("/nix/store/{suffix}-{package_name}")),
+                None,
                 Some(claim.execution_id),
+                None,
+                None,
+                None,
+                Some(&stale_diagnostics),
             )
             .await
             .is_err(),
@@ -4121,6 +4767,7 @@ mod tests {
                 &derivation,
                 "obsolete owner",
                 Some(claim.execution_id),
+                Some(&stale_diagnostics),
             )
             .await
             .is_err(),
@@ -4157,8 +4804,19 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("CVE side effects should be countable");
+        let diagnostic_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM cve_scan_diagnostic_events WHERE scan_id = $1",
+        )
+        .bind(scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("diagnostic side effects should be countable");
         assert_eq!(package_count, 0, "lost-owner package writes must roll back");
         assert_eq!(cve_count, 0, "lost-owner CVE writes must roll back");
+        assert_eq!(
+            diagnostic_count, 0,
+            "lost-owner diagnostic writes must roll back"
+        );
 
         sqlx::query("DELETE FROM cve_scans WHERE id = $1")
             .bind(scan_id)
