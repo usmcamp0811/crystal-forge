@@ -1,11 +1,11 @@
 ---
 id: TASK-326.2
 title: Bring Scanning and per-system CVE triage to updated design parity
-status: Review
+status: In Progress
 assignee:
-  - Matt Camp
+  - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-20 22:30'
+updated_date: '2026-09-20 22:46'
 labels:
   - scanning
   - web-ui
@@ -111,56 +111,26 @@ Replace separate Justify + Create POA&M with one CveTriageModal (extracted from 
 - [x] #3 Filters: text search, status, revision/freshness, latest-per-flake; sortable deterministic columns; visible result count; resettable empty state
 - [x] #4 Detail tray: real status, trigger, scanner identity, findings, failure context, bounded log (no fake progress); log has search/download; running state shows elapsed time
 - [x] #5 Failed stat card actionable (count > 0): click jumps to Completed tab, opens log; stale/failed rows show Check now/Retry/Build with exact deep links
-- [x] #6 Selection guards: Active limits to scanning/queued (cancellation); Completed allows all (archive/restore); BySystem no selection
-- [x] #7 Archive/restore on Completed: rows hidden not deleted, archived visually distinct, filtered counts honest, retention-caused empty states labeled
-- [x] #8 System Detail CVE: unified triage modal (extracted from fleet view), environment-scoped, with Triage column and row action; no separate Justify/Create buttons
-- [x] #9 Triage modal: outstanding/accepted/scheduled per environment; accepted needs justification; scheduled creates/reuses POA&M with owner/due/plan/milestones; typed assignee
-- [x] #10 Authority: exact current evidence supports triage, legacy not promoted, missing/no-scan explicit, accepted/scheduled do NOT false-claim remediation/verification
-- [x] #11 Browser assertions: Active/Completed switching, wait state rendering, failure actionability, archive/restore selection, log content, triage disposition, POA&M reuse, responsive/narrow/dark behavior
-- [x] #12 Playwright: Active/Completed filtering, wait/failed transitions, log drawer, triage modal outstanding→accepted→scheduled, POA&M reuse, responsive tests; desktop/narrow/light/dark screenshots
+- [x] #6 Archive/restore on Completed: rows hidden not deleted, archived visually distinct, filtered counts honest, retention-caused empty states labeled
+- [x] #7 System Detail CVE: unified triage modal (extracted from fleet view), environment-scoped, with Triage column and row action; no separate Justify/Create buttons
+- [x] #8 Triage modal: outstanding/accepted/scheduled per environment; accepted needs justification; scheduled creates/reuses POA&M with owner/due/plan/milestones; typed assignee
+- [x] #9 Authority: exact current evidence supports triage, legacy not promoted, missing/no-scan explicit, accepted/scheduled do NOT false-claim remediation/verification
+- [x] #10 Browser assertions: Active/Completed switching, wait state rendering, failure actionability, archive/restore selection, log content, triage disposition, POA&M reuse, responsive/narrow/dark behavior
+- [x] #11 Playwright: Active/Completed filtering, wait/failed transitions, log drawer, triage modal outstanding→accepted→scheduled, POA&M reuse, responsive tests; desktop/narrow/light/dark screenshots
+- [ ] #12 Selection guards: Active rows are not bulk-selectable while no server-owned execution-safe cancellation contract exists; Completed rows are selectable for archive/restore; BySystem has no bulk selection; scan cancellation remains deferred.
 <!-- AC:END -->
 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Finalize the in-progress Scanning slice: review the authoritative lifecycle/query contract, correct deterministic ordering and refresh/accessibility defects, add focused unit/query coverage, then rerun targeted server and Web UI checks and commit the slice.
-2. Extract a shared CVE triage modal and typed state from the fleet CVE implementation. Reuse the existing TASK-440 evidence, locking, justification, and POA&M contracts instead of duplicating domain policy in the view.
-3. Replace System Detail's separate Justify and Create POA&M actions with one environment-scoped triage action and Triage column. Represent outstanding, accepted, and scheduled independently for each environment; keep missing, no-scan, and legacy evidence explicit and never imply remediation or verification from disposition alone.
-4. Wire accepted validation and scheduled POA&M create/reuse fields, including typed assignee, owner, due date, plan, and optional milestones, to the system-context triage API committed in `0913ea87`.
-5. Update only the focused authoritative browser workflows `16c-scanning-view`, `12h-system-detail-cves-grouped-justification`, `12ha-system-detail-cve-inventory-fallbacks`, and `16-cves`. Cover wait/failed transitions, filtering, archive/restore, exact logs, triage transitions, POA&M reuse, responsive layouts, and light/dark screenshots.
-6. Run proportional formatting, Rust tests/checks, SQLx/server checks, Web UI package build, and the single focused NixOS browser check. Inspect the final diff for documentation and scope, then commit, push, open an MR against `dev`, record evidence, and move the task to Review.
-
-Constraints: safe cancellation is not implemented by the backend, so the UI MUST NOT expose a fake cancellation control. The user's host-preview waiver remains in force because TASK-440 owns the fixed ports; do not touch that worktree or its processes. Do not implement TASK-348.2 or run an unrestricted Web UI mega-check.
-
-Focused MR follow-up: implement design commit `35519546` for System Detail CVE triage with default host scope and optional server-derived environment scope. Add append-only host disposition history, host-over-environment effective precedence, scope-safe System Detail DTOs, exact-subject POA&M behavior, inherited row chips, truthful fixed-version wording, focused PostgreSQL/frontend/browser regressions, then push the existing MR and return the task to Review.
-
-Focused backend follow-up: add migration 0270 with append-only host disposition history and active identity uniqueness; extend the System Detail API with a server-derived host/environment scope enum and explicit direct/inherited/effective state; split host and environment mutations while preserving canonical CVE -> system sentinel -> policy -> exact finding lock order, exact evidence, compatible POA&M reuse, and typed conflicts; make close/reopen restore scheduled dispositions in their recorded original scope; update focused PostgreSQL regressions and run scoped rustfmt, database tests, SQLX_OFFLINE server check, and git diff --check. Only cf-server backend files and genuinely changed SQLx metadata are in scope.
-
-Focused frontend follow-up: mirror the host/environment System Detail triage DTO contract in `poam_api.rs`; make `CveTriageDraft` hydrate one selected scope and regenerate complete scope-specific defaults on every switch while preserving fleet request serialization; update the System Detail dialog and row state presentation for host precedence, inherited environment state, truthful fix wording, and existing accessibility/concurrency gates; add focused Rust regressions and run touched-file rustfmt, focused Web UI tests, WASM check when practical, and `git diff --check`.
-
-Backend acceptance corrections: derive environment POA&M subject sets and coherence from exact hosts without active host overrides; make host ACCEPTED retire inherited environment ownership for only the selected exact link; make host OPEN restore that link only when the inherited environment POA&M remains coherent for all other inherited subjects; preserve typed conflicts for incompatible active owners. Narrow migration 0270's detached-host exception to one historical exact subject and no environment-disposition history. Add active-link ownership and migration-invariant regressions, then rerun serial poam_workflows, touched-file rustfmt, offline cargo check, and diff hygiene.
-
-Review follow-up at `7c4c27d3`: add a private filesystem-identity helper in both agent and legacy server collectors. Preserve canonical root equality. For different resolved roots, require all stable NixOS sentinels (`init`, `system`, and `bin/switch-to-configuration`) to resolve to identical targets; unresolved roots return unknown and names alone never establish identity. Add isolated filesystem tests including the production-shaped `system-3079-link` wrapper.
-
-Extend the existing PostgreSQL inventory regression to prove the strict authority sequence Exact -> RetainedGenerationUnavailable -> CurrentStoreMismatch while keeping the latest-state-first query unchanged. Treat the newly discovered migration-0259 stale-state defect as a separate schema/security scope decision; do not silently add a migration in this follow-up.
-
-Replace only user-visible CVE fallback terminology with Historical wording. Preserve backend wire variants, `legacy_*` fields, test fixture identifiers, and read-only authority behavior. Update focused browser/static text assertions, then run focused Rust/UI/static checks before deciding whether one final authoritative browser run is required.
-
-Scanning workflow parity repair from current pushed head `19352160`: centralize `on_build` scan-intent creation in one transaction-local query helper. Every production build-job insertion path calls it only for rows actually inserted. The helper gates on persisted `on_build`, accepts only NixOS derivations, inserts immutable `post_build` provenance in `awaiting_build`, and uses the existing active partial uniqueness constraint with conflict-do-nothing so manual/fleet provenance wins.
-
-Adjust successful build completion to advance an existing `awaiting_build/post_build` intent through the existing prerequisite rules without creating another state machine. Keep build failure as a truthful waiting prerequisite so Vulnix is never blamed or claimed; retries and restarts reuse the durable active row. Preserve remote closure gating and add prompt calls to the authoritative bounded promotion helper where completion/publication events already have a safe post-commit hook.
-
-Reshape the production Scanning drawer around configuration identity, a concise real lifecycle strip, typed wait/failure callouts, and accessible Log/Details tabs. Keep bounded persisted diagnostics, redaction, search/navigation/highlighting/export, stale-request fencing, and all advanced metadata. Render diagnostics as terminal-style lines. Add only real retry and exact build navigation actions backed by server-issued identity.
-
-Expand focused PostgreSQL coverage across enabled/disabled policy, idempotent and concurrent insertion, local/remote promotion, non-claimable waits, build failure/retry/restart persistence, existing manual/fleet provenance, and completed-evidence semantics. Update only the 16c browser workflow for failed, waiting, running, completed, responsive, focus, Log/Details, and focused screenshots. Run cheap gates first, then exactly one final 16c VM command at candidate HEAD.
-
-Backend post-build intent follow-up: add one transaction-local helper that inserts `awaiting_build` post-build intent only for supplied NixOS derivations when persisted `on_build` is enabled, using the active partial conflict target and `DO NOTHING`. Make all four authoritative build admission functions use exact `RETURNING` derivation IDs and call the helper in the same transaction only for inserted jobs. Reshape successful build completion to attach the completed job and transition the existing post-build intent to `pending` for local output or `awaiting_closure` for remote output without cache publication; retain policy/type-gated repair for legacy missing intent and never mutate manual/fleet provenance. Add focused ignored PostgreSQL regressions for admission gates, idempotency/provenance, completion states, non-claimable waits, failures, and retry/replacement behavior. Run targeted rustfmt and the smallest dedicated PostgreSQL test selection.
-
-Authority correction: keep completion transaction logic limited to eligible missing-intent repair and `completed_build_job_id` attachment while preserving `awaiting_build`. Invoke `promote_waiting_cve_scans` only after successful commits at API-builder completion, legacy/server-local completion, and cache-push completion; promotion failures are logged and do not fail the completed build/cache operation. Update PostgreSQL regressions to assert completion attachment leaves `awaiting_build`, then explicitly invoke the authority helper to prove local `pending`, remote `awaiting_closure`, and cache-published remote `pending`.
-
-Final pre-commit review correction: restore the specified policy/type-gated completion repair for an eligible successful build that predates admission-time intent creation. The repair must insert only when no scan history exists for the derivation, preserve active manual/fleet work through the active uniqueness conflict target, leave terminal history unchanged, attach the exact successful job, and leave lifecycle promotion to promote_waiting_cve_scans. Add a focused PostgreSQL regression for the pre-existing build case.
-
-Make local-build waiting-scan promotion independent of GC-root creation success while retaining post-commit warning-only failure semantics. Run targeted rustfmt, the focused post-build PostgreSQL tests, SQLX_OFFLINE server check, and diff hygiene. Because these corrections alter backend behavior after the passing browser build, do not claim the existing 16c VM result as exact-head evidence; request explicit authorization before another VM run if final review requires it.
+Fast stabilization pass from exact pushed head `c0b35860e46e3c5663567573ba1955aabe093481`:
+1. Diagnose the confirmed server-local scan failure only through the worker, Vulnix runner, scan-result persistence, and diagnostic paths. Fix only an established cause. Independently add bounded redacted persistence-stage error-chain diagnostics with execution-token fencing and a focused regression.
+2. Replace scan-time revision inference with server-authoritative current/latest-per-flake relations. Reuse scheduler lifecycle policy for statistics and By-system freshness, and make coverage buckets mutually exclusive.
+3. Make By-system current evidence use exact-current authority and all severity counts. Restore data-backed By-system and main-table hierarchy, raise the bounded client/server record cap consistently, and disclose truncation.
+4. Apply bounded System Detail corrections: lazy first-package expansion, draft-derived submit validity, and read-only historical target groundwork using server-owned generation/derivation identities. Keep historical schema-1 observations separate from legacy schema-0 evidence and bind pagination to target identity. Do not add the final selector UI.
+5. Update focused browser fixtures/assertions and task cancellation wording. Preserve existing build-to-scan behavior and compatibility values.
+6. Run only targeted formatting, focused unit/query/database tests, Web UI WASM check, JavaScript/static checks, and diff hygiene. Do not run any authoritative browser VM, full Web UI suite, full flake check, or visual baseline update.
+7. Review only accidental unrelated edits, commit once, push immediately, verify local/remote SHAs, and stop.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -233,6 +203,8 @@ The single additionally authorized focused 16c VM gate failed and was not rerun.
 Final pre-commit review found and corrected two in-scope backend defects after the passing 16c run. `attach_completed_build_to_post_build_scan_tx` now performs the required persisted-policy/NixOS-gated compatibility repair only when the successful build's derivation has no scan history, attaches the exact successful build, preserves wait-state authority, and cannot replace manual/fleet or terminal history. Local completion now invokes waiting-scan promotion after the GC-root attempt even when GC-root creation fails; both failures remain warning-only after commit. Added a database regression covering eligible repair plus disabled-policy and non-NixOS rejection. Verification passed against a task-owned temporary PostgreSQL 17 instance on port 35435: focused `queries::build_jobs::tests::post_build` 5/5. Targeted rustfmt, `SQLX_OFFLINE=true cargo check --tests`, `git diff --check`, and final read-only code review passed; existing unrelated warnings remain. The earlier 16c VM run passed 1/1 and all 16 captures were inspected satisfactorily, but these backend corrections occurred afterward, so that result is not exact-head evidence. No commit or push was made. A further focused VM run requires explicit authorization under the user's no-automatic-rerun rule.
 
 Committed and pushed the complete Scanning workflow parity candidate as `c0b35860e46e3c5663567573ba1955aabe093481` (`TASK-326.2: Restore scanning workflow parity`). Local and remote branch SHAs match and the task worktree is clean. Per user direction, the exact pushed commit was then verified once with `CF_UI_TEST_STEPS="16c-scanning-view" nix build --impure "path:.#checks.x86_64-linux.web-ui" --no-link -L`: 1/1 workflow passed with 16 dark/light captures. All exact-head captures were manually inspected and remain satisfactory. Result: `/nix/store/9xavx94w9s5qclcb0bijfwdyvzyhdfdw-vm-test-run-crystal-forge-web-ui-mega-integration`; full output: `/home/mcamp/.local/share/opencode/tool-output/tool_0c0e7472f001L018Ng4ohWZ3Jn`. MR !329 targets `dev`, has exact head `c0b35860`, no conflicts, and pipeline 2928 is running. Task moved to Review; it must not move to Done until the MR is merged.
+
+Fast stabilization follow-up authorized by the user. Confirmed the task worktree is clean and both local and remote task heads equal `c0b35860e46e3c5663567573ba1955aabe093481`. The repository has no checked-out `main` integration worktree; `dev` contains only the previously documented unrelated untracked `session-ses_f927.md`, which will not be touched. The existing user-approved host-preview waiver remains recorded because TASK-440 owns the fixed preview ports. No authoritative browser VM or full Web UI suite will run before push.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
