@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-09-19 14:51'
-updated_date: '2026-09-20 14:04'
+updated_date: '2026-09-20 14:05'
 labels: []
 milestone: m-1
 dependencies: []
@@ -133,4 +133,29 @@ web        ready restarts: 0 ports: http:8081
 3445/8080 were occupied by an unrelated worktree's stack on this shared dev machine at the time; devenv correctly skipped to 3447/8081. `curl http://127.0.0.1:3447/status` -> healthy JSON. WASM bundle verified served (JS+`\0asm` magic bytes) at the resolved UI port. `psql -p 5432 ... SELECT hostname FROM systems WHERE hostname='test.gray'` -> present (mock fixture seeded correctly through the resolved DB connection).
 
 PostgreSQL isolation mechanism: dynamically allocated TCP port (not a Unix socket — see devenv.nix's own comment for why a Unix socket was tried first and rejected: `crates/cf-server/src/config/database.rs` cannot represent a socket-dir host in its `postgres://` URL builder).
+
+### AC #5 — worktree identity
+Left `name` unset in devenv.nix; devenv's own `project_name()` (upstream `devenv/src/proxy.rs`) falls back to the worktree directory basename. Confirmed via source inspection (`devenv/src/proxy.rs:189-197`, `DEFAULT_PROJECT_NAME = "devenv-shell"`) and via the two-worktree proof below (worktree A root `.../TASK-462.1-devenv-parallel-worktrees`, worktree B root `.../TASK-462.1-verify-b` — distinct basenames, distinct sessions, distinct ports, as observed).
+
+### AC #8 — two-worktree concurrent proof (the most important one)
+Commands (from a session with the real `devenv` CLI, `github:cachix/devenv#packages.x86_64-linux.devenv`, on PATH):
+```
+cd <worktree-A> && devenv up -d
+cd <worktree-B> && devenv up -d   # while A is still running
+devenv processes list             # run in both
+```
+Observed, both running at once:
+```
+Worktree A (.../TASK-462.1-devenv-parallel-worktrees):
+  api      ready ports: http:3447
+  postgres ready ports: main:5433
+  web      ready ports: http:8081
+Worktree B (.../TASK-462.1-verify-b):
+  api      ready ports: http:3448
+  postgres ready ports: main:5432
+  web      ready ports: http:8082
+```
+DB_A (5433) != DB_B (5432); API_A (3447) != API_B (3448); UI_A (8081) != UI_B (8082). `ss -tlnp` cross-checked against `curl`/`psql` confirmed these are genuinely two independent daemon sessions (two separate `daemon-processes` PIDs, two separate `$DEVENV_RUNTIME` hashes), not one stack answering both port sets.
+
+Process-ownership proof: inserted a marker row (`environments.name='worktree-A-marker'`) into worktree A's DB only; confirmed absent from worktree B's DB and present in A's; repeated with a second marker after a later restart with the same result both times. UI→API binding proof: `web-ui-test`'s `12-systems` workflow (a real browser session) passed against each worktree independently, which requires the browser's WASM app to have successfully authenticated and fetched data through *that worktree's own* resolved API port (this is exactly the code path that was broken before the CORS fix below, so its passing is direct evidence UI→API binding is correct per worktree).
 <!-- SECTION:NOTES:END -->
