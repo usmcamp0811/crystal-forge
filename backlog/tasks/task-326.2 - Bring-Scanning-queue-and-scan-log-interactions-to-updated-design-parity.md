@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-20 17:44'
+updated_date: '2026-09-20 18:00'
 labels:
   - scanning
   - web-ui
@@ -209,6 +209,8 @@ Verification passed: agent `system_state::tests` 7/7; server `models::system_sta
 Audit discovery requiring explicit scope decision: live migration-0259 exact-CVE view/functions and the compatibility justification handler filter invalid states before selecting the latest row. They can use an older valid state after a newer mismatch. Fixing this correctly requires a new additive migration replacing four database objects plus focused trigger/view regressions. No migration or security-boundary expansion was silently added to this wrapper/copy follow-up.
 
 Committed and pushed review follow-up as `19352160` (`TASK-326.2: Recognize activatable NixOS generations`) to MR !329. Final task status remains In Progress pending the user's scope decision for the audited migration-0259 stale-state authority defect.
+
+Backend post-build intent follow-up implemented at uncommitted worktree head based on `19352160`. Added transaction-local `create_post_build_scan_intents_tx`: persisted `on_build` plus NixOS gating, `awaiting_build`/`post_build`/`vulnix`/attempts=0 insertion, active partial conflict target, and `DO NOTHING`. The four named build admission functions now use exact returned derivation IDs and create intent in the build transaction; orphan recovery uses the same helper when it actually inserts. Completion now repairs only absent legacy post-build history, attaches the successful job to existing post-build intent, and chooses `pending`, `awaiting_closure`, or continued `awaiting_build` from output identity, remote-builder provenance, and completed cache publication. Manual/fleet provenance is not mutated; failure does not touch the waiting scan; terminal completion retries do not create fresh scans. Added four isolated PostgreSQL regressions in `queries/build_jobs.rs` covering all named admission paths, rollback atomicity, enabled/disabled/type gates, duplicate admission, manual/fleet identity, local/remote completion, non-claimable waits, failure, replacement, idempotent/terminal retry, and eligible legacy repair. Verification passed: focused PostgreSQL tests 4/4 against task-owned temporary PostgreSQL on port 35433 (then stopped); `SQLX_OFFLINE=true cargo check --tests`; touched-file rustfmt check; and `git diff --check`. Existing unrelated warnings remain. Modified only `queries/build_jobs.rs`, `queries/builders.rs`, and `queries/cve_scan_leases.rs`; no commit or push.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
