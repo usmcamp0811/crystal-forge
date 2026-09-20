@@ -1,11 +1,11 @@
 ---
 id: TASK-326.2
 title: Bring Scanning and per-system CVE triage to updated design parity
-status: Review
+status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-20 13:24'
+updated_date: '2026-09-20 14:04'
 labels:
   - scanning
   - web-ui
@@ -131,6 +131,8 @@ Replace separate Justify + Create POA&M with one CveTriageModal (extracted from 
 6. Run proportional formatting, Rust tests/checks, SQLx/server checks, Web UI package build, and the single focused NixOS browser check. Inspect the final diff for documentation and scope, then commit, push, open an MR against `dev`, record evidence, and move the task to Review.
 
 Constraints: safe cancellation is not implemented by the backend, so the UI MUST NOT expose a fake cancellation control. The user's host-preview waiver remains in force because TASK-440 owns the fixed ports; do not touch that worktree or its processes. Do not implement TASK-348.2 or run an unrestricted Web UI mega-check.
+
+Focused MR follow-up: implement design commit `35519546` for System Detail CVE triage with default host scope and optional server-derived environment scope. Add append-only host disposition history, host-over-environment effective precedence, scope-safe System Detail DTOs, exact-subject POA&M behavior, inherited row chips, truthful fixed-version wording, focused PostgreSQL/frontend/browser regressions, then push the existing MR and return the task to Review.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -163,6 +165,8 @@ Final verification completed. The authoritative focused NixOS browser check pass
 Branch `TASK-326.2-scanning-cve-triage-parity` was pushed at `664a5bd8`. MR creation is blocked because the configured GitLab CLI OAuth grant is expired or revoked (`invalid_grant`). Git push authentication remains valid. The task stays In Progress until an MR is open; use the GitLab branch link to create an MR targeting `dev`, or refresh `glab` authentication and resume finalization.
 
 Opened GitLab MR !329 against `dev` at exact head `664a5bd88114b3bc2d47f7e49cc2f504b4d99f29`: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/329. The MR includes four representative screenshots from the authoritative browser result. GitLab pipeline 2920 started for the exact MR head and was still running when the task moved to Review.
+
+Resumed TASK-326.2 in its existing dedicated worktree and MR !329. Fast-forwarded the clean task branch to the intentional design-only head `35519546fc5bb584922643b498cf722429f185d5`. The follow-up is limited to System Detail CVE host/environment triage, shared truthful fixed-version wording, and focused regression coverage. The existing host-preview waiver remains active; no other worktree or preview process will be touched. Migration inspection shows 0269 is the current highest migration, so the additive host-disposition migration will use 0270.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
