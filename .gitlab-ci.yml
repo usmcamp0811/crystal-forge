@@ -16,6 +16,10 @@ variables:
   image: alpine:latest
   before_script:
     - apk add --no-cache curl jq
+    # The optional upstream job can fail before publishing an artifact. Create
+    # the directory so the no-screenshot path exits successfully instead of
+    # failing on `ls` under GitLab's errexit shell mode.
+    - mkdir -p web-ui-screenshots
   script:
     - |
       # Read the summary markdown
