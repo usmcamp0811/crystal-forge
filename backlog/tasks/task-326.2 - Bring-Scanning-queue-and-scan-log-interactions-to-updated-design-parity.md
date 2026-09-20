@@ -1,36 +1,35 @@
 ---
 id: TASK-326.2
-title: Bring Scanning queue and scan-log interactions to updated design parity
-status: Backlog
+title: Bring Scanning and per-system CVE triage to updated design parity
+status: To Do
 assignee: []
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-09 03:33'
+updated_date: '2026-09-20 02:08'
 labels:
   - scanning
   - web-ui
   - design-parity
-  - navigation
-  - accessibility
+  - cve-triage
 dependencies:
   - TASK-326.1
   - TASK-337
-  - TASK-448
 references:
-  - git commit e1b7434899e23f43770632e59d80a76a8fc8459e
-  - TASK-448
+  - e79d0ad6
+  - ad6589e1
+  - docs/design/CrystalForge/components/ScanningView.jsx
+  - docs/design/CrystalForge/components/CvesView.jsx
+  - docs/design/CrystalForge/components/SystemDetail.jsx
 documentation:
   - docs/design/CrystalForge/components/ScanningView.jsx
+  - docs/design/CrystalForge/components/CvesView.jsx
   - docs/design/CrystalForge/data-scanning.js
-  - docs/design/CrystalForge/styles.css
-  - docs/design/CrystalForge/app.jsx
 modified_files:
   - packages/web-ui/src/views/scanning.rs
-  - packages/web-ui/src/api/client.rs
+  - packages/web-ui/src/views/system_detail.rs
+  - packages/web-ui/src/components/cve/mod.rs
   - packages/web-ui/src/api/models.rs
-  - packages/web-ui/src/state/navigation_focus.rs
   - packages/web-ui/assets/app.css
   - checks/web-ui/tests/integration-test.js
-  - checks/web-ui/coverage-manifest.json
 parent_task_id: TASK-326
 priority: high
 type: enhancement
@@ -40,19 +39,57 @@ ordinal: 473000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Implement the Scanning surface introduced by design commit `e1b74348` after the authoritative wait-state and log contracts are available. Replace the activity side panel and ambiguous Active & Recent view with focused Deployed, All scans, and By system views. Add real filtering, sorting, exact scan-log details, and actionable navigation while preserving loading, empty, error, authorization, selection, and cancellation behavior. The frontend must consume server data only and must not generate vulnix output or fake progress.
+Rewrite the production Scanning view to align with e79d0ad6 (Active/Completed/BySystem tabs with wait states, archive/restore, failure diagnostics) and add unified CVE triage modal to System Detail per ad6589e1 (environment-scoped outstanding/accepted/scheduled with POA&M create/reuse, typed assignee).
+
+## Scanning: Active vs Completed (not Deployed/All)
+
+**Active tab**: scanning/queued/awaiting states; "awaiting" = blocked on build/cache (not failure). Selection limits to cancellable rows (scanning/queued). Stats show "scanning now" with breakdown: scanning · queued · awaiting closure.
+
+**Completed tab**: terminal results + history. Archive/restore without deletion; archived rows hidden and visually distinct. Selection for history ops (archive/restore), not cancellation. Filtered empty views caused by retention say so, not "no scans exist".
+
+**BySystem**: per-revision history, newest-first, with superseded config terminology; hidden count + link; unscanned/needs-build explicit.
+
+**Controls**: Live indicator, Schedule button, no global Rescan All (check if rescan actions move elsewhere).
+
+**Filtering/Sorting**: text search, status, revision/freshness, latest-per-flake; deterministic sortable columns (status/severity/revision/timestamp); visible result count; resettable empty state.
+
+**Detail tray**: real status, trigger, scanner identity, findings, failure context, bounded log content (no fake progress).
+
+**Failed actionability**: stat card click jumps to Completed, opens failing scan's log.
+
+**By-system history**: exact per-revision scans, needs-build/never-scanned explicit, hidden older scans show count.
+
+**Wait states**: explicit "awaiting: <reason>"; stale/failed provide Check now/Retry/Build with exact deep links.
+
+## System Detail CVE: Unified Triage Modal
+
+Replace separate Justify + Create POA&M with one CveTriageModal (extracted from fleet CVE) scoped to current system's environment.
+
+**Environment-scoped decision**: each environment gets outstanding/accepted/scheduled choice. Accepted requires justification + optional review date. Scheduled creates/reuses POA&M with owner, due, plan, optional milestones.
+
+**Presentation**: add Triage column (outstanding/accepted/scheduled state); row action opens modal; no separate Justify/Create buttons.
+
+**Authority (CRITICAL)**: preserve TASK-440 rules—exact current evidence can support triage, legacy not promoted, missing/no-scan explicit, accepted/scheduled do NOT false-claim remediation/verification, only exact evidence/verification supports closure.
+
+## Dependencies & Overlap
+
+- TASK-326.1 (wait states, logs) & TASK-337 (trigger) are blockers for detail/log implementation
+- TASK-348.2 superseded by this task; make canonical and note supersession
+- Reuse existing TASK-440 CVE triage domain/client; preserve authority constraints
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Scanning provides Deployed All scans and By system views with real count badges and no obsolete activity side panel
-- [ ] #2 Deployed and All scans support query status revision freshness and latest-per-flake filtering with a visible result count and resettable empty state
-- [ ] #3 Sortable columns use deterministic status severity revision and timestamp semantics and communicate sort state accessibly
-- [ ] #4 Rows open the exact scan detail tray while modifier-based multi-selection remains limited to cancellable queued or running scans
-- [ ] #5 The detail tray shows real status trigger timestamps scanner metadata findings failure context and bounded execution log content for the exact configuration and full revision
-- [ ] #6 Log search previous and next match navigation download and live-running presentation use server-provided content and never fabricate lines or percentage progress
-- [ ] #7 Waiting and failed states provide truthful Check now Retry scan Build and cache navigation outcomes with exact deep-link context
-- [ ] #8 By system expansion preserves per-revision history and opens the exact available scan while unscanned and needs-build rows remain explicit
-- [ ] #9 Loading empty partial error stale and authorization states remain usable at desktop and narrow widths in light and dark themes with keyboard focus restoration and Escape behavior
-- [ ] #10 The WASM build and authoritative web-ui check pass with assertion coverage and screenshots for filters sorting selection waiting running failed completed log search download deep links and responsive states
+- [ ] #1 Active/Completed/BySystem tabs with correct state classification, selection semantics, and no activity side panel; Live indicator and Schedule button in header
+- [ ] #2 Active: scanning/queued/awaiting; Completed: terminal + history with archive/restore; BySystem: per-revision newest-first with superseded terminology
+- [ ] #3 Filters: text search, status, revision/freshness, latest-per-flake; sortable deterministic columns; visible result count; resettable empty state
+- [ ] #4 Detail tray: real status, trigger, scanner identity, findings, failure context, bounded log (no fake progress); log has search/download; running state shows elapsed time
+- [ ] #5 Failed stat card actionable (count > 0): click jumps to Completed tab, opens log; stale/failed rows show Check now/Retry/Build with exact deep links
+- [ ] #6 Selection guards: Active limits to scanning/queued (cancellation); Completed allows all (archive/restore); BySystem no selection
+- [ ] #7 Archive/restore on Completed: rows hidden not deleted, archived visually distinct, filtered counts honest, retention-caused empty states labeled
+- [ ] #8 System Detail CVE: unified triage modal (extracted from fleet view), environment-scoped, with Triage column and row action; no separate Justify/Create buttons
+- [ ] #9 Triage modal: outstanding/accepted/scheduled per environment; accepted needs justification; scheduled creates/reuses POA&M with owner/due/plan/milestones; typed assignee
+- [ ] #10 Authority: exact current evidence supports triage, legacy not promoted, missing/no-scan explicit, accepted/scheduled do NOT false-claim remediation/verification
+- [ ] #11 Browser assertions: Active/Completed switching, wait state rendering, failure actionability, archive/restore selection, log content, triage disposition, POA&M reuse, responsive/narrow/dark behavior
+- [ ] #12 Playwright: Active/Completed filtering, wait/failed transitions, log drawer, triage modal outstanding→accepted→scheduled, POA&M reuse, responsive tests; desktop/narrow/light/dark screenshots
 <!-- AC:END -->
