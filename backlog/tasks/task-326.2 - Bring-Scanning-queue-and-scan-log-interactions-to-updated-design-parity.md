@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-20 04:09'
+updated_date: '2026-09-20 04:10'
 labels:
   - scanning
   - web-ui
@@ -98,14 +98,12 @@ Replace separate Justify + Create POA&M with one CveTriageModal (extracted from 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Preserve current exact-evidence and execution-fencing foundations. Port only the missing TASK-337 trigger attribution into current `source_trigger` semantics, including immediate/local post-build/periodic paths and unknown-value round trips.
-2. Add migration 0269 with additive scan lifecycle and archive metadata. Represent build and closure waits as non-terminal active states, include them in active deduplication, and preserve immutable trigger/evidence/diagnostic records. Add bounded idempotent terminal archive/restore and cancellation only where execution ownership can enforce it.
-3. Extend scanning queries and admin APIs with authoritative Active/Completed/history projections, stable totals and ordering, exact detail metadata, waiting/failure context, deterministic failed identity, and server-owned archive visibility. Keep diagnostics bounded and redacted.
-4. Update the worker and exact trigger flows so one logical waiting scan transitions automatically when its exact prerequisite becomes available, without weakening leases, execution tokens, stale recovery, or duplicate-active-scan protection.
-5. Refactor TASK-440 CVE triage into shared service and Dioxus presentation code. Add a system-context endpoint that derives the current environment and exact subject set server-side, clearly applies the decision to all exact affected hosts in that environment, preserves canonical lock ordering and evidence revalidation, and never promotes legacy inventory or ordinary justification.
-6. Replace Scanning with Active/Completed/By system, truthful selection/actions, filters/sorts/counts, archive/restore, actionable failure, exact detail/log search/download, schedule behavior, accessibility, and responsive theme styling. Replace System Detail Justify/Create POA&M actions with the shared authority-aware triage experience while retaining backward-compatible legacy justification data.
-7. Extend focused Rust/PostgreSQL/API coverage and evolve workflows 16c, 12h, 12ha, and 16-cves. Run static checks, isolated database/SQLx preparation, WASM compile, host-compatible browser workflows, then the single selected authoritative VM run.
-8. Record objective AC #1–#12 evidence, document TASK-337 incorporation and the precise TASK-326.1 audit result, commit in reviewable units, push, open an MR to `dev`, and move TASK-326.2 to Review only after all required evidence passes.
+1. Keep backend commit `0913ea87` authoritative and implement only the user-approved Scanning Web UI slice. Do not modify CVE triage views/components or `checks/web-ui/tests/integration-test.js`; do not start a host preview or touch processes/ports.
+2. Mirror the new archive-aware scan-record and exact-detail DTOs in the WASM client. Add GET collection and PATCH archive helpers while preserving legacy queue/deployed DTOs and calls.
+3. Replace the Scanning view with accessible Active, Completed, and By system tabs backed by authoritative records/stats. Implement truthful state classification and counts, wait-state wording, deterministic filters/sorts, exact per-revision history, archive/restore, exact retry only, and no cancellation or fleet-wide rescan.
+4. Expand the exact detail tray with lifecycle identity/metadata, bounded diagnostic search/navigation/export, running elapsed time, bounded polling only for a selected running scan, Escape close, and focus restoration.
+5. Add scoped responsive light/dark CSS and focused Rust unit tests for classification, filtering, ordering, failed selection, diagnostics, and export semantics.
+6. Run Web UI formatting, focused/all Web UI Rust tests, wasm-target cargo check through the Nix environment, and `git diff --check`. Fix compilation/test defects and report any concrete backend contract defect without otherwise changing backend code.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
