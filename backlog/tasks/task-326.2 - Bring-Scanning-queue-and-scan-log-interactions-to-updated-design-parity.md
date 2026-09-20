@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-20 16:52'
+updated_date: '2026-09-20 17:26'
 labels:
   - scanning
   - web-ui
@@ -191,6 +191,12 @@ Focused host/environment triage follow-up committed and pushed to existing MR !3
 Final browser regression correction and review evidence: commit `7c4c27d35f7ce7c80a897d84797342cd232112e4` updates only `checks/web-ui/tests/integration-test.js`. The shared `assertTriageChip` helper now waits for refreshed exact inventory, re-expands the target package through `showInventory`, waits for the expected hydrated label, and retains exact label and title assertions. No production file changed; the `aria-disabled`/`aria-busy` focus-restoration fix remains intact. Cheap verification passed: `node --check checks/web-ui/tests/integration-test.js`; `CF_UI_STATIC_CONTRACTS=1 node checks/web-ui/tests/integration-test.js`; and `git diff --check`. The host runner does not classify 12h as a dev-stack workflow, so no host 12h run was available. The single authorized final VM command `CF_UI_TEST_STEPS="12h-system-detail-cves-grouped-justification,16-cves" nix build --impure "path:.#checks.x86_64-linux.web-ui" --no-link -L` passed both requested workflows (2/2) and captured 18 dark/light screenshots. Full command output: `/home/mcamp/.local/share/opencode/tool-output/tool_0bfa5906b0013CvesGaPBzf8e0`. Commit `7c4c27d3` was pushed to existing MR !329; local and remote SHA match, the task worktree is clean, and TASK-326.2 is ready for Review.
 
 Review follow-up resumed at current branch head `7c4c27d35f7ce7c80a897d84797342cd232112e4` to fix filesystem-proven deploy-rs activatable NixOS wrapper equivalence and replace misleading user-facing Legacy CVE fallback wording with Historical wording. The task worktree is clean. Scope preserves exact-authority fail-closed lineage checks, historical scan immutability, existing triage focus restoration, and browser sequencing repair. Planned verification is focused agent/server/UI/unit/static coverage before any final browser decision.
+
+Review follow-up implementation complete at pre-commit state. Agent and legacy server generation collectors now preserve direct canonical-root equality and recognize different activatable wrapper roots only when `init`, `system`, and `bin/switch-to-configuration` all canonicalize to the running toplevel's corresponding children. Filesystem tests cover direct generation 3079, production-shaped activatable generation 3079, unrelated systems, name-only false positives, missing profiles, and generation parsing. Exact inventory regression now proves Exact -> RetainedGenerationUnavailable -> CurrentStoreMismatch without changing query predicates. User-visible fallback copy now says Historical while wire/API `Legacy` identities remain unchanged. Browser fixture was corrected to include the current host/environment disposition DTO fields.
+
+Verification passed: agent `system_state::tests` 7/7; server `models::system_states::tests` under `SQLX_OFFLINE=true`; isolated PostgreSQL `system_inventory_classifies_fallbacks_and_exact_precedence` 1/1; Web UI CVE tests 35/35; JavaScript syntax/static contracts; targeted rustfmt and `git diff --check`. Focused authoritative browser evidence: `16-cves` passed in `/home/mcamp/.local/share/opencode/tool-output/tool_0bfc6650c001WanmaPZ5e8AHmx`; after repairing its stale DTO fixture, `12ha-system-detail-cve-inventory-fallbacks` passed 1/1 with dark/light screenshots in `/nix/store/yx3hjrsnnbxajfdjbf7qbdmxin41228k-vm-test-run-crystal-forge-web-ui-mega-integration`. Host preview remains blocked/waived because TASK-440 owns the fixed ports.
+
+Audit discovery requiring explicit scope decision: live migration-0259 exact-CVE view/functions and the compatibility justification handler filter invalid states before selecting the latest row. They can use an older valid state after a newer mismatch. Fixing this correctly requires a new additive migration replacing four database objects plus focused trigger/view regressions. No migration or security-boundary expansion was silently added to this wrapper/copy follow-up.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
