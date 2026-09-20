@@ -46,6 +46,33 @@ const SCAN_CONFIGS = (typeof __fx === "function" && __fx("scanning.configs")) ||
   { id:"sc-10", name:"edge-nyc-01",  flake:"edge-gateway",   commit:"9a01fc2", freshness:"archived", status:"stale",    found:{crit:1,high:2,med:6}, lastScan:"21d ago", trigger:"scheduled" },
 ];
 
+/* Completed scan history. A server that has been up for months has scanned
+   every config it ever built, so this list is the one that actually grows —
+   it's what retention is for. Newest first; ages are assigned in
+   data-retention.js from the same curve used by builds and evals. */
+const SCAN_HIST_HOSTS = ["gaia-web-01","gaia-web-02","gaia-web-03","atlas-01","atlas-02","orion-db-01","edge-pdx-01","edge-nyc-01","edge-sgp-01","stg-web-01","stg-web-02","hydra-03","dev-node-02","lab-vm-01","kepler-api"];
+const SCAN_HIST_FLAKES = ["infrastructure","web-services","edge-gateway","build-farm","lab-nodes"];
+function mkScanHist(i) {
+  let s = i*7411+29; const r = () => { s = (s*9301+49297)%233280; return s/233280; };
+  const roll = r();
+  const status = roll < 0.72 ? "complete" : roll < 0.9 ? "stale" : "failed";
+  const hasFindings = status !== "failed";
+  const crit = hasFindings && r() < 0.18 ? 1 + Math.floor(r()*2) : 0;
+  return {
+    id: `sch-${i}`,
+    name: SCAN_HIST_HOSTS[i % SCAN_HIST_HOSTS.length],
+    flake: SCAN_HIST_FLAKES[Math.floor(r()*SCAN_HIST_FLAKES.length)],
+    commit: Array.from({length:7},()=>"0123456789abcdef"[Math.floor(r()*16)]).join(""),
+    freshness: i < 6 ? "recent" : "archived",
+    status,
+    found: hasFindings ? { crit, high: Math.floor(r()*5), med: Math.floor(r()*11) } : null,
+    lastScan: "",
+    trigger: r() < 0.35 ? "post-build" : "scheduled",
+    error: status === "failed" ? "vulnix: derivation not available in cache" : undefined,
+  };
+}
+const SCAN_COMPLETED_HISTORY = Array.from({length:160},(_,i)=>mkScanHist(i));
+
 const SCAN_STATS = {
   scanning: SCAN_CONFIGS.filter(s=>s.status==="scanning").length,
   queued:   SCAN_CONFIGS.filter(s=>s.status==="queued").length,

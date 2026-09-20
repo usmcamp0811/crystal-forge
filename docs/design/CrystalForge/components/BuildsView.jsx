@@ -42,6 +42,7 @@ function BuildsView({ focus, onClearFocus }) {
 
   const [activeList, setActiveList] = React.useState(ACTIVE_BUILDS);
   const historyList = HISTORY_BUILDS;
+  const arc = useArchive("builds", historyList);
   React.useEffect(() => {
     if (!focus) return;
     const bySha = (b) => b.commit === focus.sha || b.commit?.startsWith(focus.sha) || focus.sha?.startsWith(b.commit);
@@ -53,7 +54,7 @@ function BuildsView({ focus, onClearFocus }) {
     // Always filter the table to this commit so any other matching builds are visible,
     // and open the drawer on the first hit — same list, just no longer hiding siblings.
     setQuery(focus.sha || focus.flake || "");
-    if (inHist) { setTab("history"); setSelected(inHist); setLogOpen(true); }
+    if (inHist) { setTab("history"); setSelected(inHist); setLogOpen(true); if (arc.archived.has(inHist.id)) arc.setInclude(true); }
     else if (inActive) { setTab("active"); setSelected(inActive); setLogOpen(true); }
     onClearFocus?.();
   }, [focus]);
@@ -90,9 +91,11 @@ function BuildsView({ focus, onClearFocus }) {
     [b.system, b.flake, b.commit, b.worker, b.arch, b.meta?.label, b.currentPkg, b.failedPkg]
       .filter(Boolean).some(v => String(v).toLowerCase().includes(q));
   const baseList = tab === "active" ? activeList : historyList;
-  const latestIds = React.useMemo(() => latestPerFlake(baseList), [baseList]);
-  const filteredList = baseList.filter(matchBuild).filter(b => !latestOnly || latestIds.has(b.id));
-  const { count, sentinelRef } = useInfiniteScroll(tab + "|" + q, 20);
+  const scopedList = tab === "active" ? baseList : arc.visible(baseList);
+  const latestIds = React.useMemo(() => latestPerFlake(scopedList), [scopedList]);
+  const filteredList = scopedList.filter(matchBuild).filter(b => !latestOnly || latestIds.has(b.id));
+  const archivedHidden = tab === "history" ? arc.hiddenIn(baseList.filter(matchBuild)) : 0;
+  const { count, sentinelRef } = useInfiniteScroll(tab + "|" + q + "|" + arc.include, 20);
   const pagedList = filteredList.slice(0, count);
   const hasMore = count < filteredList.length;
   // Selection eligibility: active = cancellable builds; completed = every row.
@@ -137,7 +140,7 @@ function BuildsView({ focus, onClearFocus }) {
       {/* Queue tabs */}
       <div className="card" style={{ overflow:"hidden" }}>
         <div className="sd-tabs q-tabbar" style={{ padding:"0 16px", borderBottom:"1px solid var(--cf-card-border)" }}>
-          {[{k:"active",l:"Active",n:activeList.length},{k:"history",l:"Completed",n:historyList.length}].map(t => (
+          {[{k:"active",l:"Active",n:activeList.length},{k:"history",l:"Completed",n:arc.include ? historyList.length : historyList.length - arc.archived.size}].map(t => (
             <button key={t.k} className={`sd-tab focus-ring${tab===t.k?" active":""}${flashTab && t.k==="history"?" attention-flash-tab":""}`} onClick={()=>{setTab(t.k);setSelected(null);}}>
               {t.l} <span className="sd-tab-badge">{t.n}</span>
             </button>
@@ -154,12 +157,26 @@ function BuildsView({ focus, onClearFocus }) {
             {q && <button className="btn-icon xs focus-ring" title="Clear search" onClick={()=>setQuery("")}><Icon name="x" size={13}/></button>}
           </div>
         </div>
+        {tab === "history" && (
+          <div className="arc-filterbar">
+            <ArchiveControls kind="builds" arc={arc} hidden={archivedHidden} label="builds"/>
+            <span className="filter-count">{filteredList.length.toLocaleString()} of {historyList.length.toLocaleString()} builds</span>
+          </div>
+        )}
         {filteredList.length === 0 ? (
+          tab === "history" && !q && !arc.include && archivedHidden > 0 ? (
+            <div className="q-empty">
+              <Icon name="archive" size={20} />
+              <div>Every completed build here is archived under the current retention rules.</div>
+              <button className="btn btn-ghost xs focus-ring" onClick={()=>arc.setInclude(true)}>Include archived</button>
+            </div>
+          ) : (
           <div className="q-empty">
             <Icon name="search" size={20} />
             <div>No builds match “{query}”.</div>
             <button className="btn btn-ghost xs focus-ring" onClick={()=>setQuery("")}>Clear search</button>
           </div>
+          )
         ) : (
           <>
             <BuildQueueTable
@@ -176,7 +193,15 @@ function BuildsView({ focus, onClearFocus }) {
               onMove={moveBuild}
               onReorder={reorderBuild}
               latestIds={latestIds}
+              arc={tab==="history" ? arc : null}
             />
+            {tab === "history" && !arc.include && archivedHidden > 0 && (
+              <div className="arc-note">
+                <Icon name="archive" size={12}/>
+                <span>{archivedHidden.toLocaleString()} archived build{archivedHidden===1?"":"s"} hidden. They keep their logs and stay linkable from compliance and POA&amp;M.</span>
+                <button className="btn btn-ghost xs focus-ring" onClick={()=>arc.setInclude(true)}>Show them</button>
+              </div>
+            )}
             {hasMore && <div ref={sentinelRef} className="infinite-sentinel">Loading more builds…</div>}
           </>
         )}
@@ -198,6 +223,17 @@ function BuildsView({ focus, onClearFocus }) {
               onClick={() => { alert(`Downloading logs for ${sel.size} build${sel.size===1?"":"s"}…`); }}>
               <Icon name="download" size={12} /> Download logs
             </button>
+            {(() => {
+              const ids = [...sel.ids];
+              const allArchived = ids.length > 0 && ids.every(id => arc.archived.has(id));
+              return (
+                <button className="btn btn-ghost xs focus-ring"
+                  onClick={() => { allArchived ? cfRetention.restore("builds", ids) : cfRetention.archive("builds", ids); sel.clear(); }}
+                  title={allArchived ? "Bring these back into the default list" : "Hide from the default list · nothing is deleted"}>
+                  <Icon name="archive" size={12} /> {allArchived ? `Restore ${sel.size}` : `Archive ${sel.size}`}
+                </button>
+              );
+            })()}
             <button className="btn btn-danger xs focus-ring"
               onClick={() => { alert(`Deleting ${sel.size} build${sel.size===1?"":"s"} from history…`); sel.clear(); }}>
               <Icon name="x" size={12} /> Delete {sel.size}
@@ -242,7 +278,7 @@ function WorkerCard({ w }) {
   );
 }
 
-function BuildQueueTable({ entries, selected, onSelect, onLog, sel, isCancellable, cancellable, selectableIds, reorderable, onMove, onReorder, flashFailed, latestIds }) {
+function BuildQueueTable({ entries, selected, onSelect, onLog, sel, isCancellable, cancellable, selectableIds, reorderable, onMove, onReorder, flashFailed, latestIds, arc }) {
   const cancellableIds = sel ? (selectableIds || cancellable.map(b => b.id)) : [];
   const [dragId, setDragId] = React.useState(null);
   const [overIdx, setOverIdx] = React.useState(null);
@@ -274,7 +310,7 @@ function BuildQueueTable({ entries, selected, onSelect, onLog, sel, isCancellabl
             onDragOver={reorderable ? (e)=>{ e.preventDefault(); e.dataTransfer.dropEffect="move"; if (overIdx!==i) setOverIdx(i); } : undefined}
             onDrop={reorderable ? (e)=>{ e.preventDefault(); if (dragId) onReorder(dragId, i); setDragId(null); setOverIdx(null); } : undefined}
             onDragEnd={reorderable ? ()=>{ setDragId(null); setOverIdx(null); } : undefined}
-            className={`${sel?"selectable ":""}q-row ${selected?.id===b.id?"selected":""}${checked?" row-checked":""}${isDragging?" q-dragging":""}${showDropBefore?" q-drop-before":""}${showDropAfter?" q-drop-after":""}${flashFailed && b.status==="failed"?" attention-flash":""}`}
+            className={`${sel?"selectable ":""}q-row ${selected?.id===b.id?"selected":""}${checked?" row-checked":""}${isDragging?" q-dragging":""}${showDropBefore?" q-drop-before":""}${showDropAfter?" q-drop-after":""}${flashFailed && b.status==="failed"?" attention-flash":""}${arc?.isArchived(b)?" q-row-archived":""}`}
             onMouseDown={sel ? (e)=>{ if(e.shiftKey) e.preventDefault(); } : undefined}
             onClick={(e)=>{ if (sel && sel.handleClick(e, b.id, cancellableIds)) return; if (sel) sel.setAnchor(b.id); onSelect(b); }}>
             {reorderable && (
@@ -293,7 +329,7 @@ function BuildQueueTable({ entries, selected, onSelect, onLog, sel, isCancellabl
               {b.currentPkg && <div className="mono" style={{ fontSize:10, color:"#60a5fa", marginTop:2 }}>building {b.currentPkg}…</div>}
               {b.failedPkg && <div className="mono" style={{ fontSize:10, color:"#f87171", marginTop:2 }}>failed on {b.failedPkg}</div>}
             </td>
-            <td><span className={`chip ${b.meta.cls}`}><span className="chip-dot" style={{ background:b.meta.color }} />{b.meta.label}</span></td>
+            <td><span className={`chip ${b.meta.cls}`}><span className="chip-dot" style={{ background:b.meta.color }} />{b.meta.label}</span>{arc?.isArchived(b) && <ArchivedChip reason={arc.reason(b)}/>}</td>
             <td><span className="mono" style={{ fontSize:12, color:"var(--cf-text-secondary)" }}>{b.worker || "—"}</span></td>
             <td style={{ width:140 }}>
               <div style={{ display:"flex", alignItems:"center", gap:8 }}>

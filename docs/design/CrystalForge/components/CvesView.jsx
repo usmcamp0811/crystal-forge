@@ -199,7 +199,7 @@ function CvesView({ onOpenSystem, focus, onClearFocus }) {
       </div>
       }
 
-      {selectedCve && <CveDrawer cve={selectedCve} onClose={() => setSelectedCve(null)} onOpenSystem={onOpenSystem} />}
+      {selectedCve && <CveDrawer key={selectedCve.id} cve={selectedCve} onClose={() => setSelectedCve(null)} onOpenSystem={onOpenSystem} />}
     </div>);
 
 }
@@ -716,7 +716,7 @@ function CveDrawer({ cve, onClose, onOpenSystem }) {
                 })}
                 {openEnvs.length > 0 && (
                   <div className="help" style={{ color:"#fbbf24" }}>
-                    <Icon name="warn" size={10} style={{ verticalAlign:"middle" }}/> {affectedSystems.length - coveredCount} host{affectedSystems.length - coveredCount === 1 ? "" : "s"} in {openEnvs.join(", ")} remain outstanding.
+                    <Icon name="warn" size={10} style={{ verticalAlign:"middle" }}/> {affectedSystems.length - coveredCount} host{affectedSystems.length - coveredCount === 1 ? "" : "s"} in {openEnvs.join(", ")} remain{affectedSystems.length - coveredCount === 1 ? "s" : ""} outstanding.
                   </div>
                 )}
               </div>
@@ -880,12 +880,10 @@ function CveTriageModal({ cve, affectedSystems, initial, onClose, onSubmit }) {
           status: "open",
           plan: plan.trim() || `Upgrade ${cve.pkg} to ${cve.fix === "available" ? cve.fixedIn : "a patched release once available"} across ${scheduledEnvs.join(", ")}.`,
           cveRefs: scheduledHosts.map(s => ({ id: cve.id, pkg: cve.pkg, sysId: s.id, hostname: s.hostname })),
-          milestones: withMilestones ? [
-            { text: `Identify patched ${cve.pkg} version`, due: poamDatePlus(3), done: cve.fix === "available" },
-            { text: "Deploy to staging", due: poamDatePlus(10), done: false },
-            { text: `Roll out to ${scheduledHosts.length} host${scheduledHosts.length === 1 ? "" : "s"} in ${scheduledEnvs.join(", ")}`, due: poamDatePlus(18), done: false },
-            { text: "Verify scan clears the CVE", due, done: false },
-          ] : [],
+          milestones: withMilestones ? poamPatchMilestones({
+            due, pkg: cve.pkg, fixAvailable: cve.fix === "available",
+            rolloutText: `Roll out to ${scheduledHosts.length} host${scheduledHosts.length === 1 ? "" : "s"} in ${scheduledEnvs.join(", ")}`,
+          }) : [],
         });
         poamId = item.id;
       }

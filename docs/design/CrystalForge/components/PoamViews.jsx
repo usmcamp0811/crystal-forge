@@ -113,6 +113,26 @@ function poamDatePlus(days) {
   d.setDate(d.getDate() + days);
   return d.toISOString().slice(0, 10);
 }
+// Space a milestone inside the interval between today and `due`, so a generated ladder stays
+// ordered and inside the target date whatever due date the user picked. Fixed day offsets can't:
+// a 14-day critical target is overshot by any +18d rollout step.
+function poamDateFraction(due, frac) {
+  const start = new Date(POAM_TODAY);
+  const end = new Date(due || POAM_TODAY);
+  const days = Math.max(0, Math.round((end - start) / 86400000));
+  const d = new Date(POAM_TODAY);
+  d.setDate(d.getDate() + Math.round(days * frac));
+  return d.toISOString().slice(0, 10);
+}
+// Standard patch ladder for a CVE remediation, derived from the chosen target date.
+function poamPatchMilestones({ due, pkg, fixAvailable, rolloutText }) {
+  return [
+    { text: `Identify patched ${pkg} version`, due: poamDateFraction(due, 0.2), done: !!fixAvailable },
+    { text: "Deploy to staging", due: poamDateFraction(due, 0.5), done: false },
+    { text: rolloutText, due: poamDateFraction(due, 0.8), done: false },
+    { text: "Verify scan clears the CVE", due, done: false },
+  ];
+}
 
 function PoamCreateModal({ finding, onClose, onCreated }) {
   const sys = SYSTEMS.find(s => s.id === finding.sysId);
@@ -251,12 +271,10 @@ function CvePoamCreateModal({ sys, cve, onClose, onCreated }) {
       status: form.status,
       plan: form.plan,
       cveRefs: [{ id: cve.id, pkg: cve.pkg, sysId: sys.id, hostname: sys.hostname }],
-      milestones: form.withMilestones ? [
-        { text: `Identify patched ${cve.pkg} version`, due: poamDatePlus(3), done:false },
-        { text: "Deploy to staging", due: poamDatePlus(10), done:false },
-        { text: `Deploy to ${sys.hostname}`, due: poamDatePlus(18), done:false },
-        { text: "Verify scan clears the CVE", due: form.due, done:false },
-      ] : [],
+      milestones: form.withMilestones ? poamPatchMilestones({
+        due: form.due, pkg: cve.pkg, fixAvailable: cve.fix === "available",
+        rolloutText: `Deploy to ${sys.hostname}`,
+      }) : [],
     });
     onCreated?.(item);
   };
@@ -513,7 +531,7 @@ function PoamDetailTray({ poam, onClose, onOpenFinding }) {
           <Section title={`Deficiency · ${poam.findings.length} finding${poam.findings.length===1?"":"s"}`} right={
             <button className="btn btn-ghost focus-ring xs" onClick={()=>setLinkOpen(o=>!o)}><Icon name="link" size={11}/> Link finding</button>
           }>
-            {poam.findings.length === 0 && !poam.assignmentRef && (
+            {poam.findings.length === 0 && !poam.assignmentRef && !(poam.cveRefs || []).length && (
               <div style={{ fontSize:12, color:"var(--cf-text-muted)" }}>No findings linked yet.</div>
             )}
             {poam.findings.length > 0 && (
@@ -553,6 +571,53 @@ function PoamDetailTray({ poam, onClose, onOpenFinding }) {
             })()}
             {linkOpen && <PoamFindingPicker poam={poam} onDone={()=>setLinkOpen(false)}/>}
           </Section>
+
+          {/* Vulnerability scope — CVE-originated POA&Ms carry hosts here rather than as control findings */}
+          {(poam.cveRefs || []).length > 0 && (() => {
+            const byCve = {};
+            poam.cveRefs.forEach(r => { (byCve[r.id] = byCve[r.id] || { pkg:r.pkg, hosts:[] }).hosts.push(r); });
+            const cveIds = Object.keys(byCve);
+            return (
+              <Section title={`Vulnerability scope · ${cveIds.length} CVE${cveIds.length===1?"":"s"} · ${poam.cveRefs.length} host${poam.cveRefs.length===1?"":"s"}`}>
+                <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                  {cveIds.map(id => {
+                    const grp = byCve[id];
+                    const live = typeof CVES !== "undefined" ? CVES.find(c => c.id === id) : null;
+                    const sevColor = { critical:"#f87171", high:"#fbbf24", medium:"#60a5fa", low:"#9ca3af" }[live?.severity] || "var(--cf-text-muted)";
+                    return (
+                      <div key={id} style={{ border:"1px solid var(--cf-divider)", borderRadius:8, overflow:"hidden" }}>
+                        <div style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 10px", background:"var(--cf-subtle-bg)", flexWrap:"wrap" }}>
+                          <Icon name="shield" size={12} style={{ color:sevColor, flexShrink:0 }}/>
+                          <span className="mono" style={{ fontSize:12, fontWeight:700 }}>{id}</span>
+                          <span className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{grp.pkg}</span>
+                          {live && <span className="chip" style={{ fontSize:9.5, color:sevColor, background:`color-mix(in oklab, ${sevColor} 14%, transparent)`, textTransform:"uppercase" }}>{live.severity} · {live.cvss.toFixed(1)}</span>}
+                          {live && <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>fix {live.fix === "available" ? <span className="mono" style={{ color:"#34d399" }}>{live.fixedIn}</span> : "pending"}</span>}
+                          <span style={{ marginLeft:"auto", fontSize:11, color:"var(--cf-text-muted)" }}>{grp.hosts.length} host{grp.hosts.length===1?"":"s"}</span>
+                        </div>
+                        <table className="sys-table compact sys-table-dense">
+                          <tbody>
+                            {grp.hosts.map(r => {
+                              const sys = SYSTEMS.find(s => s.id === r.sysId);
+                              return (
+                                <tr key={r.sysId}>
+                                  <td><span className="mono" style={{ fontWeight:600 }}>{sys?.hostname || r.hostname}</span></td>
+                                  <td>{sys && <EnvBadge env={sys.environment}/>}</td>
+                                  <td className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{sys?.commit || "—"}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="help" style={{ marginTop:8 }}>
+                  Scope is fixed at creation. A CVE re-scan does not change it — close the milestones, then close the item.
+                </div>
+              </Section>
+            );
+          })()}
 
           {/* Plan */}
           <Section title="Remediation plan">
@@ -809,6 +874,6 @@ function PoamDetailHost({ onOpenFinding }) {
 Object.assign(window, {
   usePoamStore, openPoamDetail, PoamStatusChip, PoamSevChip, FindingPoamBar,
   PoamCreateModal, CvePoamCreateModal, PoamLinkModal, PoamDetailTray, PoamFindingPicker, PoamCountStrip,
-  PoamOwnerOptions, POAM_OWNER_PEOPLE, POAM_OWNER_GROUPS,
+  PoamOwnerOptions, POAM_OWNER_PEOPLE, POAM_OWNER_GROUPS, poamDatePlus, poamDateFraction, poamPatchMilestones,
   PoamTable, SystemPoamSection, BundlePoamRollup, BundlePoamBody, PoamDetailHost,
 });

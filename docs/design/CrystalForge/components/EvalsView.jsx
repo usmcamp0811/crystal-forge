@@ -17,6 +17,7 @@ function EvalsView({ focus, onClearFocus, onOpenSystem, onOpenPolicy, onOpenFind
     }
   }, [tab]);
   const [filterStatus, setFilterStatus] = React.useState("all");
+  const arc = useArchive("evals", typeof HISTORY_EVALS !== "undefined" ? HISTORY_EVALS : []);
   const [filterFlake, setFilterFlake]   = React.useState("all");
   const [drawerEv, setDrawerEv]   = React.useState(null);
   const [drawerRestore, setDrawerRestore] = React.useState(null);
@@ -116,19 +117,28 @@ function EvalsView({ focus, onClearFocus, onOpenSystem, onOpenPolicy, onOpenFind
   };
 
   const historyFiltered = HISTORY_EVALS.filter(e => {
+    if (!arc.include && arc.archived.has(e.id)) return false;
     if (filterStatus !== "all" && e.status !== filterStatus) return false;
     if (filterFlake  !== "all" && e.flake  !== filterFlake)  return false;
     if (!matchEval(e)) return false;
     if (latestOnly && !latestHistIds.has(e.id)) return false;
     return true;
   });
-  const historySel = useMultiSelect("hist|" + filterStatus + "|" + filterFlake + "|" + q);
+  const historySel = useMultiSelect("hist|" + filterStatus + "|" + filterFlake + "|" + q + "|" + arc.include);
+  // Count only what the other filters would have shown — so the number reads as
+  // "hidden by retention", not "hidden by everything".
+  const archivedHidden = HISTORY_EVALS.reduce((n, e) => {
+    if (!arc.archived.has(e.id)) return n;
+    if (filterStatus !== "all" && e.status !== filterStatus) return n;
+    if (filterFlake !== "all" && e.flake !== filterFlake) return n;
+    return matchEval(e) ? n + 1 : n;
+  }, 0);
   const latestActiveIds = React.useMemo(() => latestPerFlake(evals), [evals]);
   const evalsShown = evals.filter(matchEval).filter(e => !latestOnly || latestActiveIds.has(e.id));
   const activePaging = useInfiniteScroll("active|" + q, 20);
   const evalsPaged = evalsShown.slice(0, activePaging.count);
   const activeHasMore = activePaging.count < evalsShown.length;
-  const histPaging = useInfiniteScroll("hist|" + filterStatus + "|" + filterFlake + "|" + q, 20);
+  const histPaging = useInfiniteScroll("hist|" + filterStatus + "|" + filterFlake + "|" + q + "|" + arc.include, 20);
   const historyPaged = historyFiltered.slice(0, histPaging.count);
   const histHasMore = histPaging.count < historyFiltered.length;
 
@@ -199,7 +209,7 @@ function EvalsView({ focus, onClearFocus, onOpenSystem, onOpenPolicy, onOpenFind
             Active Queue <span className="sd-tab-badge">{evals.length}</span>
           </button>
           <button className={`sd-tab focus-ring${tab==="history"?" active":""}${flashTab?" attention-flash-tab":""}`} onClick={()=>setTab("history")}>
-            History <span className="sd-tab-badge">{HISTORY_EVALS.length}</span>
+            History <span className="sd-tab-badge">{arc.include ? HISTORY_EVALS.length : HISTORY_EVALS.length - arc.archived.size}</span>
           </button>
           {((tab==="active" && evals.some(e=>e.canCancel)) || tab==="history") && <MultiSelectHint />}
           <button className={`btn btn-ghost xs focus-ring${latestOnly?" active-filter":""}`} onClick={()=>setLatestOnly(v=>!v)} title="Show only the most recent evaluation per flake">
@@ -251,6 +261,17 @@ function EvalsView({ focus, onClearFocus, onOpenSystem, onOpenPolicy, onOpenFind
                     Compare
                   </button>
                   <button className="btn btn-ghost focus-ring xs" onClick={()=>bulkAction("Download logs for")}><Icon name="download" size={11}/> Download logs</button>
+                  {(() => {
+                    const ids = [...historySel.ids];
+                    const allArchived = ids.length > 0 && ids.every(id => arc.archived.has(id));
+                    return (
+                      <button className="btn btn-ghost focus-ring xs"
+                        title={allArchived ? "Bring these back into the default list" : "Hide from the default list · nothing is deleted"}
+                        onClick={()=>{ allArchived ? cfRetention.restore("evals", ids) : cfRetention.archive("evals", ids); historySel.clear(); }}>
+                        <Icon name="archive" size={11}/> {allArchived ? `Restore ${ids.length}` : `Archive ${ids.length}`}
+                      </button>
+                    );
+                  })()}
                   <button className="btn-icon focus-ring" onClick={historySel.clear} title="Clear"><Icon name="x" size={14}/></button>
                 </div>
               );
@@ -268,6 +289,8 @@ function EvalsView({ focus, onClearFocus, onOpenSystem, onOpenPolicy, onOpenFind
               sentinelRef={histPaging.sentinelRef}
               totalCount={historyFiltered.length}
               latestIds={latestHistIds}
+              arc={arc}
+              archivedHidden={archivedHidden}
             />
           </>
         )}
@@ -378,7 +401,7 @@ function EvalActiveQueue({ evals, activeIdx, onCancel, onMove, onReorder, onOpen
 }
 
 /* ── History ────────────────────────────────────────── */
-function EvalHistory({ entries, activeIdx, filterStatus, setFilterStatus, filterFlake, setFilterFlake, sel, onSelectAll, onOpen, onRowAction, flashFailed, hasMore, sentinelRef, totalCount, latestIds }) {
+function EvalHistory({ entries, activeIdx, filterStatus, setFilterStatus, filterFlake, setFilterFlake, sel, onSelectAll, onOpen, onRowAction, flashFailed, hasMore, sentinelRef, totalCount, latestIds, arc, archivedHidden }) {
   const ids = entries.map(e => e.id);
   const allChecked = entries.length > 0 && entries.every(e => sel.has(e.id));
   return (
@@ -394,9 +417,14 @@ function EvalHistory({ entries, activeIdx, filterStatus, setFilterStatus, filter
           {EVAL_FLAKES.map(f => <option key={f} value={f}>{f}</option>)}
         </select>
         <span className="filter-count">{typeof totalCount === "number" ? totalCount : entries.length} entries</span>
+        {arc && <ArchiveControls kind="evals" arc={arc} hidden={archivedHidden} label="evaluations"/>}
       </div>
       {entries.length === 0 ? (
-        <div className="q-empty"><Icon name="search" size={20} /><div>No evaluations match these filters.</div></div>
+        archivedHidden > 0 && !arc?.include ? (
+          <div className="q-empty"><Icon name="archive" size={20} /><div>{archivedHidden.toLocaleString()} matching evaluation{archivedHidden===1?" is":"s are"} archived under the current retention rules.</div><button className="btn btn-ghost xs focus-ring" onClick={()=>arc.setInclude(true)}>Include archived</button></div>
+        ) : (
+          <div className="q-empty"><Icon name="search" size={20} /><div>No evaluations match these filters.</div></div>
+        )
       ) : (
       <>
       <table className="sys-table">
@@ -416,13 +444,13 @@ function EvalHistory({ entries, activeIdx, filterStatus, setFilterStatus, filter
           {entries.map((ev, i) => {
             const checked = sel.has(ev.id);
             return (
-            <tr key={ev.id} className={`selectable${i===activeIdx?" selected":""}${checked?" row-checked":""}${flashFailed && ev.status==="failed"?" attention-flash":""}`}
+            <tr key={ev.id} className={`selectable${i===activeIdx?" selected":""}${checked?" row-checked":""}${flashFailed && ev.status==="failed"?" attention-flash":""}${arc?.isArchived(ev)?" q-row-archived":""}`}
               onMouseDown={(e)=>{ if(e.shiftKey) e.preventDefault(); }}
               onClick={(e)=>{ if (sel.handleClick(e, ev.id, ids)) return; sel.setAnchor(ev.id); onOpen(ev); }}
               style={{ cursor:"pointer" }}>
               <td><div style={{ fontWeight:600, fontSize:13, display:"flex", alignItems:"center", gap:6 }}><Icon name="git" size={12} style={{ color:"var(--cf-text-muted)" }}/>{ev.flake}</div><div className={`mono${latestIds?.has(ev.id)?" commit-latest":""}`} style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{latestIds?.has(ev.id) && <Icon name="star" size={9} className="latest-star" style={{ marginRight:3, verticalAlign:"-1px" }}/>}{ev.commit}</div></td>
               <td><span className="chip chip-unknown">{ev.branch}</span></td>
-              <td><span className={`chip ${ev.meta.cls}`}><span className="chip-dot" style={{ background:ev.meta.color }} />{ev.meta.label}</span></td>
+              <td><span className={`chip ${ev.meta.cls}`}><span className="chip-dot" style={{ background:ev.meta.color }} />{ev.meta.label}</span>{arc?.isArchived(ev) && <ArchivedChip reason={arc.reason(ev)}/>}</td>
               <td style={{ fontSize:12 }}>{ev.systemCount}</td>
               <td>
                 <div style={{ display:"flex", gap:6 }}>

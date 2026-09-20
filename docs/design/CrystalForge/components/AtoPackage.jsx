@@ -329,13 +329,25 @@ function atoOscalPoam(data) {
       metadata: atoOscalMetadata(data, `Plan of Action and Milestones — ${atoScopeLabel(data.scope)}`),
       "import-ssp": { href: `./ssp-${atoSlug(data.scope)}.oscal.json` },
       "system-id": { id: atoSlug(data.scope), "identifier-type": "https://crystalforge.dev/ns/environment" },
-      observations: data.poams.flatMap(p => p.findings.filter(f => data.systems.some(s => s.id === f.sysId)).map(f => ({
-        uuid: atoUuid(`poamobs::${p.id}::${f.sysId}::${f.policyId}`),
-        title: poamFindingLabel(f),
-        description: `Finding managed by ${p.id}. Live evaluation status: ${poamFindingStatus(f)}.`,
-        methods: ["TEST"],
-        collected: data.generatedAt,
-      }))),
+      observations: [
+        ...data.poams.flatMap(p => p.findings.filter(f => data.systems.some(s => s.id === f.sysId)).map(f => ({
+          uuid: atoUuid(`poamobs::${p.id}::${f.sysId}::${f.policyId}`),
+          title: poamFindingLabel(f),
+          description: `Finding managed by ${p.id}. Live evaluation status: ${poamFindingStatus(f)}.`,
+          methods: ["TEST"],
+          collected: data.generatedAt,
+        }))),
+        ...data.poams.flatMap(p => (p.cveRefs || []).filter(r => data.systems.some(s => s.id === r.sysId)).map(r => ({
+          uuid: atoUuid(`poamcve::${p.id}::${r.sysId}::${r.id}`),
+          title: `${r.id} — ${r.hostname}`,
+          description: `Vulnerability ${r.id} in package ${r.pkg} on ${r.hostname}, remediation managed by ${p.id}.`,
+          methods: ["TEST"],
+          types: ["control-objective"],
+          subjects: [{ "subject-uuid": atoUuid("inventory::" + r.sysId), type:"inventory-item" }],
+          collected: data.generatedAt,
+          props: [{ name:"cve", ns:"https://crystalforge.dev/ns/oscal", value: r.id }],
+        }))),
+      ],
       risks,
       "poam-items": data.poams.map(p => ({
         uuid: atoUuid("poamitem::" + p.id),
@@ -349,8 +361,12 @@ function atoOscalPoam(data) {
           { name:"scheduled-completion-date", ns:"https://crystalforge.dev/ns/oscal", value: p.due || "none" },
           ...(poamIsOverdue(p) ? [{ name:"overdue", ns:"https://crystalforge.dev/ns/oscal", value:"true" }] : []),
         ],
-        "related-observations": p.findings.filter(f => data.systems.some(s => s.id === f.sysId))
-          .map(f => ({ "observation-uuid": atoUuid(`poamobs::${p.id}::${f.sysId}::${f.policyId}`) })),
+        "related-observations": [
+          ...p.findings.filter(f => data.systems.some(s => s.id === f.sysId))
+            .map(f => ({ "observation-uuid": atoUuid(`poamobs::${p.id}::${f.sysId}::${f.policyId}`) })),
+          ...(p.cveRefs || []).filter(r => data.systems.some(s => s.id === r.sysId))
+            .map(r => ({ "observation-uuid": atoUuid(`poamcve::${p.id}::${r.sysId}::${r.id}`) })),
+        ],
         "related-risks": [{ "risk-uuid": atoUuid("risk::" + p.id) }],
         remarks: (p.milestones || []).map(m => `[${m.done ? "x" : " "}] ${m.text} (due ${m.due || "—"}${m.doneAt ? `, completed ${m.doneAt}` : ""})`).join("\n") || undefined,
       })),
@@ -380,7 +396,7 @@ function atoCfJson(data, opts) {
       status: r.status, severity: r.severity, poam: r.poamId, poamStatus: r.poamStatus,
       ...(opts.configEvidence ? { evidence: (r.items || []).map(i => ({ type:i.type, source:i.source, ref:i.ref, hash:i.hash, value:i.value })) } : {}),
     })),
-    ...(opts.poams ? { poams: data.poams.map(p => ({ id:p.id, title:p.title, status:p.status, severity:p.severity, owner:p.owner, due:p.due, opened:p.opened, closed:p.closed || null, plan:p.plan, findings:p.findings, milestones:p.milestones, overdue: poamIsOverdue(p) })) } : {}),
+    ...(opts.poams ? { poams: data.poams.map(p => ({ id:p.id, title:p.title, status:p.status, severity:p.severity, owner:p.owner, due:p.due, opened:p.opened, closed:p.closed || null, plan:p.plan, findings:p.findings, cveRefs:p.cveRefs || [], milestones:p.milestones, overdue: poamIsOverdue(p) })) } : {}),
     ...(opts.cves ? { vulnerabilities: data.cves.map(c => ({ id:c.id, pkg:c.pkg, severity:c.severity, cvss:c.cvss, fix:c.fix, acceptance:c.acceptance, justification:c.justification, affectedInScope: c.affected.filter(id => data.systems.some(s => s.id === id)).length })) } : {}),
     ...(opts.attestations ? { attestations: data.attestations.map(a => ({ host:a.hostname, classification:a.classification, storePath:a.attestation.current_system_store_path, narHash:a.attestation.current_system_nar_hash, observedAt:a.attestation.observed_at, bootedGeneration:a.attestation.booted_generation, signature:a.attestation.agent_signature })) } : {}),
   }, null, 2);

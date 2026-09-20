@@ -273,7 +273,13 @@ function poamCreate(draft) {
     activity: [{ at: POAM_TODAY, who: "you", text: draft.findings?.length
       ? `POA&M created from failing finding ${draft.findings.map(f => f.sysId).length > 1 ? `${draft.findings.length} findings` : poamFindingLabel(draft.findings[0])}.`
       : draft.cveRefs?.length
-      ? `POA&M created from ${draft.cveRefs.length > 1 ? `${draft.cveRefs.length} CVEs` : draft.cveRefs[0].id} on ${draft.cveRefs[0].hostname}.`
+      ? (() => {
+          const ids = [...new Set(draft.cveRefs.map(c => c.id))];
+          const hosts = [...new Set(draft.cveRefs.map(c => c.hostname))];
+          const cvePart = ids.length > 1 ? `${ids.length} CVEs` : ids[0];
+          const hostPart = hosts.length > 1 ? `${hosts.length} hosts` : hosts[0];
+          return `POA&M created from ${cvePart} on ${hostPart}.`;
+        })()
       : "POA&M created." }],
   };
   POAMS.unshift(item);
