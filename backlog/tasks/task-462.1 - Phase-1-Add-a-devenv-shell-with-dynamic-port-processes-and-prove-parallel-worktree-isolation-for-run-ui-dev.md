@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-09-19 14:51'
-updated_date: '2026-09-20 18:02'
+updated_date: '2026-09-20 18:03'
 labels: []
 milestone: m-1
 dependencies: []
@@ -74,15 +74,15 @@ Portless requests sudo authentication for its port-80 listener on Linux. This mu
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A new devenv-based `devShells` output exists alongside the existing `devShells.default`; entering the existing `nix develop` shell and its aliases (`run-ui-dev`, `db-only`, etc.) is unaffected.
-- [ ] #2 PostgreSQL, the Crystal Forge API server, and the Dioxus web UI dev server run as devenv processes that reproduce the current `run-ui-dev` behavior (readiness waiting, dev-key generation, fixture seeding, Tailwind/wasm-bindgen setup).
-- [ ] #3 The API server and web UI dev server use devenv's automatic port allocation instead of the fixed ports 3445 and 8080; the UI process receives its own worktree's resolved API port through its environment.
-- [ ] #4 PostgreSQL runs with a per-worktree isolated port or socket instead of the fixed port 3042, with the chosen mechanism documented and justified.
-- [ ] #5 The devenv project identity used for Portless hostnames is derived from a per-worktree-unique value (such as the worktree directory basename) so two worktrees never generate colliding `.localhost` hostnames.
+- [x] #1 A new devenv-based `devShells` output exists alongside the existing `devShells.default`; entering the existing `nix develop` shell and its aliases (`run-ui-dev`, `db-only`, etc.) is unaffected.
+- [x] #2 PostgreSQL, the Crystal Forge API server, and the Dioxus web UI dev server run as devenv processes that reproduce the current `run-ui-dev` behavior (readiness waiting, dev-key generation, fixture seeding, Tailwind/wasm-bindgen setup).
+- [x] #3 The API server and web UI dev server use devenv's automatic port allocation instead of the fixed ports 3445 and 8080; the UI process receives its own worktree's resolved API port through its environment.
+- [x] #4 PostgreSQL runs with a per-worktree isolated port or socket instead of the fixed port 3042, with the chosen mechanism documented and justified.
+- [x] #5 The devenv project identity used for Portless hostnames is derived from a per-worktree-unique value (such as the worktree directory basename) so two worktrees never generate colliding `.localhost` hostnames.
 - [ ] #6 Portless (`process.proxy.enable`) is wired for the API and web UI processes and produces stable `.localhost` URLs, and every other acceptance criterion in this task also passes with Portless disabled.
-- [ ] #7 `checks/web-ui/tests/web-ui-test.sh` runs unmodified against the new stack by consuming resolved ports through the existing `CF_UI_DEV_BASE_URL` / `CF_UI_DEV_API_BASE_URL` overrides.
-- [ ] #8 Two worktrees run the new devenv workflow at the same time, each with its own isolated PostgreSQL/API/UI processes and ports, and `web-ui-test` passes independently in both; the exact commands and observed ports/hostnames are recorded as verification evidence.
-- [ ] #9 Developer-facing documentation explains how to start the new devenv workflow, inspect resolved ports/hostnames, enable/disable Portless, and how the new workflow relates to the existing `nix develop`/process-compose workflow it does not yet replace.
+- [x] #7 `checks/web-ui/tests/web-ui-test.sh` runs unmodified against the new stack by consuming resolved ports through the existing `CF_UI_DEV_BASE_URL` / `CF_UI_DEV_API_BASE_URL` overrides.
+- [x] #8 Two worktrees run the new devenv workflow at the same time, each with its own isolated PostgreSQL/API/UI processes and ports, and `web-ui-test` passes independently in both; the exact commands and observed ports/hostnames are recorded as verification evidence.
+- [x] #9 Developer-facing documentation explains how to start the new devenv workflow, inspect resolved ports/hostnames, enable/disable Portless, and how the new workflow relates to the existing `nix develop`/process-compose workflow it does not yet replace.
 - [ ] #10 `nix flake check --keep-going` passes, and no existing package, NixOS module, or `checks.*` output changes behavior as a result of this task.
 <!-- AC:END -->
 
