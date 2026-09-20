@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-19 18:23'
+updated_date: '2026-09-20 00:28'
 labels:
   - design-parity
   - web-ui
@@ -235,6 +235,8 @@ Maintainer verification adjustment: do not run the authoritative `checks.x86_64-
 2026-09-19 user-authorized strict-baseline correction: retain current production UI and canonical fixture behavior. For 20af, mixed Nix+CVE evidence, and POA&M completed-history mobile, run each focused workflow twice in baseline-update mode with no source changes; compare only the ten named strict capture hashes. Normalize any unstable visible fixture data before approval. After deterministic evidence, approve only those ten reviewed strict PNGs, rerun the focused affected workflows under normal strict comparison, then run exactly one normal full `nix build .#checks.x86_64-linux.web-ui --no-link -L`. Do not change thresholds, policies, or unrelated baselines.
 
 2026-09-19 strict-baseline determinism adjustment: explicitly set the reviewed collapsed-sidebar preference in 20af so focused and ordered profiles capture the same state. Normalize only synthetic policy rule identifiers in the mixed Nix/CVE fixture through the authenticated policy API before production evaluation. Do not modify server-derived assessments, verification history, timestamps, strict thresholds, or visual comparison policy. Run each approved workflow twice from unchanged source, compare the approved captures using the repository visual-diff tolerance, then refresh only the ten user-approved PNGs.
+
+2026-09-19 maintainer-authorized CI adjustment: make only the authoritative Web UI GitLab job optional, without changing the Web UI check itself, strict baseline policy, or the remaining required CI matrix. Preserve Web UI screenshot artifacts and MR-comment wiring for the optional job. Commit and push the current TASK-440 baseline/harness stabilization work after CI configuration validation; merge remains contingent on the rest of CI.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
