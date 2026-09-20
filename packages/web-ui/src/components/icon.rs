@@ -45,6 +45,10 @@ pub enum IconName {
     /// Clock / history-time icon (design Icon.jsx "history").
     Clock,
     Star,
+    /// Maximizes a tray or drawer.
+    Maximize,
+    /// Restores a maximized tray or drawer.
+    Minimize,
 }
 
 #[component]
@@ -366,6 +370,20 @@ pub fn Icon(name: IconName, #[props(default = 16)] size: u32) -> Element {
         IconName::Star => rsx! {
             path {
                 d: "m12 2.5 3 6.4 6.8.9-5 4.9 1.3 6.8L12 18l-6.1 3.5L7.2 14.7l-5-4.9 6.8-.9L12 2.5z",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        IconName::Maximize => rsx! {
+            path {
+                d: "M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        IconName::Minimize => rsx! {
+            path {
+                d: "M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M3 16h3a2 2 0 0 1 2 2v3M16 21v-3a2 2 0 0 1 2-2h3",
                 stroke_linecap: "round",
                 stroke_linejoin: "round"
             }

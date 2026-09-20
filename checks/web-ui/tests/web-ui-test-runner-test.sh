@@ -19,11 +19,11 @@ mock_bin="$tmp_dir/bin"
 mkdir -p "$project/checks/web-ui/tests" "$mock_bin"
 
 # Build an isolated test manifest: the real coverage-manifest.json (so
-# unknown-workflow checks exercise the real 151-workflow step list), with a
-# synthetic `fixture`-category entry added under a name ("13-flakes") that is
-# not part of the real devStackWorkflows set. This keeps the fixture-category
-# test path independent of which workflows the repository currently
-# classifies as host-compatible.
+# unknown-workflow checks exercise the real, complete workflow step list),
+# with a synthetic `fixture`-category entry added under a name ("13-flakes")
+# that is not part of the real devStackWorkflows set. This keeps the
+# fixture-category test path independent of which workflows the repository
+# currently classifies as host-compatible.
 node - "$source_manifest" "$project/checks/web-ui/coverage-manifest.json" <<'NODE'
 const fs = require("fs");
 const [srcPath, destPath] = process.argv.slice(2);
@@ -194,11 +194,44 @@ run_failure vm-only 01-login-page
 assert_contains "$tmp_dir/vm-only.stderr" 'requires the authoritative NixOS VM harness'
 assert_contains "$tmp_dir/vm-only.stderr" 'nix build --impure .#checks.x86_64-linux.web-ui'
 
-# The isolated test manifest adds a third (fixture-category) workflow, so a
-# no-argument selection here covers all three, including the precondition
-# check for the fixture-category member.
+# The isolated test manifest adds a fixture-category workflow, so a no-argument
+# selection covers every real host-compatible workflow plus the synthetic
+# member and exercises its precondition check.
+#
+# The expected selection is derived from the repository manifest rather than
+# duplicated as a literal list. The runner reads the isolated manifest copy
+# and this expectation reads `coverage-manifest.json`, so the two inputs stay
+# independent while the contract — every declared host-compatible workflow, in
+# manifest order, with `$`-prefixed metadata excluded and no duplicates — is
+# still asserted exactly. A duplicated literal list cannot express that
+# contract: it silently goes stale whenever `settings.devStackWorkflows`
+# gains or loses a workflow.
+expected_default_steps="$(node - "$source_manifest" <<'NODE'
+const fs = require("fs");
+
+const manifest = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const declared = Object.keys(manifest.settings.devStackWorkflows).filter(
+  (name) => !name.startsWith("$"),
+);
+
+if (declared.length === 0) {
+  console.error("coverage-manifest.json declares no host-compatible workflows.");
+  process.exit(1);
+}
+// The fixture-category path below is only meaningful while "13-flakes" stays
+// synthetic. If the repository ever classifies it as host-compatible, the
+// injected entry would no longer be an independent addition.
+if (declared.includes("13-flakes")) {
+  console.error("13-flakes is no longer synthetic; pick another injected name.");
+  process.exit(1);
+}
+
+process.stdout.write([...declared, "13-flakes"].join(","));
+NODE
+)"
+
 run_success default-selection
-assert_contains "$tmp_dir/default-selection.json" '"steps":"12-systems,12a-systems-empty-state,13-flakes"'
+assert_contains "$tmp_dir/default-selection.json" "\"steps\":\"$expected_default_steps\""
 assert_contains "$tmp_dir/default-selection.psql-calls" "-h 127.0.0.1 -p 3042 -U crystal_forge -d crystal_forge"
 
 # ── --list / --help ──────────────────────────────────────────────────────────

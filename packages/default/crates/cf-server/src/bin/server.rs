@@ -97,6 +97,52 @@ async fn main() -> anyhow::Result<()> {
     let pool = db_pool().await?;
     tokio::spawn(memory_monitor_task(pool.clone()));
     sqlx::migrate!("./migrations").run(&pool).await?;
+    let reclaimed =
+        crystal_forge::queries::evaluation_snapshots::reclaim_orphaned_snapshot_content(&pool)
+            .await?;
+    if !reclaimed.is_empty() {
+        info!(
+            deployment_binding_rows = reclaimed.deployment_binding_rows,
+            derivation_rows = reclaimed.derivation_rows,
+            commit_rows = reclaimed.commit_rows,
+            artifact_rows = reclaimed.artifact_rows,
+            option_content_rows = reclaimed.option_content_rows,
+            flake_content_rows = reclaimed.flake_content_rows,
+            "reclaimed orphaned snapshot content"
+        );
+    }
+    let snapshot_gc_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(15 * 60));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            // Each pass is bounded in SQL. Loop until both content tables are
+            // drained so a large evaluator retry cannot leave permanent debris.
+            loop {
+                match crystal_forge::queries::evaluation_snapshots::reclaim_orphaned_snapshot_content(
+                    &snapshot_gc_pool,
+                )
+                .await
+                {
+                    Ok(progress) if progress.is_empty() => break,
+                    Ok(progress) => info!(
+                        deployment_binding_rows = progress.deployment_binding_rows,
+                        derivation_rows = progress.derivation_rows,
+                        commit_rows = progress.commit_rows,
+                        artifact_rows = progress.artifact_rows,
+                        option_content_rows = progress.option_content_rows,
+                        flake_content_rows = progress.flake_content_rows,
+                        "reclaimed orphaned snapshot content"
+                    ),
+                    Err(error) => {
+                        warn!(error = %error, "snapshot content reclamation failed");
+                        break;
+                    }
+                }
+            }
+        }
+    });
     let encrypted_rows = encrypt_plaintext_cache_secrets(&pool).await?;
     if encrypted_rows > 0 {
         info!(
@@ -237,6 +283,7 @@ async fn main() -> anyhow::Result<()> {
             get(dashboard::dashboard_summary),
         )
         .route("/api/v1/poams", get(poam::list).post(poam::create))
+        .route("/api/v1/poams/cves", post(poam::create_cve))
         .route("/api/v1/poams/dashboard", get(poam::dashboard))
         .route("/api/v1/poams/dashboard/watchlist", get(poam::watchlist))
         .route("/api/v1/poams/rollups/systems", get(poam::system_rollups))
@@ -249,7 +296,12 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/poams/relationships/assignments",
             get(poam::assignment_relationships),
         )
+        .route(
+            "/api/v1/poams/relationships/cves",
+            get(poam::cve_relationships),
+        )
         .route("/api/v1/poams/compatible", get(poam::compatible_poams))
+        .route("/api/v1/poams/assignees", get(poam::assignee_catalog))
         .route("/api/v1/poams/:id", get(poam::get).patch(poam::update))
         .route("/api/v1/poams/:id/transition", post(poam::transition))
         .route("/api/v1/poams/:id/notes", post(poam::note))
@@ -262,6 +314,14 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/poams/:id/findings/:finding_id",
             delete(poam::unlink_finding),
+        )
+        .route(
+            "/api/v1/poams/:id/cve-findings",
+            post(poam::link_cve_finding),
+        )
+        .route(
+            "/api/v1/poams/:id/cve-findings/:finding_id",
+            delete(poam::unlink_cve_finding),
         )
         .route("/api/v1/poams/:id/assignments", post(poam::link_assignment))
         .route(
@@ -332,6 +392,10 @@ async fn main() -> anyhow::Result<()> {
             post(user_notifications::read_all_notifications),
         )
         .route(
+            "/api/v1/user/notifications/dismiss-all",
+            post(user_notifications::dismiss_all_notifications_handler),
+        )
+        .route(
             "/api/v1/user/notifications/:notification_id/read",
             post(user_notifications::read_notification),
         )
@@ -356,7 +420,13 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/cves/rescan-fleet",
             post(cves::trigger_fleet_rescan),
         )
+        .route(
+            "/api/v1/cves/rescan/:derivation_id",
+            post(cves::trigger_derivation_rescan),
+        )
         .route("/api/v1/cves/export", get(cves::export_cves))
+        .route("/api/v1/cves/:cve_id/fleet", get(poam::fleet_cve_detail))
+        .route("/api/v1/cves/:cve_id/triage", post(poam::triage_fleet_cve))
         .route("/api/v1/cves/:cve_id", get(cves::get_cve_detail))
         .route("/api/v1/cves/:cve_id/systems", get(cves::get_cve_systems))
         .route(
@@ -369,6 +439,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/v1/scanning/stats", get(scanning::get_scanning_stats))
         .route("/api/v1/scanning/queue", get(scanning::get_scanning_queue))
+        .route(
+            "/api/v1/scanning/scans/:scan_id",
+            get(scanning::get_scanning_scan_detail),
+        )
         .route(
             "/api/v1/scanning/systems",
             get(scanning::get_scanning_systems),
@@ -410,6 +484,14 @@ async fn main() -> anyhow::Result<()> {
             get(systems::get_system).patch(systems::update_system_handler),
         )
         .route("/api/v1/systems/:id/cves", get(systems::get_system_cves))
+        .route(
+            "/api/v1/systems/:id/cve-inventory",
+            get(systems::get_system_cve_inventory),
+        )
+        .route(
+            "/api/v1/systems/:id/cve-inventory-page",
+            get(systems::get_system_cve_inventory_page),
+        )
         .route(
             "/api/v1/systems/:id/cves/:cve_id/justification",
             put(systems::save_system_cve_justification),
@@ -467,6 +549,38 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/systems/:id/generations",
             get(systems::get_system_generations),
+        )
+        .route(
+            "/api/v1/systems/:id/evaluated-options",
+            get(systems::get_system_evaluated_options),
+        )
+        .route(
+            "/api/v1/systems/:id/evaluation-summary",
+            get(systems::get_system_evaluation_summary),
+        )
+        .route(
+            "/api/v1/systems/:id/evaluation-module-sources",
+            get(systems::get_system_evaluation_module_sources),
+        )
+        .route(
+            "/api/v1/systems/:id/evaluations/:revision",
+            post(systems::queue_system_evaluation_prerequisite),
+        )
+        .route(
+            "/api/v1/systems/:id/config-inspections/:revision",
+            post(systems::queue_system_config_inspection),
+        )
+        .route(
+            "/api/v1/systems/:id/config-observations/:revision",
+            post(systems::create_system_config_observation),
+        )
+        .route(
+            "/api/v1/systems/:id/config-observation-requests/:request_id",
+            get(systems::get_system_config_observation_request),
+        )
+        .route(
+            "/api/v1/systems/:id/config-observations/by-id/:observation_id",
+            get(systems::get_system_config_observation),
         )
         .route(
             "/api/v1/systems/:id/verify-generation-closure",
@@ -752,6 +866,14 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/v1/flakes/timelines", get(flakes::get_flake_timelines))
         .route(
+            "/api/v1/flakes/:id/revisions/:revision/outputs",
+            get(flakes::get_flake_revision_outputs),
+        )
+        .route(
+            "/api/v1/flakes/:id/revisions/:revision/modules/:module/declarations",
+            get(flakes::get_flake_module_declarations),
+        )
+        .route(
             "/api/v1/flakes/:id/commits/:hash/diff",
             get(flakes::get_commit_diff_handler),
         )
@@ -840,6 +962,24 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/builders/:id/next-job",
             get(builders::get_next_job).post(builders::get_next_job),
+        )
+        .route(
+            "/api/v1/builders/:id/cve-scans/claim",
+            post(builders::claim_cve_scan),
+        )
+        .route(
+            "/api/v1/builders/:id/cve-scans/heartbeat",
+            post(builders::heartbeat_cve_scan),
+        )
+        .route(
+            "/api/v1/builders/:id/cve-scans/complete",
+            post(builders::complete_cve_scan).layer(DefaultBodyLimit::max(
+                cf_protocol::builder::CVE_SCAN_MAX_BODY_BYTES as usize,
+            )),
+        )
+        .route(
+            "/api/v1/builders/:id/cve-scans/fail",
+            post(builders::fail_cve_scan),
         )
         .route(
             "/api/v1/builders/:id/jobs/:job_id/start",

@@ -19,6 +19,10 @@ let
     url = "https://unpkg.com/@babel/standalone@7.29.0/babel.min.js";
     sha256 = "186f1mfjlcs49p0j0hss1m9cxpbpw9a12imli7kmr48953iaj8r6";
   };
+  jszip = pkgs.fetchurl {
+    url = "https://unpkg.com/jszip@3.10.1/dist/jszip.min.js";
+    hash = "sha256-rMfkFFWoB2W1/Zx+4bgHim0WC7vKRVrq6FTeZclH1Z4=";
+  };
 
   designExampleSrc = "${inputs.self}/docs/design/CrystalForge";
 
@@ -29,10 +33,12 @@ let
     cp ${reactUmd}        $out/vendor/react.development.js
     cp ${reactDomUmd}     $out/vendor/react-dom.development.js
     cp ${babelStandalone} $out/vendor/babel.min.js
+    cp ${jszip}           $out/vendor/jszip.min.js
     ${pkgs.gnused}/bin/sed -i -E \
       -e 's#src="https://unpkg.com/react@[^"]*"#src="vendor/react.development.js"#' \
       -e 's#src="https://unpkg.com/react-dom@[^"]*"#src="vendor/react-dom.development.js"#' \
       -e 's#src="https://unpkg.com/@babel/standalone@[^"]*"#src="vendor/babel.min.js"#' \
+      -e 's#src="https://unpkg.com/jszip@[^"]*"#src="vendor/jszip.min.js"#' \
       -e 's# integrity="[^"]*"##g' \
       -e 's# crossorigin="anonymous"##g' \
       $out/crystal-forge.html

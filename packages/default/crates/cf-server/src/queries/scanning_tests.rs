@@ -142,18 +142,39 @@ async fn deployed_query_runs_against_current_schema() {
     assert!(result.total >= result.rows.len() as i64);
 }
 
-async fn insert_never_scanned_system_fixture(pool: &PgPool) -> (Uuid, String, i32) {
+async fn insert_never_scanned_system_fixture(pool: &PgPool) -> (Uuid, String, i32, i32) {
     let suffix = Uuid::new_v4().simple().to_string();
     let hostname = format!("never-scanned-{suffix}");
     let system_id = Uuid::new_v4();
+    let flake_id: i32 = sqlx::query_scalar(
+        "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+    )
+    .bind(format!("never-scanned-{suffix}"))
+    .bind(format!("https://example.test/never-scanned-{suffix}.git"))
+    .fetch_one(pool)
+    .await
+    .expect("never-scanned flake should be inserted");
+    let commit_id: i32 = sqlx::query_scalar(
+        "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, $2, NOW()) RETURNING id",
+    )
+    .bind(flake_id)
+    .bind(&suffix)
+    .fetch_one(pool)
+    .await
+    .expect("never-scanned commit should be inserted");
+    let store_path = format!("/nix/store/{suffix}-never-scanned");
     let derivation_id: i32 = sqlx::query_scalar(
         r#"
-        INSERT INTO derivations (derivation_type, derivation_name, status_id, attempt_count)
-        VALUES ('nixos', $1, 5, 0)
+        INSERT INTO derivations (
+            derivation_type, derivation_name, commit_id, store_path, status_id, attempt_count
+        )
+        VALUES ('nixos', $1, $2, $3, 5, 0)
         RETURNING id
         "#,
     )
     .bind(&hostname)
+    .bind(commit_id)
+    .bind(&store_path)
     .fetch_one(pool)
     .await
     .expect("never-scanned derivation should be inserted");
@@ -162,21 +183,41 @@ async fn insert_never_scanned_system_fixture(pool: &PgPool) -> (Uuid, String, i3
         r#"
         INSERT INTO systems (
             id, hostname, is_active, public_key, derivation,
-            system_configuration_name, deployment_policy
+            system_configuration_name, deployment_policy, flake_id
         )
-        VALUES ($1, $2, TRUE, 'test-key', '', $2, 'manual')
+        VALUES ($1, $2, TRUE, 'test-key', '', $2, 'manual', $3)
         "#,
     )
     .bind(system_id)
     .bind(&hostname)
+    .bind(flake_id)
     .execute(pool)
     .await
     .expect("never-scanned system should be inserted");
+    sqlx::query(
+        "INSERT INTO system_states (hostname, store_path, change_reason, timestamp) VALUES ($1, $2, 'config_change', NOW())",
+    )
+    .bind(&hostname)
+    .bind(&store_path)
+    .execute(pool)
+    .await
+    .expect("never-scanned system state should be inserted");
 
-    (system_id, hostname, derivation_id)
+    (system_id, hostname, derivation_id, flake_id)
 }
 
-async fn cleanup_never_scanned_system_fixture(pool: &PgPool, system_id: Uuid, derivation_id: i32) {
+async fn cleanup_never_scanned_system_fixture(
+    pool: &PgPool,
+    system_id: Uuid,
+    hostname: &str,
+    derivation_id: i32,
+    flake_id: i32,
+) {
+    sqlx::query("DELETE FROM system_states WHERE hostname = $1")
+        .bind(hostname)
+        .execute(pool)
+        .await
+        .expect("never-scanned system state should be deleted");
     sqlx::query("DELETE FROM systems WHERE id = $1")
         .bind(system_id)
         .execute(pool)
@@ -187,6 +228,16 @@ async fn cleanup_never_scanned_system_fixture(pool: &PgPool, system_id: Uuid, de
         .execute(pool)
         .await
         .expect("never-scanned derivation should be deleted");
+    sqlx::query("DELETE FROM commits WHERE flake_id = $1")
+        .bind(flake_id)
+        .execute(pool)
+        .await
+        .expect("never-scanned commit should be deleted");
+    sqlx::query("DELETE FROM flakes WHERE id = $1")
+        .bind(flake_id)
+        .execute(pool)
+        .await
+        .expect("never-scanned flake should be deleted");
 }
 
 async fn insert_waiting_stats_derivation(pool: &PgPool, name: &str) -> i32 {
@@ -322,10 +373,12 @@ async fn scan_stats_count_worker_eligible_waiting_targets() {
 #[ignore = "requires live database connection"]
 async fn scan_queue_normalizes_never_scanned_derivation() {
     let pool = test_pool_from_env().await;
-    let (system_id, hostname, derivation_id) = insert_never_scanned_system_fixture(&pool).await;
+    let (system_id, hostname, derivation_id, flake_id) =
+        insert_never_scanned_system_fixture(&pool).await;
 
     let result = get_scan_queue(&pool, 500).await;
-    cleanup_never_scanned_system_fixture(&pool, system_id, derivation_id).await;
+    cleanup_never_scanned_system_fixture(&pool, system_id, &hostname, derivation_id, flake_id)
+        .await;
     let rows = result.expect("queue query should return a never-scanned derivation");
     let row = rows
         .into_iter()
@@ -336,6 +389,7 @@ async fn scan_queue_normalizes_never_scanned_derivation() {
     assert_eq!(row.critical_count, 0);
     assert_eq!(row.high_count, 0);
     assert_eq!(row.medium_count, 0);
+    assert!(row.rescan_eligible);
 }
 
 /// Ensures the system queue normalizes absent `cve_scans` values for a derivation.
@@ -343,10 +397,12 @@ async fn scan_queue_normalizes_never_scanned_derivation() {
 #[ignore = "requires live database connection"]
 async fn system_scan_queue_normalizes_never_scanned_derivation() {
     let pool = test_pool_from_env().await;
-    let (system_id, hostname, derivation_id) = insert_never_scanned_system_fixture(&pool).await;
+    let (system_id, hostname, derivation_id, flake_id) =
+        insert_never_scanned_system_fixture(&pool).await;
 
     let result = get_scan_queue_for_system(&pool, system_id, 500).await;
-    cleanup_never_scanned_system_fixture(&pool, system_id, derivation_id).await;
+    cleanup_never_scanned_system_fixture(&pool, system_id, &hostname, derivation_id, flake_id)
+        .await;
     let rows = result.expect("system queue query should return a never-scanned derivation");
     let row = rows
         .into_iter()
@@ -357,4 +413,244 @@ async fn system_scan_queue_normalizes_never_scanned_derivation() {
     assert_eq!(row.critical_count, 0);
     assert_eq!(row.high_count, 0);
     assert_eq!(row.medium_count, 0);
+    assert!(row.is_current);
+    assert!(row.rescan_eligible);
+}
+
+/// Ensures All scans retains standalone NixOS derivations with nullable commit
+/// display data.
+#[tokio::test]
+#[ignore = "requires live database connection"]
+async fn scan_queue_includes_standalone_derivation() {
+    let pool = test_pool_from_env().await;
+    let suffix = Uuid::new_v4().simple().to_string();
+    let hostname = format!("standalone-{suffix}");
+    let derivation_id: i32 = sqlx::query_scalar(
+        r#"
+        INSERT INTO derivations (
+            derivation_type, derivation_name, store_path, status_id, attempt_count
+        )
+        VALUES ('nixos', $1, $2, 5, 0)
+        RETURNING id
+        "#,
+    )
+    .bind(&hostname)
+    .bind(format!("/nix/store/{suffix}-standalone"))
+    .fetch_one(&pool)
+    .await
+    .expect("standalone derivation should be inserted");
+    sqlx::query(
+        "INSERT INTO cve_scans (derivation_id, scanner_name, status, source_trigger) VALUES ($1, 'test', 'pending', 'manual')",
+    )
+    .bind(derivation_id)
+    .execute(&pool)
+    .await
+    .expect("standalone scan should be inserted");
+
+    let rows = get_scan_queue(&pool, 500)
+        .await
+        .expect("All scans should load standalone derivations");
+    let row = rows
+        .iter()
+        .find(|row| row.derivation_id == derivation_id)
+        .expect("standalone derivation should remain visible");
+
+    assert_eq!(row.hostname, hostname);
+    assert!(row.flake_name.is_none());
+    assert!(row.commit_hash.is_none());
+    assert!(row.rescan_eligible);
+
+    sqlx::query("DELETE FROM cve_scans WHERE derivation_id = $1")
+        .bind(derivation_id)
+        .execute(&pool)
+        .await
+        .expect("standalone scan should be deleted");
+    sqlx::query("DELETE FROM derivations WHERE id = $1")
+        .bind(derivation_id)
+        .execute(&pool)
+        .await
+        .expect("standalone derivation should be deleted");
+}
+
+/// Ensures system history stays within its flake and marks only the latest
+/// reported store path as current.
+#[tokio::test]
+#[ignore = "requires live database connection"]
+async fn system_scan_scope_uses_exact_flake_configuration_and_current_store_path() {
+    let pool = test_pool_from_env().await;
+    let (system_id, hostname, current_id, flake_id) =
+        insert_never_scanned_system_fixture(&pool).await;
+    let suffix = Uuid::new_v4().simple().to_string();
+    let current_store_path: String =
+        sqlx::query_scalar("SELECT store_path FROM derivations WHERE id = $1")
+            .bind(current_id)
+            .fetch_one(&pool)
+            .await
+            .expect("current store path should resolve");
+
+    let history_commit_id: i32 = sqlx::query_scalar(
+        "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, $2, NOW() - INTERVAL '1 hour') RETURNING id",
+    )
+    .bind(flake_id)
+    .bind(format!("history-{suffix}"))
+    .fetch_one(&pool)
+    .await
+    .expect("history commit should be inserted");
+    let history_id: i32 = sqlx::query_scalar(
+        r#"
+        INSERT INTO derivations (
+            derivation_type, derivation_name, commit_id, store_path, status_id, attempt_count
+        )
+        VALUES ('nixos', $1, $2, $3, 5, 0)
+        RETURNING id
+        "#,
+    )
+    .bind(&hostname)
+    .bind(history_commit_id)
+    .bind(format!("/nix/store/{suffix}-history"))
+    .fetch_one(&pool)
+    .await
+    .expect("history derivation should be inserted");
+
+    let unrelated_flake_id: i32 = sqlx::query_scalar(
+        "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+    )
+    .bind(format!("unrelated-{suffix}"))
+    .bind(format!("https://example.test/unrelated-{suffix}.git"))
+    .fetch_one(&pool)
+    .await
+    .expect("unrelated flake should be inserted");
+    let unrelated_commit_id: i32 = sqlx::query_scalar(
+        "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, $2, NOW() + INTERVAL '1 hour') RETURNING id",
+    )
+    .bind(unrelated_flake_id)
+    .bind(format!("unrelated-{suffix}"))
+    .fetch_one(&pool)
+    .await
+    .expect("unrelated commit should be inserted");
+    let unrelated_id: i32 = sqlx::query_scalar(
+        r#"
+        INSERT INTO derivations (
+            derivation_type, derivation_name, commit_id, store_path, status_id, attempt_count
+        )
+        VALUES ('nixos', $1, $2, $3, 5, 0)
+        RETURNING id
+        "#,
+    )
+    .bind(&hostname)
+    .bind(unrelated_commit_id)
+    .bind(&current_store_path)
+    .fetch_one(&pool)
+    .await
+    .expect("unrelated derivation should be inserted");
+    let unbuilt_commit_id: i32 = sqlx::query_scalar(
+        "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, $2, NOW() - INTERVAL '2 hours') RETURNING id",
+    )
+    .bind(flake_id)
+    .bind(format!("unbuilt-{suffix}"))
+    .fetch_one(&pool)
+    .await
+    .expect("unbuilt history commit should be inserted");
+    let unbuilt_id: i32 = sqlx::query_scalar(
+        r#"
+        INSERT INTO derivations (
+            derivation_type, derivation_name, commit_id, status_id, attempt_count
+        )
+        VALUES ('nixos', $1, $2, 5, 0)
+        RETURNING id
+        "#,
+    )
+    .bind(&hostname)
+    .bind(unbuilt_commit_id)
+    .fetch_one(&pool)
+    .await
+    .expect("unbuilt history derivation should be inserted");
+
+    sqlx::query(
+        "INSERT INTO cve_scans (derivation_id, scanner_name, status, source_trigger) VALUES ($1, 'test', 'pending', $2)",
+    )
+    .bind(current_id)
+    .bind("manual")
+    .execute(&pool)
+    .await
+    .expect("current scan should be inserted");
+    sqlx::query(
+        "INSERT INTO cve_scans (derivation_id, scanner_name, status, source_trigger) VALUES ($1, 'test', 'pending', $2)",
+    )
+    .bind(history_id)
+    .bind("fleet")
+    .execute(&pool)
+    .await
+    .expect("history scan should be inserted");
+
+    let rows = get_scan_queue_for_system(&pool, system_id, 500)
+        .await
+        .expect("system scan history should load");
+    let deployed = get_scan_deployed(&pool, 500, None)
+        .await
+        .expect("deployed scan rows should load");
+    let current = rows
+        .iter()
+        .find(|row| row.derivation_id == current_id)
+        .expect("current derivation should be present");
+    let history = rows
+        .iter()
+        .find(|row| row.derivation_id == history_id)
+        .expect("same-flake history should be present");
+    let unbuilt = rows
+        .iter()
+        .find(|row| row.derivation_id == unbuilt_id)
+        .expect("unbuilt same-flake history should be present");
+    let system = get_scan_systems(&pool, 500)
+        .await
+        .expect("system summaries should load")
+        .into_iter()
+        .find(|row| row.system_id == system_id)
+        .expect("fixture system summary should be present");
+
+    assert!(current.is_current);
+    assert_eq!(current.source_trigger.as_deref(), Some("manual"));
+    assert!(!history.is_current);
+    assert_eq!(history.source_trigger.as_deref(), Some("fleet"));
+    assert!(current.rescan_eligible);
+    assert!(history.rescan_eligible);
+    assert!(!unbuilt.rescan_eligible);
+    assert!(rows.iter().all(|row| row.derivation_id != unrelated_id));
+    assert!(
+        deployed
+            .rows
+            .iter()
+            .any(|row| row.derivation_id == current_id),
+        "the system flake's deployed derivation should be present"
+    );
+    assert!(
+        deployed
+            .rows
+            .iter()
+            .all(|row| row.derivation_id != unrelated_id),
+        "an identical config/store path from another flake must be excluded"
+    );
+    assert_eq!(system.current_derivation_id, Some(current_id));
+
+    sqlx::query("DELETE FROM cve_scans WHERE derivation_id = ANY($1)")
+        .bind(&[current_id, history_id][..])
+        .execute(&pool)
+        .await
+        .expect("scan fixtures should be deleted");
+    sqlx::query("DELETE FROM derivations WHERE id = ANY($1)")
+        .bind(&[history_id, unrelated_id, unbuilt_id][..])
+        .execute(&pool)
+        .await
+        .expect("history derivations should be deleted");
+    sqlx::query("DELETE FROM commits WHERE flake_id = $1")
+        .bind(unrelated_flake_id)
+        .execute(&pool)
+        .await
+        .expect("unrelated commit should be deleted");
+    sqlx::query("DELETE FROM flakes WHERE id = $1")
+        .bind(unrelated_flake_id)
+        .execute(&pool)
+        .await
+        .expect("unrelated flake should be deleted");
+    cleanup_never_scanned_system_fixture(&pool, system_id, &hostname, current_id, flake_id).await;
 }

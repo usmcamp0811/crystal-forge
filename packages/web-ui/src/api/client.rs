@@ -122,6 +122,13 @@ pub async fn fetch_scanning_queue(
     fetch_json(&url).await
 }
 
+pub async fn fetch_scanning_scan_detail(
+    scan_id: &Uuid,
+) -> Result<ScanningScanDetailResponse, ApiClientError> {
+    let url = format!("{}/scanning/scans/{}", base_url(), scan_id);
+    fetch_json(&url).await
+}
+
 pub async fn fetch_scanning_systems(
     limit: Option<i64>,
 ) -> Result<Vec<ScanningSystemsItemResponse>, ApiClientError> {
@@ -560,6 +567,14 @@ pub async fn trigger_cve_fleet_rescan() -> Result<FleetRescanResponse, ApiClient
     send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
+/// Enqueues or reuses a CVE scan for one exact derivation.
+pub async fn trigger_cve_derivation_rescan(
+    derivation_id: i32,
+) -> Result<DerivationRescanResponse, ApiClientError> {
+    let url = format!("{}/cves/rescan/{derivation_id}", base_url());
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
 /// Export CVEs as CSV (triggers browser download).
 pub async fn export_cves_csv(filters: &CveFilters) -> Result<(), ApiClientError> {
     let parts = cve_filter_query_parts(filters);
@@ -599,11 +614,422 @@ pub async fn fetch_system(id: &uuid::Uuid) -> Result<SystemDetail, ApiClientErro
     fetch_json(&url).await
 }
 
-/// Fetch CVE vulnerabilities for a single system.
-pub async fn fetch_system_cves(
+/// Fetches one bounded page of cached evaluated options without launching evaluation.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails or the response cannot be
+/// decoded as [`EvaluatedOptionsPage`].
+pub async fn fetch_system_evaluated_options(
     id: &uuid::Uuid,
-) -> Result<Vec<SystemVulnerability>, ApiClientError> {
-    let url = format!("{}/systems/{}/cves", base_url(), id);
+    request: &EvaluatedOptionsRequest,
+) -> Result<EvaluatedOptionsPage, ApiClientError> {
+    let mut parts = vec![
+        format!("revision={}", encode_query_value(&request.revision)),
+        format!("mode={}", request.mode.as_query_value()),
+        format!("filter={}", request.filter.as_query_value()),
+        format!("limit={}", request.limit.clamp(1, 100)),
+        format!("offset={}", request.offset.clamp(0, 100_000)),
+    ];
+    if let Some(generation) = request.generation {
+        parts.push(format!("generation={generation}"));
+    }
+    if !request.search.is_empty() {
+        parts.push(format!("search={}", encode_query_value(&request.search)));
+    }
+    if let Some(snapshot_token) = request.snapshot_token.as_deref() {
+        parts.push(format!(
+            "snapshot_token={}",
+            encode_query_value(snapshot_token)
+        ));
+    }
+    let url = format!(
+        "{}/systems/{}/evaluated-options?{}",
+        base_url(),
+        id,
+        parts.join("&")
+    );
+    fetch_json(&url).await
+}
+
+/// Fetches complete selected-revision module, evaluation, and drift metadata.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails or the response cannot be
+/// decoded as [`SelectedEvaluationSummary`].
+pub async fn fetch_system_evaluation_summary(
+    id: &uuid::Uuid,
+    revision: &str,
+    generation: Option<i32>,
+    mode: SnapshotRevisionMode,
+    snapshot_token: Option<&str>,
+) -> Result<SelectedEvaluationSummary, ApiClientError> {
+    let mut parts = vec![
+        format!("revision={}", encode_query_value(revision)),
+        format!("mode={}", mode.as_query_value()),
+    ];
+    if let Some(generation) = generation {
+        parts.push(format!("generation={generation}"));
+    }
+    if let Some(snapshot_token) = snapshot_token {
+        parts.push(format!(
+            "snapshot_token={}",
+            encode_query_value(snapshot_token)
+        ));
+    }
+    let url = format!(
+        "{}/systems/{}/evaluation-summary?{}",
+        base_url(),
+        id,
+        parts.join("&")
+    );
+    fetch_json(&url).await
+}
+
+/// Fetches one bounded module-source page without launching evaluation.
+///
+/// Page zero omits `snapshot_token`. Continuation requests must send the token
+/// returned by page zero so the server can reject mixed-snapshot pages.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails or the response cannot be
+/// decoded as [`EvaluationModuleSourcesPage`].
+pub async fn fetch_system_evaluation_module_sources(
+    id: &uuid::Uuid,
+    revision: &str,
+    generation: Option<i32>,
+    mode: SnapshotRevisionMode,
+    limit: i64,
+    offset: i64,
+    snapshot_token: Option<&str>,
+) -> Result<EvaluationModuleSourcesPage, ApiClientError> {
+    let mut parts = vec![
+        format!("revision={}", encode_query_value(revision)),
+        format!("mode={}", mode.as_query_value()),
+        format!("limit={}", limit.clamp(1, 100)),
+        format!("offset={}", offset.max(0)),
+    ];
+    if let Some(generation) = generation {
+        parts.push(format!("generation={generation}"));
+    }
+    if let Some(snapshot_token) = snapshot_token {
+        parts.push(format!(
+            "snapshot_token={}",
+            encode_query_value(snapshot_token)
+        ));
+    }
+    let url = format!(
+        "{}/systems/{}/evaluation-module-sources?{}",
+        base_url(),
+        id,
+        parts.join("&")
+    );
+    fetch_json(&url).await
+}
+
+/// Queues or reuses targeted Config Inspector work for a full revision SHA.
+///
+/// # Errors
+///
+/// Returns [`QueueConfigInspectionError::Prerequisite`] when primary evaluation
+/// has not persisted the exact carrier. Other request failures return
+/// [`QueueConfigInspectionError::Request`].
+pub async fn queue_system_config_inspection(
+    id: &uuid::Uuid,
+    revision: &str,
+) -> Result<QueueConfigInspectionResponse, QueueConfigInspectionError> {
+    let url = format!(
+        "{}/systems/{}/config-inspections/{}",
+        base_url(),
+        id,
+        encode_uri_component(revision)
+    );
+    let (status, text) = send_request_with_csrf("POST", &url, None)
+        .await
+        .map_err(QueueConfigInspectionError::Request)?;
+    if status == 409
+        && let Ok(error) = serde_json::from_str::<ApiError>(&text)
+        && error.error == "config_inspection_prerequisite"
+    {
+        return Err(QueueConfigInspectionError::Prerequisite(error.message));
+    }
+    if !(200..300).contains(&status) {
+        return Err(QueueConfigInspectionError::Request(
+            ApiClientError::Status {
+                code: status,
+                body: decode_api_error_message(&text),
+            },
+        ));
+    }
+    serde_json::from_str(&text).map_err(|error| {
+        QueueConfigInspectionError::Request(ApiClientError::Deserialize(error.to_string()))
+    })
+}
+
+/// Creates or reuses one exact scoped Config Explorer request.
+///
+/// This mutation uses the shared credential and CSRF helper. A successful
+/// response can be active (`202`) or already complete (`200`).
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails or the response cannot be
+/// decoded as [`ConfigObservationRequestResponse`].
+pub async fn create_system_config_observation(
+    id: &uuid::Uuid,
+    revision: &str,
+    request: &CreateConfigObservationRequest,
+) -> Result<ConfigObservationRequestResponse, ApiClientError> {
+    let url = format!(
+        "{}/systems/{}/config-observations/{}",
+        base_url(),
+        id,
+        encode_uri_component(revision)
+    );
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+/// Fetches the read-only lifecycle for one durable observation request.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails or the response cannot be
+/// decoded as [`ConfigObservationRequestResponse`].
+pub async fn fetch_system_config_observation_request(
+    id: &uuid::Uuid,
+    request_id: &uuid::Uuid,
+) -> Result<ConfigObservationRequestResponse, ApiClientError> {
+    let url = format!(
+        "{}/systems/{}/config-observation-requests/{}",
+        base_url(),
+        id,
+        request_id
+    );
+    fetch_json(&url).await
+}
+
+/// Fetches one immutable scoped Config Explorer observation by identity.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails or the response cannot be
+/// decoded as [`ConfigObservationResponse`].
+pub async fn fetch_system_config_observation(
+    id: &uuid::Uuid,
+    observation_id: &uuid::Uuid,
+) -> Result<ConfigObservationResponse, ApiClientError> {
+    let url = format!(
+        "{}/systems/{}/config-observations/by-id/{}",
+        base_url(),
+        id,
+        observation_id
+    );
+    fetch_json(&url).await
+}
+
+fn validate_config_observation_request_identity(
+    response: &ConfigObservationRequestResponse,
+    request_id: Option<uuid::Uuid>,
+    revision: &str,
+    request: &CreateConfigObservationRequest,
+) -> Result<(), ApiClientError> {
+    if request_id.is_some_and(|request_id| response.request_id != request_id)
+        || response.revision != revision
+        || response.kind != request.kind
+        || response.path_components != request.path_components
+        || response.child_offset != request.child_offset
+    {
+        return Err(ApiClientError::Deserialize(
+            "Config observation request identity changed while polling".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn config_observation_payload_identity(
+    payload: &ConfigObservationPayload,
+) -> (ConfigObservationKind, &[String], u32) {
+    match payload {
+        ConfigObservationPayload::Root {
+            path_components,
+            child_offset,
+            ..
+        } => (ConfigObservationKind::Root, path_components, *child_offset),
+        ConfigObservationPayload::Prefix {
+            path_components,
+            child_offset,
+            ..
+        } => (
+            ConfigObservationKind::Prefix,
+            path_components,
+            *child_offset,
+        ),
+        ConfigObservationPayload::Option {
+            path_components, ..
+        } => (ConfigObservationKind::Option, path_components, 0),
+        ConfigObservationPayload::Provenance {
+            path_components, ..
+        } => (ConfigObservationKind::Provenance, path_components, 0),
+        ConfigObservationPayload::ConfiguredIndex {
+            path_components, ..
+        } => (ConfigObservationKind::ConfiguredIndex, path_components, 0),
+    }
+}
+
+fn config_observation_poll_delay_ms(
+    lifecycle: ConfigObservationLifecycle,
+    first_poll: bool,
+) -> Option<u32> {
+    match lifecycle {
+        ConfigObservationLifecycle::Queued | ConfigObservationLifecycle::WaitingForCapacity => {
+            Some(if first_poll { 250 } else { 1_000 })
+        }
+        ConfigObservationLifecycle::Running => Some(if first_poll { 250 } else { 500 }),
+        ConfigObservationLifecycle::Succeeded | ConfigObservationLifecycle::Failed => None,
+    }
+}
+
+/// Posts once, polls only the durable request, and fetches its immutable result.
+///
+/// `on_lifecycle` receives the initial POST response and each later lifecycle
+/// response. The first nonterminal response polls after 250 ms so a short
+/// interactive evaluation does not incur a fixed multi-second UI delay. Later
+/// queued or capacity-waiting responses poll every second. Running requests
+/// poll every 500 ms. The loader does not synthesize a percentage or re-POST
+/// while it waits. `should_continue` stops obsolete polling without changing or
+/// cancelling the durable server request.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] for transport, status, decoding, failed-request,
+/// missing-observation, or exact-identity errors.
+pub async fn load_system_config_observation<F, C>(
+    id: &uuid::Uuid,
+    revision: &str,
+    request: CreateConfigObservationRequest,
+    mut on_lifecycle: F,
+    mut should_continue: C,
+) -> Result<Option<ConfigObservationResponse>, ApiClientError>
+where
+    F: FnMut(&ConfigObservationRequestResponse),
+    C: FnMut() -> bool,
+{
+    if !should_continue() {
+        return Ok(None);
+    }
+    let mut lifecycle = create_system_config_observation(id, revision, &request).await?;
+    if !should_continue() {
+        return Ok(None);
+    }
+    validate_config_observation_request_identity(&lifecycle, None, revision, &request)?;
+    let request_id = lifecycle.request_id;
+    on_lifecycle(&lifecycle);
+    let mut first_poll = true;
+
+    loop {
+        match lifecycle.lifecycle {
+            ConfigObservationLifecycle::Succeeded => {
+                if !should_continue() {
+                    return Ok(None);
+                }
+                let observation_id = lifecycle.observation_id.ok_or_else(|| {
+                    ApiClientError::Deserialize(
+                        "Succeeded Config observation request omitted observation_id".to_string(),
+                    )
+                })?;
+                let observation = fetch_system_config_observation(id, &observation_id).await?;
+                if !should_continue() {
+                    return Ok(None);
+                }
+                let (payload_kind, payload_path, payload_child_offset) =
+                    config_observation_payload_identity(&observation.payload);
+                if observation.observation_id != observation_id
+                    || observation.revision != revision
+                    || observation.kind != request.kind
+                    || observation.path_components != request.path_components
+                    || observation.child_offset != request.child_offset
+                    || payload_kind != request.kind
+                    || payload_path != request.path_components
+                    || payload_child_offset != request.child_offset
+                {
+                    return Err(ApiClientError::Deserialize(
+                        "Immutable Config observation identity did not match its request"
+                            .to_string(),
+                    ));
+                }
+                return Ok(Some(observation));
+            }
+            ConfigObservationLifecycle::Failed => {
+                return Err(ApiClientError::Status {
+                    code: 422,
+                    body: lifecycle
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "Config observation failed".to_string()),
+                });
+            }
+            ConfigObservationLifecycle::Queued
+            | ConfigObservationLifecycle::WaitingForCapacity
+            | ConfigObservationLifecycle::Running => {
+                if let Some(delay) =
+                    config_observation_poll_delay_ms(lifecycle.lifecycle, first_poll)
+                {
+                    gloo_timers::future::TimeoutFuture::new(delay).await;
+                }
+            }
+        }
+        first_poll = false;
+
+        if !should_continue() {
+            return Ok(None);
+        }
+        lifecycle = fetch_system_config_observation_request(id, &request_id).await?;
+        if !should_continue() {
+            return Ok(None);
+        }
+        validate_config_observation_request_identity(
+            &lifecycle,
+            Some(request_id),
+            revision,
+            &request,
+        )?;
+        on_lifecycle(&lifecycle);
+    }
+}
+
+const SYSTEM_CVE_INVENTORY_PAGE_SIZE: u16 = 100;
+
+#[derive(serde::Serialize)]
+struct SystemCveInventoryPageQuery<'a> {
+    limit: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    after: Option<&'a str>,
+}
+
+fn system_cve_inventory_url(
+    base: &str,
+    id: &Uuid,
+    after: Option<&str>,
+) -> Result<String, ApiClientError> {
+    let query = serde_urlencoded::to_string(SystemCveInventoryPageQuery {
+        limit: SYSTEM_CVE_INVENTORY_PAGE_SIZE,
+        after,
+    })
+    .map_err(|error| ApiClientError::Deserialize(error.to_string()))?;
+    Ok(format!("{base}/systems/{id}/cve-inventory-page?{query}"))
+}
+
+/// Fetches one bounded page of the typed read-only CVE inventory for a system.
+///
+/// Callers must treat `after` as opaque and pass only a server-issued
+/// [`SystemCveInventoryPageResponse::next_cursor`] value.
+pub async fn fetch_system_cve_inventory(
+    id: &Uuid,
+    after: Option<&str>,
+) -> Result<SystemCveInventoryPageResponse, ApiClientError> {
+    let url = system_cve_inventory_url(&base_url(), id, after)?;
     fetch_json(&url).await
 }
 
@@ -746,9 +1172,27 @@ pub async fn request_system_sync(
 pub async fn deploy_system(
     id: &uuid::Uuid,
     request: &crate::api::models::DeploySystemRequest,
-) -> Result<SystemMutationResponse, ApiClientError> {
+) -> Result<crate::api::models::ManualDeploymentResponse, ApiClientError> {
     let url = format!("{}/systems/{}/deploy", base_url(), id);
-    send_json_with_csrf("POST", &url, Some(request)).await
+    let body = serde_json::to_string(request)
+        .map_err(|error| ApiClientError::Deserialize(error.to_string()))?;
+    let (status, response_body) = send_request_with_csrf("POST", &url, Some(&body)).await?;
+    if let Ok(response) =
+        serde_json::from_str::<crate::api::models::ManualDeploymentResponse>(&response_body)
+    {
+        // A non-2xx response can still report a successful persisted policy
+        // conversion followed by a deployment failure.
+        return Ok(response);
+    }
+    if !(200..300).contains(&status) {
+        return Err(ApiClientError::Status {
+            code: status,
+            body: decode_api_error_message(&response_body),
+        });
+    }
+    Err(ApiClientError::Deserialize(
+        "invalid manual deployment response".to_string(),
+    ))
 }
 
 pub async fn fetch_system_commits(
@@ -843,9 +1287,11 @@ pub async fn cancel_commit_evaluation(commit_id: i32) -> Result<(), ApiClientErr
 }
 
 /// Trigger manual re-evaluation for a commit (resets attempt count and re-queues).
-pub async fn re_evaluate_commit(commit_id: i32) -> Result<(), ApiClientError> {
+pub async fn re_evaluate_commit(
+    commit_id: i32,
+) -> Result<ReEvaluateCommitResponse, ApiClientError> {
     let url = format!("{}/commits/{}/re-evaluate", base_url(), commit_id);
-    send_empty_with_csrf("POST", &url, None::<&()>).await
+    send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
 /// Force-cancel an evaluation stuck in 'cancelling' state.
@@ -928,7 +1374,8 @@ fn encode_query_value(value: &str) -> String {
 }
 
 /// URL-encode a path component (e.g., CVE ID) for safe interpolation into URL paths.
-fn encode_uri_component(value: &str) -> String {
+/// Percent-encodes one path segment or query value for an API URL.
+pub(crate) fn encode_uri_component(value: &str) -> String {
     js_sys::encode_uri_component(value).into()
 }
 
@@ -1045,9 +1492,38 @@ pub async fn cancel_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError>
 ///
 /// Creates a new queued build attempt row for the same derivation/context while
 /// preserving immutable history on prior attempts.
-pub async fn requeue_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError> {
+pub async fn requeue_build_job(
+    job_id: &uuid::Uuid,
+) -> Result<RequeueBuildJobResponse, RequeueBuildJobError> {
     let url = format!("{}/build-jobs/{}/requeue", base_url(), job_id);
-    send_empty_with_csrf("POST", &url, None::<&()>).await
+    let (status, body) = send_request_with_csrf("POST", &url, None)
+        .await
+        .map_err(RequeueBuildJobError::Request)?;
+    if (200..300).contains(&status) {
+        return serde_json::from_str(&body).map_err(|error| {
+            RequeueBuildJobError::Request(ApiClientError::Deserialize(error.to_string()))
+        });
+    }
+
+    if status == 409
+        && let Ok(error) = serde_json::from_str::<RequeueBuildJobErrorResponse>(&body)
+    {
+        if error.error == "evaluator_contract_obsolete"
+            && let Some(commit_id) = error.commit_id
+        {
+            return Err(RequeueBuildJobError::EvaluatorContractObsolete { commit_id });
+        }
+        if error.error == "build_job_not_terminal" {
+            return Err(RequeueBuildJobError::LifecycleConflict {
+                status: error.status.unwrap_or_else(|| "unknown".to_string()),
+            });
+        }
+    }
+
+    Err(RequeueBuildJobError::Request(ApiClientError::Status {
+        code: status,
+        body: decode_api_error_message(&body),
+    }))
 }
 
 /// Force-cancel a build job stuck in 'cancelling' state (admin-only).
@@ -1407,6 +1883,70 @@ pub async fn fetch_flakes() -> Result<Vec<FlakeRegistryItem>, ApiClientError> {
     fetch_json(&url).await
 }
 
+/// Fetches one bounded collection page for an exact full flake revision.
+///
+/// `limit` and `offset` apply to each top-level output collection. Callers must
+/// merge continuation pages while retaining the response's authoritative
+/// revision-wide totals. Page zero omits `snapshot_token`; continuations must
+/// send the token returned by page zero.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails or the server response
+/// cannot be decoded as [`FlakeOutputSnapshotResponse`].
+pub async fn fetch_flake_revision_outputs(
+    flake_id: i32,
+    revision: &str,
+    system_filter: FlakeSystemFilter,
+    limit: usize,
+    offset: usize,
+    snapshot_token: Option<&str>,
+) -> Result<FlakeOutputSnapshotResponse, ApiClientError> {
+    let mut url = format!(
+        "{}/flakes/{}/revisions/{}/outputs?system_filter={}&limit={limit}&offset={offset}",
+        base_url(),
+        flake_id,
+        encode_uri_component(revision),
+        system_filter.as_query_value(),
+    );
+    if let Some(snapshot_token) = snapshot_token {
+        url.push_str("&snapshot_token=");
+        url.push_str(&encode_uri_component(snapshot_token));
+    }
+    fetch_json(&url).await
+}
+
+/// Fetches one stable declaration page for an exported module and exact revision.
+///
+/// Page one omits `snapshot_token`. Every continuation request must reuse the
+/// token returned by page one so the server can reject mixed-snapshot pages.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails, the snapshot changed, or
+/// the response cannot be decoded as [`FlakeModuleDeclarationsPage`].
+pub async fn fetch_flake_module_declarations(
+    flake_id: i32,
+    revision: &str,
+    module_name: &str,
+    limit: usize,
+    offset: usize,
+    snapshot_token: Option<&str>,
+) -> Result<FlakeModuleDeclarationsPage, ApiClientError> {
+    let mut url = format!(
+        "{}/flakes/{}/revisions/{}/modules/{}/declarations?limit={limit}&offset={offset}",
+        base_url(),
+        flake_id,
+        encode_uri_component(revision),
+        encode_uri_component(module_name)
+    );
+    if let Some(token) = snapshot_token {
+        url.push_str("&snapshot_token=");
+        url.push_str(&encode_uri_component(token));
+    }
+    fetch_json(&url).await
+}
+
 /// Create a new flake registry entry.
 pub async fn create_flake(
     request: &CreateFlakeRequest,
@@ -1670,6 +2210,15 @@ pub async fn mark_user_notification_read(notification_id: Uuid) -> Result<(), Ap
 
 pub async fn mark_all_user_notifications_read() -> Result<(), ApiClientError> {
     let url = format!("{}/user/notifications/read-all", base_url());
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
+/// Dismisses all notifications visible to the current authenticated user.
+///
+/// The server applies the visibility policy and an execution-time cutoff, so
+/// notifications that arrive after the action starts remain in the feed.
+pub async fn dismiss_all_user_notifications() -> Result<(), ApiClientError> {
+    let url = format!("{}/user/notifications/dismiss-all", base_url());
     send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
@@ -2163,6 +2712,41 @@ pub enum ApiClientError {
     Deserialize(String),
 }
 
+/// Classifies targeted Config Inspector mutation failures.
+#[derive(Debug, Clone)]
+pub enum QueueConfigInspectionError {
+    /// Primary evaluation has not persisted an exact carrier for the target.
+    Prerequisite(String),
+    /// The mutation failed for another API, transport, or decoding reason.
+    Request(ApiClientError),
+}
+
+/// Classifies actionable build requeue failures.
+#[derive(Debug, Clone)]
+pub enum RequeueBuildJobError {
+    /// The exact source revision requires administrator-triggered evaluation.
+    EvaluatorContractObsolete { commit_id: i32 },
+    /// The visible source changed to a non-terminal lifecycle state.
+    LifecycleConflict { status: String },
+    /// The request failed for another HTTP, transport, or decoding reason.
+    Request(ApiClientError),
+}
+
+impl std::fmt::Display for RequeueBuildJobError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EvaluatorContractObsolete { commit_id } => write!(
+                formatter,
+                "commit {commit_id} requires authoritative re-evaluation"
+            ),
+            Self::LifecycleConflict { status } => {
+                write!(formatter, "build is no longer terminal (status: {status})")
+            }
+            Self::Request(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
 impl std::fmt::Display for ApiClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -2450,17 +3034,31 @@ pub async fn trust_policy_version(
 }
 
 /// Publish a policy version (makes it immutable / accepted).
+///
+/// # Errors
+///
+/// Returns an error when request serialization, transport, or publication
+/// fails.
 pub async fn publish_policy_version(
     version_id: &Uuid,
+    request: &PublishPolicyVersionRequest,
 ) -> Result<serde_json::Value, ApiClientError> {
     let url = format!("{}/policy-versions/{}/publish", base_url(), version_id);
-    send_json_with_csrf("POST", &url, None::<&()>).await
+    send_json_with_csrf("POST", &url, Some(request)).await
 }
 
 /// Create a new mutable draft from a published policy version.
-pub async fn create_policy_draft(policy_id: &Uuid) -> Result<serde_json::Value, ApiClientError> {
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request cannot be sent or the server
+/// rejects the draft creation.
+pub async fn create_policy_draft(
+    policy_id: &Uuid,
+    request: &CreatePolicyDraftRequest,
+) -> Result<CreatePolicyDraftResponse, ApiClientError> {
     let url = format!("{}/policies/{}/drafts", base_url(), policy_id);
-    send_json_with_csrf("POST", &url, None::<&()>).await
+    send_json_with_csrf("POST", &url, Some(request)).await
 }
 
 /// Trust or reject a bundle version.
@@ -2724,4 +3322,132 @@ pub async fn delete_policy_mapping(
         mapping_id
     );
     send_empty_with_csrf("DELETE", &url, None::<&()>).await
+}
+
+#[cfg(test)]
+mod config_observation_tests {
+    use super::*;
+
+    #[test]
+    fn system_cve_inventory_url_bounds_pages_and_encodes_opaque_cursor() {
+        let id = Uuid::from_u128(440);
+        assert_eq!(
+            system_cve_inventory_url("https://example.test/api/v1", &id, None)
+                .expect("page URL should serialize"),
+            format!("https://example.test/api/v1/systems/{id}/cve-inventory-page?limit=100")
+        );
+        assert_eq!(
+            system_cve_inventory_url(
+                "https://example.test/api/v1",
+                &id,
+                Some("opaque+/= cursor&scope")
+            )
+            .expect("cursor URL should serialize"),
+            format!(
+                "https://example.test/api/v1/systems/{id}/cve-inventory-page?limit=100&after=opaque%2B%2F%3D+cursor%26scope"
+            )
+        );
+    }
+
+    fn request(
+        kind: ConfigObservationKind,
+        path_components: Vec<String>,
+    ) -> CreateConfigObservationRequest {
+        CreateConfigObservationRequest {
+            kind,
+            path_components,
+            child_offset: 0,
+            automatic: false,
+        }
+    }
+
+    #[test]
+    fn observation_request_identity_rejects_revision_kind_path_and_request_changes() {
+        let expected = request(ConfigObservationKind::Prefix, vec!["services".into()]);
+        let response = ConfigObservationRequestResponse {
+            request_id: uuid::Uuid::from_u128(440),
+            revision: "a".repeat(40),
+            configuration_name: "atlas-01".into(),
+            kind: ConfigObservationKind::Prefix,
+            path_components: vec!["services".into()],
+            child_offset: 0,
+            lifecycle: ConfigObservationLifecycle::Running,
+            observation_id: None,
+            error: None,
+            attempts: 1,
+            heartbeat_at: None,
+            reused: false,
+        };
+        assert!(
+            validate_config_observation_request_identity(
+                &response,
+                Some(response.request_id),
+                &response.revision,
+                &expected,
+            )
+            .is_ok()
+        );
+
+        for (request_id, revision, request) in [
+            (
+                Some(uuid::Uuid::from_u128(441)),
+                response.revision.as_str(),
+                expected.clone(),
+            ),
+            (Some(response.request_id), "b", expected.clone()),
+            (
+                Some(response.request_id),
+                response.revision.as_str(),
+                request(ConfigObservationKind::Option, vec!["services".into()]),
+            ),
+            (
+                Some(response.request_id),
+                response.revision.as_str(),
+                request(ConfigObservationKind::Prefix, vec!["networking".into()]),
+            ),
+        ] {
+            assert!(
+                validate_config_observation_request_identity(
+                    &response, request_id, revision, &request,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn observation_payload_identity_uses_structured_components() {
+        let payload = ConfigObservationPayload::Option {
+            path_components: vec!["services".into(), "openssh".into(), "enable".into()],
+            key: "a".repeat(64),
+            declared_type: Some("boolean".into()),
+            is_defined: true,
+            highest_prio: Some(100),
+            value: SafeOptionValue::Scalar(serde_json::Value::Bool(true)),
+        };
+        let (kind, path, child_offset) = config_observation_payload_identity(&payload);
+        assert_eq!(kind, ConfigObservationKind::Option);
+        assert_eq!(path, ["services", "openssh", "enable"]);
+        assert_eq!(child_offset, 0);
+    }
+
+    #[test]
+    fn observation_polling_has_no_fixed_multi_second_initial_delay() {
+        assert_eq!(
+            config_observation_poll_delay_ms(ConfigObservationLifecycle::Queued, true),
+            Some(250)
+        );
+        assert_eq!(
+            config_observation_poll_delay_ms(ConfigObservationLifecycle::WaitingForCapacity, false),
+            Some(1_000)
+        );
+        assert_eq!(
+            config_observation_poll_delay_ms(ConfigObservationLifecycle::Running, false),
+            Some(500)
+        );
+        assert_eq!(
+            config_observation_poll_delay_ms(ConfigObservationLifecycle::Succeeded, true),
+            None
+        );
+    }
 }

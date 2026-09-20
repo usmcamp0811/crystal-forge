@@ -26,9 +26,8 @@ source_archive_root              = "/var/lib/crystal-forge/source-archives"
 # /etc/crystal-forge/builder.toml
 [builder]
 supported_execution_strategies = ["source_re_evaluate_verified"]
-source_mirror_root              = "/var/lib/crystal-forge/flake-mirrors"
 source_worktree_root            = "/var/lib/crystal-forge/flake-worktrees"
-cleanup_source_worktrees        = true
+allow_import_from_derivation    = true
 ```
 
 This is the most reliable and fastest startup path because:
@@ -54,12 +53,10 @@ such as `X-Forwarded-Proto: https`, `Forwarded: proto=https`, or
 credential-bearing builder cache-push jobs are rejected with HTTP `426 Upgrade
 Required` before any credentials are sent.
 
-Some flakes require Nix import-from-derivation (IFD) while evaluating
-`config.system.build.toplevel.drvPath`. Verified source re-evaluation disables
-IFD by default so remote builders do not run evaluation-time builds unless the
-operator opts in. If a builder log fails during the pre-build evaluation phase
-with `allow-import-from-derivation is disabled`, enable it explicitly for that
-deployment:
+Verified-source evaluator contract version 1 enables Nix
+import-from-derivation (IFD) to preserve the authoritative evaluation behavior.
+The NixOS module defaults the builder option to true. A builder that disables
+IFD must not advertise `source_re_evaluate_verified` contract version 1:
 
 ```nix
 services.crystal-forge.build.allow_import_from_derivation = true;
@@ -71,17 +68,30 @@ services.crystal-forge.build.allow_import_from_derivation = true;
 
 **Materialization:** When the `.drv` is not already in the builder's local Nix store, the builder streams the `.drv` closure archive directly from the CF server into `nix-store --import` — no Attic or binary cache required. In the background, the server pushes the closure to the configured cache so future builds can pull via normal Nix substituters.
 
-**Source delivery modes for `source_re_evaluate_verified`** are configured server-side via `source_delivery_mode`:
+**Source delivery for `source_re_evaluate_verified`** is configured server-side via `source_delivery_mode`:
 
-- **`local_git_worktree`** (default): Builder manages its own bare mirror. On first use it clones with `git clone --bare` from the repository URL; if the authorized commit is absent it fetches. The builder needs read access to the repository URL and credentials for private repos. Colocated server/builder deployments may share the same mirror root.
+- **`none`**: Not valid for verified-source jobs. The server rejects this mode before claim.
 
-- **`server_bundled_archive`**: Server packages the top-level flake repository as a `tar.gz` (from its own server-side bare mirror) and serves it via an authenticated API endpoint. The builder downloads, verifies SHA-256 incrementally while streaming to disk, extracts to a **job-scoped** directory, and evaluates without contacting the Git remote. Each job gets an isolated mirror directory so concurrent builds for the same repo do not interfere. Use this for air-gapped or GovCloud builders. Note: only the top-level repo is bundled; locked flake inputs not in the builder's Nix store or substituters may still require network during `nix eval`.
+- **`local_git_worktree`**: Reserved for a future evaluator contract. The server rejects this mode before a version-1 job is claimed.
 
-Job-scoped mirror layout for `server_bundled_archive`:
+- **`server_bundled_archive`**: Required by contract version 1. During authoritative evaluation, the server creates one uncompressed tracked-tree tar artifact for the exact commit. The server and builder consume the same bytes. Before claim, the server checks the published size and SHA-256 digest. The builder streams those bytes to a unique temporary file, enforces the authorized size, verifies SHA-256, applies bounded safe extraction, and evaluates the resulting Nix store source without Git credentials.
+
+  Materialization schema version 1 accepts full 40-character SHA-1 Git object
+  IDs. It rejects 64-character SHA-256 object IDs with a typed unsupported
+  object-format error before mirror initialization. A later schema must define
+  SHA-256 mirror initialization and compatibility before enabling those IDs.
+
+- **`builder_fetch_public_inputs`**: Reserved for a future evaluator contract. The server rejects this mode before a version-1 job is claimed.
+
+Contract version 1 has no source-delivery fallback. Only
+`server_bundled_archive` can claim a `source_re_evaluate_verified` job.
+
+Server publication layout for `server_bundled_archive`:
 
 ```
-<source_mirror_root>/server-bundled/<job_id>/<mirror_id>.git   ← deleted after build
-<source_worktree_root>/<mirror_id>/<commit_hash>/<job_id>/     ← deleted after build
+<source_archive_root>/mirrors/<mirror_id>.git
+<source_archive_root>/artifacts/<mirror_id>/<commit_hash>.tar
+<source_archive_root>/identities/<mirror_id>/<commit_hash>.json
 ```
 
 ### `server_derivation`
@@ -106,36 +116,54 @@ Build inputs (nixpkgs, dependencies) are pulled from configured Nix substituters
 
 Flow:
 
-1. The server evaluates the target with the equivalent of:
+1. The server fetches the exact commit into its credentialed bare mirror. It
+   exports only the tracked Git tree and ingests that tree with the canonical
+   `crystal-forge-source-v1-<commit>` name. It evaluates the resulting immutable
+   store flake in pure mode with lock mutation disabled and IFD set explicitly:
 
    ```bash
-   nix eval --raw .#nixosConfigurations.<host>.config.system.build.toplevel.drvPath
+   nix-eval-jobs --expr '<authoritative expression>' \
+       --option pure-eval true \
+       --option allow-import-from-derivation true \
+       --meta --apply 'derivation: derivation.meta.policies' \
+       --workers <n> --max-memory-size <MiB>
    ```
 
-   The resulting `.drvPath` is the server-authorized build-plan fingerprint. The server does not need `nix build --dry-run` for this identity.
+   The resulting `.drvPath` is the server-authorized build-plan fingerprint. The server does not need `nix build --dry-run` for this identity. The authoritative evaluator does not receive `BuildConfig` realization options such as sandbox, offline mode, substitution policy, max jobs, cores, max-silent-time, or build timeout. Those settings control realization and must not alter evaluation semantics.
 
-2. The server sends a job manifest containing immutable source identity, flake target, source/input delivery mode, evaluator fingerprint, and the expected server `.drvPath`.
+2. The server sends the full commit, lock digest, canonical store name, source
+   NAR hash, artifact format, artifact digest and size, evaluator contract,
+   flake target, and expected
+   `.drvPath`. The NAR hash and canonical name are the portable source identity.
+   The server's physical store path is diagnostic only.
 
-3. The builder obtains the immutable source without broad/reusable Git credentials. The preferred operational model is a local Git mirror plus detached worktree:
+3. The builder obtains the canonical artifact through the job-owned API endpoint.
+   The manifest repository URL has embedded user information, passwords, query
+   parameters, and fragments removed. The builder does not use the URL to fetch.
 
-    ```text
-    /var/lib/crystal-forge/flake-mirrors/<mirror-id>.git
-    /var/lib/crystal-forge/flake-worktrees/<mirror-id>/<commit-sha>/<job-id>
-    ```
+4. Before polling, the builder probes and caches its actual Nix version and
+   `builtins.currentSystem`. Each signed `NextJobRequest` advertises those values
+   with the contract version, pure-evaluation setting, lock-mutation setting,
+   IFD setting, and source materialization schema. The server compares the full
+   capability with its authoritative `nix-eval-jobs` fingerprint before queue
+   lookup or claim. Legacy requests and any mismatch receive HTTP 409 with the
+   `incompatible_evaluator` reason and do not mutate a queued job.
 
-    The server serves enough source metadata or snapshot data for the builder to keep its local mirror current. The builder creates a detached per-job worktree at the exact authorized commit. If server and builder are colocated, both may point at the same mirror root to avoid duplicate clone storage; job worktrees remain builder-managed and are cleaned independently.
-
-   Locked-down deployments can still choose a server-bundled source/input archive (for example, a `nix flake archive`/NAR-style artifact). For public inputs, a deployment may allow the builder to fetch public flake inputs itself.
-
-4. The builder verifies the local worktree HEAD equals the manifest commit, then evaluates before building:
+5. The builder verifies artifact size, SHA-256, format, lock digest, store name,
+   and NAR hash. It rejects incompatible Nix version, purity,
+   lock-mutation, IFD, or materialization settings before evaluation. It then
+   evaluates the same NAR-qualified store reference as the server before building:
 
    ```bash
-   drv=$(nix eval --raw <source>#nixosConfigurations.<host>.config.system.build.toplevel.drvPath)
+   drv=$(nix eval --raw --no-write-lock-file \
+      --option pure-eval true \
+      --option allow-import-from-derivation true \
+     'path:/nix/store/<source>?narHash=<percent-encoded-SRI>#nixosConfigurations.<host>.config.system.build.toplevel.drvPath')
    ```
 
-5. The builder compares `$drv` to the server-provided expected `.drvPath`. A mismatch fails before any build starts with `derivation_mismatch`.
+6. The builder compares `$drv` to the server-provided expected `.drvPath`. A mismatch fails before any build starts with `derivation_mismatch`.
 
-6. If the strings match, the builder builds the exact verified derivation object:
+7. If the strings match, the builder builds the exact verified derivation object:
 
    ```bash
    nix build "$drv^*"
@@ -145,18 +173,67 @@ Flow:
 
 This strategy verifies derivation identity/build-plan equality. It does not prove bit-for-bit output reproducibility; output reproducibility is a separate concern.
 
+The evaluator fingerprint covers contract version, linked Nix version,
+`builtins.currentSystem`, pure evaluation, lock-file mutation policy, IFD policy,
+and source materialization schema. Server-only worker count, evaluator memory
+limit, outer process timeout, and cache-status reporting are resource or
+diagnostic controls. They can stop an evaluation or add metadata, but they
+cannot change a successful `.drvPath`.
+
+A post-claim fingerprint mismatch remains a defense-in-depth check. The server
+releases that job to the queue without consuming retry budget or failing the
+shared derivation. A pre-upgrade queued job with no usable contract-v1
+publication is instead failed with the server-owned `server_failure_code` value
+`evaluator_contract_obsolete`; selection continues to the next queue candidate.
+Builder logs and failure requests cannot set this field. A later authoritative
+re-evaluation can revive the unique row only after source publication and pure
+evaluation succeed and the derivation reaches `DryRunComplete`. The same
+transaction that queues the row consumes the code by setting it to null. Other
+terminal failures retain normal retry and manual-requeue semantics.
+
 Recommended controls:
 
-- Keep source identity immutable: commit hash, lock/source metadata, and archive hash where available.
-- Prefer detached worktrees from a local mirror over mutable branch checkouts.
-- Verify the worktree `HEAD` equals the manifest commit before evaluation.
-- Clean up job/commit worktrees after build completion and cache-push/reporting lifecycle is complete.
+- Keep source identity immutable: full commit hash, lock digest, artifact format,
+  artifact SHA-256 and size, canonical store name, and source NAR hash.
+- Retain canonical server artifacts independently of job completion. Dispatch
+  validates a published artifact before atomically claiming its exact job.
+- Extract builder artifacts only through the bounded contract-v1 tar validator
+  and remove each unique temporary directory after evaluation.
 - Prefer server-bundled inputs for locked-down or GovCloud-style builders with no internet egress.
 - Do not place broad private Git credentials on every builder.
 - Record or pin the Nix version/evaluator fingerprint across server and builders.
-- Disable lockfile mutation and avoid impure evaluation for this strategy.
+- Never use `--impure` for this strategy. Impure evaluation can observe host
+  `nix.conf`, environment variables, and files and can authorize a host-specific
+  derivation.
+- P2 hardening: launch authoritative and builder evaluators with an explicit
+  environment allowlist so ambient credential variables cannot influence input
+  resolution. Contract version 1 does not yet enforce this process boundary.
 
-Expected pre-build failure phases include `source_fetch`, `source_input_availability`, `evaluation`, `derivation_mismatch`, and `path_materialization`.
+Expected pre-build failure phases include `source_fetch`,
+`source_identity_mismatch`, `evaluator_incompatible`,
+`source_input_availability`, `evaluation`, `derivation_mismatch`, and
+`path_materialization`.
+
+During rolling upgrades, new builders advertise evaluator contract version 1.
+Old builders and old request payloads default to version 0. The server returns
+409 before job claim when the configured verified-source strategy requires a
+contract the builder cannot validate. It does not silently select another
+strategy. A new builder can still poll an old server because old serde readers
+ignore the additive capability field.
+
+Every next-job 409 response has a JSON body with a stable `reason` field:
+
+- `unsupported_execution_strategy` means the builder did not advertise the
+  server's configured strategy.
+- `incompatible_evaluator` means the complete builder and server evaluator
+  fingerprints differ.
+- `incompatible_source_delivery` means the server delivery mode cannot satisfy
+  the selected evaluator contract.
+- `source_materialization_cancelled` means canonical source preparation was
+  cancelled before claim.
+
+The first three checks occur before queue lookup. Source cancellation occurs
+before the atomic claim. None of these responses claims or mutates a queued job.
 
 ## Architecture
 
@@ -476,12 +553,27 @@ Report builder heartbeat with resource metrics.
 
 **Side Effects**:
 - Updates `last_heartbeat_at` timestamp
-- Marks builder as "active" if previously inactive
+- Marks a current-session builder as "active" if previously inactive or offline
+- Persists scanner capability for a current enabled and registered session. An
+  offline builder can persist capability before this heartbeat restores active
+  state. Disabled, unregistered, and stale-session builders cannot persist it.
 - Stores metrics in `builder_metrics` table
 
-#### GET /api/v1/builders/:id/next-job
+#### POST /api/v1/builders/:id/next-job
 
-Poll for next available job.
+Poll for the next available job and advertise builder execution capabilities.
+Legacy servers can accept `GET` during a rolling upgrade when the builder also
+supports `server_derivation`.
+
+**Response**: `409 Conflict` (preclaim contract conflict)
+```json
+{
+  "reason": "incompatible_evaluator"
+}
+```
+
+The supported reason values and no-mutation guarantee are defined in the
+verified-source contract section above.
 
 **Response**: `200 OK` (job available)
 ```json
@@ -639,6 +731,112 @@ Mark job as successfully completed.
 **Side Effects**:
 - Status → "success"
 - `completed_at` → now
+- If post-build scanning is enabled, enqueue or reuse one CVE scan for the exact
+  successful derivation in the build-completion transaction. A completion retry
+  repairs a missing enqueue idempotently. Reusing active manual or fleet work
+  does not replace its trigger provenance. Scan failure does not change build or
+  cache status.
+
+#### POST /api/v1/builders/:id/cve-scans/claim
+
+Claim one schema-1 CVE scan through the authenticated builder session. Builders
+that omit the scanner capability remain compatible and receive no scan work.
+The server permits one active scan per enabled, registered, active builder and
+requires the current process session for every lease mutation. Candidate
+selection applies the same wildcard-or-assigned environment rule as build work;
+unauthorized work is omitted rather than disclosed. Background claims return no
+work while build work is queued or while the builder owns an active build. A
+request that names the builder's successful `completed_build_job_id` can claim
+only that job's post-build scan.
+
+Remote claims require the exact builder and process session that produced the
+successful build. This affinity is the only remote-output locality fact that
+the coordinator knows. A completed cache push does not prove that an arbitrary
+builder can read the cache or has materialized the output. Manual and fleet
+scans therefore remain server-local. Post-build work that the producing session
+does not claim remains for the delayed server-local fallback.
+
+The claim contains the exact target `.drv`, output mapping, the builder-reported
+scanner identity and version,
+bounded scan policy, execution UUID, session UUID, and lease expiration. The
+builder must treat all lease fields as opaque server-issued authorization. The
+builder passes its startup scanner probe into execution and rejects the lease if
+the local name or complete version string differs from the claim.
+
+Every builder-side and server-local `nix`, `nix-store`, and `vulnix` scanner
+command runs as the leader of an isolated Unix process group. Timeout, lease
+revocation, worker cancellation, future drop, and shutdown signal the complete
+group and reap the direct child. Unix init or the configured subreaper reaps
+terminated descendants because they are not direct Crystal Forge children.
+
+#### POST /api/v1/builders/:id/cve-scans/heartbeat
+
+Renew the exact active CVE execution. The server returns `410 Gone` when the
+lease expired or a new builder session superseded it. Entry and observation
+progress above the claim limits also prevents renewal.
+
+#### POST /api/v1/builders/:id/cve-scans/complete
+
+Submit structured schema-1 package and CVE observations. The request body is
+limited to 8 MiB, 50,000 package entries, and 250,000 observations. The server
+validates the exact claim identity and submitted output mappings, canonicalizes
+ordering and CVE identifiers, recomputes SHA-256, and seals the result through
+the same immutable persistence transaction used by local scanning.
+
+All submitted paths must be canonical direct children of `/nix/store`; nested
+paths, traversal components, and extra separators are rejected by both builder
+and server. When every authorized target output exists in the server's Nix
+store, the server requires each submitted package output to be a member of the
+server-computed target closure and requires Nix to report the submitted package
+`.drv` as that output's exact deriver. The persisted provenance is
+`server_local_verified`.
+
+When any target output exists only on the producing builder, the server cannot
+reconstruct the closure without materializing it. The server persists
+`unverified_remote` in that case. The server still queries the actual deriver
+for every submitted package output that exists locally and rejects any mapping
+that does not match the submitted package `.drv`. Only unavailable closure
+membership and unavailable package-output mappings remain unverified. This
+marker is not equivalent to server-local verification; the authenticated
+producing builder/session and exact target/output claim remain the explicit
+package-list trust boundary. The server does not infer package evidence from
+names or grant builders database access.
+Affected and whitelisted markers are persisted as independent exact-observation
+fields. Builder and server digest the bytes produced by the shared protocol
+canonical-result encoder.
+
+Upgraded builders may include a `diagnostics` array in completion and failure
+requests. Older builders may omit the field; the server treats an omitted field
+as an empty array. The builder applies its shared credential-redaction policy
+before it serializes either request. The server applies canonical snapshot
+redaction again before persistence as defense in depth. Diagnostics are
+operational detail and are excluded from the
+canonical schema-1 evidence bytes and SHA-256 digest. A terminal report accepts
+at most 256 prepared diagnostic events. Each persisted event contains at most
+2,048 Unicode scalar values. The server splits multiline output, normalizes
+level, source, and event type, removes control characters, and applies the
+canonical snapshot-redaction policy before persistence. Builder-side capture is
+also bounded to 64 KiB of stderr and marks truncated output. Diagnostic rows are
+append-only and are fenced by the same execution, lease, builder, and current
+session checks as the terminal scan transition. A diagnostic failure does not
+change build or cache outcomes and diagnostic content never changes CVE evidence.
+
+Invalid evidence returns `422 Unprocessable Entity` and leaves the lease active.
+An expired or superseded execution returns `410 Gone`. A same-digest retry is
+idempotent; a different digest for the same completed execution returns
+`409 Conflict`.
+
+#### POST /api/v1/builders/:id/cve-scans/fail
+
+Report a transient, deterministic, authorization, or cancelled scanner failure.
+Transient, authorization, and cancelled failures requeue the scan for the same
+producing session or the server-local fallback. Requeue clears typed remote
+ownership and sealed claim-input fields before a local worker can claim the row;
+the prior remote execution identity remains in audit metadata. Deterministic
+failures terminate only the scan. No scan failure changes the successful build
+or cache outcome. Failure requests use the same optional, backward-compatible
+`diagnostics` array, redaction boundary, event limits, and execution fencing as
+completion requests.
 
 #### POST /api/v1/builders/:id/jobs/:job_id/fail
 

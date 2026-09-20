@@ -8,6 +8,10 @@ let
   version = serverCargoToml.package.version;
   migrationsDir = ./crates/cf-server/migrations;
   nixosOptionsMetadata = pkgs.crystal-forge.nixos-options-metadata;
+  # INVARIANT: Verified-source builders must execute the Nix CLI linked to the
+  # nix-eval-jobs evaluator. Exact evaluator fingerprints are a security
+  # boundary, so an unrelated pkgs.nix must not precede this package in PATH.
+  evaluatorNix = pkgs.nix-eval-jobs.nix;
 
   # ─────────────────────────────────────────────────────────────────────────
   # Source filtering
@@ -194,13 +198,14 @@ let
   # default 404 Not Found. API routes are unaffected. This is deliberate: a
   # core build must not appear to serve a UI.
   #
-  # Only the server, hardening-worker, test-agent, and xccdf-export-fixture
-  # binaries come from this crate. The agent, builder, and keygen binaries are
-  # separate derivations.
+  # Only the server, hardening-worker, config-inspector-worker, test-agent, and
+  # xccdf-export-fixture binaries come from this crate. The agent, builder, and
+  # keygen binaries are separate derivations.
   # ─────────────────────────────────────────────────────────────────────────
   serverCargoBuildExtraArgs = lib.concatStringsSep " " [
     "--bin server"
     "--bin hardening-worker"
+    "--bin config-inspector-worker"
     "--bin test-agent"
     "--bin xccdf-export-fixture"
   ];
@@ -228,7 +233,11 @@ let
     '';
     CRYSTAL_FORGE_NIXOS_OPTIONS_METADATA = "${nixosOptionsMetadata}/share/crystal-forge/nixos-options.json";
 
-    nativeBuildInputs = commonNativeBuildInputs ++ (with pkgs; [ nix sqlx-cli ]);
+    nativeBuildInputs = commonNativeBuildInputs ++ (with pkgs; [
+      git # Server tests exercise shallow-clone and first-parent behavior.
+      nix
+      sqlx-cli
+    ]);
     buildInputs = commonBuildInputs;
 
     runtimeDeps = with pkgs; [
@@ -354,8 +363,13 @@ let
       cp ${builderWorkspaceManifest} Cargo.toml
     '';
 
-    nativeBuildInputs = commonNativeBuildInputs;
+    nativeBuildInputs = commonNativeBuildInputs ++ [ pkgs.makeWrapper ];
     buildInputs = commonBuildInputs;
+
+    postFixup = ''
+      wrapProgram "$out/bin/builder" \
+        --prefix PATH : ${lib.makeBinPath [ evaluatorNix pkgs.vulnix ]}
+    '';
 
     # SRC_HASH intentionally not set: cf-builder does not use option_env!("SRC_HASH").
 
@@ -483,6 +497,7 @@ let
 
   builder = pkgs.writeShellApplication {
     name = "builder";
+    runtimeInputs = [ evaluatorNix pkgs.vulnix ];
     text = ''${cf-builder-drv}/bin/builder "$@"'';
   };
 

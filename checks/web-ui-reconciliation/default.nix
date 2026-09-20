@@ -42,6 +42,7 @@ pkgs.testers.runNixOSTest {
     machine.succeed("mkdir -p /tmp/web-ui-tests /tmp/screenshots")
     machine.succeed("cp ${../web-ui/tests/integration-test.js} /tmp/web-ui-tests/integration-test.js")
     machine.succeed("cp ${../web-ui/coverage-manifest.json} /tmp/web-ui-tests/coverage-manifest.json")
+    machine.succeed("cp ${../web-ui/design-fixtures.json} /tmp/web-ui-tests/design-fixtures.json")
     machine.succeed("rm -f /tmp/web-ui-tests/integration.exit /tmp/screenshots/results.json /tmp/screenshots/fatal.json")
     machine.succeed(
         "nohup sh -c 'env CF_UI_TEST_PROFILE=ci_fast "

@@ -249,6 +249,7 @@ pub fn BundleHeader(props: BundleHeaderProps) -> Element {
                     if props.is_admin {
                         button {
                             class: "btn btn-ghost focus-ring",
+                            "data-testid": "compliance-edit-bundle",
                             onclick: move |_| props.on_edit.call(()),
                             Icon { name: IconName::Edit, size: 13 }
                             " Edit bundle"
@@ -863,16 +864,18 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                         }
                         Link {
                             class: "btn btn-ghost xs focus-ring",
-                            to: Route::SystemDetailView { id: system.system_id.to_string(), tab: String::new(), poam: String::new() },
+                            to: Route::SystemDetailView { id: system.system_id.to_string(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new() },
                             "Open system"
                             Icon { name: IconName::ArrowRight, size: 12 }
                         }
                     }
                     button {
-                        class: "btn btn-ghost xs focus-ring",
+                        class: "btn-icon focus-ring",
                         aria_pressed: expanded(),
+                        aria_label: if expanded() { "Restore compliance evidence drawer" } else { "Expand compliance evidence drawer" },
+                        title: if expanded() { "Restore compliance evidence drawer" } else { "Expand compliance evidence drawer" },
                         onclick: move |_| expanded.toggle(),
-                        if expanded() { "Restore" } else { "Expand" }
+                        Icon { name: if expanded() { IconName::Minimize } else { IconName::Maximize }, size: 15 }
                     }
                     button {
                         class: "btn-icon focus-ring",

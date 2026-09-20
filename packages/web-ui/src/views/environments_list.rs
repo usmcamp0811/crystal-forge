@@ -25,6 +25,7 @@ use crate::environments::adapter::{
 use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
+use crate::state::navigation_focus::{FlakeNavigation, current_query, update_query};
 use crate::theme;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,8 +48,38 @@ fn came_from_setup() -> bool {
     false
 }
 
+fn environment_panel_from_query(search: &str) -> Option<Uuid> {
+    search
+        .trim_start_matches('?')
+        .split('&')
+        .filter_map(|part| part.split_once('='))
+        .find_map(|(key, value)| {
+            (key == "panel")
+                .then(|| Uuid::parse_str(value).ok())
+                .flatten()
+        })
+}
+
+fn without_environment_panel(search: &str) -> String {
+    let parts = search
+        .trim_start_matches('?')
+        .split('&')
+        .filter(|part| !part.is_empty())
+        .filter(|part| {
+            part.split_once('=')
+                .map_or(*part != "panel", |(key, _)| key != "panel")
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", parts.join("&"))
+    }
+}
+
+/// Renders environment state and restores a URL-selected detail panel after loading.
 #[component]
-pub fn EnvironmentsListView() -> Element {
+pub fn EnvironmentsListView(initial_query: String) -> Element {
     let app_state = use_context::<Signal<AppState>>();
     let is_admin_user = auth::is_admin(&app_state.read().auth);
     let config_health = app_state.read().config_health.clone();
@@ -136,6 +167,30 @@ pub fn EnvironmentsListView() -> Element {
     let mut view_env = use_signal(|| None::<EnvironmentItem>);
 
     let items = environments.read().clone();
+    let initial_panel = environment_panel_from_query(&format!("?{initial_query}"));
+    {
+        let items = items.clone();
+        let environments = environments;
+        use_effect(move || {
+            let _ = environments.read();
+            if view_env.read().is_none() {
+                if let Some(panel_id) =
+                    initial_panel.or_else(|| environment_panel_from_query(&current_query()))
+                {
+                    // Keep the signal unchanged while the resource is empty.
+                    // Repeatedly setting None schedules a render loop before
+                    // the requested environment becomes available.
+                    if let Some(environment) = items
+                        .iter()
+                        .find(|environment| environment.id == panel_id)
+                        .cloned()
+                    {
+                        view_env.set(Some(environment));
+                    }
+                }
+            }
+        });
+    }
     let filtered = filtered_environments(&items, &query());
     let totals = EnvironmentTotals::from(&items);
 
@@ -339,7 +394,10 @@ pub fn EnvironmentsListView() -> Element {
             if let Some(env) = view_env.read().clone() {
                 EnvPanel {
                     env: env.clone(),
-                    on_close: move |_| view_env.set(None),
+                    on_close: move |_| {
+                        view_env.set(None);
+                        update_query(&without_environment_panel(&current_query()), false);
+                    },
                     on_edit: move |env: EnvironmentItem| {
                         // dismiss from within panel too (in case user re-opens edit from panel
                         // without having clicked the card first).
@@ -926,7 +984,28 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
                     } else {
                         div { style: "display:flex; gap:6px; flex-wrap:wrap;",
                             for flake in &env.flake_names {
-                                span { class: "chip chip-unknown mono", style: "font-size:11px;", "{flake}" }
+                                button {
+                                    class: "chip chip-unknown mono focus-ring",
+                                    style: "font-size:11px;cursor:pointer;",
+                                    onclick: {
+                                        let flake_name = flake.clone();
+                                        let environment_id = env.id.to_string();
+                                        move |_| {
+                                            let target = FlakeNavigation {
+                                                flake_name: Some(flake_name.clone()),
+                                                return_environment: Some(environment_id.clone()),
+                                                ..Default::default()
+                                            };
+                                            nav.push(Route::FlakesView {
+                                                query: target
+                                                    .to_query("")
+                                                    .trim_start_matches('?')
+                                                    .to_string(),
+                                            });
+                                        }
+                                    },
+                                    "{flake}"
+                                }
                             }
                         }
                     }
@@ -993,7 +1072,7 @@ fn EnvPanelSystems(props: EnvPanelSystemsProps) -> Element {
                                     let nav = nav.clone();
                                     let system_id = system.id.to_string();
                                     move |_| {
-                                        nav.push(Route::SystemDetailView { id: system_id.clone(), tab: String::new(), poam: String::new() });
+                                        nav.push(Route::SystemDetailView { id: system_id.clone(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new() });
                                     }
                                 },
                                 span { class: "status-dot", style: "--status-color: {system_status_color(&system.health_status)};" }
@@ -1106,5 +1185,19 @@ mod tests {
         assert_eq!(saved.auto_sync, None);
         assert_eq!(saved.requires_approval, None);
         assert_eq!(saved.is_production, None);
+    }
+
+    #[test]
+    fn environment_return_panel_parsing_is_exact_and_clear_preserves_other_state() {
+        let id = Uuid::from_u128(42);
+        assert_eq!(
+            environment_panel_from_query(&format!("?view=cards&panel={id}")),
+            Some(id)
+        );
+        assert_eq!(environment_panel_from_query("?subpanel=not-a-panel"), None);
+        assert_eq!(
+            without_environment_panel(&format!("?view=cards&panel={id}&sort=name")),
+            "?view=cards&sort=name"
+        );
     }
 }

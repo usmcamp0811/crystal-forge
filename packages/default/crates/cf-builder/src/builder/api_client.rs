@@ -2,9 +2,13 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use cf_config::config::BuilderConfig;
 use cf_protocol::builder::{
-    BuildFailureClass, BuildFailurePhase, BuildProgressRequest, EstablishBuilderSessionRequest,
-    EstablishBuilderSessionResponse, NextJobRequest, NextJobResponse, RemoteBuildExecutionStrategy,
-    ReportMetricsRequest, ResolveBuilderIdRequest, ResolveBuilderIdResponse,
+    BuildFailureClass, BuildFailurePhase, BuildProgressRequest, BuilderCapabilities,
+    CveScanClaimRequest, CveScanClaimResponse, CveScanCompleteRequest, CveScanCompleteResponse,
+    CveScanFailRequest, CveScanFailResponse, CveScanFailureClass, CveScanHeartbeatRequest,
+    CveScanHeartbeatResponse, EstablishBuilderSessionRequest, EstablishBuilderSessionResponse,
+    EvaluatorFingerprint, NextJobConflictReason, NextJobConflictResponse, NextJobRequest,
+    NextJobResponse, RemoteBuildExecutionStrategy, ReportMetricsRequest, ResolveBuilderIdRequest,
+    ResolveBuilderIdResponse,
 };
 use chrono::Utc;
 use ed25519_dalek::{Signature, Signer, SigningKey};
@@ -27,6 +31,64 @@ pub enum AppendLogsOutcome {
     Rejected,
     TerminalJob,
 }
+
+/// Classifies a signed CVE lease API failure without retaining response data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CveApiError {
+    /// The server revoked the lease or superseded the builder session.
+    Revoked,
+    /// Authentication or authorization failed.
+    Authorization,
+    /// The server rejected the request as malformed or conflicting.
+    Rejected,
+    /// Transport failure, overload, or server failure can be retried.
+    Transient,
+}
+
+impl CveApiError {
+    /// Maps the API failure to the scan failure class reported by the builder.
+    pub fn failure_class(self) -> CveScanFailureClass {
+        match self {
+            Self::Revoked => CveScanFailureClass::Cancelled,
+            Self::Authorization => CveScanFailureClass::Authorization,
+            Self::Rejected => CveScanFailureClass::Deterministic,
+            Self::Transient => CveScanFailureClass::Transient,
+        }
+    }
+}
+
+impl std::fmt::Display for CveApiError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Revoked => "CVE lease was revoked",
+            Self::Authorization => "CVE lease authorization failed",
+            Self::Rejected => "CVE lease request was rejected",
+            Self::Transient => "CVE lease request failed transiently",
+        })
+    }
+}
+
+impl std::error::Error for CveApiError {}
+
+/// Classifies canonical source download failures before extraction.
+#[derive(Debug)]
+pub enum SourceArtifactDownloadError {
+    /// Signed artifact metadata or downloaded bytes do not match.
+    Identity(String),
+    /// HTTP or local I/O prevented the transfer from completing.
+    Transport(anyhow::Error),
+}
+
+impl std::fmt::Display for SourceArtifactDownloadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Identity(message) => formatter.write_str(message),
+            Self::Transport(error) => write!(formatter, "{error:#}"),
+        }
+    }
+}
+
+impl std::error::Error for SourceArtifactDownloadError {}
 
 pub fn job_status_requests_cancellation(status: Option<&str>) -> bool {
     matches!(status, Some("cancelling" | "cancelled"))
@@ -58,6 +120,20 @@ fn append_logs_outcome_for_status(
 const DEFAULT_API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const DERIVATION_ARCHIVE_DOWNLOAD_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(30 * 60);
+
+pub(crate) fn cve_api_error_for_status(status: reqwest::StatusCode) -> CveApiError {
+    match status {
+        reqwest::StatusCode::GONE => CveApiError::Revoked,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
+            CveApiError::Authorization
+        }
+        reqwest::StatusCode::BAD_REQUEST
+        | reqwest::StatusCode::NOT_FOUND
+        | reqwest::StatusCode::CONFLICT
+        | reqwest::StatusCode::UNPROCESSABLE_ENTITY => CveApiError::Rejected,
+        _ => CveApiError::Transient,
+    }
+}
 
 /// Error type for the delta derivation-transport endpoints that lets callers
 /// distinguish "server doesn't support this yet" (fallback to full archive is
@@ -114,6 +190,8 @@ pub struct BuilderApiClient {
     builder_session_id: Uuid,
     signing_key: SigningKey,
     supported_execution_strategies: Vec<RemoteBuildExecutionStrategy>,
+    supported_evaluator_contract_versions: Vec<u32>,
+    evaluator: Option<EvaluatorFingerprint>,
 }
 
 impl BuilderApiClient {
@@ -135,7 +213,19 @@ impl BuilderApiClient {
     /// public key has not yet been registered (or is currently disabled) does
     /// not crash the service or block a NixOS switch. Each failed attempt is
     /// logged with the builder's public key so an admin can register/enable it.
-    pub async fn new(config: &BuilderConfig) -> Result<Self> {
+    /// The caller supplies the evaluator capability probed before polling, or
+    /// `None` when this process cannot execute verified-source jobs. The caller
+    /// also supplies capabilities after probing optional local executables.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when configuration, key loading, HTTP client creation,
+    /// builder resolution, or session establishment fails.
+    pub async fn new(
+        config: &BuilderConfig,
+        evaluator: Option<EvaluatorFingerprint>,
+        capabilities: BuilderCapabilities,
+    ) -> Result<Self> {
         let key_path = config.require_private_key_path()?;
         let server_url = config.require_server_url()?;
 
@@ -149,7 +239,6 @@ impl BuilderApiClient {
             .context("Failed to create HTTP client")?;
 
         let builder_session_id = Uuid::new_v4();
-
         let builder_id = match config.builder_id {
             Some(builder_id) => {
                 Self::establish_builder_session_with_retry(
@@ -161,6 +250,7 @@ impl BuilderApiClient {
                     config.resolve_retry_interval,
                     config.resolve_retry_max_interval,
                     config.resolve_max_attempts,
+                    capabilities,
                 )
                 .await?;
                 builder_id
@@ -174,6 +264,7 @@ impl BuilderApiClient {
                     config.resolve_retry_interval,
                     config.resolve_retry_max_interval,
                     config.resolve_max_attempts,
+                    capabilities,
                 )
                 .await?
             }
@@ -186,7 +277,104 @@ impl BuilderApiClient {
             builder_session_id,
             signing_key,
             supported_execution_strategies: config.supported_execution_strategies.clone(),
+            supported_evaluator_contract_versions: evaluator
+                .as_ref()
+                .map(|fingerprint| vec![fingerprint.contract_version])
+                .unwrap_or_default(),
+            evaluator,
         })
+    }
+
+    async fn send_cve_request<TRequest, TResponse>(
+        &self,
+        operation: &str,
+        request: &TRequest,
+    ) -> std::result::Result<TResponse, CveApiError>
+    where
+        TRequest: Serialize + ?Sized,
+        TResponse: for<'de> Deserialize<'de>,
+    {
+        let path = format!("/api/v1/builders/{}/cve-scans/{operation}", self.builder_id);
+        let body = serde_json::to_vec(request).map_err(|_| CveApiError::Rejected)?;
+        let (builder_id, signature, timestamp) = self.sign_request("POST", &path, &body);
+        let response = self
+            .client
+            .post(format!("{}{}", self.server_url, path))
+            .header("Content-Type", "application/json")
+            .header("X-Builder-ID", builder_id)
+            .header("X-Builder-Session-ID", self.builder_session_id.to_string())
+            .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| CveApiError::Transient)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(cve_api_error_for_status(status));
+        }
+        response.json().await.map_err(|_| CveApiError::Rejected)
+    }
+
+    /// Claims one server-authorized CVE lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified error for transport, authorization, revocation,
+    /// malformed response, or rejected request failures.
+    pub async fn claim_cve_scan(
+        &self,
+        capabilities: BuilderCapabilities,
+        completed_build_job_id: Option<Uuid>,
+    ) -> std::result::Result<CveScanClaimResponse, CveApiError> {
+        self.send_cve_request(
+            "claim",
+            &CveScanClaimRequest {
+                builder_session_id: self.builder_session_id,
+                capabilities,
+                completed_build_job_id,
+            },
+        )
+        .await
+    }
+
+    /// Renews one exact CVE execution lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified error for transport, authorization, revocation,
+    /// malformed response, or rejected request failures.
+    pub async fn heartbeat_cve_scan(
+        &self,
+        request: &CveScanHeartbeatRequest,
+    ) -> std::result::Result<CveScanHeartbeatResponse, CveApiError> {
+        self.send_cve_request("heartbeat", request).await
+    }
+
+    /// Completes one exact CVE execution lease with canonical evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified error for transport, authorization, revocation,
+    /// malformed response, or rejected evidence failures.
+    pub async fn complete_cve_scan(
+        &self,
+        request: &CveScanCompleteRequest,
+    ) -> std::result::Result<CveScanCompleteResponse, CveApiError> {
+        self.send_cve_request("complete", request).await
+    }
+
+    /// Reports a scanner failure independently from its producing build.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified error for transport, authorization, revocation,
+    /// malformed response, or rejected request failures.
+    pub async fn fail_cve_scan(
+        &self,
+        request: &CveScanFailRequest,
+    ) -> std::result::Result<CveScanFailResponse, CveApiError> {
+        self.send_cve_request("fail", request).await
     }
 
     /// Resolve the builder ID, retrying with exponential backoff on failure.
@@ -204,6 +392,7 @@ impl BuilderApiClient {
         retry_interval: std::time::Duration,
         max_interval: std::time::Duration,
         max_attempts: u32,
+        capabilities: BuilderCapabilities,
     ) -> Result<Uuid> {
         let public_key = Self::public_key_base64_for(signing_key);
         let mut delay = retry_interval.max(std::time::Duration::from_secs(1));
@@ -211,8 +400,14 @@ impl BuilderApiClient {
 
         loop {
             attempt += 1;
-            match Self::resolve_builder_id(client, server_url, signing_key, builder_session_id)
-                .await
+            match Self::resolve_builder_id(
+                client,
+                server_url,
+                signing_key,
+                builder_session_id,
+                capabilities.clone(),
+            )
+            .await
             {
                 Ok(builder_id) => {
                     if attempt > 1 {
@@ -314,6 +509,7 @@ impl BuilderApiClient {
         retry_interval: std::time::Duration,
         max_interval: std::time::Duration,
         max_attempts: u32,
+        capabilities: BuilderCapabilities,
     ) -> Result<()> {
         let mut delay = retry_interval.max(std::time::Duration::from_secs(1));
         let mut attempt: u32 = 0;
@@ -326,6 +522,7 @@ impl BuilderApiClient {
                 signing_key,
                 builder_id,
                 builder_session_id,
+                capabilities.clone(),
             )
             .await
             {
@@ -357,11 +554,13 @@ impl BuilderApiClient {
         signing_key: &SigningKey,
         builder_id: Uuid,
         builder_session_id: Uuid,
+        capabilities: BuilderCapabilities,
     ) -> Result<()> {
         let path = format!("/api/v1/builders/{}/session", builder_id);
         let url = format!("{}{}", server_url, path);
         let body = serde_json::to_vec(&EstablishBuilderSessionRequest {
             session_id: builder_session_id,
+            capabilities,
         })?;
         let (signature, timestamp) =
             Self::sign_bootstrap_request(signing_key, "POST", &path, &body);
@@ -433,12 +632,14 @@ impl BuilderApiClient {
         server_url: &str,
         signing_key: &SigningKey,
         builder_session_id: Uuid,
+        capabilities: BuilderCapabilities,
     ) -> Result<Uuid> {
         let path = "/api/v1/builders/resolve-id";
         let url = format!("{}{}", server_url, path);
         let body = serde_json::to_vec(&ResolveBuilderIdRequest {
             public_key: Self::public_key_base64_for(signing_key),
             session_id: Some(builder_session_id),
+            capabilities,
         })?;
         let (signature, timestamp) = Self::sign_bootstrap_request(signing_key, "POST", path, &body);
 
@@ -515,6 +716,10 @@ impl BuilderApiClient {
         let body = serde_json::to_vec(&NextJobRequest {
             protocol_version: 2,
             supported_execution_strategies: self.supported_execution_strategies.clone(),
+            supported_evaluator_contract_versions: self
+                .supported_evaluator_contract_versions
+                .clone(),
+            evaluator: self.evaluator.clone(),
         })?;
 
         let response = self.send_next_job_request("POST", body).await?;
@@ -584,12 +789,29 @@ impl BuilderApiClient {
         }
 
         if response.status() == reqwest::StatusCode::CONFLICT {
-            warn!(
-                "⚠️  Server reports incompatible execution strategy (409 Conflict). \
-                 Check server's remote_build_execution_strategy setting matches \
-                 builder supported_strategies={:?}",
-                self.supported_execution_strategies,
-            );
+            let body = response.bytes().await.unwrap_or_default();
+            match serde_json::from_slice::<NextJobConflictResponse>(&body)
+                .map(|response| response.reason)
+            {
+                Ok(NextJobConflictReason::UnsupportedExecutionStrategy) => warn!(
+                    supported_strategies = ?self.supported_execution_strategies,
+                    "Server's configured remote execution strategy is not supported by this builder (409 Conflict)"
+                ),
+                Ok(NextJobConflictReason::IncompatibleEvaluator) => warn!(
+                    builder_evaluator = ?self.evaluator,
+                    "Builder evaluator fingerprint does not match the server's authoritative evaluator (409 Conflict)"
+                ),
+                Ok(NextJobConflictReason::IncompatibleSourceDelivery) => warn!(
+                    "Server source delivery mode is incompatible with the verified-source evaluator contract (409 Conflict)"
+                ),
+                Ok(NextJobConflictReason::SourceMaterializationCancelled) => warn!(
+                    "Server cancelled canonical source preparation before claim; the builder will poll again (409 Conflict)"
+                ),
+                Err(error) => warn!(
+                    error = %error,
+                    "Server rejected next-job polling with an unstructured or unknown 409 Conflict response"
+                ),
+            }
             return Ok(None);
         }
 
@@ -947,18 +1169,27 @@ impl BuilderApiClient {
         Ok(())
     }
 
-    /// Stream the source archive (tar.gz of the bare mirror) for a job using
-    /// ServerBundledArchive delivery directly to a temp file, verifying the
-    /// SHA-256 incrementally without buffering the whole archive in RAM.
+    /// Streams the canonical source artifact for a verified-source job.
+    ///
+    /// The method enforces the authorized artifact size and SHA-256 digest while it
+    /// streams. It never buffers the complete artifact in memory.
     ///
     /// Returns the path of the downloaded temp file. Callers are responsible
     /// for extracting it and removing it afterwards.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SourceArtifactDownloadError::Identity`] when signed metadata
+    /// or downloaded bytes violate the authorized identity. Returns
+    /// [`SourceArtifactDownloadError::Transport`] for HTTP and local I/O
+    /// failures that do not prove an identity mismatch.
     pub async fn stream_source_archive_to_tempfile(
         &self,
         job_id: uuid::Uuid,
-        expected_sha256: Option<&str>,
+        expected_sha256: &str,
+        expected_size: u64,
         dest_dir: &std::path::Path,
-    ) -> Result<std::path::PathBuf> {
+    ) -> std::result::Result<std::path::PathBuf, SourceArtifactDownloadError> {
         use sha2::{Digest, Sha256};
         use tokio::io::AsyncWriteExt;
 
@@ -980,7 +1211,11 @@ impl BuilderApiClient {
             .timeout(DERIVATION_ARCHIVE_DOWNLOAD_TIMEOUT)
             .send()
             .await
-            .context("Failed to request source archive")?;
+            .map_err(|error| {
+                SourceArtifactDownloadError::Transport(
+                    anyhow::Error::new(error).context("Failed to request source archive"),
+                )
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -988,46 +1223,94 @@ impl BuilderApiClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "unknown error".to_string());
-            anyhow::bail!(
-                "Download source archive failed with status {}: {}",
-                status,
-                error_text
-            );
+            return Err(SourceArtifactDownloadError::Transport(anyhow::anyhow!(
+                "Download source archive failed with status {status}: {error_text}"
+            )));
+        }
+        if expected_size > cf_protocol::source_artifact::VERIFIED_SOURCE_ARTIFACT_MAX_BYTES {
+            return Err(SourceArtifactDownloadError::Identity(
+                "source artifact exceeds the protocol size limit".to_string(),
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|size| size != expected_size)
+        {
+            return Err(SourceArtifactDownloadError::Identity(
+                "source artifact Content-Length does not match the authorized manifest".to_string(),
+            ));
         }
 
         // Stream to a temp file, computing SHA-256 on the fly.
-        tokio::fs::create_dir_all(dest_dir)
+        tokio::fs::create_dir_all(dest_dir).await.map_err(|error| {
+            SourceArtifactDownloadError::Transport(
+                anyhow::Error::new(error).context("Failed to create source archive temp directory"),
+            )
+        })?;
+        let tmp_path = dest_dir.join(format!(
+            "source-artifact-{job_id}-{}.tar.tmp",
+            uuid::Uuid::new_v4()
+        ));
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
             .await
-            .context("Failed to create source archive temp directory")?;
-        let tmp_path = dest_dir.join(format!("source-archive-{job_id}.tar.gz.tmp"));
-        let mut file = tokio::fs::File::create(&tmp_path)
-            .await
-            .context("Failed to create source archive temp file")?;
+            .map_err(|error| {
+                SourceArtifactDownloadError::Transport(
+                    anyhow::Error::new(error).context("Failed to create source artifact temp file"),
+                )
+            })?;
 
         let mut hasher = Sha256::new();
+        let mut downloaded = 0_u64;
         let mut byte_stream = response.bytes_stream();
         use futures::StreamExt;
         while let Some(chunk) = byte_stream.next().await {
-            let chunk = chunk.context("Error reading source archive chunk from server")?;
+            let chunk = chunk.map_err(|error| {
+                SourceArtifactDownloadError::Transport(
+                    anyhow::Error::new(error)
+                        .context("Error reading source archive chunk from server"),
+                )
+            })?;
+            downloaded = downloaded.checked_add(chunk.len() as u64).ok_or_else(|| {
+                SourceArtifactDownloadError::Identity("source artifact size overflowed".to_string())
+            })?;
+            if downloaded > expected_size {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return Err(SourceArtifactDownloadError::Identity(
+                    "source artifact exceeds the authorized manifest size".to_string(),
+                ));
+            }
             hasher.update(&chunk);
-            file.write_all(&chunk)
-                .await
-                .context("Failed to write source archive chunk to temp file")?;
+            file.write_all(&chunk).await.map_err(|error| {
+                SourceArtifactDownloadError::Transport(
+                    anyhow::Error::new(error)
+                        .context("Failed to write source archive chunk to temp file"),
+                )
+            })?;
         }
-        file.flush()
-            .await
-            .context("Failed to flush source archive temp file")?;
+        file.flush().await.map_err(|error| {
+            SourceArtifactDownloadError::Transport(
+                anyhow::Error::new(error).context("Failed to flush source archive temp file"),
+            )
+        })?;
         drop(file);
 
-        // Verify SHA-256 if the server provided one.
-        if let Some(expected) = expected_sha256 {
-            let actual = format!("{:x}", hasher.finalize());
-            if actual != expected {
-                let _ = tokio::fs::remove_file(&tmp_path).await;
-                anyhow::bail!("source archive SHA-256 mismatch: expected {expected}, got {actual}");
-            }
-            info!("✅ Source archive SHA-256 verified: {}", actual);
+        if downloaded != expected_size {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(SourceArtifactDownloadError::Identity(
+                "source artifact is shorter than the authorized manifest size".to_string(),
+            ));
         }
+        let actual = format!("{:x}", hasher.finalize());
+        if actual != expected_sha256 {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(SourceArtifactDownloadError::Identity(format!(
+                "source artifact SHA-256 mismatch: expected {expected_sha256}, got {actual}"
+            )));
+        }
+        info!("✅ Source artifact SHA-256 verified: {}", actual);
 
         Ok(tmp_path)
     }
@@ -1451,7 +1734,7 @@ impl BuilderApiClient {
     }
 }
 
-/// API-backed [`BuildReporter`] for remote builders.
+/// API-backed build reporter for remote builders.
 ///
 /// Reports progress and checks cancellation entirely over the server API with no
 /// database access. Progress is sent via HTTP POST; cancellation is detected by
@@ -1536,6 +1819,8 @@ mod tests {
             builder_session_id: Uuid::new_v4(),
             signing_key: key,
             supported_execution_strategies: vec![RemoteBuildExecutionStrategy::ServerDerivation],
+            supported_evaluator_contract_versions: Vec::new(),
+            evaluator: None,
         };
 
         let body = b"test request body";
@@ -1618,6 +1903,19 @@ mod tests {
             supported_execution_strategies: vec![
                 RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
             ],
+            supported_evaluator_contract_versions: vec![
+                cf_protocol::builder::VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION,
+            ],
+            evaluator: Some(EvaluatorFingerprint {
+                contract_version: cf_protocol::builder::VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION,
+                nix_version: "test".to_string(),
+                evaluator_system: "x86_64-linux".to_string(),
+                pure_eval: true,
+                lockfile_mutation_allowed: false,
+                allow_import_from_derivation: true,
+                source_materialization_schema_version:
+                    cf_protocol::builder::VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
+            }),
         };
 
         let result = client.get_next_job().await;
@@ -1647,6 +1945,7 @@ mod tests {
         let body = serde_json::to_vec(&ResolveBuilderIdRequest {
             public_key,
             session_id: Some(Uuid::new_v4()),
+            capabilities: BuilderCapabilities::default(),
         })
         .unwrap();
 

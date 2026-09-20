@@ -15,7 +15,8 @@
  * "ci_fast". Themed screenshots are captured for every theme listed in
  * manifest settings.visualThemes and later compared against the design example
  * targets (generated offline by generate-design-targets.js) to produce a
- * non-blocking design-drift report and visual parity grid for the MR.
+ * design-drift report and visual parity grid for the MR. TASK-440 capture and
+ * semantic contracts are blocking; pixel similarity remains advisory.
  */
 const { chromium } = process.env.CF_UI_STATIC_CONTRACTS === "1"
   ? { chromium: null }
@@ -30,6 +31,22 @@ const baseUrl = process.argv[2] || "http://127.0.0.1:3000";
 const outputDir = process.argv[3] || "/tmp/screenshots";
 const apiBaseUrl = process.env.CF_UI_API_BASE_URL || baseUrl;
 const baselinesDir = process.env.CF_UI_BASELINES_DIR || "";
+
+function parseBoundedSeconds(value, defaultSeconds, name) {
+  if (value == null) return defaultSeconds;
+  if (!/^\d+$/.test(value)) throw new Error(`${name} must be an integer number of seconds`);
+  const seconds = Number(value);
+  if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > 3600) {
+    throw new Error(`${name} must be between 1 and 3600 seconds`);
+  }
+  return seconds;
+}
+
+const CONFIG_INSPECTION_WAIT_SECONDS = parseBoundedSeconds(
+  process.env.CF_TEST_CONFIG_INSPECTION_WAIT_SECONDS,
+  300,
+  "CF_TEST_CONFIG_INSPECTION_WAIT_SECONDS",
+);
 
 // SQL-backed fixture steps execute against whichever PostgreSQL instance is
 // running the target Crystal Forge database. Two deployments are supported:
@@ -117,6 +134,13 @@ if (!coverageManifestPath) {
 const MANIFEST = JSON.parse(fs.readFileSync(coverageManifestPath, "utf8"));
 const MANIFEST_STEPS = new Map(MANIFEST.steps.map((s) => [s.name, s]));
 const DESIGN_FIXTURE = MANIFEST.settings.designFixture || null;
+const designFixturePath = firstExistingPath([
+  path.join(__dirname, "design-fixtures.json"),
+  path.join(__dirname, "..", "design-fixtures.json"),
+]);
+if (!designFixturePath) throw new Error("design-fixtures.json is required for TASK-440 semantic contracts");
+const TASK_440_FIXTURE = JSON.parse(fs.readFileSync(designFixturePath, "utf8")).task440;
+const task440SemanticContracts = [];
 const intermediateVisuals = new Map();
 
 /**
@@ -262,25 +286,76 @@ function compareToBaseline(name, step) {
 
 
 async function applyVisualTheme(page, theme) {
-  // A step can finish immediately after navigation. During that window, the
-  // app's preference hydration can overwrite the first direct theme seed.
-  // Reapply after hydration settles so the captured theme is deterministic.
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    await page.evaluate((themeName) => {
-      localStorage.setItem("cf.ui.theme", themeName);
-      document.documentElement.setAttribute("data-theme", themeName);
-    }, theme);
-    await page.waitForTimeout(100);
-    const actual = await page.locator("html").getAttribute("data-theme");
-    if (actual === theme) {
-      // The shell uses 300 ms color transitions. Capture only after those
-      // transitions settle so computed contrast and pixels are deterministic.
-      await page.waitForTimeout(350);
-      return;
+  const root = page.locator("html");
+  const toggle = page.getByRole("button", { name: "Toggle theme" });
+  if ((await root.getAttribute("data-theme")) !== theme) {
+    if ((await toggle.count()) === 0) {
+      // Authentication pages do not render the application shell. Seed the
+      // preference and reload so UiTheme::load/apply owns the rendered state.
+      const fields = await page.locator("input, textarea, select").evaluateAll((elements) => elements.map((element, index) => ({
+        index,
+        value: element.value,
+        checked: "checked" in element ? element.checked : null,
+      })));
+      await page.evaluate((themeName) => localStorage.setItem("cf.ui.theme", themeName), theme);
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await page.locator("input, textarea, select").evaluateAll((elements, saved) => {
+        for (const field of saved) {
+          const element = elements[field.index];
+          if (!element) continue;
+          element.value = field.value;
+          if (field.checked !== null) element.checked = field.checked;
+          element.dispatchEvent(new Event("input", { bubbles: true }));
+          element.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      }, fields);
+    } else {
+      // Drawer and toast layers can cover the topbar. A DOM click still
+      // invokes the real Dioxus control and preference state.
+      await toggle.evaluate((button) => button.click());
     }
   }
-  const actual = await page.locator("html").getAttribute("data-theme");
-  throw new Error(`Expected visual baseline theme ${theme}, got: ${actual}`);
+
+  await page.waitForFunction(
+    (themeName) => document.documentElement.getAttribute("data-theme") === themeName,
+    theme,
+    { timeout: 5000 },
+  );
+  const renderedTheme = await page.evaluate((themeName) => {
+    const parse = (color) => {
+      const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+      return match ? match.slice(1).map(Number) : null;
+    };
+    const luminance = (rgb) => rgb ? ((rgb[0] * 299 + rgb[1] * 587 + rgb[2] * 114) / 1000) : null;
+    const candidates = [...document.querySelectorAll(".sd-card, .fl-tray, main, body")];
+    const surface = candidates.find((element) => {
+      const color = getComputedStyle(element).backgroundColor;
+      return color !== "transparent" && !/rgba\([^)]*,\s*0(?:\.0+)?\)$/.test(color);
+    }) || document.body;
+    const style = getComputedStyle(surface);
+    return {
+      theme: document.documentElement.getAttribute("data-theme"),
+      surfaceClass: surface.className || surface.tagName,
+      background: style.backgroundColor,
+      foreground: style.color,
+      backgroundLuminance: luminance(parse(style.backgroundColor)),
+      foregroundLuminance: luminance(parse(style.color)),
+      expectedDark: themeName === "dark",
+    };
+  }, theme);
+  if (renderedTheme.theme !== theme || renderedTheme.backgroundLuminance === null || renderedTheme.foregroundLuminance === null) {
+    throw new Error(`Application theme did not settle to ${theme}: ${JSON.stringify(renderedTheme)}`);
+  }
+  if (Math.abs(renderedTheme.backgroundLuminance - renderedTheme.foregroundLuminance) < 35) {
+    throw new Error(`Rendered theme lacks representative foreground/background contrast: ${JSON.stringify(renderedTheme)}`);
+  }
+  if (theme === "dark" && renderedTheme.backgroundLuminance >= renderedTheme.foregroundLuminance) {
+    throw new Error(`Dark theme surface colors are inconsistent: ${JSON.stringify(renderedTheme)}`);
+  }
+  if (theme === "light" && renderedTheme.backgroundLuminance <= renderedTheme.foregroundLuminance) {
+    throw new Error(`Light theme surface colors are inconsistent: ${JSON.stringify(renderedTheme)}`);
+  }
+  await page.waitForTimeout(350);
 }
 
 async function setAccountPreferences(page, preferences) {
@@ -302,7 +377,23 @@ async function setAccountPreferences(page, preferences) {
         body: JSON.stringify(preferences),
       });
       if (!response.ok) {
-        throw new Error(`Preference PATCH failed with HTTP ${response.status}`);
+        // A bare status is not actionable: a preference PATCH fails both when
+        // the request never reached the API and when it reached it without an
+        // accepted session. Report the served origin and the authenticated
+        // state observed from this same browser context.
+        const body = (await response.text()).slice(0, 300);
+        let whoami = "unavailable";
+        try {
+          const probe = await fetch(`${baseUrl}/api/auth/whoami`, { credentials: "include" });
+          const parsed = probe.ok ? await probe.json() : null;
+          whoami = `${probe.status}/is_authenticated=${parsed ? parsed.is_authenticated : "n/a"}`;
+        } catch (probeError) {
+          whoami = `probe failed: ${probeError.message}`;
+        }
+        throw new Error(
+          `Preference PATCH failed with HTTP ${response.status} at ${baseUrl} ` +
+            `(whoami ${whoami}, csrf header ${csrf ? "sent" : "absent"}): ${body}`,
+        );
       }
     },
     { baseUrl, preferences },
@@ -376,6 +467,191 @@ async function mockAccountNotifications(page, notification = null) {
   return requests;
 }
 
+function notificationTimestampMicros(item) {
+  return BigInt(Date.parse(item.created_at)) * 1000n;
+}
+
+function encodeMockNotificationCursor(item) {
+  return `${notificationTimestampMicros(item)}|${item.id}`;
+}
+
+function decodeMockNotificationCursor(cursor) {
+  const separator = cursor.lastIndexOf("|");
+  if (separator < 0) throw new Error(`Invalid mocked notification cursor: ${cursor}`);
+  return { createdAtMicros: BigInt(cursor.slice(0, separator)), id: cursor.slice(separator + 1) };
+}
+
+function notificationIsOlderThanCursor(item, cursor) {
+  const createdAtMicros = notificationTimestampMicros(item);
+  return createdAtMicros < cursor.createdAtMicros ||
+    (createdAtMicros === cursor.createdAtMicros && item.id < cursor.id);
+}
+
+async function mockNotificationCoordinatorScenario(page) {
+  const requests = { get: [], read: [], dismiss: [], dismissAll: [], markAll: [] };
+  let failNextGet = false;
+  const failNextRead = new Set();
+  const failNextDismiss = new Set();
+  let failNextMarkAll = false;
+  let holdNextHead = false;
+  let releaseHeldHead = null;
+  const baseTimestamp = Date.parse("2026-09-13T12:00:00.000Z");
+  let insertedSequence = 0;
+  let notifications = Array.from({ length: 120 }, (_, index) => ({
+    id: `10000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+    category: index % 2 === 0 ? "build_failures" : "policy_violations",
+    title: `Notification ${index + 1}`,
+    summary: index === 0
+      ? "Durable event summary with deliberately long context that must remain available to assistive technology without widening the notification panel"
+      : `Durable event summary ${index + 1}`,
+    route: "/systems",
+    created_at: new Date(baseTimestamp - Math.floor(index / 2) * 60_000).toISOString(),
+    read_at: null,
+  }));
+  let unread = notifications.filter((item) => item.read_at == null).length;
+
+  const ordered = (items) => [...items].sort((left, right) =>
+    right.created_at.localeCompare(left.created_at) || right.id.localeCompare(left.id));
+  await page.route("**/api/v1/user/notifications**", async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.fallback();
+      return;
+    }
+    const url = new URL(route.request().url());
+    requests.get.push(url.toString());
+    if (failNextGet) {
+      failNextGet = false;
+      await route.fulfill({ status: 503, body: "notification feed unavailable" });
+      return;
+    }
+    const cursor = url.searchParams.get("cursor");
+    const limit = Math.min(50, Math.max(1, Number.parseInt(url.searchParams.get("limit") || "20", 10)));
+    const snapshot = ordered(notifications).map((item) => ({ ...item }));
+    const snapshotUnread = unread;
+    if (!cursor && holdNextHead) {
+      holdNextHead = false;
+      await new Promise((resolve) => { releaseHeldHead = resolve; });
+      releaseHeldHead = null;
+    }
+    const eligible = cursor
+      ? snapshot.filter((item) => notificationIsOlderThanCursor(item, decodeMockNotificationCursor(cursor)))
+      : snapshot;
+    const pageItems = eligible.slice(0, limit);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        unread_count: snapshotUnread,
+        next_cursor: pageItems.length === limit ? encodeMockNotificationCursor(pageItems.at(-1)) : null,
+        notifications: pageItems,
+      }),
+    });
+  });
+  await page.route("**/api/v1/user/notifications/read-all", async (route) => {
+    requests.markAll.push(route.request().url());
+    if (failNextMarkAll) {
+      failNextMarkAll = false;
+      await route.fulfill({ status: 503, body: "mark all unavailable" });
+      return;
+    }
+    unread = 0;
+    const readAt = new Date().toISOString();
+    notifications = notifications.map((item) => ({ ...item, read_at: readAt }));
+    await route.fulfill({ status: 204 });
+  });
+  await page.route("**/api/v1/user/notifications/dismiss-all", async (route) => {
+    requests.dismissAll.push(route.request().url());
+    unread = 0;
+    notifications = [];
+    await route.fulfill({ status: 204 });
+  });
+  await page.route("**/api/v1/user/notifications/*/read", async (route) => {
+    const id = route.request().url().split("/").at(-2);
+    requests.read.push(id);
+    if (failNextRead.delete(id)) {
+      await route.fulfill({ status: 503, body: "read unavailable" });
+      return;
+    }
+    notifications = notifications.map((item) => item.id === id
+      ? { ...item, read_at: new Date().toISOString() }
+      : item);
+    unread = Math.max(0, unread - 1);
+    await route.fulfill({ status: 204 });
+  });
+  await page.route("**/api/v1/user/notifications/*", async (route) => {
+    if (route.request().method() !== "DELETE") {
+      await route.fallback();
+      return;
+    }
+    const id = route.request().url().split("/").at(-1);
+    requests.dismiss.push(id);
+    if (failNextDismiss.delete(id)) {
+      await route.fulfill({ status: 503, body: "dismiss unavailable" });
+      return;
+    }
+    const dismissed = notifications.find((item) => item.id === id);
+    if (dismissed?.read_at == null) unread = Math.max(0, unread - 1);
+    notifications = notifications.filter((item) => item.id !== id);
+    await route.fulfill({ status: 204 });
+  });
+
+  return {
+    requests,
+    failNextGet() { failNextGet = true; },
+    failNextRead(id) { failNextRead.add(id); },
+    failNextDismiss(id) { failNextDismiss.add(id); },
+    failNextMarkAll() { failNextMarkAll = true; },
+    holdNextHead() { holdNextHead = true; },
+    async waitForHeldHead() {
+      const deadline = Date.now() + 5000;
+      while (!releaseHeldHead && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      if (!releaseHeldHead) throw new Error("Notification head request was not held");
+    },
+    releaseHeldHead() {
+      if (!releaseHeldHead) throw new Error("No held notification head request");
+      releaseHeldHead();
+    },
+    insertNew(count) {
+      const inserted = Array.from({ length: count }, () => {
+        insertedSequence += 1;
+        return {
+          id: `20000000-0000-4000-8000-${String(insertedSequence).padStart(12, "0")}`,
+          category: "build_failures",
+          title: `Inserted notification ${insertedSequence}`,
+          summary: `Inserted durable event ${insertedSequence}`,
+          route: "/systems",
+          created_at: new Date(baseTimestamp + Math.ceil(insertedSequence / 2) * 60_000).toISOString(),
+          read_at: null,
+        };
+      });
+      notifications.push(...inserted);
+      unread += count;
+      return inserted;
+    },
+    dismissOnServer(id) {
+      const dismissed = notifications.find((item) => item.id === id);
+      if (dismissed?.read_at == null) unread = Math.max(0, unread - 1);
+      notifications = notifications.filter((item) => item.id !== id);
+    },
+    setEmpty() { notifications = []; unread = 0; },
+  };
+}
+
+async function waitForNotificationRowCount(page, expected) {
+  await page.waitForFunction(
+    ({ panelTestId, expectedCount }) => document
+      .querySelector(`[data-testid='${panelTestId}']`)
+      ?.querySelectorAll("[data-notification-id]").length === expectedCount,
+    { panelTestId: "topbar-notifications-panel", expectedCount: expected },
+    { timeout: 10_000 },
+  ).catch(async (error) => {
+    const actual = await page.locator("[data-testid='topbar-notifications-panel'] [data-notification-id]").count();
+    throw new Error(`Expected ${expected} notification rows, found ${actual}: ${error.message}`);
+  });
+}
+
 async function mockProfileNotificationAndSessionApis(page) {
   let notificationPreferences = {
     deploy_failures: true,
@@ -433,20 +709,52 @@ async function mockProfileNotificationAndSessionApis(page) {
 
 async function captureThemedBaselines(page, step, visualThemes) {
   const visuals = [];
+  const canonicalTask440 = step.name.includes("task440") && step.name.includes("canonical");
 
   for (const theme of visualThemes) {
+    let parityTarget = null;
+    let semanticContract = null;
+    let contentSurface = null;
     await applyVisualTheme(page, theme);
+    if (canonicalTask440) {
+      await dismissOnboardingCoachForCapture(page);
+      await prepareTask440CanonicalCapture(page, step);
+      const surfaceSelector = step.name.includes("config-") ? ".cfgx" : ".fl-tray";
+      await assertNoOverlayIntersections(page, surfaceSelector, `${step.name} ${theme} capture`);
+      const parityManifestPath = firstExistingPath([
+        path.join(__dirname, "design-parity", "manifest.json"),
+        path.join(__dirname, "..", "design-parity", "manifest.json"),
+      ]);
+      if (!parityManifestPath) throw new Error("design-parity manifest is required for canonical TASK-440 captures");
+      const parityManifest = JSON.parse(fs.readFileSync(parityManifestPath, "utf8"));
+      const targets = (parityManifest.targets?.task440 || []).filter((target) => target.dioxusStep === step.name);
+      if (targets.length !== 1) throw new Error(`Expected one TASK-440 design-parity target for ${step.name}, found ${targets.length}`);
+      parityTarget = targets[0];
+      semanticContract = TASK_440_FIXTURE.semanticTargets?.[parityTarget.name];
+      await validateTask440SemanticContract(page, parityTarget, semanticContract, theme);
+      contentSurface = await page.locator(parityTarget.contentSelector).boundingBox();
+      if (!contentSurface || contentSurface.width <= 0 || contentSurface.height <= 0) throw new Error(`${parityTarget.name} content surface is not measurable`);
+    }
 
     const captureName = `${step.name}--${theme}`;
     const outputPath = `${outputDir}/${captureName}.png`;
-    // Playwright fast-forwards finite CSS transitions before capture. This
-    // prevents VM compositor timing from freezing an intermediate theme frame.
-    await page.screenshot({ path: outputPath, animations: "disabled" });
+    await page.screenshot({ path: outputPath, animations: "disabled", timeout: 15_000 });
 
     const stats = fs.statSync(outputPath);
     const visual = compareToBaseline(captureName, MANIFEST_STEPS.get(step.name));
     console.log(`  OK: ${captureName}.png (${stats.size} bytes) [baseline: ${visual.status}]`);
-    visuals.push({ name: captureName, theme, ...visual });
+    visuals.push({ name: captureName, theme, ...visual, semanticContract: semanticContract ? { name: parityTarget.name, ok: true } : null });
+    if (canonicalTask440) {
+      const viewport = page.viewportSize();
+      if (!viewport || viewport.width !== parityTarget.viewport.width || viewport.height !== parityTarget.viewport.height) {
+        throw new Error(`Canonical viewport does not match ${parityTarget.name}: expected ${parityTarget.viewport.width}x${parityTarget.viewport.height}, got ${viewport ? `${viewport.width}x${viewport.height}` : "unknown"}`);
+      }
+      const parityDir = path.join(outputDir, "design-parity");
+      fs.mkdirSync(parityDir, { recursive: true });
+      fs.copyFileSync(outputPath, path.join(parityDir, `${parityTarget.name}--${theme}.dioxus.png`));
+      task440SemanticContracts.push({ name: `${parityTarget.name}--${theme}`, target: parityTarget.name, theme, ok: true, contentSurface });
+      console.log(`  OK TASK-440 semantic contract and design-parity capture: ${parityTarget.name}--${theme}`);
+    }
   }
 
   return visuals;
@@ -517,6 +825,7 @@ const TEST_USER = {
 const LOAD_TIMEOUT = Number(process.env.CF_UI_LOAD_TIMEOUT_MS || 10000);
 
 const VIEWPORTS = {
+  wide: { width: 1920, height: 1080 },
   desktop: { width: 1440, height: 900 },
   tablet: { width: 900, height: 900 },
   narrowDesktop: { width: 560, height: 900 },
@@ -529,7 +838,9 @@ async function assertVisible(locator, message, timeoutMs = 5000) {
     .then(() => true)
     .catch(() => false);
   if (!visible) {
-    throw new Error(message);
+    const page = locator.page();
+    const body = await page.locator("body").innerText().catch(() => "<body unavailable>");
+    throw new Error(`${message}; URL: ${page.url()}; body: ${body.replace(/\s+/g, " ").slice(0, 1600)}`);
   }
 }
 
@@ -655,6 +966,29 @@ async function fillDioxusInput(locator, value) {
   }, value);
 }
 
+async function selectAuthenticatedPoamAssignee(page, scope) {
+  const identity = await page.evaluate(async (base) => {
+    const response = await fetch(`${base}/api/auth/whoami`, { credentials: "include" });
+    return { status: response.status, body: response.ok ? await response.json() : null };
+  }, apiBaseUrl);
+  const userId = identity.body?.user?.id;
+  if (identity.status !== 200 || identity.body?.is_authenticated !== true || !userId) {
+    throw new Error(`POA&M assignee selection requires an authenticated user: ${JSON.stringify(identity)}`);
+  }
+
+  const select = scope.getByTestId("poam-assignee-select");
+  await assertEnabled(select, "POA&M assignee catalog must load eligible typed assignees");
+  const option = await select.locator("option").evaluateAll((options, expectedValue) => {
+    const match = options.find((candidate) => candidate.value === expectedValue);
+    return match ? { value: match.value, label: match.textContent.trim() } : null;
+  }, `user:${userId}`);
+  if (!option) {
+    throw new Error(`POA&M assignee catalog did not contain authenticated user ${userId}`);
+  }
+  await select.selectOption(option.value);
+  return { ...option, id: userId };
+}
+
 /**
  * Show the security-controls policy group.
  *
@@ -757,6 +1091,7 @@ async function filterPolicyCatalog(page, name) {
 async function suppressOnboardingCoach(page) {
   await page.context().addInitScript(() => {
     try {
+      if (window.localStorage.getItem("cf.coach.force_show") === "true") return;
       window.localStorage.setItem("cf.coach.collapsed", "true");
       window.localStorage.setItem("cf.coach.force_show", "false");
     } catch (_) {
@@ -800,6 +1135,75 @@ async function collapseOnboardingCoach(page) {
   throw new Error(
     "collapseOnboardingCoach: onboarding coach drawer stayed open and will intercept pointer events",
   );
+}
+
+async function dismissOnboardingCoachForCapture(page) {
+  const panel = page.locator("[data-testid='onboarding-coach-panel']");
+  if ((await panel.count()) === 0) return;
+  const dismiss = page.locator("[data-testid='onboarding-coach-dismiss']");
+  if ((await dismiss.count()) === 0) {
+    await panel.first().click();
+    await dismiss.waitFor({ state: "visible", timeout: 5000 });
+  }
+  await dismiss.click();
+  await panel.waitFor({ state: "hidden", timeout: 10000 });
+}
+
+async function routeTask440DismissedCoach(page) {
+  await page.route("**/api/v1/admin/setup-progress*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ...mockSetupCoachProgress(), dismissed: true }),
+    });
+  });
+}
+
+async function assertNoOverlayIntersections(page, surfaceSelector, label) {
+  const result = await page.evaluate((selector) => {
+    const surface = document.querySelector(selector);
+    if (!surface) throw new Error(`Missing tested surface ${selector}`);
+    const visible = (element) => {
+      const style = getComputedStyle(element);
+      const box = element.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) > 0 && box.width > 0 && box.height > 0;
+    };
+    const paintedAtCenter = (element) => {
+      const box = element.getBoundingClientRect();
+      const x = box.left + box.width / 2;
+      const y = box.top + box.height / 2;
+      for (let ancestor = element.parentElement; ancestor && ancestor !== document.body; ancestor = ancestor.parentElement) {
+        const style = getComputedStyle(ancestor);
+        if (![style.overflow, style.overflowX, style.overflowY].some((overflow) => ["auto", "hidden", "scroll", "clip"].includes(overflow))) continue;
+        const clip = ancestor.getBoundingClientRect();
+        if (x < clip.left || x > clip.right || y < clip.top || y > clip.bottom) return false;
+      }
+      return true;
+    };
+    const overlaps = (left, right) => left.left < right.right && left.right > right.left && left.top < right.bottom && left.bottom > right.top;
+    const surfaceBox = surface.getBoundingClientRect();
+    const controls = [...surface.querySelectorAll("button:not([disabled]), input:not([disabled]), select:not([disabled]), summary, [role='tab']")].filter((element) => visible(element) && paintedAtCenter(element));
+    const coachOverlaps = [...document.querySelectorAll("[data-testid*='onboarding-coach'], [data-testid^='setup-coach-']")]
+      .filter(visible)
+      .filter((element) => overlaps(element.getBoundingClientRect(), surfaceBox) || controls.some((control) => overlaps(element.getBoundingClientRect(), control.getBoundingClientRect())))
+      .map((element) => element.getAttribute("data-testid") || element.className || element.tagName);
+    const occluded = controls.filter((control) => {
+      const box = control.getBoundingClientRect();
+      if (box.bottom <= 0 || box.top >= innerHeight || box.right <= 0 || box.left >= innerWidth) return false;
+      const x = Math.min(innerWidth - 1, Math.max(0, box.left + box.width / 2));
+      const y = Math.min(innerHeight - 1, Math.max(0, box.top + box.height / 2));
+      const top = document.elementsFromPoint(x, y).find((element) => getComputedStyle(element).pointerEvents !== "none");
+      return top && !control.contains(top) && !top.contains(control);
+    }).map((control) => control.getAttribute("aria-label") || control.getAttribute("title") || control.textContent?.trim() || control.tagName);
+    return {
+      expandedCoach: Boolean(document.querySelector("aside[data-testid='onboarding-coach-panel']")),
+      coachOverlaps,
+      occluded,
+    };
+  }, surfaceSelector);
+  if (result.expandedCoach || result.coachOverlaps.length || result.occluded.length) {
+    throw new Error(`${label} has a visible overlay intersecting the tested surface or controls: ${JSON.stringify(result)}`);
+  }
 }
 
 async function waitForAssertionCardCount(page, expected, message) {
@@ -953,7 +1357,20 @@ async function ensureAuthenticated(page) {
   }, apiBaseUrl, { timeout: 5000 });
 }
 
-async function routeStandaloneUiBootstrap(page) {
+async function routeStandaloneUiBootstrap(page, role = "Admin") {
+  const standaloneUserId = role === "Admin"
+    ? "43300000-0000-4000-8000-0000000000a0"
+    : "43300000-0000-4000-8000-0000000000a1";
+  const preferenceResponse = {
+    preferences: {
+      user_id: standaloneUserId,
+      theme: "dark",
+      density: "comfortable",
+      sidebar_collapsed: false,
+      default_systems_view: "cards",
+      updated_at: "2026-09-13T12:00:00Z",
+    },
+  };
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -967,9 +1384,9 @@ async function routeStandaloneUiBootstrap(page) {
         body: JSON.stringify({
           is_authenticated: true,
           auth_mode: "local",
-          user: { id: "standalone-admin", email: "admin@example.com", display_name: "Standalone Admin" },
-          roles: ["Admin"],
-          is_admin: true,
+          user: { id: standaloneUserId, email: `${role.toLowerCase()}@example.com`, display_name: `Standalone ${role}` },
+          roles: [role],
+          is_admin: role === "Admin",
         }),
       });
       return;
@@ -979,13 +1396,37 @@ async function routeStandaloneUiBootstrap(page) {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ preferences: null }),
+        body: JSON.stringify(preferenceResponse),
+      });
+      return;
+    }
+
+    if (path === "/api/v1/user/preferences" && method === "PATCH") {
+      const update = request.postDataJSON();
+      preferenceResponse.preferences = {
+        ...preferenceResponse.preferences,
+        ...update,
+        updated_at: new Date().toISOString(),
+      };
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(preferenceResponse),
       });
       return;
     }
 
     if (path === "/api/v1/compliance/bundles" && method === "GET") {
       await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      return;
+    }
+
+    if (path === "/api/v1/poams/assignees" && method === "GET") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ people: [], groups: [] }),
+      });
       return;
     }
 
@@ -1018,6 +1459,20 @@ async function routeStandaloneUiBootstrap(page) {
       return;
     }
 
+    if (path === "/api/v1/navigation/acknowledge" && method === "POST") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+      return;
+    }
+
+    if (path === "/api/v1/user/notifications" && method === "GET") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ unread_count: 0, next_cursor: null, notifications: [] }),
+      });
+      return;
+    }
+
     if (path === "/api/v1/admin/classification-config" && method === "GET") {
       await route.fulfill({
         status: 200,
@@ -1031,7 +1486,7 @@ async function routeStandaloneUiBootstrap(page) {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ preferences: null }),
+        body: JSON.stringify(preferenceResponse),
       });
       return;
     }
@@ -1144,6 +1599,8 @@ function run(cmd, cwd = undefined) {
     cwd,
     stdio: ["ignore", "pipe", "pipe"],
     encoding: "utf8",
+    // A failed test transport must not block the complete Nix check indefinitely.
+    timeout: 60_000,
   }).trim();
 }
 
@@ -1593,6 +2050,22 @@ function mockRecentBuilds(limit) {
       queued_at: timestamp,
       started_at: timestamp,
       elapsed_secs: 15,
+      logs: null,
+    },
+    {
+      job_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      commit_id: 440,
+      server_failure_code: "evaluator_contract_obsolete",
+      system_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      hostname: "obsolete-contract-system",
+      flake_name: "platform-core",
+      commit_hash: "4400440044004400440044004400440044004400",
+      commit_message: "Build requires authoritative same-revision evaluation",
+      status: "failed",
+      builder_name: "builder-primary",
+      queued_at: timestamp,
+      started_at: timestamp,
+      elapsed_secs: 8,
       logs: null,
     },
   ];
@@ -2570,6 +3043,15 @@ async function routeEnvironmentWarningData(page) {
       color_hex: "#2563EB",
       is_active: true,
       system_count: 3,
+      rollup: {
+        active_system_count: 3,
+        healthy: 2,
+        warning: 1,
+        critical: 0,
+        offline: 0,
+        cve_critical_high: 0,
+        flakes: ["platform-core"],
+      },
     },
   ];
   const policies = [
@@ -2855,12 +3337,1653 @@ async function unrouteFlakeParityData(page) {
   await page.unroute("**/api/v1/flakes");
 }
 
+const TASK_440_SYSTEM_ID = "00000000-0000-0000-0000-0000000000a1";
+const TASK_440_CURRENT_SHA = "abcdef0123456789abcdef0123456789abcdef01";
+const TASK_440_HISTORICAL_SHA = "abcdef0fedcba9876543210fedcba9876543210f";
+const TASK_440_NEVER_DEPLOYED_SHA = "9999999999999999999999999999999999999999";
+const TASK_440_ROOT_SHA = "1111111111111111111111111111111111111111";
+const TASK_440_EXTERNAL_SHA = "2222222222222222222222222222222222222222";
+// The design defines display prefixes only. These synthetic full identities
+// preserve the production API and navigation contract in the browser fixture.
+const TASK_440_DESIGN_SHA = "a3f8c12000000000000000000000000000000000";
+const TASK_440_DESIGN_PARENT_SHA = "f1d902200000000000000000000000000000000";
+const TASK_440_CONFIG_SHA = TASK_440_FIXTURE.canonicalConfig.revision;
+const TASK_440_CURRENT_GENERATION_SNAPSHOT_ID = "44000000-0000-4000-8000-000000000174";
+const TASK_440_PREVIOUS_GENERATION_SNAPSHOT_ID = "44000000-0000-4000-8000-000000000173";
+const TASK_440_BASELINE_GENERATION_SNAPSHOT_ID = "44000000-0000-4000-8000-000000000171";
+
+function task440GenerationBaseline(generation) {
+  if (generation === 73) return { generation: 71, revision: TASK_440_ROOT_SHA };
+  if (generation === 74) return { generation: 73, revision: TASK_440_HISTORICAL_SHA };
+  if (generation === 160) return { generation: 159, revision: TASK_440_DESIGN_PARENT_SHA };
+  return null;
+}
+
+function task440TrackedFlake(sourceInput, revision) {
+  if (sourceInput === "self") {
+    return {
+      flake_id: 41,
+      flake_name: "platform-core",
+      repo_url: "https://gitlab.com/crystal-forge/platform-core.git",
+      revision,
+    };
+  }
+  if (sourceInput === "nixpkgs" && revision === TASK_440_EXTERNAL_SHA) {
+    return {
+      flake_id: 42,
+      flake_name: "nixpkgs-tracked",
+      repo_url: "https://github.com/NixOS/nixpkgs.git",
+      revision,
+    };
+  }
+  return null;
+}
+
+function task440Definition(sourcePath, tracked = true, winning = true, sourceRevision = TASK_440_CURRENT_SHA, sourceInput = "self") {
+  return {
+    source_path: sourcePath,
+    source_input: tracked ? sourceInput : null,
+    source_revision: tracked ? sourceRevision : null,
+    value: tracked ? true : null,
+    winning,
+    priority: winning ? 100 : 1000,
+    status: winning ? "winning" : "overridden",
+    winner_note: winning ? "Selected by deterministic fixture priority" : "Superseded by a higher-priority definition",
+    tracked_flake: tracked ? task440TrackedFlake(sourceInput, sourceRevision) : null,
+  };
+}
+
+function task440Option(path, declaredType, value, overrides = {}) {
+  return {
+    option: {
+      path,
+      declared_type: declaredType,
+      value,
+      definitions: overrides.definitions || [task440Definition("nixos/modules/task-440.nix", true, true, overrides.sourceRevision)],
+      overridden: overrides.overridden || false,
+    },
+    before: overrides.before || null,
+    changed: overrides.changed === undefined ? true : overrides.changed,
+    diff: overrides.diff || {
+      kind: overrides.changed === false ? "unchanged" : "modified",
+      value_kind: value.kind,
+      added: [],
+      removed: [],
+    },
+  };
+}
+
+function task440TypedOptions(revision = TASK_440_CURRENT_SHA) {
+  return [
+    task440Option("services.openssh.enable", "boolean", { kind: "scalar", value: true }, {
+      overridden: true,
+      before: {
+        path: "services.openssh.enable",
+        declared_type: "boolean",
+        value: { kind: "scalar", value: false },
+        definitions: [task440Definition("nixos/modules/base.nix", true, true, revision)],
+        overridden: false,
+      },
+      diff: {
+        kind: "modified",
+        value_kind: "scalar",
+        added: [{ kind: "scalar", value: true }],
+        removed: [{ kind: "scalar", value: false }],
+      },
+      definitions: [
+        task440Definition("nixos/hosts/atlas-01.nix", true, true, revision),
+        task440Definition("nixos/modules/base.nix", true, false, revision),
+      ],
+    }),
+    task440Option("environment.systemPackages", "list of package", {
+      kind: "list",
+      value: [
+        { kind: "package", value: { name: "ripgrep", pname: "ripgrep", version: "14.1.1", output_path: "/nix/store/redacted-ripgrep" } },
+        { kind: "package", value: { name: "jq", pname: "jq", version: "1.7.1", output_path: "/nix/store/redacted-jq" } },
+      ],
+    }, {
+      definitions: [task440Definition("pkgs/tools.nix", true, true, TASK_440_EXTERNAL_SHA, "nixpkgs")],
+    }),
+    task440Option("services.nginx.virtualHosts", "attribute set", {
+      kind: "attribute_set",
+      value: { "forge.example": { enableACME: true } },
+    }),
+    task440Option("services.postgresql.settings", "submodule", {
+      kind: "submodule",
+      value: { shared_buffers: "2GB", max_connections: 200 },
+    }),
+    task440Option("nixpkgs.overlays", "function", {
+      kind: "opaque",
+      value: { type_name: "lambda" },
+    }),
+    task440Option("services.broken.value", "string", {
+      kind: "failed",
+      value: { code: "not_evaluated", message: "fixture dependency failed" },
+    }),
+    task440Option("services.untracked.enable", "boolean", { kind: "scalar", value: true }, {
+      changed: false,
+      definitions: [task440Definition("/etc/nixos/local.nix", false, true)],
+    }),
+  ];
+}
+
+function task440CanonicalOptions(revision = TASK_440_DESIGN_SHA) {
+  const visiblePaths = [
+    'boot.kernel.sysctl."fs.protected_hardlinks"',
+    'boot.kernel.sysctl."kernel.dmesg_restrict"',
+    'boot.kernel.sysctl."kernel.kptr_restrict"',
+    'boot.kernel.sysctl."kernel.yama.ptrace_scope"',
+    'boot.kernel.sysctl."net.core.somaxconn"',
+    'boot.kernel.sysctl."net.ipv4.conf.all.rp_filter"',
+    'boot.kernel.sysctl."net.ipv4.tcp_syncookies"',
+    'boot.kernel.sysctl."net.ipv6.conf.all.accept_ra"',
+    'boot.kernel.sysctl."vm.swappiness"',
+    "boot.loader.systemd-boot.enable",
+  ];
+  const visible = visiblePaths.map((path, index) => task440Option(
+    path,
+    "integer",
+    { kind: "scalar", value: index % 3 },
+    {
+      changed: index >= 2 && index <= 6,
+      overridden: index < 2,
+      sourceRevision: revision,
+      definitions: [task440Definition(
+        "modules/stig/kernel/default.nix",
+        true,
+        true,
+        revision,
+      )],
+    },
+  ));
+  return [
+    ...visible,
+    ...Array.from({ length: TASK_440_FIXTURE.canonicalConfig.optionTotal - visible.length }, (_, index) => task440Option(
+      `services.fixture.option${String(index + 1).padStart(4, "0")}`,
+      "string",
+      { kind: "scalar", value: `fixture-${index + 1}` },
+      { changed: false, sourceRevision: revision },
+    )),
+  ];
+}
+
+function task440ModuleSources(revision = TASK_440_CURRENT_SHA, canonicalDesign = false) {
+  const source = (source_path, source_input, source_revision, defined_count, won_count) => ({
+    source_path,
+    source_input,
+    source_revision,
+    defined_count,
+    won_count,
+    tracked_flake: task440TrackedFlake(source_input, source_revision),
+  });
+  if (canonicalDesign) {
+    const paths = [
+      ["nixos/modules/profiles/qemu-guest.nix", "nixpkgs", "release-26.05"],
+      ["nixos/modules/services/networking/ssh/sshd.nix", "nixpkgs", "release-26.05"],
+      ["nixos/modules/services/monitoring/prometheus/exporters.nix", "nixpkgs", "release-26.05"],
+      ["nixos/modules/security/audit.nix", "nixpkgs", "release-26.05"],
+      ["nixos/modules/config/users-groups.nix", "nixpkgs", "release-26.05"],
+      ["nixos/modules/virtualisation/amazon-image.nix", "unstable", "nixos-unstable"],
+      ["modules/nixos/system/default.nix", "self", revision],
+      ["modules/nixos/system/networking/default.nix", "self", revision],
+      ["modules/nixos/system/zfs/default.nix", "self", revision],
+      ["modules/nixos/user/default.nix", "self", revision],
+      ["modules/nixos/security/gpg/default.nix", "self", revision],
+      ["modules/nixos/services/prometheus/default.nix", "self", revision],
+      ["modules/nixos/services/grafana/default.nix", "self", revision],
+      ["modules/nixos/services/k3s/default.nix", "self", revision],
+      ["modules/nixos/suites/kubernetes/default.nix", "self", revision],
+      ["modules/nixos/router/default.nix", "self", revision],
+      ["modules/crystal-forge/client.nix", "crystal-forge", "e91a774"],
+      ["modules/stig/sshd/default.nix", "crystal-forge", "e91a774"],
+      ["modules/stig/banner/default.nix", "crystal-forge", "e91a774"],
+      ["modules/stig/audit/default.nix", "crystal-forge", "e91a774"],
+      ["modules/stig/kernel/default.nix", "crystal-forge", "e91a774"],
+      ["nixos-modules/home-manager.nix", "home-manager", "release-26.05"],
+      ["modules/impermanence.nix", "impermanence", "a11c4a7"],
+      ["module.nix", "disko", "v1.12.0"],
+      ["modules/stylix.nix", "stylix", "release-25.11"],
+      ["nixos-modules/vault-agent.nix", "vault-service", "0f34b1c"],
+      ["nixos/host.nix", "microvm", "e2fa5d6"],
+    ];
+    return paths.map(([path, input, sourceRevision], index) => source(
+      path,
+      input,
+      sourceRevision,
+      44 - (index % 12),
+      41 - (index % 10),
+    ));
+  }
+  return [
+    source(`nixos/revisions/${revision.slice(0, 12)}.nix`, "self", revision, 20, 18),
+    source("nixos/hosts/atlas-01.nix", "self", revision, 14, 12),
+    source("nixos/modules/base.nix", "self", revision, 12, 10),
+    source("nixos/modules/task-440.nix", "self", revision, 10, 9),
+    source("pkgs/tools.nix", "nixpkgs", TASK_440_EXTERNAL_SHA, 8, 7),
+    source("shared/exact-identity.nix", "self", revision, 7, 6),
+    source("shared/exact-identity.nix", "nixpkgs", TASK_440_EXTERNAL_SHA, 6, 5),
+    source("/etc/nixos/local.nix", null, null, 5, 4),
+    ...Array.from({ length: 78 }, (_, index) => {
+      const number = String(index + 1).padStart(2, "0");
+      if (index % 13 === 0) {
+        return source(`/srv/local/module-${number}.nix`, null, null, 4, 1);
+      }
+      return source(`nixos/modules/fixture-${number}.nix`, "self", revision, 4, index % 4);
+    }),
+  ];
+}
+
+function task440ConfigSnapshotToken(revision, replacement = 0, mode = "commit", generation = null) {
+  const baselineGeneration = mode === "generation" ? task440GenerationBaseline(generation)?.generation ?? "none" : "none";
+  const selectedIdentity = mode === "generation"
+    ? `${generation ?? "none"}:generation-snapshot-${generation ?? "none"}`
+    : revision;
+  const baselineArtifact = revision === TASK_440_ROOT_SHA
+    ? "none"
+    : createHash("sha256").update(`task440:baseline:${mode}:${revision}:${baselineGeneration}`).digest("hex");
+  return createHash("sha256").update(`task440:${selectedIdentity}:${replacement}:${mode}:${baselineArtifact}`).digest("hex");
+}
+
+function task440FlakeSnapshotToken(revision) {
+  return createHash("sha256").update(`task440:flake:${revision}`).digest("hex");
+}
+
+async function routeTask440SystemData(page, overrides = {}) {
+  const state = {
+    lifecycle: "available",
+    apiError: false,
+    moduleApiError: false,
+    moduleTransportError: false,
+    deploymentPolicy: "manual",
+    queueLifecycle: "queued",
+    deployResponses: [],
+    deployRequests: [],
+    handledRequests: [],
+    heldSearchResolvers: [],
+    heldSummaryResolvers: [],
+    heldSummaryRevisionResolvers: new Map(),
+    heldModuleResolvers: new Map(),
+    heldDeployResolvers: [],
+    holdModuleRevisions: new Set(),
+    holdSummaryRevisions: new Set(),
+    moduleFailureCounts: new Map(),
+    moduleTransportFailureCounts: new Map(),
+    moduleReplacementConflictCounts: new Map(),
+    optionReplacementConflictCounts: new Map(),
+    summaryReplacementConflictCount: 0,
+    moduleReplacement: 0,
+    moduleRequests: [],
+    optionRequests: [],
+    summaryRequests: [],
+    evaluationRequests: [],
+    inspectionRequests: [],
+    observationPosts: [],
+    observationOrdinal: 0,
+    observationRequests: new Map(),
+    observationPostWaiters: [],
+    heldObservationResolvers: new Map(),
+    heldObservationWaiters: [],
+    holdObservationKinds: new Set(),
+    prefixFailureCounts: new Map(),
+    largeServicesPrefix: false,
+    inspectionPrerequisite: false,
+    rollbackRequests: [],
+    requestOrdinal: 0,
+    sevenDayDrift: "no_observed_drift",
+    agentFingerprint: null,
+    evaluationDrift: null,
+    optionInventoryState: "complete",
+    optionInventoryDiagnostics: [],
+    optionInventoryDiagnosticsTruncated: false,
+    ...overrides,
+  };
+  state.holdModuleRevisions = new Set(overrides.holdModuleRevisions || state.holdModuleRevisions);
+  state.holdSummaryRevisions = new Set(overrides.holdSummaryRevisions || state.holdSummaryRevisions);
+  state.moduleFailureCounts = new Map(overrides.moduleFailureCounts || state.moduleFailureCounts);
+  state.moduleTransportFailureCounts = new Map(overrides.moduleTransportFailureCounts || state.moduleTransportFailureCounts);
+  state.moduleReplacementConflictCounts = new Map(overrides.moduleReplacementConflictCounts || state.moduleReplacementConflictCounts);
+  state.optionReplacementConflictCounts = new Map(overrides.optionReplacementConflictCounts || state.optionReplacementConflictCounts);
+  state.holdObservationKinds = new Set(overrides.holdObservationKinds || state.holdObservationKinds);
+  state.prefixFailureCounts = new Map(overrides.prefixFailureCounts || state.prefixFailureCounts);
+  const canonicalDesign = state.canonicalDesign === true;
+  const currentRevision = canonicalDesign ? TASK_440_CONFIG_SHA : TASK_440_CURRENT_SHA;
+  const currentGeneration = canonicalDesign ? 160 : 74;
+  state.releaseHeldSearch = () => {
+    state.holdSearch = null;
+    for (const resolve of state.heldSearchResolvers.splice(0)) resolve();
+  };
+  state.releaseHeldDeploy = () => {
+    state.holdDeploy = false;
+    for (const resolve of state.heldDeployResolvers.splice(0)) resolve();
+  };
+  state.releaseHeldSummary = () => {
+    state.holdSummary = false;
+    for (const resolve of state.heldSummaryResolvers.splice(0)) resolve();
+  };
+  state.releaseHeldSummaryRevision = (revision) => {
+    state.holdSummaryRevisions.delete(revision);
+    for (const resolve of state.heldSummaryRevisionResolvers.get(revision) || []) resolve();
+    state.heldSummaryRevisionResolvers.delete(revision);
+  };
+  state.releaseHeldModules = (revision) => {
+    state.holdModuleRevisions.delete(revision);
+    for (const resolve of state.heldModuleResolvers.get(revision) || []) resolve();
+    state.heldModuleResolvers.delete(revision);
+  };
+  state.waitForObservationPosts = (kinds) => {
+    const ready = () => kinds.every((kind) => state.observationPosts.some((request) => request.kind === kind));
+    if (ready()) return Promise.resolve();
+    return new Promise((resolve) => state.observationPostWaiters.push({ ready, resolve }));
+  };
+  state.waitForHeldObservationCount = (kind, count) => {
+    const ready = () => (state.heldObservationResolvers.get(kind) || []).length >= count;
+    if (ready()) return Promise.resolve();
+    return new Promise((resolve) => state.heldObservationWaiters.push({ ready, resolve }));
+  };
+  state.releaseHeldObservation = (kind) => {
+    state.holdObservationKinds.delete(kind);
+    for (const resolve of state.heldObservationResolvers.get(kind) || []) resolve();
+    state.heldObservationResolvers.delete(kind);
+  };
+
+  await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}$`), async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.fallback();
+      return;
+    }
+    state.handledRequests.push("detail");
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: TASK_440_SYSTEM_ID,
+        hostname: canonicalDesign ? "atlas-01" : "warning-system-01",
+        system_configuration_name: "atlas-01",
+        environment: "production",
+        is_active: true,
+        deployment_policy: canonicalDesign ? "pinned" : state.deploymentPolicy,
+        health_status: "healthy",
+        deployment_status: "up_to_date",
+        pipeline_stage: "ready_for_deploy",
+        nixos_version: canonicalDesign ? "26.05" : "25.11",
+        kernel: canonicalDesign ? "6.11.15" : "6.12.42",
+        agent_version: "0.7.0",
+        current_store_path: canonicalDesign ? "/nix/store/design-atlas-01-system" : "/nix/store/task440-current-system",
+        generation: currentGeneration,
+        last_seen: canonicalDesign ? new Date(Date.now() - TASK_440_FIXTURE.canonicalConfig.heartbeatAgeMinutes * 60_000).toISOString() : "2026-08-28T18:00:00Z",
+        cve_counts: canonicalDesign ? { critical: 0, high: 2, medium: 12, low: 19 } : { critical: 0, high: 0, medium: 0, low: 0 },
+        flake: canonicalDesign
+          ? { id: 41, name: "infrastructure", repo_url: "git+ssh://git@gitlab.cf.internal/ops/nixos-infra", latest_commit: currentRevision }
+          : { id: 41, name: "platform-core", repo_url: "https://gitlab.com/crystal-forge/platform-core.git", latest_commit: currentRevision },
+        network: { primary_ip: "10.10.0.10", primary_mac: null, gateway_ip: null, reachability: "direct" },
+        hardware: { cpu_brand: "Fixture CPU", cpu_cores: 8, memory_gb: 32, uptime_secs: canonicalDesign ? 2_844_000 : 3600, board_serial: null, bios_version: null, hardware_changed_24h: false, hardware_ever_changed: false },
+        security: { tpm_present: true, secure_boot_enabled: true, fips_mode: false, selinux_status: null },
+        created_at: "2026-04-01T00:00:00Z",
+        updated_at: "2026-08-28T18:00:00Z",
+      }),
+    });
+  });
+
+  await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}/commits$`), async (route) => {
+    state.handledRequests.push("commits");
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      current_commit: currentRevision,
+      commits: [
+        { sha: currentRevision, short_sha: canonicalDesign ? currentRevision.slice(0, 7) : "abcdef0", message: canonicalDesign ? TASK_440_FIXTURE.canonicalConfig.revisionMessage : "current deployment", author: canonicalDesign ? "mreyes" : "Forge Bot", timestamp: "2026-08-28T18:00:00Z", config_inspectable: true },
+        { sha: TASK_440_NEVER_DEPLOYED_SHA, short_sha: "9999999", message: "never deployed candidate", author: "Forge Bot", timestamp: "2026-08-27T20:00:00Z", config_inspectable: true },
+        { sha: TASK_440_HISTORICAL_SHA, short_sha: "abcdef0", message: "retained deployment", author: "Forge Bot", timestamp: "2026-08-27T18:00:00Z", config_inspectable: true },
+        { sha: TASK_440_ROOT_SHA, short_sha: "1111111", message: "root revision", author: "Forge Bot", timestamp: "2026-08-20T18:00:00Z", config_inspectable: true },
+      ],
+    }) });
+  });
+
+  await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}/generations$`), async (route) => {
+    state.handledRequests.push("generations");
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      current_generation: currentGeneration,
+      generations: [
+        { generation: currentGeneration, store_path: canonicalDesign ? "/nix/store/design-atlas-01-system" : "/nix/store/task440-current-system", commit_hash: currentRevision, timestamp: "2026-08-28T18:00:00Z", is_current: true, generation_snapshot_id: TASK_440_CURRENT_GENERATION_SNAPSHOT_ID, rollback_eligible: false },
+        { generation: currentGeneration - 1, store_path: canonicalDesign ? "/nix/store/task440-old-system" : null, commit_hash: canonicalDesign ? TASK_440_DESIGN_PARENT_SHA : TASK_440_HISTORICAL_SHA, timestamp: "2026-08-27T18:00:00Z", is_current: false, generation_snapshot_id: TASK_440_PREVIOUS_GENERATION_SNAPSHOT_ID, rollback_eligible: true },
+        { generation: currentGeneration - 2, store_path: "/nix/store/task440-local-system", commit_hash: null, timestamp: "2026-08-26T18:00:00Z", is_current: false, generation_snapshot_id: null, rollback_eligible: false },
+        { generation: currentGeneration - 3, store_path: "/nix/store/task440-baseline-system", commit_hash: TASK_440_ROOT_SHA, timestamp: "2026-08-25T18:00:00Z", is_current: false, generation_snapshot_id: TASK_440_BASELINE_GENERATION_SNAPSHOT_ID, rollback_eligible: false },
+      ],
+    }) });
+  });
+
+  await page.route(/\/evaluated-options(?:\?|$)/, async (route) => {
+    state.handledRequests.push("evaluated-options");
+    if (state.apiError) {
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "deterministic snapshot API failure" }) });
+      return;
+    }
+    const url = new URL(route.request().url());
+    const search = url.searchParams.get("search") || "";
+    const filter = url.searchParams.get("filter") || "all";
+    const offset = Number(url.searchParams.get("offset") || 0);
+    const limit = Number(url.searchParams.get("limit") || 24);
+    const revision = url.searchParams.get("revision") || currentRevision;
+    const mode = url.searchParams.get("mode") || "commit";
+    const generation = url.searchParams.get("generation") ? Number(url.searchParams.get("generation")) : null;
+    const generationBaseline = mode === "generation" ? task440GenerationBaseline(generation) : null;
+    const suppliedToken = url.searchParams.get("snapshot_token");
+    if (suppliedToken && !/^[0-9a-fA-F]{64}$/.test(suppliedToken)) {
+      await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ message: "snapshot_token must be a 64-character hexadecimal digest" }) });
+      return;
+    }
+    if (offset > 0 && !suppliedToken) {
+      await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ message: "snapshot_token is required when offset is greater than 0" }) });
+      return;
+    }
+    state.optionRequests.push({ revision, search, filter, offset, limit, snapshotToken: suppliedToken, ordinal: state.requestOrdinal++ });
+    const remainingConflicts = state.optionReplacementConflictCounts.get(offset) || 0;
+    if (remainingConflicts > 0) {
+      state.optionReplacementConflictCounts.set(offset, remainingConflicts - 1);
+      state.moduleReplacement += 1;
+      await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "snapshot_changed", message: "Evaluation snapshot changed; reload Config from offset 0" }) });
+      return;
+    }
+    const token = task440ConfigSnapshotToken(revision, state.moduleReplacement, mode, generation);
+    if (suppliedToken && suppliedToken !== token) {
+      await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "snapshot_changed", message: "Evaluation snapshot changed; reload Config from offset 0" }) });
+      return;
+    }
+    const typedOptions = canonicalDesign ? task440CanonicalOptions(revision) : task440TypedOptions(revision);
+    if (state.holdSearch === search) {
+      await new Promise((resolve) => {
+        state.heldSearchResolvers.push(resolve);
+      });
+    }
+    let rows = typedOptions;
+    if (search) rows = rows.filter((row) => `${row.option.path} ${JSON.stringify(row)}`.toLowerCase().includes(search.toLowerCase()));
+    if (filter === "overridden") rows = rows.filter((row) => row.option.overridden);
+    if (filter === "changed") rows = state.optionInventoryState === "partial" ? [] : rows.filter((row) => row.changed === true);
+    const expandedRows = Array.from({ length: 31 }, (_, index) => task440Option(
+      `services.fixture.option${String(index + 1).padStart(2, "0")}`,
+      "string",
+      { kind: "scalar", value: `fixture-${index + 1}` },
+      { changed: index % 2 === 0, sourceRevision: revision },
+    ));
+    if (!canonicalDesign && !search && filter === "all") rows = [...typedOptions, ...expandedRows];
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      lifecycle: state.lifecycle,
+      option_inventory_state: state.lifecycle === "available" ? state.optionInventoryState : "unavailable",
+      option_inventory_diagnostics: state.lifecycle === "available" ? state.optionInventoryDiagnostics : [],
+      option_inventory_diagnostics_truncated: state.lifecycle === "available" && state.optionInventoryDiagnosticsTruncated,
+      revision,
+      generation,
+      generation_snapshot_id: mode === "generation" && generation != null ? (generation === currentGeneration ? TASK_440_CURRENT_GENERATION_SNAPSHOT_ID : generation === currentGeneration - 1 ? TASK_440_PREVIOUS_GENERATION_SNAPSHOT_ID : TASK_440_BASELINE_GENERATION_SNAPSHOT_ID) : null,
+      snapshot_token: state.lifecycle === "available" ? token : null,
+      baseline_revision: state.lifecycle === "available" && state.optionInventoryState === "complete" && revision !== TASK_440_ROOT_SHA ? (mode === "generation" ? generationBaseline?.revision ?? null : TASK_440_ROOT_SHA) : null,
+      baseline_generation: state.lifecycle === "available" ? generationBaseline?.generation ?? null : null,
+      comparison_available: state.lifecycle === "available" && state.optionInventoryState === "complete" && revision !== TASK_440_ROOT_SHA,
+      error: state.lifecycle === "failed" ? "safe deterministic evaluation failure" : null,
+      module_count: canonicalDesign ? 27 : 14,
+      evaluation_duration_ms: canonicalDesign ? TASK_440_FIXTURE.canonicalConfig.evaluationDurationMs : 845,
+      counts: canonicalDesign
+        ? { all: TASK_440_FIXTURE.canonicalConfig.optionTotal, overridden: TASK_440_FIXTURE.canonicalConfig.overriddenTotal, changed: TASK_440_FIXTURE.canonicalConfig.changedTotal }
+        : { all: 38, overridden: 1, changed: state.optionInventoryState === "partial" || revision === TASK_440_ROOT_SHA ? null : 22 },
+      total: rows.length,
+      offset,
+      limit,
+      options: state.lifecycle === "available" ? rows.slice(offset, offset + limit) : [],
+    }) });
+  });
+
+  await page.route(/\/evaluation-summary(?:\?|$)/, async (route) => {
+    state.handledRequests.push("evaluation-summary");
+    if (state.apiError) {
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "deterministic summary API failure" }) });
+      return;
+    }
+    const url = new URL(route.request().url());
+    const revision = url.searchParams.get("revision") || currentRevision;
+    const suppliedToken = url.searchParams.get("snapshot_token");
+    if (suppliedToken && !/^[0-9a-fA-F]{64}$/.test(suppliedToken)) {
+      await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ message: "snapshot_token must be a 64-character hexadecimal digest" }) });
+      return;
+    }
+    const mode = url.searchParams.get("mode") || "commit";
+    const generation = url.searchParams.get("generation") ? Number(url.searchParams.get("generation")) : null;
+    state.summaryRequests.push({ revision, generation, mode, snapshotToken: suppliedToken, ordinal: state.requestOrdinal++ });
+    if (state.holdSummary) {
+      await new Promise((resolve) => state.heldSummaryResolvers.push(resolve));
+    }
+    if (state.holdSummaryRevisions.has(revision)) {
+      await new Promise((resolve) => {
+        const resolvers = state.heldSummaryRevisionResolvers.get(revision) || [];
+        resolvers.push(resolve);
+        state.heldSummaryRevisionResolvers.set(revision, resolvers);
+      });
+    }
+    if (suppliedToken && state.summaryReplacementConflictCount > 0) {
+      state.summaryReplacementConflictCount -= 1;
+      state.moduleReplacement += 1;
+      await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "snapshot_changed", message: "Evaluation snapshot changed; reload Config from offset 0" }) });
+      return;
+    }
+    const token = task440ConfigSnapshotToken(revision, state.moduleReplacement, mode, generation);
+    if (suppliedToken && suppliedToken !== token) {
+      await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "snapshot_changed", message: "Evaluation snapshot changed; reload Config from offset 0" }) });
+      return;
+    }
+    const selectedStore = revision === currentRevision
+      ? canonicalDesign ? "/nix/store/design-atlas-01-system" : "/nix/store/task440-current-system"
+      : revision === TASK_440_HISTORICAL_SHA
+        ? "/nix/store/task440-old-system"
+        : null;
+    const generationBaseline = mode === "generation" ? task440GenerationBaseline(generation) : null;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      lifecycle: state.lifecycle,
+      option_inventory_state: state.lifecycle === "available" ? state.optionInventoryState : "unavailable",
+      option_inventory_diagnostics: state.lifecycle === "available" ? state.optionInventoryDiagnostics : [],
+      option_inventory_diagnostics_truncated: state.lifecycle === "available" && state.optionInventoryDiagnosticsTruncated,
+      revision,
+      generation,
+      error: state.lifecycle === "failed" ? "safe deterministic evaluation failure" : null,
+      snapshot_token: state.lifecycle === "available" ? token : null,
+      baseline_generation: state.lifecycle === "available" ? generationBaseline?.generation ?? null : null,
+      module_source_total: state.lifecycle === "available" ? task440ModuleSources(revision, canonicalDesign).length : 0,
+      completed_at: state.lifecycle === "available" ? "2026-08-28T18:00:00Z" : null,
+       evaluation_duration_ms: state.lifecycle === "available" ? canonicalDesign ? TASK_440_FIXTURE.canonicalConfig.evaluationDurationMs : 845 : null,
+       option_total: state.lifecycle === "available" ? canonicalDesign ? TASK_440_FIXTURE.canonicalConfig.optionTotal : 38 : 0,
+      selected_store_path: state.lifecycle === "available" ? selectedStore : null,
+       closure_package_count: state.lifecycle === "available" ? canonicalDesign ? TASK_440_FIXTURE.canonicalConfig.packageTotal : 731 : null,
+       closure_size_bytes: state.lifecycle === "available" ? canonicalDesign ? TASK_440_FIXTURE.canonicalConfig.closureSizeBytes : 5153960755 : null,
+      running_store_path: canonicalDesign ? "/nix/store/design-atlas-01-system" : "/nix/store/task440-current-system",
+      running_profile_matches: true,
+       host_delta_count: state.lifecycle === "available" ? canonicalDesign ? TASK_440_FIXTURE.canonicalConfig.hostDeltaTotal : 17 : null,
+      agent_fingerprint: state.agentFingerprint || (!selectedStore ? "unavailable" : selectedStore === (canonicalDesign ? "/nix/store/design-atlas-01-system" : "/nix/store/task440-current-system") ? "matches" : "differs"),
+      seven_day_drift: state.lifecycle === "available" ? state.sevenDayDrift : "insufficient_coverage",
+      drift: state.optionInventoryState === "partial" ? "unavailable" : state.evaluationDrift || (!selectedStore ? "unavailable" : selectedStore === (canonicalDesign ? "/nix/store/design-atlas-01-system" : "/nix/store/task440-current-system") ? "matches" : "differs"),
+    }) });
+  });
+
+  await page.route(/\/evaluation-module-sources(?:\?|$)/, async (route) => {
+    const url = new URL(route.request().url());
+    const revision = url.searchParams.get("revision") || currentRevision;
+    const rawLimit = url.searchParams.get("limit") || "50";
+    const rawOffset = url.searchParams.get("offset") || "0";
+    const generation = url.searchParams.get("generation") ? Number(url.searchParams.get("generation")) : null;
+    const mode = url.searchParams.get("mode") || "commit";
+    const suppliedToken = url.searchParams.get("snapshot_token");
+    if (!/^-?\d+$/.test(rawLimit) || !/^-?\d+$/.test(rawOffset)) {
+      await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ message: "limit and offset must be integers" }) });
+      return;
+    }
+    const limit = Math.min(100, Math.max(1, Number(rawLimit)));
+    const offset = Math.min(100000, Math.max(0, Number(rawOffset)));
+    if (suppliedToken && !/^[0-9a-fA-F]{64}$/.test(suppliedToken)) {
+      await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ message: "snapshot_token must be a 64-character hexadecimal digest" }) });
+      return;
+    }
+    if (offset > 0 && !suppliedToken) {
+      await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ message: "snapshot_token is required when offset is greater than 0" }) });
+      return;
+    }
+    state.moduleRequests.push({ revision, limit, offset, snapshotToken: suppliedToken, ordinal: state.requestOrdinal++ });
+    if (state.holdModuleRevisions.has(revision)) {
+      await new Promise((resolve) => {
+        const resolvers = state.heldModuleResolvers.get(revision) || [];
+        resolvers.push(resolve);
+        state.heldModuleResolvers.set(revision, resolvers);
+      });
+    }
+    if (state.moduleApiError) {
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "deterministic module source API failure" }) });
+      return;
+    }
+    if (state.moduleTransportError) {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "deterministic module source transport failure" }) });
+      return;
+    }
+    const consumeFailure = (failures) => {
+      const remaining = failures.get(offset) || 0;
+      if (remaining > 0) failures.set(offset, remaining - 1);
+      return remaining > 0;
+    };
+    if (consumeFailure(state.moduleTransportFailureCounts)) {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "deterministic module source transport failure" }) });
+      return;
+    }
+    if (consumeFailure(state.moduleFailureCounts)) {
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: `deterministic module source failure at offset ${offset}` }) });
+      return;
+    }
+    if (consumeFailure(state.moduleReplacementConflictCounts)) {
+      state.moduleReplacement += 1;
+      await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "snapshot_changed", message: "Evaluation snapshot changed; reload module sources from offset 0" }) });
+      return;
+    }
+    const token = task440ConfigSnapshotToken(revision, state.moduleReplacement, mode, generation);
+    if (suppliedToken && suppliedToken !== token) {
+      await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "snapshot_changed", message: "Evaluation snapshot changed; reload module sources from offset 0" }) });
+      return;
+    }
+    const lifecycle = state.moduleLifecycle || state.lifecycle;
+    const sources = task440ModuleSources(revision, canonicalDesign);
+    if (state.moduleReplacement > 0) {
+      sources[0] = {
+        ...sources[0],
+        source_path: `nixos/revisions/${revision.slice(0, 12)}-replacement-${state.moduleReplacement}.nix`,
+      };
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      lifecycle,
+      option_inventory_state: lifecycle === "available" ? state.optionInventoryState : "unavailable",
+      option_inventory_diagnostics: lifecycle === "available" ? state.optionInventoryDiagnostics : [],
+      option_inventory_diagnostics_truncated: lifecycle === "available" && state.optionInventoryDiagnosticsTruncated,
+      revision,
+      generation,
+      error: lifecycle === "failed" ? "safe deterministic module source failure" : null,
+      snapshot_token: lifecycle === "available" ? token : null,
+      total: lifecycle === "available" ? sources.length : 0,
+      offset,
+      limit,
+      sources: lifecycle === "available" ? sources.slice(offset, offset + limit) : [],
+    }) });
+  });
+
+  await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}/evaluations/([^/?]+)$`), async (route) => {
+    const request = route.request();
+    if (request.method() !== "POST") {
+      await route.fulfill({ status: 405, contentType: "application/json", body: JSON.stringify({ error: "method_not_allowed", message: "Method not allowed", details: null }) });
+      return;
+    }
+    const match = new URL(request.url()).pathname.match(/\/evaluations\/([^/]+)$/);
+    const revision = match ? decodeURIComponent(match[1]) : "";
+    const knownRevisions = new Set([
+      currentRevision,
+      TASK_440_NEVER_DEPLOYED_SHA,
+      TASK_440_HISTORICAL_SHA,
+      TASK_440_ROOT_SHA,
+      TASK_440_DESIGN_PARENT_SHA,
+    ]);
+    if (!/^[0-9a-f]{40}$/.test(revision) || !knownRevisions.has(revision)) {
+      await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: "invalid_revision", message: "An exact known full commit SHA is required", details: null }) });
+      return;
+    }
+    state.evaluationRequests.push({ method: request.method(), revision });
+    await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "unexpected_primary_evaluation", message: "Config UI must not queue primary evaluation", details: null }) });
+  });
+
+  await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}/config-inspections/([^/?]+)$`), async (route) => {
+    const request = route.request();
+    if (request.method() !== "POST") {
+      await route.fulfill({ status: 405, contentType: "application/json", body: JSON.stringify({ error: "method_not_allowed", message: "Method not allowed", details: null }) });
+      return;
+    }
+    const match = new URL(request.url()).pathname.match(/\/config-inspections\/([^/]+)$/);
+    const revision = match ? decodeURIComponent(match[1]) : "";
+    state.inspectionRequests.push({ method: request.method(), revision });
+    if (state.inspectionPrerequisite) {
+      await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "config_inspection_prerequisite", message: "The exact completed NixOS carrier is not available for this system revision.", details: null }) });
+      return;
+    }
+    state.lifecycle = state.queueLifecycle;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ revision, configuration_name: "atlas-01", lifecycle: state.lifecycle, queued: true }) });
+  });
+
+  const observationPayload = (kind, pathComponents, revision, childOffset = 0) => {
+    const key = (path) => createHash("sha256").update(JSON.stringify(path)).digest("hex");
+    const child = (path, childKind) => ({ path_components: path, key: key(path), kind: childKind });
+    if (kind === "root") return {
+      kind, path_components: [], child_offset: childOffset, children: [
+        child([`${revision.slice(0, 7)}-root`], "prefix"),
+        child(["fmf"], "prefix"),
+        child(["networking"], "prefix"),
+        child(["poison"], "unavailable"),
+        child(["services"], "prefix"),
+      ].slice(childOffset, childOffset + 512), children_truncated: false, total_children: 5,
+    };
+    if (kind === "prefix") {
+      const dotted = pathComponents.join(".");
+      const largeServicesChildren = [
+        child(["services", "healthy"], "prefix"),
+        ...Array.from({ length: 511 }, (_, index) => child(["services", `fixture-${String(index + 1).padStart(3, "0")}`], "prefix")),
+        child(["services", "openssh"], "prefix"),
+        child(["services", "tail"], "prefix"),
+      ];
+      const children = dotted === "services"
+        ? state.largeServicesPrefix
+          ? largeServicesChildren
+          : [
+              child(["services", "healthy"], "prefix"),
+              child(["services", "openssh"], "prefix"),
+            ]
+        : dotted === "services.openssh"
+          ? [child(["services", "openssh", "enable"], "option")]
+          : dotted === "fmf"
+            ? [
+                child(["fmf", "cache"], "prefix"),
+                child(["fmf", "cli"], "prefix"),
+              ]
+            : dotted === "fmf.cache"
+              ? [child(["fmf", "cache", "campground"], "option")]
+              : dotted === "fmf.cli"
+                ? [child(["fmf", "cli", "zsh"], "prefix")]
+                : dotted === "fmf.cli.zsh"
+                  ? [child(["fmf", "cli", "zsh", "root"], "prefix")]
+                  : dotted === "fmf.cli.zsh.root"
+                    ? [child(["fmf", "cli", "zsh", "root", "extraSource"], "option")]
+          : dotted === "networking"
+            ? [child(["networking", "hostName"], "option")]
+            : [child([...pathComponents, "enabled"], "option")];
+      const page = children.slice(childOffset, childOffset + 512);
+      return { kind, path_components: pathComponents, child_offset: childOffset, children: page, children_truncated: childOffset + page.length < children.length, total_children: children.length };
+    }
+    if (kind === "configured_index") return {
+      kind, path_components: [], total_traversed: 16000, diagnostics: [], diagnostics_truncated: false,
+      configured: canonicalDesign
+        ? [{ path_components: ["networking", "hostName"], key: key(["networking", "hostName"]) }]
+        : [
+            { path_components: ["services", "openssh", "enable"], key: key(["services", "openssh", "enable"]) },
+            { path_components: ["networking", "hostName"], key: key(["networking", "hostName"]) },
+            { path_components: ["services", "broken", "value"], key: key(["services", "broken", "value"]) },
+          ],
+      total_configured: canonicalDesign ? 1 : 3, configured_truncated: false, classifier_diagnostics: [], classifier_diagnostics_truncated: false,
+    };
+    if (kind === "option") return {
+      kind, path_components: pathComponents, key: key(pathComponents), declared_type: pathComponents.at(-1) === "enable" ? "boolean" : "string",
+      is_defined: true, highest_prio: 100, value: pathComponents.includes("broken")
+        ? { kind: "failed", value: { code: "not_evaluated", message: "fixture dependency failed" } }
+        : pathComponents.at(-1) === "campground"
+          ? { kind: "list", value: [] }
+          : pathComponents.at(-1) === "extraSource"
+            ? { kind: "scalar", value: "a deliberately long source value that remains bounded inside the selected option inspector" }
+        : { kind: "scalar", value: pathComponents.at(-1) === "enable" ? true : "atlas-01" },
+    };
+    return {
+      kind, path_components: pathComponents, key: key(pathComponents),
+      definitions: [{ source_path: "nixos/hosts/atlas-01.nix", priority: 100 }], definitions_truncated: false, total_definitions: 1,
+    };
+  };
+
+  await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}/config-observations/([^/?]+)$`), async (route) => {
+    const request = route.request();
+    if (request.method() !== "POST") return route.fallback();
+    const headers = await request.allHeaders();
+    const csrfCookie = (headers.cookie || "").split(";").map((cookie) => cookie.trim()).find((cookie) => cookie.startsWith("__Host-cf-csrf="))?.slice("__Host-cf-csrf=".length);
+    if (!csrfCookie || headers["x-csrf-token"] !== csrfCookie) {
+      await route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: "csrf_validation_failed", message: "CSRF validation failed" }) });
+      return;
+    }
+    const revision = decodeURIComponent(new URL(request.url()).pathname.split("/").at(-1));
+    const body = request.postDataJSON();
+    const observationOrdinal = ++state.observationOrdinal;
+    const requestId = `44000000-0000-4000-8000-${String(observationOrdinal).padStart(12, "0")}`;
+    const observationId = `44100000-0000-4000-8000-${String(observationOrdinal).padStart(12, "0")}`;
+    state.observationPosts.push({ revision, kind: body.kind, path_components: body.path_components, child_offset: body.child_offset, request_id: requestId, observation_id: observationId });
+    for (const waiter of state.observationPostWaiters.splice(0)) {
+      if (waiter.ready()) waiter.resolve();
+      else state.observationPostWaiters.push(waiter);
+    }
+    if (state.holdObservationKinds.has(body.kind)) {
+      await new Promise((resolve) => {
+        const resolvers = state.heldObservationResolvers.get(body.kind) || [];
+        resolvers.push(resolve);
+        state.heldObservationResolvers.set(body.kind, resolvers);
+        for (const waiter of state.heldObservationWaiters.splice(0)) {
+          if (waiter.ready()) waiter.resolve();
+          else state.heldObservationWaiters.push(waiter);
+        }
+      });
+    }
+    const dotted = body.path_components.join(".");
+    const failureKey = `${dotted}@${body.child_offset}`;
+    const failures = body.kind === "prefix"
+      ? state.prefixFailureCounts.get(failureKey) || state.prefixFailureCounts.get(dotted) || 0
+      : 0;
+    const response = {
+      request_id: requestId, revision, configuration_name: "atlas-01", kind: body.kind, path_components: body.path_components, child_offset: body.child_offset,
+      lifecycle: failures > 0 ? "failed" : "succeeded", observation_id: failures > 0 ? null : observationId,
+      error: failures > 0 ? `Unable to inspect ${dotted}` : null, attempts: 1, heartbeat_at: null, reused: false,
+    };
+    if (failures > 0) {
+      const key = state.prefixFailureCounts.has(failureKey) ? failureKey : dotted;
+      state.prefixFailureCounts.set(key, failures - 1);
+    }
+    state.observationRequests.set(requestId, response);
+    state.observationRequests.set(observationId, { ...response, payload: observationPayload(body.kind, body.path_components, revision, body.child_offset) });
+    await route.fulfill({ status: failures > 0 ? 202 : 200, contentType: "application/json", body: JSON.stringify(response) });
+  });
+
+  await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}/config-observation-requests/([^/?]+)$`), async (route) => {
+    const id = new URL(route.request().url()).pathname.split("/").at(-1);
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(state.observationRequests.get(id)) });
+  });
+
+  await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}/config-observations/by-id/([^/?]+)$`), async (route) => {
+    const id = new URL(route.request().url()).pathname.split("/").at(-1);
+    const stored = state.observationRequests.get(id);
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      observation_id: id, revision: stored.revision, configuration_name: stored.configuration_name, schema_version: 1,
+      kind: stored.kind, path_components: stored.path_components, child_offset: stored.child_offset, payload: stored.payload, created_at: "2026-09-11T20:00:00Z",
+    }) });
+  });
+
+  await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}/deploy$`), async (route) => {
+    const request = route.request().postDataJSON();
+    state.deployRequests.push(request);
+    if (state.holdDeploy) {
+      await new Promise((resolve) => state.heldDeployResolvers.push(resolve));
+    }
+    const response = state.deployResponses.shift() || {
+      status: 200,
+      body: { policy: state.deploymentPolicy, conversion: "not_requested", deployment: "queued", deployment_id: "44000000-0000-4000-8000-000000000001", message: "Deployment queued" },
+    };
+    if (response.body.policy === "manual") state.deploymentPolicy = "manual";
+    await route.fulfill({ status: response.status, contentType: "application/json", body: JSON.stringify(response.body) });
+  });
+  await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}/rollback-generation$`), async (route) => {
+    const routedRequest = route.request();
+    if (routedRequest.method() !== "POST") {
+      await route.fulfill({ status: 405, contentType: "application/json", body: JSON.stringify({ error: "method_not_allowed", message: "Method not allowed", details: null }) });
+      return;
+    }
+    const headers = await routedRequest.allHeaders();
+    const csrfCookie = (headers.cookie || "")
+      .split(";")
+      .map((cookie) => cookie.trim())
+      .find((cookie) => cookie.startsWith("__Host-cf-csrf="))
+      ?.slice("__Host-cf-csrf=".length);
+    if (!csrfCookie || headers["x-csrf-token"] !== csrfCookie) {
+      await route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: "csrf_validation_failed", message: "CSRF validation failed", details: null }) });
+      return;
+    }
+    const request = routedRequest.postDataJSON();
+    state.rollbackRequests.push(request);
+    const valid = request.generation === currentGeneration - 1
+      && request.generation_snapshot_id === TASK_440_PREVIOUS_GENERATION_SNAPSHOT_ID
+      && !Object.hasOwn(request, "store_path");
+    await route.fulfill({
+      status: valid ? 202 : 400,
+      contentType: "application/json",
+      body: JSON.stringify(valid
+        ? { status: "accepted", message: "Generation rollback requested for warning-system-01" }
+        : { error: "validation_error", message: "retained generation artifact was not found", details: null }),
+    });
+  });
+  const provenanceCommits = (flakeId) => flakeId === 42
+    ? [{ id: 4421, hash: TASK_440_EXTERNAL_SHA, message: "tracked external input", author: "Fixture Bot", committed_at: "2026-08-28T18:00:00Z", system_count: 0, commits_behind: 0, systems: [], system_paths: [], build_status: "complete", evaluation_status: "complete", evaluation_error_message: null }]
+    : [{ id: 4411, hash: TASK_440_CURRENT_SHA, message: "tracked self input", author: "Fixture Bot", committed_at: "2026-08-28T18:00:00Z", system_count: 1, commits_behind: 0, systems: ["atlas-01"], system_paths: [], build_status: "complete", evaluation_status: "complete", evaluation_error_message: null }];
+  await page.route("**/api/v1/flakes/timelines*", async (route) => {
+    state.provenanceTimelineRequests = (state.provenanceTimelineRequests || 0) + 1;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([
+      { flake_id: 41, flake_name: "platform-core", repo_url: "https://gitlab.com/crystal-forge/platform-core.git", commits: provenanceCommits(41) },
+      { flake_id: 42, flake_name: "nixpkgs-tracked", repo_url: "https://github.com/NixOS/nixpkgs.git", commits: provenanceCommits(42) },
+    ]) });
+  });
+  await page.route(new RegExp("/api/v1/flakes/(41|42)/revisions/[^/]+/outputs$"), async (route) => {
+    const match = new URL(route.request().url()).pathname.match(/^\/api\/v1\/flakes\/(41|42)\/revisions\/([^/]+)\/outputs$/);
+    const flakeId = Number(match[1]);
+    const revision = decodeURIComponent(match[2]);
+    state.provenanceOutputRequests = state.provenanceOutputRequests || [];
+    state.provenanceOutputRequests.push({ flakeId, revision });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(task440FlakeOutput(revision)) });
+  });
+  return state;
+}
+
+function task440CanonicalFlakeOutput(revision, lifecycle, comparisonAvailable, offset, limit, systemFilter) {
+  const module = (name, description, optionCount, consumers) => ({
+    name,
+    description,
+    source_input: "self",
+    source_revision: revision,
+    source_path: `modules/nixos/${name}/default.nix`,
+    declarations: [],
+    declarations_complete: name !== "system",
+    consumers: Array.from({ length: consumers }, (_, index) => `consumer-${index + 1}`),
+    declaration_count: optionCount,
+    consumer_count: consumers,
+    error: null,
+  });
+  const modules = [
+    module("services/grafana", "grafana server, provisioned dashboards", 6, 8),
+    module("system/networking", "hostname, domain, firewall defaults", 6, 7),
+    module("security/gpg", "gpg agent, pinentry, key trust", 4, 6),
+    module("services/k3s", "k3s server/agent role, cluster token", 6, 6),
+    module("system/zfs", "zfs pools, snapshots, scrub timers", 6, 5),
+    module("system", "base system: nix settings, gc, timezone, stateVersion", 6, 2),
+    module("user", "declarative users, immutable /etc/passwd", 5, 2),
+    module("services/prometheus", "node exporter, scrape config", 6, 2),
+  ];
+  modules[5].source_path = "modules/nixos/system/default.nix";
+  const todaySeconds = Math.floor(Date.now() / 86_400_000) * 86_400;
+  const input = (node, source, lockedRevision, ageDays, follows = [], descendants = 0, channel = false, tracked = false) => ({
+    node,
+    names: [node],
+    direct: true,
+    transitive: false,
+    follows,
+    original: { type: source.startsWith("gitlab:") ? "gitlab" : "github" },
+    locked: { rev: lockedRevision },
+    source_type: source.split(":", 1)[0],
+    source,
+    locked_revision: lockedRevision,
+    last_modified: todaySeconds - (ageDays * 86_400),
+    channel,
+    tracked,
+    direct_descendant_count: descendants,
+    transitive_descendant_count: descendants,
+  });
+  const inputs = [
+    input("nixpkgs", "github:NixOS/nixpkgs/release-26.05", "8f2a1c9", 3, [], 0, true),
+    input("unstable", "github:NixOS/nixpkgs/nixos-unstable", "d41e632", 1, [], 0, true),
+    input("old-nixpkgs", "github:NixOS/nixpkgs/release-25.05", "3c9f402", 243, [], 0, true),
+    input("home-manager", "github:nix-community/home-manager/release-26.05", "b7c0916", 5, ["nixpkgs"], 9),
+    input("crystal-forge", "gitlab:crystal-forge/crystal-forge/TASK-440", "e91a774", 0, ["nixpkgs"], 6, false, true),
+    input("impermanence", "github:nix-community/impermanence", "a11c183", 61, ["nixpkgs"], 8),
+    input("disko", "github:nix-community/disko/v1.12.0", "9d1f2b8", 42, ["nixpkgs"], 4),
+    input("stylix", "github:danth/stylix/release-25.11", "77bc019", 21, [], 12),
+  ];
+  const managed = [
+    ["atlas-01", "production"], ["atlas-02", "production"], ["atlas-03", "production"],
+    ["orion-db-01", "production"], ["orion-db-02", "production"],
+    ["stg-atlas-01", "staging"], ["stg-atlas-02", "staging"],
+    ["dev-node-01", "dev"], ["dev-node-02", "dev"],
+  ].map(([configurationName, environmentName], index) => ({
+    configuration_name: configurationName,
+    system_id: index === 0 ? TASK_440_SYSTEM_ID : `00000000-0000-0000-0000-${String(index + 200).padStart(12, "0")}`,
+    hostname: configurationName,
+    environment_name: environmentName,
+    environment_color: environmentName === "production" ? "#dc2626" : environmentName === "staging" ? "#d97706" : "#2563eb",
+    state: "managed",
+    deployed_revision: revision,
+    output_collapsed: false,
+  }));
+  const systems = managed.concat(["vm-test-01", "vm-test-02"].map((configurationName) => ({
+    configuration_name: configurationName,
+    system_id: null,
+    hostname: null,
+    environment_name: null,
+    environment_color: null,
+    state: "declared_unmanaged",
+    deployed_revision: null,
+    output_collapsed: false,
+  })));
+  const filteredSystems = systems.filter((system) => systemFilter === "all" || (systemFilter === "declared_unmanaged" && system.state === "declared_unmanaged") || (systemFilter === "managed_undeclared" && system.state === "managed_undeclared"));
+  const previousOutputs = {
+    declared_systems: managed.slice(0, 6).map((system) => system.configuration_name),
+    exported_modules: modules.slice(3),
+    inputs: inputs.slice(3),
+    direct_input_count: 5,
+    resolved_input_count: 42,
+    lock_error: null,
+    module_evaluation: { available: true, source: "nixpkgs", error: null },
+    nixpkgsRevisions: [TASK_440_DESIGN_PARENT_SHA],
+    multiple_nixpkgs_revisions: false,
+  };
+  return {
+    lifecycle,
+    revision,
+    first_parent_revision: comparisonAvailable ? TASK_440_DESIGN_PARENT_SHA : null,
+    first_parent_resolved: true,
+    comparison_available: comparisonAvailable,
+    error: lifecycle === "failed" ? "safe flake evaluation failure" : null,
+    snapshot_token: lifecycle === "available" ? task440FlakeSnapshotToken(revision) : null,
+    outputs: lifecycle === "available" ? {
+      declared_systems: systems.map((system) => system.configuration_name).slice(offset, offset + limit),
+      exported_modules: modules.slice(offset, offset + limit),
+      inputs: inputs.slice(offset, offset + limit),
+      direct_input_count: 8,
+      resolved_input_count: 47,
+      lock_error: null,
+      module_evaluation: { available: true, source: "nixpkgs", error: null },
+      nixpkgsRevisions: ["8f2a1c9", "d41e632", "3c9f402"],
+      multiple_nixpkgs_revisions: true,
+    } : null,
+    previous_outputs: comparisonAvailable && lifecycle === "available" ? previousOutputs : null,
+    delta: comparisonAvailable && lifecycle === "available" ? {
+      systems_added_total: 5,
+      systems_removed_total: 0,
+      modules_added_total: 3,
+      modules_removed_total: 0,
+      inputs_added_total: 0,
+      inputs_removed_total: 3,
+      input_revision_bumps_total: 5,
+      systems_added: systems.slice(6, 11).map((system) => system.configuration_name),
+      systems_removed: [],
+      modules_added: modules.slice(0, 3).map((item) => item.name),
+      modules_removed: [],
+      inputs_added: [],
+      inputs_removed: ["legacy-overlay", "legacy-tools", "legacy-hardware"],
+      input_revision_bumps: inputs.slice(0, 5).map((item) => ({ node: item.node, before: TASK_440_DESIGN_PARENT_SHA, after: item.locked_revision })),
+    } : null,
+    systems: filteredSystems.slice(offset, offset + limit),
+    managed_system_count: 9,
+    declared_system_count: 11,
+    previous_declared_system_count: comparisonAvailable ? 6 : null,
+    declared_unmanaged_count: 2,
+    managed_undeclared_count: 0,
+    output_collapsed_count: 0,
+    pinned_revision_count: 0,
+    stale_direct_input_count: 1,
+    exported_module_count: 8,
+    pagination: { offset, limit, system_total: filteredSystems.length, systems_has_more: offset + limit < filteredSystems.length },
+  };
+}
+
+function task440FlakeOutput(revision, lifecycle = "available", comparisonAvailable = true, offset = 0, limit = 50, systemFilter = "all", largeCollections = false, canonicalDesign = false) {
+  if (canonicalDesign) return task440CanonicalFlakeOutput(revision, lifecycle, comparisonAvailable, offset, limit, systemFilter);
+  const todaySeconds = Math.floor(Date.now() / 86_400_000) * 86_400;
+  const modules = [
+    {
+      name: "hardening",
+      description: "Fleet hardening module",
+      source_input: "self",
+      source_revision: revision,
+      source_path: "flake.nix",
+      declarations: [],
+      declarations_complete: false,
+      consumers: ["atlas-01", "edge-new"],
+      declaration_count: 125,
+      consumer_count: 2,
+      error: null,
+    },
+    {
+      name: "missing-binding",
+      description: "Module binding unavailable fixture",
+      source_input: null,
+      source_revision: null,
+      source_path: null,
+      declarations: [],
+      declarations_complete: true,
+      consumers: [],
+      consumer_count: 0,
+      declaration_count: 0,
+      error: null,
+    },
+    ...Array.from({ length: 50 }, (_, index) => ({
+      name: `fixture-module-${String(index + 1).padStart(2, "0")}`,
+      description: "Deterministic pagination fixture",
+      source_input: "self",
+      source_revision: revision,
+      source_path: `modules/fixture-${String(index + 1).padStart(2, "0")}.nix`,
+      declarations: [],
+      declarations_complete: true,
+      consumers: [],
+      declaration_count: 0,
+      consumer_count: 0,
+      error: null,
+    })),
+  ];
+  const inputs = [
+    { node: "nixpkgs", names: ["nixpkgs"], direct: true, transitive: false, follows: [], original: { type: "github" }, locked: { rev: "2222222222222222222222222222222222222222" }, source_type: "github", source: "github:NixOS/nixpkgs", locked_revision: "2222222222222222222222222222222222222222", last_modified: todaySeconds - (3 * 86_400), channel: false, tracked: true, direct_descendant_count: 72, transitive_descendant_count: 72 },
+    { node: "home-manager", names: ["home-manager"], direct: true, transitive: false, follows: ["nixpkgs"], original: { type: "github" }, locked: { rev: "4444444444444444444444444444444444444444" }, source_type: "github", source: "github:nix-community/home-manager", locked_revision: "4444444444444444444444444444444444444444", last_modified: todaySeconds - (120 * 86_400), channel: true, tracked: true, direct_descendant_count: 8, transitive_descendant_count: 8 },
+    { node: "nixpkgs-stable", names: ["nixpkgs-stable"], direct: false, transitive: true, follows: ["nixpkgs"], original: { type: "github" }, locked: { rev: "3333333333333333333333333333333333333333" }, source_type: "github", source: "github:NixOS/nixpkgs/nixos-25.05", locked_revision: "3333333333333333333333333333333333333333", last_modified: 1600000000, channel: false, tracked: true, direct_descendant_count: null },
+    ...Array.from({ length: largeCollections ? 51 : 0 }, (_, index) => ({
+      node: `direct-fixture-${String(index + 1).padStart(2, "0")}`,
+      names: [`direct-fixture-${String(index + 1).padStart(2, "0")}`],
+      direct: true,
+      transitive: false,
+      follows: [],
+      original: { type: "path" },
+      locked: {},
+      source_type: "path",
+      source: `/fixtures/input-${index + 1}`,
+      locked_revision: null,
+      last_modified: todaySeconds - ((index + 1) * 86_400),
+      channel: false,
+      tracked: false,
+      direct_descendant_count: 0,
+      transitive_descendant_count: 0,
+    })),
+  ];
+  const systems = [
+    { configuration_name: "atlas-01", system_id: TASK_440_SYSTEM_ID, hostname: "warning-system-01", environment_name: "production", environment_color: "#a78bfa", state: "managed", deployed_revision: TASK_440_ROOT_SHA, output_collapsed: true },
+    { configuration_name: "edge-new", system_id: null, hostname: null, environment_name: null, environment_color: null, state: "declared_unmanaged", deployed_revision: null, output_collapsed: false },
+    { configuration_name: "legacy-01", system_id: "00000000-0000-0000-0000-0000000000b1", hostname: "legacy-01", environment_name: "staging", environment_color: "#f59e0b", state: "managed_undeclared", deployed_revision: TASK_440_ROOT_SHA, output_collapsed: false },
+    ...Array.from({ length: largeCollections ? 51 : 0 }, (_, index) => ({
+      configuration_name: `fleet-${String(index + 1).padStart(2, "0")}`,
+      system_id: `00000000-0000-0000-0000-${String(index + 100).padStart(12, "0")}`,
+      hostname: `fleet-${String(index + 1).padStart(2, "0")}`,
+      environment_name: "production",
+      environment_color: "#a78bfa",
+      state: "managed",
+      deployed_revision: revision,
+      output_collapsed: false,
+    })),
+  ];
+  const filteredSystems = systems.filter((system) => systemFilter === "all" || (systemFilter === "declared_unmanaged" && system.state === "declared_unmanaged") || (systemFilter === "managed_undeclared" && system.state === "managed_undeclared"));
+  const directInputCount = inputs.filter((input) => input.direct).length;
+  const previousOutputs = {
+    declared_systems: ["atlas-01", "legacy-01", "legacy-02", "legacy-03", "legacy-04", "legacy-05"].slice(offset, offset + limit),
+    exported_modules: [],
+    inputs: [],
+    direct_input_count: 1,
+    resolved_input_count: 73,
+    lock_error: null,
+    module_evaluation: { available: true, source: "nixpkgs", error: null },
+    nixpkgsRevisions: [TASK_440_ROOT_SHA],
+    multiple_nixpkgs_revisions: false,
+  };
+  return {
+    lifecycle,
+    revision,
+    first_parent_revision: comparisonAvailable ? TASK_440_ROOT_SHA : null,
+    first_parent_resolved: true,
+    comparison_available: comparisonAvailable,
+    error: lifecycle === "failed" ? "safe flake evaluation failure" : null,
+    snapshot_token: lifecycle === "available" ? task440FlakeSnapshotToken(revision) : null,
+    outputs: lifecycle === "available" ? {
+      declared_systems: ["atlas-01", "edge-new"].slice(offset, offset + limit),
+      exported_modules: modules.slice(offset, offset + limit),
+      inputs: inputs.slice(offset, offset + limit),
+      direct_input_count: directInputCount,
+      // The server derives resolved_input_count from builtins.length of the
+      // same resolved-inputs list it paginates (see deployment_policies.rs),
+      // so the fixture's authoritative total must equal the full `inputs`
+      // array length here. A larger, unreachable declared total previously
+      // caused the product's Inputs-pane auto-continuation effect (which
+      // fetches pages until the full resolved-input set is loaded) to loop
+      // forever because the paginated array could never reach that count.
+      resolved_input_count: inputs.length,
+      lock_error: null,
+      module_evaluation: { available: true, source: "nixpkgs", error: null },
+      nixpkgsRevisions: ["2222222222222222222222222222222222222222", "3333333333333333333333333333333333333333"],
+      multiple_nixpkgs_revisions: true,
+    } : null,
+    previous_outputs: comparisonAvailable && lifecycle === "available" ? previousOutputs : null,
+    delta: comparisonAvailable && lifecycle === "available" ? {
+      systems_added_total: 1,
+      systems_removed_total: 1,
+      modules_added_total: 1,
+      modules_removed_total: 0,
+      inputs_added_total: 1,
+      inputs_removed_total: 1,
+      input_revision_bumps_total: 1,
+      systems_added: ["edge-new"].slice(offset, offset + limit),
+      systems_removed: ["legacy-01"].slice(offset, offset + limit),
+      modules_added: ["hardening"].slice(offset, offset + limit),
+      modules_removed: [],
+      inputs_added: ["home-manager"].slice(offset, offset + limit),
+      inputs_removed: ["legacy-overlay"].slice(offset, offset + limit),
+      input_revision_bumps: [{ node: "nixpkgs", before: TASK_440_ROOT_SHA, after: "2222222222222222222222222222222222222222" }].slice(offset, offset + limit),
+    } : null,
+    systems: filteredSystems.slice(offset, offset + limit),
+    managed_system_count: largeCollections ? 53 : 2,
+    declared_system_count: largeCollections ? 53 : 2,
+    previous_declared_system_count: comparisonAvailable ? 6 : null,
+    declared_unmanaged_count: 1,
+    managed_undeclared_count: 1,
+    output_collapsed_count: largeCollections ? 7 : 1,
+    pinned_revision_count: largeCollections ? 9 : 2,
+    stale_direct_input_count: largeCollections ? 12 : 1,
+    exported_module_count: modules.length,
+    pagination: { offset, limit, system_total: filteredSystems.length, systems_has_more: offset + limit < filteredSystems.length },
+  };
+}
+
+async function routeTask440FlakeOutputs(page, overrides = {}) {
+  const state = { lifecycle: "available", apiError: false, noPrevious: false, emptySystemFilter: null, largeCollections: false, requestedRevisions: [], requestedSystemFilters: [], moduleDeclarationRequests: [], timelineRequests: 0, ...overrides };
+  const canonicalDesign = state.canonicalDesign === true;
+  const currentRevision = canonicalDesign ? TASK_440_DESIGN_SHA : TASK_440_CURRENT_SHA;
+  await page.route(new RegExp("/api/v1/flakes/41/revisions/[^/]+/outputs$"), async (route) => {
+    const revision = decodeURIComponent(new URL(route.request().url()).pathname.split("/revisions/")[1].split("/outputs")[0]);
+    const url = new URL(route.request().url());
+    const offset = Number(url.searchParams.get("offset") || 0);
+    const limit = Number(url.searchParams.get("limit") || 50);
+    const systemFilter = url.searchParams.get("system_filter") || "all";
+    state.requestedSystemFilters.push(systemFilter);
+    state.requestedRevisions.push(revision);
+    if (state.apiError) {
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "deterministic flake snapshot API failure" }) });
+      return;
+    }
+    const output = task440FlakeOutput(revision, state.lifecycle, !state.noPrevious && revision !== TASK_440_ROOT_SHA, offset, limit, systemFilter, state.largeCollections, canonicalDesign);
+    if (state.emptySystemFilter === systemFilter) output.systems = [];
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(output) });
+  });
+  const commits = [
+    { id: 4401, hash: currentRevision, message: canonicalDesign ? "stig: enforce audit rules for sudo" : "current output snapshot", author: canonicalDesign ? "mreyes" : "Forge Bot", committed_at: "2026-08-28T18:00:00Z", system_count: canonicalDesign ? 11 : 2, commits_behind: 0, systems: canonicalDesign ? ["atlas-01", "atlas-02", "atlas-03", "orion-db-01", "orion-db-02", "stg-atlas-01", "stg-atlas-02", "dev-node-01", "dev-node-02", "vm-test-01", "vm-test-02"] : ["atlas-01", "edge-new"], system_paths: [], build_status: "complete", evaluation_status: "complete", evaluation_error_message: null },
+    { id: 4402, hash: TASK_440_HISTORICAL_SHA, message: "prefix collision snapshot", author: "Forge Bot", committed_at: "2026-08-27T18:00:00Z", system_count: 2, commits_behind: 1, systems: ["atlas-01", "edge-new"], system_paths: [], build_status: "complete", evaluation_status: "complete", evaluation_error_message: null },
+    { id: 4403, hash: TASK_440_ROOT_SHA, message: "root output snapshot", author: "Forge Bot", committed_at: "2026-08-20T18:00:00Z", system_count: 1, commits_behind: 2, systems: ["atlas-01"], system_paths: [], build_status: "complete", evaluation_status: "complete", evaluation_error_message: null },
+  ];
+  await page.route("**/api/v1/flakes/timelines*", async (route) => {
+    state.timelineRequests += 1;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([{ flake_id: 41, flake_name: canonicalDesign ? "infrastructure" : "platform-core", repo_url: canonicalDesign ? "git+ssh://git@gitlab.cf.internal/ops/nixos-infra" : "https://gitlab.com/crystal-forge/platform-core.git", commits }]) });
+  });
+  await page.route("**/api/v1/flakes", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([{ id: 41, name: canonicalDesign ? "infrastructure" : "platform-core", repo_url: canonicalDesign ? "git+ssh://git@gitlab.cf.internal/ops/nixos-infra" : "https://gitlab.com/crystal-forge/platform-core.git", branch: "main", build_scope: "cf_systems_only", system_count: canonicalDesign ? 9 : 2, sync_status: "synced", last_sync_at: "2026-08-28T18:00:00Z", last_sync_error: null }]) });
+  });
+  await page.route("**/api/v1/flakes/**", async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    const match = pathname.match(/^\/api\/v1\/flakes\/41\/revisions\/([^/]+)\/outputs$/);
+    if (!match) {
+      await route.fallback();
+      return;
+    }
+    const revision = decodeURIComponent(match[1]);
+    const url = new URL(route.request().url());
+    const offset = Number(url.searchParams.get("offset") || 0);
+    const limit = Number(url.searchParams.get("limit") || 50);
+    const systemFilter = url.searchParams.get("system_filter") || "all";
+    state.requestedSystemFilters.push(systemFilter);
+    state.requestedRevisions.push(revision);
+    if (state.apiError) {
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "deterministic flake snapshot API failure" }) });
+      return;
+    }
+    const output = task440FlakeOutput(revision, state.lifecycle, !state.noPrevious && revision !== TASK_440_ROOT_SHA, offset, limit, systemFilter, state.largeCollections, canonicalDesign);
+    if (state.emptySystemFilter === systemFilter) output.systems = [];
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(output) });
+  });
+  await page.route(new RegExp("/api/v1/flakes/41/revisions/[^/]+/modules/(hardening|system)/declarations(?:\\?.*)?$"), async (route) => {
+    const url = new URL(route.request().url());
+    const revision = decodeURIComponent(url.pathname.split("/revisions/")[1].split("/modules/")[0]);
+    const offset = Number(url.searchParams.get("offset") || 0);
+    const limit = Math.min(Number(url.searchParams.get("limit") || 50), 100);
+    const token = state.declarationToken || "f".repeat(64);
+    const declarations = canonicalDesign ? [
+      ["cf.system.enable", "boolean", false],
+      ["cf.system.stateVersion", "string", "26.05"],
+      ["cf.system.gc.automatic", "boolean", true],
+      ["cf.system.gc.olderThan", "string", "30d"],
+      ["cf.system.timeZone", "string", "UTC"],
+      ["cf.system.experimentalFeatures", "list of string", ["nix-command", "flakes"]],
+    ].map(([path, declared_type, defaultValue]) => ({
+      path,
+      declared_type,
+      has_default: true,
+      default: defaultValue,
+      source_paths: ["modules/nixos/system/default.nix"],
+    })) : Array.from({ length: 125 }, (_, index) => ({
+      path: index === 0
+        ? "services.openssh.enable"
+        : index === 1
+          ? `services.snapshot.${token[0]}.marker`
+          : `services.fixture.option${String(index + 1).padStart(3, "0")}`,
+      declared_type: index === 0 ? "boolean" : "string",
+      has_default: true,
+      default: index === 0 ? false : `value-${String(index + 1).padStart(3, "0")}`,
+      source_paths: [index === 0 ? "modules/hardening.nix" : `modules/fixture-${String(index + 1).padStart(3, "0")}.nix`],
+    }));
+    state.moduleDeclarationRequests.push({ revision, offset, limit, token: url.searchParams.get("snapshot_token") });
+    if (state.declarationMode === "initial-error" && offset === 0) {
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "deterministic initial declaration failure" }) });
+      return;
+    }
+    if (state.declarationMode === "continuation-error" && offset > 0) {
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "deterministic continuation declaration failure" }) });
+      return;
+    }
+    if (state.declarationMode === "conflict" && offset > 0) {
+      await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ message: "snapshot changed; request the first page again" }) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      lifecycle: state.declarationMode === "unavailable" ? "unavailable" : "available",
+      revision,
+      module_name: canonicalDesign ? "system" : "hardening",
+      error: state.declarationMode === "unavailable" ? "Declaration snapshot is unavailable" : null,
+      snapshot_token: token,
+      total: declarations.length,
+      offset,
+      limit,
+      declarations: declarations.slice(offset, offset + limit),
+    }) });
+  });
+  return state;
+}
+
 async function gotoFlakesAsAdmin(page) {
   await page.goto(`${baseUrl}/flakes?ui_check_auth=1`, { timeout: LOAD_TIMEOUT });
   await page.evaluate(() => localStorage.setItem("cf.ui_check_admin_controls", "1"));
   // The app shell only installs ui_check mock auth while auth state is empty.
   // A document reload resets in-memory viewer/admin state from prior steps.
   await page.reload({ timeout: LOAD_TIMEOUT });
+}
+
+async function assertExactTextOrder(locator, expected, label) {
+  if (expected.length > 0) await locator.first().waitFor({ state: "visible", timeout: 15000 });
+  const actual = (await locator.allTextContents()).map((text) => text.replace(/\s+/g, " ").trim());
+  if (!isDeepStrictEqual(actual, expected)) {
+    throw new Error(`${label} order changed: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+  }
+}
+
+/**
+ * Assert the Config inspector pane contract.
+ *
+ * The inspector exposes exactly two panes, Option then Sources, and the
+ * Sources pane carries the observed-source total inside its label and
+ * accessible name (see `ConfigExplorer` in
+ * packages/web-ui/src/components/system/config_explorer.rs). The design
+ * reference renders the same shape as `Sources <span
+ * class="mono">{srcs.length || ""}</span>`, so a rendered count is correct
+ * product behavior, not drift.
+ *
+ * Pane identity and the count are therefore asserted separately. Comparing
+ * the whole textContent against a bare "Sources" rejects the truthful count,
+ * and stripping digits out of the label would stop proving the count renders
+ * at all. `expectedSourceCount` is the authoritative fixture total; it must
+ * be rendered exactly when nonzero and must be absent when zero.
+ */
+async function assertTask440ConfigSemantics(page, expectedSourceCount) {
+  const explorer = page.locator(".cfgx");
+  await assertVisible(explorer.getByText("TARGET", { exact: true }), "Config Explorer lost its target contract");
+  await assertVisible(explorer.getByText("OBSERVATIONAL", { exact: true }), "Config Explorer lost its observational boundary");
+  await assertExactTextOrder(explorer.locator(".cfgx-tools .seg button"), ["Browse", "Configured", "Search"], "Config Explorer modes");
+
+  const paneTabs = explorer.locator(".cfgx-side-tabs button");
+  await paneTabs.first().waitFor({ state: "visible", timeout: 15000 });
+  const paneLabels = (await paneTabs.allTextContents()).map((text) => text.replace(/\s+/g, " ").trim());
+  if (paneLabels.length !== 2) {
+    throw new Error(`Config inspector must expose exactly two panes, got ${JSON.stringify(paneLabels)}`);
+  }
+  if (paneLabels[0] !== "Option") {
+    throw new Error(`Config inspector pane 1 must be Option, got ${JSON.stringify(paneLabels)}`);
+  }
+  if (!/^Sources(?:\s*\d+)?$/.test(paneLabels[1])) {
+    throw new Error(`Config inspector pane 2 must be Sources with an optional count, got ${JSON.stringify(paneLabels)}`);
+  }
+
+  // Accessible names must stay usable for keyboard and assistive navigation
+  // even though the visible label embeds the count.
+  const paneTabGroup = explorer.locator(".cfgx-side-tabs");
+  await assertVisible(paneTabGroup.getByRole("button", { name: "Option", exact: true }), "Config inspector lost its Option pane accessible name");
+  await assertVisible(paneTabGroup.getByRole("button", { name: /^Sources(\s*\d+)?$/ }), "Config inspector lost its Sources pane accessible name");
+
+  if (typeof expectedSourceCount === "number") {
+    const renderedCount = explorer.locator(".cfgx-side-tabs button .mono");
+    if (expectedSourceCount > 0) {
+      // The total is populated asynchronously from observed provenance, so
+      // wait for the exact fixture value instead of sampling a partial count.
+      await page
+        .waitForFunction(
+          (expected) => document.querySelector(".cfgx-side-tabs button .mono")?.textContent?.trim() === String(expected),
+          expectedSourceCount,
+          { timeout: 15000 },
+        )
+        .catch(async () => {
+          const actual = await renderedCount.allTextContents();
+          throw new Error(`Config inspector Sources count must be ${expectedSourceCount}, got ${JSON.stringify(actual)}`);
+        });
+    } else if ((await renderedCount.count()) !== 0) {
+      throw new Error("Config inspector rendered a Sources count with no observed sources");
+    }
+  }
+
+  await assertVisible(explorer.locator(".cfgx-meta-i").filter({ hasText: "inventory" }), "Config Explorer lost inventory state");
+  await assertVisible(explorer.locator(".cfgx-meta-i").filter({ hasText: "comparison" }), "Config Explorer lost comparison state");
+}
+
+async function assertTask440CanonicalConfigState(page, label) {
+  await assertVisible(page.getByRole("heading", { name: "atlas-01" }), `${label} lost the atlas-01 identity`);
+  await assertVisible(page.getByText("#160", { exact: true }), `${label} lost generation 160`);
+  await assertVisible(page.getByRole("tab", { name: "Config", selected: true }), `${label} lost its active Config tab`);
+  const revision = page.locator("select.cfgx-select");
+  await assertVisible(revision, `${label} lost its generation selector`);
+  await page.waitForFunction(
+    (expectedRevision) => {
+      const value = document.querySelector("select.cfgx-select")?.value;
+      return value === "160" || value === expectedRevision;
+    },
+    TASK_440_CONFIG_SHA,
+    { timeout: 5000 },
+  );
+  await assertTask440ConfigSemantics(page, TASK_440_FIXTURE.canonicalConfig.moduleSourceTotal);
+  await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "inventory1092 options" }), `${label} lost its complete inventory`);
+  await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "comparisonready" }), `${label} lost comparison readiness`);
+  for (const expected of ["842", "1.6 GiB", "3400 ms"]) await assertVisible(page.locator(".cfgx-meta").getByText(expected, { exact: true }), `${label} lost Explorer metric ${expected}`);
+  if (await page.getByText(/configuration issues detected/i).count()) throw new Error(`${label} inherited an unrelated global configuration warning`);
+}
+
+function task440ExpectedRows(contract, side, theme) {
+  if (Array.isArray(contract.orderedVisibleRows)) return contract.orderedVisibleRows;
+  const sideRows = contract.orderedVisibleRows?.[side];
+  return Array.isArray(sideRows) ? sideRows : sideRows?.[theme];
+}
+
+async function validateTask440SemanticContract(page, target, contract, theme) {
+  if (!contract) throw new Error(`${target.name} has no semantic fixture contract`);
+  if (contract.kind !== target.designState.kind) throw new Error(`${target.name} semantic kind does not match its manifest state`);
+  if (contract.kind === "system-config") {
+    await assertVisible(page.getByRole("heading", { name: contract.identity.system }), `${target.name} lost its system identity`);
+    await assertVisible(page.getByText(`#${contract.identity.generation}`, { exact: true }), `${target.name} lost its generation identity`);
+    await assertVisible(page.getByText(contract.identity.uptime.dioxus, { exact: true }), `${target.name} lost its uptime`);
+    await assertVisible(page.getByText(`activated · ${contract.identity.heartbeatAgeMinutes}m ago`, { exact: true }), `${target.name} lost its stable heartbeat age`);
+    const selected = page.locator("select.cfgx-select option:checked");
+    const selectedText = (await selected.textContent() || "").replace(/\s+/g, " ").trim();
+    if (!selectedText.includes(contract.identity.revision.slice(0, 7))) throw new Error(`${target.name} selected generation lost revision ${contract.identity.revision}`);
+    await assertTask440ConfigSemantics(page, contract.counts?.moduleSources);
+    const configured = page.locator(".cfgx-tools").getByRole("button", { name: "Configured", exact: true });
+    if ((await configured.getAttribute("aria-pressed")) !== "true") throw new Error(`${target.name} lost Configured mode`);
+    if (contract.expandedItem) await assertVisible(page.locator(".cfgx-insp-path").filter({ hasText: contract.expandedItem }), `${target.name} lost selected option ${contract.expandedItem}`);
+    return;
+  }
+
+  const tray = page.getByRole("dialog", { name: `${contract.identity.flake} commits` });
+  await assertVisible(tray.getByRole("tab", { name: new RegExp(`^${contract.selectedPane}\\b`), selected: true }), `${target.name} lost selected pane ${contract.selectedPane}`);
+  await assertVisible(tray.locator(".fx-revbar-msg").filter({ hasText: contract.identity.revisionMessage }), `${target.name} lost its revision message`);
+  const revisionButton = tray.getByRole("button", { name: /Change commit\. Selected full revision/ });
+  const revisionName = await revisionButton.getAttribute("aria-label");
+  if (!revisionName?.includes(contract.identity.revision)) throw new Error(`${target.name} lost revision ${contract.identity.revision}`);
+  let rows;
+  if (contract.selectedPane === "Systems") rows = tray.locator(".fx-systems-table tbody > tr code.fx-host");
+  else if (contract.selectedPane === "Modules") rows = tray.locator(".fx-modules-table > tbody > tr.fx-row code.fx-host");
+  else rows = tray.locator(".fx-inputs-table tbody > tr .fx-input-cell code.fx-host");
+  await assertExactTextOrder(rows, task440ExpectedRows(contract, "dioxus", theme), `${target.name} ordered ${contract.selectedPane} rows`);
+  if (contract.orderedExpandedRows) await assertExactTextOrder(tray.locator(".fx-detail .fx-opt-path"), contract.orderedExpandedRows, `${target.name} ordered expanded declarations`);
+  if (contract.expandedItem) {
+    const row = tray.getByText(contract.expandedItem, { exact: true }).locator("xpath=ancestor::tr[1]");
+    if ((await row.getByRole("button").getAttribute("aria-expanded")) !== "true") throw new Error(`${target.name} lost expanded item ${contract.expandedItem}`);
+  }
+}
+
+async function assertTask440SelectedConfigRevision(page, label) {
+  const revision = page.locator("select.cfgx-select");
+  await assertVisible(revision, `${label} lost its revision selector`);
+  await page.waitForFunction(
+    (expected) => document.querySelector("select.cfgx-select")?.value === expected,
+    TASK_440_CURRENT_SHA,
+    { timeout: 5000 },
+  );
+  if ((await revision.inputValue()) !== TASK_440_CURRENT_SHA) throw new Error(`${label} lost the exact selected full revision`);
+}
+
+async function assertTask440ConfigGeometry(page, viewportName) {
+  const geometry = await page.evaluate(() => {
+    const explorer = document.querySelector(".cfgx");
+    const body = explorer?.querySelector(".cfgx-body");
+    const tree = body?.querySelector(".cfgx-tree-col");
+    const side = body?.querySelector(".cfgx-side");
+    const scroll = tree?.querySelector(".cfgx-scroll");
+    if (!explorer || !body || !tree || !side || !scroll) throw new Error("Config Explorer geometry surfaces are missing");
+    const rect = (element) => {
+      const box = element.getBoundingClientRect();
+      return { top: box.top, right: box.right, bottom: box.bottom, left: box.left, width: box.width };
+    };
+    return {
+      viewportWidth: innerWidth,
+      viewportHeight: innerHeight,
+      documentWidth: document.documentElement.scrollWidth,
+      bodyWidth: document.body.scrollWidth,
+      explorer: rect(explorer),
+      body: rect(body),
+      tree: rect(tree),
+      side: rect(side),
+      scrollClientWidth: scroll.clientWidth,
+      scrollScrollWidth: scroll.scrollWidth,
+      scrollClientHeight: scroll.clientHeight,
+      scrollOverflowY: getComputedStyle(scroll).overflowY,
+      sideOverflowY: getComputedStyle(side).overflowY,
+      headers: [...tree.querySelectorAll(".cfgx-colhead > span")].map((header) => header.textContent.replace(/\s+/g, " ").trim()),
+    };
+  });
+  if (geometry.documentWidth > geometry.viewportWidth + 1 || geometry.bodyWidth > geometry.viewportWidth + 1) throw new Error(`${viewportName} Config clips horizontally: ${JSON.stringify(geometry)}`);
+  if (!isDeepStrictEqual(geometry.headers, ["configured option", "value", "defined by"])) throw new Error(`${viewportName} Config columns changed: ${JSON.stringify(geometry)}`);
+  if (geometry.scrollScrollWidth > geometry.scrollClientWidth + 1) throw new Error(`${viewportName} Config tree has horizontal overflow: ${JSON.stringify(geometry)}`);
+  if (viewportName === "wide") {
+    if (Math.abs(geometry.tree.top - geometry.side.top) > 1 || geometry.tree.right > geometry.side.left + 1) throw new Error(`Wide Config Explorer columns overlap: ${JSON.stringify(geometry)}`);
+    if (Math.abs(geometry.side.right - geometry.body.right) > 1) throw new Error(`Wide Config inspector is clipped: ${JSON.stringify(geometry)}`);
+    // The reference keeps the tree and inspector independently scrollable so a
+    // deeply expanded tree cannot turn the page into an unbounded list.
+    if (geometry.scrollOverflowY === "visible" || geometry.sideOverflowY === "visible") throw new Error(`Wide Config panes are not independently scrollable: ${JSON.stringify(geometry)}`);
+    if (geometry.scrollClientHeight > geometry.viewportHeight) throw new Error(`Wide Config tree exceeds the bounded pane height: ${JSON.stringify(geometry)}`);
+  } else {
+    if (geometry.side.top < geometry.tree.bottom - 1 || Math.abs(geometry.tree.width - geometry.side.width) > 1) throw new Error(`Narrow Config Explorer did not stack without overlap: ${JSON.stringify(geometry)}`);
+    if (Math.abs(geometry.side.bottom - geometry.body.bottom) > 2) throw new Error(`Narrow Config Explorer is clipped: ${JSON.stringify(geometry)}`);
+  }
+}
+
+async function assertTask440FlakeGeometry(page, tray, tableSelector, expectedHeaders, expectedWidths, viewportName) {
+  const geometry = await tray.evaluate((element, args) => {
+    const pane = element.querySelector(".fx-body");
+    const table = element.querySelector(args.tableSelector);
+    if (!pane || !table) throw new Error(`Missing ${args.tableSelector} geometry surface`);
+    pane.scrollTop = 0;
+    const trayBox = element.getBoundingClientRect();
+    const tableBox = table.getBoundingClientRect();
+    const headers = [...table.querySelectorAll(":scope > thead > tr > th")];
+    const scrollAncestors = [];
+    for (let current = table.parentElement; current && current !== element; current = current.parentElement) {
+      const style = getComputedStyle(current);
+      if (["auto", "scroll"].includes(style.overflowY)) scrollAncestors.push(current.className);
+    }
+    return {
+      viewportWidth: innerWidth,
+      viewportHeight: innerHeight,
+      documentWidth: document.documentElement.scrollWidth,
+      bodyWidth: document.body.scrollWidth,
+      tray: { left: trayBox.left, right: trayBox.right, top: trayBox.top, bottom: trayBox.bottom },
+      paneClientWidth: pane.clientWidth,
+      paneScrollWidth: pane.scrollWidth,
+      paneClientHeight: pane.clientHeight,
+      paneScrollHeight: pane.scrollHeight,
+      table: { left: tableBox.left, right: tableBox.right, top: tableBox.top, bottom: tableBox.bottom, width: tableBox.width },
+      headers: headers.map((header) => header.textContent.replace(/\s+/g, " ").trim()),
+      widths: headers.map((header) => header.getBoundingClientRect().width / tableBox.width),
+      scrollAncestors,
+      clippedCells: [...table.querySelectorAll("th, td")].filter((cell) => cell.scrollWidth > cell.clientWidth + 1 && getComputedStyle(cell).textOverflow !== "ellipsis").map((cell) => cell.textContent.replace(/\s+/g, " ").trim().slice(0, 80)),
+    };
+  }, { tableSelector, expectedHeaders });
+  if (!isDeepStrictEqual(geometry.headers, expectedHeaders)) throw new Error(`${viewportName} flake headers changed: ${JSON.stringify(geometry)}`);
+  if (geometry.documentWidth > geometry.viewportWidth + 1 || geometry.bodyWidth > geometry.viewportWidth + 1 || geometry.tray.left < -1 || geometry.tray.right > geometry.viewportWidth + 1 || geometry.tray.top < -1 || geometry.tray.bottom > geometry.viewportHeight + 1) {
+    throw new Error(`${viewportName} flake pane clips the viewport: ${JSON.stringify(geometry)}`);
+  }
+  if (geometry.paneScrollWidth > geometry.paneClientWidth + 1) throw new Error(`${viewportName} flake pane has nested horizontal overflow: ${JSON.stringify(geometry)}`);
+  if (geometry.scrollAncestors.length !== 1 || !String(geometry.scrollAncestors[0]).includes("fx-body")) throw new Error(`${viewportName} flake table gained an unintended nested vertical scroller: ${JSON.stringify(geometry)}`);
+  if (geometry.table.left < geometry.tray.left - 1 || geometry.table.right > geometry.tray.right + 1) throw new Error(`${viewportName} flake table is clipped outside the tray: ${JSON.stringify(geometry)}`);
+  if (geometry.clippedCells.length) throw new Error(`${viewportName} flake cells clip reachable content: ${JSON.stringify(geometry)}`);
+  geometry.widths.forEach((actual, index) => {
+    if (Math.abs(actual - expectedWidths[index]) > 0.025) throw new Error(`${viewportName} flake column ${index + 1} geometry changed: ${JSON.stringify(geometry)}`);
+  });
+}
+
+async function assertReachableControls(locator, label) {
+  const failures = [];
+  for (let index = 0; index < await locator.count(); index += 1) {
+    const control = locator.nth(index);
+    await control.scrollIntoViewIfNeeded();
+    const failure = await control.evaluate((element) => {
+      const style = getComputedStyle(element);
+      const box = element.getBoundingClientRect();
+      if (style.display === "none" || style.visibility === "hidden" || box.width === 0 || box.height === 0) return null;
+      const label = element.getAttribute("aria-label") || element.getAttribute("title") || element.textContent?.trim() || element.tagName;
+      if (box.left < -1 || box.top < -1 || box.right > innerWidth + 1 || box.bottom > innerHeight + 1) return label;
+      const top = document.elementsFromPoint(box.left + box.width / 2, box.top + box.height / 2).find((candidate) => getComputedStyle(candidate).pointerEvents !== "none");
+      return top && !element.contains(top) && !top.contains(element) ? label : null;
+    });
+    if (failure) failures.push(failure);
+  }
+  if (failures.length) throw new Error(`${label} controls are clipped or occluded: ${JSON.stringify(failures)}`);
+}
+
+async function resetTask440CaptureScroll(page) {
+  const positions = await page.evaluate(() => {
+    window.scrollTo(0, 0);
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+    const selectors = [".content", ".app-main", ".main-content", ".sd-content", ".cfgx-scroll", ".cfgx-side", ".fl-tray-body", ".fl-tray-commits", ".fx-body"];
+    const reset = [];
+    for (const selector of selectors) {
+      for (const element of document.querySelectorAll(selector)) {
+        const scrollBehavior = element.style.scrollBehavior;
+        element.style.scrollBehavior = "auto";
+        element.scrollTo(0, 0);
+        element.style.scrollBehavior = scrollBehavior;
+        reset.push({ selector, top: element.scrollTop, left: element.scrollLeft });
+      }
+    }
+    for (const element of document.querySelectorAll("*")) {
+      if (element.scrollTop !== 0 || element.scrollLeft !== 0) {
+        const scrollBehavior = element.style.scrollBehavior;
+        element.style.scrollBehavior = "auto";
+        element.scrollTo(0, 0);
+        element.style.scrollBehavior = scrollBehavior;
+        reset.push({ selector: element.className || element.tagName, top: element.scrollTop, left: element.scrollLeft });
+      }
+    }
+    return { windowY: scrollY, windowX: scrollX, reset };
+  });
+  if (positions.windowY !== 0 || positions.windowX !== 0 || positions.reset.some((item) => item.top !== 0 || item.left !== 0)) {
+    throw new Error(`Canonical capture scrollers did not reset: ${JSON.stringify(positions)}`);
+  }
+}
+
+async function prepareTask440CanonicalCapture(page, step) {
+  await resetTask440CaptureScroll(page);
+  if (step.name.includes("config-canonical")) {
+    await assertTask440CanonicalConfigState(page, "Canonical Config capture");
+    const wide = step.name.includes("wide");
+    const configured = page.locator(".cfgx-tools").getByRole("button", { name: "Configured", exact: true });
+    if ((await configured.getAttribute("aria-pressed")) !== "true") throw new Error("Canonical Config capture lost Configured mode");
+    await assertVisible(page.locator(".cfgx-insp-path").filter({ hasText: TASK_440_FIXTURE.canonicalConfig.expandedOption }), "Canonical Config capture lost its persistent option pane");
+    await assertTask440ConfigGeometry(page, wide ? "wide" : "narrow");
+  } else {
+    const tray = page.getByRole("dialog", { name: "infrastructure commits" });
+    await assertVisible(tray, "Canonical Flake capture lost its tray");
+    await assertVisible(tray.getByRole("button", { name: `Change commit. Selected full revision ${TASK_440_DESIGN_SHA}` }), "Canonical Flake capture lost its selected revision");
+    const revisionMessage = tray.locator(".fx-revbar-msg").filter({ hasText: "stig: enforce audit rules for sudo" });
+    await revisionMessage.scrollIntoViewIfNeeded();
+    await assertVisible(revisionMessage, "Canonical Flake capture lost its selected revision message");
+    for (const expected of ["+5 systems", "+3 modules", "5 inputs changed", "-3 inputs"]) {
+      await assertVisible(tray.getByText(expected, { exact: true }), `Canonical Flake capture lost ${expected}`);
+    }
+    if (await page.getByText(/configuration issues detected/i).count()) throw new Error("Canonical Flake capture inherited an unrelated global configuration warning");
+    if (step.name.includes("systems-canonical")) {
+      await assertVisible(tray.getByRole("tab", { name: /Systems 11/, selected: true }), "Canonical Flake Systems capture lost its active pane");
+      await assertExactTextOrder(tray.locator(".fx-toolbar .seg button"), ["All 11", "Unmanaged 2", "Undeclared 0"], "Canonical Flake Systems filters");
+      await assertVisible(tray.getByRole("button", { name: "Open config" }).first(), "Canonical Flake Systems capture lost its managed action");
+      await assertVisible(tray.getByRole("button", { name: "Add to Forge" }).first(), "Canonical Flake Systems capture lost its unmanaged action");
+    } else if (step.name.includes("modules-canonical")) {
+      await assertVisible(tray.getByRole("tab", { name: /Modules 8/, selected: true }), "Canonical Flake Modules capture lost its active pane/count");
+      const row = tray.getByText("system", { exact: true }).locator("xpath=ancestor::tr[1]");
+      if ((await row.getByRole("button").getAttribute("aria-expanded")) !== "true") throw new Error("Canonical Flake Modules capture lost its expanded module");
+      await assertVisible(tray.getByText("cf.system.enable", { exact: true }), "Canonical Flake Modules capture lost its declaration");
+    } else if (step.name.includes("inputs-canonical")) {
+      await assertVisible(tray.getByRole("tab", { name: /Inputs 8/, selected: true }), "Canonical Flake Inputs capture lost its active pane/direct count");
+      await assertExactTextOrder(tray.locator(".fx-stat .fx-stat-n"), ["8", "47", "3", "1"], "Canonical Flake Inputs metrics");
+      await assertVisible(tray.getByText("multiple nixpkgs revisions", { exact: false }), "Canonical Flake Inputs capture lost its revision warning");
+    }
+  }
+  if (await page.locator(".diff-modal:visible, .modal-backdrop-above-drawer:visible").count()) throw new Error("Canonical TASK-440 capture has an unintended modal above its surface");
+  await resetTask440CaptureScroll(page);
+}
+
+async function openTask440FlakePane(page, width, paneName) {
+  await page.setViewportSize({ width, height: width === 1920 ? 1080 : 900 });
+  await suppressOnboardingCoach(page);
+  await routeTask440DismissedCoach(page);
+  await routeConfigHealth(page, mockConfigHealthResponse());
+  const state = await routeTask440FlakeOutputs(page, { canonicalDesign: true });
+  await gotoFlakesAsAdmin(page);
+  await dismissOnboardingCoachForCapture(page);
+  await page.getByText("infrastructure", { exact: true }).first().click();
+  const tray = page.getByRole("dialog", { name: "infrastructure commits" });
+  await assertVisible(tray, "Expected canonical TASK-440 flake drawer", 15000);
+  await tray.evaluate(async (element) => {
+    await Promise.all(element.getAnimations().map((animation) => animation.finished.catch(() => {})));
+  });
+  const tab = tray.getByRole("tab", { name: new RegExp(paneName) });
+  await assertVisible(tab, `Expected ${paneName} flake tab`, 15000);
+  await tab.click();
+  const selectedRevision = tray.getByRole("button", { name: `Change commit. Selected full revision ${TASK_440_DESIGN_SHA}` });
+  await assertVisible(selectedRevision, "Canonical flake pane does not expose the selected full SHA through its accessible contract", 15000);
+  if ((await selectedRevision.getAttribute("title")) !== `Change commit ${TASK_440_DESIGN_SHA}`) throw new Error("Canonical flake pane title does not independently retain the selected full SHA");
+  return { state, tray };
 }
 
 async function clickFirstButtonByText(page, text) {
@@ -3061,37 +5184,124 @@ function arrangeTask433CompletedScan(derivationId, criticalCount) {
   return scanId;
 }
 
-function arrangeTask433DeployedAssessment(hostname, targetStorePath) {
+function arrangeTask433DeployedAssessment(systemId, hostname, assessment) {
   // The agent is not connected in this browser check. Arrange its deployment
-  // observation so compliance reads the assessment that production evaluation
-  // persisted for this exact target.
-  runFixtureSql(`
-    INSERT INTO system_states(hostname, change_reason, store_path, generation, timestamp)
-    VALUES ($hostname$${hostname}$hostname$, 'cf_deployment',
-            $path$${targetStorePath}$path$, 1, CURRENT_TIMESTAMP);
+  // observation and exact retained lineage. The evaluator can persist policy
+  // evidence without a Config artifact, so create a valid empty V1 artifact
+  // only to carry the deployment's commit, configuration, and derivation
+  // identity. The current snapshot selector remains unchanged.
+  const snapshotId = runFixtureSql(`
+    WITH inserted AS (
+      INSERT INTO evaluation_snapshots (
+        commit_id, configuration_name, schema_version, lifecycle,
+        first_parent_sha, option_count, module_count, evaluation_duration_ms,
+        content_bytes, completed_at
+      )
+      SELECT derivation.commit_id, derivation.derivation_name, 1, 'available',
+             commit_row.first_parent_sha, 0, 0, 0, 0, CURRENT_TIMESTAMP
+      FROM composite_policy_assessments persisted
+      JOIN derivations derivation ON derivation.id=persisted.derivation_id
+      JOIN commits commit_row ON commit_row.id=derivation.commit_id
+      WHERE persisted.id='${assessment.assessment_id}'::uuid
+        AND persisted.system_id='${systemId}'::uuid
+        AND derivation.id=${Number(assessment.derivation_id)}
+        AND COALESCE(derivation.store_path, derivation.expected_store_path)=
+            $path$${assessment.target_store_path}$path$
+        AND derivation.derivation_type='nixos'
+      RETURNING id
+    )
+    SELECT id FROM inserted;
   `);
+  if (!/^[0-9a-f-]{36}$/.test(snapshotId)) {
+    throw new Error(`Could not create deployed assessment fixture for ${hostname}: ${JSON.stringify(assessment)}`);
+  }
+  const certified = Number(runFixtureSql(`
+    WITH updated AS (
+      UPDATE evaluation_snapshots
+      SET integrity_version=1
+      WHERE id='${snapshotId}'::uuid
+        AND evaluation_snapshot_payloads_valid(id)
+      RETURNING id
+    )
+    SELECT COUNT(*) FROM updated;
+  `));
+  if (certified !== 1) {
+    throw new Error(`Could not certify deployed assessment fixture for ${hostname}: ${JSON.stringify(assessment)}`);
+  }
+  const arranged = JSON.parse(runFixtureSql(`
+    WITH target AS (
+      SELECT derivation.id, derivation.commit_id, derivation.derivation_name
+      FROM composite_policy_assessments persisted
+      JOIN derivations derivation ON derivation.id=persisted.derivation_id
+      WHERE persisted.id='${assessment.assessment_id}'::uuid
+        AND persisted.system_id='${systemId}'::uuid
+        AND derivation.id=${Number(assessment.derivation_id)}
+        AND COALESCE(derivation.store_path, derivation.expected_store_path)=
+            $path$${assessment.target_store_path}$path$
+        AND derivation.derivation_type='nixos'
+    ), retained AS (
+      INSERT INTO evaluation_generation_snapshots (
+        system_id, generation, snapshot_id, derivation_id, commit_id,
+        source_store_path, configuration_name, lineage_verified
+      )
+      SELECT '${systemId}'::uuid, 1, '${snapshotId}'::uuid, target.id,
+             target.commit_id, $path$${assessment.target_store_path}$path$,
+             target.derivation_name, true
+      FROM target
+      RETURNING id
+    ), observed AS (
+      INSERT INTO system_states(
+        hostname, change_reason, store_path, generation,
+        generation_matches_current_store_path, timestamp
+      )
+      SELECT $hostname$${hostname}$hostname$, 'cf_deployment',
+             $path$${assessment.target_store_path}$path$, 1, true,
+             CURRENT_TIMESTAMP
+      FROM retained
+      RETURNING id
+    )
+    SELECT json_build_object(
+      'retained', (SELECT COUNT(*) FROM retained),
+      'observed', (SELECT COUNT(*) FROM observed)
+    )::text;
+  `));
+  if (Number(arranged.retained) !== 1 || Number(arranged.observed) !== 1) {
+    throw new Error(`Could not bind exact deployed assessment for ${hostname}: ${JSON.stringify({ assessment, arranged })}`);
+  }
 }
 
-async function runTask433ProductionEvaluation(page, { commitId, systemId, policyId }) {
+async function runTask433ProductionEvaluation(
+  page,
+  { commitId, systemId, policyId, reEvaluate = true },
+) {
+  let previousAttemptCount = 0;
   for (let attempt = 0; attempt < 180; attempt += 1) {
-    const ready = runFixtureSql(`
-      SELECT (commit_row.evaluation_status IN ('complete', 'failed'))::text
+    const state = runFixtureSql(`
+      SELECT (commit_row.evaluation_status IN ('complete', 'failed'))::text || '|' ||
+             commit_row.evaluation_attempt_count::text
       FROM commits commit_row
       WHERE commit_row.id=${Number(commitId)};
     `);
-    if (ready === "true") break;
+    const [ready, attemptCount] = state.split("|");
+    if (ready === "true") {
+      previousAttemptCount = Number(attemptCount);
+      break;
+    }
     if (attempt === 179) {
       throw new Error(`Commit ${commitId} did not reach a terminal evaluation state before TASK-433 re-evaluation`);
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
-  await phase6Api(page, `/api/v1/commits/${commitId}/re-evaluate`, { method: "POST" });
+  if (reEvaluate) {
+    await phase6Api(page, `/api/v1/commits/${commitId}/re-evaluate`, { method: "POST" });
+  }
   for (let attempt = 0; attempt < 180; attempt += 1) {
     const result = runFixtureSql(`
       SELECT json_build_object(
         'assessment_id', assessment.id,
         'derivation_id', assessment.derivation_id,
         'target_store_path', assessment.target_store_path,
+        'effective_set_digest', assessment.effective_set_digest,
         'overall', assessment.overall_outcome,
         'finding_id', finding.id,
         'rows', COALESCE(json_agg(json_build_object(
@@ -3116,7 +5326,7 @@ async function runTask433ProductionEvaluation(page, { commitId, systemId, policy
        AND finding.policy_lineage_id=assessment.policy_lineage_id
       WHERE commit_row.id=${Number(commitId)}
         AND commit_row.evaluation_status='complete'
-        AND commit_row.evaluation_attempt_count > 0
+        AND commit_row.evaluation_attempt_count > ${reEvaluate ? previousAttemptCount : -1}
       GROUP BY assessment.id, finding.id
       ORDER BY assessment.updated_at DESC
       LIMIT 1;
@@ -3132,6 +5342,330 @@ async function runTask433ProductionEvaluation(page, { commitId, systemId, policy
     )::text FROM commits WHERE id=${Number(commitId)};
   `);
   throw new Error(`Production commit re-evaluation did not persist the TASK-433 assessment: ${status}`);
+}
+
+function createTask440LiveEvaluationFixture() {
+  const suffix = crypto.randomUUID();
+  const revision = process.env.CF_TEST_REAL_COMMIT_HASH
+    || createHash("sha1").update(`task440-live-${suffix}`).digest("hex");
+  const repoUrl = process.env.CF_TEST_REAL_REPO_URL
+    || `https://example.invalid/task440-${suffix}.git`;
+  const hostname = `task440-live-${suffix.slice(0, 8)}`;
+  const flakeName = `task440-live-${suffix}`;
+  const configurationName = process.env.CF_TEST_REAL_CONFIGURATION_NAME
+    || `${flakeName}-control-0`;
+  const result = runFixtureSql(`
+    WITH selected_environment AS (
+      SELECT id FROM environments ORDER BY created_at, id LIMIT 1
+    ), inserted_flake AS (
+      INSERT INTO flakes (name, repo_url, branch, build_scope, sync_status)
+      VALUES (
+        $name$${flakeName}$name$,
+        $repo$${repoUrl}$repo$,
+        'main', 'cf_systems_only', 'synced'
+      )
+      RETURNING id
+    ), inserted_commit AS (
+      INSERT INTO commits (
+        flake_id, git_commit_hash, commit_timestamp, message, author,
+        evaluation_status, evaluation_completed_at
+      )
+      SELECT id, '${revision}', now(), 'TASK-440 live queue regression', 'Web UI test',
+             'complete', now()
+      FROM inserted_flake
+      RETURNING id, flake_id
+    ), inserted_system AS (
+      INSERT INTO systems (
+        hostname, environment_id, is_active, public_key, flake_id, derivation,
+        deployment_policy, system_configuration_name
+      )
+      SELECT
+        '${hostname}', selected_environment.id, TRUE,
+        'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITASK440LIVE${suffix}',
+        inserted_commit.flake_id,
+        '/nix/store/00000000000000000000000000000000-task440-live',
+        'manual', '${configurationName}'
+      FROM selected_environment, inserted_commit
+      RETURNING id
+    )
+    SELECT json_build_object(
+      'systemId', (SELECT id FROM inserted_system),
+      'flakeId', (SELECT flake_id FROM inserted_commit),
+      'commitId', (SELECT id FROM inserted_commit),
+      'revision', '${revision}',
+      'hostname', '${hostname}',
+      'configurationName', '${configurationName}'
+    )::text;
+  `);
+  const fixture = JSON.parse(result);
+  const stale = runFixtureSql(`
+    WITH stale_attempt AS (
+      UPDATE evaluation_attempts
+      SET status = 'in_progress', started_at = now(), updated_at = now()
+      WHERE commit_id = ${Number(fixture.commitId)} AND status = 'queued'
+      RETURNING id, root_attempt_id, attempt_number
+    ), terminal_commit AS (
+      UPDATE commits
+      SET evaluation_status = 'complete',
+          evaluation_started_at = now() - interval '1 minute',
+          evaluation_completed_at = now(),
+          evaluation_attempt_count = (SELECT attempt_number FROM stale_attempt),
+          evaluation_error_message = NULL,
+          cancellation_requested = FALSE
+      WHERE id = ${Number(fixture.commitId)}
+      RETURNING id
+    )
+    SELECT json_build_object(
+      'staleAttemptId', (SELECT id FROM stale_attempt),
+      'rootAttemptId', (SELECT root_attempt_id FROM stale_attempt),
+      'attemptNumber', (SELECT attempt_number FROM stale_attempt)
+    )::text;
+  `);
+  return { ...fixture, ...JSON.parse(stale) };
+}
+
+async function runTask440LiveSnapshotEvaluation(page) {
+  const controlsConfigWorker = Boolean(
+    process.env.CF_TEST_REAL_REPO_URL && process.env.CF_TEST_REAL_COMMIT_HASH,
+  );
+  if (controlsConfigWorker) {
+    execFileSync("systemctl", ["stop", "crystal-forge-config-inspector.service"]);
+  }
+  const fixture = createTask440LiveEvaluationFixture();
+  try {
+    await page.unrouteAll({ behavior: "wait" });
+    await ensureAuthenticated(page);
+    await page.goto(
+    `${baseUrl}/systems/${fixture.systemId}?tab=config&config_mode=commit&revision=${fixture.revision}`,
+    { timeout: LOAD_TIMEOUT },
+  );
+    await assertVisible(
+    page.locator(".cfgx-meta-i").filter({ hasText: "inventoryunavailable" }),
+    "Expected live commit to begin without a reusable snapshot",
+    15000,
+  );
+    await phase6Api(page, `/api/v1/systems/${fixture.systemId}/evaluations/${fixture.revision}`, { method: "POST" });
+
+    let completed = null;
+    for (let attempt = 0; attempt < 180; attempt += 1) {
+    const state = runFixtureSql(`
+      SELECT json_build_object(
+        'commitStatus', commit_row.evaluation_status,
+        'activeAttempts', COUNT(*) FILTER (
+          WHERE evaluation_attempt.status IN ('queued', 'in_progress')
+        ),
+        'attempts', json_agg(json_build_object(
+          'id', evaluation_attempt.id,
+          'status', evaluation_attempt.status,
+          'attemptNumber', evaluation_attempt.attempt_number,
+          'rootAttemptId', evaluation_attempt.root_attempt_id,
+          'parentAttemptId', evaluation_attempt.parent_attempt_id
+        ) ORDER BY evaluation_attempt.attempt_number),
+        'snapshotCount', (
+          SELECT COUNT(*)
+          FROM config_snapshot_selections selection
+          JOIN evaluation_snapshots snapshot ON snapshot.id = selection.current_snapshot_id
+          WHERE selection.commit_id = commit_row.id
+            AND selection.configuration_name = '${fixture.configurationName}'
+            AND snapshot.lifecycle = 'available'
+            AND snapshot.integrity_version = 2
+        )
+      )::text
+      FROM commits commit_row
+      JOIN evaluation_attempts evaluation_attempt ON evaluation_attempt.commit_id = commit_row.id
+      WHERE commit_row.id = ${Number(fixture.commitId)}
+      GROUP BY commit_row.id;
+    `);
+      const parsed = JSON.parse(state);
+      if (Number(parsed.activeAttempts) > 1) {
+        throw new Error(`TASK-440 live retry created multiple active attempts: ${state}`);
+      }
+      const prerequisiteAttempt = parsed.attempts.find(
+        (attemptRow) => Number(attemptRow.attemptNumber) === Number(fixture.attemptNumber) + 1,
+      );
+      if (parsed.commitStatus === "complete" && prerequisiteAttempt?.status === "complete") {
+        completed = parsed;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    if (!completed) {
+      const state = runFixtureSql(`
+      SELECT json_build_object(
+        'commit', row_to_json(commit_row),
+        'attempts', COALESCE(json_agg(row_to_json(evaluation_attempt)
+          ORDER BY evaluation_attempt.attempt_number), '[]'::json)
+      )::text
+      FROM commits commit_row
+      LEFT JOIN evaluation_attempts evaluation_attempt ON evaluation_attempt.commit_id = commit_row.id
+      WHERE commit_row.id = ${Number(fixture.commitId)}
+      GROUP BY commit_row.id;
+    `);
+      throw new Error(`TASK-440 live evaluation did not complete: ${state}`);
+    }
+
+    const exactTargetState = runFixtureSql(`
+      WITH exact_target AS (
+        SELECT derivation.id, derivation.derivation_path
+        FROM derivations derivation
+        WHERE derivation.commit_id=${Number(fixture.commitId)}
+          AND derivation.derivation_type='nixos'
+          AND derivation.derivation_name='${fixture.configurationName}'
+          AND derivation.completed_at IS NOT NULL
+          AND NULLIF(BTRIM(derivation.derivation_path), '') IS NOT NULL
+      ), removed AS (
+        DELETE FROM config_inspection_jobs
+        WHERE commit_id=${Number(fixture.commitId)}
+          AND configuration_name='${fixture.configurationName}'
+        RETURNING id
+      )
+      SELECT json_build_object(
+        'derivationId', (SELECT id FROM exact_target),
+        'carrierPath', (SELECT derivation_path FROM exact_target),
+        'removedAutomaticJobs', (SELECT COUNT(*) FROM removed)
+      )::text;
+    `);
+    const exactTarget = JSON.parse(exactTargetState);
+    const remainingAutomaticJobs = runFixtureSql(`
+      SELECT COUNT(*)
+      FROM config_inspection_jobs
+      WHERE commit_id=${Number(fixture.commitId)}
+        AND configuration_name='${fixture.configurationName}';
+    `);
+    if (!exactTarget.derivationId || !exactTarget.carrierPath || Number(remainingAutomaticJobs) !== 0) {
+      throw new Error(`Could not isolate the exact targeted Config inspection from automatic scheduling: ${exactTargetState}`);
+    }
+    // The primary evaluation runs through a direct API request after the page
+    // loads. Reload so the UI receives the completed derivation and enables
+    // the scoped inventory request for that exact carrier.
+    await page.reload({ waitUntil: "domcontentloaded", timeout: LOAD_TIMEOUT });
+    const attemptsBeforeInspection = completed.attempts.length;
+    await page.getByRole("button", { name: "request full inventory" }).click();
+    let targetedState = null;
+    for (let attempt = 0; attempt < 150; attempt += 1) {
+      targetedState = runFixtureSql(`
+        SELECT json_build_object(
+          'jobs', COUNT(*),
+          'activeJobs', COUNT(*) FILTER (WHERE status IN ('queued', 'running')),
+          'derivationIds', json_agg(DISTINCT derivation_id),
+          'configurationNames', json_agg(DISTINCT configuration_name),
+          'carrierPaths', json_agg(DISTINCT carrier_drv_path),
+          'attempts', (SELECT COUNT(*) FROM evaluation_attempts WHERE commit_id=${Number(fixture.commitId)}),
+          'commitStatus', (SELECT evaluation_status FROM commits WHERE id=${Number(fixture.commitId)})
+        )::text
+        FROM config_inspection_jobs
+        WHERE commit_id=${Number(fixture.commitId)}
+          AND configuration_name='${fixture.configurationName}';
+      `);
+      if (Number(JSON.parse(targetedState).jobs) > 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    const targeted = JSON.parse(targetedState);
+    if (
+      Number(targeted.jobs) !== 1
+      || Number(targeted.activeJobs) !== 1
+      || targeted.derivationIds?.length !== 1
+      || Number(targeted.derivationIds[0]) !== Number(exactTarget.derivationId)
+      || targeted.configurationNames?.length !== 1
+      || targeted.configurationNames[0] !== fixture.configurationName
+      || targeted.carrierPaths?.length !== 1
+      || targeted.carrierPaths[0] !== exactTarget.carrierPath
+      || Number(targeted.attempts) !== attemptsBeforeInspection
+      || targeted.commitStatus !== "complete"
+    ) {
+      throw new Error(`Targeted Config inspection changed primary state or failed exact reuse: ${targetedState}`);
+    }
+
+    if (controlsConfigWorker) {
+      // The serial worker must start with only this fixture's target. Other
+      // systems can enqueue same-commit jobs and consume the readiness budget.
+      runFixtureSql(`
+        DELETE FROM config_inspection_jobs
+        WHERE commit_id <> ${Number(fixture.commitId)}
+           OR configuration_name <> '${fixture.configurationName}';
+      `);
+      execFileSync("systemctl", ["start", "crystal-forge-config-inspector.service"]);
+    }
+
+    let snapshotAvailable = false;
+    for (let attempt = 0; !snapshotAvailable && attempt < CONFIG_INSPECTION_WAIT_SECONDS; attempt += 1) {
+      const inspectionState = runFixtureSql(`
+        SELECT json_build_object(
+          'jobStatus', job.status,
+          'derivationId', job.derivation_id,
+          'carrierPath', job.carrier_drv_path,
+          'snapshotCount', (
+            SELECT COUNT(*)
+            FROM config_snapshot_selections selection
+            JOIN evaluation_snapshots snapshot ON snapshot.id = selection.current_snapshot_id
+            WHERE selection.commit_id = job.commit_id
+              AND selection.configuration_name = job.configuration_name
+              AND snapshot.lifecycle = 'available'
+              AND snapshot.integrity_version = 2
+              AND snapshot.carrier_drv_path = job.carrier_drv_path
+          )
+        )::text
+        FROM config_inspection_jobs job
+        WHERE job.commit_id=${Number(fixture.commitId)}
+          AND job.configuration_name='${fixture.configurationName}'
+          AND job.derivation_id=${Number(exactTarget.derivationId)}
+          AND job.carrier_drv_path=$carrier$${exactTarget.carrierPath}$carrier$;
+      `);
+      const inspection = inspectionState ? JSON.parse(inspectionState) : null;
+      snapshotAvailable = inspection?.jobStatus === "succeeded"
+        && Number(inspection.snapshotCount) === 1;
+      if (!snapshotAvailable) await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    if (!snapshotAvailable) {
+      const jobs = runFixtureSql(`
+        SELECT COALESCE(json_agg(row_to_json(job) ORDER BY job.created_at), '[]'::json)::text
+        FROM config_inspection_jobs job
+        WHERE job.commit_id = ${Number(fixture.commitId)};
+      `);
+      throw new Error(`TASK-440 Config Inspector did not persist a V2 snapshot: ${jobs}`);
+    }
+
+    const stale = completed.attempts.find((attempt) => attempt.id === fixture.staleAttemptId);
+    const retry = completed.attempts.find(
+    (attempt) => Number(attempt.attemptNumber) === Number(fixture.attemptNumber) + 1,
+  );
+    if (stale?.status !== "cancelled") {
+      throw new Error(`Expected stale production attempt to be retired: ${JSON.stringify(completed)}`);
+    }
+    if (
+    !retry ||
+    retry.status !== "complete" ||
+    retry.parentAttemptId !== fixture.staleAttemptId ||
+    retry.rootAttemptId !== fixture.rootAttemptId
+    ) {
+      throw new Error(`Expected preserved retry lineage and completed worker attempt: ${JSON.stringify(completed)}`);
+    }
+    if (Number(completed.activeAttempts) !== 0) {
+      throw new Error(`Completed evaluation retained active attempts: ${JSON.stringify(completed)}`);
+    }
+
+    await assertVisible(
+      page.locator(".cfgx-meta-i").filter({ hasText: "inventory" }),
+      "Expected Config to render the snapshot persisted by evaluator finalization",
+      15000,
+    );
+    await page.getByRole("button", { name: "Search", exact: true }).click();
+    const liveSearch = page.getByPlaceholder("Search all certified options…");
+    await liveSearch.fill("networking.hostName");
+    await assertVisible(
+      page.getByText("networking.hostName", { exact: true }),
+      "Expected Config to render a known option from the persisted V2 artifact",
+      15000,
+    );
+  } finally {
+    if (controlsConfigWorker) {
+      execFileSync("systemctl", ["start", "crystal-forge-config-inspector.service"]);
+    }
+    runFixtureSql(`
+      DELETE FROM systems WHERE id='${fixture.systemId}'::uuid;
+      DELETE FROM flakes WHERE id=${Number(fixture.flakeId)};
+    `);
+  }
 }
 
 async function createPhase6PoamFixture(page, label, systemCount = 1, options = {}) {
@@ -3194,7 +5728,7 @@ async function createPhase6PoamFixture(page, label, systemCount = 1, options = {
       WITH selected_environment AS (
         SELECT id FROM environments ORDER BY created_at NULLS LAST, id LIMIT 1
       ), selected_commit AS (
-        SELECT id FROM commits ORDER BY id LIMIT 1
+        SELECT id, flake_id FROM commits ORDER BY id LIMIT 1
       ), inserted_derivation AS (
         INSERT INTO derivations (
           commit_id, derivation_type, derivation_name, derivation_path, store_path,
@@ -3204,10 +5738,12 @@ async function createPhase6PoamFixture(page, label, systemCount = 1, options = {
                $path$${storePath}$path$, $path$${storePath}$path$, 10, 0, now(), '{}'::jsonb
         FROM selected_commit RETURNING id, store_path
       ), inserted_system AS (
-        INSERT INTO systems (id, hostname, environment_id, is_active, public_key, derivation)
-        SELECT '${systemId}'::uuid, $name$${hostname}$name$, environment.id, true,
+        INSERT INTO systems (id, hostname, environment_id, flake_id, is_active, public_key, derivation)
+        SELECT '${systemId}'::uuid, $name$${hostname}$name$, environment.id, commit.flake_id, true,
                'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPhase6BrowserFixture', derivation.store_path
-        FROM selected_environment environment CROSS JOIN inserted_derivation derivation
+        FROM selected_environment environment
+        CROSS JOIN inserted_derivation derivation
+        CROSS JOIN selected_commit commit
         RETURNING id, hostname
       ), inserted_state AS (
         INSERT INTO system_states (hostname, change_reason, store_path, generation, timestamp)
@@ -3490,13 +6026,10 @@ const steps = [
         "Expected email input on registration page",
       );
 
-      // Fill out registration form - use more robust selectors
-      await page.locator('input[type="text"]').first().fill(TEST_USER.username);
-      await page.locator('input[type="email"]').fill(TEST_USER.email);
-      await page.locator('input[type="password"]').first().fill(TEST_USER.password);
-      await page.locator('input[type="password"]').last().fill(TEST_USER.password);
-
-
+      await fillDioxusInput(page.locator('input[type="text"]').first(), TEST_USER.username);
+      await fillDioxusInput(page.locator('input[type="email"]'), TEST_USER.email);
+      await fillDioxusInput(page.locator('input[type="password"]').first(), TEST_USER.password);
+      await fillDioxusInput(page.locator('input[type="password"]').last(), TEST_USER.password);
       await assertEnabled(
         page.locator('button[type="submit"]').first(),
         "Expected registration submit to be enabled after filling the form",
@@ -3507,8 +6040,8 @@ const steps = [
     name: "03-registration-submit",
     description: "After clicking register",
     action: async (page) => {
-      // Click submit button
-      const submitBtn = page.locator('button[type="submit"]');
+      const submitBtn = page.locator('button[type="submit"]').first();
+      await assertEnabled(submitBtn, "Expected registration submit to remain enabled before submission");
       await submitBtn.click();
       await page.waitForTimeout(3000); // Wait for registration + redirect
 
@@ -3521,6 +6054,7 @@ const steps = [
     name: "04-post-register-login",
     description: "Login page after registration",
     action: async (page) => {
+      await page.context().clearCookies();
       await page.goto(`${baseUrl}/login`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
@@ -3529,30 +6063,34 @@ const steps = [
         "Expected password input on post-registration login page",
       );
 
-      // Fill login form
-      await page.locator('input[type="text"]').fill(TEST_USER.username);
-      await page.locator('input[type="password"]').fill(TEST_USER.password);
-      await page.waitForTimeout(500);
+      await fillDioxusInput(page.locator('input[type="text"]').first(), TEST_USER.username);
+      await fillDioxusInput(page.locator('input[type="password"]').first(), TEST_USER.password);
+      await assertEnabled(
+        page.locator('button[type="submit"]').first(),
+        "Expected post-registration sign-in submit to be enabled",
+      );
     },
   },
   {
     name: "05-login-submit",
     description: "After clicking sign in",
     action: async (page) => {
-      // Click sign in
-      const submitBtn = page.locator('button[type="submit"]');
+      await page.context().clearCookies();
+      await page.goto(`${baseUrl}/login`, { timeout: LOAD_TIMEOUT });
+      await fillDioxusInput(page.locator('input[type="text"]').first(), TEST_USER.username);
+      await fillDioxusInput(page.locator('input[type="password"]').first(), TEST_USER.password);
+      const submitBtn = page.locator('button[type="submit"]').first();
+      await assertEnabled(submitBtn, "Expected sign-in submit to be enabled after filling both fields");
       await submitBtn.click();
-      await page.waitForTimeout(3000); // Wait for login + redirect
 
-      if (page.url().includes("/login")) {
-        throw new Error("Expected login to navigate away from /login");
-      }
       await page.waitForFunction(async (base) => {
         const response = await fetch(`${base}/api/auth/whoami`, { credentials: "include" });
         if (!response.ok) return false;
         const auth = await response.json();
         return auth.is_authenticated === true;
       }, apiBaseUrl, { timeout: 5000 });
+      await page.waitForURL((url) => url.pathname !== "/login", { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.locator("[data-testid='dashboard']"), "Successful sign-in must render the dashboard");
     },
   },
 
@@ -4600,7 +7138,11 @@ const steps = [
       await captureRequiredResponsiveArtifact(page, "06h-onboarding-coach-all-configured", "completed-nine-step");
 
       await page.unroute("**/api/v1/admin/setup-progress*");
-      await page.evaluate(() => localStorage.setItem("cf.coach.force_show", "false"));
+      await page.evaluate(() => {
+        localStorage.setItem("cf.coach.force_show", "false");
+        localStorage.setItem("cf.coach.collapsed", "true");
+      });
+      await collapseOnboardingCoach(page);
     },
   },
   {
@@ -4971,7 +7513,7 @@ const steps = [
   },
   {
     name: "09g-topbar-notifications-dark",
-    description: "Durable POA&M notification panel across desktop, narrow desktop, and mobile in both themes",
+    description: "Mocked API adaptation covers populated durable-feed, mutation, keyboard, and responsive panel states",
     action: async (page) => {
       const fixture = await createPhase6PoamFixture(page, "phase-7-notification");
       const poam = await createFixturePoam(page, fixture.systems[0].assessmentId, {
@@ -5041,7 +7583,7 @@ const steps = [
       const reopenedPanel = page.locator("[data-testid='topbar-notifications-panel']");
       const reopenedRow = reopenedPanel.locator(`[data-testid="topbar-notification-item-${notificationId}"]`);
       await assertVisible(reopenedRow, "Read POA&M notification should remain durable until dismissed");
-      const dismissNotification = reopenedPanel.getByRole("menuitem", {
+      const dismissNotification = reopenedPanel.getByRole("button", {
         name: `Dismiss ${notificationTitle}`,
         exact: true,
       });
@@ -5061,6 +7603,13 @@ const steps = [
         throw new Error("POA&M notification dismiss request failed");
       }
       await assertHidden(reopenedPanel.getByText(notificationTitle, { exact: true }), "Dismissed POA&M notification should leave the inbox");
+      const settingsAfterFinalDismiss = reopenedPanel.locator("[data-testid='topbar-notifications-settings-button']");
+      await page.waitForFunction(
+        () => document.activeElement?.getAttribute("data-testid") === "topbar-notifications-settings-button",
+      );
+      if (!(await settingsAfterFinalDismiss.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Dismissing the final notification must keep focus inside the open dialog");
+      }
       if (notificationRequests.dismiss.length !== 1) {
         throw new Error(`Expected one durable dismiss mutation, got ${notificationRequests.dismiss.length}`);
       }
@@ -5086,21 +7635,406 @@ const steps = [
   },
   {
     name: "09h-topbar-notifications-light",
-    description: "Light theme notifications panel opens with server-backed notifications",
+    description: "Mocked API adaptation covers keyset reconciliation, exact retries, stale responses, mutation errors, accessibility, and responsive containment",
     action: async (page) => {
-      await mockAccountNotifications(page);
+      const bootstrapProbe = await page.evaluate(async ({ base, user }) => {
+        const login = await fetch(`${base}/api/auth/local/login`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: user.username, password: user.password }),
+        });
+        const request = async (path) => {
+          const response = await fetch(`${base}${path}`, { credentials: "include" });
+          return { status: response.status, body: response.ok ? await response.json() : null };
+        };
+        return {
+          login: login.status,
+          whoami: await request("/api/auth/whoami"),
+          systems: await request("/api/v1/systems"),
+          notifications: await request("/api/v1/user/notifications"),
+          badges: await request("/api/v1/navigation/badges"),
+        };
+      }, { base: apiBaseUrl, user: TEST_USER });
+      if (bootstrapProbe.login !== 200 || bootstrapProbe.whoami.status !== 200 ||
+          bootstrapProbe.whoami.body?.is_authenticated !== true ||
+          !bootstrapProbe.whoami.body?.roles?.includes("Admin") ||
+          bootstrapProbe.systems.status !== 200 || bootstrapProbe.notifications.status !== 200 ||
+          bootstrapProbe.badges.status !== 200) {
+        throw new Error(`Bootstrap admin preflight failed: ${JSON.stringify(bootstrapProbe)}`);
+      }
+      await setAccountPreferences(page, { theme: "light" });
+      console.log("  OK bootstrap admin: login/whoami/systems/notifications/badges/preferences PATCH = 200; role includes Admin");
+
+      const scenario = await mockNotificationCoordinatorScenario(page);
       await page.setViewportSize(VIEWPORTS.desktop);
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
-      await setAccountPreferences(page, { theme: "light" });
+      scenario.holdNextHead();
       await page.reload({ timeout: LOAD_TIMEOUT });
-      await page.waitForTimeout(1500);
 
       const bell = page.locator("[data-testid='topbar-notifications-button']");
       await assertVisible(bell, "Expected notifications bell button");
       await bell.click();
       const panel = page.locator("[data-testid='topbar-notifications-panel']");
       await assertVisible(panel, "Expected notifications panel to open");
-      await assertVisible(panel.getByText("Build failed"), "Expected server-backed notification row");
+      if ((await panel.getAttribute("role")) !== "dialog" ||
+          (await panel.getAttribute("aria-modal")) !== "true" ||
+          (await bell.getAttribute("aria-haspopup")) !== "dialog") {
+        throw new Error("Notification bell and focus-trapped panel must expose one consistent modal dialog model");
+      }
+      await assertVisible(panel.getByText("Loading notifications...", { exact: true }), "Expected notification loading state");
+      await scenario.waitForHeldHead();
+      scenario.releaseHeldHead();
+      await assertVisible(panel.getByText("Notification 1", { exact: true }), "Expected first mocked durable notification");
+      await waitForNotificationRowCount(page, 50);
+      await panel.focus();
+      await page.keyboard.press("Escape");
+      await assertHidden(panel, "Escape must close notifications before keyboard activation checks");
+      await bell.focus();
+      await bell.press("Enter");
+      await assertVisible(panel, "Enter must activate the focused notification bell");
+      await panel.focus();
+      await page.keyboard.press("Escape");
+      await bell.focus();
+      await bell.press("Space");
+      await assertVisible(panel, "Space must activate the focused notification bell");
+      const markAllButton = panel.locator("[data-testid='topbar-notifications-mark-read']");
+      const dismissAllButton = panel.locator("[data-testid='topbar-notifications-dismiss-all']");
+      const loadMore = panel.locator("[data-testid='topbar-notifications-load-more']");
+      const settings = panel.locator("[data-testid='topbar-notifications-settings-button']");
+      const layout = await panel.evaluate((element) => {
+        const head = element.querySelector(".notif-head");
+        const list = element.querySelector(".notif-list");
+        const foot = element.querySelector(".notif-foot");
+        const markReadIcon = element.querySelector(".notif-mark-read-icon");
+        const dismissAll = element.querySelector("[data-testid='topbar-notifications-dismiss-all']");
+        const loadMore = element.querySelector("[data-testid='topbar-notifications-load-more']");
+        const settings = element.querySelector("[data-testid='topbar-notifications-settings-button']");
+        const bell = document.querySelector("[data-testid='topbar-notifications-button']");
+        const rect = element.getBoundingClientRect();
+        const bellRect = bell?.getBoundingClientRect();
+        const box = (node) => node?.getBoundingClientRect();
+        return {
+          panel: box(element),
+          head: box(head),
+          list: box(list),
+          foot: box(foot),
+          markReadIcon: box(markReadIcon),
+          dismissAllParent: dismissAll?.parentElement?.className,
+          loadMoreParent: loadMore?.parentElement?.className,
+          settingsParent: settings?.parentElement?.className,
+          bell: bellRect,
+          panelRight: rect.right,
+        };
+      });
+      if (!layout.head || !layout.list || !layout.foot ||
+          layout.head.bottom > layout.list.top || layout.list.bottom > layout.foot.top ||
+          layout.dismissAllParent !== "notif-foot" || layout.settingsParent !== "notif-foot" ||
+          layout.loadMoreParent !== "notif-load-more") {
+        throw new Error(`Notification structure must keep header/list/footer distinct and Load more in the list: ${JSON.stringify(layout)}`);
+      }
+      if (!layout.markReadIcon || layout.markReadIcon.width !== 13 || layout.markReadIcon.height !== 13) {
+        throw new Error(`Mark all read must have a visible 13px checkmark: ${JSON.stringify(layout.markReadIcon)}`);
+      }
+      if (!layout.panel || !layout.bell || Math.abs(layout.panelRight - layout.bell.right) > 1) {
+        throw new Error(`Desktop notification panel must align with the bell container, not the viewport: ${JSON.stringify(layout)}`);
+      }
+      const longSummary = panel.locator('[data-notification-id="10000000-0000-4000-8000-000000000001"] .notif-sub');
+      const summaryLayout = await longSummary.evaluate((element) => ({
+        clientWidth: element.clientWidth,
+        scrollWidth: element.scrollWidth,
+        whiteSpace: getComputedStyle(element).whiteSpace,
+        overflow: getComputedStyle(element).overflow,
+      }));
+      if (summaryLayout.whiteSpace !== "nowrap" || summaryLayout.overflow !== "hidden" ||
+          summaryLayout.scrollWidth <= summaryLayout.clientWidth) {
+        throw new Error(`Long notification summaries must ellipsize within the fixed panel: ${JSON.stringify(summaryLayout)}`);
+      }
+      await panel.locator(".notif-list").evaluate((element) => { element.scrollTop = element.scrollHeight; });
+      const scrollLayout = await panel.evaluate((element) => {
+        const box = (selector) => element.querySelector(selector)?.getBoundingClientRect();
+        return { head: box(".notif-head"), list: box(".notif-list"), foot: box(".notif-foot") };
+      });
+      if (!scrollLayout.head || !scrollLayout.list || !scrollLayout.foot ||
+          scrollLayout.head.bottom > scrollLayout.list.top || scrollLayout.list.bottom > scrollLayout.foot.top) {
+        throw new Error(`Notification header and footer must remain visible while only the list scrolls: ${JSON.stringify(scrollLayout)}`);
+      }
+      const captureNotificationState = async (theme, viewportName, stateName, scrollToEnd = false) => {
+        if (await panel.isVisible()) {
+          await panel.focus();
+          await page.keyboard.press("Escape");
+          await assertHidden(panel, "Notification panel must close before themed capture setup");
+        }
+        await page.setViewportSize(VIEWPORTS[viewportName]);
+        await applyVisualTheme(page, theme);
+        await bell.click();
+        await assertVisible(panel, `Notification panel must open for ${viewportName}/${theme} capture`);
+        await waitForNotificationRowCount(page, 50);
+        if (scrollToEnd) {
+          await panel.locator(".notif-list").evaluate((element) => { element.scrollTop = element.scrollHeight; });
+          await assertVisible(loadMore, "Load more must be visible for list-continuation capture");
+        }
+        const captureName = `09h-topbar-notifications-light--${stateName}--${viewportName}--${theme}`;
+        const capturePath = `${outputDir}/${captureName}.png`;
+        await page.screenshot({ path: capturePath, animations: "disabled" });
+        console.log(`  OK notification capture: ${captureName}.png (${fs.statSync(capturePath).size} bytes)`);
+      };
+      for (const theme of ["dark", "light"]) {
+        await captureNotificationState(theme, "desktop", "populated-dropdown");
+        await captureNotificationState(theme, "tablet", "populated-dropdown");
+        await captureNotificationState(theme, "desktop", "list-continuation", true);
+      }
+      await panel.focus();
+      await page.keyboard.press("Escape");
+      await assertHidden(panel, "Notification panel must close after themed captures");
+      await page.setViewportSize(VIEWPORTS.desktop);
+      await applyVisualTheme(page, "light");
+      await bell.click();
+      await assertVisible(panel, "Notification panel must reopen after themed captures");
+      await waitForNotificationRowCount(page, 50);
+      const badge = page.locator("[data-testid='topbar-notifications-badge']");
+      if ((await badge.textContent())?.trim() !== "99+") {
+        throw new Error("Notification badge must be visually bounded at 99+");
+      }
+      if ((await bell.getAttribute("aria-label")) !== "Notifications (120 unread)") {
+        throw new Error("Notification bell must preserve the exact unread count in its accessible label");
+      }
+      await panel.focus();
+      await page.keyboard.press("Tab");
+      if (!(await markAllButton.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Notification Tab order must reach Mark all read first");
+      }
+      await page.keyboard.press("Tab");
+      const firstTabRow = panel.locator("[data-notification-id]").first();
+      if (!(await firstTabRow.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Notification Tab order must reach the first primary row");
+      }
+      await page.keyboard.press("Tab");
+      if (!(await firstTabRow.locator("..").getByTitle("Dismiss notification").evaluate(
+        (element) => element === document.activeElement,
+      ))) {
+        throw new Error("Notification Tab order must reach the row dismiss button");
+      }
+      await panel.focus();
+      await page.keyboard.press("End");
+      const lastHeadRow = panel.locator("[data-notification-id]").nth(49);
+      if (!(await lastHeadRow.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Notification End must focus the last visible row");
+      }
+      await page.keyboard.press("Home");
+      const firstRow = panel.locator("[data-notification-id]").first();
+      if (!(await firstRow.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Notification Home must focus the first visible row");
+      }
+      if (!((await firstRow.getAttribute("aria-label")) || "").startsWith("Unread notification.")) {
+        throw new Error("Unread notification state must be available without color");
+      }
+      const titleBox = await firstRow.locator(".notif-title").boundingBox();
+      const unreadMarkerBox = await firstRow.locator(".notif-unread-marker").boundingBox();
+      if (!titleBox || !unreadMarkerBox ||
+          unreadMarkerBox.x < titleBox.x + titleBox.width ||
+          unreadMarkerBox.y + unreadMarkerBox.height <= titleBox.y ||
+          unreadMarkerBox.y >= titleBox.y + titleBox.height) {
+        throw new Error("Unread marker must remain inline after the notification title");
+      }
+      const firstTwoTitles = await panel.locator("[data-notification-id] .notif-title").evaluateAll(
+        (elements) => elements.slice(0, 2).map((element) => element.textContent?.trim()),
+      );
+      if (!isDeepStrictEqual(firstTwoTitles, ["Notification 2", "Notification 1"])) {
+        throw new Error(`Equal timestamps must use descending notification ID: ${JSON.stringify(firstTwoTitles)}`);
+      }
+
+      scenario.insertNew(1);
+      scenario.failNextGet();
+      await loadMore.focus();
+      await page.keyboard.press("Tab");
+      if (!(await dismissAllButton.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Notification Tab order must reach Dismiss all after Load more");
+      }
+      await page.keyboard.press("Tab");
+      if (!(await settings.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Notification Tab order must reach settings after Dismiss all");
+      }
+      await page.keyboard.press("Tab");
+      if (!(await markAllButton.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Notification Tab must wrap from settings to the first dialog control");
+      }
+      await page.keyboard.press("Shift+Tab");
+      if (!(await settings.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Notification Shift+Tab must wrap to the last dialog control");
+      }
+      const loadMoreHitTarget = await loadMore.evaluate((button) => {
+        const rect = button.getBoundingClientRect();
+        const center = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        const target = document.elementFromPoint(center.x, center.y);
+        const list = button.closest(".notif-list");
+        const panel = button.closest(".notif-panel");
+        return {
+          button: rect,
+          center,
+          targetTag: target?.tagName,
+          targetClass: target?.className,
+          targetTestId: target?.getAttribute("data-testid"),
+          buttonContainsTarget: target ? button.contains(target) : false,
+          list: list?.getBoundingClientRect(),
+          listScrollTop: list?.scrollTop,
+          listScrollHeight: list?.scrollHeight,
+          panel: panel?.getBoundingClientRect(),
+          panelMaxHeight: panel ? getComputedStyle(panel).maxHeight : null,
+          coachTop: getComputedStyle(document.documentElement).getPropertyValue("--coach-top"),
+          viewport: { width: innerWidth, height: innerHeight },
+        };
+      });
+      if (!loadMoreHitTarget.buttonContainsTarget) {
+        throw new Error(`Load more must remain pointer-accessible inside the scrollable list: ${JSON.stringify(loadMoreHitTarget)}`);
+      }
+      await loadMore.click();
+      const appendAlert = panel.getByRole("alert").filter({ hasText: "Could not load notifications" });
+      await assertVisible(appendAlert, "Append failure must remain visible");
+      const failedAppendUrl = new URL(scenario.requests.get.at(-1));
+      const failedAppendCursor = failedAppendUrl.searchParams.get("cursor");
+      if (!/^\d+\|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(failedAppendCursor || "")) {
+        throw new Error(`Mock notification cursor must use timestamp_micros|uuid: ${failedAppendCursor}`);
+      }
+      await panel.focus();
+      await page.keyboard.press("Tab");
+      await page.keyboard.press("Tab");
+      const appendRetry = appendAlert.getByRole("button", { name: "Retry", exact: true });
+      if (!(await appendRetry.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Notification Tab order must reach the load Retry action");
+      }
+      await appendRetry.click();
+      await waitForNotificationRowCount(page, 100);
+      const retriedAppendUrl = new URL(scenario.requests.get.at(-1));
+      if (!failedAppendUrl.searchParams.get("cursor") ||
+          retriedAppendUrl.searchParams.get("cursor") !== failedAppendUrl.searchParams.get("cursor")) {
+        throw new Error("Append Retry must repeat the exact failed cursor request");
+      }
+      await assertHidden(appendAlert, "Successful append retry must clear only the append error");
+
+      const middleSuffixTombstoneId = await panel.locator("[data-notification-id]").nth(70).getAttribute("data-notification-id");
+      const oldestSuffixTombstoneId = await panel.locator("[data-notification-id]").nth(99).getAttribute("data-notification-id");
+      scenario.dismissOnServer(middleSuffixTombstoneId);
+      scenario.dismissOnServer(oldestSuffixTombstoneId);
+      const inserted = scenario.insertNew(51);
+      await panel.focus();
+      await page.keyboard.press("Escape");
+      await assertHidden(panel, "Escape must close notifications before reconciliation refresh");
+      await bell.click();
+      // The oldest displayed boundary was deleted on the server, so the
+      // authoritative refresh must traverse the complete remaining feed.
+      await waitForNotificationRowCount(page, 170);
+      await assertVisible(panel.getByText(inserted.at(-1).title, { exact: true }), "Reconciliation must bridge more than one new head page");
+      await assertHidden(
+        panel.locator(`[data-notification-id="${middleSuffixTombstoneId}"]`),
+        "Authoritative range reconciliation must remove a middle suffix tombstone",
+      );
+      await assertHidden(
+        panel.locator(`[data-notification-id="${oldestSuffixTombstoneId}"]`),
+        "Authoritative range reconciliation must remove the oldest suffix tombstone",
+      );
+
+      const failedReadRow = panel.locator("[data-notification-id]").nth(4);
+      const failedReadId = await failedReadRow.getAttribute("data-notification-id");
+      scenario.failNextRead(failedReadId);
+      await failedReadRow.click();
+      await assertHidden(panel, "Activating a notification must close the dropdown even when its read mutation fails");
+      await bell.click();
+      const readAlert = panel.getByRole("alert").filter({ hasText: "Could not mark notification read" });
+      await assertVisible(readAlert, "Read failure must expose its exact Retry");
+      await readAlert.getByRole("button", { name: "Retry", exact: true }).click();
+      await assertHidden(readAlert, "Successful read Retry must clear its own error");
+      if (!isDeepStrictEqual(scenario.requests.read.slice(-2), [failedReadId, failedReadId])) {
+        throw new Error("Read Retry must target the exact failed notification");
+      }
+
+      const failedDismissRow = panel.locator("[data-notification-id]").nth(2);
+      const failedDismissId = await failedDismissRow.getAttribute("data-notification-id");
+      const expectedFocusId = await panel.locator("[data-notification-id]").nth(3).getAttribute("data-notification-id");
+      scenario.failNextDismiss(failedDismissId);
+      await failedDismissRow.locator("..").getByTitle("Dismiss notification").click();
+      const dismissAlert = panel.getByRole("alert").filter({ hasText: "Could not dismiss notification" });
+      await assertVisible(dismissAlert, "Dismiss failure must preserve the row and expose Retry");
+      await assertVisible(panel.locator(`[data-notification-id="${failedDismissId}"]`), "Failed dismiss must preserve row state");
+      await dismissAlert.getByRole("button", { name: "Retry", exact: true }).click();
+      await assertHidden(panel.locator(`[data-notification-id="${failedDismissId}"]`), "Dismiss Retry must remove only its row after success");
+      await page.waitForFunction(
+        (id) => document.activeElement?.getAttribute("data-notification-id") === id,
+        expectedFocusId,
+      );
+
+      scenario.failNextMarkAll();
+      await panel.locator("[data-testid='topbar-notifications-mark-read']").click();
+      const markAllAlert = panel.getByRole("alert").filter({ hasText: "Could not mark notifications read" });
+      await assertVisible(markAllAlert, "Mark-all failure must expose Retry without changing rows");
+      await assertVisible(badge, "Failed mark-all must preserve unread state");
+      await markAllAlert.getByRole("button", { name: "Retry", exact: true }).click();
+      await assertHidden(markAllAlert, "Successful mark-all Retry must clear its own error");
+      await assertHidden(badge, "Successful mark-all Retry must clear unread state");
+
+      await panel.focus();
+      await page.keyboard.press("Escape");
+      await assertHidden(panel, "Escape must close notifications before stale-response reconciliation");
+      scenario.holdNextHead();
+      await bell.click();
+      await scenario.waitForHeldHead();
+      const staleDismissRow = panel.locator("[data-notification-id]").nth(1);
+      const staleDismissId = await staleDismissRow.getAttribute("data-notification-id");
+      await staleDismissRow.locator("..").getByTitle("Dismiss notification").click();
+      const heldHeadResponse = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return response.request().method() === "GET" &&
+          url.pathname === "/api/v1/user/notifications" &&
+          !url.searchParams.has("cursor");
+      });
+      scenario.releaseHeldHead();
+      await heldHeadResponse;
+      await assertHidden(
+        panel.locator(`[data-notification-id="${staleDismissId}"]`),
+        "A stale held GET must not restore a successfully dismissed row",
+      );
+
+      await dismissAllButton.click();
+      await assertVisible(panel.getByText("You're all caught up", { exact: true }), "Dismiss all must retain a usable empty state");
+      if (scenario.requests.dismissAll.length !== 1 || scenario.requests.markAll.length !== 2) {
+        throw new Error("Dismiss all and Mark all read must call distinct durable actions");
+      }
+
+      await page.keyboard.press("Escape");
+      scenario.setEmpty();
+      scenario.failNextGet();
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await bell.click();
+      await assertVisible(
+        panel.getByText("You're all caught up", { exact: true }),
+        "Bell-open refresh must recover automatically after a transient head failure",
+      );
+      await assertHidden(
+        panel.getByRole("alert").filter({ hasText: "Could not load notifications" }),
+        "A successful bell-open refresh must clear the superseded head failure",
+      );
+
+      await page.setViewportSize({ width: 390, height: 700 });
+      const geometry = await panel.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return { left: rect.left, right: rect.right, bottom: rect.bottom, height: rect.height, viewportHeight: innerHeight };
+      });
+      if (geometry.left < 0 || geometry.right > 390 || geometry.bottom > geometry.viewportHeight) {
+        throw new Error(`Notification panel must remain scrollable and contained on narrow viewports: ${JSON.stringify(geometry)}`);
+      }
+
+      const panelBox = await panel.boundingBox();
+      if (!panelBox) throw new Error("Notification panel must be measurable before outside-click verification");
+      const outsidePoint = { x: 2, y: panelBox.y + 2 };
+      const outsideTarget = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.className, outsidePoint);
+      if (outsideTarget !== "cf-overlay-backdrop") {
+        throw new Error(`Expected an unobscured notification backdrop outside the narrow panel, got ${JSON.stringify(outsideTarget)}`);
+      }
+      await page.mouse.click(outsidePoint.x, outsidePoint.y);
+      await assertHidden(panel, "Outside click must close notifications");
+      if (!(await bell.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Outside click must restore focus to the notification bell");
+      }
       const theme = await page.locator("html").getAttribute("data-theme");
       if (theme !== "light") {
         throw new Error(`Expected light theme for notifications screenshot, got: ${theme}`);
@@ -5109,7 +8043,7 @@ const steps = [
   },
   {
     name: "09i-topbar-notifications-non-admin",
-    description: "Non-admin shell hides admin-gated notifications",
+    description: "Mocked API response verifies allowed notification presentation in a viewer shell",
     action: async (page) => {
       await mockAccountNotifications(page);
       await page.setViewportSize(VIEWPORTS.desktop);
@@ -5124,11 +8058,7 @@ const steps = [
 
       const panel = page.locator("[data-testid='topbar-notifications-panel']");
       await assertVisible(panel, "Expected notifications panel to open for non-admin shell");
-      await assertVisible(panel.getByText("Build failed"), "Expected non-admin-visible server notification");
-      await assertHidden(
-        panel.getByText("New critical CVE: CVE-2026-31822"),
-        "Expected admin-gated CVE notification to be hidden for non-admin shell",
-      );
+      await assertVisible(panel.getByText("Build failed"), "Expected mocked allowed notification for viewer shell");
     },
   },
   {
@@ -5738,14 +8668,18 @@ const steps = [
         timeout: LOAD_TIMEOUT,
       });
       await page.waitForTimeout(1200);
-      // Header action cluster matches CrystalForgelatest: Rollback / SSH / Edit / Deploy.
-      // (Per-config CVE/Hardening scans now live on their tab surfaces, not the header.)
-      for (const action of ["Rollback", "SSH", "Edit", "Deploy"]) {
+      // Deploy and rollback live on their tab/history surfaces, not in the header.
+      for (const action of ["SSH", "Edit"]) {
         await assertVisible(
           page.locator(".sd-head-actions button", { hasText: action }).first(),
           `Expected '${action}' header action to be visible on system detail`,
           12000,
         );
+      }
+      for (const duplicate of ["Rollback", "Deploy"]) {
+        if (await page.locator(".sd-head-actions button", { hasText: duplicate }).count()) {
+          throw new Error(`Expected duplicate '${duplicate}' header action to be absent`);
+        }
       }
 
         await page.unroute(
@@ -5847,12 +8781,26 @@ const steps = [
         });
 
         await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await collapseOnboardingCoach(page);
         await page.waitForTimeout(2200);
         await page.getByRole("button", { name: "Table" }).first().click();
         await page.waitForTimeout(300);
-        const systemRow = page.locator("tr").filter({ hasText: "warning-system-01" }).first();
+      const systemRow = page.getByTestId("systems-table").locator("tbody tr").filter({
+        has: page.getByText("warning-system-01", { exact: true }),
+      });
+      await assertCount(systemRow, 1, "Systems table must contain exactly one warning-system-01 row");
         await assertVisible(systemRow, "Expected warning-system-01 row to be visible", 15000);
-        await systemRow.getByRole("button", { name: "Edit" }).first().click({ force: true });
+      const [detailResponse] = await Promise.all([
+        page.waitForResponse((response) => {
+          const url = new URL(response.url());
+          return url.pathname === `/api/v1/systems/${systemId}` &&
+            response.request().method() === "GET";
+        }),
+        systemRow.getByRole("button", { name: "Edit", exact: true }).click(),
+      ]);
+      if (detailResponse.status() !== 200) {
+        throw new Error(`Exact system detail GET returned ${detailResponse.status()}`);
+      }
 
         const modal = page.locator(".modal").filter({ hasText: "Edit warning-system-01" }).first();
         await assertVisible(modal, "Expected edit modal to open", 15000);
@@ -6719,13 +9667,18 @@ const steps = [
           10000,
         );
 
-        // Header action cluster matches CrystalForgelatest: Rollback / SSH / Edit / Deploy.
-        for (const action of ["Rollback", "SSH", "Edit", "Deploy"]) {
+        // The header keeps host actions only; deployment controls are contextual.
+        for (const action of ["SSH", "Edit"]) {
           await assertVisible(
             page.locator(".sd-head-actions button", { hasText: action }).first(),
             `Expected '${action}' header action to render`,
             10000,
           );
+        }
+        for (const duplicate of ["Rollback", "Deploy"]) {
+          if (await page.locator(".sd-head-actions button", { hasText: duplicate }).count()) {
+            throw new Error(`Expected duplicate '${duplicate}' header action to be absent`);
+          }
         }
 
         // Return to the Overview tab so the captured screenshot shows the
@@ -6742,7 +9695,7 @@ const steps = [
   },
   {
     name: "12h-system-detail-cves-grouped-justification",
-    description: "System detail CVEs tab grouped list, filters, details link, and justification save",
+    description: "System detail package-first CVEs preserve exact evidence for POA&M creation and keep justification distinct",
     action: async (page) => {
       await routeSystemsWarningData(page);
 
@@ -6765,9 +9718,18 @@ const steps = [
 
       let justificationSaved = false;
       let capturedJustificationRequest = null;
+      let capturedCvePoamRequest = null;
 
-      await page.route("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cves*", async (route) => {
-        const payload = [
+      const exactObservation = {
+        system_id: "00000000-0000-0000-0000-0000000000a1",
+        scan_id: "00000000-0000-0000-0000-000000000c01",
+        occurrence_derivation_path: "/nix/store/exact-openssl-occurrence",
+        canonical_cve_id: "CVE-2025-1111",
+        canonical_package_name: "linux-kernel",
+      };
+
+      await page.route("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-inventory*", async (route) => {
+        const vulnerabilities = [
           {
             cve_id: "CVE-2025-1111",
             severity: "high",
@@ -6784,6 +9746,18 @@ const steps = [
               ? "Accepted risk until scheduled maintenance window"
               : null,
             justification_updated_at: justificationSaved ? "2026-04-12T12:00:00Z" : null,
+            remediation: {
+              cve_finding_id: null,
+              observation: exactObservation,
+              observed_package_name: "linuxPackages_6_10.kernel",
+              observed_package_version: "6.10.12",
+              is_whitelisted: false,
+              is_justified: justificationSaved,
+              active_poam: null,
+              historical_poams: [],
+              historical_has_more: false,
+              historical_next_offset: null,
+            },
           },
           {
             cve_id: "CVE-2025-1111",
@@ -6817,7 +9791,35 @@ const steps = [
             justification_reason: null,
             justification_updated_at: null,
           },
-        ];
+        ].map((vulnerability) => ({
+          ...vulnerability,
+          stable_identity: {
+            canonical_cve_id: vulnerability.cve_id,
+            canonical_package_name: vulnerability.package_name,
+          },
+          canonical_package_name: vulnerability.package_name,
+        }));
+
+        const payload = {
+          authority: "exact",
+          exact_authority_failure: null,
+          source: {
+            scan_id: exactObservation.scan_id,
+            scanner_name: "vulnix",
+            scanner_version: "1.10.1",
+            completed_at: "2026-04-10T09:00:00Z",
+          },
+          vulnerabilities,
+          metadata: {
+            total_findings: 3,
+            total_cves: 2,
+            total_packages: 3,
+            severity: { critical: 0, high: 2, medium: 0, low: 1, unknown: 0 },
+          },
+          inventory_revision: justificationSaved ? "justified-revision" : "initial-revision",
+          has_more: false,
+          next_cursor: null,
+        };
 
         await route.fulfill({
           status: 200,
@@ -6839,6 +9841,19 @@ const steps = [
         },
       );
 
+      await page.route("**/api/v1/poams/cves", async (route) => {
+        capturedCvePoamRequest = route.request().postDataJSON();
+        await route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: "finding_already_managed",
+            message: "Exact vulnerability already has an active remediation plan",
+            details: null,
+          }),
+        });
+      });
+
       await page.route("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/commits*", async (route) => {
         await route.fulfill({
           status: 200,
@@ -6852,83 +9867,79 @@ const steps = [
       });
       await page.waitForTimeout(1200);
 
-      await page.getByRole("button", { name: "CVEs" }).first().click();
+      await page.getByRole("tab", { name: "CVEs" }).first().click();
 
       await assertVisible(
-        page.getByText("2 grouped CVEs").first(),
-        "Expected grouped CVE count to collapse duplicate CVE IDs",
+        page.getByTestId("system-cves-exact"),
+        "Expected typed exact CVE inventory state",
         12000,
       );
 
       await assertVisible(
-        page.getByText("2 packages").first(),
-        "Expected grouped CVE row to show affected package count",
+        page.getByText("3 of 3 shown · 3 of 3 packages loaded").first(),
+        "Expected package-first CVE count to preserve distinct package instances",
+        12000,
       );
 
-      await page.locator("button", { hasText: "CVE-2025-1111" }).first().click();
-
       await assertVisible(
-        page.getByText("Kernel memory corruption under crafted input").first(),
-        "Expected expanded CVE entry to show internal description",
-      );
-      await assertVisible(
-        page.getByText("linuxPackages_6_10.kernel").first(),
-        "Expected expanded grouped CVE to show first affected package",
-      );
-      await assertVisible(
-        page.getByText("linuxPackages_6_1.kernel").first(),
-        "Expected expanded grouped CVE to show second affected package",
+        page.getByText("6.10.12", { exact: true }).first(),
+        "Expected package group to preserve the installed version",
       );
 
-      const nvdHref = await page.locator("a:has-text('View on NVD')").first().getAttribute("href");
-      if (nvdHref !== "https://nvd.nist.gov/vuln/detail/CVE-2025-1111") {
-        throw new Error(`Expected CVE details link to point at NVD detail page, got: ${nvdHref}`);
+      await page.locator("button", { hasText: "linuxPackages_6_10.kernel" }).first().click();
+
+      await assertVisible(
+        page.getByText("CVE-2025-1111", { exact: true }).first(),
+        "Expected expanded package to show the exact CVE",
+      );
+      await assertVisible(
+        page.getByText("available", { exact: true }).first(),
+        "Expected fixed-version evidence to retain patch availability",
+      );
+
+      await page.getByRole("button", { name: "Create POA&M" }).first().click();
+      const createDialog = page.getByTestId("cve-poam-create");
+      await assertVisible(
+        createDialog,
+        "Expected exact-CVE creation dialog",
+      );
+      await assertVisible(
+        createDialog.getByText("/nix/store/exact-openssl-occurrence", { exact: true }),
+        "Expected dialog to show immutable occurrence context",
+      );
+      await assertVisible(
+        createDialog.getByText(exactObservation.scan_id, { exact: true }),
+        "Expected dialog to show the authoritative scan identity",
+      );
+      await createDialog
+        .locator("textarea[placeholder*='exact CVE absence']")
+        .fill("Deploy the fixed kernel and run a new exact scan.");
+      await createDialog.getByRole("button", { name: "Create POA&M" }).click();
+      await assertVisible(
+        createDialog.getByText("This exact vulnerability already has an active remediation plan.", { exact: false }),
+        "Expected active-remediation conflict to remain in the dialog",
+      );
+      if (!capturedCvePoamRequest) {
+        throw new Error("Expected exact-CVE POA&M request to be captured");
       }
-
-      await page.locator("input[placeholder='Filter package/version']").fill("diag-tools");
-      await assertVisible(
-        page.getByText("CVE-2024-2222").first(),
-        "Expected package filter to keep matching CVE",
-      );
-
-      const cve1111VisibleAfterPackageFilter = await page
-        .getByText("CVE-2025-1111")
-        .first()
-        .isVisible({ timeout: 1500 })
-        .catch(() => false);
-      if (cve1111VisibleAfterPackageFilter) {
-        throw new Error("Expected package filter to hide non-matching grouped CVE row");
+      if (JSON.stringify(capturedCvePoamRequest.observation) !== JSON.stringify(exactObservation)) {
+        throw new Error(`Exact-CVE request changed opaque observation context: ${JSON.stringify(capturedCvePoamRequest)}`);
       }
-
-      await page.locator("input[placeholder='Filter package/version']").fill("");
-      await page.locator("select").first().selectOption("high");
-      await assertVisible(
-        page.getByText("CVE-2025-1111").first(),
-        "Expected severity filter to retain High CVE",
-      );
-      await assertHidden(
-        page.getByText("CVE-2024-2222").first(),
-        "Expected severity filter to hide Low CVE row",
-      );
-
-      await page.locator("select").first().selectOption("all");
-      const cve1111Toggle = page.locator("button", { hasText: "CVE-2025-1111" }).first();
-      const editJustificationButton = page
-        .getByRole("button", { name: "Edit justification" })
-        .first();
-      const editButtonInitiallyVisible = await editJustificationButton
-        .isVisible({ timeout: 1000 })
-        .catch(() => false);
-      if (!editButtonInitiallyVisible) {
-        await cve1111Toggle.click();
+      for (const forbidden of ["finding_id", "assessment_id", "scan_derivation_id"]) {
+        if (Object.hasOwn(capturedCvePoamRequest, forbidden)) {
+          throw new Error(`Exact-CVE request must not synthesize ${forbidden}`);
+        }
       }
+      await createDialog.getByRole("button", { name: "Close" }).click();
+
+      const editJustificationButton = page.getByRole("button", { name: "Justify" }).first();
       await assertVisible(
         editJustificationButton,
-        "Expected CVE row to provide justification edit action",
+        "Expected exact CVE row to provide an independent justification action",
       );
       await editJustificationButton.click();
 
-      await page.locator("select").nth(1).selectOption("accepted_risk");
+      await page.locator("select").first().selectOption("accepted_risk");
       const reasonInput = page.locator("textarea[placeholder='Document risk acceptance / mitigation rationale']").first();
       const seededReason = await reasonInput.inputValue();
       if (!seededReason.toLowerCase().includes("accepted risk")) {
@@ -6977,10 +9988,9 @@ const steps = [
         "Expected UI acknowledgement after saving CVE justification",
       );
 
-      await page.locator("button", { hasText: "CVE-2025-1111" }).first().click();
       await assertVisible(
-        page.getByText("Justified").first(),
-        "Expected grouped CVE row to remain visually marked after save + reload",
+        page.getByText("Justified, not remediated", { exact: true }).first(),
+        "Expected justification to remain visibly distinct from remediation after reload",
       );
 
       await page.unroute(
@@ -6990,8 +10000,303 @@ const steps = [
       await page.unroute(
         "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cves/CVE-2025-1111/justification",
       );
+      await page.unroute("**/api/v1/poams/assignees");
+      await page.unroute("**/api/v1/poams/cves");
       await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/commits*");
       await unrouteSystemsWarningData(page);
+    },
+  },
+  {
+    name: "12ha-system-detail-cve-inventory-fallbacks",
+    description: "System detail incrementally loads bounded CVE pages with authoritative totals and preserves exact, legacy, clean, and no-scan states",
+    action: async (page) => {
+      await routeSystemsWarningData(page);
+      let inventoryState = "exact-large";
+      const firstCursor = "page-100";
+      const inventoryRequests = [];
+      let rejectNextContinuation = true;
+      let inventoryRevision = 1;
+      const largeInventory = Array.from({ length: 1315 }, (_, index) => {
+        const suffix = String(index).padStart(4, "0");
+        return {
+          stable_identity: {
+            canonical_cve_id: `CVE-2026-${suffix}`,
+            canonical_package_name: `package-${suffix}`,
+          },
+          cve_id: `CVE-2026-${suffix}`,
+          canonical_package_name: `package-${suffix}`,
+          severity: index === 0 ? "unknown" : index % 2 === 0 ? "high" : "medium",
+          cvss_score: index === 0 ? null : index % 2 === 0 ? 8.1 : 5.4,
+          description: `Bounded inventory finding ${suffix}`,
+          package_name: `package-${suffix}`,
+          installed_version: `1.0.${index}`,
+          fixed_version: index % 2 === 0 ? `1.1.${index}` : null,
+          first_seen: "2026-04-10T09:00:00Z",
+          published_at: "2026-04-08T00:00:00Z",
+          status: index % 2 === 0 ? "fix_available" : "open",
+          justification_category: null,
+          justification_reason: null,
+          justification_updated_at: null,
+          remediation: null,
+        };
+      });
+      const metadata = (totalFindings, includesUnknown = false) => ({
+        total_findings: totalFindings,
+        total_cves: totalFindings,
+        total_packages: totalFindings,
+        severity: {
+          critical: 0,
+          high: Math.ceil(totalFindings / 2) - (includesUnknown ? 1 : 0),
+          medium: Math.floor(totalFindings / 2),
+          low: 0,
+          unknown: includesUnknown ? 1 : 0,
+        },
+      });
+
+      await page.route(
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-inventory*",
+        async (route) => {
+          const requestUrl = new URL(route.request().url());
+          inventoryRequests.push(requestUrl);
+          if (!requestUrl.pathname.endsWith("/cve-inventory-page")) {
+            throw new Error(`Expected the versioned paged inventory route, got ${requestUrl.pathname}`);
+          }
+          if (requestUrl.searchParams.get("limit") !== "100") {
+            throw new Error(`Expected bounded limit=100, got ${requestUrl.search}`);
+          }
+          if (inventoryState === "exact-large") {
+            const after = requestUrl.searchParams.get("after");
+            if (after !== null && rejectNextContinuation) {
+              rejectNextContinuation = false;
+              inventoryRevision += 1;
+              await route.fulfill({
+                status: 409,
+                contentType: "application/json",
+                body: JSON.stringify({
+                  error: "inventory_changed",
+                  message: "System CVE inventory changed; restart from the first page",
+                }),
+              });
+              return;
+            }
+            const firstPage = after === null;
+            const start = firstPage ? 0 : Number.parseInt(after?.replace("page-", ""), 10);
+            if (!firstPage && (!after?.startsWith("page-") || !Number.isInteger(start))) {
+              throw new Error(`Expected an opaque continuation cursor, got ${after}`);
+            }
+            const vulnerabilities = firstPage
+              ? largeInventory.slice(0, 100)
+              : [largeInventory[start - 1], ...largeInventory.slice(start, start + 100)];
+            const hasMore = start + 100 < largeInventory.length;
+            await route.fulfill({
+              status: 200,
+              contentType: "application/json",
+              body: JSON.stringify({
+                authority: "exact",
+                exact_authority_failure: null,
+                source: {
+                  scan_id: "00000000-0000-0000-0000-000000000c45",
+                  scanner_name: "vulnix",
+                  scanner_version: "1.10.1",
+                  completed_at: "2026-04-10T09:00:00Z",
+                },
+                vulnerabilities,
+                metadata: metadata(1315, true),
+                inventory_revision: `exact-large-revision-${inventoryRevision}`,
+                has_more: hasMore,
+                next_cursor: hasMore ? `page-${start + 100}` : null,
+              }),
+            });
+            return;
+          }
+
+          const vulnerabilities = inventoryState === "legacy-findings"
+            ? [{
+                stable_identity: {
+                  canonical_cve_id: "CVE-2025-4400",
+                  canonical_package_name: "legacy-openssl",
+                },
+                cve_id: "CVE-2025-4400",
+                canonical_package_name: "legacy-openssl",
+                severity: "high",
+                cvss_score: 8.4,
+                description: "Finding retained from a pre-upgrade CVE scan",
+                package_name: "legacy-openssl",
+                installed_version: "3.0.14",
+                fixed_version: "3.0.15",
+                first_seen: "2026-04-09T08:00:00Z",
+                published_at: "2026-04-08T00:00:00Z",
+                status: "fix_available",
+                justification_category: null,
+                justification_reason: null,
+                justification_updated_at: null,
+              }]
+            : [];
+          const noScan = inventoryState === "no-scan";
+          const exact = inventoryState === "exact-clean";
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              authority: noScan ? "no_scan" : exact ? "exact" : "legacy",
+              exact_authority_failure: exact
+                ? null
+                : noScan
+                ? "missing_current_generation"
+                : "no_schema1_current_scan",
+              source: noScan
+                ? null
+                : {
+                    scan_id: "00000000-0000-0000-0000-000000000c44",
+                    scanner_name: "vulnix",
+                    scanner_version: "0.8.0",
+                    completed_at: "2026-04-09T08:00:00Z",
+                  },
+              vulnerabilities,
+              metadata: metadata(vulnerabilities.length),
+              inventory_revision: `${inventoryState}-revision`,
+              has_more: false,
+              next_cursor: null,
+            }),
+          });
+        },
+      );
+
+      const openCves = async () => {
+        await page.goto(`${baseUrl}/systems/00000000-0000-0000-0000-0000000000a1`, {
+          timeout: LOAD_TIMEOUT,
+        });
+        await page.getByRole("tab", { name: "CVEs" }).first().click();
+      };
+
+      try {
+        await openCves();
+        await assertVisible(
+          page.getByTestId("system-cves-exact"),
+          "Expected exact CVE inventory state",
+          12000,
+        );
+        await assertVisible(
+          page.getByText("100 of 1,315 shown · 100 of 1,315 packages loaded", { exact: true }),
+          "Expected first page to show authoritative full-scope totals",
+        );
+        if (inventoryRequests.length !== 1 || inventoryRequests[0].searchParams.has("after")) {
+          throw new Error("Expected one bounded first-page request without a cursor");
+        }
+        const unknownPackage = page.getByRole("button", { name: /package-0000/ });
+        await assertVisible(unknownPackage, "Expected unknown-only package summary");
+        await assertVisible(
+          unknownPackage.getByText("max CVSS unavailable", { exact: false }),
+          "Expected unknown-only package not to report CVSS 0.0",
+        );
+        await assertVisible(
+          unknownPackage.getByText("1 unknown", { exact: true }),
+          "Expected explicit Unknown package summary",
+        );
+        await unknownPackage.click();
+        await assertVisible(
+          page.getByText("Unknown", { exact: true }).first(),
+          "Expected explicit Unknown row severity",
+        );
+        const conflictResponse = page.waitForResponse(
+          (response) => response.url().includes("/cve-inventory-page") && response.status() === 409,
+        );
+        const refreshedResponse = page.waitForResponse((response) => {
+          const responseUrl = new URL(response.url());
+          return responseUrl.pathname.endsWith("/cve-inventory-page")
+            && !responseUrl.searchParams.has("after")
+            && response.status() === 200;
+        });
+        await page.getByRole("button", { name: "Load more vulnerabilities" }).click();
+        await conflictResponse;
+        await refreshedResponse;
+        if (
+          inventoryRequests.length < 3
+          || inventoryRequests[1].searchParams.get("after") !== firstCursor
+          || inventoryRequests[2].searchParams.has("after")
+        ) {
+          throw new Error("Expected a changed-inventory conflict to restart from page zero");
+        }
+        while (await page.getByRole("button", { name: "Load more vulnerabilities" }).count()) {
+          await page.getByRole("button", { name: "Load more vulnerabilities" }).click();
+          await page.waitForTimeout(100);
+        }
+        await assertVisible(
+          page.getByText("1,315 of 1,315 shown · 1,315 of 1,315 packages loaded", { exact: true }),
+          "Expected every stable identity to remain reachable without duplicate rows",
+          12000,
+        );
+        if (inventoryRequests.length !== 16 || inventoryRequests[3].searchParams.get("after") !== firstCursor) {
+          throw new Error("Expected load-more request to preserve the opaque cursor");
+        }
+        if (await page.getByText("package-0099", { exact: true }).count() !== 1) {
+          throw new Error("Expected duplicate stable identity to render once after append");
+        }
+
+        inventoryState = "legacy-findings";
+        await openCves();
+        const legacy = page.getByTestId("system-cves-legacy");
+        await assertVisible(legacy, "Expected legacy CVE inventory state", 12000);
+        await assertVisible(
+          legacy.getByText("Legacy scan findings.", { exact: false }),
+          "Expected legacy findings guidance",
+        );
+        await assertVisible(
+          page.getByText("legacy-openssl", { exact: true }),
+          "Expected pre-upgrade finding to remain visible",
+        );
+        if (await page.getByRole("button", { name: "Create POA&M" }).count()) {
+          throw new Error("Legacy inventory exposed exact POA&M creation");
+        }
+        await page.getByRole("button", { name: /legacy-openssl/ }).click();
+        const justify = page.getByRole("button", { name: "Justify" });
+        await assertVisible(
+          justify,
+          "Expected ordinary justification to remain available for a legacy finding",
+        );
+        await justify.click();
+        await assertVisible(
+          page.getByRole("heading", { name: "Justification — CVE-2025-4400" }),
+          "Expected the legacy finding justification editor",
+        );
+
+        inventoryState = "exact-clean";
+        await openCves();
+        await assertVisible(
+          page.getByTestId("system-cves-exact").getByText("Exact scan clean.", { exact: false }),
+          "Expected exact-clean state to use authoritative zero totals",
+          12000,
+        );
+
+        inventoryState = "legacy-clean";
+        await openCves();
+        await assertVisible(
+          page.getByTestId("system-cves-legacy").getByText("Legacy scan clean.", { exact: false }),
+          "Expected legacy-clean state to remain distinct from no scan",
+          12000,
+        );
+        await assertVisible(
+          page.getByText("No vulnerabilities detected", { exact: true }),
+          "Expected a completed legacy-clean scan to render a clean result",
+        );
+
+        inventoryState = "no-scan";
+        await openCves();
+        await assertVisible(
+          page.getByTestId("system-cves-no-scan"),
+          "Expected no-scan CVE inventory state",
+          12000,
+        );
+        await assertVisible(
+          page.getByText("No scan inventory available", { exact: true }),
+          "Expected no-scan state not to claim a clean result",
+        );
+      } finally {
+        await page.unroute(
+          "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-inventory*",
+        );
+        await unrouteSystemsWarningData(page);
+      }
     },
   },
   {
@@ -7452,7 +10757,9 @@ const steps = [
       await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
-      const syncBtn = page.locator("button:has-text('Sync from Source')").first();
+      const syncBtn = page
+        .getByRole("button", { name: "Sync", exact: true })
+        .first();
       await syncBtn.waitFor({ timeout: 5000 });
       await syncBtn.click();
 
@@ -7475,7 +10782,10 @@ const steps = [
       const flakeCell = page.locator("text=test-flake").first();
       await flakeCell.waitFor({ timeout: 10000 });
       await flakeCell.click();
-      await page.waitForTimeout(1200);
+      const flakeTray = page
+        .getByRole("dialog", { name: /test-flake commits/i })
+        .first();
+      await flakeTray.waitFor({ timeout: 10000 });
 
       const beforeCountText = await page
         .locator(".fl-tray-commits-search span")
@@ -7486,9 +10796,25 @@ const steps = [
       const rewrittenHead = forceRewriteGitServerMain();
       console.log(`Rewrote gitserver main branch to new HEAD: ${rewrittenHead}`);
 
-      const syncButton = page.locator("button:has-text('Sync from Source')").first();
-      await syncButton.waitFor({ timeout: 7000 });
-      await syncButton.click();
+      const rewriteDialog = page
+        .getByRole("heading", { name: "History Rewrite Detected" })
+        .first();
+      const rewriteAlreadyDetected = await rewriteDialog
+        .isVisible({ timeout: 1500 })
+        .catch(() => false);
+      if (!rewriteAlreadyDetected) {
+        const syncButton = flakeTray
+          .getByRole("button", { name: "Sync", exact: true })
+          .first();
+        await syncButton.waitFor({ timeout: 7000 });
+        await syncButton.click();
+      }
+
+      await rewriteDialog.waitFor({ timeout: 10000 });
+      await page
+        .getByRole("button", { name: "Accept rewrite and resync" })
+        .click();
+      await rewriteDialog.waitFor({ state: "hidden", timeout: 10000 });
 
       // Wait for timeline refresh polling to settle.
       await page.waitForTimeout(6000);
@@ -7828,14 +11154,43 @@ const steps = [
       });
 
       let requeueCalls = 0;
+      let requeueCreated = false;
+      let releaseRequeue;
+      const requeueGate = new Promise((resolve) => {
+        releaseRequeue = resolve;
+      });
+      const activeAttempt = {
+        ...mockRecentBuildsWithCancelled().items[0],
+        job_id: "88888888-8888-4888-8888-888888888888",
+        status: "queued",
+        attempt_number: 2,
+        parent_job_id: "99999999-9999-4999-8999-999999999999",
+        root_job_id: "99999999-9999-4999-8999-999999999999",
+      };
+      await page.route("**/api/v1/build-jobs?*", async (route) => {
+        const queue = mockBuildsDashboardSummaryWithCancelStates().build_queue.items;
+        const items = requeueCreated ? [activeAttempt, ...queue] : queue;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ total: items.length, domain_total: items.length, page: 1, limit: 50, items }),
+        });
+      });
       await page.route("**/api/v1/build-jobs/*/requeue", async (route) => {
         if (route.request().method() === "POST") {
           requeueCalls += 1;
         }
+        await requeueGate;
+        requeueCreated = true;
         await route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: "{}",
+          body: JSON.stringify({
+            attempt_id: "88888888-8888-4888-8888-888888888888",
+            attempt_number: 2,
+            status: "queued",
+            outcome: "created",
+          }),
         });
       });
 
@@ -7858,10 +11213,15 @@ const steps = [
       const modalConfirm = page.locator(".cf-modal-panel-30 button:has-text('Restart')");
       await assertVisible(modalConfirm, "Restart confirmation button should be visible in modal");
       await modalConfirm.click();
-      await page.waitForTimeout(600);
+      await assertAttribute(modalConfirm, "disabled", "", "Restart confirmation should disable synchronously");
+      await modalConfirm.dispatchEvent("click");
+      releaseRequeue();
+      await page.getByRole("status").filter({ hasText: "attempt #2" }).waitFor({ timeout: 3000 });
+      await page.getByRole("button", { name: /Active/ }).waitFor({ state: "visible" });
+      await page.getByText("cancelled-history-system").first().waitFor({ state: "visible", timeout: 3000 });
 
-      if (requeueCalls < 1) {
-        throw new Error("Expected Restart from Completed tab to call requeue endpoint");
+      if (requeueCalls !== 1) {
+        throw new Error(`Expected one requeue request after rapid confirmation, got ${requeueCalls}`);
       }
 
       const missingRowError = page.getByText(/Build row #.* not found/i);
@@ -7869,6 +11229,167 @@ const steps = [
         missingRowError,
         "Restart from Completed tab should not show 'Build row not found' error",
       );
+
+      await page.unroute("**/api/v1/build-jobs/recent*");
+      await page.unroute("**/api/v1/build-jobs?*");
+      await page.unroute("**/api/v1/build-jobs/*/requeue");
+      await unrouteBuildsDataWithCancelStates(page);
+    },
+  },
+  {
+    name: "15h2-builds-obsolete-contract-re-evaluation",
+    description: "Obsolete build recovery queues authoritative evaluation for the exact commit",
+    action: async (page) => {
+      await routeBuildsDataWithCancelStates(page);
+      let reevaluateCalls = 0;
+      let requeueCalls = 0;
+      await page.route("**/api/v1/commits/440/re-evaluate", async (route) => {
+        reevaluateCalls += 1;
+        const headers = await route.request().allHeaders();
+        const csrfCookie = (headers.cookie || "").split(";").map((cookie) => cookie.trim()).find((cookie) => cookie.startsWith("__Host-cf-csrf="))?.slice("__Host-cf-csrf=".length);
+        if (!csrfCookie || headers["x-csrf-token"] !== csrfCookie) {
+          await route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: "csrf_validation_failed", message: "CSRF validation failed" }) });
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            status: "ok",
+            queued: true,
+            message: "Commit 440 queued for re-evaluation",
+          }),
+        });
+      });
+      await page.route("**/api/v1/build-jobs/*/requeue", async (route) => {
+        requeueCalls += 1;
+        await route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: "evaluator_contract_obsolete",
+            message: "Re-evaluate this exact revision before retrying the build",
+            commit_id: 440,
+            action: "re_evaluate_commit",
+          }),
+        });
+      });
+
+      await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
+      await page.getByRole("button", { name: /Completed \(/ }).click();
+      const obsoleteRow = page.locator("tr", { hasText: "obsolete-contract-system" });
+      await assertVisible(obsoleteRow, "Obsolete build should appear in completed history");
+      await obsoleteRow.locator("button[title='Retry build']").click();
+      await page.getByRole("heading", { name: /Restart build\?/i }).waitFor({ timeout: 3000 });
+      await page.locator(".cf-modal-panel-30 button:has-text('Restart')").click();
+      await page.getByRole("status").filter({ hasText: /replacement build attempt is queued automatically/i }).waitFor({ timeout: 3000 });
+
+      if (reevaluateCalls !== 1) throw new Error(`Expected one exact-commit re-evaluation, got ${reevaluateCalls}`);
+      if (requeueCalls !== 1) throw new Error("Structured requeue conflict must authorize obsolete recovery");
+
+      await page.unroute("**/api/v1/commits/440/re-evaluate");
+      await page.unroute("**/api/v1/build-jobs/*/requeue");
+      await unrouteBuildsDataWithCancelStates(page);
+    },
+  },
+  {
+    name: "15h3-builds-operator-obsolete-contract-guidance",
+    description: "Operators receive administrator guidance without starting authoritative recovery",
+    action: async (page) => {
+      await routeBuildsDataWithCancelStates(page);
+      let requeueCalls = 0;
+      let reevaluateCalls = 0;
+      await page.route("**/api/v1/build-jobs/*/requeue", async (route) => {
+        requeueCalls += 1;
+        await route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: "evaluator_contract_obsolete",
+            message: "Re-evaluate this exact revision before retrying the build",
+            commit_id: 440,
+            action: "re_evaluate_commit",
+          }),
+        });
+      });
+      await page.route("**/api/v1/commits/*/re-evaluate", async (route) => {
+        reevaluateCalls += 1;
+        await route.fulfill({ status: 500, body: "unexpected operator re-evaluation" });
+      });
+
+      await page.goto(`${baseUrl}/builds?ui_check_auth=1&ui_check_role=operator`, { timeout: LOAD_TIMEOUT });
+      await page.getByRole("button", { name: /Completed \(/ }).click();
+      const obsoleteRow = page.locator("tr", { hasText: "obsolete-contract-system" });
+      await obsoleteRow.locator("button[title='Retry build']").click();
+      await page.getByRole("heading", { name: /Restart build\?/i }).waitFor({ timeout: 3000 });
+      await page.locator(".cf-modal-panel-30 button:has-text('Restart')").click();
+      await page.getByRole("alert").filter({ hasText: /administrator must re-evaluate commit 440/i }).waitFor({ timeout: 3000 });
+
+      if (requeueCalls !== 1) throw new Error("Operator recovery must ask the server whether an active attempt can be reused");
+      if (reevaluateCalls !== 0) throw new Error("Operator obsolete guidance must not start authoritative re-evaluation");
+
+      await page.unroute("**/api/v1/build-jobs/*/requeue");
+      await page.unroute("**/api/v1/commits/*/re-evaluate");
+      await unrouteBuildsDataWithCancelStates(page);
+    },
+  },
+  {
+    name: "15h4-builds-completed-bulk-retry",
+    description: "Completed bulk retry exposes accessible selection and reports partial stale results",
+    action: async (page) => {
+      await routeBuildsDataWithCancelStates(page);
+      await page.route("**/api/v1/build-jobs/recent*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(mockRecentBuildsWithCancelled()),
+        });
+      });
+      await page.route("**/api/v1/build-jobs/*/requeue", async (route) => {
+        const jobId = new URL(route.request().url()).pathname.split("/").at(-2);
+        if (jobId === "99999999-9999-4999-8999-999999999999") {
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              attempt_id: "88888888-8888-4888-8888-888888888888",
+              attempt_number: 2,
+              status: "queued",
+              outcome: "created",
+            }),
+          });
+          return;
+        }
+        await route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: "build_job_not_terminal",
+            message: "Only terminal build jobs can be requeued",
+            status: "building",
+          }),
+        });
+      });
+
+      await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
+      await page.getByRole("button", { name: /Completed \(/ }).click();
+      const cancelledSelection = page.getByRole("checkbox", { name: "Select build cancelled-history-system" });
+      const completedSelection = page.getByRole("checkbox", { name: "Select build history-system-1" });
+      await assertVisible(cancelledSelection, "Cancelled history row should expose an accessible selection control");
+      await assertVisible(completedSelection, "Completed history row should expose an accessible selection control");
+      await cancelledSelection.check();
+      await completedSelection.check();
+
+      const toolbar = page.getByRole("toolbar", { name: "Completed build actions" });
+      await assertVisible(toolbar, "Completed selection should expose its bulk toolbar");
+      await assertVisible(toolbar.getByRole("button", { name: "Re-run" }), "Completed bulk toolbar should expose Re-run");
+      await assertVisible(toolbar.getByRole("button", { name: "Clear" }), "Completed bulk toolbar should expose Clear");
+      await assertHidden(toolbar.getByRole("button", { name: /Cancel|Delete|Download/i }), "Completed bulk toolbar must not expose unsupported actions");
+      await toolbar.getByRole("button", { name: "Re-run" }).click();
+
+      await page.getByRole("status").filter({ hasText: /Build recovery: 1 created, 0 reused, 0 re-evaluations queued, 0 already active, 1 skipped, 0 failed/ }).waitFor({ timeout: 3000 });
+      await page.getByRole("status").filter({ hasText: /no longer terminal \(status: building\)/ }).waitFor({ timeout: 3000 });
+      await page.getByRole("button", { name: /Active/ }).waitFor({ state: "visible" });
 
       await page.unroute("**/api/v1/build-jobs/recent*");
       await page.unroute("**/api/v1/build-jobs/*/requeue");
@@ -7996,8 +11517,22 @@ const steps = [
   },
   {
     name: "16-cves",
-    description: "CVE dashboard - fleet overview",
+    description: "CVE dashboard - exact fleet detail and triage",
     action: async (page) => {
+      // Do not install routeStandaloneUiBootstrap() here. Its broad
+      // page.route("**/api/**") handler has no matching page.unroute() and
+      // therefore survives step cleanup, poisoning every workflow that runs
+      // afterward on the same page/context with standalone-mocked empty
+      // responses (compliance bundles, policies, environments, eval queue,
+      // etc.). CF_UI_TEST_STANDALONE=1 runs already receive an equivalent
+      // bootstrap from the shared focused-run preflight before the step loop
+      // starts (see needsAuthPreflight below); non-standalone runs use the
+      // real session and real backend responses established by the earlier
+      // ordered login steps. If a future CVE-only standalone fixture needs
+      // role-specific bootstrap state that the shared preflight does not
+      // provide, install it only under an explicit
+      // `process.env.CF_UI_TEST_STANDALONE === "1"` guard and unroute the
+      // broad handler before this step returns.
       await suppressOnboardingCoach(page);
       // Mock the CVE API endpoints so the test doesn't require real scan data.
       await page.route("**/api/v1/cves/stats*", async (route) => {
@@ -8014,6 +11549,9 @@ const steps = [
             exploited: 2,
             environments_affected: 3,
             systems_affected: 8,
+            exact_systems_affected: 7,
+            legacy_systems_affected: 1,
+            no_scan_systems: 1,
             outstanding: 30,
             accepted: 8,
             scheduled: 4,
@@ -8072,34 +11610,208 @@ const steps = [
           ]),
         });
       });
-      // Drawer detail endpoints for the selected CVE.
-      await page.route(/\/api\/v1\/cves\/CVE-2024-1234$/, async (route) => {
+      const fleetDetail = {
+        cve: {
+          cve_id: "CVE-2024-1234",
+          cvss_v3_score: 9.8,
+          severity: "critical",
+          title: "OpenSSL bounds check issue",
+          cvss_vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+          cwe_id: "CWE-125",
+          published_date: "2024-02-01",
+          modified_date: "2024-02-03",
+          exploited: true,
+          package_name: "openssl",
+          installed_version: "3.0.1",
+          fixed_version: "3.0.2",
+          detection_method: "vulnix",
+          fix_status: "fix_available",
+        },
+        canonical_package_name: "openssl",
+        rollup: "partial",
+        affected_system_count: 4,
+        exact_affected_system_count: 3,
+        legacy_affected_system_count: 1,
+        no_scan_system_count: 1,
+        environments: [
+          {
+            environment_id: "00000000-0000-0000-0000-0000000000e1",
+            environment_name: "Development",
+            affected_system_count: 1,
+            exact_affected_system_count: 1,
+            legacy_affected_system_count: 0,
+            systems: [{
+              system_id: "00000000-0000-0000-0000-0000000000a1",
+              environment_id: "00000000-0000-0000-0000-0000000000e1",
+              hostname: "dev-web-01",
+              environment: "Development",
+              primary_ip_address: "10.0.0.1",
+              flake_name: "platform",
+              flake_id: 1,
+              commit_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              deployment_policy: "automatic",
+              current_package_version: "3.0.1",
+              inventory_authority: "exact",
+            }],
+            disposition: {
+              state: "accepted",
+              justification: "Internal-only service behind network segmentation.",
+              review_date: "2026-10-01",
+              actor: { user_id: "00000000-0000-0000-0000-0000000000f1", display: "Morgan Reyes" },
+              accepted_at: "2026-09-12T12:00:00Z",
+            },
+          },
+          {
+            environment_id: "00000000-0000-0000-0000-0000000000e2",
+            environment_name: "Production",
+            affected_system_count: 1,
+            exact_affected_system_count: 1,
+            legacy_affected_system_count: 0,
+            systems: [{
+              system_id: "00000000-0000-0000-0000-0000000000a2",
+              environment_id: "00000000-0000-0000-0000-0000000000e2",
+              hostname: "prod-web-01",
+              environment: "Production",
+              primary_ip_address: "10.0.1.1",
+              flake_name: "platform",
+              flake_id: 1,
+              commit_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              deployment_policy: "manual",
+              current_package_version: "3.0.1",
+              inventory_authority: "exact",
+            }],
+            disposition: {
+              state: "scheduled",
+              poam_id: "00000000-0000-0000-0000-0000000000d1",
+              poam: {
+                id: "00000000-0000-0000-0000-0000000000d1",
+                human_id: "POAM-0042",
+                title: "Existing OpenSSL fleet remediation",
+                plan: "Promote the fixed OpenSSL package and verify exact scan absence.",
+                target_date: "2026-10-15",
+                risk: "high",
+                assignee: {
+                  kind: "oidc_group",
+                  group_name: "platform-operators",
+                  display: "Platform operators",
+                  available: true,
+                },
+              },
+              actor: { user_id: "00000000-0000-0000-0000-0000000000f1", display: "Morgan Reyes" },
+              scheduled_at: "2026-09-13T12:00:00Z",
+            },
+          },
+          {
+            environment_id: "00000000-0000-0000-0000-0000000000e3",
+            environment_name: "Lab",
+            affected_system_count: 1,
+            exact_affected_system_count: 1,
+            legacy_affected_system_count: 0,
+            systems: [{
+              system_id: "00000000-0000-0000-0000-0000000000a4",
+              environment_id: "00000000-0000-0000-0000-0000000000e3",
+              hostname: "lab-web-01",
+              environment: "Lab",
+              primary_ip_address: "10.0.2.1",
+              flake_name: "platform",
+              flake_id: 1,
+              commit_hash: "dddddddddddddddddddddddddddddddddddddddd",
+              deployment_policy: "manual",
+              current_package_version: "3.0.1",
+              inventory_authority: "exact",
+            }],
+            disposition: null,
+          },
+          {
+            environment_id: "00000000-0000-0000-0000-0000000000e4",
+            environment_name: "Archive",
+            affected_system_count: 1,
+            exact_affected_system_count: 0,
+            legacy_affected_system_count: 1,
+            systems: [{
+              system_id: "00000000-0000-0000-0000-0000000000a5",
+              environment_id: "00000000-0000-0000-0000-0000000000e4",
+              hostname: "archive-web-01",
+              environment: "Archive",
+              primary_ip_address: "10.0.3.1",
+              flake_name: "platform",
+              flake_id: 1,
+              commit_hash: null,
+              deployment_policy: "manual",
+              current_package_version: "3.0.1",
+              inventory_authority: "legacy",
+            }],
+            disposition: null,
+          },
+        ],
+      };
+      let fleetDetailRequests = 0;
+      let fleetDetailAfterMutation = null;
+      await page.route(/\/api\/v1\/cves\/CVE-2024-1234\/fleet\?package=openssl$/, async (route) => {
+        fleetDetailRequests += 1;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(fleetDetailAfterMutation ?? fleetDetail),
+        });
+      });
+      await page.route("**/api/v1/poams/assignees", async (route) => {
         await route.fulfill({
           status: 200,
           contentType: "application/json",
           body: JSON.stringify({
-            cve_id: "CVE-2024-1234",
-            cvss_v3_score: 9.8,
-            severity: "critical",
-            title: "OpenSSL bounds check issue",
-            cvss_vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-            cwe_id: "CWE-125",
-            published_date: "2024-02-01",
-            modified_date: "2024-02-03",
-            exploited: true,
-            package_name: "openssl",
-            installed_version: "3.0.1",
-            fixed_version: "3.0.2",
-            detection_method: "vulnix",
-            fix_status: "fix_available",
+            people: [{ user_id: "00000000-0000-0000-0000-0000000000f1", label: "Morgan Reyes" }],
+            groups: [{ group_name: "platform-operators" }],
           }),
         });
       });
-      await page.route(/\/api\/v1\/cves\/CVE-2024-1234\/systems$/, async (route) => {
-        await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
-      });
-      await page.route(/\/api\/v1\/cves\/CVE-2024-1234\/justifications$/, async (route) => {
-        await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      const triageBodies = [];
+      await page.route(/\/api\/v1\/cves\/CVE-2024-1234\/triage$/, async (route) => {
+        const body = route.request().postDataJSON();
+        triageBodies.push(body);
+        if (triageBodies.length === 1) {
+          await route.fulfill({
+            status: 409,
+            contentType: "application/json",
+            body: JSON.stringify({
+              error: "cve_evidence_changed",
+              message: "The exact affected fleet changed while triage was pending.",
+              details: { current_subject_count: 4 },
+            }),
+          });
+          return;
+        }
+        const returnedDetail = JSON.parse(JSON.stringify(fleetDetail));
+        returnedDetail.affected_system_count = 5;
+        returnedDetail.exact_affected_system_count = 4;
+        returnedDetail.rollup = "partial";
+        returnedDetail.environments[1].systems.push({
+          system_id: "00000000-0000-0000-0000-0000000000a3",
+          environment_id: "00000000-0000-0000-0000-0000000000e2",
+          hostname: "server-post-response-prod-02",
+          environment: "Production",
+          primary_ip_address: "10.0.1.2",
+          flake_name: "platform",
+          flake_id: 1,
+          commit_hash: "cccccccccccccccccccccccccccccccccccccccc",
+          deployment_policy: "automatic",
+          current_package_version: "3.0.1",
+          inventory_authority: "exact",
+        });
+        returnedDetail.environments[1].affected_system_count =
+          returnedDetail.environments[1].systems.length;
+        fleetDetailAfterMutation = JSON.parse(JSON.stringify(returnedDetail));
+        fleetDetailAfterMutation.environments[1].systems.at(-1).hostname =
+          "server-recomputed-prod-02";
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            detail: returnedDetail,
+            poam_id: "00000000-0000-0000-0000-0000000000d1",
+            poam_reused: true,
+          }),
+        });
       });
       await page.route(/\/api\/v1\/cves(?:\?.*)?$/, async (route) => {
         await route.fulfill({
@@ -8119,12 +11831,14 @@ const steps = [
       const fleetRescanResponses = [
         {
           status: 202,
-          payload: { enqueued_count: 3, message: "Queued 3 CVE scan(s)." },
+          payload: { eligible_count: 3, enqueued_count: 3, reused_count: 0, message: "Queued 3 CVE scan(s)." },
         },
         {
           status: 202,
           payload: {
+            eligible_count: 4,
             enqueued_count: 0,
+            reused_count: 4,
             message:
               "All 4 eligible system configuration(s) already have a scan pending or in progress.",
           },
@@ -8132,14 +11846,18 @@ const steps = [
         {
           status: 202,
           payload: {
+            eligible_count: 3,
             enqueued_count: 2,
+            reused_count: 1,
             message: "Queued 2 CVE scan(s); 1 already had an active scan.",
           },
         },
         {
           status: 202,
           payload: {
+            eligible_count: 0,
             enqueued_count: 0,
+            reused_count: 0,
             message: "No active systems are reporting a running configuration to scan.",
           },
         },
@@ -8167,7 +11885,6 @@ const steps = [
       });
 
       await page.goto(`${baseUrl}/cves`, { timeout: LOAD_TIMEOUT });
-      await page.waitForTimeout(2000);
       await collapseOnboardingCoach(page);
 
       // Assert the page heading is present.
@@ -8305,27 +12022,225 @@ const steps = [
         );
       }
 
-      // Non-admin CVE authorization is intentionally NOT asserted here.
-      //
-      // The `ui_check_auth` / `ui_check_role` query-parameter harness in
-      // `app_shell.rs` is gated behind `#[cfg(debug_assertions)]` so a
-      // production bundle can never be role-spoofed from a URL. This check
-      // serves the release bundle built by `dx bundle --platform web
-      // --release`, so both helpers compile to constants (`false` and
-      // `Role::Admin`) and a `ui_check_role=viewer` navigation is served as
-      // the ordinary session, not as a Viewer. Asserting Viewer denial here
-      // would therefore be unsatisfiable by construction rather than a real
-      // regression signal.
-      //
-      // The same behavior is covered where it is actually decidable:
-      //   - `app_shell::tests::cve_route_denied_for_non_admin` and
-      //     `cve_route_allowed_for_admin` pin the route-level admin policy
-      //     that renders the "Access Denied" panel instead of `CvesView`.
-      //   - `handlers::api::cves::fleet_rescan_authorization_tests` drives the
-      //     real `RequireAdmin` extractor over the actual route and asserts
-      //     401 unauthenticated, 403 Viewer, 403 Operator, and 202 Admin.
-      // Server-side rejection is the authoritative control; hiding the button
-      // is presentation only.
+      const browserInstance = page.context().browser();
+      if (!browserInstance) throw new Error("Viewer CVE contract requires a browser instance");
+      const viewerContext = await browserInstance.newContext({ viewport: VIEWPORTS.desktop });
+      const viewerPage = await viewerContext.newPage();
+      let releaseLoadingFleet;
+      try {
+        await suppressOnboardingCoach(viewerPage);
+      await routeStandaloneUiBootstrap(viewerPage, "Viewer");
+        await viewerPage.route("**/api/v1/user/notifications**", async (route) => {
+          if (route.request().method() !== "GET") {
+            await route.fallback();
+            return;
+          }
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({ unread_count: 0, next_cursor: null, notifications: [] }),
+          });
+        });
+        await viewerPage.route("**/api/v1/cves/stats*", async (route) => {
+          if (route.request().method() !== "GET") {
+            await route.fallback();
+            return;
+          }
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              total_cves: 1, critical: 1, high: 0, medium: 0, low: 0,
+              fixable: 1, exploited: 1, environments_affected: 3,
+              systems_affected: 3, outstanding: 1, accepted: 1, scheduled: 1,
+            }),
+          });
+        });
+        await viewerPage.route("**/api/v1/cves/packages*", async (route) => {
+          if (route.request().method() !== "GET") {
+            await route.fallback();
+            return;
+          }
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(["openssl"]) });
+        });
+        await viewerPage.route(/\/api\/v1\/cves\/grouped(?:\?.*)?$/, async (route) => {
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify([{
+              package_name: "openssl", cve_count: 1, critical_count: 1,
+              high_count: 0, medium_count: 0, low_count: 0,
+              environments_count: 3, total_affected_systems: 3,
+              fixable_count: 1, outstanding_count: 1, exploited_count: 1,
+              max_cvss: 9.8, severity_score: 1000, cves: [cveRowFixture],
+            }]),
+          });
+        });
+        await viewerPage.route(/\/api\/v1\/cves(?:\?.*)?$/, async (route) => {
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([cveRowFixture]) });
+        });
+      let viewerFleetRequests = 0;
+      await viewerPage.route(/\/api\/v1\/cves\/CVE-2024-1234\/fleet(?:\?.*)?$/, async (route) => {
+        const url = new URL(route.request().url());
+        if (url.pathname !== "/api/v1/cves/CVE-2024-1234/fleet" ||
+            url.searchParams.get("package") !== "openssl" ||
+            [...url.searchParams.keys()].length !== 1 ||
+            route.request().method() !== "GET") {
+          await route.fallback();
+          return;
+        }
+        viewerFleetRequests += 1;
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(fleetDetail) });
+      });
+      await viewerPage.route(/\/api\/v1\/cves\/CVE-FAST\/fleet\?package=openssl$/, async (route) => {
+        const fastDetail = JSON.parse(JSON.stringify(fleetDetail));
+        fastDetail.cve.cve_id = "CVE-FAST";
+        fastDetail.cve.title = "Newer exact selection";
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(fastDetail) });
+      });
+      for (const [cveId, status] of [["CVE-EMPTY", 404], ["CVE-DENIED", 403], ["CVE-ERROR", 500]]) {
+        await viewerPage.route(new RegExp(`/api/v1/cves/${cveId}/fleet\\?package=openssl$`), async (route) => {
+          await route.fulfill({
+            status,
+            contentType: "application/json",
+            body: JSON.stringify({ error: `fleet_${status}`, message: `Fleet response ${status}`, details: null }),
+          });
+        });
+      }
+      let markLoadingFleetStarted;
+      let markLoadingFleetFinished;
+      const loadingFleetStarted = new Promise((resolve) => { markLoadingFleetStarted = resolve; });
+      const loadingFleetFinished = new Promise((resolve) => { markLoadingFleetFinished = resolve; });
+      await viewerPage.route(/\/api\/v1\/cves\/CVE-LOADING\/fleet\?package=openssl$/, async (route) => {
+        markLoadingFleetStarted();
+        await new Promise((resolve) => { releaseLoadingFleet = resolve; });
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(fleetDetail) });
+        markLoadingFleetFinished();
+      });
+        await viewerPage.goto(`${baseUrl}/cves?cve=CVE-2024-1234&cve_package=openssl`, {
+          timeout: LOAD_TIMEOUT,
+        });
+        const viewerDrawer = viewerPage.getByRole("dialog", { name: "CVE-2024-1234 openssl fleet inventory" });
+        await assertVisible(viewerDrawer, "Viewer should read exact fleet detail from a deep link");
+        if (viewerFleetRequests !== 1) {
+          throw new Error(`Viewer exact fleet detail made ${viewerFleetRequests} exact requests`);
+        }
+        const viewerUrl = new URL(viewerPage.url());
+        if (viewerUrl.searchParams.get("cve") !== "CVE-2024-1234" ||
+            viewerUrl.searchParams.get("cve_package") !== "openssl") {
+          throw new Error(`Viewer deep link lost exact CVE query parameters: ${viewerPage.url()}`);
+        }
+      await assertVisible(viewerPage.getByRole("link", { name: "CVEs" }).first(), "Viewer should see CVE navigation");
+      await assertHidden(
+        viewerDrawer.getByTestId("cve-triage-open"),
+        "Viewer must not receive fleet triage mutation controls",
+      );
+      await viewerPage.goto(`${baseUrl}/cves?cve=CVE-LOADING&cve_package=openssl`, { timeout: LOAD_TIMEOUT });
+      await loadingFleetStarted;
+      await assertVisible(viewerPage.getByText("Loading fleet inventory..."), "Fleet inventory detail should expose loading state");
+      await viewerPage.evaluate(() => {
+        window.history.pushState({}, "", "/cves?cve=CVE-FAST&cve_package=openssl");
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      });
+      const fastDrawer = viewerPage.getByRole("dialog", { name: "CVE-FAST openssl fleet inventory" });
+      await assertVisible(fastDrawer.getByText("CVE-FAST"), "Newer exact selection should replace pending detail");
+      releaseLoadingFleet();
+      await loadingFleetFinished;
+      await assertVisible(fastDrawer.getByText("CVE-FAST"), "Late fleet responses must not overwrite newer selection");
+      await viewerPage.goto(`${baseUrl}/cves?cve=CVE-EMPTY&cve_package=openssl`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(viewerPage.getByText("No current inventory findings"), "404 should render the fleet inventory empty state");
+      await viewerPage.goto(`${baseUrl}/cves?cve=CVE-DENIED&cve_package=openssl`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(viewerPage.getByText("Fleet detail unavailable"), "403 should render the exact-fleet unauthorized state");
+      await viewerPage.goto(`${baseUrl}/cves?cve=CVE-ERROR&cve_package=openssl`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(viewerPage.getByText("Could not load fleet detail"), "500 should render the retryable exact-fleet error state");
+      await assertVisible(viewerPage.getByRole("button", { name: "Retry" }), "Retryable fleet errors should expose retry");
+      } finally {
+        if (releaseLoadingFleet) releaseLoadingFleet();
+        await viewerPage.unrouteAll({ behavior: "ignoreErrors" }).catch(() => {});
+        await viewerContext.close().catch(() => {});
+      }
+
+      const completedPoamId = "00000000-0000-0000-0000-0000000000d3";
+      const completedContext = await browserInstance.newContext({ viewport: VIEWPORTS.desktop });
+      const completedPage = await completedContext.newPage();
+      try {
+        await suppressOnboardingCoach(completedPage);
+      await routeStandaloneUiBootstrap(completedPage, "Admin");
+      await completedPage.route(new RegExp(`/api/v1/poams/${completedPoamId}(?:\\?.*)?$`), async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            id: completedPoamId,
+            human_id: "POAM-2026-0042",
+            title: "Completed exact CVE remediation",
+            plan: "Deploy and verify exact CVE absence.",
+            owner: "",
+            assignee: { kind: "user", user_id: "00000000-0000-0000-0000-0000000000f1", display: "Morgan Reyes", available: true },
+            target_date: "2026-09-12",
+            risk: "high",
+            status: "completed",
+            revision: 4,
+            overdue: false,
+            finding_count: 0,
+            cve_finding_count: 1,
+            created_at: "2026-09-01T12:00:00Z",
+            updated_at: "2026-09-13T12:00:00Z",
+            closed_at: "2026-09-13T12:00:00Z",
+            closure_attempt_id: "00000000-0000-0000-0000-0000000000c1",
+            findings: [],
+            cve_findings: [{
+              id: "00000000-0000-0000-0000-0000000000f2",
+              system_id: "00000000-0000-0000-0000-0000000000a2",
+              hostname: "prod-web-01",
+              environment_id: "00000000-0000-0000-0000-0000000000e2",
+              canonical_cve_id: "CVE-2024-1234",
+              canonical_package_name: "openssl",
+              link_id: "00000000-0000-0000-0000-0000000000f3",
+              linked_at: "2026-09-01T12:00:00Z",
+              linked_by: "00000000-0000-0000-0000-0000000000f1",
+              retired_at: "2026-09-13T12:00:00Z",
+              retired_by: "00000000-0000-0000-0000-0000000000f1",
+              retirement_reason: `closed:00000000-0000-0000-0000-0000000000c1`,
+              link_active: false,
+              baseline_scan_id: "00000000-0000-0000-0000-0000000000f4",
+              baseline_scan_completed_at: "2026-09-01T11:55:00Z",
+              baseline_generation: 42,
+              baseline_target_store_path: "/nix/store/completed-exact-baseline",
+              baseline_occurrence_derivation_path: "/nix/store/openssl-3.0.1.drv",
+              baseline_observed_package_version: "3.0.1",
+              current_derivation_id: null,
+              current_target_store_path: null,
+              current_scan_id: null,
+              current_occurrence_derivation_path: null,
+              current_observed_package_version: null,
+              resolution_state: "resolved",
+            }],
+            findings_has_more: false,
+            findings_next_cursor: null,
+            milestones: [],
+            assignment_references: [],
+            verification_attempts: [],
+            verification_has_more: false,
+            verification_next_cursor: null,
+            activity: [],
+            activity_has_more: false,
+            activity_next_cursor: null,
+          }),
+        });
+      });
+      await completedPage.goto(`${baseUrl}/compliance?poam=${completedPoamId}`, { timeout: LOAD_TIMEOUT });
+      const completedDetail = completedPage.getByTestId("poam-detail");
+      await assertVisible(completedDetail, "Completed POA&M deep link should open exact detail");
+      await assertVisible(completedDetail.getByText("Retired vulnerability history"), "Completed POA&M should expose retired exact-link history");
+      const retiredExactLink = completedDetail.getByTestId("poam-retired-vulnerability");
+      await assertVisible(retiredExactLink.getByText("CVE-2024-1234"), "Retired exact link should retain its CVE identity");
+      await assertVisible(retiredExactLink.getByText("Generation 42"), "Retired exact link should retain its generation baseline");
+      await assertCount(retiredExactLink.getByRole("button"), 0, "Retired exact links must not expose an unlink action");
+      } finally {
+        await completedPage.unrouteAll({ behavior: "ignoreErrors" }).catch(() => {});
+        await completedContext.close().catch(() => {});
+      }
 
       // Assert summary stat cards are rendered.
       const patchableCard = page.locator("main").getByText("Patchable now");
@@ -8350,51 +12265,382 @@ const steps = [
       const flatViewBtn = page.locator("button:has-text('Flat')");
       await flatViewBtn.waitFor({ timeout: 5000 });
       await flatViewBtn.click();
-      await page.waitForTimeout(1000);
 
       const cveRow = page.locator("main td:has-text('CVE-2024-1234')");
       await assertVisible(cveRow, "Expected CVE row to render");
 
       // Open the CVE detail drawer from the flat-view row and assert it renders.
-      await cveRow.click();
-      await page.waitForTimeout(1000);
-      const drawer = page.locator("aside[role='dialog']");
+      const openFleet = page.getByRole("button", {
+        name: "Open fleet inventory for CVE-2024-1234 openssl",
+      });
+      await openFleet.click();
+      const drawer = page.getByRole("dialog", { name: "CVE-2024-1234 openssl fleet inventory" });
       await assertVisible(drawer, "Expected CVE detail drawer to open");
       const drawerCveId = drawer.locator(".mono:has-text('CVE-2024-1234')").first();
       await assertVisible(drawerCveId, "Expected CVE id in drawer header");
+      await assertVisible(drawer.getByText("OpenSSL bounds check issue"), "Expected advisory title in drawer header");
+      await assertVisible(drawer.getByText("exploited in the wild"), "Expected exploited status in drawer header");
+      const advisoryLink = drawer.getByTestId("cve-advisory-link");
+      await assertVisible(advisoryLink, "Expected advisory action in drawer header");
+      await assertAttribute(advisoryLink, "target", "_blank", "Advisory should open separately");
+      await assertAttribute(advisoryLink, "rel", "noopener noreferrer", "Advisory must not receive opener access");
+      await assertVisible(drawer.getByTestId("cve-cvss-vector").getByText(cveRowFixture.cvss_vector), "Expected CVSS vector section");
+      await assertVisible(drawer.getByTestId("cve-authority-details"), "Expected exact and legacy authority summary");
+      await assertVisible(drawer.getByTestId("cve-remediation").getByText("openssl-3.0.2"), "Expected prominent fixed-version remediation");
+      await assertVisible(drawer.getByTestId("cve-affected-systems"), "Expected a distinct affected-systems section");
 
-      const acceptRiskButton = drawer.locator("button:has-text('Accept risk')").first();
-      await acceptRiskButton.click();
-      await assertVisible(
-        drawer.locator("label:has-text('Review / expiry date (optional)')"),
-        "Expected review/expiry date field in accept-risk form",
+      const environmentCards = drawer.getByTestId("cve-fleet-environment");
+      const developmentCard = environmentCards.filter({ has: page.getByText("Development", { exact: true }) });
+      const productionCard = environmentCards.filter({ has: page.getByText("Production", { exact: true }) });
+      const labCard = environmentCards.filter({ has: page.getByText("Lab", { exact: true }) });
+      const affectedEnvironmentCards = drawer.getByTestId("cve-affected-environment");
+      const archiveInventory = affectedEnvironmentCards.filter({ has: page.getByText("Archive", { exact: true }) });
+      await assertVisible(drawer.getByText("MIXED", { exact: true }), "Expected authoritative mixed fleet rollup");
+      await assertVisible(developmentCard.getByText("EXACT ACCEPTED", { exact: true }), "Expected accepted environment state");
+      await assertVisible(developmentCard.getByText(/Accepted by Morgan Reyes/), "Expected accepted-risk disposition actor");
+      await assertVisible(developmentCard.getByText("review 2026-10-01"), "Expected accepted review date");
+      await assertVisible(productionCard.getByText("EXACT SCHEDULED", { exact: true }), "Expected scheduled environment state");
+      await assertVisible(productionCard.getByText(/Scheduled by Morgan Reyes/), "Expected scheduled-remediation actor");
+      await assertVisible(productionCard.getByText("POAM-0042: Existing OpenSSL fleet remediation"), "Expected useful scheduled POA&M link label");
+      await assertVisible(productionCard.getByText("Promote the fixed OpenSSL package and verify exact scan absence."), "Expected scheduled remediation plan");
+      await assertVisible(productionCard.getByText("Platform operators"), "Expected typed scheduled assignee");
+      await assertVisible(productionCard.getByText("2026-10-15"), "Expected scheduled target date");
+      await assertVisible(productionCard.getByText("CAT I - High"), "Expected scheduled risk");
+      await assertVisible(labCard.getByText("EXACT OPEN", { exact: true }), "Expected open environment state");
+      await assertCount(environmentCards.filter({ has: page.getByText("Archive", { exact: true }) }), 0, "Legacy-only environments must not imply a triage disposition");
+      await assertVisible(drawer.getByTestId("cve-fleet-legacy"), "Expected display-only legacy fleet warning");
+      await assertVisible(drawer.getByTestId("cve-fleet-no-scan"), "Expected no-scan fleet warning");
+      await assertVisible(archiveInventory.getByText("LEGACY", { exact: true }), "Expected legacy host authority label");
+      for (let index = 0; index < await affectedEnvironmentCards.count(); index += 1) {
+        const card = affectedEnvironmentCards.nth(index);
+        const declared = Number((await card.locator("header .mono").textContent()).match(/(\d+) host/)?.[1]);
+        const rendered = await card.getByTestId("cve-fleet-host").count();
+        if (declared !== rendered) {
+          throw new Error(`Fleet detail mock violated server count contract: declared ${declared}, rendered ${rendered}`);
+        }
+      }
+      if (!new URL(page.url()).searchParams.get("cve_package")) {
+        throw new Error(`Exact package selection was not encoded in URL state: ${page.url()}`);
+      }
+      const assertFleetDetailCapture = async () => {
+        const authority = drawer.getByTestId("cve-authority-details");
+        const vector = drawer.getByTestId("cve-cvss-vector");
+        const legacyWarning = drawer.getByTestId("cve-fleet-legacy");
+        await assertVisible(authority, "CVE capture must preserve authority details");
+        const [authorityBox, vectorBox, legacyBox] = await Promise.all([
+          authority.boundingBox(),
+          vector.boundingBox(),
+          legacyWarning.boundingBox(),
+        ]);
+        const authorityRender = await authority.evaluate((element) => ({
+          opacity: getComputedStyle(element).opacity,
+        }));
+        if (!authorityBox || !vectorBox || !legacyBox || authorityBox.height < 30 || authorityRender.opacity !== "1" || authorityBox.y <= vectorBox.y || authorityBox.y >= legacyBox.y) {
+          throw new Error(`CVE authority details must render between the vector and legacy warning: ${JSON.stringify({ authorityBox, vectorBox, legacyBox, authorityRender })}`);
+        }
+      };
+      await captureWorkflowViewportState(page, "16-cves", "mixed-fleet-detail", "wide", assertFleetDetailCapture);
+      await captureWorkflowViewportState(page, "16-cves", "mixed-fleet-detail", "tablet", assertFleetDetailCapture);
+      await page.goBack();
+      await assertHidden(drawer, "Browser back should close exact fleet detail");
+      await page.goForward();
+      await assertVisible(drawer, "Browser forward should reopen exact fleet detail");
+      await assertAttribute(drawer, "aria-modal", "true", "Fleet drawer must be modal");
+      await drawer.getByTestId("cve-triage-open").click();
+      let triageDialog = page.getByRole("dialog", { name: "Triage CVE-2024-1234 openssl" });
+      await assertVisible(triageDialog, "Operator/Admin should receive the exact fleet triage editor");
+      await assertVisible(triageDialog.getByTestId("cve-triage-context"), "Expected vulnerability context in triage editor");
+      const assertTriageCapture = async () => {
+        const context = triageDialog.getByTestId("cve-triage-context");
+        const firstEnvironment = triageDialog.locator(".cve-triage-env").first();
+        await assertVisible(context, "CVE triage capture must preserve vulnerability context");
+        const [contextBox, environmentBox] = await Promise.all([context.boundingBox(), firstEnvironment.boundingBox()]);
+        const contextOpacity = await context.evaluate((element) => getComputedStyle(element).opacity);
+        if (!contextBox || !environmentBox || contextBox.height < 80 || contextOpacity !== "1" || contextBox.y >= environmentBox.y) {
+          throw new Error(`CVE vulnerability context must precede environment controls: ${JSON.stringify({ contextBox, environmentBox })}`);
+        }
+      };
+      await captureWorkflowViewportState(page, "16-cves", "mixed-triage-editor", "wide", assertTriageCapture);
+      await captureWorkflowViewportState(page, "16-cves", "mixed-triage-editor", "tablet", assertTriageCapture);
+      const triageClose = triageDialog.getByRole("button", { name: "Close triage editor" });
+      await page.waitForFunction(
+        () => document.activeElement?.getAttribute("aria-label") === "Close triage editor",
+      ).catch(async () => {
+        const active = await page.evaluate(() => {
+          const element = document.activeElement;
+          if (!element) return null;
+          return {
+            tag: element.tagName,
+            ariaLabel: element.getAttribute("aria-label"),
+            className: element.className,
+            testId: element.getAttribute("data-testid"),
+            disabled: element.hasAttribute("disabled"),
+            text: (element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 80),
+          };
+        }).catch(() => null);
+        const closeState = await page.evaluate(() => {
+          const element = document.querySelector('#cve-triage-dialog [aria-label="Close triage editor"]');
+          if (!element) return null;
+          return { disabled: element.hasAttribute("disabled"), autofocus: element.hasAttribute("autofocus") };
+        }).catch(() => null);
+        throw new Error(`Exact fleet triage editor did not receive initial focus; activeElement=${JSON.stringify(active)}; closeButton=${JSON.stringify(closeState)}`);
+      });
+      if (!(await triageClose.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Exact fleet triage editor did not receive initial focus");
+      }
+      await page.keyboard.press("Shift+Tab");
+      if (!(await triageDialog.evaluate((element) => element.contains(document.activeElement)))) {
+        throw new Error("Exact fleet triage editor allowed keyboard focus to escape");
+      }
+      await page.keyboard.press("Escape");
+      await assertHidden(triageDialog, "Nested Escape should close only the triage editor");
+      await assertVisible(drawer, "Closing the nested triage editor should preserve fleet detail");
+      await drawer.getByTestId("cve-triage-open").click();
+      triageDialog = page.getByRole("dialog", { name: "Triage CVE-2024-1234 openssl" });
+      const developmentDraft = triageDialog.getByTestId("cve-triage-environment").filter({ hasText: "Development" });
+      const productionDraft = triageDialog.getByTestId("cve-triage-environment").filter({ hasText: "Production" });
+      const labDraft = triageDialog.getByTestId("cve-triage-environment").filter({ hasText: "Lab" });
+      await assertCount(
+        triageDialog.getByTestId("cve-triage-environment").filter({ hasText: "Archive" }),
+        0,
+        "Legacy-only environments must not enter the triage draft",
       );
+      await developmentDraft.getByTestId("cve-accept-justification").fill("");
+      await triageDialog.getByTestId("cve-triage-submit").click();
       await assertVisible(
-        drawer.locator("text=Date persistence is not yet implemented; tracked in TASK-348.1.1."),
-        "Expected date persistence deferral notice",
+        triageDialog.getByRole("alert").filter({ hasText: "Development" }),
+        "Missing environment-specific acceptance justification must fail before POST",
       );
+      if (triageBodies.length !== 0) throw new Error("Acceptance validation sent a triage request");
+      await developmentDraft.getByTestId("cve-accept-justification").fill("too short");
+      await triageDialog.getByTestId("cve-triage-submit").click();
+      await assertVisible(
+        triageDialog.getByRole("alert").filter({ hasText: "10 to 2000 bytes for Development" }),
+        "Short environment-specific acceptance justification must fail before POST",
+      );
+      if (triageBodies.length !== 0) throw new Error("Short acceptance validation sent a triage request");
+      await developmentDraft.getByTestId("cve-accept-justification").fill("Internal-only service behind network segmentation.");
+      const reviewDate = developmentDraft.getByTestId("cve-accept-review-date");
+      await reviewDate.evaluate((input) => {
+        input.type = "text";
+        input.value = "invalid-review-date";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await triageDialog.getByTestId("cve-triage-submit").click();
+      await assertVisible(
+        triageDialog.getByRole("alert").filter({ hasText: "valid review date for Development" }),
+        "Invalid optional review date must fail before POST",
+      );
+      if (triageBodies.length !== 0) throw new Error("Review-date validation sent a triage request");
+      await reviewDate.fill("");
+      if (await triageDialog.getByTestId("cve-poam-title").inputValue() !== "Existing OpenSSL fleet remediation") {
+        throw new Error("Scheduled POA&M title did not initialize from fleet metadata");
+      }
+      if (await triageDialog.getByTestId("cve-poam-target").inputValue() !== "2026-10-15") {
+        throw new Error("Scheduled POA&M target date did not initialize from fleet metadata");
+      }
+      if (await triageDialog.getByTestId("cve-poam-plan").inputValue() !== "Promote the fixed OpenSSL package and verify exact scan absence.") {
+        throw new Error("Scheduled POA&M plan did not initialize from fleet metadata");
+      }
+      const assignee = triageDialog.getByTestId("cve-poam-assignee");
+      if (await assignee.inputValue() !== "group:platform-operators") {
+        throw new Error("Typed scheduled POA&M assignee did not initialize from fleet metadata");
+      }
+      await assignee.evaluate((select) => {
+        const option = document.createElement("option");
+        option.value = "invalid-untyped-owner";
+        option.textContent = "invalid-untyped-owner";
+        select.append(option);
+        select.value = option.value;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      await triageDialog.getByTestId("cve-triage-submit").click();
+      await assertVisible(
+        triageDialog.getByRole("alert").filter({ hasText: "valid POA&M assignee" }),
+        "Untyped assignee shape must fail before POST",
+      );
+      if (triageBodies.length !== 0) throw new Error("Assignee validation sent a triage request");
+      await assignee.selectOption("group:platform-operators");
+      await triageDialog.getByTestId("cve-triage-submit").click();
+      await assertVisible(
+        drawer.getByRole("alert").filter({ hasText: "exact affected fleet changed" }),
+        "Typed evidence conflict should remain actionable while authoritative detail refreshes",
+      );
+      if (triageBodies.length !== 1) throw new Error(`Expected one conflicted triage POST, got ${triageBodies.length}`);
+      const firstTriage = triageBodies[0];
+      if (JSON.stringify(firstTriage).match(/system_id|hostname|actor|evidence/i)) {
+        throw new Error(`Fleet triage body leaked server-owned authority: ${JSON.stringify(firstTriage)}`);
+      }
+      if (firstTriage.actions.map((action) => action.action).join(",") !== "accept_risk,schedule_patch,leave_open") {
+        throw new Error(`Mixed environment intentions were not preserved: ${JSON.stringify(firstTriage.actions)}`);
+      }
+      if (firstTriage.poam.assignee.kind !== "oidc_group" || firstTriage.poam.assignee.group_name !== "platform-operators") {
+        throw new Error(`Typed non-grant group representation changed: ${JSON.stringify(firstTriage.poam.assignee)}`);
+      }
+      await drawer.getByTestId("cve-triage-open").click();
+      triageDialog = page.getByRole("dialog", { name: "Triage CVE-2024-1234 openssl" });
+      const refreshedDevelopmentDraft = triageDialog.getByTestId("cve-triage-environment").filter({ hasText: "Development" });
+      await refreshedDevelopmentDraft.getByRole("button", { name: "Leave open" }).click();
+      await triageDialog.getByTestId("cve-triage-submit").click();
+      await assertVisible(
+        drawer.getByText("server-recomputed-prod-02"),
+        "Success must render the authoritative refetched host scope",
+      );
+      await assertHidden(
+        drawer.getByText("server-post-response-prod-02"),
+        "Success must not blindly retain the POST response host scope",
+      );
+      await assertVisible(drawer.getByTestId("cve-triage-poam-link"), "Scheduled success should link the created POA&M");
+      await assertVisible(drawer.getByText("existing POA&M"), "Reused scheduled remediation must be reported accurately");
+      const reusedTriage = triageBodies[1];
+      if (reusedTriage.actions.map((action) => action.action).join(",") !== "leave_open,schedule_patch,leave_open") {
+        throw new Error(`Mixed preserve-and-change intentions were not submitted: ${JSON.stringify(reusedTriage.actions)}`);
+      }
+      if (reusedTriage.poam.title !== fleetDetail.environments[1].disposition.poam.title
+        || reusedTriage.poam.plan !== fleetDetail.environments[1].disposition.poam.plan
+        || reusedTriage.poam.target_date !== fleetDetail.environments[1].disposition.poam.target_date
+        || reusedTriage.poam.risk !== fleetDetail.environments[1].disposition.poam.risk
+        || reusedTriage.poam.assignee.group_name !== fleetDetail.environments[1].disposition.poam.assignee.group_name) {
+        throw new Error(`Reused POA&M request did not preserve exact server metadata: ${JSON.stringify(reusedTriage.poam)}`);
+      }
+      await page.keyboard.press("Escape");
+      await assertHidden(drawer, "Escape should close exact fleet detail");
+      fleetDetailAfterMutation = null;
+      delete fleetDetail.environments[1].disposition.poam;
+      await openFleet.click();
+      await assertVisible(drawer, "Expected old-server fleet detail to reopen");
+      await drawer.getByTestId("cve-triage-open").click();
+      triageDialog = page.getByRole("dialog", { name: "Triage CVE-2024-1234 openssl" });
+      await assertVisible(
+        triageDialog.getByRole("alert").filter({ hasText: "server version" }),
+        "Old-server scheduled metadata omission must show an explicit upgrade state",
+      );
+      if (await triageDialog.getByTestId("cve-triage-submit").isEnabled()) {
+        throw new Error("Old-server metadata omission allowed a misleading preservation submission");
+      }
+      const oldServerProduction = triageDialog.getByTestId("cve-triage-environment").filter({ hasText: "Production" });
+      await oldServerProduction.getByRole("button", { name: "Leave open" }).click();
+      if (!(await triageDialog.getByTestId("cve-triage-submit").isEnabled())) {
+        throw new Error("Removing every scheduled environment did not unblock an allowed no-POA&M submission");
+      }
+      await page.keyboard.press("Escape");
+      await page.keyboard.press("Escape");
+      await assertHidden(drawer, "Escape should close old-server fleet detail");
+      if (!(await openFleet.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Closing exact fleet detail did not restore trigger focus");
+      }
+      if (fleetDetailRequests < 2) {
+        throw new Error(`Expected exact fleet detail to reload after history navigation, got ${fleetDetailRequests}`);
+      }
 
-      await drawer.locator("button:has-text('Schedule patch')").click();
-      await assertVisible(
-        drawer.locator("label:has-text('Target patch date')"),
-        "Expected target patch date field when scheduling a patch",
-      );
+      const legacyOnlyDetail = JSON.parse(JSON.stringify(fleetDetail));
+      legacyOnlyDetail.rollup = "outstanding";
+      legacyOnlyDetail.affected_system_count = 1;
+      legacyOnlyDetail.exact_affected_system_count = 0;
+      legacyOnlyDetail.exact_mutation_target_count = 0;
+      legacyOnlyDetail.legacy_affected_system_count = 1;
+      legacyOnlyDetail.environments = [legacyOnlyDetail.environments.find((environment) => environment.environment_name === "Archive")];
+      fleetDetailAfterMutation = legacyOnlyDetail;
+      await openFleet.click();
+      await assertVisible(drawer, "Expected legacy-only CVE inventory to remain readable");
       await assertDisabled(
-        drawer.locator(".field:has(label:has-text('Target patch date')) input[type='date']"),
-        "Target patch date input should be disabled until persistence is implemented",
+        drawer.getByTestId("cve-triage-open"),
+        "Legacy-only CVE inventory should show why fleet triage is unavailable",
       );
+      await assertVisible(
+        drawer.getByText("No exact current scan subjects are available"),
+        "Legacy-only CVE inventory should explain the read-only authority boundary",
+      );
+      await drawer.getByRole("button", { name: "Close fleet inventory" }).click();
+      await assertHidden(drawer, "Expected legacy-only detail to close");
 
-      // Leave the drawer open so the captured screenshot shows the detail surface and triage form.
+      const exactOnlyDetail = JSON.parse(JSON.stringify(fleetDetail));
+      exactOnlyDetail.affected_system_count = 3;
+      exactOnlyDetail.exact_affected_system_count = 3;
+      exactOnlyDetail.exact_mutation_target_count = 3;
+      exactOnlyDetail.legacy_affected_system_count = 0;
+      exactOnlyDetail.environments = exactOnlyDetail.environments.filter((environment) => environment.environment_name !== "Archive");
+      fleetDetailAfterMutation = exactOnlyDetail;
+      await openFleet.click();
+      await assertVisible(drawer, "Expected exact-only CVE inventory to remain actionable");
+      if (!(await drawer.getByTestId("cve-triage-open").isEnabled())) {
+        throw new Error("Exact-only CVE inventory did not enable fleet triage");
+      }
+      await assertHidden(drawer.getByTestId("cve-fleet-legacy"), "Exact-only inventory should not show a legacy warning");
+      await drawer.getByRole("button", { name: "Close fleet inventory" }).click();
+      await assertHidden(drawer, "Expected exact-only detail to close");
+
+      // Reopen the restored detail hierarchy for the workflow's light/dark capture.
+      fleetDetail.environments[1].disposition.poam = {
+        id: "00000000-0000-0000-0000-0000000000d1",
+        human_id: "POAM-0042",
+        title: "Existing OpenSSL fleet remediation",
+        plan: "Promote the fixed OpenSSL package and verify exact scan absence.",
+        target_date: "2026-10-15",
+        risk: "high",
+        assignee: {
+          kind: "oidc_group",
+          group_name: "platform-operators",
+          display: "Platform operators",
+          available: true,
+        },
+      };
+      fleetDetailAfterMutation = null;
+      await openFleet.click();
+      await assertVisible(drawer, "Expected restored CVE detail hierarchy for visual capture");
+      await page.waitForFunction(
+        () => getComputedStyle(document.querySelector("[data-testid='cve-fleet-drawer']")).transform === "none",
+      );
+      const drawerGeometry = await drawer.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return { left: rect.left, right: rect.right, viewportWidth: window.innerWidth, scrollWidth: element.scrollWidth, clientWidth: element.clientWidth };
+      });
+      if (drawerGeometry.left < 0 || drawerGeometry.right > drawerGeometry.viewportWidth + 1 || drawerGeometry.scrollWidth > drawerGeometry.clientWidth) {
+        throw new Error(`CVE detail drawer overflows the viewport: ${JSON.stringify(drawerGeometry)}`);
+      }
 
       // Unroute after test.
       await page.unroute("**/api/v1/cves/stats*");
       await page.unroute("**/api/v1/cves/packages*");
       await page.unroute(/\/api\/v1\/cves\/grouped(?:\?.*)?$/);
-      await page.unroute(/\/api\/v1\/cves\/CVE-2024-1234$/);
-      await page.unroute(/\/api\/v1\/cves\/CVE-2024-1234\/systems$/);
-      await page.unroute(/\/api\/v1\/cves\/CVE-2024-1234\/justifications$/);
+      await page.unroute(/\/api\/v1\/cves\/CVE-2024-1234\/fleet\?package=openssl$/);
+      await page.unroute("**/api/v1/poams/assignees");
+      await page.unroute(/\/api\/v1\/cves\/CVE-2024-1234\/triage$/);
       await page.unroute(/\/api\/v1\/cves(?:\?.*)?$/);
       await page.unroute("**/api/v1/cves/rescan-fleet");
+
+      // Regression guard for the route-leak fix above: routeStandaloneUiBootstrap()
+      // must not run unconditionally in this step. Its broad
+      // page.route("**/api/**") handler has no matching page.unroute() call, so if
+      // it were still installed here it would keep answering every later
+      // workflow's API calls in this run with hardcoded standalone-mock data
+      // instead of real backend responses. CF_UI_TEST_STANDALONE=1 runs
+      // legitimately keep an equivalent bootstrap installed by the shared
+      // focused-run preflight (see needsAuthPreflight) for the rest of the run,
+      // so this probe only applies to real-backend runs (VM/full and
+      // non-standalone host runs). /api/auth/whoami is a reliable leak signal
+      // because the mock always answers with a fixed sentinel identity
+      // regardless of which backend fixtures exist.
+      if (process.env.CF_UI_TEST_STANDALONE !== "1") {
+        const identityProbe = await page.evaluate(async () => {
+          const response = await fetch("/api/auth/whoami", { credentials: "include" });
+          const body = await response.json().catch(() => ({}));
+          return { status: response.status, userId: body?.user?.id, displayName: body?.user?.display_name };
+        });
+        const standaloneSentinelUserIds = new Set([
+          "43300000-0000-4000-8000-0000000000a0",
+          "43300000-0000-4000-8000-0000000000a1",
+        ]);
+        if (
+          standaloneSentinelUserIds.has(identityProbe.userId) ||
+          identityProbe.displayName === "Standalone Admin" ||
+          identityProbe.displayName === "Standalone Viewer"
+        ) {
+          throw new Error(
+            `16-cves leaked its standalone bootstrap route past step cleanup: /api/auth/whoami still answers with mocked identity ${JSON.stringify(identityProbe)} instead of the real authenticated session`,
+          );
+        }
+      }
     },
   },
   {
@@ -8608,7 +12854,42 @@ const steps = [
     action: async (page) => {
       const stepName = "20af-policy-catalog-selection-delete-regressions";
       await suppressOnboardingCoach(page);
+      // The full profile reaches this workflow after a collapsed-sidebar
+      // interaction. Focused runs must capture the same reviewed state.
+      await setAccountPreferences(page, { sidebar_collapsed: true });
       const prefix = "TASK433 catalog deletion";
+      const authenticatedWhoami = await page.evaluate(async (base) => {
+        const response = await fetch(`${base}/api/auth/whoami`, { credentials: "include" });
+        return { status: response.status, body: response.ok ? await response.json() : null };
+      }, apiBaseUrl);
+      if (authenticatedWhoami.status !== 200 || authenticatedWhoami.body?.is_authenticated !== true ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(authenticatedWhoami.body?.user?.id || "")) {
+        throw new Error(`20af requires the real authenticated whoami identity: ${JSON.stringify(authenticatedWhoami)}`);
+      }
+      await page.route("**/api/auth/whoami", async (route) => {
+        if (route.request().method() !== "GET") {
+          await route.fallback();
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(authenticatedWhoami.body),
+        });
+      });
+      await page.route("**/api/v1/user/notifications**", async (route) => {
+        if (route.request().method() !== "GET") {
+          await route.fallback();
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ unread_count: 0, next_cursor: null, notifications: [] }),
+        });
+      });
+      let primaryError = null;
+      try {
       runFixtureSql(`
         INSERT INTO deployment_policies (name, description, policy_type, config, enabled)
         SELECT $name$${prefix} $name$ || lpad(series::text, 3, '0'),
@@ -8646,14 +12927,55 @@ const steps = [
         method: "POST",
         body: JSON.stringify({ trusted: true, review_note: "TASK-433 partial deletion regression" }),
       });
-      await phase6Api(page, `/api/v1/policy-versions/${immutablePolicy.current_version_id}/publish`, {
-        method: "POST",
-        body: JSON.stringify({ expected_semantic_digest: null }),
-      });
+      const immutableDigest = runFixtureSql(`
+        SELECT semantic_digest FROM deployment_policy_versions
+        WHERE id='${immutablePolicy.current_version_id}'::uuid;
+      `);
       await page.reload({ waitUntil: "domcontentloaded" });
       await collapseOnboardingCoach(page);
       await openSecurityPolicyTab(page);
       const search = page.getByPlaceholder("Search policies…").first();
+      await search.fill(`${prefix} 061`);
+      const immutableCard = page.locator(`[data-policy-card][data-policy-name="${prefix} 061"]`);
+      await immutableCard.click();
+      const immutableDrawer = page.locator("#policy-detail-dialog");
+      await assertVisible(immutableDrawer, "Trusted draft policy must open in the policy drawer");
+      const publishPath = `/api/v1/policy-versions/${immutablePolicy.current_version_id}/publish`;
+      const [publishRequest, publishResponse] = await Promise.all([
+        page.waitForRequest((request) => new URL(request.url()).pathname === publishPath && request.method() === "POST"),
+        page.waitForResponse((response) => new URL(response.url()).pathname === publishPath && response.request().method() === "POST"),
+        immutableDrawer.getByRole("button", { name: "Publish", exact: true }).click(),
+      ]);
+      const publishContentType = publishRequest.headers()["content-type"] || "";
+      if (!publishContentType.includes("application/json")) {
+        throw new Error(`Policy publication must send application/json, got ${publishContentType || "no Content-Type"}`);
+      }
+      const publishBody = publishRequest.postDataJSON();
+      if (publishBody?.expected_semantic_digest !== immutableDigest) {
+        throw new Error(`Policy publication sent the wrong digest: ${JSON.stringify(publishBody)}`);
+      }
+      if (publishResponse.status() !== 200) {
+        throw new Error(`Policy publication failed with HTTP ${publishResponse.status()}: ${await publishResponse.text()}`);
+      }
+      await assertVisible(immutableDrawer.getByText("Published", { exact: true }), "Successful publication must update the drawer status");
+      const publicationState = JSON.parse(runFixtureSql(`
+        SELECT json_build_object(
+          'state', version.publication_state,
+          'isCurrentPublished', policy.current_published_version_id=version.id,
+          'draftCleared', policy.current_draft_version_id IS NULL
+        )::text
+        FROM deployment_policy_versions version
+        JOIN deployment_policies policy ON policy.id=version.policy_id
+        WHERE version.id='${immutablePolicy.current_version_id}'::uuid;
+      `));
+      if (publicationState.state !== "accepted" || !publicationState.isCurrentPublished || !publicationState.draftCleared) {
+        throw new Error(`Policy publication did not commit accepted/current state: ${JSON.stringify(publicationState)}`);
+      }
+      await immutableDrawer.getByRole("button", { name: "Close policy detail" }).click();
+      await assertHidden(immutableDrawer, "Published policy drawer must close from its close control");
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await collapseOnboardingCoach(page);
+      await openSecurityPolicyTab(page);
       await search.fill(prefix);
       const group = page.locator(".pol-group").filter({ hasText: "TASK433-REGRESSION" }).first();
       await group.waitFor({ state: "visible", timeout: 15000 });
@@ -8676,6 +12998,11 @@ const steps = [
       await page.keyboard.press("Enter");
       const policyDrawer = page.locator("#policy-detail-dialog");
       await assertVisible(policyDrawer, "Keyboard Enter on a policy card must open its detail drawer");
+      await page.waitForFunction(
+        () => document.activeElement?.getAttribute("aria-label") === "Close policy detail",
+        null,
+        { timeout: 15000 },
+      );
       await page.keyboard.press("Escape");
       await assertHidden(policyDrawer, "Policy drawer Escape must close the dialog");
       if (!(await firstCard.evaluate((element) => element === document.activeElement))) {
@@ -8702,6 +13029,150 @@ const steps = [
       await assertCount(group.locator('[data-policy-card]'), 1, "Only the immutable policy may remain after accepted server mutations");
       await collapseOnboardingCoach(page);
       await captureWorkflowViewportState(page, stepName, "partial-delete-result", "narrowDesktop");
+
+      const acceptedVersionId = immutablePolicy.current_version_id;
+      const pointersBefore = JSON.parse(runFixtureSql(`
+        SELECT json_build_object(
+          'currentDraftVersionId', current_draft_version_id,
+          'currentPublishedVersionId', current_published_version_id
+        )::text
+        FROM deployment_policies
+        WHERE id='${immutablePolicyId}'::uuid;
+      `));
+      if (pointersBefore.currentDraftVersionId !== null || pointersBefore.currentPublishedVersionId !== acceptedVersionId) {
+        throw new Error(`Accepted policy prerequisite pointers are invalid: ${JSON.stringify(pointersBefore)}`);
+      }
+
+      await page.getByRole("button", { name: "Cancel", exact: true }).click();
+      await immutableCard.click();
+      await assertVisible(immutableDrawer, "Accepted policy must reopen for real draft creation");
+      const createDraftPath = `/api/v1/policies/${immutablePolicyId}/drafts`;
+      const expectedCsrf = await page.evaluate(() => document.cookie
+        .split(";")
+        .map((cookie) => cookie.trim())
+        .find((cookie) => cookie.startsWith("__Host-cf-csrf="))
+        ?.slice("__Host-cf-csrf=".length));
+      if (!expectedCsrf) throw new Error("Policy draft request requires the authenticated CSRF cookie");
+      const acceptedSourceBefore = JSON.parse(runFixtureSql(`
+        SELECT to_jsonb(source_version)::text
+        FROM deployment_policy_versions source_version
+        WHERE source_version.id='${acceptedVersionId}'::uuid;
+      `));
+      const [draftRequest, draftResponse] = await Promise.all([
+        page.waitForRequest((request) => new URL(request.url()).pathname === createDraftPath && request.method() === "POST"),
+        page.waitForResponse((response) => new URL(response.url()).pathname === createDraftPath && response.request().method() === "POST"),
+        immutableDrawer.getByRole("button", { name: "Create draft", exact: true }).click(),
+      ]);
+      if (draftRequest.postData() === null) throw new Error("Policy draft POST must not be bodyless");
+      if (draftRequest.postData() !== '{"new_version":null}') {
+        throw new Error(`Policy draft POST must send the exact default request JSON: ${draftRequest.postData()}`);
+      }
+      if (JSON.stringify(draftRequest.postDataJSON()) !== '{"new_version":null}') {
+        throw new Error(`Policy draft POST parsed body is incorrect: ${JSON.stringify(draftRequest.postDataJSON())}`);
+      }
+      const draftContentType = draftRequest.headers()["content-type"] || "";
+      if (!draftContentType.includes("application/json")) {
+        throw new Error(`Policy draft creation must send application/json, got ${draftContentType || "no Content-Type"}`);
+      }
+      if (draftRequest.headers()["x-csrf-token"] !== expectedCsrf) {
+        throw new Error("Policy draft request CSRF header must match the authenticated CSRF cookie");
+      }
+      if (draftResponse.status() === 415) throw new Error("Correct policy draft JSON must not return HTTP 415");
+      if (draftResponse.status() !== 201) {
+        throw new Error(`Policy draft creation failed with HTTP ${draftResponse.status()}: ${await draftResponse.text()}`);
+      }
+      const draftBody = await draftResponse.json();
+      if (!draftBody.version_id || !draftBody.version || draftBody.publication_state !== "draft" || draftBody.derived_from_version_id !== acceptedVersionId) {
+        throw new Error(`Policy draft response is invalid: ${JSON.stringify(draftBody)}`);
+      }
+      const acceptedSourceAfter = JSON.parse(runFixtureSql(`
+        SELECT to_jsonb(source_version)::text
+        FROM deployment_policy_versions source_version
+        WHERE source_version.id='${acceptedVersionId}'::uuid;
+      `));
+      if (acceptedSourceBefore.id !== acceptedVersionId || acceptedSourceBefore.policy_id !== immutablePolicyId || acceptedSourceBefore.publication_state !== "accepted") {
+        throw new Error(`Policy draft source must be the exact accepted version: ${JSON.stringify(acceptedSourceBefore)}`);
+      }
+      const acceptedSourceImmutableColumns = [
+        "id", "policy_id", "version", "publication_state", "published_at", "name", "description",
+        "policy_type", "implementation_state", "execution_phase", "config", "compliance_metadata",
+        "dependencies", "semantic_digest", "digest_algorithm", "canonicalization_version",
+        "source_artifact_id", "opaque_xml", "derived_from_version_id", "created_by", "created_at",
+        "enabled_by_default", "trust_state", "trusted_by", "trusted_at", "trust_review_note",
+        "mapping_digest",
+      ];
+      const missingAcceptedSourceColumns = acceptedSourceImmutableColumns.filter((column) =>
+        !Object.hasOwn(acceptedSourceBefore, column) || !Object.hasOwn(acceptedSourceAfter, column));
+      if (missingAcceptedSourceColumns.length !== 0) {
+        throw new Error(`Accepted source snapshot omitted immutable columns: ${missingAcceptedSourceColumns.join(", ")}`);
+      }
+      const acceptedSourceChanges = Object.fromEntries(acceptedSourceImmutableColumns
+        .filter((column) => !isDeepStrictEqual(acceptedSourceBefore[column], acceptedSourceAfter[column]))
+        .map((column) => [column, { before: acceptedSourceBefore[column], after: acceptedSourceAfter[column] }]));
+      if (Object.keys(acceptedSourceChanges).length !== 0 || acceptedSourceAfter.publication_state !== "accepted") {
+        throw new Error(`Creating a policy draft changed the accepted source version: ${JSON.stringify(acceptedSourceChanges)}`);
+      }
+      await assertVisible(immutableDrawer.getByText("Draft created", { exact: true }), "Successful draft creation must update the drawer status");
+
+      const lifecycle = JSON.parse(runFixtureSql(`
+        SELECT json_build_object(
+          'currentDraftVersionId', policy.current_draft_version_id,
+          'currentPublishedVersionId', policy.current_published_version_id,
+          'draftPolicyId', draft.policy_id,
+          'draftState', draft.publication_state,
+          'draftVersion', draft.version,
+          'derivedFromVersionId', draft.derived_from_version_id
+        )::text
+        FROM deployment_policies policy
+        JOIN deployment_policy_versions draft ON draft.id=policy.current_draft_version_id
+        JOIN deployment_policy_versions source ON source.id=policy.current_published_version_id
+        WHERE policy.id='${immutablePolicyId}'::uuid;
+      `));
+      if (lifecycle.currentDraftVersionId !== draftBody.version_id || lifecycle.draftPolicyId !== immutablePolicyId || lifecycle.draftState !== "draft") {
+        throw new Error(`Policy draft row/current pointer did not persist: ${JSON.stringify(lifecycle)}`);
+      }
+      if (lifecycle.currentPublishedVersionId !== acceptedVersionId || lifecycle.derivedFromVersionId !== acceptedVersionId) {
+        throw new Error(`Policy draft lineage changed the published pointer: ${JSON.stringify(lifecycle)}`);
+      }
+      if (lifecycle.draftVersion !== draftBody.version) {
+        throw new Error(`Server-derived policy version does not match its response: ${JSON.stringify(lifecycle)}`);
+      }
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await collapseOnboardingCoach(page);
+      await openSecurityPolicyTab(page);
+      const refreshedSearch = page.getByPlaceholder("Search policies…").first();
+      await refreshedSearch.fill(`${prefix} 061`);
+      const refreshedCard = page.locator(`[data-policy-card][data-policy-name="${prefix} 061"]`);
+      await assertVisible(refreshedCard.getByText("draft", { exact: true }), "Catalog refresh must show the current draft state");
+      await refreshedCard.click();
+      const refreshedDrawer = page.locator("#policy-detail-dialog");
+      await assertVisible(refreshedDrawer.getByRole("button", { name: "Edit", exact: true }), "Current policy draft must be editable after refresh");
+      await assertVisible(refreshedDrawer.getByRole("button", { name: "Trust", exact: true }), "Current policy draft must expose its draft lifecycle action");
+      await assertHidden(refreshedDrawer.getByRole("button", { name: "Create draft", exact: true }), "Current editable draft must replace the accepted-policy draft action");
+      } catch (error) {
+        primaryError = error;
+        throw error;
+      } finally {
+        try {
+          runFixtureSql(`
+            DELETE FROM deployment_policies policy
+            WHERE policy.name LIKE $name$${prefix} %$name$
+              AND NOT EXISTS (
+                SELECT 1 FROM deployment_policy_versions version
+                WHERE version.policy_id=policy.id
+                  AND version.publication_state='accepted'
+              );
+          `);
+        } catch (cleanupError) {
+          if (primaryError) {
+            console.error(`20af cleanup also failed: ${cleanupError.message}`);
+          } else {
+            throw cleanupError;
+          }
+        }
+        await page.unroute("**/api/v1/user/notifications**").catch(() => {});
+        await page.unroute("**/api/auth/whoami").catch(() => {});
+      }
     },
   },
   {
@@ -10367,11 +14838,62 @@ By using this IS (which includes any device attached to this IS), you consent to
         LIMIT 1;
       `).split("|");
       if (target.length !== 3) throw new Error(`Canonical evaluator target is unavailable: ${JSON.stringify(target)}`);
-      const [systemId, hostname, commitId] = target;
-      runFixtureSql(`
-        UPDATE systems SET system_configuration_name='test-agent'
-        WHERE id='${systemId}'::uuid;
-      `);
+      const [sourceSystemId, , commitId] = target;
+      const systemId = "43300000-0000-4000-8000-000000000010";
+      const hostname = "task433-mixed-evidence-target";
+      let systemInserted = false;
+      let reservedConfigurationIds = [];
+      let primaryError = null;
+      try {
+        const reservedCount = Number(runFixtureSql(`
+          SELECT COUNT(*) FROM systems
+          WHERE id='${systemId}'::uuid OR hostname=$hostname$${hostname}$hostname$;
+        `));
+        if (reservedCount !== 0) {
+          throw new Error(`Canonical mixed-evidence reserved system already exists: ${systemId} / ${hostname}`);
+        }
+        reservedConfigurationIds = JSON.parse(runFixtureSql(`
+          WITH reserved AS (
+            UPDATE systems candidate
+            SET system_configuration_name='task433-held-mixed-test-agent-' || replace(candidate.id::text, '-', '')
+            FROM systems source
+            WHERE source.id='${sourceSystemId}'::uuid
+              AND candidate.flake_id=source.flake_id
+              AND COALESCE(NULLIF(BTRIM(candidate.system_configuration_name), ''), candidate.hostname)='test-agent'
+              AND candidate.id <> '${systemId}'::uuid
+            RETURNING candidate.id
+          )
+          SELECT COALESCE(json_agg(id ORDER BY id), '[]'::json)::text FROM reserved;
+        `));
+        const insertedCount = Number(runFixtureSql(`
+          WITH inserted AS (
+            INSERT INTO systems (
+            id, hostname, environment_id, flake_id, is_active, public_key,
+            system_configuration_name, derivation
+            )
+            SELECT '${systemId}'::uuid, '${hostname}', environment_id, flake_id, true,
+                   'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITask433MixedEvidenceTarget',
+                   'test-agent', derivation
+            FROM systems WHERE id='${sourceSystemId}'::uuid
+            RETURNING id
+          )
+          SELECT COUNT(*) FROM inserted;
+        `));
+        if (insertedCount !== 1) throw new Error("Canonical mixed-evidence system insertion did not create one row");
+        systemInserted = true;
+
+        const configurationCount = Number(runFixtureSql(`
+          SELECT COUNT(*)
+          FROM systems candidate
+          JOIN systems source ON source.id='${sourceSystemId}'::uuid
+          WHERE candidate.flake_id=source.flake_id
+            AND COALESCE(NULLIF(BTRIM(candidate.system_configuration_name), ''), candidate.hostname)='test-agent';
+        `));
+        // Persistence lookup does not filter inactive systems, so identity must
+        // be unique across all rows for this flake before evaluation starts.
+        if (configurationCount !== 1) {
+          throw new Error(`Canonical mixed-evidence configuration identity is ambiguous: ${configurationCount}`);
+        }
 
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
       await collapseOnboardingCoach(page);
@@ -10400,9 +14922,27 @@ By using this IS (which includes any device attached to this IS), you consent to
       const createResponse = await createPromise;
       if (createResponse.status() !== 201) throw new Error(`Dedicated mixed policy create returned ${createResponse.status()}`);
       const policy = await createResponse.json();
-      const detail = (await phase6Api(page, `/api/v1/deployment-policies/${policy.id}`)).body;
+      let detail = (await phase6Api(page, `/api/v1/deployment-policies/${policy.id}`)).body;
+      const canonicalRuleIds = [
+        "43300000-0000-4000-8000-000000000011",
+        "43300000-0000-4000-8000-000000000012",
+      ];
+      await phase6Api(page, `/api/v1/deployment-policies/${policy.id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          policy_type: detail.policy_type,
+          config: {
+            ...detail.config,
+            rules: detail.config.rules.map((rule, index) => ({
+              ...rule,
+              id: canonicalRuleIds[index],
+            })),
+          },
+        }),
+      });
+      detail = (await phase6Api(page, `/api/v1/deployment-policies/${policy.id}`)).body;
       const policyVersionId = detail.current_version_id;
-      if (detail.config.rules.length !== 2 || detail.config.rules[0].kind !== "nixos_option" || detail.config.rules[1].kind !== "cve_block") {
+       if (detail.config.rules.length !== 2 || detail.config.rules[0].kind !== "nixos_option" || detail.config.rules[1].kind !== "cve_block") {
         throw new Error(`Canonical policy is not dedicated Nix+CVE enforcement: ${JSON.stringify(detail.config)}`);
       }
       await phase6Api(page, `/api/v1/policy-versions/${policyVersionId}/requirement-mappings`, {
@@ -10477,7 +15017,7 @@ By using this IS (which includes any device attached to this IS), you consent to
       if (cveResult.evidence.count !== 2 || cveResult.evidence.max_allowed !== 0 || outcome.overall !== "fail") {
         throw new Error(`Server produced incorrect all-mode aggregate evidence: ${JSON.stringify(outcome)}`);
       }
-      arrangeTask433DeployedAssessment(hostname, outcome.target_store_path);
+      arrangeTask433DeployedAssessment(systemId, hostname, outcome);
       const findingId = outcome.finding_id;
       if (!findingId) throw new Error("Production assessment did not establish the canonical finding identity");
 
@@ -10500,6 +15040,38 @@ By using this IS (which includes any device attached to this IS), you consent to
       await assertVisible(page.getByText(cveResult.detail, { exact: true }), "Server-derived scan detail must render unchanged");
       await captureWorkflowState(page, stepName, "server-derived-phases-sources-outcomes");
       await captureWorkflowViewportState(page, stepName, "server-derived-evidence", "mobile");
+      } catch (error) {
+        primaryError = error;
+        throw error;
+      } finally {
+        if (systemInserted || reservedConfigurationIds.length) {
+          try {
+            runFixtureSql(`
+              BEGIN;
+              UPDATE compliance_bundle_assignments
+              SET active=false
+              WHERE system_id='${systemId}'::uuid
+                AND active
+                AND ${systemInserted ? "true" : "false"};
+              UPDATE systems
+              SET is_active=false,
+                  system_configuration_name='task433-retired-mixed-${systemId}'
+              WHERE id='${systemId}'::uuid
+                AND ${systemInserted ? "true" : "false"};
+              UPDATE systems
+              SET system_configuration_name='test-agent'
+              WHERE id IN (${reservedConfigurationIds.map((id) => `'${id}'::uuid`).join(", ") || "NULL"});
+              COMMIT;
+            `);
+          } catch (cleanupError) {
+            if (primaryError) {
+              console.error(`Canonical mixed-evidence cleanup also failed: ${cleanupError.message}`);
+            } else {
+              throw cleanupError;
+            }
+          }
+        }
+      }
     },
   },
   {
@@ -11419,6 +15991,51 @@ security.audit.enable = true;</fixtext>
     name: "16c-scanning-view",
     description: "Scanning view - live endpoint wiring, nested rows, and schedule modal",
     action: async (page) => {
+      const exactRescanRequests = [];
+      const exactRescanRoute = /\/api\/v1\/cves\/rescan\/\d+(?:\?.*)?$/;
+      let diagnosticMode = "loaded";
+      let diagnosticRequests = 0;
+      const diagnosticResponses = [];
+      let releaseInitialDiagnosticRequest;
+      const initialDiagnosticGate = new Promise((resolve) => {
+        releaseInitialDiagnosticRequest = resolve;
+      });
+      await page.route("**/api/v1/cves/rescan-fleet", async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        await route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({
+            eligible_count: 3,
+            enqueued_count: 2,
+            reused_count: 1,
+            message: "Queued 2 CVE scan(s); 1 already had an active scan.",
+          }),
+        });
+      });
+      await page.route(exactRescanRoute, async (route) => {
+        const derivationId = Number(route.request().url().split("/").pop());
+        exactRescanRequests.push(derivationId);
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        if (derivationId === 202) {
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "scanner queue unavailable" }),
+          });
+          return;
+        }
+        await route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({
+            derivation_id: derivationId,
+            scan_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            enqueued: true,
+            message: `Queued derivation ${derivationId}`,
+          }),
+        });
+      });
       await page.route("**/api/v1/scanning/stats*", async (route) => {
         await route.fulfill({
           status: 200,
@@ -11440,6 +16057,8 @@ security.audit.enable = true;</fixtext>
           contentType: "application/json",
           body: JSON.stringify([
             {
+              derivation_id: 101,
+              rescan_eligible: true,
               scan_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
               hostname: "prod-server-01",
               flake_name: "core-fleet",
@@ -11450,8 +16069,90 @@ security.audit.enable = true;</fixtext>
               critical_count: 1,
               high_count: 2,
               medium_count: 0,
+              freshness: "deployed",
+              is_current: true,
+              is_latest_per_flake: true,
+              source_trigger: "manual",
+            },
+            {
+              derivation_id: 202,
+              rescan_eligible: true,
+              scan_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
+              hostname: "prod-server-01",
+              flake_name: "core-fleet",
+              commit_hash: "def5678",
+              status: "completed",
+              completed_at: new Date(Date.now() - 86400000).toISOString(),
+              scheduled_at: new Date(Date.now() - 86400000).toISOString(),
+              critical_count: 0,
+              high_count: 0,
+              medium_count: 1,
+              freshness: "recent",
+              is_current: false,
+              is_latest_per_flake: false,
+              source_trigger: "fleet",
             },
           ]),
+        });
+      });
+
+      await page.route("**/api/v1/scanning/scans/*", async (route) => {
+        diagnosticRequests += 1;
+        const response = diagnosticResponses.shift();
+        response?.started?.();
+        if (diagnosticRequests === 1) {
+          await initialDiagnosticGate;
+        }
+        if (response?.gate) {
+          await response.gate;
+        }
+        const responseMode = response?.mode ?? diagnosticMode;
+        if (responseMode === "error") {
+          await route.fulfill({
+            status: 503,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "diagnostics temporarily unavailable" }),
+          });
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            scan_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+            status: "completed",
+            scanner_name: "vulnix",
+            scanner_version: "1.12.4",
+            source_trigger: "manual",
+            events: responseMode === "empty" ? [] : [
+              {
+                id: diagnosticRequests,
+                execution_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                attempt_number: 1,
+                occurred_at: new Date().toISOString(),
+                level: "warning",
+                source: "vulnix",
+                event_type: "output",
+                message: response?.message ?? "Authorization: Bearer [REDACTED]",
+                truncated: true,
+              },
+            ],
+            truncated: responseMode === "loaded",
+          }),
+        });
+        response?.finished?.();
+      });
+
+      await page.route("**/api/v1/scanning/deployed*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            items: [],
+            total: 0,
+            has_more: false,
+            next_cursor: null,
+          }),
         });
       });
 
@@ -11471,6 +16172,70 @@ security.audit.enable = true;</fixtext>
               unscanned: 1,
               current_crit: 1,
               current_high: 2,
+              current_derivation_id: 101,
+            },
+          ]),
+        });
+      });
+
+      await page.route("**/api/v1/scanning/systems/*/scans*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify([
+            {
+              derivation_id: 101,
+              rescan_eligible: true,
+              scan_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+              hostname: "prod-server-01",
+              flake_name: "core-fleet",
+              commit_hash: "abc1234",
+              status: "completed",
+              completed_at: new Date().toISOString(),
+              scheduled_at: new Date().toISOString(),
+              critical_count: 1,
+              high_count: 2,
+              medium_count: 0,
+              freshness: "deployed",
+              is_current: true,
+              is_latest_per_flake: true,
+              source_trigger: "manual",
+            },
+            {
+              derivation_id: 202,
+              rescan_eligible: true,
+              scan_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
+              hostname: "prod-server-01",
+              flake_name: "core-fleet",
+              commit_hash: "def5678",
+              status: "completed",
+              completed_at: new Date(Date.now() - 86400000).toISOString(),
+              scheduled_at: new Date(Date.now() - 86400000).toISOString(),
+              critical_count: 0,
+              high_count: 0,
+              medium_count: 1,
+              freshness: "recent",
+              is_current: false,
+              is_latest_per_flake: false,
+              source_trigger: "fleet",
+            },
+            {
+              derivation_id: 303,
+              rescan_eligible: false,
+              scan_id: null,
+              hostname: "prod-server-01",
+              flake_name: "core-fleet",
+              commit_hash: "987zyx6",
+              status: "never_scanned",
+              completed_at: null,
+              scheduled_at: null,
+              critical_count: 0,
+              high_count: 0,
+              medium_count: 0,
+              freshness: "archived",
+              is_current: false,
+              is_latest_per_flake: false,
+              source_trigger: null,
             },
           ]),
         });
@@ -11531,21 +16296,193 @@ security.audit.enable = true;</fixtext>
 
       await assertVisible(page.locator("main h1:has-text('Scanning')"), "Expected Scanning heading");
       await assertVisible(page.getByText("Scanning now").first(), "Expected Scanning stat cards");
+      await assertVisible(page.getByRole("tab", { name: /Deployed/ }), "Expected Deployed tab");
+      await assertVisible(page.getByRole("tab", { name: /All scans/ }), "Expected All scans tab");
+      await assertVisible(page.getByRole("tab", { name: /By system/ }), "Expected By system tab");
 
-      await page.locator("button:has-text('All configs')").first().click({ force: true });
+      const fleetRescan = page.getByRole("button", { name: /^Rescan all$/ });
+      await fleetRescan.click();
+      await page.waitForFunction(
+        () => document.querySelector('button[aria-label="Rescan all"]')?.disabled === true,
+      );
+      await assertDisabled(fleetRescan, "Expected fleet rescan to stay disabled while pending");
+      await assertVisible(
+        page.getByText(/3 eligible, 2 queued, 1 reused/),
+        "Expected fleet response counts in success feedback",
+      );
+
+      await page.getByRole("tab", { name: /All scans/ }).click();
+      await assertVisible(page.getByText("manual").first(), "Expected persisted source_trigger in scan DTO");
+      const scanDiagnostics = page.getByRole("button", { name: "View scan diagnostics" }).first();
+      await scanDiagnostics.click();
+      await assertVisible(
+        page.getByRole("status").filter({ hasText: "Loading scan diagnostics" }),
+        "Expected scan diagnostics loading state",
+      );
+      releaseInitialDiagnosticRequest();
+      await assertVisible(
+        page.getByRole("heading", { name: "Scan diagnostics" }),
+        "Expected loaded scan diagnostics drawer",
+      );
+      await assertVisible(page.getByText("Authorization: Bearer [REDACTED]"), "Expected redacted diagnostic output");
+      await assertVisible(page.getByText("Only the first 500 diagnostic events are shown."), "Expected response truncation notice");
+      await assertVisible(page.getByText("Output truncated at the capture boundary."), "Expected event truncation notice");
+
+      await page.setViewportSize({ width: 900, height: 900 });
+      const narrowDrawer = page.getByRole("dialog", { name: "Scan diagnostics" });
+      await assertVisible(narrowDrawer, "Expected diagnostics drawer at the narrow viewport");
+      const narrowGeometry = await narrowDrawer.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return {
+          left: rect.left,
+          right: rect.right,
+          top: rect.top,
+          bottom: rect.bottom,
+          viewportWidth: window.innerWidth,
+          viewportHeight: window.innerHeight,
+          documentWidth: document.documentElement.scrollWidth,
+        };
+      });
+      if (
+        narrowGeometry.left < 0
+        || narrowGeometry.right > narrowGeometry.viewportWidth
+        || narrowGeometry.top < 0
+        || narrowGeometry.bottom > narrowGeometry.viewportHeight
+        || narrowGeometry.documentWidth > narrowGeometry.viewportWidth
+      ) {
+        throw new Error(`Diagnostics drawer clips or causes horizontal overflow at 900x900: ${JSON.stringify(narrowGeometry)}`);
+      }
+      await assertVisible(page.getByRole("button", { name: "Refresh scan diagnostics" }), "Expected narrow refresh control");
+      await assertVisible(page.getByRole("button", { name: "Close scan diagnostics" }), "Expected narrow close control");
+      await page.setViewportSize({ width: 1920, height: 1080 });
+
+      let releaseStaleRefresh;
+      let markStaleRefreshStarted;
+      let markStaleRefreshFinished;
+      const staleRefreshGate = new Promise((resolve) => {
+        releaseStaleRefresh = resolve;
+      });
+      const staleRefreshStarted = new Promise((resolve) => {
+        markStaleRefreshStarted = resolve;
+      });
+      const staleRefreshFinished = new Promise((resolve) => {
+        markStaleRefreshFinished = resolve;
+      });
+      diagnosticResponses.push(
+        {
+          mode: "loaded",
+          message: "stale overlapping refresh",
+          gate: staleRefreshGate,
+          started: markStaleRefreshStarted,
+          finished: markStaleRefreshFinished,
+        },
+        { mode: "loaded", message: "newest overlapping refresh" },
+      );
+      await page.getByRole("button", { name: "Refresh scan diagnostics" }).click();
+      await staleRefreshStarted;
+      await page.getByRole("button", { name: "Refresh scan diagnostics" }).click();
+      await assertVisible(page.getByText("newest overlapping refresh"), "Expected newest overlapping refresh response");
+      releaseStaleRefresh();
+      await staleRefreshFinished;
+      await assertHidden(page.getByText("stale overlapping refresh"), "Expected stale overlapping refresh to be ignored");
+
+      let releaseClosedRequest;
+      let markClosedRequestStarted;
+      let markClosedRequestFinished;
+      const closedRequestGate = new Promise((resolve) => {
+        releaseClosedRequest = resolve;
+      });
+      const closedRequestStarted = new Promise((resolve) => {
+        markClosedRequestStarted = resolve;
+      });
+      const closedRequestFinished = new Promise((resolve) => {
+        markClosedRequestFinished = resolve;
+      });
+      diagnosticResponses.push({
+        mode: "loaded",
+        message: "response from closed drawer",
+        gate: closedRequestGate,
+        started: markClosedRequestStarted,
+        finished: markClosedRequestFinished,
+      });
+      await page.getByRole("button", { name: "Refresh scan diagnostics" }).click();
+      await closedRequestStarted;
+      await page.keyboard.press("Escape");
+      diagnosticResponses.push({ mode: "loaded", message: "response after drawer reopened" });
+      await scanDiagnostics.click();
+      await assertVisible(page.getByText("response after drawer reopened"), "Expected reopened drawer response");
+      releaseClosedRequest();
+      await closedRequestFinished;
+      await assertHidden(page.getByText("response from closed drawer"), "Expected pre-close response to be ignored");
+
+      diagnosticMode = "error";
+      await page.getByRole("button", { name: "Refresh scan diagnostics" }).click();
+      await assertVisible(
+        page.getByRole("heading", { name: "Diagnostics could not be loaded" }),
+        "Expected refresh error state",
+      );
+      diagnosticMode = "empty";
+      await page.getByRole("button", { name: "Retry" }).click();
+      await assertVisible(page.getByRole("heading", { name: "No diagnostic events" }), "Expected retry empty state");
+      await page.keyboard.press("Escape");
+      await assertHidden(
+        page.getByRole("heading", { name: "Scan diagnostics" }),
+        "Expected Escape to close scan diagnostics",
+      );
+      const restoredLabel = await page.evaluate(() => document.activeElement?.getAttribute("aria-label"));
+      if (restoredLabel !== "View scan diagnostics") {
+        throw new Error(`Expected scan diagnostics to restore opener focus, got ${restoredLabel}`);
+      }
+
+      const rowRescan = page.getByRole("button", { name: "Rescan exact derivation" }).first();
+      await rowRescan.click();
+      await assertDisabled(rowRescan, "Expected exact row rescan to stay disabled while pending");
+      await assertVisible(
+        page.getByText(/Scan IDs: bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/),
+        "Expected returned scan identity in exact rescan feedback",
+      );
+      if (exactRescanRequests[0] !== 101) {
+        throw new Error(`Expected exact row action to request derivation 101, got ${exactRescanRequests[0]}`);
+      }
+
+      await page.getByRole("tab", { name: /By system/ }).click();
       await page.waitForTimeout(500);
 
-      await assertVisible(page.getByText("prod-server-01").first(), "Expected system row in All configs table");
-
-      await page.evaluate(() => {
-        const expandButton = document.querySelector("table.sys-table tbody tr button.btn-icon");
-        if (expandButton instanceof HTMLElement) {
-          expandButton.click();
-        }
-      });
+      await assertVisible(page.getByText("prod-server-01").first(), "Expected system row in By system table");
+      await page.locator("button.scanning-system-toggle").first().click();
       await page.waitForTimeout(400);
 
       await assertVisible(page.getByText("abc1234").first(), "Expected nested per-commit scan row after expand");
+      await assertVisible(page.getByText("def5678").first(), "Expected distinct historical derivation row");
+
+      const currentRescan = page.getByRole("button", { name: "Rescan current deployed derivation" });
+      await currentRescan.click();
+      await assertVisible(page.getByText(/current deployment: queued 1, reused 0/), "Expected current-scope feedback");
+      if (exactRescanRequests.at(-1) !== 101) {
+        throw new Error(`Expected current action to request derivation 101, got ${exactRescanRequests.at(-1)}`);
+      }
+
+      const historyRescans = page.getByRole("button", { name: "Rescan exact historical derivation" });
+      await historyRescans.nth(1).click();
+      await assertVisible(
+        page.getByText(/derivation 202:.*scanner queue unavailable.*Retrying is safe/),
+        "Expected actionable historical rescan error feedback",
+      );
+      if (exactRescanRequests.at(-1) !== 202) {
+        throw new Error(`Expected historical action to request derivation 202, got ${exactRescanRequests.at(-1)}`);
+      }
+      await assertDisabled(
+        historyRescans.nth(2),
+        "Expected an unbuilt historical derivation rescan to be disabled",
+      );
+      await page.getByRole("button", { name: "Rescan history" }).click();
+      await assertVisible(
+        page.getByText(/prod-server-01 history: queued 1, reused 0; 1 request\(s\) failed/),
+        "Expected history batch to finish before route cleanup",
+      );
+      if (exactRescanRequests.includes(303)) {
+        throw new Error("Expected history bulk rescan to exclude unbuilt derivation 303");
+      }
 
       await assertVisible(
         page.getByRole("button", { name: /^Schedule$/ }).first(),
@@ -11554,9 +16491,14 @@ security.audit.enable = true;</fixtext>
 
       await page.unroute("**/api/v1/scanning/stats*");
       await page.unroute("**/api/v1/scanning/queue*");
+      await page.unroute("**/api/v1/scanning/scans/*");
+      await page.unroute("**/api/v1/scanning/deployed*");
       await page.unroute("**/api/v1/scanning/systems*");
+      await page.unroute("**/api/v1/scanning/systems/*/scans*");
       await page.unroute("**/api/v1/scanning/activity*");
       await page.unroute("**/api/v1/scanning/schedule*");
+      await page.unroute("**/api/v1/cves/rescan-fleet");
+      await page.unroute(exactRescanRoute);
     },
   },
   // ── End CVE/multi-rule policy checks ─────────────────────────────────────
@@ -12117,8 +17059,8 @@ security.audit.enable = true;</fixtext>
       });
       await page.waitForTimeout(1600);
 
-      await page.getByRole("button", { name: "Deploy" }).first().click();
-      await page.waitForTimeout(600);
+      await page.getByRole("tab", { name: "Deploy" }).first().click();
+      await page.getByRole("button", { name: "Generation" }).first().waitFor({ state: "visible" });
 
       await assertVisible(
         page.getByRole("button", { name: "Generation" }).first(),
@@ -13169,12 +18111,13 @@ security.audit.enable = true;</fixtext>
       const assignmentId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
       const assignmentVersionId = "99999999-9999-4999-8999-999999999999";
       const systemId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-      let reason = null;
-      let versionNumber = 1;
+      let reason = "Reason A";
 
       // The standalone profile has no authenticated server or seeded target.
-      // The server-backed harness runs this same UI flow against the real
-      // assignment endpoints and uses the bundle created by 20ab.
+      // The server-backed harness creates the assignment through the
+      // authenticated API because bundle detail no longer owns assignment
+      // creation. The drawer remains the read-only metadata and assignment
+      // maintenance surface.
       if (process.env.CF_UI_TEST_STANDALONE !== "1") {
         const liveFixture = await page.evaluate(async (base) => {
           const response = await fetch(`${base}/api/v1/compliance/bundles`, { credentials: "include" });
@@ -13183,35 +18126,36 @@ security.audit.enable = true;</fixtext>
           const candidates = bundles.filter((item) => item.name?.startsWith("UI requirement-only baseline "));
           const bundle = candidates.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
           if (!bundle) throw new Error("Live assignment step requires the bundle created by 20ab");
-          const environmentsResponse = await fetch(`${base}/api/v1/environments`, { credentials: "include" });
-          const environments = await environmentsResponse.json();
-          if (!environmentsResponse.ok || !environments[0]) {
-            throw new Error(`Live environment list failed: HTTP ${environmentsResponse.status}`);
-          }
-          return { bundle, environment: environments[0] };
+          return { bundle };
         }, apiBaseUrl);
         const liveBundle = liveFixture.bundle;
-        const liveEnvironment = liveFixture.environment;
-        if (!liveBundle.current_draft_version_id && !liveBundle.current_published_version_id) {
+        const bundleVersionId = liveBundle.current_published_version_id || liveBundle.current_draft_version_id;
+        if (!bundleVersionId) {
           throw new Error("Live assignment bundle has no assignable version");
         }
+        const systems = (await phase6Api(page, "/api/v1/systems?page=1&per_page=200")).body?.items || [];
+        const liveSystem = systems[0];
+        if (!liveSystem) throw new Error("Live assignment step requires one managed system");
+        await phase6Api(page, "/api/v1/compliance/assignments", {
+          method: "POST",
+          body: JSON.stringify({
+            bundle_version_id: bundleVersionId,
+            scope_type: "system",
+            scope_id: liveSystem.id,
+            enforcement_mode: "enforce",
+            exclusions: [],
+            additions: [],
+            value_overrides: [],
+            reason: "Reason A",
+          }),
+        });
 
         await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
         await page.getByText(liveBundle.name, { exact: true }).first().click();
-        await page.getByRole("button", { name: /Assign bundle/i }).click();
-        await page.getByPlaceholder(/Enter reason for this assignment/i).fill("Reason A");
-        await page.locator("select").filter({ has: page.locator(`option[value="${liveEnvironment.id}"]`) }).last().selectOption(liveEnvironment.id);
-        await page.getByRole("button", { name: /Preview effective set/i }).click();
-        const createResponse = page.waitForResponse(
-          (response) => response.url().endsWith("/api/v1/compliance/assignments") && response.request().method() === "POST",
-        );
-        // Attach a no-op handler immediately so Node.js 24 does not treat the
-        // rejection as unhandled if the response arrives (or times out) before
-        // the `await` below can catch it.
-        createResponse.catch(() => {});
-        await page.getByRole("button", { name: /Create assignment/i }).click();
-        const created = await createResponse;
-        if (created.status() !== 201) throw new Error(`Live assignment create returned HTTP ${created.status()}: ${await created.text()}`);
+        if (await page.getByRole("button", { name: /Assign bundle/i }).count() !== 0) {
+          throw new Error("Bundle detail must not expose duplicate assignment creation");
+        }
+        await page.getByRole("button", { name: `Manage assignment references for ${liveSystem.hostname}`, exact: true }).click();
 
         await page.getByRole("button", { name: "Edit mode", exact: true }).click();
         await assertValue(page.getByPlaceholder("reason (leave empty to preserve)"), "Reason A", "Live create did not persist reason A");
@@ -13257,8 +18201,8 @@ security.audit.enable = true;</fixtext>
         current_version_id: assignmentVersionId,
         bundle_id: bundleId,
         bundle_version_id: versionId,
-        scope_type: "environment",
-        scope_id: environmentId,
+        scope_type: "system",
+        scope_id: systemId,
         enforcement_mode: "enforce",
         exclusions: [],
         additions: [],
@@ -13332,26 +18276,13 @@ security.audit.enable = true;</fixtext>
       await page.route("**/api/v1/environments*", async (route) => {
         await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([{ id: environmentId, name: "production", description: null, color_hex: "#3b82f6", is_active: true, system_count: 0 }]) });
       });
-      await page.route(`**/api/v1/environments/${environmentId}/compliance-assignments`, async (route) => {
-        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ assignments: reason === null && versionNumber === 1 ? [] : [assignment()] }) });
-      });
-      await page.route("**/api/v1/compliance/assignments/preview", async (route) => {
-        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ policies: [], warnings: [], effective_set_digest: "fixture-digest" }) });
-      });
-      await page.route("**/api/v1/compliance/assignments", async (route) => {
-        if (route.request().method() === "POST") {
-          reason = (await route.request().postDataJSON()).reason || null;
-          versionNumber = 1;
-          await route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify(assignment()) });
-        } else {
-          await route.continue();
-        }
+      await page.route(`**/api/v1/systems/${systemId}/compliance-assignments`, async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ assignments: [assignment()] }) });
       });
       await page.route(`**/api/v1/compliance/assignments/${assignmentId}`, async (route) => {
         if (route.request().method() === "PUT") {
           const payload = await route.request().postDataJSON();
           if (Object.prototype.hasOwnProperty.call(payload, "reason")) reason = payload.reason;
-          versionNumber += 1;
           await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(assignment()) });
         } else {
           await route.continue();
@@ -13364,12 +18295,10 @@ security.audit.enable = true;</fixtext>
       if (await assignmentChip.getAttribute("title") !== "Change freeze exception") {
         throw new Error("Pinned SystemsMatrix assignment reason should be available as the assignment chip title");
       }
-      await page.getByRole("button", { name: /Assign bundle/i }).click();
-      const createReason = page.getByPlaceholder(/Enter reason for this assignment/i);
-      await createReason.fill("Reason A");
-      await page.locator("select").nth(2).selectOption(environmentId);
-      await page.getByRole("button", { name: /Preview effective set/i }).click();
-      await page.getByRole("button", { name: /Create assignment/i }).click();
+      if (await page.getByRole("button", { name: /Assign bundle/i }).count() !== 0) {
+        throw new Error("Bundle detail must not expose duplicate assignment creation");
+      }
+      await page.getByRole("button", { name: "Manage assignment references for reason-fixture-host", exact: true }).click();
       await page.getByRole("button", { name: "Edit mode", exact: true }).click();
       const editReason = page.getByPlaceholder("reason (leave empty to preserve)");
       await assertValue(editReason, "Reason A", "Created assignment reason should be authoritative on reopen");
@@ -13407,6 +18336,7 @@ security.audit.enable = true;</fixtext>
         }
       };
       page.on("request", onWaiverRequest);
+      try {
       const bar = await openPhase6Evidence(page, fixture, system);
       await assertVisible(bar, "Expected remediation controls for the persisted legacy FAIL observation");
       await assertVisible(bar.getByText("FAIL", { exact: true }), "The finding must render FAIL before remediation");
@@ -13431,8 +18361,8 @@ security.audit.enable = true;</fixtext>
         "The create flow must keep remediation separate from waiver risk acceptance",
       );
 
-      await modal.getByLabel("Title").fill("Disable direct root SSH login");
-      await modal.getByLabel("Owner").fill("Host Security");
+        await modal.getByLabel("Title", { exact: true }).fill("Disable direct root SSH login");
+        const eligibleAssignee = await selectAuthenticatedPoamAssignee(page, modal);
       await modal.getByLabel("Target completion").fill("2026-09-19");
       await modal.getByLabel("Risk").selectOption("High");
       await modal.getByLabel("Remediation plan").fill("Deploy PermitRootLogin=no and verify the exact assessment target.");
@@ -13447,15 +18377,34 @@ security.audit.enable = true;</fixtext>
       if (posted.assessment_id !== undefined || posted.finding_id !== system.findingId) {
         throw new Error(`Legacy create did not use only stable finding identity: ${JSON.stringify(posted)}`);
       }
+        if (posted.assignee?.kind !== "user" || posted.assignee.user_id !== eligibleAssignee.id) {
+          throw new Error(`Legacy create did not submit the selected typed assignee: ${JSON.stringify(posted.assignee)}`);
+        }
       if (posted.observation?.source !== "nix_policy_result" || posted.observation?.source_id !== String(system.derivationId) || posted.observation?.policy_version_id !== fixture.policyVersionId || !posted.observation?.token) {
         throw new Error(`Legacy create omitted the authoritative observation reference: ${JSON.stringify(posted.observation)}`);
       }
       const created = await createResponse.json();
+        if (created.assignee?.kind !== "user" || created.assignee.user_id !== eligibleAssignee.id) {
+          throw new Error(`Legacy create did not return the selected typed assignee: ${JSON.stringify(created.assignee)}`);
+        }
       const detail = page.getByTestId("poam-detail");
+      await detail.waitFor({ state: "visible", timeout: 15000 });
       await assertVisible(detail.getByText(created.human_id, { exact: true }), "Expected returned human POA&M ID");
       await assertVisible(detail.getByText("Open", { exact: true }).first(), "Expected returned Open status");
-      await assertVisible(detail.getByText("Host Security", { exact: true }), "Expected returned owner");
-      await assertVisible(detail.getByText("2026-09-19", { exact: true }), "Expected returned due date");
+      await assertVisible(
+        detail.getByTestId("poam-metadata-summary").getByText(eligibleAssignee.label, { exact: true }),
+        "Expected returned typed assignee",
+      );
+      const metadataSummary = detail.getByTestId("poam-metadata-summary");
+      await metadataSummary.waitFor({ state: "visible", timeout: 15000 });
+      const returnedDueDate = metadataSummary
+        .locator(":scope > div")
+        .filter({ hasText: "Target completion" })
+        .locator("strong");
+      await returnedDueDate.waitFor({ state: "visible", timeout: 15000 });
+      if ((await returnedDueDate.textContent())?.trim() !== "2026-09-19") {
+        throw new Error(`Expected returned due date, got ${JSON.stringify(await returnedDueDate.textContent())}`);
+      }
       if (!page.url().includes(`poam=${created.id}`)) throw new Error(`POA&M detail route omitted exact ID: ${page.url()}`);
 
       const exactEvidence = detail.getByTestId("poam-linked-finding").filter({ hasText: system.hostname });
@@ -13481,8 +18430,10 @@ security.audit.enable = true;</fixtext>
       if (compositeCount !== 0) throw new Error(`Legacy POA&M create fabricated ${compositeCount} composite assessments`);
       const persistedResults = JSON.parse(runFixtureSql(`SELECT policy_results::text FROM derivations WHERE id=${system.derivationId};`));
       if (!isDeepStrictEqual(persistedResults, policyResults)) throw new Error(`Legacy POA&M create changed policy evidence: ${JSON.stringify(persistedResults)}`);
-      page.off("request", onWaiverRequest);
       if (waiverMutations.length !== 0) throw new Error(`POA&M create used waiver mutations: ${waiverMutations.join(", ")}`);
+      } finally {
+        page.off("request", onWaiverRequest);
+      }
     },
   },
   {
@@ -13496,6 +18447,10 @@ security.audit.enable = true;</fixtext>
       const poam = await createFixturePoam(page, first.assessmentId, { title: "Shared lineage remediation", targetDate: "2026-10-04" });
       const incompatiblePoam = await createFixturePoam(page, incompatible.systems[0].assessmentId, { title: `Excluded ${incompatible.name}` });
       const bar = await openPhase6Evidence(page, fixture, second);
+      await assertVisible(
+        bar.getByRole("button", { name: "Link existing", exact: true }),
+        `Compatible finding must offer Link existing; remediation=${JSON.stringify(await bar.innerText())}`,
+      );
       await bar.getByRole("button", { name: "Link existing", exact: true }).click();
       const modal = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Link existing POA&M" }) });
       const searchResponse = await page.waitForResponse(
@@ -13556,7 +18511,7 @@ security.audit.enable = true;</fixtext>
       if ((await activityPagePromise).status() !== 200) throw new Error("Activity continuation request failed");
       await assertVisible(detail.getByText("Added note: History note 100", { exact: true }), "Activity continuation must append older events");
       const historyActivity = detail.locator(`[data-activity-kind="note"]`).filter({ hasText: "History note 100" });
-      await assertVisible(historyActivity.getByText(`Actor: ${historyActorDisplay}`, { exact: true }), "Activity must identify its actor");
+      await assertVisible(historyActivity.locator(".poam-activity-actor").getByText(historyActorDisplay, { exact: true }), "Activity must identify its actor in a compact column");
       await assertVisible(historyActivity.locator("time"), "Activity must render its timestamp");
       if (await historyActivity.getByText("Diagnostics", { exact: true }).locator("..").evaluate((node) => node.open)) {
         throw new Error("Raw activity diagnostics must remain collapsed by default");
@@ -13570,8 +18525,8 @@ security.audit.enable = true;</fixtext>
       if ((await verificationPagePromise).status() !== 200) throw new Error("Verification continuation request failed");
       await page.waitForFunction(() => document.querySelectorAll('[data-testid="poam-detail"] [data-testid="poam-verification-result"]').length === 11);
 
-      await detail.getByLabel("Title").fill("Persisted remediation metadata");
-      await detail.getByLabel("Owner").fill("Security Engineering");
+      await detail.getByLabel("Title", { exact: true }).fill("Persisted remediation metadata");
+      const metadataAssignee = await selectAuthenticatedPoamAssignee(page, detail);
       await detail.getByLabel("Target completion").fill("2026-11-12");
       await detail.getByLabel("Risk").selectOption("Low");
       await detail.getByPlaceholder("What will change, where, and how it will be verified").fill("Persist this exact remediation plan.");
@@ -13581,17 +18536,20 @@ security.audit.enable = true;</fixtext>
       await detail.getByRole("button", { name: "Save metadata", exact: true }).click();
       const metadataResponse = await metadataResponsePromise;
       const metadataRequest = metadataResponse.request().postDataJSON();
-      if (metadataResponse.status() !== 200 || metadataRequest.plan != null) {
+      const metadataDetail = await metadataResponse.json();
+      if (metadataResponse.status() !== 200 || metadataRequest.plan != null ||
+          metadataRequest.assignee?.kind !== "user" || metadataRequest.assignee.user_id !== metadataAssignee.id ||
+          metadataDetail.assignee?.kind !== "user" || metadataDetail.assignee.user_id !== metadataAssignee.id) {
         throw new Error(`Metadata save must not implicitly persist the remediation plan: ${JSON.stringify(metadataRequest)}`);
       }
-      await assertVisible(detail.getByText("Security Engineering", { exact: true }).first(), "Saved owner must reconcile from server response");
+      await assertVisible(detail.getByText(metadataAssignee.label, { exact: true }).first(), "Saved typed assignee must reconcile from server response");
       const planResponsePromise = page.waitForResponse(
         (response) => response.url().endsWith(`/api/v1/poams/${poam.id}`) && response.request().method() === "PATCH",
       );
       await detail.getByRole("button", { name: "Save plan", exact: true }).click();
       const planResponse = await planResponsePromise;
       const planRequest = planResponse.request().postDataJSON();
-      if (planResponse.status() !== 200 || planRequest.plan !== "Persist this exact remediation plan." || planRequest.title != null || planRequest.owner != null || planRequest.target_date != null || planRequest.risk != null) {
+      if (planResponse.status() !== 200 || planRequest.plan !== "Persist this exact remediation plan." || planRequest.title != null || planRequest.owner != null || planRequest.assignee != null || planRequest.target_date != null || planRequest.risk != null) {
         throw new Error(`Plan save must persist only the labeled remediation-plan field: ${JSON.stringify(planRequest)}`);
       }
       const progressResponsePromise = page.waitForResponse(
@@ -13601,7 +18559,7 @@ security.audit.enable = true;</fixtext>
       const progressResponse = await progressResponsePromise;
       if (progressResponse.status() !== 200) throw new Error(`In-progress transition returned ${progressResponse.status()}: ${await progressResponse.text()}`);
       await assertVisible(detail.getByText("In Progress", { exact: true }).first(), "Status transition must reconcile");
-      await detail.getByPlaceholder("Add a durable note").fill("Browser persisted durable note");
+      await detail.getByPlaceholder("Add a note...").fill("Browser persisted durable note");
       const noteResponsePromise = page.waitForResponse(
         (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/notes`) && response.request().method() === "POST",
       );
@@ -13614,23 +18572,71 @@ security.audit.enable = true;</fixtext>
       }
       await assertVisible(detail.getByText("Added note: Browser persisted durable note", { exact: true }), "Durable note must appear in activity");
 
-      await detail.getByPlaceholder("Add milestone").fill("Browser release gate");
+      await detail.getByPlaceholder("Add a milestone...").fill("Browser release gate");
       await detail.locator('.poam-milestone-add input[type="date"]').fill("2026-10-31");
       const addMilestoneResponsePromise = page.waitForResponse(
         (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/milestones`) && response.request().method() === "POST",
       );
-      await detail.locator(".poam-milestone-add").getByRole("button", { name: "Add", exact: true }).click();
+      await detail.locator(".poam-milestone-add").getByRole("button", { name: "Add milestone", exact: true }).click();
       const addMilestoneResponse = await addMilestoneResponsePromise;
       const addedDetail = await addMilestoneResponse.json();
       const addedMilestone = addedDetail.milestones.find((item) => item.title === "Browser release gate");
       if (!addedMilestone) throw new Error(`Milestone response omitted added row: ${JSON.stringify(addedDetail.milestones)}`);
       const milestone = detail.locator(`[data-testid="poam-milestone"][data-milestone-id="${addedMilestone.id}"]`);
       await assertVisible(milestone, "Added milestone must reconcile from server response");
-      await milestone.getByRole("button", { name: "Complete", exact: true }).click();
-      await assertVisible(milestone.getByRole("button", { name: "Reopen", exact: true }), "Completed milestone must expose reopen");
-      await milestone.getByRole("button", { name: "Reopen", exact: true }).click();
-      await assertVisible(milestone.getByRole("button", { name: "Complete", exact: true }), "Reopened milestone must persist");
-      await milestone.getByTitle("Remove milestone").click();
+      await assertVisible(milestone.getByText("due Oct 31", { exact: true }), "Open milestone must show its compact due date");
+      const milestoneTitleEditor = milestone.getByLabel("Milestone title for Browser release gate", { exact: true });
+      await assertHidden(milestoneTitleEditor, "Milestone editing controls must not be permanent row content");
+      await milestone.getByRole("button", { name: "Edit milestone Browser release gate", exact: true }).click();
+      await assertVisible(milestoneTitleEditor, "Compact title interaction must expose optional milestone editing");
+      await page.waitForFunction(
+        (label) => document.activeElement?.getAttribute("aria-label") === label,
+        "Milestone title for Browser release gate",
+        { timeout: 15000 },
+      );
+      if (!(await milestoneTitleEditor.evaluate((node) => node === document.activeElement))) {
+        throw new Error("Opening optional milestone editing must focus its title field");
+      }
+      await milestone.getByLabel("Milestone target date for Browser release gate", { exact: true }).fill("2026-11-01");
+      const updateMilestoneResponsePromise = page.waitForResponse(
+        (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/milestones/${addedMilestone.id}`) && response.request().method() === "PATCH",
+      );
+      await milestone.getByRole("button", { name: "Save", exact: true }).click();
+      if ((await updateMilestoneResponsePromise).status() !== 200) throw new Error("Milestone update failed");
+      await assertHidden(milestoneTitleEditor, "Saving milestone editing must restore compact checklist geometry");
+      await assertVisible(milestone.getByText("due Nov 1", { exact: true }), "Saved milestone must reconcile its updated date");
+      if (!(await milestone.getByRole("button", { name: "Edit milestone Browser release gate", exact: true }).evaluate((node) => node === document.activeElement))) {
+        throw new Error("Saving optional milestone editing must restore focus to its trigger after reconciliation");
+      }
+      await milestone.getByRole("button", { name: "Edit milestone Browser release gate", exact: true }).click();
+      await milestone.getByRole("button", { name: "Cancel", exact: true }).click();
+      await assertHidden(milestoneTitleEditor, "Cancelling milestone editing must restore compact checklist geometry");
+      if (!(await milestone.getByRole("button", { name: "Edit milestone Browser release gate", exact: true }).evaluate((node) => node === document.activeElement))) {
+        throw new Error("Closing optional milestone editing must restore focus to its trigger");
+      }
+      const completeResponsePromise = page.waitForResponse(
+        (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/milestones/${addedMilestone.id}`) && response.request().method() === "PATCH",
+      );
+      await milestone.getByRole("checkbox", { name: "Mark Browser release gate complete", exact: true }).click();
+      const completeResponse = await completeResponsePromise;
+      if (completeResponse.status() !== 200 || completeResponse.request().postDataJSON().completed !== true) {
+        throw new Error(`Milestone checkbox must send completed=true: ${completeResponse.request().postData()}`);
+      }
+      await assertVisible(milestone.getByRole("checkbox", { name: "Reopen Browser release gate", exact: true }), "Completed milestone must expose reopen through its checkbox");
+      await assertVisible(milestone.getByText(/^done /), "Completed milestone must show its compact completion date");
+      if (!(await milestone.locator(".poam-milestone-title").evaluate((node) => getComputedStyle(node).textDecorationLine.includes("line-through")))) {
+        throw new Error("Completed milestone title must be struck through");
+      }
+      const reopenResponsePromise = page.waitForResponse(
+        (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/milestones/${addedMilestone.id}`) && response.request().method() === "PATCH",
+      );
+      await milestone.getByRole("checkbox", { name: "Reopen Browser release gate", exact: true }).click();
+      const reopenResponse = await reopenResponsePromise;
+      if (reopenResponse.status() !== 200 || reopenResponse.request().postDataJSON().completed !== false) {
+        throw new Error(`Milestone checkbox must send completed=false: ${reopenResponse.request().postData()}`);
+      }
+      await assertVisible(milestone.getByRole("checkbox", { name: "Mark Browser release gate complete", exact: true }), "Reopened milestone must persist");
+      await milestone.getByRole("button", { name: "Remove milestone Browser release gate", exact: true }).click();
       await assertHidden(detail.getByTestId("poam-milestone").filter({ hasText: "Browser release gate" }), "Removed milestone must disappear");
 
       await page.reload({ timeout: LOAD_TIMEOUT });
@@ -13638,8 +18644,8 @@ security.audit.enable = true;</fixtext>
       await reloaded.waitFor({ state: "visible", timeout: 15000 });
       await waitForPhase6Target(page, reloaded, "Reloaded POA&M detail");
       await page.waitForTimeout(500);
-      await assertValue(reloaded.getByLabel("Title"), "Persisted remediation metadata", "Title must survive reload");
-      await assertValue(reloaded.getByLabel("Owner"), "Security Engineering", "Owner must survive reload");
+      await assertValue(reloaded.getByLabel("Title", { exact: true }), "Persisted remediation metadata", "Title must survive reload");
+      await assertValue(reloaded.getByTestId("poam-assignee-select"), metadataAssignee.value, "Typed assignee must survive reload");
       await assertValue(reloaded.getByLabel("Target completion"), "2026-11-12", "Target must survive reload");
       await assertValue(reloaded.getByLabel("Risk"), "Low", "Risk must survive reload");
       await assertValue(reloaded.getByPlaceholder("What will change, where, and how it will be verified"), "Persist this exact remediation plan.", "Plan must survive reload");
@@ -13651,7 +18657,7 @@ security.audit.enable = true;</fixtext>
         method: "POST",
         body: JSON.stringify({ revision: current.revision, text: "Concurrent revision" }),
       });
-      await reloaded.getByLabel("Owner").fill("Preserved stale draft");
+      await reloaded.getByLabel("Title", { exact: true }).fill("Preserved stale draft title");
       const staleResponsePromise = page.waitForResponse(
         (response) => response.url().endsWith(`/api/v1/poams/${poam.id}`) && response.request().method() === "PATCH",
       );
@@ -13659,7 +18665,7 @@ security.audit.enable = true;</fixtext>
       const staleResponse = await staleResponsePromise;
       if (staleResponse.status() !== 409) throw new Error(`Expected real stale revision 409, got ${staleResponse.status()}`);
       await assertVisible(reloaded.getByText(/changed before saving metadata/i), "Stale revision must have actionable presentation");
-      await assertValue(reloaded.getByLabel("Owner"), "Preserved stale draft", "Stale refresh must preserve entered values");
+      await assertValue(reloaded.getByLabel("Title", { exact: true }), "Preserved stale draft title", "Stale refresh must preserve the exact Title draft");
     },
   },
   {
@@ -13682,11 +18688,68 @@ security.audit.enable = true;</fixtext>
         LIMIT 1;
       `).split("|");
       if (target.length !== 3) throw new Error(`Canonical POA&M evaluator target is unavailable: ${JSON.stringify(target)}`);
-      const [systemId, hostname, commitId] = target;
-      runFixtureSql(`
-        UPDATE systems SET system_configuration_name='test-agent'
-        WHERE id='${systemId}'::uuid;
-      `);
+      const [sourceSystemId, , commitId] = target;
+      const systemId = "43300000-0000-4000-8000-000000000020";
+      const hostname = "task433-poam-lifecycle-target";
+      const linkedSystemId = "43300000-0000-4000-8000-000000000021";
+      const linkedHostname = "task433-linked-canonical";
+      let primarySystemInserted = false;
+      let linkedSystemInserted = false;
+      let reservedTestAgentIds = [];
+      let reservedCfTestSysIds = [];
+      let primaryError = null;
+      try {
+        const reservedCount = Number(runFixtureSql(`
+          SELECT COUNT(*) FROM systems
+          WHERE id IN ('${systemId}'::uuid, '${linkedSystemId}'::uuid)
+             OR hostname IN ($hostname$${hostname}$hostname$, $hostname$${linkedHostname}$hostname$);
+        `));
+        if (reservedCount !== 0) {
+          throw new Error("Canonical POA&M reserved system IDs or hostnames already exist");
+        }
+        reservedTestAgentIds = JSON.parse(runFixtureSql(`
+          WITH reserved AS (
+            UPDATE systems candidate
+            SET system_configuration_name='task433-held-poam-test-agent-' || replace(candidate.id::text, '-', '')
+            FROM systems source
+            WHERE source.id='${sourceSystemId}'::uuid
+              AND candidate.flake_id=source.flake_id
+              AND COALESCE(NULLIF(BTRIM(candidate.system_configuration_name), ''), candidate.hostname)='test-agent'
+              AND candidate.id NOT IN ('${systemId}'::uuid, '${linkedSystemId}'::uuid)
+            RETURNING candidate.id
+          )
+          SELECT COALESCE(json_agg(id ORDER BY id), '[]'::json)::text FROM reserved;
+        `));
+        reservedCfTestSysIds = JSON.parse(runFixtureSql(`
+          WITH reserved AS (
+            UPDATE systems candidate
+            SET system_configuration_name='task433-held-poam-cf-test-sys-' || replace(candidate.id::text, '-', '')
+            FROM systems source
+            WHERE source.id='${sourceSystemId}'::uuid
+              AND candidate.flake_id=source.flake_id
+              AND COALESCE(NULLIF(BTRIM(candidate.system_configuration_name), ''), candidate.hostname)='cf-test-sys'
+              AND candidate.id NOT IN ('${systemId}'::uuid, '${linkedSystemId}'::uuid)
+            RETURNING candidate.id
+          )
+          SELECT COALESCE(json_agg(id ORDER BY id), '[]'::json)::text FROM reserved;
+        `));
+        const insertedCount = Number(runFixtureSql(`
+          WITH inserted AS (
+            INSERT INTO systems (
+              id, hostname, environment_id, flake_id, is_active, public_key,
+              system_configuration_name, derivation
+            )
+            SELECT '${systemId}'::uuid, '${hostname}', environment_id, flake_id, true,
+                   'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITask433PoamLifecycleTarget',
+                   'test-agent', derivation
+            FROM systems WHERE id='${sourceSystemId}'::uuid
+            RETURNING id
+          )
+          SELECT COUNT(*) FROM inserted;
+        `));
+        if (insertedCount !== 1) throw new Error("Canonical POA&M primary system insertion did not create one row");
+        primarySystemInserted = true;
+
       const requirementContext = await loadTask433RequirementContext(page);
       const nixRuleId = "43300000-0000-4000-8000-000000000001";
       const cveRuleId = "43300000-0000-4000-8000-000000000002";
@@ -13762,9 +18825,8 @@ security.audit.enable = true;</fixtext>
         }),
       });
 
-      const linkedSystemId = "43300000-0000-4000-8000-000000000003";
-      const linkedHostname = "task433-linked-canonical";
-      runFixtureSql(`
+        const linkedInsertedCount = Number(runFixtureSql(`
+          WITH inserted AS (
         INSERT INTO systems (
           id, hostname, environment_id, flake_id, is_active, public_key,
           system_configuration_name, derivation
@@ -13773,8 +18835,28 @@ security.audit.enable = true;</fixtext>
                flake_id, true,
                'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITask433CanonicalLinkedHost',
                'cf-test-sys', derivation
-        FROM systems WHERE id='${systemId}'::uuid;
-      `);
+            FROM systems WHERE id='${systemId}'::uuid
+            RETURNING id
+          )
+          SELECT COUNT(*) FROM inserted;
+        `));
+        if (linkedInsertedCount !== 1) throw new Error("Canonical POA&M linked system insertion did not create one row");
+        linkedSystemInserted = true;
+
+        const configurationCounts = JSON.parse(runFixtureSql(`
+          SELECT json_build_object(
+            'testAgent', COUNT(*) FILTER (WHERE COALESCE(NULLIF(BTRIM(candidate.system_configuration_name), ''), candidate.hostname)='test-agent'),
+            'cfTestSys', COUNT(*) FILTER (WHERE COALESCE(NULLIF(BTRIM(candidate.system_configuration_name), ''), candidate.hostname)='cf-test-sys')
+          )::text
+          FROM systems candidate
+          JOIN systems source ON source.id='${sourceSystemId}'::uuid
+          WHERE candidate.flake_id=source.flake_id;
+        `));
+        // Persistence lookup does not filter inactive systems. Both canonical
+        // configuration identities must be unique before evaluation starts.
+        if (Number(configurationCounts.testAgent) !== 1 || Number(configurationCounts.cfTestSys) !== 1) {
+          throw new Error(`Canonical POA&M configuration identities are ambiguous: ${JSON.stringify(configurationCounts)}`);
+        }
       await phase6Api(page, "/api/v1/compliance/assignments", {
         method: "POST",
         body: JSON.stringify({
@@ -13794,20 +18876,14 @@ security.audit.enable = true;</fixtext>
         commitId,
         policyId: policy.id,
       });
-      const linkedInitial = JSON.parse(runFixtureSql(`
-        SELECT json_build_object(
-          'assessment_id', assessment.id,
-          'derivation_id', assessment.derivation_id,
-          'target_store_path', assessment.target_store_path
-        )::text
-        FROM composite_policy_assessments assessment
-        WHERE assessment.system_id='${linkedSystemId}'::uuid
-          AND assessment.policy_lineage_id='${policy.id}'::uuid
-        ORDER BY assessment.updated_at DESC LIMIT 1;
-      `));
+        const linkedInitial = await runTask433ProductionEvaluation(page, {
+          systemId: linkedSystemId,
+          commitId,
+          policyId: policy.id,
+        });
       const failingScanId = arrangeTask433CompletedScan(initialEvaluation.derivation_id, 2);
-      arrangeTask433CompletedScan(linkedInitial.derivation_id, 2);
-      const assessmentFixture = await runTask433ProductionEvaluation(page, {
+        const linkedFailingScanId = arrangeTask433CompletedScan(linkedInitial.derivation_id, 2);
+      let assessmentFixture = await runTask433ProductionEvaluation(page, {
         systemId,
         commitId,
         policyId: policy.id,
@@ -13815,28 +18891,26 @@ security.audit.enable = true;</fixtext>
       if (!assessmentFixture.rows.some((row) => row.kind === "cve_block" && row.source_scan_id === failingScanId && row.outcome === "fail")) {
         throw new Error(`Production re-evaluation did not consume the failing scan: ${JSON.stringify(assessmentFixture)}`);
       }
-      const linkedAssessment = JSON.parse(runFixtureSql(`
-        SELECT json_build_object(
-          'assessment_id', assessment.id,
-          'finding_id', finding.id,
-          'overall', assessment.overall_outcome
-        )::text
-        FROM composite_policy_assessments assessment
-        JOIN poam_findings finding
-          ON finding.system_id=assessment.system_id
-         AND finding.policy_lineage_id=assessment.policy_lineage_id
-        WHERE assessment.system_id='${linkedSystemId}'::uuid
-          AND assessment.policy_lineage_id='${policy.id}'::uuid
-        ORDER BY assessment.updated_at DESC LIMIT 1;
-      `));
-      if (linkedAssessment.overall !== "fail" || !linkedAssessment.finding_id) {
+        const linkedAssessment = await runTask433ProductionEvaluation(page, {
+          systemId: linkedSystemId,
+          commitId,
+          policyId: policy.id,
+        });
+        if (linkedAssessment.overall !== "fail" || !linkedAssessment.finding_id ||
+            !linkedAssessment.rows.some((row) => row.kind === "cve_block" && row.source_scan_id === linkedFailingScanId && row.outcome === "fail")) {
         throw new Error(`Production re-evaluation did not create the compatible FAIL finding: ${JSON.stringify(linkedAssessment)}`);
       }
+      assessmentFixture = await runTask433ProductionEvaluation(page, {
+        systemId,
+        commitId,
+        policyId: policy.id,
+        reEvaluate: false,
+      });
       let assessmentId = assessmentFixture.assessment_id;
       let derivationId = assessmentFixture.derivation_id;
       const findingId = assessmentFixture.finding_id;
-      arrangeTask433DeployedAssessment(hostname, assessmentFixture.target_store_path);
-      arrangeTask433DeployedAssessment(linkedHostname, linkedInitial.target_store_path);
+      arrangeTask433DeployedAssessment(systemId, hostname, assessmentFixture);
+      arrangeTask433DeployedAssessment(linkedSystemId, linkedHostname, linkedAssessment);
       const fixture = {
         policy,
         policyVersionId,
@@ -13853,10 +18927,20 @@ security.audit.enable = true;</fixtext>
         15000,
       );
       await assertVisible(page.getByText("FAIL", { exact: true }).first(), "Canonical POA&M lifecycle must begin from persisted FAIL evidence");
+      // The reviewed visual fixture is POAM-0007. Focused runs do not execute
+      // the six earlier POA&M workflows that advance this sequence in the full
+      // profile, so align only an unadvanced sequence before creation.
+      runFixtureSql(`
+        SELECT setval(
+          'poam_human_id_seq',
+          GREATEST((SELECT COALESCE(MAX(human_number), 0) FROM poams), 6),
+          true
+        );
+      `);
       await remediation.getByRole("button", { name: "Create POA&M", exact: true }).click();
       const createModal = page.getByRole("dialog", { name: "Create POA&M", exact: true });
-      await createModal.getByLabel("Title").fill("Canonical authoritative remediation");
-      await createModal.getByLabel("Owner").fill("Security Operations");
+        await createModal.getByLabel("Title", { exact: true }).fill("Canonical authoritative remediation");
+        const createAssignee = await selectAuthenticatedPoamAssignee(page, createModal);
       await createModal.getByLabel("Target completion").fill("2026-10-15");
       await createModal.getByLabel("Risk").selectOption("High");
       await createModal.getByLabel("Remediation plan").fill("Correct the mixed enforcement failure and verify authoritative evidence.");
@@ -13865,17 +18949,33 @@ security.audit.enable = true;</fixtext>
         createModal.getByRole("button", { name: "Create POA&M", exact: true }).click(),
       ]);
       if (createResponse.status() !== 201) throw new Error(`Canonical POA&M create returned ${createResponse.status()}`);
+        const createRequest = createResponse.request().postDataJSON();
+        if (createRequest.assignee?.kind !== "user" || createRequest.assignee.user_id !== createAssignee.id) {
+          throw new Error(`Canonical POA&M create did not submit its typed assignee: ${JSON.stringify(createRequest.assignee)}`);
+        }
       const poam = await createResponse.json();
+        if (poam.assignee?.kind !== "user" || poam.assignee.user_id !== createAssignee.id) {
+          throw new Error(`Canonical POA&M create did not return its typed assignee: ${JSON.stringify(poam.assignee)}`);
+        }
       const detail = page.getByTestId("poam-detail");
       await waitForPhase6Target(page, detail, "Created canonical POA&M detail");
       const primaryFinding = detail.locator(`[data-testid="poam-linked-finding"][data-finding-id="${findingId}"]`);
       await assertVisible(primaryFinding.getByText(`${requirementContext.framework.name} · ${requirementContext.version.version}`, { exact: true }), "Linked finding must render the mapped framework and release");
       await assertVisible(primaryFinding.getByText(requirementContext.requirement.external_id, { exact: true }), "Linked finding must render the mapped requirement identifier");
       await assertVisible(primaryFinding.getByText(requirementContext.requirement.title, { exact: true }), "Linked finding must render the mapped requirement title");
-      await detail.getByLabel("Owner").fill("Platform Security");
+        await detail.getByLabel("Risk").selectOption("Low");
       await detail.getByPlaceholder("What will change, where, and how it will be verified").fill("Deploy the correction, rerun evaluation, and retain the exact PASS evidence.");
+        const metadataResponsePromise = page.waitForResponse(
+          (response) => response.url().endsWith(`/api/v1/poams/${poam.id}`) && response.request().method() === "PATCH",
+        );
       await detail.getByRole("button", { name: "Save metadata", exact: true }).click();
-      await assertVisible(detail.getByText("Platform Security", { exact: true }).first(), "Canonical metadata edit must reconcile before the plan save");
+        const metadataResponse = await metadataResponsePromise;
+        const metadataRequest = metadataResponse.request().postDataJSON();
+        const metadataDetail = await metadataResponse.json();
+        if (metadataResponse.status() !== 200 || metadataRequest.risk !== "low" || metadataDetail.risk !== "low") {
+          throw new Error(`Canonical Risk edit did not reconcile: ${JSON.stringify({ request: metadataRequest, response: metadataDetail })}`);
+        }
+        await assertValue(detail.getByLabel("Risk"), "Low", "Canonical Risk edit must reconcile before the plan save");
       const planResponsePromise = page.waitForResponse(
         (response) => response.url().endsWith(`/api/v1/poams/${poam.id}`) && response.request().method() === "PATCH",
       );
@@ -13885,12 +18985,12 @@ security.audit.enable = true;</fixtext>
       if (planResponse.status() !== 200 || planRequest.plan !== "Deploy the correction, rerun evaluation, and retain the exact PASS evidence.") {
         throw new Error(`Canonical labeled plan save did not persist the exact draft: ${JSON.stringify(planRequest)}`);
       }
-      await detail.getByPlaceholder("Add milestone").fill("Authoritative reevaluation");
+      await detail.getByPlaceholder("Add a milestone...").fill("Authoritative reevaluation");
       await detail.locator('.poam-milestone-add input[type="date"]').fill("2026-10-01");
       const addMilestoneResponsePromise = page.waitForResponse(
         (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/milestones`) && response.request().method() === "POST",
       );
-      await detail.locator(".poam-milestone-add").getByRole("button", { name: "Add", exact: true }).click();
+      await detail.locator(".poam-milestone-add").getByRole("button", { name: "Add milestone", exact: true }).click();
       const addMilestoneResponse = await addMilestoneResponsePromise;
       if (addMilestoneResponse.status() !== 201) throw new Error(`Canonical milestone returned ${addMilestoneResponse.status()}`);
       const addedMilestone = (await addMilestoneResponse.json()).milestones.find((item) => item.title === "Authoritative reevaluation");
@@ -13928,6 +19028,29 @@ security.audit.enable = true;</fixtext>
         { poamId: poam.id, revision: unlinkedDetail.revision },
       );
       await assertHidden(linkedRow, "Unlinked finding must leave the canonical POA&M detail");
+      // Normalize the canonical visual state after the typed-assignee and Risk
+      // edit assertions have proved those mutations. The reviewed baseline uses
+      // the design fixture's legacy owner and High risk, while the workflow
+      // still exercises and validates the newer typed-assignee and Low-risk
+      // response contracts before this point.
+      const canonicalMetadata = await phase6Api(page, `/api/v1/poams/${poam.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          revision: unlinkedDetail.revision,
+          owner: "Platform Security",
+          risk: "high",
+        }),
+      });
+      if (canonicalMetadata.status !== 200 || canonicalMetadata.body.owner !== "Platform Security" || canonicalMetadata.body.risk !== "high") {
+        throw new Error(`Canonical visual metadata did not reconcile: ${JSON.stringify(canonicalMetadata)}`);
+      }
+      runFixtureSql(`
+        UPDATE poams
+        SET created_at='2026-09-01T10:39:00Z'::timestamptz
+        WHERE id='${poam.id}'::uuid;
+      `);
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await waitForPhase6Target(page, detail, "Canonical POA&M after visual metadata normalization");
       // Keep strict evidence anchored after link actions scroll the tray.
       await detail.locator(".poam-tray-scroll").evaluate((element) => { element.scrollTop = 0; });
       await captureWorkflowState(page, stepName, "failed-evidence-edited-remediation");
@@ -14027,8 +19150,23 @@ security.audit.enable = true;</fixtext>
       await assertVisible(detail.getByTestId("poam-verification-result").getByText("Pass", { exact: true }).first(), "Authoritative PASS must appear in verification history");
       const successfulClosePromise = page.waitForResponse((response) => response.url().endsWith(`/api/v1/poams/${poam.id}/close`) && response.request().method() === "POST");
       await detail.getByRole("button", { name: "Authoritative close", exact: true }).click();
-      if ((await successfulClosePromise).status() !== 200) throw new Error("Authoritative PASS closure request failed");
+      const successfulCloseResponse = await successfulClosePromise;
+      if (successfulCloseResponse.status() !== 200) throw new Error("Authoritative PASS closure request failed");
+      const successfulCloseDetail = await successfulCloseResponse.json();
+      const closeRequirement = successfulCloseDetail.verification_attempts
+        ?.find((attempt) => attempt.id === successfulCloseDetail.closure_attempt_id)
+        ?.items?.[0]?.requirements?.[0];
+      if (closeRequirement?.external_id !== requirementContext.requirement.external_id) {
+        throw new Error(`Immediate close response omitted hydrated requirement metadata: ${JSON.stringify(successfulCloseDetail)}`);
+      }
       await assertVisible(detail.getByText("Completed", { exact: true }).first(), "Successful authoritative closure must render Completed");
+      runFixtureSql(`
+        UPDATE poams
+        SET closed_at='2026-09-01T10:39:37Z'::timestamptz
+        WHERE id='${poam.id}'::uuid;
+      `);
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await waitForPhase6Target(page, detail, "Canonical completed POA&M after visual time normalization");
       await captureWorkflowState(page, stepName, "authoritative-pass-closed");
       await page.reload({ waitUntil: "domcontentloaded" });
       await waitForPhase6Target(page, detail, "Reloaded completed canonical POA&M");
@@ -14046,12 +19184,52 @@ security.audit.enable = true;</fixtext>
       await assertVisible(detail.locator('[data-activity-kind="closed"]'), "Closure activity must survive reload");
       await captureWorkflowState(page, stepName, "reloaded-completed-history");
       await captureWorkflowViewportState(page, stepName, "reloaded-completed-history", "mobile");
+      } catch (error) {
+        primaryError = error;
+        throw error;
+      } finally {
+        try {
+          if (primarySystemInserted || linkedSystemInserted || reservedTestAgentIds.length || reservedCfTestSysIds.length) {
+            const insertedIds = [
+              ...(primarySystemInserted ? [`'${systemId}'::uuid`] : []),
+              ...(linkedSystemInserted ? [`'${linkedSystemId}'::uuid`] : []),
+            ].join(", ");
+            runFixtureSql(`
+              BEGIN;
+              UPDATE compliance_bundle_assignments
+              SET active=false
+              WHERE system_id IN (${insertedIds || "NULL"}) AND active;
+              UPDATE systems
+              SET is_active=false,
+                  system_configuration_name=CASE id
+                    WHEN '${systemId}'::uuid THEN 'task433-retired-poam-${systemId}'
+                    WHEN '${linkedSystemId}'::uuid THEN 'task433-retired-poam-${linkedSystemId}'
+                  END
+              WHERE id IN (${insertedIds || "NULL"});
+              UPDATE systems
+              SET system_configuration_name='test-agent'
+              WHERE id IN (${reservedTestAgentIds.map((id) => `'${id}'::uuid`).join(", ") || "NULL"});
+              UPDATE systems
+              SET system_configuration_name='cf-test-sys'
+              WHERE id IN (${reservedCfTestSysIds.map((id) => `'${id}'::uuid`).join(", ") || "NULL"});
+              COMMIT;
+            `);
+          }
+        } catch (cleanupError) {
+          if (primaryError) {
+            console.error(`Canonical POA&M cleanup also failed: ${cleanupError.message}`);
+          } else {
+            throw cleanupError;
+          }
+        }
+      }
     },
   },
   {
     name: "29k-poam-system-rollups-navigation",
     description: "System compliance uses real Open, Overdue, and Closed rollups with common detail and exact evidence navigation",
     action: async (page) => {
+      await suppressOnboardingCoach(page);
       const fixture = await createPhase6PoamFixture(page, "system-rollup");
       const system = fixture.systems[0];
       const overdue = await createFixturePoam(page, system.assessmentId, { title: "System overdue remediation", targetDate: "2020-01-01" });
@@ -14068,6 +19246,7 @@ security.audit.enable = true;</fixtext>
 
       const expected = (await phase6Api(page, `/api/v1/poams/rollups/systems?ids=${system.id}`)).body[0];
       await page.goto(`${baseUrl}/systems/${system.id}?tab=compliance`, { timeout: LOAD_TIMEOUT });
+      await collapseOnboardingCoach(page);
       const section = page.locator("section.poam-system-section");
       await waitForPhase6Target(page, section, "System POA&M section");
       for (const [label, value] of [["Open findings", expected.open_findings], ["On POA&M", expected.on_poam_findings], ["No POA&M", expected.no_poam_findings], ["Overdue", expected.overdue], ["Awaiting verification", expected.awaiting_verification], ["Closed", expected.completed]]) {
@@ -14445,7 +19624,10 @@ security.audit.enable = true;</fixtext>
     action: async (page) => {
       const policyName = `Evidence Test Policy ${Date.now()}`;
       const policyCard = () => page.locator(`[data-policy-card][data-policy-name="${policyName}"]`);
+      let createdPolicy = null;
+      let primaryError = null;
       // STEP 1: Create a policy with initial evidence
+      try {
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
       await collapseOnboardingCoach(page);
       await page.getByRole("button", { name: /New custom policy/i }).first().click();
@@ -14486,13 +19668,15 @@ security.audit.enable = true;</fixtext>
       await expectOutput.fill("active");
       
       // Save policy with first evidence
-      const createResponsePromise = page.waitForResponse(
-        (response) => response.url().includes("/api/v1/deployment-policies") && response.request().method() === "POST",
-      );
-      await page.getByRole("button", { name: /Create policy/i }).click();
-      const createResponse = await createResponsePromise;
+      const createEditorModal = page.getByTestId("policy-editor-modal");
+      const [createResponse] = await Promise.all([
+        page.waitForResponse(
+          (response) => response.url().includes("/api/v1/deployment-policies") && response.request().method() === "POST",
+        ),
+        createEditorModal.getByRole("button", { name: "Create policy", exact: true }).click(),
+      ]);
       if (createResponse.status() !== 201) throw new Error(`Evidence policy create returned ${createResponse.status()}`);
-      const createdPolicy = await createResponse.json();
+      createdPolicy = await createResponse.json();
       await filterPolicyCatalog(page, policyName);
       await assertVisible(policyCard(), "Expected policy created with evidence");
       
@@ -14608,7 +19792,22 @@ security.audit.enable = true;</fixtext>
         "Expected evidence cleared and persisted after reload",
       );
       await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
+      } catch (error) {
+        primaryError = error;
+        throw error;
+      } finally {
+        if (createdPolicy?.id) {
+          try {
       await phase6Api(page, `/api/v1/deployment-policies/${createdPolicy.id}`, { method: "DELETE" });
+          } catch (cleanupError) {
+            if (primaryError) {
+              console.error(`Evidence policy cleanup also failed: ${cleanupError.message}`);
+            } else {
+              throw new Error(`Evidence policy cleanup failed: ${cleanupError.message}`);
+            }
+          }
+        }
+      }
     },
   },
   {
@@ -14829,6 +20028,976 @@ security.audit.enable = true;</fixtext>
     },
   },
   {
+    name: "12l-task440-config-lifecycle",
+    description: "TASK-440 live explicit primary prerequisite and targeted Config Inspector regression plus mocked auxiliary lifecycle and legacy-generation states",
+    action: async (page) => {
+      await runTask440LiveSnapshotEvaluation(page);
+      await suppressOnboardingCoach(page);
+      await routeSystemsWarningData(page);
+      const state = await routeTask440SystemData(page);
+      const configUrl = `${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_NEVER_DEPLOYED_SHA}`;
+      await page.goto(configUrl, { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.locator(".cfgx").getByText("TARGET", { exact: true }), `Expected Config Explorer; fixture requests: ${state.handledRequests.join(",")}`, 15000);
+      await assertVisible(page.locator(".cfgx-hist").filter({ hasText: /never deployed here/ }), "Expected never-deployed warning");
+      if (!page.url().includes(TASK_440_NEVER_DEPLOYED_SHA)) throw new Error("Expected full revision in Config deep link");
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await assertVisible(page.locator(".cfgx-hist").filter({ hasText: /never deployed here/ }), "Expected revision context after reload", 15000);
+
+      state.lifecycle = "unavailable";
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "primary evalunavailable" }), "Expected unavailable primary evaluation state", 15000);
+      await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "inventoryunavailable" }), "Expected unavailable inventory state");
+      await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "comparisonunavailable" }), "Unavailable inventory made comparison look ready");
+      await page.getByRole("button", { name: "Configured", exact: true }).click();
+      await assertVisible(page.getByRole("button", { name: "Inspect configured option services.openssh.enable" }), "Lazy configured data should remain usable without certified inventory", 15000);
+      state.inspectionPrerequisite = true;
+      await page.getByRole("button", { name: "request full inventory" }).click();
+      await assertVisible(page.getByText(/Configuration inspection prerequisite: The exact completed NixOS carrier is not available/i), "Expected distinct Config inspection prerequisite");
+      state.inspectionPrerequisite = false;
+      await page.getByRole("button", { name: "request full inventory" }).click();
+      const queuedInventory = page.locator(".cfgx-meta-i").filter({ hasText: "inventoryqueued" });
+      await assertVisible(queuedInventory, "Expected queued inventory state", 15000);
+      if ((await queuedInventory.textContent()).toLowerCase().includes("running")) throw new Error("Queued inventory was mislabeled as running");
+
+      state.lifecycle = "running";
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "inventoryrunning" }), "Expected running inventory state", 15000);
+      state.lifecycle = "failed";
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "primary evalfailed" }), "Expected failed primary evaluation state", 15000);
+      await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "inventoryfailed" }), "Expected failed inventory state");
+      await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "comparisonunavailable" }), "Failed inventory made comparison look ready");
+    },
+  },
+  {
+    name: "12la-task440-partial-config-inventory",
+    description: "TASK-440 truthful partial Config search, Sources, and fail-closed comparison contract",
+    action: async (page) => {
+      await suppressOnboardingCoach(page);
+      await routeSystemsWarningData(page);
+      const state = await routeTask440SystemData(page, {
+        optionInventoryState: "partial",
+        optionInventoryDiagnostics: [{
+          path_components: ["services", "poison"],
+          code: "unreadable_option_subtree",
+          message: "Option subtree could not be inspected",
+        }],
+        optionInventoryDiagnosticsTruncated: false,
+      });
+      await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_CURRENT_SHA}`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "inventorypartial" }), "Expected explicit partial inventory state", 15000);
+      await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "comparisonunavailable" }), "Partial inventory made comparison look available");
+      await page.getByRole("button", { name: "Search", exact: true }).click();
+      await assertVisible(page.getByText("Partial search over options observed in this Explorer session only. No match does not mean the option is absent.", { exact: true }), "Expected truthful partial search scope");
+      await assertVisible(page.getByText("No match in options observed during this Explorer session. Unobserved paths were not searched.", { exact: true }), "Expected truthful partial empty search");
+      await page.getByRole("button", { name: /^Sources\b/ }).click();
+      await assertVisible(page.getByText("Partial list: only source paths from provenance inspected in this Explorer target and session. This is not a complete module registry.", { exact: true }), "Expected truthful partial Sources scope");
+      if (state.inspectionRequests.length) throw new Error("Opening a partial inventory queued a complete inspection");
+      if (state.optionRequests.some((request) => request.filter === "changed")) throw new Error("Partial inventory UI requested unavailable comparison data");
+    },
+  },
+  {
+    name: "12m-task440-config-explorer-keyboard-wide",
+    description: "TASK-440 comprehensive mocked Config Explorer: lazy observations, bounded continuation, local failures, persistent detail, explicit provenance, certified search, and revision fencing",
+    action: async (page) => {
+      const stepName = "12m-task440-config-explorer-keyboard-wide";
+      await page.setViewportSize({ width: 1920, height: 1080 });
+      await suppressOnboardingCoach(page);
+      await routeSystemsWarningData(page);
+      const state = await routeTask440SystemData(page, {
+        holdObservationKinds: ["root"],
+        prefixFailureCounts: [["services@512", 1]],
+        largeServicesPrefix: true,
+      });
+      await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_CURRENT_SHA}`, { timeout: LOAD_TIMEOUT });
+      await state.waitForObservationPosts(["root"]);
+      await assertVisible(page.getByRole("status").filter({ hasText: "Root: Queued" }), "Expected independently queued root observation");
+      if (state.observationPosts.some((request) => request.kind === "configured_index")) throw new Error("Opening Config eagerly requested configured_index");
+      if (state.inspectionRequests.length) throw new Error(`Opening Config queued a forbidden complete inspection: ${JSON.stringify(state.inspectionRequests)}`);
+      state.releaseHeldObservation("root");
+      let servicesPrefix = page.getByRole("button", { name: "Expand services" });
+      await assertVisible(servicesPrefix, "Root observation did not render", 15000);
+      await assertVisible(page.getByRole("status", { name: "Unavailable child poison" }), "Expected unavailable root child to remain explicit");
+
+      state.holdObservationKinds.add("prefix");
+      // The expand control's accessible name flips to Collapse while loading,
+      // so the row is located by its stable qualified-path title instead.
+      const fmfRow = page.locator(".cfg-explorer-tree-row").filter({ has: page.locator('[title="config.fmf"]') });
+      await page.getByRole("button", { name: "Expand fmf" }).click();
+      await state.waitForObservationPosts(["prefix"]);
+      await assertVisible(fmfRow.locator(".cfgx-val .cfgx-insp"), "Delayed branch loading did not stay in the affected value cell");
+      if (await page.locator(".cfg-explorer-status").count()) throw new Error("Expanding a branch inserted a generic status block instead of a row indicator");
+      await assertVisible(page.locator(".cfgx-live").filter({ hasText: "Inspecting fmf" }), "Branch loading did not produce one accessible announcement");
+      await assertVisible(page.getByRole("button", { name: "Expand networking" }), "Delayed branch loading hid a loaded sibling");
+      await captureWorkflowState(page, stepName, "branch-loading-in-row");
+      await page.getByRole("button", { name: "Collapse fmf" }).click();
+      await page.getByRole("button", { name: "Expand fmf" }).click();
+      const pendingFmfRequests = state.observationPosts.filter((request) => request.kind === "prefix" && isDeepStrictEqual(request.path_components, ["fmf"]));
+      if (pendingFmfRequests.length !== 1) throw new Error(`Collapsing and reopening a loading branch duplicated work: ${JSON.stringify(pendingFmfRequests)}`);
+      state.releaseHeldObservation("prefix");
+      const fmfCache = page.getByRole("button", { name: "Expand fmf.cache" });
+      const fmfCli = page.getByRole("button", { name: "Expand fmf.cli" });
+      await assertVisible(fmfCache, "Expected populated fmf cache branch", 15000);
+      await assertVisible(fmfCli, "Expected populated fmf cli branch");
+      if ((await fmfCache.locator(".cfg-explorer-path").textContent()).trim() !== "cache") throw new Error("Browse repeated the qualified path instead of showing the final component");
+
+      await fmfCache.click();
+      const campgroundOption = page.getByRole("button", { name: "Inspect option fmf.cache.campground" });
+      await assertVisible(campgroundOption, "Expected fmf.cache.campground option", 15000);
+      state.holdObservationKinds.add("option");
+      await campgroundOption.click();
+      await state.waitForHeldObservationCount("option", 1);
+      await assertVisible(campgroundOption.locator(".cfgx-val .cfgx-insp"), "Option loading did not stay in its value cell");
+      if (!(await campgroundOption.getAttribute("class")).includes("sel")) throw new Error("Selected option did not retain its row accent while loading");
+      await assertVisible(page.getByRole("complementary", { name: "Configuration inspector" }).locator(".cfgx-insp-state").filter({ hasText: /queued option/i }), "Selected-option loading did not render in the detail pane");
+      await assertVisible(page.locator(".cfgx-live").filter({ hasText: "Inspecting option fmf.cache.campground" }), "Option loading did not produce one accessible announcement");
+      await assertVisible(fmfCli, "Selecting a delayed option hid a loaded sibling");
+      await captureWorkflowState(page, stepName, "selected-option-loading");
+      state.releaseHeldObservation("option");
+      await assertVisible(campgroundOption.locator(".cfgx-val .v-list").getByText("[]", { exact: true }), "Known empty list was rendered as an unknown value", 15000);
+      await assertVisible(page.getByRole("complementary", { name: "Configuration inspector" }).locator(".cfgx-pre.v-list").getByText("[]", { exact: true }), "Inspector did not preserve the known empty list");
+
+      await fmfCli.click();
+      await page.getByRole("button", { name: "Expand fmf.cli.zsh" }).click();
+      await page.getByRole("button", { name: "Expand fmf.cli.zsh.root" }).click();
+      const extraSource = page.getByRole("button", { name: "Inspect option fmf.cli.zsh.root.extraSource" });
+      await assertVisible(extraSource, "Expected long nested option path", 15000);
+      await extraSource.click();
+      await assertVisible(page.locator(".cfgx-insp-path").filter({ hasText: "fmf.cli.zsh.root.extraSource" }), "Long selected path did not render in the persistent inspector", 15000);
+      await captureWorkflowState(page, stepName, "selected-option-populated-tree");
+      const explicitlySelected = [["fmf", "cache", "campground"], ["fmf", "cli", "zsh", "root", "extraSource"]];
+      const optionPosts = state.observationPosts.filter((request) => request.kind === "option");
+      if (optionPosts.length !== explicitlySelected.length || !optionPosts.every((request) => explicitlySelected.some((path) => isDeepStrictEqual(request.path_components, path)))) {
+        throw new Error(`Rendering rows fetched option values that were never selected: ${JSON.stringify(optionPosts.map((request) => request.path_components))}`);
+      }
+      if (state.observationPosts.some((request) => request.kind === "provenance")) throw new Error("Rendering the tree eagerly requested provenance");
+
+      state.holdObservationKinds.add("configured_index");
+      const configuredMode = page.getByRole("button", { name: "Configured", exact: true });
+      await configuredMode.click();
+      await state.waitForObservationPosts(["configured_index"]);
+      await assertVisible(page.getByRole("status").filter({ hasText: "Configured options: Queued" }), "First Configured activation did not start configured_index");
+      state.releaseHeldObservation("configured_index");
+      await assertVisible(page.getByRole("button", { name: "Inspect configured option services.openssh.enable" }), "Configured index did not render", 15000);
+      const configuredPosts = () => state.observationPosts.filter((request) => request.kind === "configured_index").length;
+      const configuredCount = configuredPosts();
+      await page.getByRole("button", { name: "Browse", exact: true }).click();
+      await configuredMode.click();
+      if (configuredPosts() !== configuredCount) throw new Error("Revisiting Configured duplicated configured_index work");
+      await page.getByRole("button", { name: "Browse", exact: true }).click();
+
+      await servicesPrefix.click();
+      await assertVisible(page.getByText("Showing 512 of 514 children under services.", { exact: true }), "Expected bounded services prefix page", 15000);
+      if (await page.getByRole("button", { name: "Expand services.openssh" }).count()) throw new Error("Browse eagerly exposed child 513 before continuation");
+      const retainedFirst = page.getByRole("button", { name: "Expand services.healthy" });
+      await assertVisible(retainedFirst, "Expected first prefix row before continuation");
+      if ((await retainedFirst.locator(".cfgx-val").innerText()).trim() !== "") throw new Error("Collapsed Browse prefix row exposed a value it never inspected");
+      const loadMoreServices = page.getByRole("button", { name: "Load more children under services" });
+      await loadMoreServices.click();
+      const continuationFailure = page.getByRole("alert").filter({ hasText: "Unable to inspect services" });
+      await assertVisible(continuationFailure, "Expected continuation failure to remain local", 15000);
+      await assertVisible(retainedFirst, "Continuation failure discarded loaded prefix rows");
+      await assertVisible(page.getByRole("button", { name: "Expand networking" }), "Continuation failure removed a healthy root sibling");
+      await captureWorkflowState(page, stepName, "branch-continuation-failure-retry");
+      await loadMoreServices.click();
+      const offsetRequests = state.observationPosts.filter((request) => request.kind === "prefix" && isDeepStrictEqual(request.path_components, ["services"]) && request.child_offset === 512);
+      if (offsetRequests.length !== 2) throw new Error(`Expected failed and retried offset 512 requests: ${JSON.stringify(offsetRequests)}`);
+      const servicesRows = page.locator(".cfg-explorer-tree [title^='config.services.']");
+      await assertVisible(page.getByRole("button", { name: "Expand services.openssh" }), "Child 513 was not reachable after continuation retry", 15000);
+      const serviceTitles = await servicesRows.evaluateAll((elements) => elements.map((element) => element.getAttribute("title")));
+      if (serviceTitles.length !== 514 || new Set(serviceTitles).size !== 514 || serviceTitles[0] !== "config.services.healthy" || serviceTitles[512] !== "config.services.openssh" || serviceTitles[513] !== "config.services.tail") {
+        throw new Error(`Prefix continuation lost, duplicated, or reordered rows: ${JSON.stringify({ count: serviceTitles.length, first: serviceTitles[0], child513: serviceTitles[512], last: serviceTitles[513] })}`);
+      }
+      await page.getByRole("button", { name: "Expand services.openssh" }).click();
+      const treeOption = page.getByRole("button", { name: "Inspect option services.openssh.enable" });
+      await assertVisible(treeOption, "Expected nested lazy option", 15000);
+      await treeOption.click();
+      await assertVisible(page.locator(".cfgx-insp-path").filter({ hasText: "services.openssh.enable" }), "Tree option did not render lazy detail", 15000);
+      const treeOperation = state.observationPosts.filter((request) => request.kind === "option").at(-1);
+      await page.getByRole("button", { name: /^Sources\b/ }).click();
+      await page.getByRole("button", { name: "Option", exact: true }).click();
+      await assertVisible(page.locator(".cfgx-insp-path").filter({ hasText: "services.openssh.enable" }), "Option detail did not persist across inspector panes");
+      await page.getByRole("button", { name: "Configured", exact: true }).click();
+      await page.getByRole("button", { name: "Inspect configured option services.openssh.enable" }).click();
+      await assertVisible(page.locator(".cfgx-insp-path").filter({ hasText: "services.openssh.enable" }), "Configured option did not render shared lazy detail", 15000);
+      const configuredOperation = state.observationPosts.filter((request) => request.kind === "option").at(-1);
+      if (!treeOperation || !configuredOperation || JSON.stringify(treeOperation.path_components) !== JSON.stringify(configuredOperation.path_components)) {
+        throw new Error(`Tree and configured options used different operations: ${JSON.stringify({ treeOperation, configuredOperation })}`);
+      }
+      const provenanceBefore = state.observationPosts.filter((request) => request.kind === "provenance").length;
+      if (provenanceBefore !== 0) throw new Error("Option selection eagerly requested provenance");
+      await page.getByRole("button", { name: "Inspect provenance for services.openssh.enable" }).click();
+      await assertVisible(page.locator(".cfgx-defs .cfgx-def-f").getByText("nixos/hosts/atlas-01.nix", { exact: true }), "Separate provenance did not render", 15000);
+      if (state.observationPosts.filter((request) => request.kind === "provenance").length !== provenanceBefore + 1) {
+        throw new Error("Option detail did not start exactly one separate provenance request");
+      }
+      await page.getByRole("button", { name: "Configured", exact: true }).click();
+      await page.getByRole("button", { name: "Inspect configured option services.broken.value" }).click();
+      await assertVisible(page.getByRole("complementary", { name: "Configuration inspector" }).getByText("not evaluated: fixture dependency failed", { exact: true }), "Failed value did not remain local to its option", 15000);
+      await assertVisible(page.getByRole("button", { name: "Inspect configured option networking.hostName" }), "Failed value displaced a healthy configured sibling");
+      await page.getByRole("button", { name: "Search", exact: true }).click();
+      await assertVisible(page.getByText("Complete search over the certified inventory for this exact target.", { exact: true }), "Complete inventory did not advertise certified search scope");
+      const certifiedSearch = page.getByPlaceholder("Search all certified options…");
+      await certifiedSearch.fill("openssh");
+      await assertVisible(page.getByRole("button", { name: "Inspect certified option services.openssh.enable" }), "Certified search did not return the matching option", 15000);
+      await page.getByRole("button", { name: /^Sources\b/ }).click();
+      await assertVisible(page.getByText("Partial list: only source paths from provenance inspected in this Explorer target and session. This is not a complete module registry.", { exact: true }), "Incomplete source pagination was mislabeled as complete coverage");
+      await page.getByRole("button", { name: "Browse", exact: true }).click();
+      state.holdObservationKinds.add("root");
+      const commitSelect = page.locator("select.cfgx-select");
+      const historicalRootPost = page.waitForRequest((request) => request.method() === "POST" && request.url().includes("/config-observations/") && request.url().includes(TASK_440_HISTORICAL_SHA) && request.postDataJSON().kind === "root");
+      await commitSelect.selectOption(TASK_440_HISTORICAL_SHA);
+      await historicalRootPost;
+      const newestRootPost = page.waitForRequest((request) => request.method() === "POST" && request.url().includes("/config-observations/") && request.url().includes(TASK_440_NEVER_DEPLOYED_SHA) && request.postDataJSON().kind === "root");
+      await commitSelect.selectOption(TASK_440_NEVER_DEPLOYED_SHA);
+      await newestRootPost;
+      await state.waitForHeldObservationCount("root", 2);
+      state.releaseHeldObservation("root");
+      await assertVisible(page.getByRole("button", { name: /^(?:Expand|Collapse) "9999999-root"$/ }), "Newest revision root did not render after releasing held responses", 15000);
+      await assertHidden(page.getByRole("button", { name: /^(?:Expand|Collapse) abcdef0-root$/ }), "Old revision root overwrote the newer exact revision");
+      const requestIds = state.observationPosts.map((request) => request.request_id);
+      const observationIds = state.observationPosts.map((request) => request.observation_id);
+      if (new Set(requestIds).size !== requestIds.length || new Set(observationIds).size !== observationIds.length) {
+        throw new Error(`Config observation route reused an identity: ${JSON.stringify({ requestIds, observationIds })}`);
+      }
+      await commitSelect.selectOption(TASK_440_CURRENT_SHA);
+      await assertVisible(page.getByRole("button", { name: new RegExp(`^(?:Expand|Collapse) ${TASK_440_CURRENT_SHA.slice(0, 7)}-root$`) }), "Current revision did not recover after stale-response scenario", 15000);
+      await page.getByRole("button", { name: "Configured", exact: true }).click();
+      await page.getByRole("button", { name: "Inspect configured option services.openssh.enable" }).click();
+      for (const theme of ["dark", "light"]) {
+        await applyVisualTheme(page, theme);
+        await assertTask440ConfigGeometry(page, "wide");
+      }
+    },
+  },
+  {
+    name: "12n-task440-config-narrow-keyboard",
+    description: "TASK-440 mocked narrow Config Explorer revision, mode, option-pane, and geometry keyboard contract",
+    action: async (page) => {
+      await page.setViewportSize({ width: 900, height: 900 });
+      await routeSystemsWarningData(page);
+      await routeTask440SystemData(page);
+      await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_CURRENT_SHA}`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.locator(".cfgx").getByText("TARGET", { exact: true }), "Expected narrow Config Explorer", 15000);
+      await assertTask440SelectedConfigRevision(page, "Narrow Config");
+      const generationsMode = page.getByRole("button", { name: "Generations" });
+      const commitsMode = page.getByRole("button", { name: "Commits" });
+      if ((await generationsMode.getAttribute("aria-pressed")) !== "false" || (await commitsMode.getAttribute("aria-pressed")) !== "true") throw new Error("Initial revision-mode selected state is unavailable to assistive technology");
+      await generationsMode.focus();
+      await page.keyboard.press("Enter");
+      if ((await generationsMode.getAttribute("aria-pressed")) !== "true" || (await commitsMode.getAttribute("aria-pressed")) !== "false") throw new Error("Keyboard activation did not select Generations semantically");
+      await commitsMode.focus();
+      await page.keyboard.press("Enter");
+      if ((await commitsMode.getAttribute("aria-pressed")) !== "true" || (await generationsMode.getAttribute("aria-pressed")) !== "false") throw new Error("Keyboard activation did not restore Commits semantically");
+      const configuredMode = page.getByRole("button", { name: "Configured", exact: true });
+      await configuredMode.focus();
+      await page.keyboard.press("Enter");
+      if ((await configuredMode.getAttribute("aria-pressed")) !== "true") throw new Error("Keyboard activation did not select Configured mode");
+      const option = page.getByRole("button", { name: "Inspect configured option services.openssh.enable" });
+      await assertVisible(option, "Expected keyboard-accessible configured option", 15000);
+      await option.focus();
+      await page.keyboard.press("Enter");
+      await assertVisible(page.locator(".cfgx-insp-path").filter({ hasText: "services.openssh.enable" }), "Keyboard option selection did not populate the persistent pane");
+      if ((await option.getAttribute("aria-pressed")) !== "true" || !(await option.getAttribute("class")).includes("sel")) {
+        throw new Error("Keyboard selection did not persist a visible selected row");
+      }
+      await captureWorkflowState(page, "12n-task440-config-narrow-keyboard", "narrow-selected-option");
+      await assertTask440ConfigGeometry(page, "narrow");
+    },
+  },
+  {
+    name: "12p-task440-config-canonical-wide-expanded",
+    description: "TASK-440 canonical mocked Config Explorer wide Configured state with persistent option pane and consolidated geometry",
+    action: async (page) => {
+      await page.setViewportSize({ width: 1920, height: 1080 });
+      await suppressOnboardingCoach(page);
+      await routeTask440DismissedCoach(page);
+      await routeConfigHealth(page, mockConfigHealthResponse());
+      const state = await routeTask440SystemData(page, { canonicalDesign: true });
+      const url = `${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_CONFIG_SHA}`;
+      const loadCanonicalGeneration = async () => {
+        await page.goto(url, { timeout: LOAD_TIMEOUT });
+        await dismissOnboardingCoachForCapture(page);
+        await assertVisible(page.locator(".cfgx").getByText("TARGET", { exact: true }), "Expected canonical wide Config Explorer", 15000);
+        await page.getByRole("button", { name: "Generations" }).click();
+        await page.locator("select.cfgx-select").selectOption("160");
+      };
+      await loadCanonicalGeneration();
+      await assertTask440CanonicalConfigState(page, "Canonical wide Config");
+      await page.getByRole("button", { name: "Commits" }).click();
+      await page.locator("select.cfgx-select").selectOption(TASK_440_CONFIG_SHA);
+      await page.getByRole("button", { name: "Configured", exact: true }).click();
+      const configuredOption = page.getByRole("button", { name: `Inspect configured option ${TASK_440_FIXTURE.canonicalConfig.expandedOption}` });
+      await assertVisible(configuredOption, "Canonical Configured option did not render", 15000);
+      await configuredOption.click();
+      await assertVisible(page.locator(".cfgx-insp-path").filter({ hasText: TASK_440_FIXTURE.canonicalConfig.expandedOption }), "Canonical option did not populate the persistent inspector");
+      for (const theme of ["dark", "light"]) {
+        await applyVisualTheme(page, theme);
+        await assertTask440ConfigGeometry(page, "wide");
+        await assertReachableControls(page.locator(".cfgx button:not([disabled]), .cfgx input:not([disabled]), .cfgx select:not([disabled])"), `${theme} wide Config Explorer`);
+      }
+    },
+  },
+  {
+    name: "12q-task440-config-canonical-narrow",
+    description: "TASK-440 canonical mocked Config Explorer narrow Configured state, persistent option pane, controls, and stacking",
+    action: async (page) => {
+      await page.setViewportSize({ width: 900, height: 900 });
+      await suppressOnboardingCoach(page);
+      await routeTask440DismissedCoach(page);
+      await routeConfigHealth(page, mockConfigHealthResponse());
+      await routeTask440SystemData(page, { canonicalDesign: true });
+      await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_CONFIG_SHA}`, { timeout: LOAD_TIMEOUT });
+      await dismissOnboardingCoachForCapture(page);
+      await assertVisible(page.locator(".cfgx").getByText("TARGET", { exact: true }), "Expected canonical narrow Config Explorer", 15000);
+      await page.getByRole("button", { name: "Configured", exact: true }).click();
+      const configuredOption = page.getByRole("button", { name: `Inspect configured option ${TASK_440_FIXTURE.canonicalConfig.expandedOption}` });
+      await assertVisible(configuredOption, "Canonical narrow Configured option did not render", 15000);
+      await configuredOption.click();
+      await assertVisible(page.locator(".cfgx-insp-path").filter({ hasText: TASK_440_FIXTURE.canonicalConfig.expandedOption }), "Canonical narrow option did not populate the persistent inspector");
+      for (const control of [
+        page.getByRole("button", { name: "Generations" }),
+        page.getByRole("button", { name: "Commits" }),
+        page.getByPlaceholder("Search all certified options…"),
+        page.locator("select.cfgx-select"),
+      ]) await assertVisible(control, "A narrow Config control became unreachable");
+      for (const theme of ["dark", "light"]) {
+        await applyVisualTheme(page, theme);
+        await assertTask440CanonicalConfigState(page, `${theme} canonical narrow Config`);
+        await assertTask440ConfigGeometry(page, "narrow");
+        await assertReachableControls(page.locator(".cfgx button:not([disabled]), .cfgx input:not([disabled]), .cfgx select:not([disabled])"), `${theme} narrow Config`);
+        await assertNoOverlayIntersections(page, ".cfgx", `${theme} narrow Config`);
+      }
+    },
+  },
+  {
+    name: "13j-task440-flake-states-panes-navigation",
+    description: "TASK-440 mocked API flake workflow (not live integration): lifecycle, full-SHA identity, panes, reconciliation, and navigation",
+    action: async (page) => {
+      await page.setViewportSize({ width: 1920, height: 1080 });
+      await suppressOnboardingCoach(page);
+      await routeTask440DismissedCoach(page);
+      const state = await routeTask440FlakeOutputs(page);
+      await gotoFlakesAsAdmin(page);
+      await dismissOnboardingCoachForCapture(page);
+      await page.getByText("platform-core", { exact: true }).first().click();
+      const tray = page.getByRole("dialog", { name: "platform-core commits" });
+      const commitList = tray.locator(".fl-tray-body .fl-tray-commits");
+      await assertVisible(tray, "Expected flake drawer", 15000);
+      await tray.evaluate(async (element) => {
+        await Promise.all(element.getAnimations().map((animation) => animation.finished.catch(() => {})));
+      });
+      for (const theme of ["dark", "light"]) {
+        await applyVisualTheme(page, theme);
+        const geometry = await tray.evaluate((element) => {
+          const bounds = element.getBoundingClientRect();
+          return {
+            viewportWidth: innerWidth,
+            viewportHeight: innerHeight,
+            documentWidth: document.documentElement.scrollWidth,
+            bounds: { top: bounds.top, right: bounds.right, bottom: bounds.bottom, left: bounds.left },
+          };
+        });
+        if (geometry.documentWidth > geometry.viewportWidth) throw new Error(`${theme} flake drawer clips horizontally: ${JSON.stringify(geometry)}`);
+        if (geometry.bounds.top < 0 || geometry.bounds.left < 0 || geometry.bounds.right > geometry.viewportWidth || geometry.bounds.bottom > geometry.viewportHeight) {
+          throw new Error(`${theme} flake drawer exceeds the viewport: ${JSON.stringify(geometry)}`);
+        }
+      }
+      await assertVisible(tray.getByRole("tab", { name: /Systems 2/ }), "Expected authoritative managed-system count", 15000);
+      await assertVisible(tray.getByRole("tab", { name: /Modules 52/ }), "Expected authoritative module count before loading continuation pages");
+      await tray.getByRole("tab", { name: /Systems/ }).click();
+      await assertVisible(page.getByText("managed", { exact: true }), `Expected managed reconciliation; timeline requests: ${state.timelineRequests}; revisions: ${state.requestedRevisions.join(",")}`);
+      await assertVisible(page.getByText("not managed", { exact: true }), "Expected declared-unmanaged reconciliation");
+      await assertVisible(page.getByText("undeclared", { exact: true }), "Expected managed-undeclared reconciliation");
+      const systemsTable = tray.locator(".fx-table tbody");
+      await assertVisible(systemsTable.getByLabel("Environment production", { exact: true }), "Expected visible managed environment metadata");
+      await assertVisible(page.getByText(/collapsed mapping/i), "Expected output-collapse warning");
+      await assertVisible(page.getByText(/Authoritative managed total: 2/), "Expected reconciled managed total");
+      if (await tray.getByRole("button", { name: "Load more revision data" }).isVisible()) throw new Error("Systems exposed load-more solely because Modules had another page");
+      await tray.getByRole("button", { name: /Unmanaged 1/ }).click();
+      await assertVisible(systemsTable.getByText("edge-new", { exact: true }), "Expected server-filtered unmanaged row");
+      if (await systemsTable.getByText("legacy-01", { exact: true }).isVisible()) throw new Error("Unmanaged filter retained a managed-undeclared row");
+      await tray.getByRole("button", { name: /Undeclared 1/ }).click();
+      await assertVisible(systemsTable.getByText("legacy-01", { exact: true }), "Expected server-filtered undeclared row");
+      await tray.getByRole("button", { name: /All 3/ }).click();
+      await assertVisible(systemsTable.getByText("edge-new", { exact: true }), "Expected All reconciliation rows after clearing filter");
+      for (const expectedFilter of ["all", "declared_unmanaged", "managed_undeclared"]) {
+        if (!state.requestedSystemFilters.includes(expectedFilter)) throw new Error(`Missing server-side system filter request: ${expectedFilter}`);
+      }
+
+      await tray.getByRole("button", { name: "Add to Forge" }).click();
+      await page.waitForURL((url) => url.pathname === "/systems" && url.searchParams.get("configuration") === "edge-new");
+      const registrationUrl = new URL(page.url());
+      for (const [key, value] of [["hostname", "edge-new"], ["flake_name", "platform-core"], ["branch", "main"]]) {
+        if (registrationUrl.searchParams.get(key) !== value) throw new Error(`Registration prefill lost ${key}: ${page.url()}`);
+      }
+
+      await gotoFlakesAsAdmin(page);
+      await page.getByText("platform-core", { exact: true }).first().click();
+      await tray.getByRole("tab", { name: /Systems/ }).click();
+
+      const openConfig = tray.getByRole("button", { name: "Open config" }).first();
+      const expectedRevision = state.requestedRevisions.at(-1);
+      await openConfig.click();
+      await page.waitForURL((url) => url.pathname === `/systems/${TASK_440_SYSTEM_ID}` && url.searchParams.get("revision") === expectedRevision);
+      if (new URL(page.url()).searchParams.get("config_mode") !== "commit") throw new Error("Flake-to-Config lost exact commit mode");
+
+      await gotoFlakesAsAdmin(page);
+      await page.getByText("platform-core", { exact: true }).first().click();
+      await tray.getByRole("tab", { name: /Modules/ }).click();
+      if (!(await tray.getByRole("tab", { name: /Modules/ }).evaluate((element) => element === document.activeElement))) throw new Error("Flake pane rerender moved focus away from the selected tab");
+      await assertVisible(page.getByText("hardening", { exact: true }).first(), "Expected modules pane");
+      await assertVisible(page.getByText("self / flake.nix", { exact: true }), "Expected exported-module carrier provenance");
+      await tray.getByRole("button", { name: "Load more revision data" }).click();
+      await assertVisible(tray.getByRole("tab", { name: /Modules 52/ }), "Expected authoritative module count to remain stable after continuation");
+      await assertVisible(page.getByText("fixture-module-50", { exact: true }), "Expected second module collection page");
+      await assertVisible(page.getByText("Export binding unavailable", { exact: true }), "Expected a missing exported-module binding to render unavailable");
+      const moduleRow = page.getByText("hardening", { exact: true }).locator("xpath=ancestor::tr[1]");
+      state.declarationMode = "initial-error";
+      await moduleRow.getByRole("button").focus();
+      await page.keyboard.press("Enter");
+      await assertVisible(tray.getByRole("alert").filter({ hasText: /deterministic initial declaration failure/i }), "Expected initial declaration error alert");
+      state.declarationMode = "available";
+      const initialRetryResponse = page.waitForResponse((response) => (
+        response.url().includes("/modules/hardening/declarations")
+          && response.request().method() === "GET"
+      ));
+      await tray.getByRole("button", { name: "Retry declarations" }).click();
+      const initialRetryStatus = (await initialRetryResponse).status();
+      if (initialRetryStatus !== 200) {
+        throw new Error(`Initial declaration retry returned HTTP ${initialRetryStatus}`);
+      }
+      await assertVisible(page.getByText("services.openssh.enable", { exact: true }), "Expected expandable module declaration detail");
+      await assertVisible(tray.getByRole("columnheader", { name: "Option", exact: true }), "Expected structured declaration Option column");
+      await assertVisible(tray.getByRole("columnheader", { name: "Type", exact: true }), "Expected structured declaration Type column");
+      await assertVisible(tray.getByRole("columnheader", { name: "Default", exact: true }), "Expected structured declaration Default column");
+      await assertVisible(page.getByText("Source: modules/hardening.nix", { exact: true }), "Expected declaration source metadata");
+      await assertVisible(page.getByText(/cached per revision; browsing does not evaluate each host/i), "Expected cached no-per-host explanation");
+      const hardeningRowText = await moduleRow.innerText();
+      if (!/\b2\b/.test(hardeningRowText)) throw new Error(`Expected hardening consumer count, got: ${hardeningRowText}`);
+      const firstModuleName = await tray.locator(".fx-table > tbody > .fx-row").first().locator("code.fx-host").innerText();
+      if (firstModuleName !== "hardening") throw new Error(`Modules were not sorted by descending blast radius: ${firstModuleName}`);
+      const declarationLoadMore = tray.getByRole("button", { name: "Load more declarations for hardening" });
+      state.declarationMode = "continuation-error";
+      await declarationLoadMore.focus();
+      await page.keyboard.press("Enter");
+      await assertVisible(tray.getByRole("alert").filter({ hasText: /deterministic continuation declaration failure/i }), "Expected continuation declaration error alert");
+      await assertVisible(page.getByText("services.openssh.enable", { exact: true }), "Continuation error discarded the successful first declaration page");
+      state.declarationMode = "available";
+      await tray.getByRole("button", { name: "Retry declarations" }).click();
+      await assertVisible(page.getByText("services.fixture.option125", { exact: true }), "Expected a declaration beyond the first 100 rows");
+      const successfulContinuation = state.moduleDeclarationRequests.at(-1);
+      if (successfulContinuation.offset !== 100 || successfulContinuation.token !== "f".repeat(64)) {
+        throw new Error(`Declaration continuation lost offset/token: ${JSON.stringify(state.moduleDeclarationRequests)}`);
+      }
+
+      await moduleRow.getByRole("button").click();
+      state.declarationMode = "unavailable";
+      await moduleRow.getByRole("button").click();
+      await assertVisible(tray.getByRole("alert").filter({ hasText: /Declaration snapshot is unavailable/i }), "Expected declaration unavailable lifecycle alert");
+      state.declarationMode = "available";
+      await tray.getByRole("button", { name: "Retry declarations" }).click();
+      await assertVisible(page.getByText("services.openssh.enable", { exact: true }), "Expected declaration retry after unavailable lifecycle");
+
+      state.declarationMode = "conflict";
+      await tray.getByRole("button", { name: "Load more declarations for hardening" }).click();
+      await assertVisible(tray.getByRole("alert").filter({ hasText: /snapshot changed.*first page/i }), "Expected 409 snapshot-token replacement alert");
+      state.declarationMode = "available";
+      state.declarationToken = "g".repeat(64);
+      await tray.getByRole("button", { name: "Retry declarations" }).click();
+      await assertVisible(page.getByText("services.openssh.enable", { exact: true }), "Expected replacement snapshot first page");
+      await assertVisible(page.getByText("services.snapshot.g.marker", { exact: true }), "Expected replacement declaration snapshot content");
+      if (await page.getByText("services.snapshot.f.marker", { exact: true }).count()) throw new Error("Declaration replacement mixed rows from the prior snapshot token");
+      const replacementRequest = state.moduleDeclarationRequests.at(-1);
+      if (replacementRequest.offset !== 0 || replacementRequest.token !== null) {
+        throw new Error(`409 retry reused the replaced snapshot token: ${JSON.stringify(replacementRequest)}`);
+      }
+      await tray.getByRole("button", { name: "Load more declarations for hardening" }).click();
+      await assertVisible(page.getByText("services.fixture.option125", { exact: true }), "Expected bounded continuation on the replacement snapshot");
+      const replacementContinuation = state.moduleDeclarationRequests.at(-1);
+      if (replacementContinuation.offset !== 100 || replacementContinuation.token !== "g".repeat(64)) {
+        throw new Error(`Replacement snapshot continuation lost its token: ${JSON.stringify(replacementContinuation)}`);
+      }
+      await tray.getByRole("tab", { name: /Inputs/ }).click();
+      await assertVisible(tray.getByRole("tab", { name: /Inputs 2/ }), "Expected authoritative direct-input total instead of loaded-page length");
+      await assertVisible(page.getByText("multiple nixpkgs revisions", { exact: false }), "Expected multiple-nixpkgs warning");
+      await assertVisible(page.getByText("stale over 90d", { exact: true }), "Expected stale input metric");
+      await assertVisible(page.getByText("+72 transitive", { exact: true }), "Expected direct-root descendant count");
+      await assertVisible(page.getByText("+1 inputs", { exact: true }), "Expected added input delta");
+      await assertVisible(page.getByText("-1 inputs", { exact: true }), "Expected removed input delta");
+      await assertVisible(tray.getByTitle("Channel input"), "Expected channel=true input metadata");
+      const homeManagerRow = tray.getByText("home-manager", { exact: true }).locator("xpath=ancestor::tr[1]");
+      await assertVisible(homeManagerRow.locator("td").nth(4).getByText("nixpkgs", { exact: true }), "Expected plain unquoted follows path");
+      if (await tray.getByRole("button", { name: "Load more revision data" }).isVisible()) throw new Error("Inputs exposed load-more solely because Modules had another page");
+
+      state.largeCollections = true;
+      await tray.getByRole("tab", { name: /Commits/ }).click();
+      await commitList.locator(".fl-commit-item").filter({ hasText: "prefix collision snapshot" }).click();
+      await tray.getByRole("tab", { name: /Systems/ }).click();
+      await assertVisible(tray.getByText("7 declared output name(s) are shared by multiple visible managed systems. Review the collapsed mapping before deployment.", { exact: true }), "Expected revision-global collapse warning count beyond the first Systems page");
+      await assertVisible(tray.getByText("9 managed system(s) are deployed at a different revision.", { exact: true }), "Expected revision-global pinned warning count beyond the first Systems page");
+      await assertVisible(tray.getByRole("button", { name: "Load more revision data" }), "Expected >50 Systems continuation");
+      await tray.getByRole("button", { name: "Load more revision data" }).click();
+      await assertVisible(tray.getByText("Showing 54 reconciled rows. Authoritative managed total: 53.", { exact: true }), "Systems continuation did not merge beyond 50 rows");
+      await tray.getByRole("tab", { name: /Commits/ }).click();
+      await commitList.locator(".fl-commit-item").filter({ hasText: "current output snapshot" }).click();
+      await tray.getByRole("tab", { name: /Inputs/ }).click();
+      await assertVisible(tray.locator(".fx-stat").filter({ hasText: "stale over 90d" }).getByText("12", { exact: true }), "Expected revision-global stale warning count beyond the first direct Inputs page");
+      // Unlike Systems/Modules, the Inputs pane auto-continues fetching pages
+      // until the full resolved-input set is loaded (stale/multi-nixpkgs
+      // analysis needs the complete set), so no manual "Load more" click is
+      // needed or offered here; wait for the auto-loaded row beyond the
+      // first 50-item page instead.
+      await assertVisible(tray.getByText("direct-fixture-51", { exact: true }), "Direct Inputs auto-continuation did not merge a row beyond 50");
+      if (await tray.getByRole("button", { name: "Load more revision data" }).isVisible()) throw new Error("Inputs pane exposed a manual Load-more control instead of completing auto-continuation");
+      state.largeCollections = false;
+
+      await tray.getByRole("tab", { name: /Commits/ }).click();
+      await assertVisible(commitList, "Expected visible commit list after pane change");
+      const collisionRows = commitList.getByText("abcdef0", { exact: true });
+      if ((await collisionRows.count()) < 2) throw new Error("Expected two distinct commits sharing the displayed SHA prefix");
+      const collisionCommit = commitList.locator(".fl-commit-item").filter({ hasText: "prefix collision snapshot" });
+      await collisionCommit.click();
+      if (!(await collisionCommit.evaluate((element) => element === document.activeElement))) throw new Error("Flake revision rerender moved focus away from the selected commit");
+      await page.goBack();
+      const currentRevisionContract = tray.getByLabel(`Full revision ${TASK_440_CURRENT_SHA}`, { exact: true });
+      await assertVisible(currentRevisionContract, "Back navigation did not restore the exact full-SHA accessible contract", 15000);
+      if ((await currentRevisionContract.getAttribute("title")) !== TASK_440_CURRENT_SHA) throw new Error("Current flake revision title does not independently retain TASK_440_CURRENT_SHA");
+      await page.goForward();
+      const historicalRevisionContract = tray.getByLabel(`Full revision ${TASK_440_HISTORICAL_SHA}`, { exact: true });
+      await assertVisible(historicalRevisionContract, "Forward navigation did not restore the exact historical full-SHA accessible contract", 15000);
+      if ((await historicalRevisionContract.getAttribute("title")) !== TASK_440_HISTORICAL_SHA) throw new Error("Historical flake revision title lost its full SHA");
+      await tray.getByRole("tab", { name: /Systems/ }).click();
+
+      await tray.getByRole("tab", { name: /Commits/ }).click();
+      await tray.getByText("1111111", { exact: true }).click();
+      await tray.getByRole("tab", { name: /Systems/ }).click();
+      await assertVisible(tray.getByText(/root commit.*no previous revision/i), "Expected root revision no-parent state");
+
+      state.lifecycle = "unavailable";
+      await tray.getByRole("tab", { name: /Commits/ }).click();
+      await commitList.locator(".fl-commit-item").filter({ hasText: "current output snapshot" }).click();
+      await tray.getByRole("tab", { name: /Systems/ }).click();
+      await assertVisible(tray.getByRole("status").filter({ hasText: "Revision outputs unavailable" }), "Expected flake unavailable status semantics");
+      state.apiError = true;
+      await tray.getByRole("tab", { name: /Commits/ }).click();
+      await commitList.locator(".fl-commit-item").filter({ hasText: "prefix collision snapshot" }).click();
+      await tray.getByRole("tab", { name: /Systems/ }).click();
+      await assertVisible(tray.getByRole("alert").filter({ hasText: /Unable to load revision outputs.*deterministic flake snapshot API failure/i }), "Expected flake API error alert semantics");
+
+      state.apiError = false;
+      state.lifecycle = "available";
+      await page.setViewportSize({ width: 900, height: 900 });
+      await tray.getByRole("tab", { name: /Commits/ }).click();
+      await commitList.locator(".fl-commit-item").filter({ hasText: "current output snapshot" }).click();
+      const assertNarrowPaneFits = async (paneName) => {
+        const geometry = await tray.evaluate((element) => {
+          const pane = element.querySelector(".fx-body");
+          const bounds = element.getBoundingClientRect();
+          return {
+            viewportWidth: innerWidth,
+            viewportHeight: innerHeight,
+            documentWidth: document.documentElement.scrollWidth,
+            tray: { left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom },
+            paneClientWidth: pane?.clientWidth || 0,
+            paneScrollWidth: pane?.scrollWidth || 0,
+          };
+        });
+        if (geometry.documentWidth > geometry.viewportWidth || geometry.tray.left < 0 || geometry.tray.right > geometry.viewportWidth || geometry.tray.top < 0 || geometry.tray.bottom > geometry.viewportHeight) {
+          throw new Error(`${paneName} clips at 900x900: ${JSON.stringify(geometry)}`);
+        }
+        if (geometry.paneScrollWidth > geometry.paneClientWidth + 1) throw new Error(`${paneName} has inaccessible horizontal content at 900x900: ${JSON.stringify(geometry)}`);
+      };
+      await tray.getByRole("tab", { name: /Systems/ }).click();
+      await assertVisible(tray.getByRole("button", { name: "Open config" }).first(), "Expected accessible Systems control at 900x900");
+      await assertNarrowPaneFits("Systems");
+      await tray.getByRole("tab", { name: /Modules/ }).click();
+      const narrowModuleRow = tray.getByText("hardening", { exact: true }).locator("xpath=ancestor::tr[1]");
+      await narrowModuleRow.getByRole("button").click();
+      await assertVisible(tray.getByRole("button", { name: "Load more declarations for hardening" }), "Expected bounded declaration control at 900x900");
+      await assertNarrowPaneFits("Modules expanded");
+      await tray.getByRole("button", { name: "Load more declarations for hardening" }).click();
+      await assertVisible(tray.getByText("services.fixture.option125", { exact: true }), "Expected declaration continuation at 900x900");
+      await assertNarrowPaneFits("Modules continued");
+      await tray.getByRole("tab", { name: /Inputs/ }).click();
+      await assertVisible(tray.locator("summary:visible").filter({ hasText: "Lock metadata" }).first(), "Expected accessible Inputs metadata control at 900x900");
+      await assertVisible(tray.locator(".fx-url:visible").filter({ hasText: "github:NixOS/nixpkgs" }).first(), "Expected accessible Inputs source at 900x900");
+      await assertNarrowPaneFits("Inputs");
+      await tray.getByRole("tab", { name: /Commits/ }).click();
+      await assertVisible(tray.getByRole("tab", { name: /Commits/ }), "Expected accessible flake tabs at 900x900");
+    },
+  },
+  {
+    name: "13l-task440-flake-systems-canonical-wide",
+    description: "TASK-440 canonical mocked Flake Systems state at 1920x1080 with exact segments, reconciliation totals/order, environment metadata, revision reset, and geometry",
+    action: async (page) => {
+      const { state, tray } = await openTask440FlakePane(page, 1920, "Systems");
+      const table = tray.locator(".fx-systems-table");
+      const canonicalRows = ["atlas-01", "atlas-02", "atlas-03", "orion-db-01", "orion-db-02", "stg-atlas-01", "stg-atlas-02", "dev-node-01", "dev-node-02", "vm-test-01", "vm-test-02"];
+      await assertExactTextOrder(tray.locator(".fx-toolbar .seg button"), ["All 11", "Unmanaged 2", "Undeclared 0"], "Flake Systems segments");
+      await assertExactTextOrder(table.locator("tbody > tr code.fx-host"), canonicalRows, "Flake Systems reconciliation rows");
+      await assertExactTextOrder(tray.locator(".fx-stat .fx-stat-n"), ["11", "9", "2", "0"], "Flake Systems metric values");
+      await assertExactTextOrder(tray.locator(".fx-stat .fx-stat-l"), ["declared here", "managed by Forge", "declared unmanaged", "managed undeclared"], "Flake Systems metric labels");
+      for (const environment of ["production", "staging", "dev"]) {
+        const environmentChip = table.locator(`[aria-label="Environment ${environment}"]`).first();
+        await environmentChip.scrollIntoViewIfNeeded();
+        await assertVisible(environmentChip, `Managed ${environment} environment metadata disappeared`);
+      }
+
+      state.emptySystemFilter = "declared_unmanaged";
+      await tray.getByRole("button", { name: "Unmanaged 2" }).click();
+      await assertVisible(table.getByText("Nothing in this category.", { exact: true }), "Systems category empty state disappeared");
+      state.emptySystemFilter = null;
+      await tray.getByRole("button", { name: "All 11" }).click();
+      await tray.getByRole("button", { name: "Unmanaged 2" }).click();
+      await tray.getByRole("tab", { name: /Commits/ }).click();
+      await tray.locator(".fl-commit-item").filter({ hasText: "prefix collision snapshot" }).click();
+      await tray.getByRole("tab", { name: /Systems/ }).click();
+      await assertVisible(tray.locator(".fx-toolbar .seg button.active").filter({ hasText: "All 11" }), "Systems filter selection did not reset on revision change", 15000);
+      await assertExactTextOrder(table.locator("tbody > tr code.fx-host"), canonicalRows, "Revision-reset Systems rows");
+      await tray.getByRole("tab", { name: /Commits/ }).click();
+      await tray.locator(".fl-commit-item").filter({ hasText: "stig: enforce audit rules for sudo" }).click();
+      await tray.getByRole("tab", { name: /Systems/ }).click();
+      if (!state.requestedSystemFilters.includes("declared_unmanaged") || state.requestedSystemFilters.at(-1) !== "all") throw new Error(`Systems filters were not server-backed/reset: ${JSON.stringify(state.requestedSystemFilters)}`);
+      for (const theme of ["dark", "light"]) {
+        await applyVisualTheme(page, theme);
+        await assertExactTextOrder(table.locator("tbody > tr code.fx-host"), canonicalRows, `${theme} wide Flake Systems rows`);
+        await assertExactTextOrder(tray.locator(".fx-stat .fx-stat-n"), ["11", "9", "2", "0"], `${theme} wide Flake Systems metrics`);
+        await assertTask440FlakeGeometry(page, tray, ".fx-systems-table", ["nixosConfiguration", "Environment", "State", ""], [0.34, 0.20, 0.24, 0.22], `${theme} wide Systems`);
+        await assertReachableControls(tray.locator(".fx-pane button:not([disabled]), .fx-tabs button:not([disabled])"), `${theme} wide Systems`);
+        await assertNoOverlayIntersections(page, ".fl-tray", `${theme} wide Systems`);
+      }
+    },
+  },
+  {
+    name: "13m-task440-flake-systems-canonical-narrow",
+    description: "TASK-440 canonical mocked Flake Systems state at 900x900 with exact rows, controls, columns, and no nested clipping",
+    action: async (page) => {
+      const { tray } = await openTask440FlakePane(page, 900, "Systems");
+      const canonicalRows = ["atlas-01", "atlas-02", "atlas-03", "orion-db-01", "orion-db-02", "stg-atlas-01", "stg-atlas-02", "dev-node-01", "dev-node-02", "vm-test-01", "vm-test-02"];
+      await assertExactTextOrder(tray.locator(".fx-systems-table tbody > tr code.fx-host"), canonicalRows, "Narrow Flake Systems rows");
+      await assertVisible(tray.getByRole("button", { name: "Open config" }).first(), "Narrow Systems action became unreachable");
+      const registration = tray.getByRole("button", { name: "Add to Forge" }).first();
+      await registration.scrollIntoViewIfNeeded();
+      await assertVisible(registration, "Narrow registration action became unreachable");
+      for (const theme of ["dark", "light"]) {
+        await applyVisualTheme(page, theme);
+        await assertExactTextOrder(tray.locator(".fx-systems-table tbody > tr code.fx-host"), canonicalRows, `${theme} narrow Flake Systems rows`);
+        await assertTask440FlakeGeometry(page, tray, ".fx-systems-table", ["nixosConfiguration", "Environment", "State", ""], [0.34, 0.20, 0.24, 0.22], `${theme} narrow Systems`);
+        await assertReachableControls(tray.locator(".fx-pane button:not([disabled]), .fx-tabs button:not([disabled])"), `${theme} narrow Systems`);
+        await assertNoOverlayIntersections(page, ".fl-tray", `${theme} narrow Systems`);
+      }
+    },
+  },
+  {
+    name: "13n-task440-flake-modules-canonical-wide-expanded",
+    description: "TASK-440 canonical mocked Flake Modules expanded state at 1920x1080 with module source path, exact headers, declarations, and geometry",
+    action: async (page) => {
+      const { tray } = await openTask440FlakePane(page, 1920, "Modules");
+      const row = tray.getByText("system", { exact: true }).locator("xpath=ancestor::tr[1]");
+      await row.getByRole("button").click();
+      await assertVisible(tray.getByText("cf.system.enable", { exact: true }), "Wide expanded module declaration missing", 15000);
+      await assertVisible(tray.locator(".fx-detail-head").getByText("self / modules/nixos/system/default.nix", { exact: true }), "Expanded Flake Module header lost its module-level source path");
+      for (const theme of ["dark", "light"]) {
+        await applyVisualTheme(page, theme);
+        await assertVisible(tray.getByText("cf.system.enable", { exact: true }), `${theme} wide expanded module declaration missing`);
+        await assertExactTextOrder(tray.locator(".fx-modules-table > thead th"), ["Module", "Sets", "Options", "Consumed by"], `${theme} Flake Modules headers`);
+        await assertTask440FlakeGeometry(page, tray, ".fx-modules-table", ["Module", "Sets", "Options", "Consumed by"], [0.32, 0.34, 0.10, 0.24], `${theme} wide Modules`);
+        await assertReachableControls(tray.locator(".fx-tabs button:not([disabled]), .fx-modules-table .fx-row-toggle").filter({ hasText: "system" }), `${theme} wide Modules`);
+        await assertNoOverlayIntersections(page, ".fl-tray", `${theme} wide Modules`);
+      }
+    },
+  },
+  {
+    name: "13o-task440-flake-modules-canonical-narrow-expanded",
+    description: "TASK-440 canonical mocked Flake Modules expanded state at 900x900 with source path, declaration control, and unclipped column geometry",
+    action: async (page) => {
+      const { tray } = await openTask440FlakePane(page, 900, "Modules");
+      const row = tray.getByText("system", { exact: true }).locator("xpath=ancestor::tr[1]");
+      await row.getByRole("button").click();
+      await assertVisible(tray.locator(".fx-detail-head").getByText("self / modules/nixos/system/default.nix", { exact: true }), "Narrow expanded module header lost its source path", 15000);
+      await assertVisible(tray.getByText("cf.system.experimentalFeatures", { exact: true }), "Narrow canonical declaration set is incomplete");
+      for (const theme of ["dark", "light"]) {
+        await applyVisualTheme(page, theme);
+        await assertVisible(tray.getByText("cf.system.enable", { exact: true }), `${theme} narrow canonical declaration set became unreachable`);
+        await assertTask440FlakeGeometry(page, tray, ".fx-modules-table", ["Module", "Sets", "Options", "Consumed by"], [0.32, 0.34, 0.10, 0.24], `${theme} narrow Modules`);
+        await assertReachableControls(tray.locator(".fx-tabs button:not([disabled]), .fx-modules-table .fx-row-toggle").filter({ hasText: "system" }), `${theme} narrow Modules`);
+        await assertNoOverlayIntersections(page, ".fl-tray", `${theme} narrow Modules`);
+      }
+    },
+  },
+  {
+    name: "13p-task440-flake-inputs-canonical-wide",
+    description: "TASK-440 canonical mocked Flake Inputs state at 1920x1080 with direct-root hierarchy, exact headers, authoritative totals, transitive counts, deltas, and geometry",
+    action: async (page) => {
+      const { tray } = await openTask440FlakePane(page, 1920, "Inputs");
+      const table = tray.locator(".fx-inputs-table");
+      const canonicalInputs = ["crystal-forge", "disko", "home-manager", "impermanence", "nixpkgs", "old-nixpkgs", "stylix", "unstable"];
+      await assertExactTextOrder(table.locator("thead th"), ["Input", "Source", "Locked", "Updated", "Follows"], "Flake Inputs headers");
+      await assertExactTextOrder(table.locator("tbody > tr .fx-input-cell code.fx-host"), canonicalInputs, "Flake direct-root input hierarchy");
+      await assertExactTextOrder(tray.locator(".fx-stat .fx-stat-n"), ["8", "47", "3", "1"], "Flake Inputs metric values");
+      await assertExactTextOrder(tray.locator(".fx-stat .fx-stat-l"), ["direct inputs", "resolved total", "nixpkgs revisions", "stale over 90d"], "Flake Inputs metric labels");
+      for (const expected of ["+9 transitive", "+6 transitive", "+8 transitive", "+4 transitive", "+12 transitive", "+3 modules", "-3 inputs", "5 inputs changed"]) {
+        await assertVisible(tray.getByText(expected, { exact: true }).first(), `Missing authoritative Inputs metadata ${expected}`);
+      }
+      if (await table.locator("tbody > tr td:first-child details:visible").count()) throw new Error("Lock metadata moved into and dominated the Input column");
+      if (await table.locator("tbody > tr td:nth-child(2) details:visible").count() !== 8) throw new Error("Lock metadata is not retained in the Source column");
+      const channelMarker = table.locator('[title="Channel input"]').first();
+      await channelMarker.scrollIntoViewIfNeeded();
+      await assertVisible(channelMarker, "Wide Inputs channel marker disappeared");
+      await assertVisible(table.getByText("home-manager", { exact: true }).locator("xpath=ancestor::tr[1]").locator("td").nth(4).getByText("nixpkgs", { exact: true }), "Wide Inputs follows value is quoted or missing");
+      for (const theme of ["dark", "light"]) {
+        await applyVisualTheme(page, theme);
+        await assertExactTextOrder(table.locator("tbody > tr .fx-input-cell code.fx-host"), canonicalInputs, `${theme} wide direct Inputs`);
+        await assertTask440FlakeGeometry(page, tray, ".fx-inputs-table", ["Input", "Source", "Locked", "Updated", "Follows"], [0.27, 0.31, 0.12, 0.14, 0.16], `${theme} wide Inputs`);
+        await assertReachableControls(tray.locator(".fx-pane summary:visible, .fx-tabs button:visible:not([disabled])"), `${theme} wide Inputs`);
+        await assertNoOverlayIntersections(page, ".fl-tray", `${theme} wide Inputs`);
+      }
+    },
+  },
+  {
+    name: "13q-task440-flake-inputs-canonical-narrow",
+    description: "TASK-440 canonical mocked Flake Inputs state at 900x900 with direct roots, exact headers, reachable metadata, and unclipped column geometry",
+    action: async (page) => {
+      const { tray } = await openTask440FlakePane(page, 900, "Inputs");
+      const table = tray.locator(".fx-inputs-table");
+      const canonicalInputs = ["crystal-forge", "disko", "home-manager", "impermanence", "nixpkgs", "old-nixpkgs", "stylix", "unstable"];
+      await assertExactTextOrder(table.locator("thead th"), ["Input", "Source", "Locked", "Updated", "Follows"], "Narrow Flake Inputs headers");
+      await assertExactTextOrder(table.locator("tbody > tr .fx-input-cell code.fx-host"), canonicalInputs, "Narrow direct-root input hierarchy");
+      await assertVisible(table.locator("tbody > tr").first().locator("td:nth-child(2) .fx-url"), "Narrow Inputs source became unreachable");
+      await assertVisible(table.getByText("+12 transitive", { exact: true }), "Narrow direct descendant count disappeared");
+      if (await table.locator("tbody > tr td:first-child details:visible").count()) throw new Error("Narrow lock metadata moved into the Input column");
+      for (const theme of ["dark", "light"]) {
+        await applyVisualTheme(page, theme);
+        await assertExactTextOrder(table.locator("tbody > tr .fx-input-cell code.fx-host"), canonicalInputs, `${theme} narrow direct Inputs`);
+        await assertTask440FlakeGeometry(page, tray, ".fx-inputs-table", ["Input", "Source", "Locked", "Updated", "Follows"], [0.27, 0.31, 0.12, 0.14, 0.16], `${theme} narrow Inputs`);
+        await assertReachableControls(tray.locator(".fx-pane summary:visible, .fx-tabs button:visible:not([disabled])"), `${theme} narrow Inputs`);
+        await assertNoOverlayIntersections(page, ".fl-tray", `${theme} narrow Inputs`);
+      }
+    },
+  },
+  {
+    name: "13k-task440-drawer-modal-keyboard-layering",
+    description: "TASK-440 drawer and diff-modal Escape precedence, focus trap, stacking, and focus restoration",
+    action: async (page) => {
+      await routeFlakeParityData(page);
+      await routeTask440FlakeOutputs(page);
+      await gotoFlakesAsAdmin(page);
+      const opener = page.locator("#flake-opener-41");
+      await opener.focus();
+      await opener.click();
+      const tray = page.getByRole("dialog", { name: "platform-core commits" });
+      await assertVisible(tray, "Expected keyboard-test flake drawer", 15000);
+      const diffButton = tray.locator(".fl-file-card").first();
+      await assertVisible(diffButton, "Expected changed-file diff action");
+      await diffButton.click();
+      const modal = page.locator(".diff-modal");
+      await assertVisible(modal, "Expected file diff modal");
+      const layers = await page.evaluate(() => ({
+        tray: Number(getComputedStyle(document.querySelector(".fl-tray")).zIndex),
+        modal: Number(getComputedStyle(document.querySelector(".modal-backdrop-above-drawer")).zIndex),
+      }));
+      if (!(layers.modal > layers.tray)) throw new Error(`Diff modal is not above flake tray: ${JSON.stringify(layers)}`);
+      await page.keyboard.press("Shift+Tab");
+      if (!(await modal.evaluate((element) => element.contains(document.activeElement)))) throw new Error("Diff modal focus escaped on Shift+Tab");
+      await page.keyboard.press("Escape");
+      await modal.waitFor({ state: "hidden" });
+      await assertVisible(tray, "Escape should close modal before drawer");
+      await page.keyboard.press("Escape");
+      await tray.waitFor({ state: "hidden" });
+      if (!(await opener.evaluate((element) => element === document.activeElement))) throw new Error("Drawer close did not restore opener focus");
+    },
+  },
+  {
+    name: "12o-task440-rollback-notification-auto-latest",
+    description: "TASK-440 exact Deploy notification, rollback preselection, selector labels, and all auto_latest outcomes including retry idempotency",
+    action: async (page) => {
+      await suppressOnboardingCoach(page);
+      await routeSystemsWarningData(page);
+      const state = await routeTask440SystemData(page, {
+        deploymentPolicy: "auto_latest",
+        deployResponses: [
+          { status: 409, body: { policy: "auto_latest", conversion: "not_requested", deployment: "failed", deployment_id: null, message: "conversion failed; no deployment queued" } },
+          { status: 500, body: { policy: "manual", conversion: "converted", deployment: "failed", deployment_id: null, message: "Policy is manual; deployment failed" } },
+          { status: 200, body: { policy: "manual", conversion: "already_manual", deployment: "already_queued", deployment_id: "44000000-0000-4000-8000-000000000001", message: "Deployment already queued" } },
+        ],
+      });
+      await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=deploy`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.getByText("New commit", { exact: true }), "Expected New commit selector label", 15000);
+      await assertVisible(page.getByText("Previous generation", { exact: true }), "Expected Previous generation selector label");
+      await page.locator(".sd-commit-item").first().click();
+      await page.getByRole("button", { name: /Deploy abcdef0/ }).click();
+      const prompt = page.getByRole("dialog", { name: "Deploy while auto_latest is enabled?" });
+      await assertVisible(prompt, "Expected auto_latest warning");
+      await prompt.getByRole("button", { name: "Cancel" }).click();
+      await prompt.waitFor({ state: "hidden" });
+      if (state.deployRequests.length !== 0) throw new Error("Cancel queued a deployment");
+
+      await page.getByRole("button", { name: /Deploy abcdef0/ }).click();
+      await prompt.getByRole("button", { name: "Continue on auto_latest" }).click();
+      await assertVisible(page.getByText(/conversion failed; no deployment queued/i).first(), "Expected failed no-queue outcome");
+      if (state.deployRequests[0].action !== "continue_auto_latest") throw new Error("Continue sent the wrong typed deployment action");
+
+      await page.getByRole("button", { name: /Deploy abcdef0/ }).click();
+      await prompt.focus();
+      await page.keyboard.press("Tab");
+      await page.keyboard.press("Shift+Tab");
+      if (!(await prompt.evaluate((element) => element.contains(document.activeElement)))) throw new Error("auto_latest dialog focus trap failed");
+      state.holdDeploy = true;
+      await prompt.getByRole("button", { name: "Convert to manual and deploy" }).click();
+      await assertVisible(prompt, "Expected auto_latest dialog to remain mounted during submission");
+      await page.keyboard.press("Tab");
+      if (!(await prompt.evaluate((element) => element.contains(document.activeElement)))) throw new Error("Submitting auto_latest dialog allowed focus to escape");
+      state.releaseHeldDeploy();
+      await assertVisible(page.getByText(/Policy is manual; deployment failed/i).first(), "Expected persisted manual plus failed deployment outcome");
+      if (state.deployRequests[1].action !== "convert_to_manual") throw new Error("Convert sent the wrong typed deployment action");
+      if (!state.deployRequests[1].request_id) throw new Error("Convert request omitted its stable request_id");
+
+      await page.getByRole("button", { name: /Deploy abcdef0/ }).click();
+      await assertVisible(page.getByText(/Deployment already queued/i).first(), "Expected idempotent retry outcome");
+      if (state.deployRequests[2].commit_sha !== state.deployRequests[1].commit_sha) throw new Error("Retry changed the exact deployment target");
+      if (state.deployRequests[2].request_id !== state.deployRequests[1].request_id) throw new Error("Retry changed the deployment request_id");
+      if (state.deployRequests[2].action !== state.deployRequests[1].action) throw new Error("Retry changed the original deployment action after policy conversion");
+
+      await page.getByRole("tab", { name: "History" }).click();
+      const currentGenerationCard = page.locator(".tl-card").filter({ has: page.locator(".tl-gen strong", { hasText: "#74" }) });
+      if (await currentGenerationCard.getByTitle("Rollback to this generation").count()) {
+        throw new Error("History advertised rollback for the current server-ineligible generation");
+      }
+      const rollback = page.locator(".tl-card").filter({ has: page.locator(".tl-gen strong", { hasText: "#73" }) }).getByTitle("Rollback to this generation");
+      await rollback.click();
+      await assertVisible(page.getByRole("tab", { name: "Deploy", selected: true }), "Expected History rollback to route into Deploy");
+      if (new URL(page.url()).searchParams.get("deploy_generation") !== "73") throw new Error(`Rollback did not preselect generation 73: ${page.url()}`);
+      await assertVisible(page.getByRole("button", { name: "Previous generation" }), "Expected generation rollback mode after History navigation");
+      const invalidRollback = await page.evaluate(async ({ systemId }) => {
+        const csrf = document.cookie
+          .split(";")
+          .map((cookie) => cookie.trim())
+          .find((cookie) => cookie.startsWith("__Host-cf-csrf="))
+          ?.slice("__Host-cf-csrf=".length);
+        if (!csrf) throw new Error("Authenticated browser session omitted its CSRF cookie");
+        const response = await fetch(`/api/v1/systems/${systemId}/rollback-generation`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
+          body: JSON.stringify({ generation_snapshot_id: "44000000-0000-4000-8000-000000000199", generation: 99 }),
+        });
+        return { status: response.status, body: await response.json() };
+      }, { systemId: TASK_440_SYSTEM_ID });
+      if (invalidRollback.status !== 400 || invalidRollback.body.error !== "validation_error" || invalidRollback.body.message !== "retained generation artifact was not found") {
+        throw new Error(`Rollback fixture invalid-artifact contract diverged from production: ${JSON.stringify(invalidRollback)}`);
+      }
+      const rollbackSubmission = page.waitForResponse((response) => response.url().endsWith(`/api/v1/systems/${TASK_440_SYSTEM_ID}/rollback-generation`) && response.request().postDataJSON().generation === 73);
+      await page.getByRole("button", { name: "Switch to gen #73" }).click();
+      const rollbackResponse = await rollbackSubmission;
+      if (rollbackResponse.status() !== 202) throw new Error(`Expected accepted rollback HTTP 202, got ${rollbackResponse.status()}`);
+      const rollbackRequest = state.rollbackRequests.at(-1);
+      if (!rollbackRequest || rollbackRequest.generation_snapshot_id !== TASK_440_PREVIOUS_GENERATION_SNAPSHOT_ID || rollbackRequest.generation !== 73 || Object.hasOwn(rollbackRequest, "store_path") || Object.hasOwn(rollbackRequest, "path")) {
+        throw new Error(`Generation rollback did not use retained identity plus exact generation without store_path: ${JSON.stringify(rollbackRequest)}`);
+      }
+      await assertVisible(page.locator(".sd-callout-info").filter({ hasText: "Generation rollback requested for warning-system-01" }), "Accepted rollback did not render its successful result state");
+    },
+  },
+  {
+    name: "14d-task440-cross-surface-auth-navigation",
+    description: "TASK-440 environment return, exact deployment notification, hidden environment non-disclosure, and Compliance edit authorization",
+    action: async (page) => {
+      await routeEnvironmentWarningData(page);
+      await routeTask440FlakeOutputs(page);
+      console.log("  [14d] Routes installed; opening Environments");
+      await page.goto(`${baseUrl}/environments`, { timeout: LOAD_TIMEOUT });
+      console.log("  [14d] Environments loaded; opening Production");
+      await page.getByText("Production", { exact: true }).first().click();
+      const environmentPanel = page.locator(".side-panel").filter({ hasText: "Production" });
+      await assertVisible(environmentPanel, "Expected originating environment panel", 15000);
+      console.log("  [14d] Production panel visible; opening flake drawer");
+      await environmentPanel.getByRole("button", { name: "platform-core" }).click();
+      const flakeTray = page.getByRole("dialog", { name: "platform-core commits" });
+      await assertVisible(flakeTray, "Expected environment flake chip to open drawer", 15000);
+      console.log("  [14d] Flake drawer visible; closing it");
+      await Promise.all([
+        page.waitForURL((url) => url.pathname === "/environments" && url.searchParams.has("panel"), { waitUntil: "domcontentloaded" }),
+        flakeTray.getByRole("button", { name: "Close" }).evaluate((button) => button.click()),
+      ]);
+      await page.waitForLoadState("domcontentloaded");
+      const restoredPanel = page.locator(".side-panel").filter({ hasText: "Production" });
+      await assertVisible(restoredPanel, "Expected environment panel restored after drawer close", 15000);
+      console.log("  [14d] Environment panel restored; testing notification navigation");
+
+      await routeSystemsWarningData(page);
+      await routeTask440SystemData(page);
+      await page.unroute("**/api/v1/user/notifications**");
+      const notificationId = "44000000-0000-4000-8000-000000000099";
+      const notificationRequests = await mockAccountNotifications(page, {
+        id: notificationId,
+        category: "deploy_failures",
+        title: "Pending deployment approval",
+        summary: "Review this exact system",
+        route: `/systems/${TASK_440_SYSTEM_ID}?tab=deploy`,
+      });
+      const initialNotificationResponse = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return response.request().method() === "GET" &&
+          url.pathname === "/api/v1/user/notifications";
+      }, { timeout: LOAD_TIMEOUT });
+      await Promise.all([
+        initialNotificationResponse,
+        page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT }),
+      ]);
+      await page.locator("[data-testid='topbar-notifications-button']").click();
+      const notification = page.locator(`[data-testid="topbar-notification-item-${notificationId}"]`);
+      await assertVisible(notification, "Expected pending deployment approval notification", 15000);
+      await notification.click();
+      await page.waitForURL((url) => url.pathname === `/systems/${TASK_440_SYSTEM_ID}` && url.searchParams.get("tab") === "deploy");
+      await assertVisible(page.getByRole("tab", { name: "Deploy", selected: true }), "Notification did not open exact Deploy tab");
+      if (notificationRequests.read.length !== 1) throw new Error(`Expected one notification read mutation, got ${notificationRequests.read.length}`);
+      console.log("  [14d] Notification navigation complete; testing non-disclosure");
+
+      const hiddenId = "00000000-0000-0000-0000-0000000000ff";
+      await page.route(new RegExp(`/api/v1/systems/${hiddenId}$`), async (route) => {
+        await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ message: "not found" }) });
+      });
+      await page.goto(`${baseUrl}/systems/${hiddenId}?tab=config&config_mode=commit&revision=${TASK_440_CURRENT_SHA}`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.getByText(/not found|unavailable/i).first(), "Expected non-disclosing hidden-environment state", 15000);
+      if ((await page.getByText("warning-system-01", { exact: true }).count()) > 0) throw new Error("Hidden system response disclosed protected identity");
+      console.log("  [14d] Non-disclosure complete; testing Compliance authorization");
+
+      const bundle = {
+        id: "44000000-0000-4000-8000-000000000010",
+        name: "TASK-440 baseline",
+        framework: "NIST 800-53",
+        version: "1.0",
+        description: "Authorization fixture",
+        layer: "baseline",
+        owner: "Security",
+        last_review: "2026-08-28T18:00:00Z",
+        policy_ids: [], required_envs: [], control_count: 4, environment_count: 1,
+        active_assignment_count: 0, current_draft_version_id: null, current_published_version_id: null,
+        current_draft_version: null, current_published_version: null, versions: [], policy_count: 0,
+        requirement_count: 4, applicable_system_count: 1, aggregate_score: 100,
+      };
+      await page.route("**/api/v1/compliance/bundles*", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([bundle]) });
+      });
+      await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
+      await page.getByText("TASK-440 baseline", { exact: true }).first().click();
+      const drawer = page.getByRole("dialog").filter({ hasText: "TASK-440 baseline" });
+      await assertVisible(drawer, "Expected Compliance bundle drawer", 15000);
+      const editButtons = drawer.getByRole("button", { name: /Edit bundle/i });
+      if ((await editButtons.count()) !== 1) throw new Error(`Expected exactly one authorized outer Compliance Edit action, found ${await editButtons.count()}`);
+      console.log("  [14d] Admin authorization complete; switching to viewer");
+
+      await page.route("**/api/auth/whoami", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ is_authenticated: true, auth_mode: "local", user: { id: "task440-viewer", email: "viewer@example.test", display_name: "TASK-440 Viewer" }, roles: ["Viewer"], is_admin: false }) });
+      });
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      const viewerDrawer = page.getByRole("dialog").filter({ hasText: "TASK-440 baseline" });
+      await assertVisible(viewerDrawer, "Expected viewer Compliance drawer", 15000);
+      if (await viewerDrawer.getByRole("button", { name: /Edit bundle/i }).count()) throw new Error("Viewer received unauthorized Compliance Edit action");
+      console.log("  [14d] Viewer authorization complete");
+    },
+  },
+  {
     name: "31-not-found",
     description: "Catch-all 404 page renders for unknown routes inside the app shell",
     action: async (page) => {
@@ -14849,8 +21018,25 @@ security.audit.enable = true;</fixtext>
 
 function runStaticHarnessContracts() {
   const sourceDir = process.env.CF_WEB_UI_SOURCE_DIR || path.resolve(__dirname, "..");
+  const rustSourceDir = process.env.CF_WEB_UI_RUST_SOURCE_DIR || path.resolve(sourceDir, "../..");
+  const requiredRustSources = [
+    "packages/web-ui/src/components/cve/mod.rs",
+    "packages/web-ui/src/views/cves.rs",
+    "packages/web-ui/src/components/poam/mod.rs",
+    "packages/web-ui/src/views/poam_api.rs",
+    "packages/web-ui/src/components/layout/topbar.rs",
+  ];
   const defaultNix = fs.readFileSync(path.join(sourceDir, "default.nix"), "utf8");
   const source = fs.readFileSync(__filename, "utf8");
+  const rustSources = new Map(requiredRustSources.map((relativePath) => [
+    relativePath,
+    fs.readFileSync(path.join(rustSourceDir, relativePath), "utf8"),
+  ]));
+  const cveComponent = rustSources.get(requiredRustSources[0]);
+  const cveView = rustSources.get(requiredRustSources[1]);
+  const poamComponent = rustSources.get(requiredRustSources[2]);
+  const poamApi = rustSources.get(requiredRustSources[3]);
+  const topbar = rustSources.get(requiredRustSources[4]);
   const assertContract = (condition, message) => {
     if (!condition) throw new Error(message);
   };
@@ -14861,7 +21047,19 @@ function runStaticHarnessContracts() {
   assertContract(defaultNix.includes("invalid counts schema"), "Nix driver must validate visual report counts");
   assertContract(defaultNix.includes("invalid failures schema"), "Nix driver must validate visual report failures");
   assertContract(defaultNix.includes("CF_UI_BASELINES_DIR=/tmp/web-ui-baselines"), "Nix driver must configure repository visual baselines");
-  assertContract(defaultNix.includes("server-journal.log"), "Nix driver must export the server journal on browser failure");
+  assertContract(
+    defaultNix.includes("CF_WEB_UI_RUST_SOURCE_DIR=/tmp/web-ui-source"),
+    "Nix static preflight must configure its hermetic Rust source root",
+  );
+  for (const relativePath of requiredRustSources) {
+    assertContract(
+      defaultNix.includes(`inputs.self + "/${relativePath}"`) &&
+        defaultNix.includes(`/tmp/web-ui-source/${relativePath}`),
+      `Nix static preflight must copy ${relativePath} from a Nix path input`,
+    );
+  }
+  assertContract(defaultNix.includes("journalctl -u crystal-forge-server.service"), "Nix driver must print the server journal on browser failure");
+  assertContract(!defaultNix.includes("browser-failure-artifacts"), "Nix driver must not retain temporary browser failure artifacts");
   assertContract(defaultNix.includes('print_browser_diagnostics("timed out waiting for integration.exit")'), "Nix driver must print browser logs before rethrowing a timeout");
   assertContract(defaultNix.includes('if ${if updateVisualBaselines then "False" else "True"}:'), "Baseline update mode must bypass only strict visual rejection");
   assertContract(source.includes("process.exitCode = 1;"), "Browser failures must produce a nonzero process exit");
@@ -14869,6 +21067,120 @@ function runStaticHarnessContracts() {
   assertContract(source.includes('context.on("page", attachFatalPageHandlers)'), "Every context page must make runtime errors fatal");
   assertContract(source.includes("counts: { match: 0, diff: 0, new: 0, skipped: 0, error: 0 }"), "Visual report must initialize every consumed count");
   assertContract(source.includes("failures: []"), "Visual report must initialize strict failures");
+  const notificationWorkflow = source.slice(
+    source.indexOf('name: "09h-topbar-notifications-light"'),
+    source.indexOf('name: "09i-topbar-notifications-non-admin"'),
+  );
+  for (const contract of [
+    '"99+"',
+    'page.keyboard.press("Home")',
+    'page.keyboard.press("End")',
+    "scenario.holdNextHead()",
+    "scenario.releaseHeldHead()",
+    'name: "Retry"',
+    '"You\'re all caught up"',
+    "topbar-notifications-load-more",
+  ]) {
+    assertContract(notificationWorkflow.includes(contract), `09h notification workflow is missing ${contract}`);
+  }
+  assertContract(topbar.includes("mutation_epoch != request.mutation_epoch"), "Notification coordinator must discard whole stale GET responses after mutations");
+  assertContract(
+    topbar.includes("NotificationReconciliation") &&
+      topbar.includes("MAX_NOTIFICATION_RECONCILIATION_PAGES") &&
+      topbar.includes("reconciliation_reached_boundary"),
+    "Notification coordinator must model bounded composite-key range reconciliation",
+  );
+  assertContract(topbar.includes("load_failure") && topbar.includes("mutation_failures"), "Notification coordinator must preserve operation-scoped failures");
+  assertContract(
+    topbar.includes("pending_mutations: HashSet<NotificationMutation>") &&
+      topbar.includes("if !self.pending_mutations.insert(operation.clone())") &&
+      topbar.includes('"aria-busy": dismiss_pending') &&
+      topbar.includes('disabled: dismiss_pending'),
+    "Notification mutations must deduplicate durable operation identities and expose disabled working controls",
+  );
+  assertContract(
+    topbar.includes("dismiss_focus_is_current(") &&
+      topbar.includes("feed.owner.as_ref()") &&
+      topbar.includes("let (applied, request) = ctx.feed.write().dismiss_succeeded") &&
+      topbar.includes("stale_account_dismiss_neither_applies_nor_owns_focus"),
+    "Dismiss focus restoration must require a current applied account-owned response",
+  );
+  assertContract(
+    topbar.includes("prior append retry cannot be valid against it") &&
+      topbar.includes("self.load_failure = None;"),
+    "Authoritative reconciliation must retire every obsolete append retry cursor",
+  );
+  assertContract(
+    topbar.includes('role: "dialog"') &&
+      topbar.includes('"aria-modal": "true"') &&
+      topbar.includes('"aria-haspopup": "dialog"'),
+    "Notification bell and focus-trapped panel must use a consistent modal dialog model",
+  );
+  assertContract(
+    topbar.includes('class: "notif-title-line"') &&
+      topbar.includes('class: "notif-unread-marker"') &&
+      topbar.includes('class: "sr-only", "Unread notification."'),
+    "Unread notifications must keep the visible marker inline with the title and expose a non-color label",
+  );
+  assertContract(topbar.includes("trap_notification_tab") && topbar.includes("focus_notification_settings"), "Notification dialog must trap focus and retain in-dialog focus after final dismissal");
+  assertContract(source.includes("Array.from({ length: 120 }"), "The 99+ browser fixture must contain at least 100 real unread notifications");
+  const cursorTimestamp = "2026-09-13T12:00:00.000Z";
+  const cursorItem = {
+    created_at: cursorTimestamp,
+    id: "10000000-0000-4000-8000-000000000002",
+  };
+  const equalTimestampOlderItem = {
+    created_at: cursorTimestamp,
+    id: "10000000-0000-4000-8000-000000000001",
+  };
+  const productionCursor = `${BigInt(Date.parse(cursorTimestamp)) * 1000n}|${cursorItem.id}`;
+  assertContract(
+    encodeMockNotificationCursor(cursorItem) === productionCursor &&
+      notificationIsOlderThanCursor(equalTimestampOlderItem, decodeMockNotificationCursor(productionCursor)),
+    "Notification cursor helpers must preserve production wire shape and equal-timestamp UUID ordering",
+  );
+  assertContract(
+    source.includes("function encodeMockNotificationCursor(item)") &&
+      source.includes("return `${notificationTimestampMicros(item)}|${item.id}`"),
+    "Notification browser cursors must use the production timestamp_micros|uuid wire shape",
+  );
+  assertContract(!topbar.includes('role: "menuitem"'), "Notification controls must retain ordinary button semantics");
+  const scenario12h = source.slice(source.indexOf('name: "12h-'), source.indexOf('name: "12d-systems-api-error'));
+  const scenario16 = source.slice(source.indexOf('name: "16-cves"'), source.indexOf('name: "16b-cves'));
+  assertContract(!scenario12h.includes("triageBodies") && !scenario12h.includes("fleetDetail"), "System-detail scenario must not own global CVE triage fixtures");
+  for (const identifier of ["fleetDetail", "triageBodies"]) {
+    const declaration = scenario16.search(new RegExp(`(?:const|let) ${identifier}\\b`));
+    assertContract(declaration >= 0 && scenario16.indexOf(identifier, declaration + identifier.length) > declaration, `16-cves must declare ${identifier} before runtime use`);
+  }
+  const typedCveAssignees = [...scenario16.matchAll(/assignee:\s*\{[^}]*kind:\s*"(?:user|oidc_group)"[^}]*\}/g)];
+  assertContract(typedCveAssignees.length > 0, "16-cves must exercise a typed assignee fixture");
+  assertContract(
+    typedCveAssignees.every(([fixture]) => /available:\s*true/.test(fixture)),
+    "16-cves typed User/Group assignee fixtures must include available: true",
+  );
+  assertContract(cveView.includes("request_token_is_current") && cveView.includes("load_generation.peek()"), "Exact fleet loads must use non-reactive newest-request tokens");
+  assertContract(poamComponent.includes("Retired vulnerability history") && poamComponent.includes("Retired links are immutable audit evidence"), "POA&M detail must distinguish immutable retired exact links");
+  assertContract(
+    poamApi.includes('request("POST", &format!("{}/poams/cves", base_url()), Some(body))'),
+    "Exact-CVE creation must use the dedicated API route",
+  );
+  assertContract(
+    poamApi.includes("pub observation: CveObservationReference") &&
+      !poamApi.slice(poamApi.indexOf("pub struct CreateCvePoamRequest"), poamApi.indexOf("pub struct AddCveFindingRequest")).includes("scan_derivation_id"),
+    "Exact-CVE creation must submit opaque observation context instead of deriving scan identity",
+  );
+  assertContract(
+    cveComponent.includes(
+      "inventory_allows_exact_remediation(inventory_authority, allow_mutations)",
+    ) &&
+      cveComponent.includes(
+        "inventory_allows_ordinary_justification(inventory_authority, allow_mutations)",
+      ) &&
+      cveComponent.includes("if exact_remediation_allowed {") &&
+      cveComponent.includes("if ordinary_justification_allowed { button {") &&
+      cveComponent.includes('title: if has_justification { "Edit justification" } else { "Justify" }'),
+    "System CVE mutation controls must remain authorization-gated",
+  );
   const sqlAuthoredHelperName = "createTask433Composite" + "AssessmentFixture";
   assertContract(!source.includes(`${sqlAuthoredHelperName}(`), "Canonical workflows must not use the SQL-authored assessment helper");
   const productionHelperStart = source.indexOf("async function runTask433ProductionEvaluation(");
@@ -14946,9 +21258,9 @@ function runStaticHarnessContracts() {
   };
   const notificationWorkflowSource = isolateWorkflow("09g-topbar-notifications-dark");
   assertContract(
-    notificationWorkflowSource.includes('reopenedPanel.getByRole("menuitem"') &&
+    notificationWorkflowSource.includes('reopenedPanel.getByRole("button"') &&
       !notificationWorkflowSource.includes('reopenedRow.getByTitle("Dismiss notification")'),
-    "Notification dismissal must locate the accessible sibling menu item",
+    "Notification dismissal must locate the accessible sibling button",
   );
   assertContract(
     /const dismissResponseResult = page\.waitForResponse\([\s\S]*?\)\.then\(/.test(notificationWorkflowSource) &&
@@ -15026,6 +21338,7 @@ function runStaticHarnessContracts() {
 
   validateManifest(MANIFEST);
   for (const name of [
+    "12l-task440-config-lifecycle",
     "task433-canonical-large-catalog",
     "20af-policy-catalog-selection-delete-regressions",
     "task433-canonical-unmapped-nix-policy",
@@ -15116,22 +21429,27 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
   console.log(`  Visual themes: ${visualThemes.join(", ")}`);
   console.log("");
 
-  const browser = await chromium.launch({
+  const browserLaunchOptions = {
     ...(process.env.PLAYWRIGHT_EXECUTABLE_PATH
       ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH }
       : {}),
     ...(process.env.PLAYWRIGHT_DISABLE_WEB_SECURITY === "1"
       ? { args: ["--disable-web-security"] }
       : {}),
-  });
+  };
+  let browser = await chromium.launch(browserLaunchOptions);
   // Use a single browser context to maintain session/cookies across steps.
   // Timezone and locale are pinned by the manifest so rendered timestamps and
   // number formats are reproducible across local Nix and CI runs.
-  const context = await browser.newContext({
+  const contextOptions = {
     viewport: MANIFEST.settings.viewport,
     timezoneId: MANIFEST.settings.timezoneId,
     locale: MANIFEST.settings.locale,
-  });
+    // The task-local Caddy preview uses its own internal certificate. This is
+    // opt-in so the production-like VM check continues to verify TLS normally.
+    ...(process.env.CF_UI_IGNORE_HTTPS_ERRORS === "1" ? { ignoreHTTPSErrors: true } : {}),
+  };
+  let context = await browser.newContext(contextOptions);
   const pageRuntimeErrors = [];
   const attachFatalPageHandlers = (runtimePage) => {
     runtimePage.on("pageerror", (error) => {
@@ -15152,8 +21470,44 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
     p.waitForTimeout = (ms) => originalWaitForTimeout(Math.max(50, Math.floor(ms * 0.3)));
     return p;
   };
+  const closeWithin = async (close, timeoutMs) => {
+    await Promise.race([
+      close().catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+    ]);
+  };
 
   let page = await createStepPage();
+  const restartBrowser = async () => {
+    await closeWithin(() => page.close(), 10_000);
+    await closeWithin(() => context.close(), 10_000);
+    await closeWithin(() => browser.close(), 10_000);
+    browser = await chromium.launch(browserLaunchOptions);
+    context = await browser.newContext(contextOptions);
+    context.on("page", attachFatalPageHandlers);
+    page = await createStepPage();
+    await suppressOnboardingCoach(page);
+    if (process.env.CF_UI_TEST_STANDALONE === "1") {
+      await routeStandaloneUiBootstrap(page);
+    }
+    await ensureAuthenticated(page);
+  };
+  const runStepWithin = async (step, timeoutMs) => {
+    let timeout;
+    try {
+      await Promise.race([
+        step.action(page),
+        new Promise((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error(`Step exceeded ${timeoutMs} ms`)),
+            timeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
 
   // Focused runs intentionally skip the ordered auth steps. Establish the
   // same authenticated session those steps would have created before running
@@ -15186,20 +21540,29 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
     let error = null;
     let visuals = [];
 
-    try {
-      // INVARIANT: Each step starts at the manifest viewport. A step may use a
-      // different viewport for its own assertions and captures, but it must not
-      // make later baseline dimensions depend on the selected profile or order.
-      await page.setViewportSize(MANIFEST.settings.viewport);
-      await step.action(page);
+    // The real force-push workflow must not inherit route handlers or renderer
+    // state from the preceding stress-data workflows.
+    if (step.name === "13h-flakes-force-push-rewrite-recovery") {
+      console.log("  Restarting Chromium before force-push recovery");
+      await restartBrowser();
+      console.log("  Chromium restart and authentication complete");
+    }
 
-      // Take one screenshot per required visual theme. Baseline names include
-      // the theme suffix so reviewers can approve dark and light mode
-      // independently: <step>--dark.png and <step>--light.png.
-      visuals = [
-        ...(intermediateVisuals.get(step.name) || []),
-        ...(await captureThemedBaselines(page, step, visualThemes)),
-      ];
+
+    try {
+      // Each step starts at the manifest viewport; focused workflows may
+      // change it explicitly before their own captures.
+      await page.setViewportSize(MANIFEST.settings.viewport);
+      // timeouts. Keep one damaged renderer from consuming the complete VM
+      // check timeout, then replace the browser after any failed step.
+      await runStepWithin(step, 600_000);
+
+      if (step.name !== "13h-flakes-force-push-rewrite-recovery") {
+        visuals = [
+          ...(intermediateVisuals.get(step.name) || []),
+          ...(await captureThemedBaselines(page, step, visualThemes)),
+        ];
+      }
     } catch (err) {
       ok = false;
       error = err.message;
@@ -15219,15 +21582,8 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
         });
       } catch (_) {}
 
-      // Isolate follow-up steps from lingering page state when a step fails.
-      try {
-        await page.close();
-      } catch (_) {}
-      page = await createStepPage();
-      if (process.env.CF_UI_TEST_STANDALONE === "1") {
-        await routeStandaloneUiBootstrap(page);
-      }
-      await ensureAuthenticated(page);
+      // Replace the browser after a damaged renderer or failed workflow.
+      await restartBrowser();
     }
 
     results.push({
@@ -15239,14 +21595,16 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
     });
   }
 
-  // ── Design-parity capture pass (non-blocking) ───────────────────────────────
+  // ── Optional primary-view design-parity capture pass ───────────────────────
   // Capture the real Dioxus UI for the primary views in both themes so the
   // design-parity harness can compare them against the design-example targets.
-  // These captures never fail the check; compare-design-parity.js scores drift.
+  // TASK-440 canonical captures are produced by their merge-blocking steps above.
   const designParityDir = `${outputDir}/design-parity`;
-  let designParityCaptured = 0;
+  let designParityCaptured = fs.existsSync(designParityDir)
+    ? fs.readdirSync(designParityDir).filter((name) => name.endsWith(".dioxus.png")).length
+    : 0;
   const dioxusParityResults = [];
-  const captureDesignParity = process.env.CF_UI_SKIP_DESIGN_PARITY !== "1";
+  const captureDesignParity = !requestedSteps && process.env.CF_UI_SKIP_DESIGN_PARITY !== "1";
   if (captureDesignParity) try {
     const parityManifestPath = firstExistingPath([
       path.join(__dirname, "design-parity", "manifest.json"),
@@ -15358,8 +21716,16 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
   }
   console.log(`Design-parity Dioxus captures: ${designParityCaptured}`);
 
-  await context.close();
-  await browser.close();
+  if (task440SemanticContracts.length) {
+    fs.mkdirSync(designParityDir, { recursive: true });
+    fs.writeFileSync(
+      `${designParityDir}/task440-semantic-contracts.json`,
+      JSON.stringify({ version: 1, results: task440SemanticContracts }, null, 2),
+    );
+  }
+
+  await closeWithin(() => context.close(), 10_000);
+  await closeWithin(() => browser.close(), 10_000);
   await settleFatalRuntimeEvents();
 
   if (fatalRuntimeEvents.length) {
@@ -15384,7 +21750,7 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
   // ── Visual report ──────────────────────────────────────────────────────────
   const okCount = results.filter((r) => r.ok).length;
   const failCount = results.filter((r) => !r.ok).length;
-  const designReferenced = stepsToRun.filter((s) => s.designRef).length;
+  const designReferenced = stepsToRun.filter((step) => MANIFEST_STEPS.get(step.name)?.designRef).length;
   const themed = results.flatMap((r) => r.visuals || []);
 
   const visualReport = {

@@ -1,0 +1,2304 @@
+//! Renders lazy, path-scoped system configuration observations.
+//!
+//! The Explorer is observational and independent from certified Config
+//! snapshots. Structured path components remain the request identity. Dotted
+//! paths are presentation only.
+
+use std::cell::Cell;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::rc::Rc;
+
+use dioxus::prelude::*;
+use serde_json::Value as JsonValue;
+use uuid::Uuid;
+
+use crate::api::client::{ApiClientError, load_system_config_observation};
+use crate::api::models::{
+    ConfigObservationChild, ConfigObservationChildKind, ConfigObservationKind,
+    ConfigObservationLifecycle, ConfigObservationPayload, ConfigObservationResponse,
+    ConfiguredOptionIdentity, CreateConfigObservationRequest, EvaluatedOption,
+    EvaluatedOptionCounts, EvaluatedOptionFilter, EvaluatedOptionRow, EvaluationModuleSummary,
+    OptionDefinitionProvenance, OptionInventoryState, SafeOptionValue, SnapshotLifecycle,
+};
+use crate::components::icon::{Icon, IconName};
+
+#[derive(Clone, PartialEq)]
+enum ObservationState {
+    Idle,
+    Lifecycle(ConfigObservationLifecycle),
+    Loaded(ConfigObservationResponse),
+    Error(String),
+    /// A bounded automatic preview did not complete (budget exhaustion,
+    /// authorization, or any other outcome) before the request became
+    /// terminal. This is deliberately not [`ObservationState::Error`]: the
+    /// option is not known to be absent or broken, only not-yet-loaded by
+    /// the automatic path. A fresh explicit selection always retries with
+    /// the full inspection deadline.
+    Deferred,
+}
+
+/// Distinguishes a bounded speculative value preview from an explicit click.
+///
+/// Only [`RequestIntent::Explicit`] can retry a terminal
+/// [`ObservationState::Error`] or [`ObservationState::Deferred`] outcome.
+/// [`RequestIntent::Automatic`] never starts on top of any existing cache
+/// entry, so a failed or deferred automatic preview is never retried
+/// automatically.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RequestIntent {
+    Explicit,
+    Automatic,
+}
+
+impl RequestIntent {
+    fn is_automatic(self) -> bool {
+        matches!(self, Self::Automatic)
+    }
+}
+
+/// Maximum visible-and-uncached option paths considered per automatic
+/// scheduling pass.
+///
+/// The Explorer always starts the single topmost (lexicographically
+/// smallest path) candidate from this bounded window, so this constant
+/// limits how much of a very tall viewport is scanned, not how many
+/// requests run at once. Conservative starting bound; see
+/// `docs/config-explorer-architecture.md`.
+const MAX_AUTOMATIC_PENDING_CANDIDATES: usize = 16;
+
+/// Debounce window after the visible-row set changes before the automatic
+/// scheduler recomputes its candidate window.
+///
+/// Prevents rapid expansion or scrolling from enqueueing a fetch for every
+/// intermediate frame. Conservative starting bound, not a measured optimum.
+const AUTOMATIC_PREVIEW_DEBOUNCE_MS: u32 = 200;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExplorerMode {
+    Browse,
+    Configured,
+    Search,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InspectorPane {
+    Option,
+    Sources,
+}
+
+fn should_start_configured(mode: ExplorerMode, state: &ObservationState) -> bool {
+    mode == ExplorerMode::Configured && matches!(state, ObservationState::Idle)
+}
+
+fn initial_scoped_operations(
+    revision: Option<&str>,
+    scoped_enabled: bool,
+) -> Vec<ConfigObservationKind> {
+    if scoped_enabled && revision.is_some() {
+        vec![ConfigObservationKind::Root]
+    } else {
+        Vec::new()
+    }
+}
+
+fn next_operation_sequence(current: u64) -> u64 {
+    current.saturating_add(1)
+}
+
+fn should_request_prefix(child_offset: u32, loaded: bool) -> bool {
+    child_offset != 0 || !loaded
+}
+
+fn display_path_component(component: &str) -> String {
+    let mut chars = component.chars();
+    let starts_like_identifier = chars
+        .next()
+        .is_some_and(|character| character.is_ascii_alphabetic() || character == '_');
+    if starts_like_identifier
+        && chars.all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '\'')
+        })
+    {
+        component.to_string()
+    } else {
+        serde_json::to_string(component).unwrap_or_else(|_| "\"<unavailable>\"".into())
+    }
+}
+
+fn dotted_path(path: &[String]) -> String {
+    path.iter()
+        .map(|component| display_path_component(component))
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn display_path_parts(path: &[String]) -> (String, String) {
+    match path.split_last() {
+        Some((leaf, parent)) => {
+            let parent = if parent.is_empty() {
+                String::new()
+            } else {
+                format!("{}.", dotted_path(parent))
+            };
+            (parent, display_path_component(leaf))
+        }
+        None => (String::new(), String::new()),
+    }
+}
+
+fn tree_leaf_label(path: &[String]) -> String {
+    path.last()
+        .map(|component| display_path_component(component))
+        .unwrap_or_default()
+}
+
+fn display_qualified_path_parts(path: &str) -> (&str, &str) {
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut separator = None;
+    for (index, character) in path.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            '.' if !quoted => separator = Some(index),
+            _ => {}
+        }
+    }
+    separator
+        .map(|index| (&path[..=index], &path[index + 1..]))
+        .unwrap_or(("", path))
+}
+
+fn observation_error(error: &ApiClientError) -> String {
+    match error {
+        ApiClientError::Status {
+            code: 403 | 404, ..
+        } => "This configuration observation is unavailable or you do not have access.".into(),
+        ApiClientError::Status { code: 422, body } if !body.is_empty() => body.clone(),
+        _ => "The configuration observation request failed.".into(),
+    }
+}
+
+fn lifecycle_copy(lifecycle: ConfigObservationLifecycle) -> &'static str {
+    match lifecycle {
+        ConfigObservationLifecycle::Queued => "Queued",
+        ConfigObservationLifecycle::WaitingForCapacity => "Waiting for evaluator capacity",
+        ConfigObservationLifecycle::Running => "Inspecting",
+        ConfigObservationLifecycle::Succeeded => "Loading observation",
+        ConfigObservationLifecycle::Failed => "Inspection failed",
+    }
+}
+
+fn render_json_value(value: &JsonValue) -> String {
+    match value {
+        JsonValue::String(value) => format!("\"{value}\""),
+        _ => serde_json::to_string(value).unwrap_or_else(|_| "<unavailable>".into()),
+    }
+}
+
+fn render_safe_option_value(value: &SafeOptionValue) -> String {
+    match value {
+        SafeOptionValue::Scalar(value) => render_json_value(value),
+        SafeOptionValue::Package(package) => {
+            let identity = package
+                .name
+                .as_ref()
+                .or(package.pname.as_ref())
+                .map(String::as_str)
+                .unwrap_or("package");
+            package
+                .version
+                .as_ref()
+                .map(|version| format!("{identity}-{version}"))
+                .unwrap_or_else(|| identity.to_string())
+        }
+        SafeOptionValue::List(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(render_safe_option_value)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        SafeOptionValue::AttributeSet(values) | SafeOptionValue::Submodule(values) => {
+            render_json_value(&JsonValue::Object(values.clone()))
+        }
+        SafeOptionValue::Opaque { type_name } => format!("<{type_name}: opaque>"),
+        SafeOptionValue::Failed(error) => format!("not evaluated: {}", error.message),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ValuePresentation {
+    text: String,
+    class: &'static str,
+}
+
+fn present_safe_option_value(value: &SafeOptionValue) -> ValuePresentation {
+    let class = match value {
+        SafeOptionValue::Scalar(JsonValue::Bool(_)) => "v-bool",
+        SafeOptionValue::Scalar(JsonValue::Number(_)) => "v-num",
+        SafeOptionValue::Scalar(JsonValue::String(value)) if value.starts_with("/nix/store/") => {
+            "v-store"
+        }
+        SafeOptionValue::Scalar(JsonValue::String(_)) => "v-str",
+        SafeOptionValue::Scalar(JsonValue::Null) => "v-null",
+        SafeOptionValue::Scalar(JsonValue::Array(_)) | SafeOptionValue::List(_) => "v-list",
+        SafeOptionValue::Scalar(JsonValue::Object(_))
+        | SafeOptionValue::AttributeSet(_)
+        | SafeOptionValue::Submodule(_) => "v-attrs",
+        SafeOptionValue::Package(_) => "v-store",
+        SafeOptionValue::Opaque { .. } => "v-fn",
+        SafeOptionValue::Failed(_) => "cfg-val-err",
+    };
+    ValuePresentation {
+        text: render_safe_option_value(value),
+        class,
+    }
+}
+
+fn scoped_option_presentation(state: Option<&ObservationState>) -> Option<ValuePresentation> {
+    let observation = scoped_option(state)?;
+    match &observation.payload {
+        ConfigObservationPayload::Option { value, .. } => Some(present_safe_option_value(value)),
+        _ => None,
+    }
+}
+
+fn render_typed_diff_value(value: &JsonValue) -> String {
+    serde_json::from_value::<SafeOptionValue>(value.clone())
+        .map(|value| render_safe_option_value(&value))
+        .unwrap_or_else(|_| render_json_value(value))
+}
+
+fn scoped_option<'a>(state: Option<&'a ObservationState>) -> Option<&'a ConfigObservationResponse> {
+    match state {
+        Some(ObservationState::Loaded(observation))
+            if matches!(observation.payload, ConfigObservationPayload::Option { .. }) =>
+        {
+            Some(observation)
+        }
+        _ => None,
+    }
+}
+
+fn scoped_option_value(state: Option<&ObservationState>) -> Option<String> {
+    let observation = scoped_option(state)?;
+    match &observation.payload {
+        ConfigObservationPayload::Option { value, .. } => Some(render_safe_option_value(value)),
+        _ => None,
+    }
+}
+
+fn scoped_option_source(
+    path: &[String],
+    provenance: &HashMap<Vec<String>, ConfigObservationResponse>,
+) -> Option<String> {
+    match &provenance.get(path)?.payload {
+        ConfigObservationPayload::Provenance { definitions, .. } => definitions
+            .iter()
+            .find_map(|definition| definition.source_path.clone()),
+        _ => None,
+    }
+}
+
+fn evaluated_option_source(option: &EvaluatedOption) -> Option<String> {
+    option
+        .definitions
+        .iter()
+        .find(|definition| definition.winning)
+        .or_else(|| option.definitions.first())
+        .and_then(|definition| {
+            definition
+                .source_path
+                .clone()
+                .or_else(|| definition.source_input.clone())
+        })
+}
+
+fn observed_option_paths(
+    root: &ObservationState,
+    branches: &HashMap<Vec<String>, ObservationState>,
+    configured: &ObservationState,
+    details: &HashMap<Vec<String>, ObservationState>,
+    provenance: &HashMap<Vec<String>, ConfigObservationResponse>,
+    query: &str,
+) -> Vec<Vec<String>> {
+    let mut paths = BTreeMap::<Vec<String>, ()>::new();
+    let mut add_children = |state: &ObservationState| {
+        let ObservationState::Loaded(observation) = state else {
+            return;
+        };
+        let children = match &observation.payload {
+            ConfigObservationPayload::Root { children, .. }
+            | ConfigObservationPayload::Prefix { children, .. } => children,
+            _ => return,
+        };
+        for child in children {
+            if child.kind == ConfigObservationChildKind::Option {
+                paths.insert(child.path_components.clone(), ());
+            }
+        }
+    };
+    add_children(root);
+    for branch in branches.values() {
+        add_children(branch);
+    }
+    if let ObservationState::Loaded(observation) = configured
+        && let ConfigObservationPayload::ConfiguredIndex {
+            configured: options,
+            ..
+        } = &observation.payload
+    {
+        for option in options {
+            paths.insert(option.path_components.clone(), ());
+        }
+    }
+    for path in details.keys() {
+        paths.insert(path.clone(), ());
+    }
+
+    let query = query.trim().to_ascii_lowercase();
+    paths
+        .into_keys()
+        .filter(|path| {
+            query.is_empty()
+                || dotted_path(path).to_ascii_lowercase().contains(&query)
+                || scoped_option_value(details.get(path))
+                    .is_some_and(|value| value.to_ascii_lowercase().contains(&query))
+                || scoped_option_source(path, provenance)
+                    .is_some_and(|source| source.to_ascii_lowercase().contains(&query))
+        })
+        .collect()
+}
+
+fn observation_task_is_current(
+    expected_scope: u64,
+    current_scope: u64,
+    expected_operation: u64,
+    current_operation: u64,
+) -> bool {
+    expected_scope == current_scope && expected_operation == current_operation
+}
+
+fn merge_tree_observation(
+    current: &ConfigObservationResponse,
+    mut page: ConfigObservationResponse,
+) -> Result<ConfigObservationResponse, String> {
+    let (current_children, current_total) = match &current.payload {
+        ConfigObservationPayload::Root {
+            children,
+            total_children,
+            ..
+        }
+        | ConfigObservationPayload::Prefix {
+            children,
+            total_children,
+            ..
+        } => (children, *total_children),
+        _ => return Err("Current observation is not a tree page.".into()),
+    };
+    let expected_offset = u32::try_from(current_children.len())
+        .map_err(|_| "Current observation exceeds the child bound.".to_string())?;
+    if page.child_offset != expected_offset
+        || page.kind != current.kind
+        || page.path_components != current.path_components
+    {
+        return Err("Continuation identity did not match the loaded tree.".into());
+    }
+    let known = current_children
+        .iter()
+        .map(|child| child.path_components.clone())
+        .collect::<HashSet<_>>();
+    let known_keys = current_children
+        .iter()
+        .map(|child| child.key.clone())
+        .collect::<HashSet<_>>();
+    let (page_children, page_total, page_truncated) = match &mut page.payload {
+        ConfigObservationPayload::Root {
+            child_offset,
+            children,
+            total_children,
+            children_truncated,
+            ..
+        }
+        | ConfigObservationPayload::Prefix {
+            child_offset,
+            children,
+            total_children,
+            children_truncated,
+            ..
+        } => {
+            if *child_offset != expected_offset || *total_children != current_total {
+                return Err("Continuation totals changed while loading the tree.".into());
+            }
+            (children, *total_children, *children_truncated)
+        }
+        _ => return Err("Continuation payload is not a tree page.".into()),
+    };
+    let mut page_paths = HashSet::new();
+    let mut page_keys = HashSet::new();
+    let mut previous_path = current_children
+        .last()
+        .map(|child| child.path_components.as_slice());
+    for child in page_children.iter() {
+        if known.contains(&child.path_components)
+            || known_keys.contains(&child.key)
+            || !page_paths.insert(child.path_components.clone())
+            || !page_keys.insert(child.key.clone())
+            || previous_path.is_some_and(|previous| previous >= child.path_components.as_slice())
+        {
+            return Err("Continuation repeated or reordered a child.".into());
+        }
+        previous_path = Some(&child.path_components);
+    }
+    let mut merged = current_children.clone();
+    merged.append(page_children);
+    let merged_count = u32::try_from(merged.len())
+        .map_err(|_| "Merged observation exceeds the child bound.".to_string())?;
+    let merged_count = u64::from(merged_count);
+    if merged_count > page_total
+        || page_truncated != (merged_count < page_total)
+        || (page_truncated && merged_count == u64::from(expected_offset))
+    {
+        return Err("Continuation count did not match the loaded tree.".into());
+    }
+    match &mut page.payload {
+        ConfigObservationPayload::Root {
+            child_offset,
+            children,
+            total_children,
+            children_truncated,
+            ..
+        }
+        | ConfigObservationPayload::Prefix {
+            child_offset,
+            children,
+            total_children,
+            children_truncated,
+            ..
+        } => {
+            *child_offset = 0;
+            *children = merged;
+            *total_children = page_total;
+            *children_truncated = page_truncated;
+        }
+        _ => unreachable!("tree payload was checked above"),
+    }
+    page.child_offset = 0;
+    Ok(page)
+}
+
+// ---------------------------------------------------------------------------
+// Bounded automatic value preview: visibility tracking
+// ---------------------------------------------------------------------------
+//
+// Mirrors the existing `hooks::infinite_scroll` convention: rows carry a
+// stable server-issued key in a `data-*` attribute, register themselves via
+// `onmounted`, and one shared `IntersectionObserver` per Explorer instance
+// maintains the visible set. This avoids a parallel per-row DOM-element
+// registry; only the CSS selector lookup at registration time needs the key.
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static VISIBLE_OPTION_OBSERVERS: std::cell::RefCell<
+        HashMap<u32, (web_sys::IntersectionObserver, wasm_bindgen::prelude::Closure<dyn FnMut(js_sys::Array)>)>
+    > = std::cell::RefCell::new(HashMap::new());
+}
+
+static VISIBLE_OPTION_HOOK_COUNTER: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
+/// Renders the structured path as the value of a `data-cfgx-path` attribute.
+///
+/// The visibility observer reads this attribute directly from the
+/// intersecting element; no side table of DOM node identities is kept.
+fn visible_row_path_attr(path: &[String]) -> String {
+    serde_json::to_string(path).unwrap_or_default()
+}
+
+/// Tracks Option rows currently intersecting the `.cfgx-scroll` viewport.
+///
+/// Returns the live visible-path set and a hook identity used to register
+/// individual rows. "Visible" means genuinely inside the scrollable tree
+/// viewport, not merely present somewhere in an expanded page of rows.
+fn use_visible_option_paths() -> (Signal<HashSet<Vec<String>>>, u32) {
+    let hook_id = use_signal(|| {
+        VISIBLE_OPTION_HOOK_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    });
+    let id = *hook_id.read();
+    let visible = use_signal(HashSet::<Vec<String>>::new);
+
+    use_effect(move || {
+        #[cfg(target_arch = "wasm32")]
+        {
+            use wasm_bindgen::JsCast;
+            use wasm_bindgen::prelude::*;
+            let mut visible = visible;
+            let Some(window) = web_sys::window() else {
+                return;
+            };
+            let Some(document) = window.document() else {
+                return;
+            };
+            let callback =
+                Closure::<dyn FnMut(js_sys::Array)>::new(move |entries: js_sys::Array| {
+                    for entry in entries.iter() {
+                        let entry: web_sys::IntersectionObserverEntry = entry.unchecked_into();
+                        let Some(raw_path) = entry.target().get_attribute("data-cfgx-path") else {
+                            continue;
+                        };
+                        let Ok(path) = serde_json::from_str::<Vec<String>>(&raw_path) else {
+                            continue;
+                        };
+                        if entry.is_intersecting() {
+                            visible.with_mut(|set| {
+                                set.insert(path);
+                            });
+                        } else {
+                            visible.with_mut(|set| {
+                                set.remove(&path);
+                            });
+                        }
+                    }
+                });
+            let mut options = web_sys::IntersectionObserverInit::new();
+            options.root_margin("0px");
+            if let Some(root) = document.query_selector(".cfgx-scroll").ok().flatten() {
+                options.root(Some(&root));
+            }
+            if let Ok(observer) = web_sys::IntersectionObserver::new_with_options(
+                callback.as_ref().unchecked_ref(),
+                &options,
+            ) {
+                VISIBLE_OPTION_OBSERVERS.with(|registry| {
+                    if let Some((old, _)) = registry.borrow_mut().insert(id, (observer, callback)) {
+                        old.disconnect();
+                    }
+                });
+            }
+        }
+    });
+
+    use_drop(move || {
+        #[cfg(target_arch = "wasm32")]
+        VISIBLE_OPTION_OBSERVERS.with(|registry| {
+            if let Some((observer, _)) = registry.borrow_mut().remove(&id) {
+                observer.disconnect();
+            }
+        });
+    });
+
+    (visible, id)
+}
+
+/// Registers one rendered Option row for visibility tracking.
+///
+/// Call from that row's `onmounted`. Dioxus fires `onmounted` once for a DOM
+/// node it does not remount, so this is safe to call unconditionally.
+fn observe_visible_option_row(hook_id: u32, key: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        // SAFETY(selector): `key` is a server-issued hex content digest
+        // (`option_key`), so it cannot contain characters that require CSS
+        // attribute-selector escaping.
+        let selector = format!("[data-cfgx-auto-key='{key}']");
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let Some(element) = document.query_selector(&selector).ok().flatten() else {
+            return;
+        };
+        VISIBLE_OPTION_OBSERVERS.with(|registry| {
+            if let Some((observer, _)) = registry.borrow().get(&hook_id) {
+                observer.observe(&element);
+            }
+        });
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (hook_id, key);
+}
+
+/// Removes every visible-row entry at or below a collapsed prefix.
+///
+/// Loaded branch content is cached and not cleared on collapse, so the
+/// visible set must be pruned explicitly here rather than relying on the
+/// browser to report collapsed (but still-cached) rows as non-intersecting.
+fn prune_collapsed_branch(visible: &mut HashSet<Vec<String>>, collapsed_prefix: &[String]) {
+    visible.retain(|path| {
+        path.len() <= collapsed_prefix.len() || &path[..collapsed_prefix.len()] != collapsed_prefix
+    });
+}
+
+/// Chooses the next automatic preview candidate, if any.
+///
+/// Only visible paths with no existing cache entry qualify: a value that is
+/// already loading, loaded, failed, or deferred is never re-enqueued
+/// automatically. The bounded window is applied before selection, but
+/// selection always picks the lexicographically smallest (topmost-rendered)
+/// candidate, so the window size does not change which candidate is chosen
+/// among a smaller visible set — it only bounds how much of a very tall
+/// viewport is considered per pass.
+fn next_automatic_candidate(
+    visible: &HashSet<Vec<String>>,
+    cached: &HashMap<Vec<String>, ObservationState>,
+    window: usize,
+) -> Option<Vec<String>> {
+    let mut candidates: Vec<&Vec<String>> = visible
+        .iter()
+        .filter(|path| !cached.contains_key(*path))
+        .collect();
+    candidates.sort();
+    candidates.truncate(window.max(1));
+    candidates.into_iter().next().cloned()
+}
+
+fn start_top_level_observation(
+    system_id: Uuid,
+    revision: String,
+    kind: ConfigObservationKind,
+    sequence: u64,
+    operation_sequence: Signal<u64>,
+    component_active: Rc<Cell<bool>>,
+    mut state: Signal<ObservationState>,
+) {
+    state.set(ObservationState::Lifecycle(
+        ConfigObservationLifecycle::Queued,
+    ));
+    spawn(async move {
+        let is_current = || component_active.get() && sequence == *operation_sequence.peek();
+        let result = load_system_config_observation(
+            &system_id,
+            &revision,
+            CreateConfigObservationRequest {
+                kind,
+                path_components: Vec::new(),
+                child_offset: 0,
+                automatic: false,
+            },
+            |request| {
+                if is_current() {
+                    state.set(ObservationState::Lifecycle(request.lifecycle));
+                }
+            },
+            is_current,
+        )
+        .await;
+        if !is_current() {
+            return;
+        }
+        match result {
+            Ok(Some(observation)) => state.set(ObservationState::Loaded(observation)),
+            Ok(None) => {}
+            Err(error) => state.set(ObservationState::Error(observation_error(&error))),
+        }
+    });
+}
+
+/// Bundles the signals and identity needed to load or preview one option's
+/// detail, shared between explicit selection and the automatic scheduler.
+///
+/// Cloning is cheap: every field is a `Signal` (`Copy`) except `revision`
+/// (a small owned `Option<String>` snapshot of the currently selected exact
+/// target) and `component_active` (a shared drop flag).
+#[derive(Clone)]
+struct OptionLoadContext {
+    system_id: Uuid,
+    revision: Option<String>,
+    scoped_enabled: bool,
+    component_active: Rc<Cell<bool>>,
+    scope_sequence: Signal<u64>,
+    detail_sequence: Signal<u64>,
+    detail_sequences: Signal<HashMap<Vec<String>, u64>>,
+    detail_cache: Signal<HashMap<Vec<String>, ObservationState>>,
+    announcement: Signal<String>,
+    visible_paths: Signal<HashSet<Vec<String>>>,
+    automatic_active_path: Signal<Option<Vec<String>>>,
+}
+
+/// Ensures one option's detail is loading or loaded, regardless of caller.
+///
+/// Both explicit selection and the automatic scheduler share this path.
+///
+/// * An explicit click sharing an in-flight or already-loaded entry never
+///   starts a duplicate fetch; only a terminal [`ObservationState::Error`] or
+///   [`ObservationState::Deferred`] entry is retried explicitly.
+/// * An automatic preview never starts on top of any existing entry
+///   (loaded, in-flight, failed, or deferred): no automatic retry, and no
+///   duplicate of a request another caller already claimed.
+///
+/// When the fetch was automatic, completion (success, failure, staleness, or
+/// a tombstoned response) always clears the single-flight marker and
+/// advances the automatic queue, but only while the caller's exact scope is
+/// still current; a stale automatic completion after a revision or system
+/// change must not continue scheduling work for the old target.
+///
+/// Returns `true` when a new fetch started.
+fn ensure_option_detail(ctx: OptionLoadContext, intent: RequestIntent, path: Vec<String>) -> bool {
+    let existing = ctx.detail_cache.peek().get(&path).cloned();
+    let should_start = match (&existing, intent) {
+        (Some(_), RequestIntent::Automatic) => false,
+        (None, _) => true,
+        (
+            Some(ObservationState::Error(_) | ObservationState::Deferred),
+            RequestIntent::Explicit,
+        ) => true,
+        (Some(_), RequestIntent::Explicit) => false,
+    };
+    if !should_start {
+        return false;
+    }
+    let Some(revision) = ctx.revision.clone().filter(|_| ctx.scoped_enabled) else {
+        return false;
+    };
+    let OptionLoadContext {
+        system_id,
+        component_active,
+        scope_sequence,
+        mut detail_sequence,
+        mut detail_sequences,
+        mut detail_cache,
+        mut announcement,
+        mut automatic_active_path,
+        ..
+    } = ctx.clone();
+    let sequence = detail_sequence.peek().saturating_add(1);
+    detail_sequence.set(sequence);
+    let scope = *scope_sequence.peek();
+    detail_sequences.write().insert(path.clone(), sequence);
+    if intent == RequestIntent::Explicit {
+        announcement.set(format!("Inspecting option {}", dotted_path(&path)));
+    }
+    detail_cache.write().insert(
+        path.clone(),
+        ObservationState::Lifecycle(ConfigObservationLifecycle::Queued),
+    );
+    let continuation_ctx = ctx;
+    spawn(async move {
+        let is_current = || {
+            component_active.get()
+                && observation_task_is_current(
+                    scope,
+                    *scope_sequence.peek(),
+                    sequence,
+                    detail_sequences
+                        .peek()
+                        .get(&path)
+                        .copied()
+                        .unwrap_or_default(),
+                )
+        };
+        let result = load_system_config_observation(
+            &system_id,
+            &revision,
+            CreateConfigObservationRequest {
+                kind: ConfigObservationKind::Option,
+                path_components: path.clone(),
+                child_offset: 0,
+                automatic: intent.is_automatic(),
+            },
+            |request| {
+                if is_current() {
+                    detail_cache
+                        .write()
+                        .insert(path.clone(), ObservationState::Lifecycle(request.lifecycle));
+                }
+            },
+            is_current,
+        )
+        .await;
+        if is_current() {
+            let next_state = match result {
+                Ok(Some(observation)) => Some(ObservationState::Loaded(observation)),
+                Ok(None) => None,
+                Err(error) => Some(match intent {
+                    RequestIntent::Explicit => ObservationState::Error(observation_error(&error)),
+                    RequestIntent::Automatic => ObservationState::Deferred,
+                }),
+            };
+            if let Some(next_state) = next_state {
+                if intent == RequestIntent::Explicit {
+                    announcement.set(match &next_state {
+                        ObservationState::Error(_) => {
+                            format!("Option {} inspection failed", dotted_path(&path))
+                        }
+                        _ => format!("Loaded option {}", dotted_path(&path)),
+                    });
+                }
+                detail_cache.write().insert(path.clone(), next_state);
+            }
+        }
+        // CONCURRENCY: Only continue the automatic pipeline while this
+        // execution's exact scope (system/revision target) is still current.
+        // A stale completion after a revision or system change must not
+        // schedule further automatic work against the old target.
+        if intent.is_automatic() && component_active.get() && *scope_sequence.peek() == scope {
+            if automatic_active_path.peek().as_deref() == Some(path.as_slice()) {
+                automatic_active_path.set(None);
+            }
+            advance_automatic_queue(continuation_ctx);
+        }
+    });
+    true
+}
+
+/// Starts the next bounded automatic option preview, if any is eligible.
+///
+/// A no-op when automatic previews are disabled for the current target, one
+/// is already in flight, or no visible row is both uncached and eligible.
+fn advance_automatic_queue(ctx: OptionLoadContext) {
+    if !ctx.scoped_enabled || ctx.revision.is_none() {
+        return;
+    }
+    if ctx.automatic_active_path.peek().is_some() {
+        return;
+    }
+    let Some(path) = next_automatic_candidate(
+        &ctx.visible_paths.peek(),
+        &ctx.detail_cache.peek(),
+        MAX_AUTOMATIC_PENDING_CANDIDATES,
+    ) else {
+        return;
+    };
+    let mut automatic_active_path = ctx.automatic_active_path;
+    automatic_active_path.set(Some(path.clone()));
+    ensure_option_detail(ctx, RequestIntent::Automatic, path);
+}
+
+#[component]
+fn ExplorerStatus(state: ObservationState, surface: &'static str) -> Element {
+    match state {
+        ObservationState::Idle => rsx! {
+            div { class: "cfg-explorer-status", role: "status", "{surface} is idle." }
+        },
+        ObservationState::Lifecycle(lifecycle) => rsx! {
+            div { class: "cfg-explorer-status", role: "status", "{surface}: {lifecycle_copy(lifecycle)}" }
+        },
+        ObservationState::Error(error) => rsx! {
+            div { class: "cfg-explorer-status cfg-explorer-error", role: "alert", "{surface}: {error}" }
+        },
+        ObservationState::Deferred => rsx! {
+            div { class: "cfg-explorer-status", role: "status", "{surface} was not loaded automatically." }
+        },
+        ObservationState::Loaded(_) => rsx! {},
+    }
+}
+
+#[component]
+fn ExplorerChildren(
+    entries: Vec<ConfigObservationChild>,
+    depth: usize,
+    expanded: Signal<HashSet<Vec<String>>>,
+    branches: Signal<HashMap<Vec<String>, ObservationState>>,
+    details: Signal<HashMap<Vec<String>, ObservationState>>,
+    provenance: Signal<HashMap<Vec<String>, ConfigObservationResponse>>,
+    more_loading: Signal<HashSet<Vec<String>>>,
+    more_errors: Signal<HashMap<Vec<String>, String>>,
+    selected_path: Vec<String>,
+    visible_hook_id: u32,
+    on_prefix: EventHandler<(Vec<String>, u32)>,
+    on_option: EventHandler<Vec<String>>,
+) -> Element {
+    rsx! {
+        ul { class: "cfg-explorer-tree",
+            for child in entries {
+                {
+                    let path = child.path_components.clone();
+                    let display = dotted_path(&path);
+                    let leaf = tree_leaf_label(&path);
+                    let is_expanded = expanded.read().contains(&path);
+                    let branch_state = branches.read().get(&path).cloned().unwrap_or(ObservationState::Idle);
+                    let detail_state = details.read().get(&path).cloned();
+                    let value = scoped_option_presentation(detail_state.as_ref());
+                    let source = scoped_option_source(&path, &provenance.read());
+                    let row_style = format!("--cfgx-depth:{}px", depth * 15);
+                    rsx! {
+                        li { key: "{child.key}", class: "cfg-explorer-node",
+                            match child.kind {
+                                ConfigObservationChildKind::Prefix => rsx! {
+                                    button {
+                                        class: if matches!(&branch_state, ObservationState::Error(_)) { "cfg-explorer-tree-row branch failed focus-ring" } else { "cfg-explorer-tree-row branch focus-ring" },
+                                        style: "{row_style}",
+                                        "aria-label": if is_expanded { format!("Collapse {display}") } else { format!("Expand {display}") },
+                                        "aria-expanded": is_expanded,
+                                        onclick: {
+                                            let path = path.clone();
+                                            move |_| on_prefix.call((path.clone(), 0))
+                                        },
+                                        span { class: "mono cfg-explorer-path", title: "config.{display}", span { class: if is_expanded { "cfg-caret open" } else { "cfg-caret" }, Icon { name: IconName::ChevronRight, size: 12 } } "{leaf}" }
+                                        span { class: "cfgx-val sub",
+                                            if is_expanded {
+                                                if let ObservationState::Lifecycle(lifecycle) = &branch_state {
+                                                    span { class: "cfgx-insp", title: "{lifecycle_copy(lifecycle.clone())}", i {} "{lifecycle_copy(lifecycle.clone()).to_ascii_lowercase()}" }
+                                                } else if matches!(&branch_state, ObservationState::Error(_)) {
+                                                    span { class: "err", "unavailable" }
+                                                }
+                                            }
+                                        }
+                                        span { class: "cfgx-by mono", "aria-label": "Not applicable to a namespace" }
+                                    }
+                                    if is_expanded {
+                                        match branch_state.clone() {
+                                            ObservationState::Loaded(observation) => match observation.payload {
+                                                ConfigObservationPayload::Prefix { children, children_truncated, total_children, .. } => rsx! {
+                                                    ExplorerChildren {
+                                                        entries: children.clone(),
+                                                        depth: depth + 1,
+                                                        expanded,
+                                                        branches,
+                                                        details,
+                                                        provenance,
+                                                        more_loading,
+                                                        more_errors,
+                                                        selected_path: selected_path.clone(),
+                                                        visible_hook_id,
+                                                        on_prefix,
+                                                        on_option,
+                                                    }
+                                                    if children_truncated {
+                                                        button {
+                                                            class: "btn btn-ghost focus-ring xs",
+                                                            disabled: more_loading.read().contains(&path),
+                                                            "aria-label": "Load more children under {display}",
+                                                            onclick: {
+                                                                let path = path.clone();
+                                                                let offset = u32::try_from(children.len()).unwrap_or(u32::MAX);
+                                                                move |event| { event.stop_propagation(); on_prefix.call((path.clone(), offset)); }
+                                                            },
+                                                            if more_loading.read().contains(&path) { "Loading more…" } else { "Load more" }
+                                                        }
+                                                        span { class: "cfg-explorer-local-note", role: "status", "Showing {children.len()} of {total_children} children under {display}." }
+                                                    }
+                                                    if let Some(error) = more_errors.read().get(&path) { div { class: "cfg-explorer-local-error", role: "alert", "{error}" } }
+                                                },
+                                                _ => rsx! { div { class: "cfg-explorer-local-error", role: "alert", "Unexpected observation payload for {display}." } },
+                                            },
+                                            ObservationState::Error(error) => rsx! {
+                                                div { class: "cfg-explorer-local-error", role: "alert",
+                                                    span { "{display}: {error}" }
+                                                    button {
+                                                        class: "btn btn-ghost focus-ring xs",
+                                                        "aria-label": "Retry {display}",
+                                                        onclick: {
+                                                            let path = path.clone();
+                                                            move |event| { event.stop_propagation(); on_prefix.call((path.clone(), 0)); }
+                                                        },
+                                                        "Retry"
+                                                    }
+                                                }
+                                            },
+                                            ObservationState::Idle | ObservationState::Lifecycle(_) | ObservationState::Deferred => rsx! {},
+                                        }
+                                    }
+                                },
+                                ConfigObservationChildKind::Option => rsx! {
+                                    button {
+                                        class: if selected_path == path { "cfg-explorer-tree-row cfg-explorer-option sel focus-ring" } else { "cfg-explorer-tree-row cfg-explorer-option focus-ring" },
+                                        style: "{row_style}",
+                                        "aria-pressed": selected_path == path,
+                                        "aria-label": "Inspect option {display}",
+                                        "data-cfgx-auto-key": "{child.key}",
+                                        "data-cfgx-path": "{visible_row_path_attr(&path)}",
+                                        onmounted: {
+                                            let key = child.key.clone();
+                                            move |_| observe_visible_option_row(visible_hook_id, &key)
+                                        },
+                                        onclick: {
+                                            let path = path.clone();
+                                            move |_| on_option.call(path.clone())
+                                        },
+                                        span { class: "mono cfg-explorer-path", title: "config.{display}", span { class: "cfg-explorer-leaf cfgx-bullet" } "{leaf}" }
+                                        span { class: "cfgx-val mono",
+                                            match detail_state {
+                                                Some(ObservationState::Lifecycle(lifecycle)) => rsx! { span { class: "cfgx-insp", title: "{lifecycle_copy(lifecycle)} option value", i {} } },
+                                                Some(ObservationState::Error(_)) => rsx! { span { class: "cfg-val-err", title: "Option value is unavailable", "unavailable" } },
+                                                Some(ObservationState::Deferred) => rsx! { span { class: "cfgx-deferred", title: "Not loaded automatically — select to inspect.", "not loaded" } },
+                                                _ => if let Some(value) = value { rsx! { span { class: "{value.class}", title: "{value.text}", "{value.text}" } } } else { rsx! { span { class: "cfgx-uninspected", title: "Value not inspected", "aria-label": "Value not inspected" } } },
+                                            }
+                                        }
+                                        span { class: "cfgx-by mono", if let Some(source) = source { span { title: "{source}", "{source}" } } else { span { class: "cfgx-uninspected", title: "Provenance not inspected", "aria-label": "Provenance not inspected" } } }
+                                    }
+                                },
+                                ConfigObservationChildKind::Unavailable => rsx! {
+                                    div { class: "cfg-explorer-tree-row cfg-explorer-unavailable", style: "{row_style}", role: "status", "aria-label": "Unavailable child {display}",
+                                        span { class: "mono cfg-explorer-path", title: "config.{display}", span { class: "cfg-explorer-leaf", Icon { name: IconName::Warn, size: 12 } } "{leaf}" }
+                                        span { class: "cfgx-val mono cfg-val-err", "unavailable" }
+                                        span { class: "cfgx-by mono", "aria-label": "Source unavailable" }
+                                    }
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Renders independent lazy hierarchy and configured-option observations.
+///
+/// The component never uses the certified V2 snapshot token for scoped reads.
+/// When `scoped_enabled` is false, Browse and Configured remain local
+/// unavailable states while certified Search and Sources remain usable.
+#[component]
+pub(crate) fn ConfigExplorer(
+    system_id: Uuid,
+    revision: Option<String>,
+    scoped_enabled: bool,
+    disabled_reason: String,
+    target: String,
+    primary_lifecycle: SnapshotLifecycle,
+    evaluation_time: String,
+    package_count: String,
+    closure_size: String,
+    carrier: String,
+    inventory_label: String,
+    inventory_state: OptionInventoryState,
+    inventory_request_allowed: bool,
+    inventory_request_error: Option<String>,
+    comparison_ready: bool,
+    search: Signal<String>,
+    search_rows: Vec<EvaluatedOptionRow>,
+    search_total: i64,
+    search_offset: i64,
+    search_limit: i64,
+    search_filter: EvaluatedOptionFilter,
+    search_counts: EvaluatedOptionCounts,
+    search_loading: bool,
+    search_error: Option<String>,
+    comparison_baseline: Option<String>,
+    certified_sources: Vec<EvaluationModuleSummary>,
+    certified_sources_complete: bool,
+    certified_sources_has_more: bool,
+    certified_sources_loading_more: bool,
+    certified_sources_error: Option<String>,
+    on_request_inventory: EventHandler<()>,
+    on_search_offset: EventHandler<i64>,
+    on_search_filter: EventHandler<EvaluatedOptionFilter>,
+    on_load_more_sources: EventHandler<()>,
+    on_open_definition: EventHandler<OptionDefinitionProvenance>,
+    on_open_source: EventHandler<EvaluationModuleSummary>,
+) -> Element {
+    let mut scope_sequence = use_signal(|| 0_u64);
+    let mut root_sequence = use_signal(|| 0_u64);
+    let mut configured_sequence = use_signal(|| 0_u64);
+    let mut branch_sequence = use_signal(|| 0_u64);
+    let mut detail_sequence = use_signal(|| 0_u64);
+    let mut provenance_sequence = use_signal(|| 0_u64);
+    let mut root = use_signal(|| ObservationState::Idle);
+    let mut configured = use_signal(|| ObservationState::Idle);
+    let mut branches = use_signal(HashMap::<Vec<String>, ObservationState>::new);
+    let mut branch_sequences = use_signal(HashMap::<Vec<String>, u64>::new);
+    let mut branch_more_loading = use_signal(HashSet::<Vec<String>>::new);
+    let mut branch_more_errors = use_signal(HashMap::<Vec<String>, String>::new);
+    let mut expanded = use_signal(HashSet::<Vec<String>>::new);
+    let mut root_more_loading = use_signal(|| false);
+    let mut root_more_error = use_signal(|| None::<String>);
+    let mut detail_cache = use_signal(HashMap::<Vec<String>, ObservationState>::new);
+    let mut detail_sequences = use_signal(HashMap::<Vec<String>, u64>::new);
+    let (mut visible_option_paths, visible_option_hook_id) = use_visible_option_paths();
+    // CONCURRENCY: This marker is claimed before an automatic request starts
+    // and released only by that request's completion path. It enforces one
+    // automatic evaluation at a time even when several observer callbacks or
+    // debounced effects arrive in the same render cycle.
+    let mut automatic_active_path = use_signal(|| None::<Vec<String>>);
+    let mut automatic_schedule_generation = use_signal(|| 0_u64);
+    let mut detail_path = use_signal(Vec::<String>::new);
+    let mut certified_detail = use_signal(|| None::<EvaluatedOptionRow>);
+    let mut provenance = use_signal(|| ObservationState::Idle);
+    let mut provenance_cache = use_signal(HashMap::<Vec<String>, ConfigObservationResponse>::new);
+    let mut mode = use_signal(|| ExplorerMode::Browse);
+    let mut inspector_pane = use_signal(|| InspectorPane::Sources);
+    // One shared polite live region reports the most recent scoped operation.
+    // Row-level indicators stay visual because assistive technology ignores
+    // nested status content inside a row button.
+    let mut announcement = use_signal(String::new);
+    let component_active = use_hook(|| Rc::new(Cell::new(true)));
+    {
+        let component_active = component_active.clone();
+        use_drop(move || component_active.set(false));
+    }
+
+    {
+        let component_active = component_active.clone();
+        use_effect(use_reactive(
+            (&revision, &scoped_enabled),
+            move |(requested_revision, scoped_enabled)| {
+                // CONCURRENCY: Invalidate every prior operation before clearing
+                // scoped state. Start Root in this effect so a separate reset
+                // effect cannot overwrite its Queued lifecycle with Idle.
+                let sequence = next_operation_sequence(*scope_sequence.peek());
+                scope_sequence.set(sequence);
+                let root_operation = next_operation_sequence(*root_sequence.peek());
+                root_sequence.set(root_operation);
+                let configured_operation = next_operation_sequence(*configured_sequence.peek());
+                configured_sequence.set(configured_operation);
+                branches.set(HashMap::new());
+                branch_sequences.set(HashMap::new());
+                branch_more_loading.set(HashSet::new());
+                branch_more_errors.set(HashMap::new());
+                expanded.set(HashSet::new());
+                root.set(ObservationState::Idle);
+                configured.set(ObservationState::Idle);
+                root_more_loading.set(false);
+                root_more_error.set(None);
+                detail_cache.set(HashMap::new());
+                detail_sequences.set(HashMap::new());
+                visible_option_paths.set(HashSet::new());
+                automatic_active_path.set(None);
+                let generation = next_operation_sequence(*automatic_schedule_generation.peek());
+                automatic_schedule_generation.set(generation);
+                detail_path.set(Vec::new());
+                certified_detail.set(None);
+                provenance.set(ObservationState::Idle);
+                provenance_cache.set(HashMap::new());
+                mode.set(ExplorerMode::Browse);
+                inspector_pane.set(InspectorPane::Sources);
+                announcement.set(String::new());
+                let operations =
+                    initial_scoped_operations(requested_revision.as_deref(), scoped_enabled);
+                let Some(revision) = requested_revision else {
+                    return;
+                };
+                for operation in operations {
+                    start_top_level_observation(
+                        system_id,
+                        revision.clone(),
+                        operation,
+                        root_operation,
+                        root_sequence,
+                        component_active.clone(),
+                        root,
+                    );
+                }
+            },
+        ));
+    }
+
+    {
+        let revision = revision.clone();
+        let component_active = component_active.clone();
+        use_effect(use_reactive(&mode, move |selected_mode| {
+            if !should_start_configured(*selected_mode.read(), &configured.peek()) {
+                return;
+            }
+            let sequence = next_operation_sequence(*configured_sequence.peek());
+            configured_sequence.set(sequence);
+            let Some(revision) = revision.clone().filter(|_| scoped_enabled) else {
+                configured.set(ObservationState::Idle);
+                return;
+            };
+            start_top_level_observation(
+                system_id,
+                revision,
+                ConfigObservationKind::ConfiguredIndex,
+                sequence,
+                configured_sequence,
+                component_active.clone(),
+                configured,
+            );
+        }));
+    }
+
+    let retry_root = EventHandler::new({
+        let revision = revision.clone();
+        let component_active = component_active.clone();
+        move |_| {
+            let Some(revision) = revision.clone().filter(|_| scoped_enabled) else {
+                return;
+            };
+            let sequence = next_operation_sequence(*root_sequence.peek());
+            root_sequence.set(sequence);
+            start_top_level_observation(
+                system_id,
+                revision,
+                ConfigObservationKind::Root,
+                sequence,
+                root_sequence,
+                component_active.clone(),
+                root,
+            );
+        }
+    });
+    let retry_configured = EventHandler::new({
+        let revision = revision.clone();
+        let component_active = component_active.clone();
+        move |_| {
+            let Some(revision) = revision.clone().filter(|_| scoped_enabled) else {
+                return;
+            };
+            let sequence = next_operation_sequence(*configured_sequence.peek());
+            configured_sequence.set(sequence);
+            start_top_level_observation(
+                system_id,
+                revision,
+                ConfigObservationKind::ConfiguredIndex,
+                sequence,
+                configured_sequence,
+                component_active.clone(),
+                configured,
+            );
+        }
+    });
+
+    let load_prefix = EventHandler::new({
+        let revision = revision.clone();
+        let component_active = component_active.clone();
+        move |(path, child_offset): (Vec<String>, u32)| {
+            let currently_expanded = expanded.peek().contains(&path);
+            let branch_state = branches.peek().get(&path).cloned();
+            let loaded = matches!(branch_state, Some(ObservationState::Loaded(_)));
+            if child_offset == 0 && currently_expanded {
+                expanded.write().remove(&path);
+                visible_option_paths.with_mut(|visible| prune_collapsed_branch(visible, &path));
+                return;
+            }
+            expanded.write().insert(path.clone());
+            if child_offset == 0 && matches!(branch_state, Some(ObservationState::Lifecycle(_))) {
+                return;
+            }
+            if !should_request_prefix(child_offset, loaded) {
+                return;
+            }
+            let Some(revision) = revision.clone().filter(|_| scoped_enabled) else {
+                return;
+            };
+            let sequence = branch_sequence.peek().saturating_add(1);
+            branch_sequence.set(sequence);
+            let scope = *scope_sequence.peek();
+            branch_sequences.write().insert(path.clone(), sequence);
+            if child_offset == 0 {
+                announcement.set(format!("Inspecting {}", dotted_path(&path)));
+                branches.write().insert(
+                    path.clone(),
+                    ObservationState::Lifecycle(ConfigObservationLifecycle::Queued),
+                );
+            } else {
+                branch_more_loading.write().insert(path.clone());
+                branch_more_errors.write().remove(&path);
+            }
+            let component_active = component_active.clone();
+            spawn(async move {
+                let is_current = || {
+                    component_active.get()
+                        && observation_task_is_current(
+                            scope,
+                            *scope_sequence.peek(),
+                            sequence,
+                            branch_sequences
+                                .peek()
+                                .get(&path)
+                                .copied()
+                                .unwrap_or_default(),
+                        )
+                };
+                let result = load_system_config_observation(
+                    &system_id,
+                    &revision,
+                    CreateConfigObservationRequest {
+                        kind: ConfigObservationKind::Prefix,
+                        path_components: path.clone(),
+                        child_offset,
+                        automatic: false,
+                    },
+                    |request| {
+                        if is_current() && child_offset == 0 {
+                            branches.write().insert(
+                                path.clone(),
+                                ObservationState::Lifecycle(request.lifecycle),
+                            );
+                        }
+                    },
+                    is_current,
+                )
+                .await;
+                if is_current() {
+                    let next_state = match result {
+                        Ok(Some(observation)) if child_offset > 0 => {
+                            let current = branches.peek().get(&path).cloned();
+                            match current {
+                                Some(ObservationState::Loaded(current)) => {
+                                    match merge_tree_observation(&current, observation) {
+                                        Ok(observation) => ObservationState::Loaded(observation),
+                                        Err(error) => {
+                                            branch_more_errors.write().insert(path.clone(), error);
+                                            ObservationState::Loaded(current)
+                                        }
+                                    }
+                                }
+                                _ => ObservationState::Error(
+                                    "Loaded tree was replaced before continuation completed."
+                                        .into(),
+                                ),
+                            }
+                        }
+                        Ok(Some(observation)) => ObservationState::Loaded(observation),
+                        Ok(None) => return,
+                        Err(error) if child_offset > 0 => {
+                            branch_more_errors
+                                .write()
+                                .insert(path.clone(), observation_error(&error));
+                            branch_more_loading.write().remove(&path);
+                            return;
+                        }
+                        Err(error) => ObservationState::Error(observation_error(&error)),
+                    };
+                    branch_more_loading.write().remove(&path);
+                    if child_offset == 0 {
+                        announcement.set(match &next_state {
+                            ObservationState::Error(_) => {
+                                format!("{} inspection failed", dotted_path(&path))
+                            }
+                            _ => format!("Loaded {}", dotted_path(&path)),
+                        });
+                    }
+                    branches.write().insert(path, next_state);
+                }
+            });
+        }
+    });
+
+    let option_load_context = OptionLoadContext {
+        system_id,
+        revision: revision.clone(),
+        scoped_enabled,
+        component_active: component_active.clone(),
+        scope_sequence,
+        detail_sequence,
+        detail_sequences,
+        detail_cache,
+        announcement,
+        visible_paths: visible_option_paths,
+        automatic_active_path,
+    };
+    let select_option = EventHandler::new({
+        let option_load_context = option_load_context.clone();
+        move |path: Vec<String>| {
+            certified_detail.set(None);
+            detail_path.set(path.clone());
+            inspector_pane.set(InspectorPane::Option);
+            provenance.set(
+                provenance_cache
+                    .peek()
+                    .get(&path)
+                    .cloned()
+                    .map(ObservationState::Loaded)
+                    .unwrap_or(ObservationState::Idle),
+            );
+            ensure_option_detail(option_load_context.clone(), RequestIntent::Explicit, path);
+        }
+    });
+
+    {
+        let option_load_context = option_load_context.clone();
+        use_effect(move || {
+            // Subscribe to both inputs. The delayed continuation below checks
+            // the generation, so a scroll/expand/render burst collapses to a
+            // single scheduling pass after the debounce window.
+            let _ = visible_option_paths.read();
+            let _ = detail_cache.read();
+            let generation = next_operation_sequence(*automatic_schedule_generation.peek());
+            automatic_schedule_generation.set(generation);
+            let option_load_context = option_load_context.clone();
+            spawn(async move {
+                gloo_timers::future::TimeoutFuture::new(AUTOMATIC_PREVIEW_DEBOUNCE_MS).await;
+                if *automatic_schedule_generation.peek() == generation {
+                    advance_automatic_queue(option_load_context);
+                }
+            });
+        });
+    }
+
+    let load_provenance = {
+        let revision = revision.clone();
+        let component_active = component_active.clone();
+        move |_| {
+            let path = detail_path.peek().clone();
+            let Some(revision) = revision
+                .clone()
+                .filter(|_| scoped_enabled && !path.is_empty())
+            else {
+                return;
+            };
+            let sequence = provenance_sequence.peek().saturating_add(1);
+            provenance_sequence.set(sequence);
+            let scope = *scope_sequence.peek();
+            provenance.set(ObservationState::Lifecycle(
+                ConfigObservationLifecycle::Queued,
+            ));
+            let component_active = component_active.clone();
+            spawn(async move {
+                let is_current = || {
+                    component_active.get()
+                        && observation_task_is_current(
+                            scope,
+                            *scope_sequence.peek(),
+                            sequence,
+                            *provenance_sequence.peek(),
+                        )
+                        && detail_path.peek().as_slice() == path.as_slice()
+                };
+                let result = load_system_config_observation(
+                    &system_id,
+                    &revision,
+                    CreateConfigObservationRequest {
+                        kind: ConfigObservationKind::Provenance,
+                        path_components: path.clone(),
+                        child_offset: 0,
+                        automatic: false,
+                    },
+                    |request| {
+                        if is_current() {
+                            provenance.set(ObservationState::Lifecycle(request.lifecycle));
+                        }
+                    },
+                    is_current,
+                )
+                .await;
+                if is_current() {
+                    provenance.set(match result {
+                        Ok(Some(observation)) => {
+                            provenance_cache
+                                .write()
+                                .insert(path.clone(), observation.clone());
+                            ObservationState::Loaded(observation)
+                        }
+                        Ok(None) => return,
+                        Err(error) => ObservationState::Error(observation_error(&error)),
+                    });
+                }
+            });
+        }
+    };
+
+    let load_more_root = {
+        let revision = revision.clone();
+        let component_active = component_active.clone();
+        move |_| {
+            let current = root.peek().clone();
+            let ObservationState::Loaded(current_observation) = current else {
+                return;
+            };
+            let ConfigObservationPayload::Root { children, .. } = &current_observation.payload
+            else {
+                return;
+            };
+            let Ok(child_offset) = u32::try_from(children.len()) else {
+                root_more_error.set(Some("Loaded root exceeds the continuation bound.".into()));
+                return;
+            };
+            let Some(revision) = revision.clone().filter(|_| scoped_enabled) else {
+                return;
+            };
+            let sequence = root_sequence.peek().saturating_add(1);
+            root_sequence.set(sequence);
+            let scope = *scope_sequence.peek();
+            root_more_loading.set(true);
+            root_more_error.set(None);
+            let component_active = component_active.clone();
+            spawn(async move {
+                let is_current = || {
+                    component_active.get()
+                        && observation_task_is_current(
+                            scope,
+                            *scope_sequence.peek(),
+                            sequence,
+                            *root_sequence.peek(),
+                        )
+                };
+                let result = load_system_config_observation(
+                    &system_id,
+                    &revision,
+                    CreateConfigObservationRequest {
+                        kind: ConfigObservationKind::Root,
+                        path_components: Vec::new(),
+                        child_offset,
+                        automatic: false,
+                    },
+                    |_| {},
+                    is_current,
+                )
+                .await;
+                if !is_current() {
+                    return;
+                }
+                root_more_loading.set(false);
+                match result {
+                    Ok(Some(page)) => match merge_tree_observation(&current_observation, page) {
+                        Ok(observation) => root.set(ObservationState::Loaded(observation)),
+                        Err(error) => root_more_error.set(Some(error)),
+                    },
+                    Ok(None) => {}
+                    Err(error) => root_more_error.set(Some(observation_error(&error))),
+                }
+            });
+        }
+    };
+
+    let select_certified = EventHandler::new(move |row: EvaluatedOptionRow| {
+        let next_detail = detail_sequence.peek().saturating_add(1);
+        let next_provenance = provenance_sequence.peek().saturating_add(1);
+        detail_sequence.set(next_detail);
+        provenance_sequence.set(next_provenance);
+        detail_path.set(Vec::new());
+        provenance.set(ObservationState::Idle);
+        certified_detail.set(Some(row));
+        inspector_pane.set(InspectorPane::Option);
+    });
+
+    let root_state = root.read().clone();
+    let configured_state = configured.read().clone();
+    let selected_scoped_path = detail_path.read().clone();
+    let detail_state = detail_cache.read().get(&selected_scoped_path).cloned();
+    let provenance_state = provenance.read().clone();
+    let certified_detail_state = certified_detail.read().clone();
+    let selected_certified_path = certified_detail_state
+        .as_ref()
+        .and_then(|row| row.option.as_ref().or(row.before.as_ref()))
+        .map(|option| option.path.clone());
+    let selected_mode = *mode.read();
+    let selected_pane = *inspector_pane.read();
+    let inventory_complete = inventory_state == OptionInventoryState::Complete;
+    let local_search_paths = observed_option_paths(
+        &root_state,
+        &branches.read(),
+        &configured_state,
+        &detail_cache.read(),
+        &provenance_cache.read(),
+        &search.read(),
+    );
+    let observed_sources = provenance_cache
+        .read()
+        .values()
+        .filter_map(|observation| match &observation.payload {
+            ConfigObservationPayload::Provenance { definitions, .. } => Some(definitions),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|definition| definition.source_path.clone())
+        .fold(BTreeMap::<String, usize>::new(), |mut sources, path| {
+            *sources.entry(path).or_default() += 1;
+            sources
+        });
+    let source_count = certified_sources.len().saturating_add(
+        observed_sources
+            .keys()
+            .filter(|path| {
+                !certified_sources
+                    .iter()
+                    .any(|source| source.source_path.as_deref() == Some(path.as_str()))
+            })
+            .count(),
+    );
+    let primary_label = match primary_lifecycle {
+        SnapshotLifecycle::Available => "complete",
+        SnapshotLifecycle::Queued => "queued",
+        SnapshotLifecycle::Running => "running",
+        SnapshotLifecycle::Failed => "failed",
+        SnapshotLifecycle::Unavailable => "unavailable",
+    };
+    let search_page_end = search_offset
+        .saturating_add(i64::try_from(search_rows.len()).unwrap_or(i64::MAX))
+        .min(search_total);
+    let changed_count_label = search_counts
+        .changed
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "unavailable".into());
+    rsx! {
+        div { class: "cfgx-explorer",
+            div { class: "cfgx-live sr-only", role: "status", "aria-live": "polite", "aria-atomic": "true", "{announcement}" }
+            div { class: "cfgx-meta",
+                div { class: "cfgx-meta-i", title: "Whether the primary evaluator has produced a result for this exact target. Explorer observations never replace primary evaluation.", span { "primary eval" } b { class: if primary_lifecycle == SnapshotLifecycle::Available { "ok" } else { "warn" }, "{primary_label}" } }
+                div { class: "cfgx-meta-i", span { "eval time" } b { class: "mono", "{evaluation_time}" } }
+                div { class: "cfgx-meta-i", span { "packages" } b { class: "mono", "{package_count}" } }
+                div { class: "cfgx-meta-i", span { "closure" } b { class: "mono", "{closure_size}" } }
+                div { class: "cfgx-meta-i", span { "carrier" } b { class: "mono", title: "{carrier}", "{carrier}" } }
+                div { class: "cfgx-meta-sp" }
+                div { class: "cfgx-meta-i", title: "Browsing needs no complete inventory. A complete certified inventory enables complete search and comparison.", span { "inventory" }
+                    b { class: if inventory_complete { "ok" } else { "warn" }, "{inventory_label}" }
+                    if inventory_request_allowed {
+                        button { class: "cfgx-link focus-ring", onclick: move |_| on_request_inventory.call(()), "request full inventory" }
+                    }
+                }
+                div { class: "cfgx-meta-i", title: if comparison_ready { "A certified complete inventory and valid baseline make comparison meaningful." } else { "Changed and Drift require sufficient certified complete coverage. Incomplete data does not mean zero changes or no drift." }, span { "comparison" } b { class: if comparison_ready { "ok" } else { "warn" }, if comparison_ready { "ready" } else { "unavailable" } } }
+            }
+                if let Some(error) = inventory_request_error.as_deref() {
+                    div { class: "cfg-explorer-local-error", role: "alert", "Configuration inspection prerequisite: {error}" }
+                }
+                div { class: "cfgx-tools",
+                    div { class: "seg xs",
+                        button { class: if selected_mode == ExplorerMode::Browse { "active focus-ring" } else { "focus-ring" }, "aria-pressed": selected_mode == ExplorerMode::Browse, onclick: move |_| mode.set(ExplorerMode::Browse), "Browse" }
+                        button { class: if selected_mode == ExplorerMode::Configured { "active focus-ring" } else { "focus-ring" }, "aria-pressed": selected_mode == ExplorerMode::Configured, onclick: move |_| mode.set(ExplorerMode::Configured), "Configured" }
+                        button { class: if selected_mode == ExplorerMode::Search { "active focus-ring" } else { "focus-ring" }, "aria-pressed": selected_mode == ExplorerMode::Search, onclick: move |_| mode.set(ExplorerMode::Search), "Search" }
+                    }
+                    div { class: "cfgx-search", Icon { name: IconName::Search, size: 12 }
+                        input { class: "focus-ring", value: "{search}", placeholder: if inventory_complete { "Search all certified options…" } else { "Search observed options…" }, oninput: move |event| { search.set(event.value()); mode.set(ExplorerMode::Search); } }
+                        if !search.read().is_empty() { button { class: "btn-icon xs focus-ring", title: "Clear", "aria-label": "Clear option search", onclick: move |_| search.set(String::new()), Icon { name: IconName::X, size: 12 } } }
+                    }
+                    if selected_mode == ExplorerMode::Search && inventory_complete {
+                        div { class: "seg xs", "aria-label": "Certified option filter",
+                            button { class: if search_filter == EvaluatedOptionFilter::All { "active focus-ring" } else { "focus-ring" }, "aria-pressed": search_filter == EvaluatedOptionFilter::All, onclick: move |_| on_search_filter.call(EvaluatedOptionFilter::All), "All ({search_counts.all})" }
+                            button { class: if search_filter == EvaluatedOptionFilter::Overridden { "active focus-ring" } else { "focus-ring" }, "aria-pressed": search_filter == EvaluatedOptionFilter::Overridden, onclick: move |_| on_search_filter.call(EvaluatedOptionFilter::Overridden), "Overridden ({search_counts.overridden})" }
+                            button { class: if search_filter == EvaluatedOptionFilter::Changed { "active focus-ring" } else { "focus-ring" }, "aria-pressed": search_filter == EvaluatedOptionFilter::Changed, disabled: !comparison_ready, title: if comparison_ready { "Compare with the selected mode's valid baseline." } else { "Changed requires a valid certified comparison baseline." }, onclick: move |_| on_search_filter.call(EvaluatedOptionFilter::Changed), "Changed ({changed_count_label})" }
+                        }
+                    }
+                    span { class: "cfgx-count mono", if selected_mode == ExplorerMode::Search { if inventory_complete && search_loading { "searching…" } else if inventory_complete { "{search_total} hits" } else { "{local_search_paths.len()} observed" } } }
+                }
+                if selected_mode == ExplorerMode::Search {
+                    div { class: if inventory_complete { "cfgx-scope full" } else { "cfgx-scope partial" },
+                        if inventory_complete { "Complete search over the certified inventory for this exact target." }
+                        else { "Partial search over options observed in this Explorer session only. No match does not mean the option is absent." }
+                    }
+                }
+                div { class: "cfgx-body",
+                    section { class: "cfgx-tree-col", "aria-label": "Configuration options",
+                        div { class: "cfgx-colhead", span { if selected_mode == ExplorerMode::Configured { "configured option" } else if selected_mode == ExplorerMode::Search { "match" } else { "config.*" } } span { "value" } span { "defined by" } }
+                        div { class: "cfgx-scroll",
+                        if selected_mode == ExplorerMode::Browse {
+                        if !scoped_enabled {
+                            div { class: "cfgx-scope partial", role: "status", "{disabled_reason}" }
+                        } else { match root_state.clone() {
+                            ObservationState::Loaded(observation) => match observation.payload {
+                                ConfigObservationPayload::Root { children, children_truncated, total_children, .. } => rsx! {
+                                        ExplorerChildren { entries: children.clone(), depth: 0, expanded, branches, details: detail_cache, provenance: provenance_cache, more_loading: branch_more_loading, more_errors: branch_more_errors, selected_path: selected_scoped_path.clone(), visible_hook_id: visible_option_hook_id, on_prefix: load_prefix, on_option: select_option }
+                                    if children_truncated {
+                                        div { class: "cfgx-more", span { role: "status", "Showing {children.len()} of {total_children}" } button { class: "cfgx-link focus-ring", disabled: *root_more_loading.read(), onclick: load_more_root, if *root_more_loading.read() { "loading…" } else { "load more" } } }
+                                    }
+                                    if let Some(error) = root_more_error.read().as_ref() { div { class: "cfg-explorer-local-error", role: "alert", "{error}" } }
+                                },
+                                _ => rsx! { div { class: "cfg-explorer-local-error", role: "alert", "Unexpected root observation payload." } },
+                            },
+                            ObservationState::Error(error) => rsx! {
+                                div { class: "cfg-explorer-local-error", role: "alert",
+                                    span { "Root: {error}" }
+                                    button {
+                                        class: "btn btn-ghost focus-ring xs",
+                                        "aria-label": "Retry root configuration observation",
+                                        onclick: retry_root,
+                                        "Retry"
+                                    }
+                                }
+                            },
+                            state => rsx! { ExplorerStatus { state, surface: "Root" } },
+                        } }
+                        } else if selected_mode == ExplorerMode::Configured {
+                        if !scoped_enabled {
+                            div { class: "cfgx-scope partial", role: "status", "{disabled_reason}" }
+                        } else { match configured_state.clone() {
+                            ObservationState::Loaded(observation) => match observation.payload {
+                                ConfigObservationPayload::ConfiguredIndex {
+                                    configured: options,
+                                    total_traversed,
+                                    diagnostics,
+                                    diagnostics_truncated,
+                                    total_configured,
+                                    configured_truncated,
+                                    classifier_diagnostics,
+                                    classifier_diagnostics_truncated,
+                                    ..
+                                } => rsx! {
+                                    div { class: "cfg-explorer-configured-meta", role: "status", "{total_configured} configured from {total_traversed} traversed; declaration-only defaults excluded" }
+                                    if options.is_empty() { div { class: "cfg-explorer-status", "No surviving non-default assignments were observed." } }
+                                    else { ConfiguredOptions { options, details: detail_cache, provenance: provenance_cache, selected_path: selected_scoped_path.clone(), on_option: select_option } }
+                                    if configured_truncated { div { class: "cfg-explorer-local-note", "The configured list is bounded; {total_configured} identities exist." } }
+                                    if !diagnostics.is_empty() || !classifier_diagnostics.is_empty() || diagnostics_truncated || classifier_diagnostics_truncated {
+                                        div { class: "cfg-explorer-diagnostics", role: "status", "Inspection retained {diagnostics.len()} traversal and {classifier_diagnostics.len()} classifier diagnostics. Some identities may be unavailable." }
+                                    }
+                                },
+                                _ => rsx! { div { class: "cfg-explorer-local-error", role: "alert", "Unexpected configured-index payload." } },
+                            },
+                            ObservationState::Error(error) => rsx! {
+                                div { class: "cfg-explorer-local-error", role: "alert",
+                                    span { "Configured options: {error}" }
+                                    button {
+                                        class: "btn btn-ghost focus-ring xs",
+                                        "aria-label": "Retry configured options observation",
+                                        onclick: retry_configured,
+                                        "Retry"
+                                    }
+                                }
+                            },
+                            state => rsx! { ExplorerStatus { state, surface: "Configured options" } },
+                        } }
+                        } else if inventory_complete {
+                            if search_loading {
+                                div { class: "cfg-explorer-status", role: "status", "Searching cached certified data…" }
+                            } else if let Some(error) = search_error.as_deref() {
+                                div { class: "cfg-explorer-local-error", role: "alert", "Search: {error}" }
+                            } else if search_rows.is_empty() {
+                                div { class: "cfg-explorer-status", "No options match." }
+                            } else {
+                                ul { class: "cfg-explorer-configured",
+                                    for row in search_rows {
+                                        if let Some(option) = row.option.as_ref().or(row.before.as_ref()) {
+                                            {
+                                                let path = option.path.clone();
+                                                 let value = row.option.as_ref().map(|selected| render_safe_option_value(&selected.value)).unwrap_or_else(|| "removed".into());
+                                                 let value_class = row.option.as_ref().map(|selected| present_safe_option_value(&selected.value).class).unwrap_or("cfg-val-err");
+                                                 let source = row.option.as_ref().or(row.before.as_ref()).and_then(evaluated_option_source).unwrap_or_else(|| "—".into());
+                                                 let selected = row.clone();
+                                                 let (parent, leaf) = display_qualified_path_parts(&path);
+                                                 let row_class = if selected_certified_path.as_deref() == Some(path.as_str()) { "cfgx-row hit sel focus-ring" } else { "cfgx-row hit focus-ring" };
+                                                 rsx! { li { key: "{path}", button { class: "{row_class}", "aria-pressed": selected_certified_path.as_deref() == Some(path.as_str()), "aria-label": "Inspect certified option {path}", onclick: move |_| select_certified.call(selected.clone()), span { class: "cfgx-name mono", title: "{path}", span { class: "dim", "{parent}" } "{leaf}" } span { class: "cfgx-val mono {value_class}", title: "{value}", "{value}" } span { class: "cfgx-by mono", title: "{source}", "{source}" } } } }
+                                            }
+                                        }
+                                    }
+                                }
+                                div { class: "cfgx-more", role: "navigation", "aria-label": "Certified option search pages",
+                                    span { role: "status", if search_total > 0 { "Showing {search_offset + 1}–{search_page_end} of {search_total}" } else { "No results" } }
+                                    button { class: "cfgx-link focus-ring", disabled: search_offset <= 0 || search_loading, onclick: move |_| on_search_offset.call(search_offset.saturating_sub(search_limit)), "previous" }
+                                    button { class: "cfgx-link focus-ring", disabled: search_offset.saturating_add(search_limit) >= search_total || search_loading, onclick: move |_| on_search_offset.call(search_offset.saturating_add(search_limit)), "next" }
+                                }
+                            }
+                        } else if local_search_paths.is_empty() {
+                            div { class: "cfg-explorer-status", "No match in options observed during this Explorer session. Unobserved paths were not searched." }
+                        } else {
+                            ul { class: "cfg-explorer-configured",
+                                for path in local_search_paths {
+                                    {
+                                         let display = dotted_path(&path);
+                                         let detail_state = detail_cache.read().get(&path).cloned();
+                                         let value = scoped_option_presentation(detail_state.as_ref());
+                                         let source = scoped_option_source(&path, &provenance_cache.read());
+                                         let (parent, leaf) = display_path_parts(&path);
+                                         let row_class = if selected_scoped_path == path { "cfgx-row hit sel focus-ring" } else { "cfgx-row hit focus-ring" };
+                                         rsx! { li { key: "{display}", button { class: "{row_class}", "aria-pressed": selected_scoped_path == path, "aria-label": "Inspect observed option {display}", onclick: { let path = path.clone(); move |_| select_option.call(path.clone()) }, span { class: "cfgx-name mono", title: "{display}", span { class: "dim", "{parent}" } "{leaf}" } span { class: "cfgx-val mono", if let Some(value) = value { span { class: "{value.class}", title: "{value.text}", "{value.text}" } } else { span { class: "cfgx-uninspected", title: "Value not inspected", "aria-label": "Value not inspected" } } } span { class: "cfgx-by mono", if let Some(source) = source { span { title: "{source}", "{source}" } } else { span { class: "cfgx-uninspected", title: "Provenance not inspected", "aria-label": "Provenance not inspected" } } } } } }
+                                    }
+                                }
+                            }
+                        }
+                        }
+                    }
+                    aside { class: "cfgx-side", "aria-label": "Configuration inspector",
+                        div { class: "cfgx-side-tabs",
+                            div { class: "seg xs",
+                                button { class: if selected_pane == InspectorPane::Option { "active focus-ring" } else { "focus-ring" }, "aria-pressed": selected_pane == InspectorPane::Option, disabled: detail_path.read().is_empty() && certified_detail.read().is_none(), onclick: move |_| inspector_pane.set(InspectorPane::Option), "Option" }
+                                // The count is part of the accessible name so the
+                                // observed-source total is announced with the tab.
+                                button { class: if selected_pane == InspectorPane::Sources { "active focus-ring" } else { "focus-ring" }, "aria-pressed": selected_pane == InspectorPane::Sources, onclick: move |_| inspector_pane.set(InspectorPane::Sources), "Sources" if source_count > 0 { span { class: "mono", "{source_count}" } } }
+                            }
+                        }
+                    if selected_pane == InspectorPane::Option {
+                    if let Some(row) = certified_detail_state {
+                        CertifiedOptionDetail { row, comparison_baseline: comparison_baseline.clone(), on_open_definition }
+                    } else if selected_scoped_path.is_empty() {
+                        div { class: "cfg-explorer-detail-empty", "Select an option to inspect its value and request provenance." }
+                    } else {
+                        { let (parent, leaf) = display_path_parts(&selected_scoped_path); rsx! { div { class: "cfgx-insp-head", div { class: "mono cfgx-insp-path", span { class: "dim", "config.{parent}" } "{leaf}" } } } }
+                        match detail_state {
+                        Some(ObservationState::Loaded(observation)) => match observation.payload {
+                            ConfigObservationPayload::Option { path_components, declared_type, is_defined, highest_prio, value, .. } => {
+                                let path = dotted_path(&path_components);
+                                let value = present_safe_option_value(&value);
+                                let declared_type_label = declared_type.as_deref().unwrap_or("Not reported");
+                                let defined_label = if is_defined { "yes" } else { "no" };
+                                let priority_label = highest_prio.map(|value| value.to_string()).unwrap_or_else(|| "Not reported".into());
+                                rsx! {
+                                    div { class: "cfgx-insp-body",
+                                        div { class: "cfgx-kv", span { "Type" } b { class: "mono cfgx-type", "{declared_type_label}" } }
+                                        div { class: "cfgx-block",
+                                            div { class: "cfgx-block-h", "Value" }
+                                            pre { class: "cfgx-pre {value.class}", "{value.text}" }
+                                        }
+                                        div { class: "cfgx-secondary-meta", "aria-label": "Option metadata",
+                                            div { span { "Defined" } b { "{defined_label}" } }
+                                            div { span { "Highest priority" } b { class: "mono", "{priority_label}" } }
+                                        }
+                                        div { class: "cfgx-block",
+                                            div { class: "cfgx-block-h", "Provenance" span { class: "cfgx-block-note", "requested separately" } }
+                                            p { class: "cfgx-block-copy", "Option detail does not establish complete source provenance." }
+                                            if matches!(provenance_state, ObservationState::Idle | ObservationState::Error(_)) {
+                                                button { class: "cfgx-btn focus-ring", "aria-label": "Inspect provenance for {path}", onclick: load_provenance, if matches!(provenance_state, ObservationState::Error(_)) { "Retry provenance" } else { "Inspect provenance" } }
+                                            }
+                                            match provenance_state {
+                                                ObservationState::Loaded(observation) => match observation.payload {
+                                             ConfigObservationPayload::Provenance { definitions, definitions_truncated, total_definitions, .. } => rsx! {
+                                                 div { class: "cfgx-defs",
+                                                     div { class: "cfgx-kv", span { "Observed definitions" } b { class: "mono", "{total_definitions}" } }
+                                                     if definitions.is_empty() { p { class: "cfgx-block-copy", "No definitions were observed for this option." } }
+                                                     for (index, definition) in definitions.into_iter().enumerate() {
+                                                         {
+                                                             let source_label = definition.source_path.as_deref().unwrap_or("Source unavailable");
+                                                             let priority_label = definition.priority.map(|value| value.to_string()).unwrap_or_else(|| "unknown".into());
+                                                             rsx! { div { class: "cfgx-def", span { class: "cfgx-def-i mono", "{index + 1}" } div { class: "cfgx-def-b", div { class: "mono cfgx-def-f", title: "{source_label}", "{source_label}" } div { class: "cfgx-def-m", "priority " span { class: "mono", "{priority_label}" } } } } }
+                                                         }
+                                                     }
+                                                     if definitions_truncated { p { class: "cfg-explorer-local-note", "Showing bounded definitions; {total_definitions} exist." } }
+                                                 }
+                                             },
+                                             _ => rsx! { div { class: "cfg-explorer-local-error", role: "alert", "Unexpected provenance payload." } },
+                                                },
+                                                 ObservationState::Error(error) => rsx! { div { class: "cfg-explorer-local-error", role: "alert", "Provenance: {error}" } },
+                                                 ObservationState::Lifecycle(lifecycle) => rsx! { div { class: "cfgx-inline-status", role: "status", "aria-live": "polite", i {} "Provenance: {lifecycle_copy(lifecycle)}" } },
+                                                 ObservationState::Idle | ObservationState::Deferred => rsx! {},
+                                            }
+                                        }
+                                        div { class: "cfgx-insp-foot mono", "observation cached · schema v1 · provenance may be partial" }
+                                     }
+                                 }
+                             },
+                             _ => rsx! { div { class: "cfg-explorer-local-error", role: "alert", "Unexpected option observation payload." } },
+                         },
+                          Some(ObservationState::Error(error)) => rsx! { div { class: "cfgx-insp-state", role: "alert", p { "Option detail: {error}" } button { class: "cfgx-btn focus-ring", onclick: { let path = selected_scoped_path.clone(); move |_| select_option.call(path.clone()) }, "Retry option" } } },
+                          Some(ObservationState::Deferred) => rsx! { div { class: "cfgx-insp-state", role: "status", p { "This value was not loaded automatically." } button { class: "cfgx-btn focus-ring", onclick: { let path = selected_scoped_path.clone(); move |_| select_option.call(path.clone()) }, "Inspect option" } } },
+                          Some(ObservationState::Lifecycle(lifecycle)) => rsx! { div { class: "cfgx-insp-state", role: "status", "aria-live": "polite", span { class: "cfgx-insp", i {} "{lifecycle_copy(lifecycle)} option…" } } },
+                         Some(ObservationState::Idle) | None => rsx! { div { class: "cfgx-insp-state", role: "status", "Option has not been inspected." } },
+                    }
+                    }
+                    } else {
+                        div { class: "cfgx-side-hint",
+                            if certified_sources_complete { "Complete certified source paths for this target. Explorer-observed paths are included in the same target view." }
+                            else { "Partial list: only source paths from provenance inspected in this Explorer target and session. This is not a complete module registry." }
+                        }
+                        div { class: "cfgx-mods",
+                            for source in &certified_sources {
+                                {
+                                    let source_label = source.source_path.as_deref().or(source.source_input.as_deref()).unwrap_or("Source path unavailable");
+                                    let source_available = source.source_path.is_some() || source.tracked_flake.is_some();
+                                    rsx! { button { class: "cfgx-mod focus-ring", disabled: !source_available, "aria-label": "Inspect source {source_label}", onclick: { let source = source.clone(); move |_| on_open_source.call(source.clone()) }, span { class: "mono cfgx-mod-p", title: "{source_label}", "{source_label}" } span { class: "mono cfgx-mod-n", "{source.defined_count}" } } }
+                                }
+                            }
+                            if certified_sources_loading_more && certified_sources.is_empty() {
+                                div { class: "cfg-explorer-status", role: "status", "Loading certified sources…" }
+                            } else if certified_sources.is_empty() && observed_sources.is_empty() {
+                                div { class: "cfg-explorer-status", "Nothing observed yet. Select an option and Inspect provenance." }
+                            }
+                            for (path, count) in observed_sources {
+                                if !certified_sources.iter().any(|source| source.source_path.as_deref() == Some(path.as_str())) {
+                                    div { class: "cfgx-mod", span { class: "mono cfgx-mod-p", title: "{path}", "{path}" } span { class: "mono cfgx-mod-n", "{count}" } }
+                                }
+                            }
+                            if certified_sources_has_more {
+                                button { class: "cfgx-link cfgx-source-more focus-ring", disabled: certified_sources_loading_more, onclick: move |_| on_load_more_sources.call(()), if certified_sources_loading_more { "loading…" } else { "load more certified sources" } }
+                            }
+                            if let Some(error) = certified_sources_error.as_deref() {
+                                div { class: "cfg-explorer-local-error", role: "alert", "Sources: {error}" }
+                            }
+                        }
+                    }
+                    }
+                }
+            div { class: "cfgx-foot mono", "observational cache · {target}" }
+        }
+    }
+}
+
+#[component]
+fn CertifiedOptionDetail(
+    row: EvaluatedOptionRow,
+    comparison_baseline: Option<String>,
+    on_open_definition: EventHandler<OptionDefinitionProvenance>,
+) -> Element {
+    let Some(option) = row.option.as_ref().or(row.before.as_ref()) else {
+        return rsx! { div { class: "cfg-explorer-detail-empty", "Certified option detail is unavailable." } };
+    };
+    let value = row
+        .option
+        .as_ref()
+        .map(|selected| present_safe_option_value(&selected.value))
+        .unwrap_or_else(|| ValuePresentation {
+            text: "removed".into(),
+            class: "cfg-val-err",
+        });
+    let declared_type = option.declared_type.as_deref().unwrap_or("Not reported");
+    let overridden = option
+        .overridden
+        .map(|value| if value { "yes" } else { "no" })
+        .unwrap_or("Not reported");
+    let before = row
+        .before
+        .as_ref()
+        .map(|previous| render_safe_option_value(&previous.value));
+    let baseline_label = comparison_baseline.as_deref().unwrap_or("Unavailable");
+    let change_kind = row.diff.as_ref().map(|diff| match diff.kind {
+        crate::api::models::OptionChangeKind::Added => "added",
+        crate::api::models::OptionChangeKind::Removed => "removed",
+        crate::api::models::OptionChangeKind::Modified => "modified",
+        crate::api::models::OptionChangeKind::Unchanged => "unchanged",
+    });
+    let change_kind_label = change_kind.unwrap_or("changed");
+    let (parent, leaf) = display_qualified_path_parts(&option.path);
+    rsx! {
+        div { class: "cfgx-insp-head", div { class: "mono cfgx-insp-path", span { class: "dim", "config.{parent}" } "{leaf}" } }
+        div { class: "cfgx-insp-body",
+            div { class: "cfgx-kv", span { "Type" } b { class: "mono cfgx-type", "{declared_type}" } }
+            div { class: "cfgx-block", div { class: "cfgx-block-h", "Value" } pre { class: "cfgx-pre {value.class}", "{value.text}" } }
+            div { class: "cfgx-secondary-meta", "aria-label": "Certified option metadata",
+                div { span { "Definitions" } b { class: "mono", "{option.definitions.len()}" } }
+                div { span { "Overridden" } b { "{overridden}" } }
+                div { span { "Comparison" } b { if let Some(changed) = row.changed { if changed { "changed" } else { "unchanged" } } else { "Not available" } } }
+                div { span { "Baseline" } b { class: "mono", "{baseline_label}" } }
+            }
+            if let Some(diff) = row.diff.as_ref() {
+                div { class: "cfgx-block cfg-diff",
+                    div { class: "cfgx-block-h", "Typed change" span { class: "cfgx-block-note mono", "{change_kind_label} · {diff.value_kind}" } }
+                    if let Some(before) = before.as_ref() { div { class: "cfg-diff-line cfg-diff-from mono", "− {before}" } }
+                    div { class: "cfg-diff-line cfg-diff-to mono", "+ {value.text}" }
+                    if !diff.added.is_empty() {
+                        div { class: "cfg-diff-add", strong { "Added" } for value in &diff.added { span { class: "mono", "+ {render_typed_diff_value(value)}" } } }
+                    }
+                    if !diff.removed.is_empty() {
+                        div { class: "cfg-diff-rem", strong { "Removed" } for value in &diff.removed { span { class: "mono", "− {render_typed_diff_value(value)}" } } }
+                    }
+                }
+            }
+            div { class: "cfgx-block",
+                div { class: "cfgx-block-h", "Provenance" span { class: "cfgx-block-note", "certified snapshot" } }
+                if option.definitions.is_empty() {
+                    p { class: "cfgx-block-copy", "Definition provenance is unavailable in this response." }
+                }
+                div { class: "cfgx-defs",
+                    for (index, definition) in option.definitions.iter().enumerate() {
+                        {
+                            let source = definition.source_path.as_deref().or(definition.source_input.as_deref()).unwrap_or("Source unavailable");
+                            let status = definition.status.as_deref().unwrap_or(if definition.winning { "winning" } else { "overridden" });
+                            let definition = definition.clone();
+                            rsx! { button { class: if definition.winning { "cfgx-def win focus-ring" } else { "cfgx-def focus-ring" }, "aria-label": "Inspect definition source {source}", onclick: move |_| on_open_definition.call(definition.clone()), span { class: "cfgx-def-i mono", "{index + 1}" } div { class: "cfgx-def-b", div { class: "mono cfgx-def-f", title: "{source}", "{source}" } div { class: "cfgx-def-m", "{status}" } } } }
+                        }
+                    }
+                }
+            }
+            div { class: "cfgx-insp-foot mono", "certified snapshot · exact target" }
+        }
+    }
+}
+
+#[component]
+fn ConfiguredOptions(
+    options: Vec<ConfiguredOptionIdentity>,
+    details: Signal<HashMap<Vec<String>, ObservationState>>,
+    provenance: Signal<HashMap<Vec<String>, ConfigObservationResponse>>,
+    selected_path: Vec<String>,
+    on_option: EventHandler<Vec<String>>,
+) -> Element {
+    rsx! {
+        ul { class: "cfg-explorer-configured",
+            for option in options {
+                {
+                    let path = option.path_components.clone();
+                    let display = dotted_path(&path);
+                    let detail_state = details.read().get(&path).cloned();
+                    let value = scoped_option_presentation(detail_state.as_ref());
+                    let source = scoped_option_source(&path, &provenance.read());
+                    let (parent, leaf) = display_path_parts(&path);
+                    let selected = selected_path == path;
+                    rsx! { li { key: "{option.key}", button { class: if selected { "cfgx-row sel focus-ring" } else { "cfgx-row focus-ring" }, "aria-pressed": selected, "aria-label": "Inspect configured option {display}", onclick: move |_| on_option.call(path.clone()), span { class: "cfgx-name mono", title: "{display}", span { class: "dim", "{parent}" } "{leaf}" } span { class: "cfgx-val mono",
+                        match detail_state {
+                            Some(ObservationState::Lifecycle(lifecycle)) => rsx! { span { class: "cfgx-insp", title: "{lifecycle_copy(lifecycle)} option value", i {} } },
+                            Some(ObservationState::Error(_)) => rsx! { span { class: "cfg-val-err", title: "Option value is unavailable", "unavailable" } },
+                            _ => if let Some(value) = value { rsx! { span { class: "{value.class}", title: "{value.text}", "{value.text}" } } } else { rsx! { span { class: "cfgx-uninspected", title: "Value not inspected", "aria-label": "Value not inspected" } } },
+                        }
+                    } span { class: "cfgx-by mono", if let Some(source) = source { span { title: "{source}", "{source}" } } else { span { class: "cfgx-uninspected", title: "Provenance not inspected", "aria-label": "Provenance not inspected" } } } } } }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ExplorerMode, ObservationState, display_path_parts, display_qualified_path_parts,
+        dotted_path, initial_scoped_operations, merge_tree_observation, next_operation_sequence,
+        observation_error, observation_task_is_current, observed_option_paths,
+        present_safe_option_value, should_request_prefix, should_start_configured, tree_leaf_label,
+    };
+    use crate::api::client::ApiClientError;
+    use crate::api::models::{
+        ConfigObservationChild, ConfigObservationChildKind, ConfigObservationKind,
+        ConfigObservationPayload, ConfigObservationResponse, SafeEvaluationError, SafeOptionValue,
+    };
+
+    fn tree_page(offset: u32, names: &[&str], truncated: bool) -> ConfigObservationResponse {
+        ConfigObservationResponse {
+            observation_id: uuid::Uuid::new_v4(),
+            revision: "a".repeat(40),
+            configuration_name: "host".into(),
+            schema_version: 1,
+            kind: ConfigObservationKind::Prefix,
+            path_components: vec!["services".into()],
+            child_offset: offset,
+            payload: ConfigObservationPayload::Prefix {
+                path_components: vec!["services".into()],
+                child_offset: offset,
+                children: names
+                    .iter()
+                    .map(|name| ConfigObservationChild {
+                        path_components: vec!["services".into(), (*name).into()],
+                        key: format!("{name:0<64}"),
+                        kind: ConfigObservationChildKind::Option,
+                    })
+                    .collect(),
+                children_truncated: truncated,
+                total_children: 3,
+            },
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn observation_task_fence_rejects_scope_and_operation_supersession() {
+        assert!(observation_task_is_current(4, 4, 8, 8));
+        assert!(!observation_task_is_current(4, 5, 8, 8));
+        assert!(!observation_task_is_current(4, 4, 8, 9));
+    }
+
+    #[test]
+    fn configured_index_starts_only_on_first_configured_activation() {
+        assert!(!should_start_configured(
+            ExplorerMode::Browse,
+            &ObservationState::Idle
+        ));
+        assert!(should_start_configured(
+            ExplorerMode::Configured,
+            &ObservationState::Idle
+        ));
+        assert!(!should_start_configured(
+            ExplorerMode::Configured,
+            &ObservationState::Lifecycle(crate::api::models::ConfigObservationLifecycle::Queued)
+        ));
+        assert!(!should_start_configured(
+            ExplorerMode::Configured,
+            &ObservationState::Error("failed".into())
+        ));
+        assert_eq!(
+            usize::from(should_start_configured(
+                ExplorerMode::Configured,
+                &ObservationState::Idle
+            )),
+            1
+        );
+    }
+
+    #[test]
+    fn fresh_prefix_expansion_starts_exactly_one_prefix_operation() {
+        assert_eq!(usize::from(should_request_prefix(0, false)), 1);
+        assert_eq!(usize::from(should_request_prefix(0, true)), 0);
+        assert_eq!(usize::from(should_request_prefix(512, true)), 1);
+    }
+
+    #[test]
+    fn exact_revision_initially_starts_only_one_shallow_root_operation() {
+        let operations = initial_scoped_operations(Some(&"a".repeat(40)), true);
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|kind| **kind == ConfigObservationKind::Root)
+                .count(),
+            1
+        );
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|kind| **kind == ConfigObservationKind::ConfiguredIndex)
+                .count(),
+            0
+        );
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|kind| **kind == ConfigObservationKind::Prefix)
+                .count(),
+            0
+        );
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|kind| **kind == ConfigObservationKind::Option)
+                .count(),
+            0
+        );
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|kind| **kind == ConfigObservationKind::Provenance)
+                .count(),
+            0
+        );
+        let full_inventory_requests = 0;
+        assert_eq!(full_inventory_requests, 0);
+        assert!(initial_scoped_operations(None, true).is_empty());
+        assert!(initial_scoped_operations(Some(&"a".repeat(40)), false).is_empty());
+    }
+
+    #[test]
+    fn each_retry_advances_exactly_one_operation_generation() {
+        assert_eq!(next_operation_sequence(7), 8);
+        assert_eq!(next_operation_sequence(u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn config_rows_keep_grid_columns_and_left_alignment() {
+        let css = include_str!("../../../assets/app.css");
+        assert!(css.contains(
+            ".cfgx-colhead, .cfgx-row, .cfgx .cfg-explorer-tree-row { display: grid; \
+grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) 76px;"
+        ));
+        assert!(css.contains(
+            ".cfgx-name, .cfgx-val, .cfgx-by { min-width: 0; overflow: hidden; \
+text-align: left;"
+        ));
+        assert!(css.contains(
+            ".cfgx-row:is(:focus, :active), .cfgx .cfg-explorer-tree-row:is(:focus, :active) { text-align: left; }"
+        ));
+        assert!(!css.contains(
+            ".cfgx-by { color: var(--cf-text-muted); font-size: 10px; text-align: right;"
+        ));
+        assert!(
+            css.contains(".cfgx-scroll { min-height: 300px; max-height: 58vh; overflow: auto; }")
+        );
+        assert!(css.contains(".cfgx-row.sel, .cfgx .cfg-explorer-tree-row.sel { background:"));
+        assert!(css.contains(
+            ".cfgx .cfg-explorer-tree-row .cfg-explorer-path { padding-left: var(--cfgx-depth, 0); }"
+        ));
+    }
+
+    #[test]
+    fn dotted_paths_are_display_only_and_do_not_define_identity() {
+        let nested = vec!["services".to_string(), "api.port".to_string()];
+        let flat = vec!["services.api".to_string(), "port".to_string()];
+        assert_ne!(nested, flat);
+        assert_eq!(dotted_path(&nested), "services.\"api.port\"");
+        assert_eq!(dotted_path(&flat), "\"services.api\".port");
+        assert_ne!(dotted_path(&nested), dotted_path(&flat));
+        assert_eq!(
+            display_path_parts(&nested),
+            ("services.".into(), "\"api.port\"".into())
+        );
+        assert_eq!(
+            display_path_parts(&flat),
+            ("\"services.api\".".into(), "port".into())
+        );
+        assert_eq!(tree_leaf_label(&nested), "\"api.port\"");
+        assert_eq!(
+            display_qualified_path_parts("services.\"api.port\".enable"),
+            ("services.\"api.port\".", "enable")
+        );
+    }
+
+    #[test]
+    fn typed_value_presentation_does_not_conflate_known_empty_and_failure_states() {
+        let cases = [
+            (SafeOptionValue::Scalar(false.into()), "false", "v-bool"),
+            (SafeOptionValue::Scalar(0.into()), "0", "v-num"),
+            (
+                SafeOptionValue::Scalar(serde_json::Value::Null),
+                "null",
+                "v-null",
+            ),
+            (SafeOptionValue::Scalar("".into()), "\"\"", "v-str"),
+            (SafeOptionValue::List(Vec::new()), "[]", "v-list"),
+            (
+                SafeOptionValue::Failed(SafeEvaluationError {
+                    code: "not_evaluated".into(),
+                    message: "dependency failed".into(),
+                }),
+                "not evaluated: dependency failed",
+                "cfg-val-err",
+            ),
+        ];
+        for (value, text, class) in cases {
+            let presentation = present_safe_option_value(&value);
+            assert_eq!(presentation.text, text);
+            assert_eq!(presentation.class, class);
+        }
+    }
+
+    #[test]
+    fn partial_search_filters_only_structured_observed_option_paths() {
+        let branches = std::collections::HashMap::from([(
+            vec!["services".into()],
+            ObservationState::Loaded(tree_page(0, &["api.port", "nginx"], false)),
+        )]);
+        let paths = observed_option_paths(
+            &ObservationState::Idle,
+            &branches,
+            &ObservationState::Idle,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+            "api.port",
+        );
+        assert_eq!(
+            paths,
+            vec![vec!["services".to_string(), "api.port".to_string()]]
+        );
+        assert!(
+            observed_option_paths(
+                &ObservationState::Idle,
+                &branches,
+                &ObservationState::Idle,
+                &std::collections::HashMap::new(),
+                &std::collections::HashMap::new(),
+                "missing",
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn tree_continuation_merges_exact_next_page_without_duplicates() {
+        let first = tree_page(0, &["a", "b"], true);
+        let merged = merge_tree_observation(&first, tree_page(2, &["c"], false))
+            .expect("exact continuation should merge");
+        let ConfigObservationPayload::Prefix {
+            children,
+            children_truncated,
+            ..
+        } = merged.payload
+        else {
+            panic!("merged payload should remain a prefix");
+        };
+        assert_eq!(
+            children
+                .iter()
+                .map(|child| child.path_components[1].as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+        assert!(!children_truncated);
+        assert!(merge_tree_observation(&first, tree_page(1, &["b", "c"], false)).is_err());
+        assert!(merge_tree_observation(&first, tree_page(2, &["c", "c"], false)).is_err());
+        assert!(merge_tree_observation(&first, tree_page(2, &["d", "c"], false)).is_err());
+        assert!(merge_tree_observation(&first, tree_page(2, &[], true)).is_err());
+        assert!(merge_tree_observation(&first, tree_page(2, &["c"], true)).is_err());
+        assert!(merge_tree_observation(&first, tree_page(2, &["c", "d"], false)).is_err());
+
+        let mut duplicate_key = tree_page(2, &["c"], false);
+        let ConfigObservationPayload::Prefix {
+            children: first_children,
+            ..
+        } = &first.payload
+        else {
+            panic!("fixture should be a prefix page");
+        };
+        let ConfigObservationPayload::Prefix { children, .. } = &mut duplicate_key.payload else {
+            panic!("fixture should be a prefix page");
+        };
+        children[0].key = first_children[0].key.clone();
+        assert!(merge_tree_observation(&first, duplicate_key).is_err());
+    }
+
+    #[test]
+    fn observation_error_hides_authorization_and_start_failure_details() {
+        for error in [
+            ApiClientError::Status {
+                code: 403,
+                body: "protected system exists".into(),
+            },
+            ApiClientError::Status {
+                code: 500,
+                body: "internal cache carrier path".into(),
+            },
+            ApiClientError::Network("private endpoint detail".into()),
+        ] {
+            let copy = observation_error(&error);
+            assert!(!copy.contains("protected system"));
+            assert!(!copy.contains("carrier"));
+            assert!(!copy.contains("endpoint"));
+        }
+    }
+}

@@ -5,19 +5,20 @@
 //! rollups, assignment previews) must use this resolver — not reimplement the
 //! ordering, exclusion, addition, or precedence rules.
 //!
-//! # Schema assumptions (2022_correctness_3.sql + 0198_assignments.sql)
+//! # Schema assumptions (0204_compliance_assignment_versions.sql)
 //!
-//! - `compliance_bundle_assignments` stores one row per (bundle_version_id, scope, scope_id).
-//!   The CHECK constraint ensures scope_type='environment' ⟹ environment_id IS NOT NULL AND system_id IS NULL,
-//!   and scope_type='system' ⟹ system_id IS NOT NULL AND environment_id IS NULL.
-//! - `compliance_assignment_exclusions` and `compliance_assignment_additions` are
-//!   simple join tables; PK is (assignment_id, policy_version_id).
-//! - `compliance_assignment_value_overrides` uses (assignment_id, policy_version_id, value_path) unique key.
-//! - All child tables fire `invalidate_overlay_on_child_change` → sets
-//!   `assignment_overlay_digest = 'pending'`. Rust write paths must call
-//!   `write_assignment_effective_set_digest` in the same transaction.
-//! - `assignment_overlay_digest` is computed from `AssignmentEffectiveSetCanonical`
-//!   (see digest.rs lines 150-197).
+//! - `compliance_bundle_assignments` stores assignment lineage identity. Each
+//!   active bundle and target pair has at most one lineage. The scope check
+//!   requires exactly one matching environment or system target.
+//! - `current_version_id` selects the authoritative immutable assignment
+//!   snapshot. Active lineages without a valid current snapshot are incomplete
+//!   and must not participate in effective-policy resolution.
+//! - `compliance_bundle_assignment_versions` stores immutable snapshots of the
+//!   selected bundle version, enforcement mode, provenance, and overlay digest.
+//! - Exclusions, additions, and value overrides belong to an immutable
+//!   `assignment_version_id`, not directly to the assignment lineage.
+//! - `assignment_overlay_digest` is computed from
+//!   `AssignmentEffectiveSetCanonical` (see `digest.rs`).
 //!
 //! # Effective set algorithm
 //!
@@ -1425,10 +1426,11 @@ async fn resolve_systems_effective_policies_batch_in_tx(
         Option<Uuid>,
     )> = sqlx::query_as(
         r#"SELECT a.id, a.current_version_id, a.bundle_id, av.bundle_version_id,
-                      a.scope_type, a.enforcement_mode, a.assignment_overlay_digest,
-                      a.environment_id, a.system_id
-               FROM compliance_bundle_assignments a
-               JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
+                       a.scope_type, av.enforcement_mode, av.assignment_overlay_digest,
+                       a.environment_id, a.system_id
+                FROM compliance_bundle_assignments a
+                JOIN compliance_bundle_assignment_versions av
+                  ON av.id = a.current_version_id AND av.assignment_id = a.id
                WHERE a.active AND a.current_version_id IS NOT NULL
                  AND ($3::uuid[] IS NULL OR av.bundle_version_id = ANY($3))
                  AND (
@@ -2428,9 +2430,10 @@ async fn resolve_system_effective_policies_with_options_in_tx(
     let assignments: Vec<_> =
         sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid, String, String, String)>(
             r#"SELECT a.id, a.current_version_id, a.bundle_id, av.bundle_version_id,
-                  a.scope_type, a.enforcement_mode, a.assignment_overlay_digest
+                   a.scope_type, av.enforcement_mode, av.assignment_overlay_digest
             FROM compliance_bundle_assignments a
-            JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
+            JOIN compliance_bundle_assignment_versions av
+              ON av.id = a.current_version_id AND av.assignment_id = a.id
             WHERE a.active AND a.current_version_id IS NOT NULL
               AND ((a.scope_type = 'environment' AND a.environment_id = $2)
                 OR (a.scope_type = 'system' AND a.system_id = $1)

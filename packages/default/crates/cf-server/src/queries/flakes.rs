@@ -6,6 +6,7 @@ use crate::models::flakes::{BranchCommitSnapshot, Flake};
 use anyhow::Context;
 use anyhow::Result;
 use sqlx::PgPool;
+use uuid::Uuid;
 
 pub async fn insert_flake(
     pool: &PgPool,
@@ -161,7 +162,18 @@ pub async fn find_flake_by_repo_urls(
     .context("Failed to find flake by repo URLs")
 }
 
-pub async fn list_flake_registry(pool: &PgPool) -> Result<Vec<FlakeRegistryItem>> {
+/// Lists flakes and authoritative managed-system counts visible to a caller.
+///
+/// `visibility_user = None` is reserved for administrators. Other callers see
+/// only flakes and active systems joined through their environment memberships.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot load the visible registry rows.
+pub async fn list_flake_registry(
+    pool: &PgPool,
+    visibility_user: Option<Uuid>,
+) -> Result<Vec<FlakeRegistryItem>> {
     // Intermediate row struct matching the query column names.
     // Required because the tuple approach becomes unwieldy with 20+ columns.
     #[derive(sqlx::FromRow)]
@@ -192,6 +204,14 @@ pub async fn list_flake_registry(pool: &PgPool) -> Result<Vec<FlakeRegistryItem>
             SELECT *
             FROM flakes
             WHERE deleted_at IS NULL
+              AND ($1::uuid IS NULL OR EXISTS (
+                  SELECT 1 FROM systems visible_system
+                  JOIN user_environment_memberships membership
+                    ON membership.environment_id = visible_system.environment_id
+                   AND membership.user_id = $1
+                  WHERE visible_system.flake_id = flakes.id
+                    AND visible_system.is_active = TRUE
+              ))
         ),
         system_agg AS (
             SELECT
@@ -205,15 +225,22 @@ pub async fn list_flake_registry(pool: &PgPool) -> Result<Vec<FlakeRegistryItem>
             FROM systems s
             LEFT JOIN environments e ON e.id = s.environment_id
             WHERE s.flake_id IN (SELECT id FROM active_flakes)
+              AND s.is_active = TRUE
+              AND ($1::uuid IS NULL OR EXISTS (
+                  SELECT 1 FROM user_environment_memberships membership
+                  WHERE membership.user_id = $1
+                    AND membership.environment_id = s.environment_id
+              ))
             GROUP BY s.flake_id
         ),
         snapshot_stats AS (
             SELECT
                 fbcs.flake_id,
-                MAX(fbcs.commit_id) FILTER (WHERE fbcs.position = 0) AS head_commit_id,
+                (array_agg(fbcs.commit_id ORDER BY fbcs.position))[1] AS head_commit_id,
                 COUNT(*)::bigint AS total_count
             FROM flake_branch_commit_snapshot fbcs
             JOIN active_flakes f ON f.id = fbcs.flake_id
+            JOIN commits c ON c.id = fbcs.commit_id AND c.source_archived = false
             WHERE f.snapshot_ready_at IS NOT NULL
             GROUP BY fbcs.flake_id
         ),
@@ -224,7 +251,7 @@ pub async fn list_flake_registry(pool: &PgPool) -> Result<Vec<FlakeRegistryItem>
                 COUNT(*) OVER (PARTITION BY c.flake_id)::bigint AS total_count
             FROM commits c
             JOIN active_flakes f ON f.id = c.flake_id
-            WHERE f.snapshot_ready_at IS NULL
+            WHERE f.snapshot_ready_at IS NULL AND c.source_archived = false
             ORDER BY c.flake_id, c.commit_timestamp DESC, c.id DESC
         ),
         effective_commits AS (
@@ -257,6 +284,20 @@ pub async fn list_flake_registry(pool: &PgPool) -> Result<Vec<FlakeRegistryItem>
             WHERE d.commit_id IN (
                 SELECT commit_id FROM effective_commits WHERE commit_id IS NOT NULL
             )
+              AND ($1::uuid IS NULL OR (
+                  (bj.environment_id IS NOT NULL AND EXISTS (
+                      SELECT 1 FROM user_environment_memberships membership
+                      WHERE membership.user_id = $1
+                        AND membership.environment_id = bj.environment_id
+                  )) OR (bj.environment_id IS NULL AND EXISTS (
+                      SELECT 1 FROM systems visible_system
+                      JOIN user_environment_memberships membership
+                        ON membership.environment_id = visible_system.environment_id
+                      WHERE membership.user_id = $1
+                        AND (visible_system.hostname = d.derivation_target
+                             OR visible_system.system_configuration_name = d.derivation_target)
+                  ))
+              ))
             GROUP BY d.commit_id
         )
         SELECT
@@ -297,6 +338,7 @@ pub async fn list_flake_registry(pool: &PgPool) -> Result<Vec<FlakeRegistryItem>
         ORDER BY lower(f.name) ASC
         "#,
     )
+    .bind(visibility_user)
     .fetch_all(pool)
     .await?;
 
@@ -435,15 +477,16 @@ pub async fn delete_flake_by_id(pool: &PgPool, flake_id: i32) -> Result<u64> {
     Ok(result.rows_affected())
 }
 
-/// Atomically reset a flake's source identity and purge its commit history.
+/// Atomically resets a flake's source identity and purges unretained history.
 ///
 /// Called when `repo_url` or `branch` changes, OR when reactivating a
 /// soft-deleted flake row under a (possibly new) repo_url/branch.  In one
 /// transaction:
 ///
 /// 1. Deletes the branch snapshot.
-/// 2. Purges all dependent commit data in the established order (caches →
-///    derivations → commits) — same cascade order as `purge_flake_commit_history`.
+/// 2. Purges caches and history that no retained generation references. A
+///    retained derivation, commit, and snapshot remain as immutable generation
+///    history but are absent from the new branch snapshot.
 /// 3. Updates the flake identity (name, repo_url, branch, build_scope) and
 ///    clears `deleted_at` (reactivates a soft-deleted row; a no-op for
 ///    already-active flakes).
@@ -454,7 +497,16 @@ pub async fn delete_flake_by_id(pool: &PgPool, flake_id: i32) -> Result<u64> {
 /// also the reactivation path for soft-deleted flakes, and must be able to
 /// find and update those rows.
 ///
-/// All errors are propagated via `?`.  Returns the updated `Flake` row.
+/// The transaction acquires the snapshot-writer lock before the per-flake sync
+/// lock and the attention lock. Callers that already hold the per-flake sync
+/// lock MUST hold the snapshot-writer lock first.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot acquire a lock, purge the old source
+/// lineage, or persist the replacement source identity.
+///
+/// Returns the updated `Flake` row.
 pub async fn reset_flake_source(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     flake_id: i32,
@@ -464,6 +516,13 @@ pub async fn reset_flake_source(
     build_scope: &str,
 ) -> Result<Flake> {
     use crate::queries::commits::SYNC_LOCK_BASE;
+
+    // CONCURRENCY: The global order is snapshot writer, per-flake sync, then
+    // attention. Deployment binding/release and source-history preservation
+    // therefore cannot commit from incompatible views of the same lineage.
+    crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(tx)
+        .await
+        .context("Failed to acquire snapshot-writer lock for source reset")?;
 
     // 0. Acquire the per-flake advisory lock that serializes source reset
     //    with sync_flake_recorded's publication transaction.  This prevents
@@ -570,13 +629,43 @@ pub async fn reset_flake_source(
     .await
     .context("Failed to resolve build/eval attention occurrences during source reset")?;
 
-    // Remove derivations linked to this flake's commits
+    // RETENTION: Source replacement must remain operational when old commits
+    // back retained generations or deployment-bound derivations or artifacts.
+    // Delete only derivations that none of these durable identities or sealed
+    // exact-CVE POA&M verification items requires. Unreferenced schema-1 scans
+    // follow their parent derivation lifecycle.
     sqlx::query(
         r#"
         DELETE FROM derivations d
         USING commits c
         WHERE d.commit_id = c.id
           AND c.flake_id = $1
+           AND NOT EXISTS (
+               SELECT 1 FROM evaluation_generation_snapshots retained
+               WHERE retained.derivation_id = d.id
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM pending_system_deployments pending
+               WHERE pending.requested_derivation_id = d.id
+           )
+           AND NOT EXISTS (
+                SELECT 1
+                FROM pending_system_deployments pending
+               JOIN evaluation_snapshots snapshot
+                 ON snapshot.id = pending.evaluation_snapshot_id
+                AND snapshot.commit_id = pending.requested_commit_id
+               WHERE snapshot.commit_id = d.commit_id
+                  AND snapshot.configuration_name = d.derivation_name
+           )
+           AND NOT EXISTS (
+               SELECT 1
+               FROM cve_scans scan
+               JOIN poam_cve_verification_items item ON item.scan_id = scan.id
+               JOIN poam_verification_attempts attempt ON attempt.id = item.attempt_id
+               WHERE scan.derivation_id = d.id
+                 AND scan.evidence_schema_version = 1
+                 AND attempt.sealed_at IS NOT NULL
+           )
         "#,
     )
     .bind(flake_id)
@@ -584,12 +673,83 @@ pub async fn reset_flake_source(
     .await
     .context("Failed to clear derivations during source reset")?;
 
-    // Delete commits
-    sqlx::query("DELETE FROM commits WHERE flake_id = $1")
-        .bind(flake_id)
-        .execute(&mut **tx)
-        .await
-        .context("Failed to clear commits during source reset")?;
+    // RETENTION: Mark generation-, deployment-, reservation-, or exact-CVE-
+    // bound history as belonging to the replaced source before the flake row
+    // receives its new source identity. Source mutation never asks an ON DELETE
+    // action to decide whether a retained identity can be released. The bounded
+    // maintenance path owns deployment retention, including for legacy and
+    // path-only rows without exact artifact or derivation bindings. Explicit
+    // request reservations and sealed exact-CVE POA&M evidence remain durable
+    // without a time limit. Active revision APIs reject this flag.
+    sqlx::query(
+        "UPDATE commits c SET source_archived = true WHERE c.flake_id = $1
+         AND (
+              EXISTS (
+                  SELECT 1 FROM evaluation_generation_snapshots retained
+                  WHERE retained.commit_id = c.id
+               ) OR EXISTS (
+                   SELECT 1
+                   FROM pending_system_deployments pending
+                   WHERE pending.requested_commit_id = c.id
+               ) OR EXISTS (
+                 SELECT 1
+                 FROM pending_system_deployments pending
+                 JOIN evaluation_snapshots snapshot
+                   ON snapshot.id = pending.evaluation_snapshot_id
+                  AND snapshot.commit_id = pending.requested_commit_id
+                  WHERE snapshot.commit_id = c.id
+              ) OR EXISTS (
+                  SELECT 1
+                  FROM deployment_request_reservations reservation
+                  WHERE reservation.requested_commit_id = c.id
+               ) OR EXISTS (
+                   SELECT 1
+                   FROM derivations derivation
+                   JOIN cve_scans scan ON scan.derivation_id = derivation.id
+                   JOIN poam_cve_verification_items item ON item.scan_id = scan.id
+                   JOIN poam_verification_attempts attempt ON attempt.id = item.attempt_id
+                   WHERE derivation.commit_id = c.id
+                     AND scan.evidence_schema_version = 1
+                     AND attempt.sealed_at IS NOT NULL
+               )
+         )",
+    )
+    .bind(flake_id)
+    .execute(&mut **tx)
+    .await
+    .context("Failed to archive retained commits during source reset")?;
+
+    // Retained commits stay queryable by generation identity but cannot appear
+    // as revisions of the new source.
+    sqlx::query(
+        "DELETE FROM commits c WHERE c.flake_id = $1
+           AND NOT EXISTS (
+               SELECT 1 FROM derivations derivation
+               WHERE derivation.commit_id = c.id
+           ) AND NOT EXISTS (
+               SELECT 1 FROM evaluation_generation_snapshots retained
+              WHERE retained.commit_id = c.id
+           ) AND NOT EXISTS (
+               SELECT 1
+               FROM pending_system_deployments pending
+               WHERE pending.requested_commit_id = c.id
+           ) AND NOT EXISTS (
+             SELECT 1
+             FROM pending_system_deployments pending
+             JOIN evaluation_snapshots snapshot
+               ON snapshot.id = pending.evaluation_snapshot_id
+              AND snapshot.commit_id = pending.requested_commit_id
+              WHERE snapshot.commit_id = c.id
+         ) AND NOT EXISTS (
+             SELECT 1
+             FROM deployment_request_reservations reservation
+             WHERE reservation.requested_commit_id = c.id
+         )",
+    )
+    .bind(flake_id)
+    .execute(&mut **tx)
+    .await
+    .context("Failed to clear commits during source reset")?;
 
     // 3+4. Update flake identity, reactivate (clear deleted_at), and reset all
     //      sync/snapshot state atomically.  Combining these into one UPDATE
@@ -648,9 +808,11 @@ pub async fn reset_flake_source(
     Ok(flake)
 }
 
-/// Mutate an existing flake's identity/metadata under the per-flake advisory
-/// lock, re-reading the CURRENT row inside the lock before deciding what to
-/// write. This is the single linearization point for both the create and
+/// Mutates an existing flake's identity or metadata under ordered advisory locks.
+///
+/// The function acquires the snapshot-writer lock before the per-flake lock and
+/// re-reads the current row inside the locks before it decides what to write.
+/// This is the single linearization point for both the create and
 /// update HTTP handlers: any write that could touch `repo_url` or `branch`
 /// must go through this function (or `create_or_mutate_flake` below) so a
 /// concurrent identity change is never silently clobbered or silently
@@ -665,6 +827,11 @@ pub async fn reset_flake_source(
 /// the requested identity, the source is reset via `reset_flake_source`
 /// (purges history, clears the snapshot, invalidates in-flight syncs).
 /// Otherwise only non-source metadata (`name`, `build_scope`) is updated.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot acquire a lock, read the current
+/// identity, reset the source, update metadata, or commit the transaction.
 pub async fn mutate_flake_locked(
     pool: &PgPool,
     flake_id: i32,
@@ -679,6 +846,10 @@ pub async fn mutate_flake_locked(
         .begin()
         .await
         .context("Failed to begin flake mutation tx")?;
+
+    crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx)
+        .await
+        .context("Failed to acquire snapshot-writer lock for flake mutation")?;
 
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(SYNC_LOCK_BASE + i64::from(flake_id))
@@ -757,6 +928,10 @@ async fn mutate_conflicting_flake_locked(
         .begin()
         .await
         .context("Failed to begin flake mutation tx")?;
+
+    crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx)
+        .await
+        .context("Failed to acquire snapshot-writer lock for flake mutation")?;
 
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(SYNC_LOCK_BASE + i64::from(flake_id))
@@ -995,13 +1170,34 @@ pub async fn accept_history_rewrite_reset(pool: &PgPool, flake_id: i32) -> Resul
     .await
     .context("Failed to resolve build/eval attention occurrences during rewrite acceptance")?;
 
-    // Remove derivations linked to this flake's commits.
+    // RETENTION: A retained generation or deployment request owns its exact
+    // derivation. Preserve that row during rewrite acceptance so restrictive
+    // foreign keys do not abort recovery and each request remains attributable.
+    // A sealed exact-CVE POA&M verification item retains its cited system
+    // derivation. Unreferenced schema-1 scans follow the parent lifecycle.
     sqlx::query(
         r#"
         DELETE FROM derivations d
         USING commits c
         WHERE d.commit_id = c.id
           AND c.flake_id = $1
+          AND NOT EXISTS (
+              SELECT 1 FROM evaluation_generation_snapshots retained
+              WHERE retained.derivation_id = d.id
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM pending_system_deployments pending
+              WHERE pending.requested_derivation_id = d.id
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM cve_scans scan
+              JOIN poam_cve_verification_items item ON item.scan_id = scan.id
+              JOIN poam_verification_attempts attempt ON attempt.id = item.attempt_id
+              WHERE scan.derivation_id = d.id
+                AND scan.evidence_schema_version = 1
+                AND attempt.sealed_at IS NOT NULL
+          )
         "#,
     )
     .bind(flake_id)
@@ -1009,10 +1205,41 @@ pub async fn accept_history_rewrite_reset(pool: &PgPool, flake_id: i32) -> Resul
     .await
     .context("Failed to clear derivations during rewrite acceptance")?;
 
+    // SECURITY: Every commit that survives the purge belongs to the replaced
+    // lineage. Archive the complete lineage before deletion so a snapshot or
+    // another restrictive reference cannot leave an old SHA authorized by an
+    // active-revision API. A later sync explicitly reactivates SHAs that Git
+    // proves belong to the rewritten branch.
+    sqlx::query("UPDATE commits SET source_archived = true WHERE flake_id = $1")
+        .bind(flake_id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to archive old-lineage commits during rewrite acceptance")?;
+
     let deleted_commits = sqlx::query(
         r#"
-        DELETE FROM commits
-        WHERE flake_id = $1
+        DELETE FROM commits c
+        WHERE c.flake_id = $1
+          AND NOT EXISTS (
+              SELECT 1 FROM derivations derivation
+              WHERE derivation.commit_id = c.id
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM evaluation_snapshots snapshot
+              WHERE snapshot.commit_id = c.id
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM flake_output_snapshots snapshot
+              WHERE snapshot.commit_id = c.id
+          )
+           AND NOT EXISTS (
+               SELECT 1 FROM pending_system_deployments pending
+               WHERE pending.requested_commit_id = c.id
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM deployment_request_reservations reservation
+               WHERE reservation.requested_commit_id = c.id
+           )
         "#,
     )
     .bind(flake_id)
@@ -1332,7 +1559,8 @@ pub async fn fetch_dashboard_flake_timelines(
                    c.commit_timestamp DESC, c.id DESC) AS rn
           FROM visible_flakes vf LEFT JOIN commits c ON c.flake_id = vf.id
           LEFT JOIN flake_branch_commit_snapshot fbcs ON fbcs.flake_id = vf.id AND fbcs.commit_id = c.id
-          WHERE c.id IS NULL OR vf.snapshot_ready_at IS NULL OR fbcs.commit_id IS NOT NULL
+           WHERE c.id IS NULL OR (c.source_archived = false
+             AND (vf.snapshot_ready_at IS NULL OR fbcs.commit_id IS NOT NULL))
         ), deployments AS (
           SELECT s.flake_id, v.current_commit_hash,
                  COUNT(DISTINCT s.id)::bigint AS system_count,
@@ -1435,10 +1663,15 @@ pub async fn fetch_dashboard_flake_timelines(
 ///
 /// Ordering uses the branch-commit snapshot (position) when `snapshot_ready_at`
 /// IS NOT NULL, falling back to `(commit_timestamp DESC, id DESC)` otherwise.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot load the visible timeline rows.
 pub async fn fetch_flake_timelines(
     pool: &PgPool,
     max_commits_per_flake: i64,
     flake_ids: Option<&[i32]>,
+    visibility_user: Option<Uuid>,
 ) -> Result<Vec<FlakeTimeline>> {
     let flake_filter: Option<Vec<i32>> = flake_ids.map(|ids| ids.to_vec());
 
@@ -1508,8 +1741,17 @@ pub async fn fetch_flake_timelines(
             LEFT JOIN flake_branch_commit_snapshot fbcs
                 ON fbcs.commit_id = c.id AND fbcs.flake_id = f.id
             WHERE f.deleted_at IS NULL
+              AND c.source_archived = false
               AND ($1::int[] IS NULL OR f.id = ANY($1))
               AND (f.snapshot_ready_at IS NULL OR fbcs.commit_id IS NOT NULL)
+              AND ($3::uuid IS NULL OR EXISTS (
+                  SELECT 1 FROM systems visible_system
+                  JOIN user_environment_memberships membership
+                    ON membership.environment_id = visible_system.environment_id
+                   AND membership.user_id = $3
+                  WHERE visible_system.flake_id = f.id
+                    AND visible_system.is_active = TRUE
+              ))
         ),
         build_agg AS (
             SELECT
@@ -1524,7 +1766,37 @@ pub async fn fetch_flake_timelines(
             FROM build_jobs bj
             JOIN derivations d ON d.id = bj.derivation_id
             WHERE d.commit_id IN (SELECT commit_id FROM ranked WHERE rn <= $2)
+              AND ($3::uuid IS NULL OR (
+                  (bj.environment_id IS NOT NULL AND EXISTS (
+                      SELECT 1 FROM user_environment_memberships membership
+                      WHERE membership.user_id = $3
+                        AND membership.environment_id = bj.environment_id
+                  )) OR (bj.environment_id IS NULL AND EXISTS (
+                      SELECT 1 FROM systems visible_system
+                      JOIN user_environment_memberships membership
+                        ON membership.environment_id = visible_system.environment_id
+                      WHERE membership.user_id = $3
+                        AND (visible_system.hostname = d.derivation_target
+                             OR visible_system.system_configuration_name = d.derivation_target)
+                  ))
+              ))
             GROUP BY d.commit_id
+        ),
+        managed_systems AS (
+            SELECT s.flake_id,
+                   COUNT(DISTINCT s.id)::bigint AS system_count,
+                   array_agg(
+                       DISTINCT COALESCE(NULLIF(btrim(s.system_configuration_name), ''), s.hostname)
+                       ORDER BY COALESCE(NULLIF(btrim(s.system_configuration_name), ''), s.hostname)
+                   ) AS systems
+            FROM systems s
+            WHERE s.is_active = TRUE
+              AND ($3::uuid IS NULL OR EXISTS (
+                  SELECT 1 FROM user_environment_memberships membership
+                  WHERE membership.user_id = $3
+                    AND membership.environment_id = s.environment_id
+              ))
+            GROUP BY s.flake_id
         )
         SELECT
             r.flake_id,
@@ -1535,43 +1807,32 @@ pub async fn fetch_flake_timelines(
             c.commit_timestamp,
             c.message,
             c.author,
-            COALESCE(CARDINALITY(cac.nixos_configurations), 0)::bigint AS system_count,
-            COALESCE(
-                cac.nixos_configurations,
-                (
-                    SELECT COALESCE(array_agg(dn.derivation_name), ARRAY[]::text[])
-                    FROM (
-                        SELECT DISTINCT d2.derivation_name
-                        FROM derivations d2
-                        WHERE d2.commit_id = c.id
-                          AND d2.derivation_type = 'nixos'
-                        ORDER BY d2.derivation_name
-                    ) dn
-                ),
-                ARRAY[]::text[]
-            ) AS systems,
+            COALESCE(managed.system_count, 0)::bigint AS system_count,
+            COALESCE(managed.systems, ARRAY[]::text[]) AS systems,
             r.commits_behind,
             ba.build_status,
             c.evaluation_status,
             c.evaluation_error_message,
-            cmc.total_systems,
-            cmc.systems_passed_policy,
-            cmc.systems_failed_policy_strict,
-            cmc.systems_failed_policy_non_strict,
-            cmc.has_nix_eval_error,
-            cmc.has_policy_failures,
-            cmc.all_systems_passed
+            CASE WHEN $3::uuid IS NULL THEN cmc.total_systems ELSE NULL END AS total_systems,
+            CASE WHEN $3::uuid IS NULL THEN cmc.systems_passed_policy ELSE NULL END AS systems_passed_policy,
+            CASE WHEN $3::uuid IS NULL THEN cmc.systems_failed_policy_strict ELSE NULL END AS systems_failed_policy_strict,
+            CASE WHEN $3::uuid IS NULL THEN cmc.systems_failed_policy_non_strict ELSE NULL END AS systems_failed_policy_non_strict,
+            CASE WHEN $3::uuid IS NULL THEN cmc.has_nix_eval_error ELSE NULL END AS has_nix_eval_error,
+            CASE WHEN $3::uuid IS NULL THEN cmc.has_policy_failures ELSE NULL END AS has_policy_failures,
+            CASE WHEN $3::uuid IS NULL THEN cmc.all_systems_passed ELSE NULL END AS all_systems_passed
         FROM ranked r
         JOIN commits c ON c.id = r.commit_id
         LEFT JOIN build_agg ba ON ba.commit_id = r.commit_id
         LEFT JOIN commit_artifacts_cache cac ON cac.commit_id = r.commit_id
         LEFT JOIN commit_metadata_cache cmc ON cmc.commit_id = r.commit_id
+        LEFT JOIN managed_systems managed ON managed.flake_id = r.flake_id
         WHERE r.rn <= $2
         ORDER BY r.flake_name ASC, r.rn ASC
         "#,
     )
     .bind(&flake_filter)
     .bind(max_commits_per_flake)
+    .bind(visibility_user)
     .fetch_all(pool)
     .await?;
 
@@ -1841,7 +2102,7 @@ mod task_397_tests {
             commit_ids.push(id);
         }
 
-        let fallback = fetch_flake_timelines(&pool, 2, Some(&[flake.id]))
+        let fallback = fetch_flake_timelines(&pool, 2, Some(&[flake.id]), None)
             .await
             .expect("fetch fallback timeline");
         assert_eq!(fallback.len(), 1);
@@ -1856,7 +2117,7 @@ mod task_397_tests {
             .await
             .expect("replace snapshot");
 
-        let snapshot = fetch_flake_timelines(&pool, 10, Some(&[flake.id]))
+        let snapshot = fetch_flake_timelines(&pool, 10, Some(&[flake.id]), None)
             .await
             .expect("fetch snapshot timeline");
         assert_eq!(snapshot.len(), 1);
@@ -1866,7 +2127,7 @@ mod task_397_tests {
         assert_eq!(snapshot[0].commits[1].hash, "newest");
         assert_eq!(snapshot[0].commits[1].commits_behind, 1);
 
-        let registry = list_flake_registry(&pool)
+        let registry = list_flake_registry(&pool, None)
             .await
             .expect("fetch enriched registry");
         let item = registry
@@ -1875,6 +2136,40 @@ mod task_397_tests {
             .expect("registry item");
         assert_eq!(item.latest_commit_hash.as_deref(), Some("oldest"));
         assert_eq!(item.total_commit_count, 2);
+
+        sqlx::query("UPDATE commits SET source_archived = true WHERE id = $1")
+            .bind(commit_ids[0])
+            .execute(&pool)
+            .await
+            .expect("archive former snapshot head");
+        let active_snapshot = fetch_flake_timelines(&pool, 10, Some(&[flake.id]), None)
+            .await
+            .expect("fetch active-only snapshot timeline");
+        assert_eq!(active_snapshot[0].commits.len(), 1);
+        assert_eq!(active_snapshot[0].commits[0].hash, "newest");
+        let active_registry = list_flake_registry(&pool, None)
+            .await
+            .expect("fetch active-only registry");
+        let active_item = active_registry
+            .iter()
+            .find(|item| item.id == flake.id)
+            .expect("active registry item");
+        assert_eq!(active_item.latest_commit_hash.as_deref(), Some("newest"));
+        assert_eq!(active_item.total_commit_count, 1);
+
+        let unrelated_user = Uuid::new_v4();
+        assert!(
+            list_flake_registry(&pool, Some(unrelated_user))
+                .await
+                .expect("fetch membership-filtered registry")
+                .is_empty()
+        );
+        assert!(
+            fetch_flake_timelines(&pool, 10, Some(&[flake.id]), Some(unrelated_user))
+                .await
+                .expect("fetch membership-filtered timeline")
+                .is_empty()
+        );
     }
 
     /// Regression test for the create-path stale-conflict race: a row
