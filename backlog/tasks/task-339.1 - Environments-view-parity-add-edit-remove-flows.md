@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.6-terra
 created_date: '2026-06-10 13:35'
-updated_date: '2026-09-20 03:28'
+updated_date: '2026-09-20 03:40'
 labels:
   - design-parity
   - environments
@@ -130,6 +130,10 @@ No backend implementation dependency is currently required for the modal parity 
 The current cache assignment API is real but asymmetric: authenticated environment reads are exposed at `/api/environments/:id/caches`, while admin assignment is performed through `PUT /api/caches/:id/environments`. The task therefore requires UI reconciliation through the existing contract and only allows backend work if an atomic environment-scoped gap is proven. Existing version-aware bundle assignment semantics remain mandatory.
 
 2026-09-19 preflight: Created clean dedicated worktree `/home/mcamp/code/crystal-forge/TASK-339.1-environment-modal-parity` on branch `TASK-339.1-environment-modal-parity` from `origin/dev` `e304867c43abc8a7d8efe1f01e71af64cca67d8b`. The dev worktree has an unrelated untracked session file and another task worktree has unrelated changes; this task worktree is clean.
+
+2026-09-19 implementation progress (not review-ready): Replaced the active shared modal body with a sectioned `pe-shell` editor, contextual header/rail/footer, and Edit-only danger section. Added dialog semantics, Escape, focus sentinels/restoration, responsive editor CSS, real policy search, and truthful deployment descriptions. Extended the draft with explicit multi-cache IDs; Edit hydration now reads the cache catalog plus each cache membership, and save reconciles changed cache memberships by read-modify-replace while preserving unrelated environment IDs. This preserves the current many-to-many cache model; global caches remain global and are not modified. Bundle reconciliation remains version-aware and save stays disabled during Edit assignment hydration. Added basic 14a semantic checks for dialog/rail section navigation and Escape/focus return.
+
+Verification completed: `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` (passed, repository warnings); `nix develop -c node --check checks/web-ui/tests/integration-test.js` (passed); `git diff --check` (passed). Preview/browser verification is blocked: port 8080 and API port 3445 are owned by TASK-440's preview (PIDs 1077 and 9406). The fixed-port launcher cannot safely start an isolated TASK-339.1 preview, so no browser workflow, screenshot, focused authoritative run, commit, push, MR, or Review transition has been performed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
