@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-20 16:37'
+updated_date: '2026-09-20 16:52'
 labels:
   - scanning
   - web-ui
@@ -139,6 +139,12 @@ Focused backend follow-up: add migration 0270 with append-only host disposition 
 Focused frontend follow-up: mirror the host/environment System Detail triage DTO contract in `poam_api.rs`; make `CveTriageDraft` hydrate one selected scope and regenerate complete scope-specific defaults on every switch while preserving fleet request serialization; update the System Detail dialog and row state presentation for host precedence, inherited environment state, truthful fix wording, and existing accessibility/concurrency gates; add focused Rust regressions and run touched-file rustfmt, focused Web UI tests, WASM check when practical, and `git diff --check`.
 
 Backend acceptance corrections: derive environment POA&M subject sets and coherence from exact hosts without active host overrides; make host ACCEPTED retire inherited environment ownership for only the selected exact link; make host OPEN restore that link only when the inherited environment POA&M remains coherent for all other inherited subjects; preserve typed conflicts for incompatible active owners. Narrow migration 0270's detached-host exception to one historical exact subject and no environment-disposition history. Add active-link ownership and migration-invariant regressions, then rerun serial poam_workflows, touched-file rustfmt, offline cargo check, and diff hygiene.
+
+Review follow-up at `7c4c27d3`: add a private filesystem-identity helper in both agent and legacy server collectors. Preserve canonical root equality. For different resolved roots, require all stable NixOS sentinels (`init`, `system`, and `bin/switch-to-configuration`) to resolve to identical targets; unresolved roots return unknown and names alone never establish identity. Add isolated filesystem tests including the production-shaped `system-3079-link` wrapper.
+
+Extend the existing PostgreSQL inventory regression to prove the strict authority sequence Exact -> RetainedGenerationUnavailable -> CurrentStoreMismatch while keeping the latest-state-first query unchanged. Treat the newly discovered migration-0259 stale-state defect as a separate schema/security scope decision; do not silently add a migration in this follow-up.
+
+Replace only user-visible CVE fallback terminology with Historical wording. Preserve backend wire variants, `legacy_*` fields, test fixture identifiers, and read-only authority behavior. Update focused browser/static text assertions, then run focused Rust/UI/static checks before deciding whether one final authoritative browser run is required.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
