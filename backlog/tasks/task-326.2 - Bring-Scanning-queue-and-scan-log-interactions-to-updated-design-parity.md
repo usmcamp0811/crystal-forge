@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-20 14:56'
+updated_date: '2026-09-20 14:58'
 labels:
   - scanning
   - web-ui
@@ -137,6 +137,8 @@ Focused MR follow-up: implement design commit `35519546` for System Detail CVE t
 Focused backend follow-up: add migration 0270 with append-only host disposition history and active identity uniqueness; extend the System Detail API with a server-derived host/environment scope enum and explicit direct/inherited/effective state; split host and environment mutations while preserving canonical CVE -> system sentinel -> policy -> exact finding lock order, exact evidence, compatible POA&M reuse, and typed conflicts; make close/reopen restore scheduled dispositions in their recorded original scope; update focused PostgreSQL regressions and run scoped rustfmt, database tests, SQLX_OFFLINE server check, and git diff --check. Only cf-server backend files and genuinely changed SQLx metadata are in scope.
 
 Focused frontend follow-up: mirror the host/environment System Detail triage DTO contract in `poam_api.rs`; make `CveTriageDraft` hydrate one selected scope and regenerate complete scope-specific defaults on every switch while preserving fleet request serialization; update the System Detail dialog and row state presentation for host precedence, inherited environment state, truthful fix wording, and existing accessibility/concurrency gates; add focused Rust regressions and run touched-file rustfmt, focused Web UI tests, WASM check when practical, and `git diff --check`.
+
+Backend acceptance corrections: derive environment POA&M subject sets and coherence from exact hosts without active host overrides; make host ACCEPTED retire inherited environment ownership for only the selected exact link; make host OPEN restore that link only when the inherited environment POA&M remains coherent for all other inherited subjects; preserve typed conflicts for incompatible active owners. Narrow migration 0270's detached-host exception to one historical exact subject and no environment-disposition history. Add active-link ownership and migration-invariant regressions, then rerun serial poam_workflows, touched-file rustfmt, offline cargo check, and diff hygiene.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
