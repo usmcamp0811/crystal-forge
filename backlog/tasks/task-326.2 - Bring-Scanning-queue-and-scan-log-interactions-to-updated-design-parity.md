@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-20 14:04'
+updated_date: '2026-09-20 14:06'
 labels:
   - scanning
   - web-ui
@@ -133,6 +133,8 @@ Replace separate Justify + Create POA&M with one CveTriageModal (extracted from 
 Constraints: safe cancellation is not implemented by the backend, so the UI MUST NOT expose a fake cancellation control. The user's host-preview waiver remains in force because TASK-440 owns the fixed ports; do not touch that worktree or its processes. Do not implement TASK-348.2 or run an unrestricted Web UI mega-check.
 
 Focused MR follow-up: implement design commit `35519546` for System Detail CVE triage with default host scope and optional server-derived environment scope. Add append-only host disposition history, host-over-environment effective precedence, scope-safe System Detail DTOs, exact-subject POA&M behavior, inherited row chips, truthful fixed-version wording, focused PostgreSQL/frontend/browser regressions, then push the existing MR and return the task to Review.
+
+Focused backend follow-up: add migration 0270 with append-only host disposition history and active identity uniqueness; extend the System Detail API with a server-derived host/environment scope enum and explicit direct/inherited/effective state; split host and environment mutations while preserving canonical CVE -> system sentinel -> policy -> exact finding lock order, exact evidence, compatible POA&M reuse, and typed conflicts; make close/reopen restore scheduled dispositions in their recorded original scope; update focused PostgreSQL regressions and run scoped rustfmt, database tests, SQLX_OFFLINE server check, and git diff --check. Only cf-server backend files and genuinely changed SQLx metadata are in scope.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
