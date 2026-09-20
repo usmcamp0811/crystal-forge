@@ -10216,9 +10216,28 @@ const steps = [
         ) {
           throw new Error("Expected a changed-inventory conflict to restart from page zero");
         }
-        while (await page.getByRole("button", { name: "Load more vulnerabilities" }).count()) {
-          await page.getByRole("button", { name: "Load more vulnerabilities" }).click();
-          await page.waitForTimeout(100);
+        await assertVisible(
+          page.getByText("100 of 1,315 shown · 100 of 1,315 packages loaded", { exact: true }),
+          "Expected the conflict restart to render the replacement first page",
+        );
+        for (let pageIndex = 1; pageIndex <= 13; pageIndex += 1) {
+          const loadMore = page.getByTestId("system-cves-load-more");
+          await assertVisible(loadMore, `Expected continuation control for inventory page ${pageIndex + 1}`);
+          await assertEnabled(loadMore, `Expected continuation control to settle for inventory page ${pageIndex + 1}`);
+          const continuation = page.waitForResponse((response) => {
+            const responseUrl = new URL(response.url());
+            return responseUrl.pathname.endsWith("/cve-inventory-page")
+              && responseUrl.searchParams.has("after")
+              && response.status() === 200;
+          });
+          await loadMore.click();
+          await continuation;
+          const loaded = Math.min(100 + pageIndex * 100, largeInventory.length);
+          await assertVisible(
+            page.getByText(`${loaded.toLocaleString("en-US")} of 1,315 shown · ${loaded.toLocaleString("en-US")} of 1,315 packages loaded`, { exact: true }),
+            `Expected inventory page ${pageIndex + 1} to render before the next continuation`,
+            12000,
+          );
         }
         await assertVisible(
           page.getByText("1,315 of 1,315 shown · 1,315 of 1,315 packages loaded", { exact: true }),
