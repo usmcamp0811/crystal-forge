@@ -415,6 +415,8 @@ pub async fn get_scanning_scan_detail(
                 low_count: detail.low_count,
                 failure: detail.failure,
                 wait_reason: detail.wait_reason,
+                build_job_id: detail.build_job_id,
+                build_status: detail.build_status,
                 executor: detail.executor,
                 archived_at: detail.archived_at,
                 cancellable: false,

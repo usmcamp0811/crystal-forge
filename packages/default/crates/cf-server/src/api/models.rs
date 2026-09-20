@@ -535,6 +535,10 @@ pub struct ScanningScanDetailResponse {
     pub failure: Option<String>,
     /// Explains why this lifecycle is waiting.
     pub wait_reason: Option<String>,
+    /// Identifies the build attempt most directly associated with this scan.
+    pub build_job_id: Option<Uuid>,
+    /// Contains that build attempt's current lifecycle status.
+    pub build_status: Option<String>,
     /// Contains bounded executor identity suitable for administration.
     pub executor: Option<String>,
     /// Contains archive time when hidden by an administrator.

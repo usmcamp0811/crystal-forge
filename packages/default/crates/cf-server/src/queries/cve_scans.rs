@@ -2481,6 +2481,9 @@ async fn defer_locked_revocation(
 /// `limit` claims are ever returned.
 const CLAIM_CANDIDATE_OVERSCAN: i64 = 8;
 
+/// Limits prompt event-driven promotion work before the periodic worker resumes it.
+pub(crate) const EVENT_PROMOTION_LIMIT: i64 = 32;
+
 /// Advances waiting scans whose exact build or closure prerequisite now exists.
 ///
 /// The function uses the established CVE writer lock order for each bounded
@@ -2508,16 +2511,29 @@ pub async fn promote_waiting_cve_scans(pool: &PgPool, limit: i64) -> Result<i64>
                 WHEN derivation.store_path IS NULL
                   OR BTRIM(derivation.store_path) = ''
                   OR derivation.derivation_path IS NULL
-                  OR BTRIM(derivation.derivation_path) = '' THEN 'awaiting_build'
+                  OR BTRIM(derivation.derivation_path) = ''
+                  OR (scan.source_trigger = 'post_build' AND NOT EXISTS (
+                      SELECT 1 FROM build_jobs job
+                      WHERE job.id = scan.completed_build_job_id
+                        AND job.derivation_id = scan.derivation_id
+                        AND job.status = 'success'
+                  )) THEN 'awaiting_build'
                 WHEN EXISTS (
                     SELECT 1 FROM build_jobs job
-                    WHERE job.derivation_id = scan.derivation_id
-                      AND job.status = 'success'
+                    WHERE job.status = 'success'
                       AND job.builder_id IS NOT NULL
+                      AND (
+                          (scan.source_trigger = 'post_build'
+                           AND job.id = scan.completed_build_job_id
+                           AND job.derivation_id = scan.derivation_id)
+                          OR (scan.source_trigger <> 'post_build'
+                              AND job.derivation_id = scan.derivation_id)
+                      )
                 ) AND NOT EXISTS (
                     SELECT 1 FROM cache_push_jobs push
                     WHERE push.derivation_id = scan.derivation_id
                       AND push.status = 'completed'
+                      AND push.store_path = derivation.store_path
                       AND push.cache_destination IS NOT NULL
                       AND BTRIM(push.cache_destination) <> ''
                 ) THEN 'awaiting_closure'
@@ -2530,8 +2546,17 @@ pub async fn promote_waiting_cve_scans(pool: &PgPool, limit: i64) -> Result<i64>
               (scan.status = 'awaiting_build'
                AND derivation.store_path IS NOT NULL
                AND BTRIM(derivation.store_path) <> ''
-               AND derivation.derivation_path IS NOT NULL
-               AND BTRIM(derivation.derivation_path) <> '')
+                AND derivation.derivation_path IS NOT NULL
+                AND BTRIM(derivation.derivation_path) <> ''
+                AND (
+                    scan.source_trigger <> 'post_build'
+                    OR EXISTS (
+                        SELECT 1 FROM build_jobs job
+                        WHERE job.id = scan.completed_build_job_id
+                          AND job.derivation_id = scan.derivation_id
+                          AND job.status = 'success'
+                    )
+                ))
               OR (scan.status = 'awaiting_closure' AND (
                   NOT EXISTS (
                       SELECT 1 FROM build_jobs job
@@ -2542,6 +2567,7 @@ pub async fn promote_waiting_cve_scans(pool: &PgPool, limit: i64) -> Result<i64>
                       SELECT 1 FROM cache_push_jobs push
                       WHERE push.derivation_id = scan.derivation_id
                         AND push.status = 'completed'
+                        AND push.store_path = derivation.store_path
                         AND push.cache_destination IS NOT NULL
                         AND BTRIM(push.cache_destination) <> ''
                   )
@@ -2580,14 +2606,21 @@ pub async fn promote_waiting_cve_scans(pool: &PgPool, limit: i64) -> Result<i64>
                         AND BTRIM(derivation.derivation_path) <> ''
                         AND EXISTS (
                             SELECT 1 FROM build_jobs job
-                            WHERE job.derivation_id = derivation.id
-                              AND job.status = 'success'
+                            WHERE job.status = 'success'
                               AND job.builder_id IS NOT NULL
+                              AND (
+                                  (cve_scans.source_trigger = 'post_build'
+                                   AND job.id = cve_scans.completed_build_job_id
+                                   AND job.derivation_id = derivation.id)
+                                  OR (cve_scans.source_trigger <> 'post_build'
+                                      AND job.derivation_id = derivation.id)
+                              )
                         )
                         AND NOT EXISTS (
                             SELECT 1 FROM cache_push_jobs push
                             WHERE push.derivation_id = derivation.id
                               AND push.status = 'completed'
+                              AND push.store_path = derivation.store_path
                               AND push.cache_destination IS NOT NULL
                               AND BTRIM(push.cache_destination) <> ''
                         )
@@ -2601,15 +2634,31 @@ pub async fn promote_waiting_cve_scans(pool: &PgPool, limit: i64) -> Result<i64>
                             AND derivation.derivation_path IS NOT NULL
                             AND BTRIM(derivation.derivation_path) <> ''
                             AND (
+                                cve_scans.source_trigger <> 'post_build'
+                                OR EXISTS (
+                                    SELECT 1 FROM build_jobs completed_job
+                                    WHERE completed_job.id = cve_scans.completed_build_job_id
+                                      AND completed_job.derivation_id = derivation.id
+                                      AND completed_job.status = 'success'
+                                )
+                            )
+                            AND (
                                 NOT EXISTS (
                                     SELECT 1 FROM build_jobs job
-                                    WHERE job.derivation_id = derivation.id
-                                      AND job.status = 'success'
+                                    WHERE job.status = 'success'
                                       AND job.builder_id IS NOT NULL
+                                      AND (
+                                          (cve_scans.source_trigger = 'post_build'
+                                           AND job.id = cve_scans.completed_build_job_id
+                                           AND job.derivation_id = derivation.id)
+                                          OR (cve_scans.source_trigger <> 'post_build'
+                                              AND job.derivation_id = derivation.id)
+                                      )
                                 ) OR EXISTS (
                                     SELECT 1 FROM cache_push_jobs push
                                     WHERE push.derivation_id = derivation.id
                                       AND push.status = 'completed'
+                                      AND push.store_path = derivation.store_path
                                       AND push.cache_destination IS NOT NULL
                                       AND BTRIM(push.cache_destination) <> ''
                                 )

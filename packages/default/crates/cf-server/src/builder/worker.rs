@@ -307,8 +307,20 @@ async fn mark_build_complete_and_release(
     tx.commit().await?;
 
     // Create GC root to prevent cleanup before cache push
-    if let Err(e) = create_gc_root(store_path, derivation_id).await {
-        warn!("Failed to create GC root for {}: {}", store_path, e);
+    if let Err(error) = create_gc_root(store_path, derivation_id).await {
+        warn!("Failed to create GC root for {}: {}", store_path, error);
+    }
+    if let Err(error) = crate::queries::cve_scans::promote_waiting_cve_scans(
+        pool,
+        crate::queries::cve_scans::EVENT_PROMOTION_LIMIT,
+    )
+    .await
+    {
+        warn!(
+            derivation_id,
+            %error,
+            "Failed to promote waiting CVE scans after local build completion"
+        );
     }
 
     Ok(())

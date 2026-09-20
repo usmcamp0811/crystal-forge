@@ -69,6 +69,8 @@ pub(crate) struct ScanDiagnosticDetail {
     pub(crate) low_count: i32,
     pub(crate) failure: Option<String>,
     pub(crate) wait_reason: Option<String>,
+    pub(crate) build_job_id: Option<Uuid>,
+    pub(crate) build_status: Option<String>,
     pub(crate) executor: Option<String>,
     pub(crate) archived_at: Option<DateTime<Utc>>,
     pub(crate) events: Vec<ScanDiagnosticRow>,
@@ -252,13 +254,17 @@ pub(crate) async fn get_scan_diagnostics(
                COALESCE(builder.name,
                    CASE WHEN scan.scan_metadata ? 'execution_id' THEN 'server-local' END
                ) AS executor,
-               archive.archived_at
+               archive.archived_at,
+               related_build.id AS build_job_id,
+               related_build.status AS build_status
         FROM cve_scans scan
         JOIN derivations derivation ON derivation.id = scan.derivation_id
         LEFT JOIN commits commit ON commit.id = derivation.commit_id
         LEFT JOIN flakes flake ON flake.id = commit.flake_id
         LEFT JOIN builders builder ON builder.id = scan.lease_builder_id
         LEFT JOIN cve_scan_archives archive ON archive.scan_id = scan.id
+        LEFT JOIN build_jobs related_build
+          ON related_build.id = scan.completed_build_job_id
         WHERE scan.id = $1
         "#,
     )
@@ -323,6 +329,8 @@ pub(crate) async fn get_scan_diagnostics(
             .map(|value| redact_text(&value))
             .map(|value| value.chars().take(MAX_DIAGNOSTIC_CHARS).collect()),
         wait_reason: metadata.get("wait_reason"),
+        build_job_id: metadata.get("build_job_id"),
+        build_status: metadata.get("build_status"),
         executor: metadata.get("executor"),
         archived_at: metadata.get("archived_at"),
         events,

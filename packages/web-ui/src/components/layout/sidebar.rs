@@ -379,7 +379,9 @@ pub fn SidebarNav() -> Element {
                 }
                 NavLink {
                     collapsed: is_collapsed,
-                    to: Route::BuildsView {},
+                    to: Route::BuildsView {
+                        query: String::new(),
+                    },
                     label: "Builds",
                     // Builds badge is acknowledged only when the failures tab is opened (not on mount).
                     // The view itself calls acknowledge("builds") when the completed/failed tab opens.
@@ -756,7 +758,9 @@ pub fn MobileDrawer() -> Element {
                 }
                 NavLink {
                     collapsed: false,
-                    to: Route::BuildsView {},
+                    to: Route::BuildsView {
+                        query: String::new(),
+                    },
                     label: "Builds",
                     icon: rsx!(
                         svg {

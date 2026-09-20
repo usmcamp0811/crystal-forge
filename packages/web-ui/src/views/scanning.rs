@@ -37,6 +37,12 @@ enum ScanTab {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum ScanDetailTab {
+    Log,
+    Details,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ScanSort {
     Configuration,
     Revision,
@@ -820,7 +826,15 @@ pub fn ScanningView() -> Element {
                 ) }
             }
             if let Some(selection) = selected_scan() {
-                ScanDetailDrawer { selection, selected: selected_scan, state: detail_state, generation: detail_generation }
+                ScanDetailDrawer {
+                    selection,
+                    selected: selected_scan,
+                    state: detail_state,
+                    generation: detail_generation,
+                    retry_pending: exact_retry_pending,
+                    feedback: action_feedback,
+                    refresh,
+                }
             }
         }
     }
@@ -1345,10 +1359,14 @@ fn ScanDetailDrawer(
     mut selected: Signal<Option<ScanDetailSelection>>,
     mut state: Signal<ScanDetailState>,
     generation: Signal<u64>,
+    retry_pending: Signal<HashSet<i32>>,
+    feedback: Signal<Option<ScanActionFeedback>>,
+    refresh: Signal<u64>,
 ) -> Element {
     let mut search = use_signal(String::new);
     let mut match_position = use_signal(|| 0_usize);
     let mut now = use_signal(Utc::now);
+    let mut tab = use_signal(|| ScanDetailTab::Log);
     let selection_id = selection.scan_id;
     let poll_selection = selection.clone();
 
@@ -1356,6 +1374,7 @@ fn ScanDetailDrawer(
         let scan_id = selection_id;
         search.set(String::new());
         match_position.set(0);
+        tab.set(ScanDetailTab::Log);
         let _ = scan_id;
     });
     use_effect(move || {
@@ -1422,20 +1441,42 @@ fn ScanDetailDrawer(
         div { class: "side-panel-backdrop scanning-log-backdrop", tabindex: "-1", onclick: move |_| close_scan_detail(selected, generation),
             aside { id: "scan-diagnostics-dialog", class: "side-panel scanning-log-drawer", role: "dialog", aria_modal: "true", aria_labelledby: "scan-log-title", tabindex: "-1", onclick: move |event| event.stop_propagation(),
                 DialogFocusRestore {}
+                DialogInitialFocus { dialog_id: "scan-diagnostics-dialog".to_string() }
                 DialogFocusSentinel { dialog_id: "scan-diagnostics-dialog".to_string(), boundary: DialogFocusBoundary::Last }
                 div { class: "scanning-log-head",
-                    div { h2 { id: "scan-log-title", "Exact scan detail" } p { "{selection.label}" } code { "{selection.scan_id}" } }
+                    div { h2 { id: "scan-log-title", Icon { name: IconName::Shield, size: 14 } " Scan details" } p { "{selection.label}" } code { "{selection.scan_id}" } }
                     div { class: "row-actions",
                         button { class: "btn-icon focus-ring", aria_label: "Refresh exact scan detail", onclick: { let refresh_selection = selection.clone(); move |_| load_scan_detail(refresh_selection.clone(), selected, state, generation) }, Icon { name: IconName::Sync, size: 14 } }
-                        button { class: "btn-icon focus-ring", autofocus: true, aria_label: "Close exact scan detail", onclick: move |_| close_scan_detail(selected, generation), Icon { name: IconName::X, size: 15 } }
+                        button { class: "btn-icon focus-ring", aria_label: "Close exact scan detail", onclick: move |_| close_scan_detail(selected, generation), Icon { name: IconName::X, size: 15 } }
                     }
                 }
-                div { class: "scanning-log-body",
-                    match &*state.read() {
-                        ScanDetailState::Loading => rsx! { div { class: "q-empty", role: "status", "Loading exact scan detail…" } },
-                        ScanDetailState::Error(error) => rsx! { { load_error_state("Exact scan detail could not be loaded", error, { let retry_selection = selection.clone(); move || load_scan_detail(retry_selection.clone(), selected, state, generation) }) } },
-                        ScanDetailState::Loaded(detail) => rsx! {
-                            { detail_summary(detail, now()) }
+                match &*state.read() {
+                    ScanDetailState::Loading => rsx! { div { class: "scanning-log-body", div { class: "q-empty", role: "status", "Loading exact scan detail…" } } },
+                    ScanDetailState::Error(error) => rsx! { div { class: "scanning-log-body", { load_error_state("Exact scan detail could not be loaded", error, { let retry_selection = selection.clone(); move || load_scan_detail(retry_selection.clone(), selected, state, generation) }) } } },
+                    ScanDetailState::Loaded(detail) => rsx! {
+                        { detail_identity(detail) }
+                        { detail_status_strip(detail, now()) }
+                        { detail_callout(detail, selected, generation, retry_pending, feedback, refresh) }
+                        div { class: "sd-tabs scanning-detail-tabs", role: "tablist", aria_label: "Scan detail sections",
+                            onkeydown: move |event| {
+                                let next = match event.key() {
+                                    Key::ArrowRight | Key::ArrowLeft => match tab() {
+                                        ScanDetailTab::Log => ScanDetailTab::Details,
+                                        ScanDetailTab::Details => ScanDetailTab::Log,
+                                    },
+                                    Key::End => ScanDetailTab::Details,
+                                    Key::Home => ScanDetailTab::Log,
+                                    _ => return,
+                                };
+                                event.prevent_default();
+                                tab.set(next);
+                                focus_element_by_id(match next { ScanDetailTab::Log => "scan-detail-log-tab", ScanDetailTab::Details => "scan-detail-details-tab" });
+                            },
+                            button { id: "scan-detail-log-tab", class: if tab() == ScanDetailTab::Log { "sd-tab focus-ring active" } else { "sd-tab focus-ring" }, role: "tab", tabindex: if tab() == ScanDetailTab::Log { "0" } else { "-1" }, aria_selected: tab() == ScanDetailTab::Log, aria_controls: "scan-detail-log-panel", onclick: move |_| tab.set(ScanDetailTab::Log), "Log" }
+                            button { id: "scan-detail-details-tab", class: if tab() == ScanDetailTab::Details { "sd-tab focus-ring active" } else { "sd-tab focus-ring" }, role: "tab", tabindex: if tab() == ScanDetailTab::Details { "0" } else { "-1" }, aria_selected: tab() == ScanDetailTab::Details, aria_controls: "scan-detail-details-panel", onclick: move |_| tab.set(ScanDetailTab::Details), "Details" }
+                        }
+                        if tab() == ScanDetailTab::Log {
+                            div { id: "scan-detail-log-panel", class: "scanning-log-body scanning-detail-panel", role: "tabpanel", aria_labelledby: "scan-detail-log-tab",
                             div { class: "scanning-log-tools",
                                 div { class: "q-search scanning-log-search", Icon { name: IconName::Search, size: 12 } input { class: "q-search-input", aria_label: "Search authorized diagnostic content", placeholder: "Search diagnostics…", value: search(), oninput: move |event| { search.set(event.value()); match_position.set(0); } } }
                                 span { class: "filter-count", "{diagnostic_count_label}" }
@@ -1445,15 +1486,21 @@ fn ScanDetailDrawer(
                             }
                             if detail.truncated { div { class: "sd-callout sd-callout-warning", role: "status", "The API bounded this authorized response. Export preserves the same ordered content and truncation marker." } }
                             if detail.events.is_empty() { div { class: "q-empty", h3 { "No persisted diagnostic events" } p { "No log output is fabricated for this lifecycle." } } }
-                            else { ol { class: "scanning-log-events", for (index, event) in detail.events.iter().enumerate() {
-                                li { id: "scan-event-{event.id}", key: "{event.id}", class: if matches.get(match_position()).copied() == Some(index) && !search().trim().is_empty() { "scanning-log-event active-match level-{event.level}" } else { "scanning-log-event level-{event.level}" },
-                                    div { class: "scanning-log-event-meta", time { datetime: "{event.occurred_at.to_rfc3339()}", "{event.occurred_at.to_rfc3339()}" } span { "attempt {event.attempt_number}" } span { "{event.level}" } span { "{event.source}" } span { "{event.event_type}" } code { "{event.execution_id}" } }
-                                    pre { "{event.message}" }
-                                    if event.truncated { div { class: "scanning-log-truncated", "Event output was truncated at the capture boundary." } }
+                            else { div { class: "sd-log-stream build-log-stream scanning-log-stream", for (index, event) in detail.events.iter().enumerate() {
+                                div { id: "scan-event-{event.id}", key: "{event.id}", class: diagnostic_line_class(event.level.as_str(), matches.get(match_position()).copied() == Some(index) && !search().trim().is_empty()),
+                                    span { class: "sd-log-t", title: "{event.occurred_at.to_rfc3339()}", "{diagnostic_time(event.occurred_at)}" }
+                                    span { class: "sd-log-lvl", "{event.level.to_ascii_uppercase()}" }
+                                    span { class: "sd-log-m", span { class: "scanning-log-source", "{event.source}/{event.event_type} · execution {event.execution_id} · attempt {event.attempt_number} · " } { highlighted_diagnostic_message(&event.message, &search()) } }
+                                    if event.truncated { span { class: "scanning-log-truncated", " Event output was truncated at the capture boundary." } }
                                 }
                             } } }
-                        },
-                    }
+                            }
+                        } else {
+                            div { id: "scan-detail-details-panel", class: "scanning-log-body scanning-detail-panel focus-ring", role: "tabpanel", tabindex: "0", aria_labelledby: "scan-detail-details-tab",
+                                { detail_summary(detail) }
+                            }
+                        }
+                    },
                 }
                 DialogFocusSentinel { dialog_id: "scan-diagnostics-dialog".to_string(), boundary: DialogFocusBoundary::First }
             }
@@ -1461,9 +1508,106 @@ fn ScanDetailDrawer(
     }
 }
 
-fn detail_summary(detail: &ScanningScanDetailResponse, now: DateTime<Utc>) -> Element {
+fn detail_identity(detail: &ScanningScanDetailResponse) -> Element {
+    let flake = detail.flake_name.as_deref().unwrap_or("Not recorded");
+    let revision = detail.commit_hash.as_deref().unwrap_or("Not recorded");
+    let short_revision = revision.chars().take(12).collect::<String>();
+    rsx! {
+        div { class: "scanning-detail-config",
+            div { class: "scanning-detail-config-icon", Icon { name: IconName::Shield, size: 17 } }
+            div { class: "scanning-detail-config-copy",
+                strong { "{detail.hostname}" }
+                span { class: "mono", "{flake} · {short_revision}" }
+            }
+        }
+    }
+}
+
+fn detail_status_strip(detail: &ScanningScanDetailResponse, now: DateTime<Utc>) -> Element {
     let meta = status_meta(&detail.status);
     let elapsed = detail_elapsed_seconds(detail, now).map(format_duration);
+    let trigger = detail.source_trigger.as_deref().unwrap_or("Not recorded");
+    let timestamp = detail
+        .completed_at
+        .or(detail.started_at)
+        .or(detail.scheduled_at)
+        .unwrap_or(detail.created_at);
+    rsx! {
+        div { class: "scanning-detail-status-strip",
+            span { class: "chip {meta.class}", span { class: "chip-dot", style: "background:{meta.color};" } "{meta.label}" }
+            span { class: "chip chip-unknown scanning-trigger-chip", "{trigger}" }
+            time { datetime: "{timestamp.to_rfc3339()}", title: "{timestamp.to_rfc3339()}", "{detail_time(timestamp)}" }
+            if let Some(elapsed) = elapsed { span { class: "scanning-detail-elapsed", "Elapsed {elapsed}" } }
+            if detail.archived_at.is_some() { span { class: "chip chip-unknown", "Archived" } }
+            if detail.total_vulnerabilities > 0 { div { class: "scanning-detail-severity",
+                if detail.critical_count > 0 { span { class: "chip chip-critical", "{detail.critical_count}C" } }
+                if detail.high_count > 0 { span { class: "chip chip-warning", "{detail.high_count}H" } }
+                if detail.medium_count > 0 { span { class: "chip chip-info", "{detail.medium_count}M" } }
+            } }
+        }
+    }
+}
+
+fn detail_callout(
+    detail: &ScanningScanDetailResponse,
+    selected: Signal<Option<ScanDetailSelection>>,
+    generation: Signal<u64>,
+    retry_pending: Signal<HashSet<i32>>,
+    feedback: Signal<Option<ScanActionFeedback>>,
+    refresh: Signal<u64>,
+) -> Element {
+    let build_terminal = matches!(detail.build_status.as_deref(), Some("failed" | "cancelled"));
+    let (kind, title, guidance) = if detail.status == "failed" {
+        (
+            "danger",
+            detail
+                .failure
+                .as_deref()
+                .unwrap_or("The vulnerability scan failed."),
+            "Review the persisted scanner log. Retry starts a new exact scan for this derivation.",
+        )
+    } else if detail.status == "awaiting_build" && build_terminal {
+        (
+            "danger",
+            if detail.build_status.as_deref() == Some("cancelled") {
+                "The prerequisite build was cancelled"
+            } else {
+                "The prerequisite build failed"
+            },
+            "The scan remains queued and has not run Vulnix. Retry or replace the terminal build; this scan intent will continue when build output exists.",
+        )
+    } else if detail.status == "awaiting_build" {
+        (
+            "waiting",
+            "Waiting on the build",
+            "Vulnix needs the realized NixOS output. This scan starts automatically after the associated build succeeds.",
+        )
+    } else if detail.status == "awaiting_closure" {
+        (
+            "waiting",
+            "Waiting for a reachable closure",
+            "The remote build succeeded, but no completed cache publication makes its closure available to a scanner yet.",
+        )
+    } else {
+        return rsx! {};
+    };
+    rsx! {
+        div { class: "scanning-detail-callout scanning-detail-callout-{kind}", role: if kind == "danger" { "alert" } else { "status" },
+            Icon { name: if kind == "danger" { IconName::Warn } else { IconName::Clock }, size: 15 }
+            div { class: "scanning-detail-callout-copy",
+                strong { "{title}" }
+                p { "{guidance}" }
+                div { class: "row-actions",
+                    if let Some(build_job_id) = detail.build_job_id { a { class: "btn btn-ghost xs focus-ring", href: "/builds?job={build_job_id}", Icon { name: IconName::Build, size: 11 } " View build" } }
+                    if detail.status == "failed" { button { class: "btn btn-ghost xs focus-ring", disabled: retry_pending.read().contains(&detail.derivation_id), onclick: { let derivation_id = detail.derivation_id; let label = format!("{} {}", detail.hostname, commit_label(&detail.commit_hash)); move |_| { retry_exact_scan(derivation_id, label.clone(), retry_pending, feedback, refresh); close_scan_detail(selected, generation); } }, Icon { name: IconName::Sync, size: 11 } " Retry scan" } }
+                }
+            }
+        }
+    }
+}
+
+fn detail_summary(detail: &ScanningScanDetailResponse) -> Element {
+    let meta = status_meta(&detail.status);
     let flake = detail.flake_name.as_deref().unwrap_or("Not recorded");
     let revision = detail.commit_hash.as_deref().unwrap_or("Not recorded");
     let trigger = detail.source_trigger.as_deref().unwrap_or("Not recorded");
@@ -1482,13 +1626,21 @@ fn detail_summary(detail: &ScanningScanDetailResponse, now: DateTime<Utc>) -> El
         .unwrap_or_else(|| "Not terminal".to_string());
     rsx! {
         div { class: "scanning-detail-summary",
-            div { class: "scanning-detail-identity", span { class: "chip {meta.class}", "{meta.label}" } if detail.archived_at.is_some() { span { class: "chip chip-unknown", "Archived" } } if let Some(elapsed) = elapsed { span { "Elapsed {elapsed}" } } }
+            div { class: "scanning-detail-findings",
+                h3 { "Findings" }
+                div { class: "scanning-detail-finding-total", strong { "{detail.total_vulnerabilities}" } span { " vulnerabilities across {detail.total_packages} packages" } }
+                div { class: "scanning-detail-severity",
+                    span { class: "chip chip-critical", "{detail.critical_count} critical" }
+                    span { class: "chip chip-warning", "{detail.high_count} high" }
+                    span { class: "chip chip-info", "{detail.medium_count} medium" }
+                    span { class: "chip chip-unknown", "{detail.low_count} low" }
+                }
+            }
             dl { class: "scanning-detail-grid",
-                dt { "Scan ID" } dd { code { "{detail.scan_id}" } }
-                dt { "Derivation" } dd { code { "{detail.derivation_id}" } }
                 dt { "Configuration" } dd { "{detail.hostname}" }
                 dt { "Flake" } dd { "{flake}" }
                 dt { "Revision" } dd { code { "{revision}" } }
+                dt { "Status" } dd { span { class: "chip {meta.class}", "{meta.label}" } }
                 dt { "Trigger" } dd { "{trigger}" }
                 dt { "Scanner" } dd { "{detail.scanner_name}" if let Some(version) = detail.scanner_version.as_deref() { " {version}" } }
                 dt { "Executor" } dd { "{executor}" }
@@ -1497,15 +1649,59 @@ fn detail_summary(detail: &ScanningScanDetailResponse, now: DateTime<Utc>) -> El
                 dt { "Started" } dd { "{started}" }
                 dt { "Completed" } dd { "{completed}" }
                 dt { "Attempts" } dd { "{detail.attempts}" }
-                dt { "Packages" } dd { "{detail.total_packages}" }
-                dt { "Findings" } dd { "{detail.total_vulnerabilities} total · {detail.critical_count} critical · {detail.high_count} high · {detail.medium_count} medium · {detail.low_count} low" }
+                if let Some(build_job_id) = detail.build_job_id { dt { "Build job" } dd { code { "{build_job_id}" } if let Some(build_status) = detail.build_status.as_deref() { " · {build_status}" } } }
                 if let Some(reason) = detail.wait_reason.as_deref() { dt { "Wait" } dd { "{reason}" } }
                 if let Some(failure) = detail.failure.as_deref() { dt { "Failure" } dd { class: "scanning-detail-failure", "{failure}" } }
                 if let Some(archived_at) = detail.archived_at { dt { "Archived" } dd { "{archived_at.to_rfc3339()}" } }
                 dt { "Cancellation" } dd { if detail.cancellable { "Available" } else { "Not supported by execution ownership" } }
+                dt { "Derivation" } dd { code { "{detail.derivation_id}" } }
+                dt { "Scan ID" } dd { code { "{detail.scan_id}" } }
             }
         }
     }
+}
+
+fn diagnostic_line_class(level: &str, active: bool) -> &'static str {
+    match (level, active) {
+        ("error", true) => "sd-log-line sd-log-error log-line-hit log-line-active",
+        ("warning", true) => "sd-log-line sd-log-warn log-line-hit log-line-active",
+        (_, true) => "sd-log-line sd-log-info log-line-hit log-line-active",
+        ("error", false) => "sd-log-line sd-log-error",
+        ("warning", false) => "sd-log-line sd-log-warn",
+        _ => "sd-log-line sd-log-info",
+    }
+}
+
+fn diagnostic_time(occurred_at: DateTime<Utc>) -> String {
+    occurred_at.format("%H:%M:%S").to_string()
+}
+
+fn detail_time(timestamp: DateTime<Utc>) -> String {
+    timestamp.format("%Y-%m-%d %H:%M UTC").to_string()
+}
+
+fn highlighted_diagnostic_message(message: &str, query: &str) -> Element {
+    let query = query.trim();
+    if query.is_empty() {
+        return rsx! { "{message}" };
+    }
+    let lower_message = message.to_ascii_lowercase();
+    let lower_query = query.to_ascii_lowercase();
+    let mut parts = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative) = lower_message[cursor..].find(&lower_query) {
+        let start = cursor + relative;
+        if start > cursor {
+            parts.push((false, message[cursor..start].to_string()));
+        }
+        let end = start + query.len();
+        parts.push((true, message[start..end].to_string()));
+        cursor = end;
+    }
+    if cursor < message.len() {
+        parts.push((false, message[cursor..].to_string()));
+    }
+    rsx! { for (highlighted, part) in parts { if highlighted { mark { class: "log-hit", "{part}" } } else { "{part}" } } }
 }
 
 fn detail_elapsed_seconds(detail: &ScanningScanDetailResponse, now: DateTime<Utc>) -> Option<i64> {
@@ -1789,6 +1985,8 @@ mod tests {
             low_count: row.low_count,
             failure: row.failure,
             wait_reason: row.wait_reason,
+            build_job_id: Some(Uuid::new_v4()),
+            build_status: Some("failed".to_string()),
             executor: row.executor,
             archived_at: row.archived_at,
             cancellable: false,

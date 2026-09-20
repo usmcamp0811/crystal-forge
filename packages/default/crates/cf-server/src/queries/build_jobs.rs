@@ -80,6 +80,9 @@ pub enum BuildJobInsertOutcome {
 ///
 /// # Returns
 /// Number of build jobs created
+///
+/// Build admission and policy-eligible post-build scan intent creation commit
+/// or roll back together. Existing active scan work retains its identity.
 pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Result<usize> {
     let mut tx = pool
         .begin()
@@ -94,7 +97,7 @@ pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Resu
     .await
     .context("Failed to read max queue_position")?;
 
-    let result = sqlx::query(
+    let inserted_derivation_ids = sqlx::query_scalar::<_, i32>(
         r#"
         INSERT INTO build_jobs (
             derivation_id,
@@ -133,19 +136,27 @@ pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Resu
             )
         ON CONFLICT (derivation_id)
             WHERE status IN ('queued', 'building', 'cancelling') DO NOTHING
+        RETURNING derivation_id
         "#,
     )
     .bind(commit_id)
     .bind(max_pos)
-    .execute(&mut *tx)
+    .fetch_all(&mut *tx)
     .await
     .context("Failed to create build jobs for commit")?;
+
+    crate::queries::cve_scan_leases::create_post_build_scan_intents_tx(
+        &mut tx,
+        &inserted_derivation_ids,
+    )
+    .await
+    .context("Failed to create post-build scan intents")?;
 
     tx.commit()
         .await
         .context("Failed to commit create_build_jobs_for_commit")?;
 
-    let count = result.rows_affected() as usize;
+    let count = inserted_derivation_ids.len();
 
     if count > 0 {
         info!("📋 Created {} build jobs for commit {}", count, commit_id);
@@ -159,6 +170,15 @@ pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Resu
     Ok(count)
 }
 
+/// Creates commit build jobs and post-build scan intent in the caller's transaction.
+///
+/// Only derivations returned by the build insert receive intent. A concurrent or
+/// repeated admission that inserts no build job cannot create scan work.
+///
+/// # Errors
+///
+/// Returns an error when queue locking, build insertion, or scan-intent
+/// persistence fails.
 pub async fn create_build_jobs_for_commit_tx(
     tx: &mut Transaction<'_, Postgres>,
     commit_id: i32,
@@ -222,6 +242,11 @@ pub async fn create_build_jobs_for_commit_tx(
     .await
     .context("Failed to create build jobs for commit")?;
 
+    let derivation_ids = rows.iter().map(|row| row.derivation_id).collect::<Vec<_>>();
+    crate::queries::cve_scan_leases::create_post_build_scan_intents_tx(tx, &derivation_ids)
+        .await
+        .context("Failed to create post-build scan intents")?;
+
     Ok(rows)
 }
 
@@ -233,6 +258,8 @@ pub async fn create_build_jobs_for_commit_tx(
 /// same-revision evaluation creates a new queued child. The failed source row
 /// remains immutable. All other existing terminal rows remain unchanged and produce
 /// [`BuildJobInsertOutcome::AlreadyExists`].
+/// A newly inserted build and its policy-eligible post-build scan intent share
+/// the caller's transaction. An `AlreadyExists` outcome never creates intent.
 ///
 /// # Errors
 ///
@@ -341,6 +368,9 @@ pub async fn create_build_job_for_derivation_tx(
     .context("Failed to create build job for derivation")?;
 
     if let Some((build_job_id,)) = inserted {
+        crate::queries::cve_scan_leases::create_post_build_scan_intents_tx(tx, &[derivation_id])
+            .await
+            .context("Failed to create post-build scan intent")?;
         return Ok(Some(BuildJobInsertOutcome::Inserted { build_job_id }));
     }
 
@@ -376,6 +406,8 @@ pub async fn create_build_job_for_derivation_tx(
 ///
 /// Idempotency: existing history prevents scheduler-created attempts, and the
 /// active-attempt index absorbs concurrent initial enqueue races.
+/// Policy-eligible post-build scan intent commits atomically with a newly
+/// inserted build job. Existing build jobs do not create intent on retry.
 ///
 /// Returns `true` if a new job was created, `false` if one already existed.
 pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32) -> Result<bool> {
@@ -392,7 +424,7 @@ pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32)
     .await
     .context("Failed to read max queue_position")?;
 
-    let result = sqlx::query(
+    let inserted_derivation_id = sqlx::query_scalar::<_, i32>(
         r#"
         INSERT INTO build_jobs (
             derivation_id,
@@ -431,19 +463,29 @@ pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32)
           )
         ON CONFLICT (derivation_id)
             WHERE status IN ('queued', 'building', 'cancelling') DO NOTHING
+        RETURNING derivation_id
         "#,
     )
     .bind(derivation_id)
     .bind(next_pos)
-    .execute(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await
     .context("Failed to enqueue build job for derivation")?;
+
+    if let Some(inserted_derivation_id) = inserted_derivation_id {
+        crate::queries::cve_scan_leases::create_post_build_scan_intents_tx(
+            &mut tx,
+            &[inserted_derivation_id],
+        )
+        .await
+        .context("Failed to create post-build scan intent")?;
+    }
 
     tx.commit()
         .await
         .context("Failed to commit enqueue_build_job_for_derivation")?;
 
-    let created = result.rows_affected() > 0;
+    let created = inserted_derivation_id.is_some();
     if created {
         info!(
             "📋 Incremental build job created for derivation {}",
@@ -908,6 +950,12 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
 
         match inserted {
             Ok(Some(true)) => {
+                crate::queries::cve_scan_leases::create_post_build_scan_intents_tx(
+                    &mut tx,
+                    &[derivation_id],
+                )
+                .await
+                .context("Failed to create recovery post-build scan intent")?;
                 // Successfully inserted. Update state inside the same tx
                 // (never use a separate pooled connection while holding row locks).
                 match sqlx::query(
@@ -1069,6 +1117,75 @@ pub async fn mark_job_success(pool: &PgPool, job_id: Uuid, logs: Option<&str>) -
 #[cfg(test)]
 mod tests {
     use crate::queue::QueueNotifier;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    async fn insert_buildable_derivation(
+        pool: &PgPool,
+        label: &str,
+        derivation_type: &str,
+    ) -> (i32, i32) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let repo_url = format!("https://example.test/{label}-{suffix}.git");
+        crate::queries::flakes::insert_flake(
+            pool,
+            &format!("{label}-{suffix}"),
+            &repo_url,
+            "main",
+            "all_configs",
+        )
+        .await
+        .expect("test flake should be inserted");
+        crate::queries::commits::insert_commit(
+            pool,
+            &format!("{label}-{suffix}"),
+            &repo_url,
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("test commit should be inserted");
+        let commit_id: i32 =
+            sqlx::query_scalar("SELECT id FROM commits WHERE git_commit_hash = $1")
+                .bind(format!("{label}-{suffix}"))
+                .fetch_one(pool)
+                .await
+                .expect("test commit should load");
+        let derivation_id: i32 = sqlx::query_scalar(
+            r#"
+            INSERT INTO derivations (
+                commit_id, derivation_type, derivation_name, derivation_path,
+                status_id, attempt_count, cf_agent_enabled,
+                policy_requirements_met
+            )
+            VALUES ($1, $2, $3, $4, 5, 0, TRUE, TRUE)
+            RETURNING id
+            "#,
+        )
+        .bind(commit_id)
+        .bind(derivation_type)
+        .bind(format!("{label}-{suffix}"))
+        .bind(format!("/nix/store/{suffix}-{label}.drv"))
+        .fetch_one(pool)
+        .await
+        .expect("test derivation should be inserted");
+        (commit_id, derivation_id)
+    }
+
+    async fn active_scan_state(pool: &PgPool, derivation_id: i32) -> Vec<(String, String, i32)> {
+        sqlx::query_as(
+            r#"
+            SELECT status, source_trigger, attempts
+            FROM cve_scans
+            WHERE derivation_id = $1
+              AND status IN ('awaiting_build', 'awaiting_closure', 'pending', 'in_progress')
+            ORDER BY created_at, id
+            "#,
+        )
+        .bind(derivation_id)
+        .fetch_all(pool)
+        .await
+        .expect("active scan state should load")
+    }
 
     /// Verify that a QueueNotifier notification issued after incremental enqueue
     /// is observable by a waiting consumer.
@@ -1117,6 +1234,665 @@ mod tests {
             result.is_err(),
             "Coalesced notifications should produce exactly one wakeup"
         );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn post_build_intent_covers_authoritative_admission_paths_and_gates(pool: PgPool) {
+        sqlx::query("UPDATE scan_schedule_policy SET on_build = TRUE WHERE id = 1")
+            .execute(&pool)
+            .await
+            .expect("post-build policy should be enabled");
+
+        let (pool_commit, pool_derivation) =
+            insert_buildable_derivation(&pool, "post-build-pool", "nixos").await;
+        assert_eq!(
+            super::create_build_jobs_for_commit(&pool, pool_commit)
+                .await
+                .expect("pool-owned bulk admission should succeed"),
+            1
+        );
+
+        let (tx_commit, tx_derivation) =
+            insert_buildable_derivation(&pool, "post-build-tx", "nixos").await;
+        let mut tx = pool.begin().await.expect("bulk transaction should begin");
+        assert_eq!(
+            super::create_build_jobs_for_commit_tx(&mut tx, tx_commit)
+                .await
+                .expect("caller-owned bulk admission should succeed")
+                .len(),
+            1
+        );
+        tx.commit().await.expect("bulk transaction should commit");
+
+        let (_, single_derivation) =
+            insert_buildable_derivation(&pool, "post-build-single", "nixos").await;
+        let mut tx = pool.begin().await.expect("single transaction should begin");
+        assert!(matches!(
+            super::create_build_job_for_derivation_tx(&mut tx, single_derivation)
+                .await
+                .expect("single admission should succeed"),
+            Some(super::BuildJobInsertOutcome::Inserted { .. })
+        ));
+        tx.commit().await.expect("single transaction should commit");
+
+        let (_, incremental_derivation) =
+            insert_buildable_derivation(&pool, "post-build-incremental", "nixos").await;
+        assert!(
+            super::enqueue_build_job_for_derivation(&pool, incremental_derivation)
+                .await
+                .expect("incremental admission should succeed")
+        );
+
+        for derivation_id in [
+            pool_derivation,
+            tx_derivation,
+            single_derivation,
+            incremental_derivation,
+        ] {
+            assert_eq!(
+                active_scan_state(&pool, derivation_id).await,
+                vec![("awaiting_build".into(), "post_build".into(), 0)]
+            );
+        }
+        assert!(
+            !super::enqueue_build_job_for_derivation(&pool, incremental_derivation)
+                .await
+                .expect("duplicate admission should be idempotent")
+        );
+        assert_eq!(
+            active_scan_state(&pool, incremental_derivation).await.len(),
+            1
+        );
+
+        sqlx::query("UPDATE scan_schedule_policy SET on_build = FALSE WHERE id = 1")
+            .execute(&pool)
+            .await
+            .expect("post-build policy should be disabled");
+        let (_, disabled_derivation) =
+            insert_buildable_derivation(&pool, "post-build-disabled", "nixos").await;
+        assert!(
+            super::enqueue_build_job_for_derivation(&pool, disabled_derivation)
+                .await
+                .expect("disabled admission should still create its build")
+        );
+        assert!(
+            active_scan_state(&pool, disabled_derivation)
+                .await
+                .is_empty()
+        );
+
+        sqlx::query("UPDATE scan_schedule_policy SET on_build = TRUE WHERE id = 1")
+            .execute(&pool)
+            .await
+            .expect("post-build policy should be re-enabled");
+        let (_, package_derivation) =
+            insert_buildable_derivation(&pool, "post-build-package", "package").await;
+        assert!(
+            super::enqueue_build_job_for_derivation(&pool, package_derivation)
+                .await
+                .expect("package admission should still create its build")
+        );
+        assert!(
+            active_scan_state(&pool, package_derivation)
+                .await
+                .is_empty()
+        );
+
+        let (_, rolled_back_derivation) =
+            insert_buildable_derivation(&pool, "post-build-rollback", "nixos").await;
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("rollback transaction should begin");
+        assert!(matches!(
+            super::create_build_job_for_derivation_tx(&mut tx, rolled_back_derivation)
+                .await
+                .expect("rolled-back admission should execute"),
+            Some(super::BuildJobInsertOutcome::Inserted { .. })
+        ));
+        tx.rollback()
+            .await
+            .expect("admission transaction should roll back");
+        let persisted: (i64, i64) = sqlx::query_as(
+            r#"
+            SELECT
+                (SELECT COUNT(*) FROM build_jobs WHERE derivation_id = $1),
+                (SELECT COUNT(*) FROM cve_scans WHERE derivation_id = $1)
+            "#,
+        )
+        .bind(rolled_back_derivation)
+        .fetch_one(&pool)
+        .await
+        .expect("rolled-back rows should be countable");
+        assert_eq!(persisted, (0, 0));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn post_build_intent_is_atomic_under_failure_and_concurrent_admission(pool: PgPool) {
+        let (_, concurrent_derivation) =
+            insert_buildable_derivation(&pool, "post-build-concurrent", "nixos").await;
+        let first_pool = pool.clone();
+        let second_pool = pool.clone();
+        let (first, second) = tokio::join!(
+            super::enqueue_build_job_for_derivation(&first_pool, concurrent_derivation),
+            super::enqueue_build_job_for_derivation(&second_pool, concurrent_derivation),
+        );
+        let admitted = [first, second]
+            .into_iter()
+            .map(|result| result.expect("concurrent admission should not fail"))
+            .filter(|created| *created)
+            .count();
+        assert_eq!(admitted, 1);
+        let concurrent_counts: (i64, i64) = sqlx::query_as(
+            r#"
+            SELECT
+                (SELECT COUNT(*) FROM build_jobs WHERE derivation_id = $1),
+                (SELECT COUNT(*) FROM cve_scans WHERE derivation_id = $1)
+            "#,
+        )
+        .bind(concurrent_derivation)
+        .fetch_one(&pool)
+        .await
+        .expect("concurrent rows should be countable");
+        assert_eq!(concurrent_counts, (1, 1));
+
+        sqlx::query(
+            r#"
+            CREATE FUNCTION reject_test_post_build_intent() RETURNS trigger
+            LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.source_trigger = 'post_build' THEN
+                    RAISE EXCEPTION 'test post-build intent rejection';
+                END IF;
+                RETURN NEW;
+            END;
+            $$
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("failure-injection function should be installed");
+        sqlx::query(
+            r#"
+            CREATE TRIGGER reject_test_post_build_intent
+            BEFORE INSERT ON cve_scans
+            FOR EACH ROW EXECUTE FUNCTION reject_test_post_build_intent()
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("failure-injection trigger should be installed");
+        let (_, rejected_derivation) =
+            insert_buildable_derivation(&pool, "post-build-rejected", "nixos").await;
+        let error = super::enqueue_build_job_for_derivation(&pool, rejected_derivation)
+            .await
+            .expect_err("scan intent failure must reject build admission");
+        assert!(error.to_string().contains("post-build scan intent"));
+        let rejected_counts: (i64, i64) = sqlx::query_as(
+            r#"
+            SELECT
+                (SELECT COUNT(*) FROM build_jobs WHERE derivation_id = $1),
+                (SELECT COUNT(*) FROM cve_scans WHERE derivation_id = $1)
+            "#,
+        )
+        .bind(rejected_derivation)
+        .fetch_one(&pool)
+        .await
+        .expect("rejected rows should be countable");
+        assert_eq!(rejected_counts, (0, 0));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn post_build_admission_preserves_existing_active_provenance(pool: PgPool) {
+        for trigger in ["manual", "fleet"] {
+            let (_, derivation_id) =
+                insert_buildable_derivation(&pool, &format!("post-build-{trigger}"), "nixos").await;
+            sqlx::query(
+                "INSERT INTO cve_scans (derivation_id, scanner_name, status, attempts, source_trigger) VALUES ($1, 'vulnix', 'pending', 0, $2)",
+            )
+            .bind(derivation_id)
+            .bind(trigger)
+            .execute(&pool)
+            .await
+            .expect("existing active scan should be inserted");
+
+            assert!(
+                super::enqueue_build_job_for_derivation(&pool, derivation_id)
+                    .await
+                    .expect("build admission should succeed")
+            );
+            assert_eq!(
+                active_scan_state(&pool, derivation_id).await,
+                vec![("pending".into(), trigger.into(), 0)]
+            );
+            let build_job_id: Uuid = sqlx::query_scalar(
+                "UPDATE build_jobs SET status = 'success', completed_at = NOW() WHERE derivation_id = $1 RETURNING id",
+            )
+            .bind(derivation_id)
+            .fetch_one(&pool)
+            .await
+            .expect("winning-provenance build should complete");
+            sqlx::query(
+                "UPDATE cve_scans SET status = 'completed', completed_at = NOW() WHERE derivation_id = $1",
+            )
+            .bind(derivation_id)
+            .execute(&pool)
+            .await
+            .expect("winning-provenance scan should become terminal");
+            let mut tx = pool
+                .begin()
+                .await
+                .expect("completion transaction should begin");
+            assert!(
+                !crate::queries::cve_scan_leases::attach_completed_build_to_post_build_scan_tx(
+                    &mut tx,
+                    build_job_id,
+                )
+                .await
+                .expect("completion attachment should remain a no-op")
+            );
+            tx.commit()
+                .await
+                .expect("completion transaction should commit");
+            let history: Vec<(String, String)> = sqlx::query_as(
+                "SELECT status, source_trigger FROM cve_scans WHERE derivation_id = $1 ORDER BY created_at, id",
+            )
+            .bind(derivation_id)
+            .fetch_all(&pool)
+            .await
+            .expect("scan history should load");
+            assert_eq!(history, vec![("completed".into(), trigger.into())]);
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn post_build_completion_repairs_only_eligible_missing_intent(pool: PgPool) {
+        let (_, eligible_derivation) =
+            insert_buildable_derivation(&pool, "post-build-legacy-eligible", "nixos").await;
+        let eligible_output = format!("/nix/store/{eligible_derivation}-legacy-system");
+        sqlx::query("UPDATE derivations SET store_path = $2 WHERE id = $1")
+            .bind(eligible_derivation)
+            .bind(&eligible_output)
+            .execute(&pool)
+            .await
+            .expect("legacy build output should persist");
+        let eligible_job_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW()) RETURNING id",
+        )
+        .bind(eligible_derivation)
+        .fetch_one(&pool)
+        .await
+        .expect("legacy successful build should be inserted without admission intent");
+
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("legacy repair transaction should begin");
+        assert!(
+            crate::queries::cve_scan_leases::attach_completed_build_to_post_build_scan_tx(
+                &mut tx,
+                eligible_job_id,
+            )
+            .await
+            .expect("eligible legacy completion should repair its missing intent")
+        );
+        tx.commit()
+            .await
+            .expect("legacy repair transaction should commit");
+        let repaired: (String, String, i32, Option<Uuid>) = sqlx::query_as(
+            "SELECT status, source_trigger, attempts, completed_build_job_id FROM cve_scans WHERE derivation_id = $1",
+        )
+        .bind(eligible_derivation)
+        .fetch_one(&pool)
+        .await
+        .expect("repaired intent should load");
+        assert_eq!(
+            repaired,
+            (
+                "awaiting_build".into(),
+                "post_build".into(),
+                0,
+                Some(eligible_job_id)
+            )
+        );
+        assert_eq!(
+            crate::queries::cve_scans::promote_waiting_cve_scans(&pool, 10)
+                .await
+                .expect("authoritative promotion should advance repaired intent"),
+            1
+        );
+        assert_eq!(
+            active_scan_state(&pool, eligible_derivation).await,
+            vec![("pending".into(), "post_build".into(), 0)]
+        );
+
+        sqlx::query("UPDATE scan_schedule_policy SET on_build = FALSE WHERE id = 1")
+            .execute(&pool)
+            .await
+            .expect("post-build policy should be disabled");
+        let (_, disabled_derivation) =
+            insert_buildable_derivation(&pool, "post-build-legacy-disabled", "nixos").await;
+        let disabled_job_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW()) RETURNING id",
+        )
+        .bind(disabled_derivation)
+        .fetch_one(&pool)
+        .await
+        .expect("disabled-policy build should be inserted");
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("disabled-policy transaction should begin");
+        assert!(
+            !crate::queries::cve_scan_leases::attach_completed_build_to_post_build_scan_tx(
+                &mut tx,
+                disabled_job_id,
+            )
+            .await
+            .expect("disabled policy should not repair an intent")
+        );
+        tx.commit()
+            .await
+            .expect("disabled-policy transaction should commit");
+
+        sqlx::query("UPDATE scan_schedule_policy SET on_build = TRUE WHERE id = 1")
+            .execute(&pool)
+            .await
+            .expect("post-build policy should be enabled");
+        let (_, package_derivation) =
+            insert_buildable_derivation(&pool, "post-build-legacy-package", "package").await;
+        let package_job_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW()) RETURNING id",
+        )
+        .bind(package_derivation)
+        .fetch_one(&pool)
+        .await
+        .expect("package build should be inserted");
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("package completion transaction should begin");
+        assert!(
+            !crate::queries::cve_scan_leases::attach_completed_build_to_post_build_scan_tx(
+                &mut tx,
+                package_job_id,
+            )
+            .await
+            .expect("package completion should not repair an intent")
+        );
+        tx.commit()
+            .await
+            .expect("package completion transaction should commit");
+
+        for derivation_id in [disabled_derivation, package_derivation] {
+            assert!(active_scan_state(&pool, derivation_id).await.is_empty());
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn post_build_completion_attaches_then_authority_promotes_one_intent(pool: PgPool) {
+        let builder_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO builders (id, name, public_key, arch, status) VALUES ($1, $2, $3, 'x86_64-linux', 'active')",
+        )
+        .bind(builder_id)
+        .bind(format!("post-build-builder-{builder_id}"))
+        .bind(format!("post-build-key-{builder_id}"))
+        .execute(&pool)
+        .await
+        .expect("remote builder should be inserted");
+
+        let (_, remote_derivation) =
+            insert_buildable_derivation(&pool, "post-build-remote", "nixos").await;
+        assert!(
+            super::enqueue_build_job_for_derivation(&pool, remote_derivation)
+                .await
+                .expect("remote build should be admitted")
+        );
+        let remote_job_id: Uuid =
+            sqlx::query_scalar("SELECT id FROM build_jobs WHERE derivation_id = $1")
+                .bind(remote_derivation)
+                .fetch_one(&pool)
+                .await
+                .expect("remote build job should load");
+        sqlx::query(
+            "UPDATE build_jobs SET status = 'building', builder_id = $2, started_at = NOW() WHERE id = $1",
+        )
+        .bind(remote_job_id)
+        .bind(builder_id)
+        .execute(&pool)
+        .await
+        .expect("remote build should be assigned");
+        sqlx::query("UPDATE derivations SET store_path = $2 WHERE id = $1")
+            .bind(remote_derivation)
+            .bind(format!(
+                "/nix/store/{remote_derivation}-retained-prior-output"
+            ))
+            .execute(&pool)
+            .await
+            .expect("retained prior output should be persisted");
+        assert_eq!(
+            crate::queries::cve_scans::promote_waiting_cve_scans(&pool, 10)
+                .await
+                .expect("incomplete exact build must remain waiting"),
+            0
+        );
+        assert_eq!(
+            active_scan_state(&pool, remote_derivation).await,
+            vec![("awaiting_build".into(), "post_build".into(), 0)]
+        );
+        let remote_output = format!("/nix/store/{remote_derivation}-remote-system");
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("remote completion transaction should begin");
+        sqlx::query("UPDATE build_jobs SET status = 'success', completed_at = NOW() WHERE id = $1")
+            .bind(remote_job_id)
+            .execute(&mut *tx)
+            .await
+            .expect("remote build should complete");
+        sqlx::query("UPDATE derivations SET store_path = $2 WHERE id = $1")
+            .bind(remote_derivation)
+            .bind(&remote_output)
+            .execute(&mut *tx)
+            .await
+            .expect("remote output should be persisted");
+        assert!(
+            crate::queries::cve_scan_leases::attach_completed_build_to_post_build_scan_tx(
+                &mut tx,
+                remote_job_id,
+            )
+            .await
+            .expect("remote scan intent should attach the completed build")
+        );
+        tx.commit()
+            .await
+            .expect("remote completion transaction should commit");
+        let remote_state: (String, String, i32, Option<Uuid>) = sqlx::query_as(
+            "SELECT status, source_trigger, attempts, completed_build_job_id FROM cve_scans WHERE derivation_id = $1",
+        )
+        .bind(remote_derivation)
+        .fetch_one(&pool)
+        .await
+        .expect("remote scan state should load");
+        assert_eq!(
+            remote_state,
+            (
+                "awaiting_build".into(),
+                "post_build".into(),
+                0,
+                Some(remote_job_id)
+            )
+        );
+        assert_eq!(
+            crate::queries::cve_scans::promote_waiting_cve_scans(&pool, 10)
+                .await
+                .expect("remote waiting scan should promote"),
+            1
+        );
+        assert_eq!(
+            active_scan_state(&pool, remote_derivation).await,
+            vec![("awaiting_closure".into(), "post_build".into(), 0)]
+        );
+        assert!(
+            crate::queries::cve_scans::claim_queued_cve_scans(&pool, 1)
+                .await
+                .expect("waiting scan claim should execute")
+                .is_empty()
+        );
+        sqlx::query(
+            r#"
+            INSERT INTO cache_push_jobs (
+                derivation_id, status, store_path, completed_at, cache_destination
+            ) VALUES ($1, 'completed', $2, NOW(), 'post-build-test-cache')
+            "#,
+        )
+        .bind(remote_derivation)
+        .bind(&remote_output)
+        .execute(&pool)
+        .await
+        .expect("completed remote cache publication should be inserted");
+        assert_eq!(
+            crate::queries::cve_scans::promote_waiting_cve_scans(&pool, 10)
+                .await
+                .expect("cache-published remote scan should promote"),
+            1
+        );
+        assert_eq!(
+            active_scan_state(&pool, remote_derivation).await,
+            vec![("pending".into(), "post_build".into(), 0)]
+        );
+        let (_, retry_is_new) = crate::queries::builders::complete_job_atomic(
+            &pool,
+            &remote_job_id,
+            &builder_id,
+            None,
+            Some("/nix/store/ignored-retry-output"),
+        )
+        .await
+        .expect("completion retry should be idempotent");
+        assert!(!retry_is_new);
+        assert_eq!(active_scan_state(&pool, remote_derivation).await.len(), 1);
+        sqlx::query(
+            "UPDATE cve_scans SET status = 'completed', completed_at = NOW() WHERE derivation_id = $1",
+        )
+        .bind(remote_derivation)
+        .execute(&pool)
+        .await
+        .expect("remote scan should become terminal");
+        let (_, terminal_retry_is_new) = crate::queries::builders::complete_job_atomic(
+            &pool,
+            &remote_job_id,
+            &builder_id,
+            None,
+            Some("/nix/store/ignored-terminal-retry-output"),
+        )
+        .await
+        .expect("terminal completion retry should remain idempotent");
+        assert!(!terminal_retry_is_new);
+        let post_build_history: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM cve_scans WHERE derivation_id = $1 AND source_trigger = 'post_build'",
+        )
+        .bind(remote_derivation)
+        .fetch_one(&pool)
+        .await
+        .expect("post-build history should be countable");
+        assert_eq!(post_build_history, 1);
+
+        let (_, local_derivation) =
+            insert_buildable_derivation(&pool, "post-build-local", "nixos").await;
+        assert!(
+            super::enqueue_build_job_for_derivation(&pool, local_derivation)
+                .await
+                .expect("local build should be admitted")
+        );
+        let local_job_id: Uuid = sqlx::query_scalar(
+            "UPDATE build_jobs SET status = 'success', completed_at = NOW() WHERE derivation_id = $1 RETURNING id",
+        )
+        .bind(local_derivation)
+        .fetch_one(&pool)
+        .await
+        .expect("local build should complete");
+        sqlx::query("UPDATE derivations SET store_path = $2 WHERE id = $1")
+            .bind(local_derivation)
+            .bind(format!("/nix/store/{local_derivation}-local-system"))
+            .execute(&pool)
+            .await
+            .expect("local output should be persisted");
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("local completion transaction should begin");
+        assert!(
+            crate::queries::cve_scan_leases::attach_completed_build_to_post_build_scan_tx(
+                &mut tx,
+                local_job_id,
+            )
+            .await
+            .expect("local scan intent should attach the completed build")
+        );
+        tx.commit()
+            .await
+            .expect("local completion transaction should commit");
+        assert_eq!(
+            active_scan_state(&pool, local_derivation).await,
+            vec![("awaiting_build".into(), "post_build".into(), 0)]
+        );
+        assert_eq!(
+            crate::queries::cve_scans::promote_waiting_cve_scans(&pool, 10)
+                .await
+                .expect("local waiting scan should promote"),
+            1
+        );
+        assert_eq!(
+            active_scan_state(&pool, local_derivation).await,
+            vec![("pending".into(), "post_build".into(), 0)]
+        );
+
+        let (_, failed_derivation) =
+            insert_buildable_derivation(&pool, "post-build-failed", "nixos").await;
+        assert!(
+            super::enqueue_build_job_for_derivation(&pool, failed_derivation)
+                .await
+                .expect("failed build should be admitted")
+        );
+        let failed_job_id: Uuid = sqlx::query_scalar(
+            "UPDATE build_jobs SET max_retries = 1 WHERE derivation_id = $1 RETURNING id",
+        )
+        .bind(failed_derivation)
+        .fetch_one(&pool)
+        .await
+        .expect("failed build job should load");
+        super::mark_job_failed(&pool, failed_job_id, "build failed", None)
+            .await
+            .expect("build failure should persist");
+        assert_eq!(
+            active_scan_state(&pool, failed_derivation).await,
+            vec![("awaiting_build".into(), "post_build".into(), 0)]
+        );
+        let replacement = crate::queries::builders::requeue_build_job_as_new_attempt(
+            &pool,
+            &failed_job_id,
+            Uuid::nil(),
+            true,
+        )
+        .await
+        .expect("failed build should create a replacement attempt");
+        assert_ne!(replacement.attempt.id, failed_job_id);
+        assert_eq!(active_scan_state(&pool, failed_derivation).await.len(), 1);
+        let replacement_prerequisite: Option<Uuid> = sqlx::query_scalar(
+            "SELECT completed_build_job_id FROM cve_scans WHERE derivation_id = $1",
+        )
+        .bind(failed_derivation)
+        .fetch_one(&pool)
+        .await
+        .expect("replacement scan prerequisite should load");
+        assert_eq!(replacement_prerequisite, Some(replacement.attempt.id));
     }
 
     /// The per-derivation SQL uses the active-attempt conflict target for

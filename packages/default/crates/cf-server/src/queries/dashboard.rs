@@ -834,9 +834,10 @@ pub async fn fetch_recent_build_history(
               AND ($4::text IS NULL OR display_name ILIKE ('%' || $4 || '%') OR system_configuration_name ILIKE ('%' || $4 || '%'))
               AND ($5::timestamptz IS NULL OR created_at >= $5)
               AND ($6::timestamptz IS NULL OR created_at <= $6)
-              AND ($7::text IS NULL OR display_name ILIKE ('%' || $7 || '%') OR flake_name ILIKE ('%' || $7 || '%')
-                   OR git_commit_hash ILIKE ('%' || $7 || '%') OR builder_name ILIKE ('%' || $7 || '%')
-                   OR status ILIKE ('%' || $7 || '%')
+               AND ($7::text IS NULL OR display_name ILIKE ('%' || $7 || '%') OR flake_name ILIKE ('%' || $7 || '%')
+                    OR git_commit_hash ILIKE ('%' || $7 || '%') OR builder_name ILIKE ('%' || $7 || '%')
+                    OR id::text = $7
+                    OR status ILIKE ('%' || $7 || '%')
                    OR CASE status WHEN 'success' THEN 'complete' WHEN 'cancelling' THEN 'stopping' ELSE status END ILIKE ('%' || $7 || '%')
                    OR 'x86_64-linux' ILIKE ('%' || $7 || '%'))
                AND (NOT $8 OR is_latest_per_flake)
@@ -928,6 +929,7 @@ pub async fn fetch_recent_build_history(
               AND ($6::timestamptz IS NULL OR queued_at <= $6)
               AND ($7::text IS NULL OR hostname ILIKE ('%' || $7 || '%') OR flake_name ILIKE ('%' || $7 || '%')
                    OR commit_hash ILIKE ('%' || $7 || '%') OR COALESCE(builder_name, '') ILIKE ('%' || $7 || '%')
+                   OR job_id::text = $7
                    OR status ILIKE ('%' || $7 || '%')
                    OR CASE status WHEN 'success' THEN 'complete' WHEN 'cancelling' THEN 'stopping' ELSE status END ILIKE ('%' || $7 || '%')
                    OR 'x86_64-linux' ILIKE ('%' || $7 || '%'))
@@ -1134,6 +1136,7 @@ pub async fn list_build_queue_paginated(
               AND ($7::timestamptz IS NULL OR created_at <= $7)
               AND ($8::text IS NULL OR display_name ILIKE ('%' || $8 || '%') OR flake_name ILIKE ('%' || $8 || '%')
                    OR git_commit_hash ILIKE ('%' || $8 || '%') OR builder_name ILIKE ('%' || $8 || '%')
+                   OR id::text = $8
                    OR status ILIKE ('%' || $8 || '%')
                    OR CASE status WHEN 'success' THEN 'complete' WHEN 'cancelling' THEN 'stopping' ELSE status END ILIKE ('%' || $8 || '%')
                    OR 'x86_64-linux' ILIKE ('%' || $8 || '%'))
@@ -1282,6 +1285,7 @@ pub async fn list_build_queue_paginated(
             AND ($7::timestamptz IS NULL OR queued_at <= $7)
             AND ($8::text IS NULL OR hostname ILIKE ('%' || $8 || '%') OR flake_name ILIKE ('%' || $8 || '%')
                  OR commit_hash ILIKE ('%' || $8 || '%') OR COALESCE(builder_name, '') ILIKE ('%' || $8 || '%')
+                 OR job_id::text = $8
                  OR status ILIKE ('%' || $8 || '%')
                  OR CASE status WHEN 'success' THEN 'complete' WHEN 'cancelling' THEN 'stopping' ELSE status END ILIKE ('%' || $8 || '%')
                  OR 'x86_64-linux' ILIKE ('%' || $8 || '%'))

@@ -57,8 +57,8 @@ pub enum Route {
     #[route("/flakes?:..query")]
     FlakesView { query: String },
 
-    #[route("/builds")]
-    BuildsView {},
+    #[route("/builds?:..query")]
+    BuildsView { query: String },
 
     #[route("/evaluations")]
     EvaluationsView {},

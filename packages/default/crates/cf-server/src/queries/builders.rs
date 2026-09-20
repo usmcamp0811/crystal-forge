@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use sqlx::{PgPool, Postgres, Transaction};
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::models::builders::{
@@ -1289,8 +1289,16 @@ pub async fn mark_job_complete(
 /// (`building → success`). The caller should only queue best-effort cache-push side
 /// effects when `true`; idempotent retries reuse the originally persisted store path
 /// and must not accept a newly supplied request path.
-/// Policy-enabled post-build CVE enqueue commits in the same transaction. An
-/// idempotent retry repairs a previously missing scan before returning success.
+/// Policy-enabled post-build CVE provenance commits in the same transaction.
+/// After commit, prerequisite promotion is best effort and does not turn a
+/// successful build into a failed completion response. An idempotent retry
+/// reattaches successful build provenance to the durable admission-time intent.
+///
+/// # Errors
+///
+/// Returns an error when the job does not exist, builder ownership or session
+/// identity does not match, the job is not completable, or required persistence
+/// fails. Post-commit CVE promotion failure is logged but is not returned.
 pub async fn complete_job_atomic(
     pool: &PgPool,
     job_id: &Uuid,
@@ -1334,14 +1342,28 @@ pub async fn complete_job_atomic(
 
     if status == "success" {
         // Idempotent: already completed by this exact builder+session.
-        // Repair post-build scan enqueue before returning success. This closes
-        // the crash window from deployments that completed before migration 0263.
-        crate::queries::cve_scan_leases::enqueue_post_build_scan_tx(&mut tx, *job_id)
-            .await
-            .context("Failed to recover post-build CVE enqueue")?;
+        // Reattach build provenance before returning success. Admission-time
+        // intent is atomic, so completion must not synthesize new scan work.
+        crate::queries::cve_scan_leases::attach_completed_build_to_post_build_scan_tx(
+            &mut tx, *job_id,
+        )
+        .await
+        .context("Failed to recover post-build CVE intent")?;
         tx.commit()
             .await
             .context("Failed to commit idempotent completion transaction")?;
+        if let Err(error) = crate::queries::cve_scans::promote_waiting_cve_scans(
+            pool,
+            crate::queries::cve_scans::EVENT_PROMOTION_LIMIT,
+        )
+        .await
+        {
+            warn!(
+                build_job_id = %job_id,
+                error = %error,
+                "Failed to promote waiting CVE scans after idempotent build completion"
+            );
+        }
         let job = get_build_job_by_id(pool, job_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Build job disappeared on idempotent completion"))?;
@@ -1393,13 +1415,26 @@ pub async fn complete_job_atomic(
         .context("Failed to mark derivation complete")?;
     }
 
-    crate::queries::cve_scan_leases::enqueue_post_build_scan_tx(&mut tx, *job_id)
+    crate::queries::cve_scan_leases::attach_completed_build_to_post_build_scan_tx(&mut tx, *job_id)
         .await
-        .context("Failed to enqueue post-build CVE scan")?;
+        .context("Failed to attach completed build to post-build CVE scan")?;
 
     tx.commit()
         .await
         .context("Failed to commit completion transaction")?;
+
+    if let Err(error) = crate::queries::cve_scans::promote_waiting_cve_scans(
+        pool,
+        crate::queries::cve_scans::EVENT_PROMOTION_LIMIT,
+    )
+    .await
+    {
+        warn!(
+            build_job_id = %job_id,
+            error = %error,
+            "Failed to promote waiting CVE scans after build completion"
+        );
+    }
 
     let _ = attention::resolve(pool, "builds", "build_job", &job_id.to_string())
         .await
@@ -1963,6 +1998,15 @@ pub async fn mark_job_failed_with_retry(
         None
     };
 
+    if retry_job.is_some() {
+        crate::queries::cve_scan_leases::create_post_build_scan_intents_tx(
+            &mut tx,
+            &[job.derivation_id],
+        )
+        .await
+        .context("Failed to persist post-build scan intent for automatic build retry")?;
+    }
+
     tx.commit()
         .await
         .context("Failed to commit build failure")?;
@@ -2428,6 +2472,16 @@ pub async fn requeue_build_job_as_new_attempt(
     .await
     .context("Failed to requeue build job as new attempt")
     .map_err(RequeueBuildJobError::Internal)?;
+
+    if inserted.is_some() {
+        crate::queries::cve_scan_leases::create_post_build_scan_intents_tx(
+            &mut tx,
+            &[source.derivation_id],
+        )
+        .await
+        .context("Failed to persist post-build scan intent for requeued build")
+        .map_err(RequeueBuildJobError::Internal)?;
+    }
 
     let (attempt, disposition) = if let Some(attempt) = inserted {
         (attempt, RequeueBuildJobDisposition::Created)

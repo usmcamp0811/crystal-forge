@@ -1688,7 +1688,9 @@ pub fn SystemDetailView(
                 },
                 on_open_build: move |focus: NavigationFocus| {
                     navigation_focus.set(Some(focus));
-                    nav.push(Route::BuildsView {});
+                    nav.push(Route::BuildsView {
+                        query: String::new(),
+                    });
                 },
                 on_open_systems: move |focus: NavigationFocus| {
                     navigation_focus.set(Some(NavigationFocus {
@@ -3151,7 +3153,9 @@ fn OverviewTab(
                             class: "tl-commit-link mono focus-ring",
                             title: "Open the build for {flake_commit_for_title}",
                             onclick: move |_| {
-                                nav.push(Route::BuildsView {});
+                                nav.push(Route::BuildsView {
+                                    query: String::new(),
+                                });
                             },
                             "{generation_text}"
                         }

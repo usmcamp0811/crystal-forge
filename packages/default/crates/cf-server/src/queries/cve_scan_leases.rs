@@ -13,7 +13,7 @@ use cf_protocol::builder::{
     canonical_cve_result_digest, is_canonical_nix_store_path,
 };
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use tokio::io::AsyncReadExt;
@@ -93,66 +93,130 @@ pub async fn record_session_cve_capabilities(
     Ok(result.rows_affected() == 1)
 }
 
-/// Queues post-build CVE work for the successful build's exact output.
+/// Creates durable post-build scan intent for admitted NixOS derivations.
 ///
-/// The partial active-scan index makes this idempotent. The producing builder
-/// can claim the row immediately by supplying `completed_build_job_id`. The
-/// same builder process can also recover its affinity work during background
-/// polling. After the affinity interval, only the server-local worker can claim
-/// the row as fallback. Cache publication does not prove another builder has
-/// configured access to or materialized the output.
+/// ATOMICITY: Callers invoke this helper in the transaction that inserts the
+/// build jobs, so each build admission and its scan intent commit or roll back
+/// together. Eligibility is read from the persisted singleton policy and is
+/// limited to `derivation_type = 'nixos'`.
+///
+/// IDEMPOTENCY: The active-scan partial index retains the identity and immutable
+/// trigger of existing work. Manual and fleet work is unchanged. A replacement
+/// build updates only an `awaiting_build` post-build intent's exact prerequisite
+/// job identity. Only derivation IDs returned by a successful build insert may
+/// be supplied.
 ///
 /// # Errors
 ///
-/// Returns an error when policy lookup or enqueue persistence fails.
-pub async fn enqueue_post_build_scan(pool: &PgPool, build_job_id: Uuid) -> Result<bool> {
-    let mut tx = pool.begin().await?;
-    let queued = enqueue_post_build_scan_tx(&mut tx, build_job_id).await?;
-    tx.commit().await?;
-    Ok(queued)
-}
+/// Returns an error when policy lookup or intent persistence fails.
+pub(crate) async fn create_post_build_scan_intents_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    derivation_ids: &[i32],
+) -> Result<u64> {
+    if derivation_ids.is_empty() {
+        return Ok(0);
+    }
 
-/// Queues post-build CVE work in the caller's build-completion transaction.
-///
-/// Existing active manual or fleet work retains its trigger and original
-/// provenance. A successful completion retry repairs a missing post-build row
-/// before it returns success.
-///
-/// # Errors
-///
-/// Returns an error when policy lookup or enqueue persistence fails.
-pub async fn enqueue_post_build_scan_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    build_job_id: Uuid,
-) -> Result<bool> {
-    let inserted = sqlx::query_scalar::<_, Uuid>(
+    let inserted = sqlx::query(
         r#"
         INSERT INTO cve_scans AS scan (
             id, derivation_id, scanner_name, status, attempts, source_trigger,
             completed_build_job_id
         )
-        SELECT gen_random_uuid(), job.derivation_id, 'vulnix', 'pending', 0,
-               'post_build', job.id
-        FROM build_jobs job
+        SELECT gen_random_uuid(), derivation.id, 'vulnix', 'awaiting_build', 0,
+               'post_build', admitted_job.id
+        FROM derivations derivation
         JOIN scan_schedule_policy policy ON policy.id = 1 AND policy.on_build
-        WHERE job.id = $1 AND job.status = 'success'
+        JOIN LATERAL (
+            SELECT job.id
+            FROM build_jobs job
+            WHERE job.derivation_id = derivation.id
+              AND job.status IN ('queued', 'building', 'cancelling')
+            ORDER BY job.created_at DESC, job.id DESC
+            LIMIT 1
+        ) admitted_job ON TRUE
+        WHERE derivation.id = ANY($1)
+          AND derivation.derivation_type = 'nixos'
         ON CONFLICT (derivation_id) WHERE status IN (
             'awaiting_build', 'awaiting_closure', 'pending', 'in_progress'
+        ) DO UPDATE
+          SET completed_build_job_id = EXCLUDED.completed_build_job_id
+        WHERE scan.source_trigger = 'post_build'
+          AND scan.status = 'awaiting_build'
+        "#,
+    )
+    .bind(derivation_ids)
+    .execute(&mut **tx)
+    .await?;
+    Ok(inserted.rows_affected())
+}
+
+/// Confirms successful build provenance for active post-build scan intent.
+///
+/// The helper does not mutate scan status. Newly admitted or repaired intent
+/// therefore remains `awaiting_build`; only
+/// [`promote_waiting_cve_scans`](crate::queries::cve_scans::promote_waiting_cve_scans)
+/// owns prerequisite-driven lifecycle transitions. Existing active manual or
+/// fleet work retains its trigger and provenance. The exact prerequisite guard
+/// prevents a delayed completion retry from replacing a newer admitted build.
+/// Completion repairs a missing intent only for an eligible NixOS derivation
+/// with no scan history. This compatibility path covers build jobs admitted
+/// before atomic intent creation. It does not create fresh work after terminal
+/// evidence or replace active manual or fleet provenance.
+///
+/// # Errors
+///
+/// Returns an error when build lookup or provenance persistence fails.
+pub(crate) async fn attach_completed_build_to_post_build_scan_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    build_job_id: Uuid,
+) -> Result<bool> {
+    let attached = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        WITH repaired AS (
+            INSERT INTO cve_scans (
+                id, derivation_id, scanner_name, status, attempts,
+                source_trigger, completed_build_job_id
+            )
+            SELECT
+                gen_random_uuid(), derivation.id, 'vulnix', 'awaiting_build', 0,
+                'post_build', job.id
+            FROM build_jobs job
+            JOIN derivations derivation ON derivation.id = job.derivation_id
+            JOIN scan_schedule_policy policy ON policy.id = 1 AND policy.on_build
+            WHERE job.id = $1
+              AND job.status = 'success'
+              AND derivation.derivation_type = 'nixos'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM cve_scans history
+                  WHERE history.derivation_id = derivation.id
+              )
+            ON CONFLICT (derivation_id) WHERE status IN (
+                'awaiting_build', 'awaiting_closure', 'pending', 'in_progress'
+            ) DO NOTHING
+            RETURNING id
+        ), attached AS (
+            UPDATE cve_scans scan
+            SET completed_build_job_id = job.id
+            FROM build_jobs job
+            WHERE job.id = $1 AND job.status = 'success'
+              AND scan.derivation_id = job.derivation_id
+              AND scan.source_trigger = 'post_build'
+              AND scan.status = 'awaiting_build'
+              AND scan.completed_build_job_id = job.id
+            RETURNING scan.id
         )
-        DO UPDATE SET source_trigger = scan.source_trigger,
-                      completed_build_job_id = COALESCE(
-                          scan.completed_build_job_id,
-                          EXCLUDED.completed_build_job_id
-                      )
-        WHERE scan.status = 'pending'
-          AND scan.source_trigger = 'post_build'
-        RETURNING id
+        SELECT id FROM repaired
+        UNION ALL
+        SELECT id FROM attached
+        LIMIT 1
         "#,
     )
     .bind(build_job_id)
     .fetch_optional(&mut **tx)
     .await?;
-    Ok(inserted.is_some())
+    Ok(attached.is_some())
 }
 
 /// Claims one queued scan for an authenticated scanner-capable builder.

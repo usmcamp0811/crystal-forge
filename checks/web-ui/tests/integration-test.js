@@ -1560,11 +1560,24 @@ async function assertEnabled(locator, message) {
 }
 
 async function assertAttribute(locator, name, expected, message) {
-  await locator.waitFor({ state: "visible", timeout: 5000 });
-  const actual = await locator.getAttribute(name);
-  if (actual !== expected) {
-    throw new Error(`${message} (expected ${name}=${expected}, got ${actual})`);
+  const deadline = Date.now() + 5000;
+  let actual = null;
+  while (Date.now() < deadline) {
+    actual = await locator.getAttribute(name).catch(() => null);
+    if (actual === expected) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
   }
+  throw new Error(`${message} (expected ${name}=${expected}, got ${actual})`);
+}
+
+async function assertFocused(locator, message) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const focused = await locator.evaluate((element) => document.activeElement === element).catch(() => false);
+    if (focused) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(message);
 }
 
 async function assertAttachedAttribute(locator, name, expected, message) {
@@ -16205,6 +16218,8 @@ security.audit.enable = true;</fixtext>
         build: "10000000-0000-4000-8000-000000000002",
         closure: "10000000-0000-4000-8000-000000000003",
         pending: "10000000-0000-4000-8000-000000000004",
+        failedBuild: "10000000-0000-4000-8000-000000000005",
+        cancelledBuild: "10000000-0000-4000-8000-000000000006",
         newest: "20000000-0000-4000-8000-000000000001",
         superseded: "20000000-0000-4000-8000-000000000002",
         failed: "20000000-0000-4000-8000-000000000003",
@@ -16229,6 +16244,8 @@ security.audit.enable = true;</fixtext>
         executor: "builder-a",
         failure: status === "failed" ? `failure for ${revision}` : null,
         wait_reason: null,
+        build_job_id: `30000000-0000-4000-8000-${String(derivationId).padStart(12, "0")}`,
+        build_status: status === "failed" ? "failed" : status === "awaiting_build" ? "queued" : status === "awaiting_closure" ? "success" : "success",
         total_packages: status === "completed" ? 120 : 0,
         total_vulnerabilities: status === "completed" ? 4 : 0,
         critical_count: status === "completed" ? 1 : 0,
@@ -16246,6 +16263,8 @@ security.audit.enable = true;</fixtext>
         record(ids.build, 102, "alpha-build-wait", "core-fleet", "aaaa-build", "awaiting_build", 8, { wait_reason: "Build output is not available." }),
         record(ids.closure, 103, "beta-closure-wait", "core-fleet", "bbbb-closure", "awaiting_closure", 7, { wait_reason: "A completed cache closure is not available." }),
         record(ids.pending, 104, "gamma-queued", "lab-fleet", "cccc-queued", "pending", 6),
+        record(ids.failedBuild, 105, "delta-build-failed", "failed-build-fleet", "dddd-build-failed", "awaiting_build", 5, { build_status: "failed", wait_reason: "The associated build failed." }),
+        record(ids.cancelledBuild, 106, "epsilon-build-cancelled", "cancelled-build-fleet", "eeee-build-cancelled", "awaiting_build", 4, { build_status: "cancelled", wait_reason: "The associated build was cancelled." }),
       ];
       const completedRows = [
         record(ids.newest, 201, "alpha-current", "core-fleet", "zzzz-current", "completed", 15),
@@ -16266,7 +16285,7 @@ security.audit.enable = true;</fixtext>
       await page.route("**/api/v1/scanning/stats", async (route) => route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ scanning: 1, queued: 1, awaiting_build: 1, awaiting_closure: 1, stale: 2, never_scanned: 2, failed: 2, coverage_percent: 86 }),
+        body: JSON.stringify({ scanning: 1, queued: 1, awaiting_build: 3, awaiting_closure: 1, stale: 2, never_scanned: 2, failed: 2, coverage_percent: 86 }),
       }));
       await page.route(scansRoute, async (route) => {
         const request = route.request();
@@ -16344,7 +16363,7 @@ security.audit.enable = true;</fixtext>
         await page.goto(`${baseUrl}/scanning`, { timeout: LOAD_TIMEOUT });
         await assertVisible(page.getByRole("heading", { name: "Scanning" }), "Expected Scanning heading");
         for (const tab of ["Active", "Completed", "By system"]) await assertVisible(page.getByRole("tab", { name: new RegExp(`^${tab}`) }), `Expected ${tab} tab`);
-        await assertVisible(page.getByText("1 pending · 1 awaiting build · 1 awaiting closure"), "Expected prerequisite wait totals");
+        await assertVisible(page.getByText("1 pending · 3 awaiting build · 1 awaiting closure"), "Expected prerequisite wait totals");
         await assertVisible(page.getByText("Awaiting: Build output is not available."), "Expected build wait reason");
         await assertVisible(page.getByText("Awaiting: A completed cache closure is not available."), "Expected closure wait reason");
         await assertCount(page.getByRole("button", { name: /Cancel scan/i }), 0, "Scanning must not expose cancellation");
@@ -16371,20 +16390,88 @@ security.audit.enable = true;</fixtext>
         await page.getByRole("button", { name: "Latest per flake" }).click();
         await page.getByRole("button", { name: "Sort by Configuration" }).click();
         const sortedActive = await page.locator("#scan-active-panel tbody .scanning-config-name").allTextContents();
-        if (sortedActive.join(",") !== "alpha-build-wait,beta-closure-wait,gamma-queued,zeta-running") {
+        if (sortedActive.join(",") !== "alpha-build-wait,beta-closure-wait,delta-build-failed,epsilon-build-cancelled,gamma-queued,zeta-running") {
           throw new Error(`Configuration sorting was not deterministic: ${sortedActive.join(",")}`);
         }
 
         await page.getByRole("button", { name: "Open the newest failed scan" }).click();
-        let detail = page.getByRole("dialog", { name: "Exact scan detail" });
-        await assertVisible(detail.getByText("omega-new-failure"), "Failed stat should open the newest failure");
+        let detail = page.getByRole("dialog", { name: "Scan details" });
+        await assertVisible(detail.locator(".scanning-log-head").getByText("omega-new-failure · ffff-failed", { exact: true }), "Failed stat should open the newest failure");
+        await assertVisible(detail.getByRole("alert"), "Expected prominent failed-scan callout");
+        await assertVisible(detail.getByRole("button", { name: "Retry scan" }), "Expected real failed-scan retry action");
+        const exactBuildId = `30000000-0000-4000-8000-${String(203).padStart(12, "0")}`;
+        const buildLink = detail.getByRole("link", { name: "View build" });
+        await assertAttribute(buildLink, "href", `/builds?job=${exactBuildId}`, "Expected exact associated-build deep link");
+        await detail.getByRole("tab", { name: "Details" }).click();
         await assertVisible(detail.getByText("Not supported by execution ownership"), "Expected non-cancellable ownership detail");
-        await detail.getByRole("button", { name: "Close exact scan detail" }).click();
+        await assertVisible(detail.getByRole("heading", { name: "Findings" }), "Expected findings-first detail hierarchy");
+        await captureWorkflowViewportState(page, "16c-scanning-view", "failed-detail", "desktop");
+        const exactBuildRoute = "**/api/v1/build-jobs/recent?*";
+        await page.route(exactBuildRoute, async (route) => {
+          const exactBuild = {
+            ...mockRecentBuilds().items[1],
+            job_id: exactBuildId,
+            hostname: "omega-new-failure",
+            flake_name: "failure-fleet",
+            commit_hash: "ffff-failed",
+            commit_message: "Exact prerequisite build for failed scan",
+          };
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({ total: 1, domain_total: 1, page: 1, limit: 10000, items: [exactBuild] }),
+          });
+        });
+        await buildLink.click();
+        await page.waitForURL(new RegExp(`/builds\\?job=${exactBuildId}$`));
+        await assertValue(page.locator("input.q-search-input").first(), exactBuildId, "Exact build deep link should initialize build search");
+        await assertAttribute(page.getByRole("button", { name: /^Completed/ }), "class", "sd-tab focus-ring active", "Exact terminal build should select Completed");
+        await assertVisible(page.locator(".build-log-tray .fl-tray-head").getByText("omega-new-failure", { exact: true }), "Exact build deep link should open the associated build");
+        await page.unroute(exactBuildRoute);
+        await page.goto(`${baseUrl}/scanning`, { timeout: LOAD_TIMEOUT });
+        await assertVisible(page.getByRole("heading", { name: "Scanning" }), "Expected Scanning heading after exact build navigation");
 
         await activeTab.click();
+        const waitingRow = page.locator("#scan-active-panel tbody tr").filter({ hasText: "alpha-build-wait" });
+        const waitingDetailButton = waitingRow.getByRole("button", { name: `Open details for scan ${ids.build}` });
+        await waitingDetailButton.click();
+        detail = page.getByRole("dialog", { name: "Scan details" });
+        await assertVisible(detail.getByText("Waiting on the build", { exact: true }), "Expected typed build-prerequisite callout");
+        await assertVisible(detail.getByText(/starts automatically after the associated build succeeds/), "Expected truthful automatic progression guidance");
+        await assertFocused(detail.getByRole("button", { name: "Refresh exact scan detail" }), "Scan detail initial focus did not land on the first enabled control");
+        await captureWorkflowViewportState(page, "16c-scanning-view", "awaiting-build", "desktop");
+        await detail.press("Escape");
+        await assertHidden(detail, "Escape should close scan detail");
+        await assertFocused(waitingDetailButton, "Scan detail did not restore focus to its opener");
+
+        for (const [scanId, hostname, expectedTitle] of [
+          [ids.failedBuild, "delta-build-failed", "The prerequisite build failed"],
+          [ids.cancelledBuild, "epsilon-build-cancelled", "The prerequisite build was cancelled"],
+        ]) {
+          const terminalBuildRow = page.locator("#scan-active-panel tbody tr").filter({ hasText: hostname });
+          await terminalBuildRow.getByRole("button", { name: `Open details for scan ${scanId}` }).click();
+          detail = page.getByRole("dialog", { name: "Scan details" });
+          await assertVisible(detail.getByRole("alert").getByText(expectedTitle, { exact: true }), `Expected ${hostname} prerequisite callout`);
+          await detail.getByRole("button", { name: "Close exact scan detail" }).click();
+        }
+
+        const closureRow = page.locator("#scan-active-panel tbody tr").filter({ hasText: "beta-closure-wait" });
+        await closureRow.getByRole("button", { name: `Open details for scan ${ids.closure}` }).click();
+        detail = page.getByRole("dialog", { name: "Scan details" });
+        await assertVisible(detail.getByText("Waiting for a reachable closure", { exact: true }), "Expected typed closure-prerequisite callout");
+        await detail.getByRole("button", { name: "Close exact scan detail" }).click();
+
         const runningRow = page.locator("#scan-active-panel tbody tr").filter({ hasText: "zeta-running" });
         await runningRow.getByRole("button", { name: `Open details for scan ${ids.running}` }).click();
-        detail = page.getByRole("dialog", { name: "Exact scan detail" });
+        detail = page.getByRole("dialog", { name: "Scan details" });
+        await assertAttribute(detail.getByRole("tab", { name: "Log" }), "aria-selected", "true", "Log must be the default drawer tab");
+        if (!(await detail.evaluate((dialog) => dialog.contains(document.activeElement)))) throw new Error("Scan detail drawer did not receive initial focus");
+        const logTab = detail.getByRole("tab", { name: "Log" });
+        await logTab.focus();
+        await logTab.press("End");
+        await assertAttribute(detail.getByRole("tab", { name: "Details" }), "aria-selected", "true", "End should select the Details tab");
+        await detail.getByRole("tab", { name: "Details" }).press("Home");
+        await assertAttribute(logTab, "aria-selected", "true", "Home should return to the Log tab");
         const elapsed = detail.getByText(/^Elapsed \d+m \d{2}s$/);
         await assertVisible(elapsed, "Expected running elapsed time");
         const elapsedMinutes = Number.parseInt((await elapsed.textContent()).match(/Elapsed (\d+)m/)?.[1] || "0", 10);
@@ -16412,6 +16499,13 @@ security.audit.enable = true;</fixtext>
         await assertVisible(page.getByText("alpha-old", { exact: true }), "Expected superseded revision filter");
         await assertHidden(page.getByText("alpha-current", { exact: true }), "Superseded filter should exclude newest flake revision");
         await revisionFilter.selectOption("all");
+        const completedRow = page.locator("#scan-completed-panel tbody tr").filter({ hasText: "alpha-current" });
+        await completedRow.getByRole("button", { name: `Open details for scan ${ids.newest}` }).click();
+        detail = page.getByRole("dialog", { name: "Scan details" });
+        await detail.getByRole("tab", { name: "Details" }).click();
+        await assertVisible(detail.getByText("4 vulnerabilities across 120 packages"), "Expected operator findings summary");
+        await captureWorkflowViewportState(page, "16c-scanning-view", "completed-detail", "desktop");
+        await detail.getByRole("button", { name: "Close exact scan detail" }).click();
         const failedRow = page.locator("#scan-completed-panel tbody tr").filter({ hasText: "omega-new-failure" });
         await failedRow.getByRole("button", { name: "Retry exact" }).click();
         await assertVisible(page.getByText(/omega-new-failure ffff-failed: queued exact scan/), "Expected exact failed-scan retry feedback");
