@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.6-terra
 created_date: '2026-06-10 13:35'
-updated_date: '2026-09-20 03:40'
+updated_date: '2026-09-20 04:11'
 labels:
   - design-parity
   - environments
@@ -136,6 +136,8 @@ The current cache assignment API is real but asymmetric: authenticated environme
 Verification completed: `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` (passed, repository warnings); `nix develop -c node --check checks/web-ui/tests/integration-test.js` (passed); `git diff --check` (passed). Preview/browser verification is blocked: port 8080 and API port 3445 are owned by TASK-440's preview (PIDs 1077 and 9406). The fixed-port launcher cannot safely start an isolated TASK-339.1 preview, so no browser workflow, screenshot, focused authoritative run, commit, push, MR, or Review transition has been performed.
 
 2026-09-19 progress: Implemented the sectioned shared Environment editor shell, multi-cache explicit assignment hydration/reconciliation, policy search, deployment copy, dialog focus/accessibility, responsive CSS, and initial 14a semantics. Fast checks passed: WASM cargo check, Node syntax check, and git diff --check. Blocked from browser/focused workflow verification: fixed ports 8080/3445 are owned by TASK-440 (PIDs 1077/9406), so no isolated TASK-339.1 preview can start. No commit, push, MR, or Review transition performed.
+
+2026-09-20 verification update: the single permitted selected authoritative run `CF_UI_TEST_STEPS="14a-environments-add-modal" nix build --impure .#checks.x86_64-linux.web-ui --no-link -L` executed the environment workflow but failed before screenshot capture. The rendered cache section was present, but `.field label { text-transform: uppercase; }` made Playwright's exact-case `getByText("Explicit cache destinations")` fail against rendered uppercase text. The test now uses case-insensitive regex locators for that label and the similarly styled `Default deployment mode` label. `nix develop -c node --check checks/web-ui/tests/integration-test.js` and `git diff --check` pass after the correction. No browser rerun was performed because the stated focused-build budget is exhausted. `cargo fmt --check` also reports pre-existing formatting drift in unrelated `flake_timeline.rs` and `coach_panel.rs`; no unrelated formatting was changed. TASK remains In Progress and is not review-ready until browser evidence is re-established.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
