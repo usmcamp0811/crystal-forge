@@ -9860,7 +9860,11 @@ const steps = [
         await page.goto(`${baseUrl}/systems/${systemId}`, { timeout: LOAD_TIMEOUT });
         await page.getByRole("tab", { name: "CVEs" }).first().click();
         await assertVisible(page.getByTestId("system-cves-exact"), "Expected exact CVE inventory authority", 12000);
-        await page.getByRole("button", { name: /linuxPackages_6_10\.kernel/ }).click();
+        const packageToggle = page
+          .locator("button[aria-controls^='system-cve-package-']")
+          .filter({ hasText: "linuxPackages_6_10.kernel" })
+          .first();
+        await packageToggle.click();
         await assertVisible(page.getByRole("columnheader", { name: "Triage" }), "Expected unified Triage column");
         await assertCount(page.getByRole("button", { name: "Justify" }), 0, "Separate justification action must be absent");
         await assertCount(page.getByRole("button", { name: "Create POA&M" }), 0, "Separate POA&M action must be absent");
@@ -9882,6 +9886,10 @@ const steps = [
         await captureWorkflowViewportState(page, "12h-system-detail-cves-grouped-justification", "accepted-triage-modal", "desktop");
         await captureWorkflowViewportState(page, "12h-system-detail-cves-grouped-justification", "accepted-triage-modal", "narrowDesktop");
         await dialog.getByTestId("cve-triage-submit").click();
+        await assertHidden(dialog, "Expected accepted triage submission to close the dialog");
+        if ((await packageToggle.getAttribute("aria-expanded")) !== "true") {
+          await packageToggle.click();
+        }
         await assertVisible(page.getByTestId("system-cve-triage-state").filter({ hasText: "Accepted" }), "Expected authoritative Outstanding to Accepted transition");
         if (triageRequests[0].canonical_package_name !== "linuxPackages_6_10.kernel" || triageRequests[0].review_date !== "2026-10-01") {
           throw new Error(`Accepted triage request lost package or review date: ${JSON.stringify(triageRequests[0])}`);
@@ -12462,7 +12470,10 @@ const steps = [
         "Untyped assignee shape must fail before POST",
       );
       if (triageBodies.length !== 0) throw new Error("Assignee validation sent a triage request");
-      await assignee.selectOption("group:platform-operators");
+      await assignee.evaluate((select) => {
+        select.value = "group:platform-operators";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      });
       await triageDialog.getByTestId("cve-triage-submit").click();
       await assertVisible(
         drawer.getByRole("alert").filter({ hasText: "exact affected fleet changed" }),
