@@ -309,12 +309,108 @@ pub struct UpdateScanSchedulePolicyRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanningStatsResponse {
+    /// Counts execution-owned scans.
     pub scanning: i64,
+    /// Counts runnable scans waiting for a worker claim.
     pub queued: i64,
+    /// Counts scans waiting for an exact build output.
+    pub awaiting_build: i64,
+    /// Counts scans waiting for an exact cache closure.
+    pub awaiting_closure: i64,
+    /// Counts completed evidence older than the deployed freshness interval.
     pub stale: i64,
+    /// Counts NixOS derivations without completed scan evidence.
     pub never_scanned: i64,
+    /// Counts derivations whose latest lifecycle failed.
     pub failed: i64,
+    /// Reports the percentage of NixOS derivations with completed evidence.
     pub coverage_percent: i64,
+}
+
+/// Returns an archive-aware page of exact scan lifecycle rows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanningScanRecordsResponse {
+    /// Contains deterministically ordered scan lifecycle rows.
+    pub items: Vec<ScanningScanRecordResponse>,
+    /// Counts matching rows before archive filtering and response limiting.
+    pub total: i64,
+    /// Counts archived matching rows omitted from this response.
+    pub hidden_archived: i64,
+}
+
+/// Describes one exact persisted scan lifecycle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanningScanRecordResponse {
+    /// Identifies the immutable scan lifecycle.
+    pub scan_id: Uuid,
+    /// Identifies the exact derivation.
+    pub derivation_id: i32,
+    /// Contains the configuration name.
+    pub hostname: String,
+    /// Contains the flake name when available.
+    pub flake_name: Option<String>,
+    /// Contains the exact commit hash when available.
+    pub commit_hash: Option<String>,
+    /// Contains the persisted lifecycle status.
+    pub status: String,
+    /// Contains canonical trigger presentation while preserving unknown values.
+    pub source_trigger: Option<String>,
+    /// Contains lifecycle creation time.
+    pub created_at: DateTime<Utc>,
+    /// Contains requested schedule time when available.
+    pub scheduled_at: Option<DateTime<Utc>>,
+    /// Contains terminal time when available.
+    pub completed_at: Option<DateTime<Utc>>,
+    /// Contains the scanner implementation name.
+    pub scanner_name: String,
+    /// Contains scanner version when known.
+    pub scanner_version: Option<String>,
+    /// Contains bounded executor identity suitable for administration.
+    pub executor: Option<String>,
+    /// Contains a bounded redacted failure summary.
+    pub failure: Option<String>,
+    /// Explains why a waiting lifecycle is not runnable.
+    pub wait_reason: Option<String>,
+    /// Counts examined packages.
+    pub total_packages: i32,
+    /// Counts all vulnerability findings.
+    pub total_vulnerabilities: i32,
+    /// Counts critical findings.
+    pub critical_count: i32,
+    /// Counts high findings.
+    pub high_count: i32,
+    /// Counts medium findings.
+    pub medium_count: i32,
+    /// Counts low findings.
+    pub low_count: i32,
+    /// Contains scanner duration in milliseconds when recorded.
+    pub scan_duration_ms: Option<i32>,
+    /// Counts execution attempts.
+    pub attempts: i32,
+    /// Contains archive time when the row is archived.
+    pub archived_at: Option<DateTime<Utc>>,
+    /// Is false because current scan ownership has no safe cancellation API.
+    pub cancellable: bool,
+}
+
+/// Requests one idempotent bounded archive-state operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateScanningArchiveRequest {
+    /// Selects terminal scan rows. The server accepts at most 100 unique IDs.
+    pub scan_ids: Vec<Uuid>,
+    /// Archives rows when true and restores rows when false.
+    pub archived: bool,
+}
+
+/// Reports the result of an archive-state operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateScanningArchiveResponse {
+    /// Counts unique requested scan identities.
+    pub requested: usize,
+    /// Counts archive metadata rows inserted or removed.
+    pub changed: u64,
+    /// Contains the requested resulting archive state.
+    pub archived: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -393,6 +489,14 @@ pub struct ScanningActivityItemResponse {
 pub struct ScanningScanDetailResponse {
     /// Exact scan identity requested by the administrator.
     pub scan_id: Uuid,
+    /// Identifies the exact derivation scanned.
+    pub derivation_id: i32,
+    /// Contains the configuration identity.
+    pub hostname: String,
+    /// Contains the owning flake name when available.
+    pub flake_name: Option<String>,
+    /// Contains the exact commit hash when available.
+    pub commit_hash: Option<String>,
     /// Current scan lifecycle status.
     pub status: String,
     /// Scanner implementation name recorded on the scan.
@@ -400,7 +504,39 @@ pub struct ScanningScanDetailResponse {
     /// Scanner version recorded for the execution, when available.
     pub scanner_version: Option<String>,
     /// Durable trigger provenance for the scan.
-    pub source_trigger: String,
+    pub source_trigger: Option<String>,
+    /// Contains lifecycle creation time.
+    pub created_at: DateTime<Utc>,
+    /// Contains requested schedule time when available.
+    pub scheduled_at: Option<DateTime<Utc>>,
+    /// Contains terminal time when available.
+    pub completed_at: Option<DateTime<Utc>>,
+    /// Contains scanner duration in milliseconds when recorded.
+    pub scan_duration_ms: Option<i32>,
+    /// Counts execution attempts.
+    pub attempts: i32,
+    /// Counts examined packages.
+    pub total_packages: i32,
+    /// Counts all vulnerability findings.
+    pub total_vulnerabilities: i32,
+    /// Counts critical findings.
+    pub critical_count: i32,
+    /// Counts high findings.
+    pub high_count: i32,
+    /// Counts medium findings.
+    pub medium_count: i32,
+    /// Counts low findings.
+    pub low_count: i32,
+    /// Contains a bounded redacted failure summary.
+    pub failure: Option<String>,
+    /// Explains why this lifecycle is waiting.
+    pub wait_reason: Option<String>,
+    /// Contains bounded executor identity suitable for administration.
+    pub executor: Option<String>,
+    /// Contains archive time when hidden by an administrator.
+    pub archived_at: Option<DateTime<Utc>>,
+    /// Is false because current scan ownership has no safe cancellation API.
+    pub cancellable: bool,
     /// Chronologically ordered diagnostic events, bounded by the API limit.
     pub events: Vec<ScanningScanDiagnosticEventResponse>,
     /// Is `true` when more persisted events exist than this fixed response.
@@ -981,6 +1117,87 @@ pub struct FleetCveTriageResponse {
     /// Identifies the created or reused POA&M when patching was scheduled.
     pub poam_id: Option<Uuid>,
     /// Indicates that all scheduled subjects already used a compatible POA&M.
+    pub poam_reused: bool,
+}
+
+/// Selects one disposition for the selected system's derived environment.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum SystemCveTriageAction {
+    /// Removes the environment disposition and leaves the exact findings open.
+    LeaveOpen,
+    /// Accepts risk without creating remediation or verification evidence.
+    AcceptRisk {
+        /// Gives the required acceptance justification.
+        justification: String,
+        /// Gives an optional risk review date.
+        review_date: Option<chrono::NaiveDate>,
+    },
+    /// Schedules every current exact affected host in the derived environment.
+    SchedulePatch,
+}
+
+/// Requests triage from one System Detail CVE row.
+///
+/// The request cannot select an environment or host list. The server derives
+/// both values from the selected system's current exact occurrence.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SystemCveTriageRequest {
+    /// Gives the canonical package identity selected by the System Detail row.
+    pub canonical_package_name: String,
+    /// Selects the disposition for the server-derived environment.
+    #[serde(flatten)]
+    pub action: SystemCveTriageAction,
+    /// Supplies POA&M metadata exactly when patching is scheduled.
+    pub poam: Option<FleetCvePoamRequest>,
+}
+
+/// Identifies the server-owned scope of a System Detail triage operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemCveTriageScopeKind {
+    /// Includes all current exact affected hosts in the derived environment.
+    CurrentExactAffectedHostsInEnvironment,
+}
+
+/// Describes the explicit environment scope derived from the selected system.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemCveTriageScope {
+    /// Identifies the fixed server-owned scope rule.
+    pub kind: SystemCveTriageScopeKind,
+    /// Identifies the selected system whose current environment was derived.
+    pub selected_system_id: Uuid,
+    /// Identifies the derived current environment.
+    pub environment_id: Uuid,
+    /// Gives the visible derived environment name.
+    pub environment_name: String,
+    /// Counts all current exact affected hosts included in the scope.
+    pub exact_affected_system_count: i64,
+}
+
+/// Reports System Detail triage state for one exact CVE/package occurrence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemCveTriageDetail {
+    /// Gives the canonical CVE identity.
+    pub canonical_cve_id: String,
+    /// Gives the canonical package identity.
+    pub canonical_package_name: String,
+    /// Describes the environment-wide exact mutation scope.
+    pub scope: SystemCveTriageScope,
+    /// Lists every current exact affected host included in the scope.
+    pub systems: Vec<CveAffectedSystemDetail>,
+    /// Gives the coherent current disposition. `None` means outstanding.
+    pub disposition: Option<CveEnvironmentDisposition>,
+}
+
+/// Reports the result of one System Detail environment-scoped mutation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemCveTriageResponse {
+    /// Gives transaction-owned state for the derived environment.
+    pub detail: SystemCveTriageDetail,
+    /// Identifies the created or reused POA&M when patching was scheduled.
+    pub poam_id: Option<Uuid>,
+    /// Indicates that the selected exact subjects already used a compatible POA&M.
     pub poam_reused: bool,
 }
 

@@ -136,7 +136,9 @@ pub async fn enqueue_post_build_scan_tx(
         FROM build_jobs job
         JOIN scan_schedule_policy policy ON policy.id = 1 AND policy.on_build
         WHERE job.id = $1 AND job.status = 'success'
-        ON CONFLICT (derivation_id) WHERE status IN ('pending', 'in_progress')
+        ON CONFLICT (derivation_id) WHERE status IN (
+            'awaiting_build', 'awaiting_closure', 'pending', 'in_progress'
+        )
         DO UPDATE SET source_trigger = scan.source_trigger,
                       completed_build_job_id = COALESCE(
                           scan.completed_build_job_id,

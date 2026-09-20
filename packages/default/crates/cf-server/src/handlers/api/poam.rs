@@ -571,6 +571,67 @@ pub async fn triage_fleet_cve(
     }
 }
 
+/// Returns environment-scoped triage state for one System Detail CVE row.
+///
+/// The service derives the current environment and exact affected hosts. A
+/// hidden system or a row without current exact evidence returns not found.
+pub async fn system_cve_triage_detail(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<(Uuid, String)>, PathRejection>,
+    query: Result<Query<FleetCveDetailQuery>, QueryRejection>,
+) -> Response {
+    let (system_id, cve_id) = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let query = match query_body(query, "invalid_query", "Malformed system CVE triage query") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match poam::system_cve_triage_detail(&pool, &actor, system_id, &cve_id, &query.package).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+/// Applies one environment-scoped triage action from System Detail.
+///
+/// The body cannot supply environment or host identities. The handler enforces
+/// CSRF before the shared service validates authorization and exact evidence.
+pub async fn triage_system_cve(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<(Uuid, String)>, PathRejection>,
+    body: Result<Json<crate::api::models::SystemCveTriageRequest>, JsonRejection>,
+) -> Response {
+    let (system_id, cve_id) = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(response) = csrf(&headers) {
+        return response;
+    }
+    let body = match json_body(body, "Malformed system CVE triage request") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match poam::triage_system_cve(&pool, &actor, system_id, &cve_id, body, &SystemClock).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
 /// Returns one visible POA&M with requested bounded history pages.
 ///
 /// Returns a structured error response when authentication, path or query

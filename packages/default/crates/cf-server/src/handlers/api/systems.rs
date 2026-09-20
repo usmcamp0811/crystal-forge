@@ -2299,6 +2299,8 @@ pub async fn get_cve_scan_status(
             scan_id: scan.id,
             derivation_id: scan.derivation_id,
             status: match scan.status {
+                crate::models::cve_scans::ScanStatus::AwaitingBuild => "awaiting_build",
+                crate::models::cve_scans::ScanStatus::AwaitingClosure => "awaiting_closure",
                 crate::models::cve_scans::ScanStatus::Pending => "pending",
                 crate::models::cve_scans::ScanStatus::InProgress => "in_progress",
                 crate::models::cve_scans::ScanStatus::Completed => "completed",

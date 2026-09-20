@@ -2,7 +2,6 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
-use std::collections::HashSet;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +21,10 @@ pub struct ScanStatsRow {
     /// Derivations waiting for a scan through either the persisted operator
     /// queue or the worker's dynamic post-build and stale-rescan selectors.
     pub queued: i64,
+    /// Scans waiting for their exact derivation to finish building.
+    pub awaiting_build: i64,
+    /// Scans waiting for an exact closure to become available from cache.
+    pub awaiting_closure: i64,
     pub stale: i64,
     pub never_scanned: i64,
     pub failed: i64,
@@ -80,6 +83,93 @@ pub struct ScanActivityRow {
     pub event: String,
     pub detail: String,
     pub status: String,
+}
+
+/// Selects the lifecycle partition returned by the admin scan-record query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanRecordCollection {
+    /// Returns nonterminal waiting, queued, and running rows.
+    Active,
+    /// Returns completed and failed rows.
+    Completed,
+    /// Returns every persisted lifecycle row.
+    History,
+}
+
+impl ScanRecordCollection {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Completed => "completed",
+            Self::History => "history",
+        }
+    }
+}
+
+/// One exact persisted scan lifecycle for admin scanning views.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanRecordRow {
+    /// Identifies the immutable scan lifecycle.
+    pub scan_id: Uuid,
+    /// Identifies the exact scanned derivation.
+    pub derivation_id: i32,
+    /// Contains the configuration name recorded on the derivation.
+    pub hostname: String,
+    /// Contains the owning flake name when the derivation belongs to a flake.
+    pub flake_name: Option<String>,
+    /// Contains the exact commit hash when available.
+    pub commit_hash: Option<String>,
+    /// Contains the persisted lifecycle state.
+    pub status: String,
+    /// Contains the canonical presentation trigger.
+    pub source_trigger: Option<String>,
+    /// Contains the time the lifecycle row was created.
+    pub created_at: DateTime<Utc>,
+    /// Contains the requested schedule time when available.
+    pub scheduled_at: Option<DateTime<Utc>>,
+    /// Contains the terminal time when available.
+    pub completed_at: Option<DateTime<Utc>>,
+    /// Contains the scanner implementation name.
+    pub scanner_name: String,
+    /// Contains the scanner version when known.
+    pub scanner_version: Option<String>,
+    /// Contains the execution identity without exposing lease credentials.
+    pub executor: Option<String>,
+    /// Contains a bounded redacted terminal failure summary.
+    pub failure: Option<String>,
+    /// Explains an authoritative waiting state.
+    pub wait_reason: Option<String>,
+    /// Counts all packages examined by the scanner.
+    pub total_packages: i32,
+    /// Counts all vulnerability findings.
+    pub total_vulnerabilities: i32,
+    /// Counts critical findings.
+    pub critical_count: i32,
+    /// Counts high findings.
+    pub high_count: i32,
+    /// Counts medium findings.
+    pub medium_count: i32,
+    /// Counts low findings.
+    pub low_count: i32,
+    /// Contains scanner duration in milliseconds when recorded.
+    pub scan_duration_ms: Option<i32>,
+    /// Counts execution attempts.
+    pub attempts: i32,
+    /// Contains archive time when hidden by an administrator.
+    pub archived_at: Option<DateTime<Utc>>,
+    /// Is always false until execution ownership supports safe cancellation.
+    pub cancellable: bool,
+}
+
+/// Returns exact scan records and archive-aware count metadata.
+#[derive(Debug, Clone)]
+pub struct ScanRecordResult {
+    /// Contains deterministically ordered records.
+    pub rows: Vec<ScanRecordRow>,
+    /// Counts matching records before the response limit and archive filter.
+    pub total: i64,
+    /// Counts matching archived records hidden from this response.
+    pub hidden_archived: i64,
 }
 
 pub async fn get_scan_schedule_policy(pool: &PgPool) -> Result<ScanSchedulePolicyRow> {
@@ -173,6 +263,9 @@ pub async fn get_scan_stats(pool: &PgPool) -> Result<ScanStatsRow> {
                 FROM cve_scans
                 WHERE status = 'in_progress'
             ) AS scanning,
+            (SELECT COUNT(*) FROM cve_scans WHERE status = 'pending')::BIGINT AS queued,
+            (SELECT COUNT(*) FROM cve_scans WHERE status = 'awaiting_build')::BIGINT AS awaiting_build,
+            (SELECT COUNT(*) FROM cve_scans WHERE status = 'awaiting_closure')::BIGINT AS awaiting_closure,
             COUNT(*) FILTER (WHERE ll.status = 'failed')::BIGINT AS failed,
             COUNT(*) FILTER (WHERE lc.completed_at IS NULL)::BIGINT AS never_scanned,
             COUNT(*) FILTER (
@@ -192,7 +285,9 @@ pub async fn get_scan_stats(pool: &PgPool) -> Result<ScanStatsRow> {
 
     Ok(ScanStatsRow {
         scanning: row.get("scanning"),
-        queued: get_waiting_scan_count(pool).await?,
+        queued: row.get("queued"),
+        awaiting_build: row.get("awaiting_build"),
+        awaiting_closure: row.get("awaiting_closure"),
         stale: row.get("stale"),
         never_scanned: row.get("never_scanned"),
         failed: row.get("failed"),
@@ -200,49 +295,183 @@ pub async fn get_scan_stats(pool: &PgPool) -> Result<ScanStatsRow> {
     })
 }
 
-/// Returns the deduplicated number of derivations that the CVE worker can
-/// select next.
+/// Returns one lifecycle partition with complete exact history and archive state.
 ///
-/// The persisted `pending` rows represent Phase 0 operator requests. Phases 1
-/// and 2 intentionally discover post-build and stale work dynamically, so
-/// those derivations do not have pending rows while they wait. This function
-/// calls the same selectors as the worker rather than restating their status,
-/// failure-backoff, lifecycle, and policy predicates.
+/// `system_id` scopes rows to the active system's exact flake and effective
+/// configuration. Archive filtering never deletes or mutates scan evidence.
 ///
 /// # Errors
 ///
-/// Returns an error when the policy, pending-row, or worker-selector query
-/// fails.
-async fn get_waiting_scan_count(pool: &PgPool) -> Result<i64> {
-    let mut waiting: HashSet<i32> =
-        sqlx::query_scalar("SELECT DISTINCT derivation_id FROM cve_scans WHERE status = 'pending'")
-            .fetch_all(pool)
-            .await?
-            .into_iter()
-            .collect();
-
-    let policy = get_scan_schedule_policy(pool).await?;
-    if policy.on_build {
-        waiting.extend(
-            crate::queries::cve_scans::get_targets_needing_cve_scan(
-                pool,
-                Some(i64::MAX),
-                &[],
-                None,
-            )
-            .await?
-            .into_iter()
-            .map(|derivation| derivation.id),
-        );
-    }
-    waiting.extend(
-        crate::queries::cve_scans::get_targets_needing_cve_rescan(pool, Some(i64::MAX))
-            .await?
-            .into_iter()
-            .map(|derivation| derivation.id),
+/// Returns an error when PostgreSQL cannot load the records or counts.
+pub async fn get_scan_records(
+    pool: &PgPool,
+    collection: ScanRecordCollection,
+    include_archived: bool,
+    system_id: Option<Uuid>,
+    limit: i64,
+) -> Result<ScanRecordResult> {
+    let base = r#"
+        FROM cve_scans scan
+        JOIN derivations derivation ON derivation.id = scan.derivation_id
+        LEFT JOIN commits commit ON commit.id = derivation.commit_id
+        LEFT JOIN flakes flake ON flake.id = commit.flake_id
+        LEFT JOIN builders builder ON builder.id = scan.lease_builder_id
+        LEFT JOIN cve_scan_archives archive ON archive.scan_id = scan.id
+        WHERE derivation.derivation_type = 'nixos'
+          AND (
+              $1 = 'history'
+              OR ($1 = 'active' AND scan.status IN (
+                  'awaiting_build', 'awaiting_closure', 'pending', 'in_progress'
+              ))
+              OR ($1 = 'completed' AND scan.status IN ('completed', 'failed'))
+          )
+          AND ($2::uuid IS NULL OR EXISTS (
+              SELECT 1
+              FROM systems system
+              WHERE system.id = $2
+                AND system.is_active = TRUE
+                AND system.flake_id = commit.flake_id
+                AND COALESCE(
+                    NULLIF(BTRIM(system.system_configuration_name), ''),
+                    system.hostname
+                ) = derivation.derivation_name
+          ))
+    "#;
+    let count_sql = format!(
+        "SELECT COUNT(*)::bigint AS total, COUNT(*) FILTER (WHERE archive.scan_id IS NOT NULL)::bigint AS archived {base}"
     );
+    let counts = sqlx::query(&count_sql)
+        .bind(collection.as_str())
+        .bind(system_id)
+        .fetch_one(pool)
+        .await?;
+    let total: i64 = counts.get("total");
+    let archived: i64 = counts.get("archived");
 
-    Ok(waiting.len() as i64)
+    let rows_sql = format!(
+        r#"
+        SELECT
+            scan.id AS scan_id, scan.derivation_id,
+            derivation.derivation_name AS hostname,
+            flake.name AS flake_name, commit.git_commit_hash AS commit_hash,
+            scan.status, scan.source_trigger, scan.created_at, scan.scheduled_at,
+            scan.completed_at, scan.scanner_name, scan.scanner_version,
+            COALESCE(builder.name,
+                CASE WHEN scan.scan_metadata ? 'execution_id' THEN 'server-local' END
+            ) AS executor,
+            scan.scan_metadata ->> 'error' AS failure,
+            CASE scan.status
+                WHEN 'awaiting_build' THEN 'Build output is not available.'
+                WHEN 'awaiting_closure' THEN 'A completed cache closure is not available.'
+            END AS wait_reason,
+            scan.total_packages, scan.total_vulnerabilities,
+            scan.critical_count, scan.high_count, scan.medium_count, scan.low_count,
+            scan.scan_duration_ms, scan.attempts, archive.archived_at
+        {base}
+          AND ($3 OR archive.scan_id IS NULL)
+        ORDER BY
+            CASE scan.status
+                WHEN 'in_progress' THEN 0
+                WHEN 'pending' THEN 1
+                WHEN 'awaiting_closure' THEN 2
+                WHEN 'awaiting_build' THEN 3
+                WHEN 'failed' THEN 4
+                WHEN 'completed' THEN 5
+                ELSE 6
+            END,
+            COALESCE(scan.completed_at, scan.scheduled_at, scan.created_at) DESC,
+            scan.id DESC
+        LIMIT $4
+        "#
+    );
+    let rows = sqlx::query(&rows_sql)
+        .bind(collection.as_str())
+        .bind(system_id)
+        .bind(include_archived)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+    let rows = rows
+        .into_iter()
+        .map(|row| {
+            let failure = row
+                .get::<Option<String>, _>("failure")
+                .map(|value| crate::security::snapshot_redaction::redact_text(&value))
+                .map(|value| value.chars().take(2048).collect());
+            ScanRecordRow {
+                scan_id: row.get("scan_id"),
+                derivation_id: row.get("derivation_id"),
+                hostname: row.get("hostname"),
+                flake_name: row.get("flake_name"),
+                commit_hash: row.get("commit_hash"),
+                status: row.get("status"),
+                source_trigger: crate::queries::cve_scans::present_scan_trigger(
+                    row.get::<Option<String>, _>("source_trigger").as_deref(),
+                ),
+                created_at: row.get("created_at"),
+                scheduled_at: row.get("scheduled_at"),
+                completed_at: row.get("completed_at"),
+                scanner_name: row.get("scanner_name"),
+                scanner_version: row.get("scanner_version"),
+                executor: row.get("executor"),
+                failure,
+                wait_reason: row.get("wait_reason"),
+                total_packages: row.get("total_packages"),
+                total_vulnerabilities: row.get("total_vulnerabilities"),
+                critical_count: row.get("critical_count"),
+                high_count: row.get("high_count"),
+                medium_count: row.get("medium_count"),
+                low_count: row.get("low_count"),
+                scan_duration_ms: row.get("scan_duration_ms"),
+                attempts: row.get("attempts"),
+                archived_at: row.get("archived_at"),
+                cancellable: false,
+            }
+        })
+        .collect();
+    Ok(ScanRecordResult {
+        rows,
+        total,
+        hidden_archived: if include_archived { 0 } else { archived },
+    })
+}
+
+/// Sets archive presentation state for a bounded set of eligible terminal scans.
+///
+/// The operation is idempotent. It writes only `cve_scan_archives`, never the
+/// immutable scan row, findings, or diagnostics.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot apply the archive-state change.
+pub async fn set_scan_archive_state(
+    pool: &PgPool,
+    scan_ids: &[Uuid],
+    archived: bool,
+    actor_id: Uuid,
+) -> Result<u64> {
+    if archived {
+        let result = sqlx::query(
+            r#"
+            INSERT INTO cve_scan_archives (scan_id, archived_by)
+            SELECT id, $2
+            FROM cve_scans
+            WHERE id = ANY($1) AND status IN ('completed', 'failed')
+            ON CONFLICT (scan_id) DO NOTHING
+            "#,
+        )
+        .bind(scan_ids)
+        .bind(actor_id)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected())
+    } else {
+        let result = sqlx::query("DELETE FROM cve_scan_archives WHERE scan_id = ANY($1)")
+            .bind(scan_ids)
+            .execute(pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
 }
 
 /// Returns the latest scan lifecycle for each NixOS derivation.
@@ -339,7 +568,9 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
             freshness: row.get("freshness"),
             is_current: row.get("is_current"),
             is_latest_per_flake: row.get("is_latest_per_flake"),
-            source_trigger: row.get("source_trigger"),
+            source_trigger: crate::queries::cve_scans::present_scan_trigger(
+                row.get::<Option<String>, _>("source_trigger").as_deref(),
+            ),
         })
         .collect())
 }
@@ -523,7 +754,9 @@ pub async fn get_scan_deployed(
                     freshness: row.get("freshness"),
                     is_current: row.get("is_current"),
                     is_latest_per_flake: row.get("is_latest_per_flake"),
-                    source_trigger: row.get("source_trigger"),
+                    source_trigger: crate::queries::cve_scans::present_scan_trigger(
+                        row.get::<Option<String>, _>("source_trigger").as_deref(),
+                    ),
                 },
                 row.get::<i32, _>("derivation_id"),
             )
@@ -699,7 +932,9 @@ pub async fn get_scan_queue_for_system(
             freshness: row.get("freshness"),
             is_current: row.get("is_current"),
             is_latest_per_flake: row.get("is_latest_per_flake"),
-            source_trigger: row.get("source_trigger"),
+            source_trigger: crate::queries::cve_scans::present_scan_trigger(
+                row.get::<Option<String>, _>("source_trigger").as_deref(),
+            ),
         })
         .collect())
 }

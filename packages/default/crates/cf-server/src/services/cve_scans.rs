@@ -1,9 +1,10 @@
 use crate::config::CrystalForgeConfig;
 use crate::queries::cve_scans::{
-    CreateCveScanOutcome, acknowledge_revoked_cve_scan_execution, acquire_execution_lock,
-    create_cve_scan, get_active_scan_for_derivation, heartbeat_cve_scan_execution,
-    mark_cve_scan_failed_by_id_for_execution, mark_cve_scan_failed_for_execution,
-    release_execution_lock_or_close, save_scan_results_for_execution,
+    CreateCveScanOutcome, ScanTrigger, acknowledge_revoked_cve_scan_execution,
+    acquire_execution_lock, create_cve_scan_with_trigger, get_active_scan_for_derivation,
+    heartbeat_cve_scan_execution, mark_cve_scan_failed_by_id_for_execution,
+    mark_cve_scan_failed_for_execution, release_execution_lock_or_close,
+    save_scan_results_for_execution,
 };
 use crate::queries::derivations::get_derivation_by_id;
 use crate::vulnix::vulnix_runner::VulnixRunner;
@@ -124,9 +125,15 @@ where
     R: ImmediateCveScanRunner,
     F: FnOnce() -> R + Send + 'static,
 {
-    let scan_claim = create_cve_scan(&pool, derivation_id, "vulnix", vulnix_version.clone())
-        .await
-        .map_err(CveScanError::Internal)?;
+    let scan_claim = create_cve_scan_with_trigger(
+        &pool,
+        derivation_id,
+        "vulnix",
+        vulnix_version.clone(),
+        ScanTrigger::Manual,
+    )
+    .await
+    .map_err(CveScanError::Internal)?;
     let claim = match scan_claim {
         CreateCveScanOutcome::Created(claim) => claim,
         CreateCveScanOutcome::Existing(scan_id) => return Ok(scan_id),
@@ -506,20 +513,25 @@ mod tests {
         .expect("first immediate scan should start");
         wait_for_counter(&runner.calls, 1, "first immediate scanner invocation").await;
 
-        let (execution_id, initial_heartbeat): (Uuid, chrono::DateTime<chrono::Utc>) =
-            sqlx::query_as(
-                r#"
+        let (execution_id, initial_heartbeat, source_trigger): (
+            Uuid,
+            chrono::DateTime<chrono::Utc>,
+            Option<String>,
+        ) = sqlx::query_as(
+            r#"
                 SELECT
                     (scan_metadata ->> 'execution_id')::uuid,
-                    (scan_metadata ->> 'execution_heartbeat_at')::timestamptz
+                    (scan_metadata ->> 'execution_heartbeat_at')::timestamptz,
+                    source_trigger
                 FROM cve_scans
                 WHERE id = $1 AND status = 'in_progress'
                 "#,
-            )
-            .bind(first_scan_id)
-            .fetch_one(&pool)
-            .await
-            .expect("immediate execution should store lease metadata");
+        )
+        .bind(first_scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("immediate execution should store lease metadata");
+        assert_eq!(source_trigger.as_deref(), Some("manual"));
 
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {

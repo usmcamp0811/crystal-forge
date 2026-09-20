@@ -33,14 +33,16 @@ use crate::derivations::utils::{
 use crate::log::{WorkerState, WorkerStatus, get_cve_status};
 use crate::models::cache_destination::CacheDestination;
 use crate::queries::cache_destinations::get_cache_destination;
+#[cfg(test)]
+use crate::queries::cve_scans::create_cve_scan;
 use crate::queries::cve_scans::{
-    CreateCveScanOutcome, CveScanExecutionClaim, acknowledge_revoked_cve_scan_execution,
-    acquire_execution_lock, claim_queued_cve_scans, create_cve_scan,
-    get_targets_needing_cve_rescan, get_targets_needing_cve_scan, heartbeat_cve_scan_execution,
-    mark_cve_scan_failed_by_id_for_execution, mark_cve_scan_failed_for_execution,
-    mark_cve_scan_failed_with_diagnostics_for_execution, recover_stale_scans,
-    release_execution_lock_or_close, requeue_cve_scan_execution,
-    save_scan_results_with_diagnostics_for_execution,
+    CreateCveScanOutcome, CveScanExecutionClaim, ScanTrigger,
+    acknowledge_revoked_cve_scan_execution, acquire_execution_lock, claim_queued_cve_scans,
+    create_cve_scan_with_trigger, get_targets_needing_cve_rescan, get_targets_needing_cve_scan,
+    heartbeat_cve_scan_execution, mark_cve_scan_failed_by_id_for_execution,
+    mark_cve_scan_failed_for_execution, mark_cve_scan_failed_with_diagnostics_for_execution,
+    promote_waiting_cve_scans, recover_stale_scans, release_execution_lock_or_close,
+    requeue_cve_scan_execution, save_scan_results_with_diagnostics_for_execution,
 };
 use crate::queries::derivations::get_derivation_by_id;
 use crate::queries::scanning::get_scan_schedule_policy;
@@ -377,6 +379,12 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
         Err(e) => error!("Failed to recover stale CVE scans: {e}"),
     }
 
+    match promote_waiting_cve_scans(pool, 32).await {
+        Ok(count) if count > 0 => info!("Advanced {count} CVE scan prerequisite wait(s)"),
+        Ok(_) => {}
+        Err(error) => error!("Failed to advance waiting CVE scans: {error:#}"),
+    }
+
     // --- Phase 0: operator-queued scans (bounded) ---
     //
     // Fleet rescan requests enqueue `pending` claims rather than executing
@@ -533,6 +541,7 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
                         vulnix_version.clone(),
                         derivation,
                         enabled_rx,
+                        ScanTrigger::PostBuild,
                     )
                     .await
                     {
@@ -582,6 +591,7 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
                     vulnix_version.clone(),
                     derivation,
                     enabled_rx,
+                    ScanTrigger::Periodic,
                 )
                 .await
                 {
@@ -639,6 +649,7 @@ async fn scan_one<R: CveScanRunner + Sync>(
     vulnix_version: Option<String>,
     derivation: &crate::derivations::Derivation,
     enabled_rx: &tokio::sync::RwLock<bool>,
+    source_trigger: ScanTrigger,
 ) -> Result<()> {
     set_cve_status_working(&format!("scanning {}", derivation.derivation_name)).await;
 
@@ -661,8 +672,14 @@ async fn scan_one<R: CveScanRunner + Sync>(
             return Ok(());
         }
 
-        let scan_claim =
-            create_cve_scan(pool, derivation.id, "vulnix", vulnix_version.clone()).await?;
+        let scan_claim = create_cve_scan_with_trigger(
+            pool,
+            derivation.id,
+            "vulnix",
+            vulnix_version.clone(),
+            source_trigger,
+        )
+        .await?;
         // Release the guard as soon as the claim is committed.  From here the
         // scan is authorized and runs to completion even if disable fires later.
         drop(enabled_guard);
@@ -2250,23 +2267,27 @@ mod tests {
             "target should be processed exactly once"
         );
 
-        let (status, completed_at): (Option<String>, Option<chrono::DateTime<chrono::Utc>>) =
-            sqlx::query_as(
-                r#"
-            SELECT status, completed_at
+        let (status, completed_at, source_trigger): (
+            Option<String>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<String>,
+        ) = sqlx::query_as(
+            r#"
+            SELECT status, completed_at, source_trigger
             FROM cve_scans
             WHERE derivation_id = $1
             ORDER BY created_at DESC
             LIMIT 1
             "#,
-            )
-            .bind(derivation.id)
-            .fetch_one(pool)
-            .await
-            .expect("scan row should exist");
+        )
+        .bind(derivation.id)
+        .fetch_one(pool)
+        .await
+        .expect("scan row should exist");
 
         assert_eq!(status, Some("completed".to_string()));
         assert!(completed_at.is_some(), "scan should be terminal");
+        assert_eq!(source_trigger.as_deref(), Some("post_build"));
 
         sqlx::query("UPDATE scan_schedule_policy SET on_build = FALSE WHERE id = 1")
             .execute(pool)
@@ -2500,6 +2521,7 @@ mod tests {
                 Some("test".to_string()),
                 &first_derivation,
                 &first_enabled,
+                ScanTrigger::PostBuild,
             )
             .await
         });
@@ -2626,6 +2648,7 @@ mod tests {
                 Some("test".to_string()),
                 &second_derivation,
                 &second_enabled,
+                ScanTrigger::PostBuild,
             )
             .await
         });

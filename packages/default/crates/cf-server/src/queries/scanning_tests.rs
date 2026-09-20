@@ -4,9 +4,9 @@
 //! `DATABASE_URL=... cargo test -p crystal-forge --lib scanning_tests -- --ignored`
 
 use crate::queries::scanning::{
-    ScanSchedulePolicyRow, get_scan_activity, get_scan_deployed, get_scan_queue,
-    get_scan_queue_for_system, get_scan_schedule_policy, get_scan_stats, get_scan_systems,
-    update_scan_schedule_policy,
+    ScanRecordCollection, ScanSchedulePolicyRow, get_scan_activity, get_scan_deployed,
+    get_scan_queue, get_scan_queue_for_system, get_scan_records, get_scan_schedule_policy,
+    get_scan_stats, get_scan_systems, set_scan_archive_state, update_scan_schedule_policy,
 };
 use futures::FutureExt;
 use serial_test::serial;
@@ -102,10 +102,334 @@ async fn stats_aggregation_is_internally_consistent() {
     // All counts are non-negative and coverage is a percentage.
     assert!(stats.scanning >= 0);
     assert!(stats.queued >= 0);
+    assert!(stats.awaiting_build >= 0);
+    assert!(stats.awaiting_closure >= 0);
     assert!(stats.stale >= 0);
     assert!(stats.never_scanned >= 0);
     assert!(stats.failed >= 0);
     assert!((0..=100).contains(&stats.coverage_percent));
+}
+
+/// Ensures exact prerequisites use build provenance, preserve trigger
+/// provenance, and never advance from a persisted output identity alone.
+#[tokio::test]
+#[ignore = "requires live database connection"]
+async fn waiting_scan_promotes_through_exact_prerequisites() {
+    use crate::queries::cve_scans::{
+        claim_queued_cve_scans, enqueue_exact_cve_scan, promote_waiting_cve_scans,
+        requeue_cve_scan_execution,
+    };
+
+    let pool = test_pool_from_env().await;
+    let suffix = Uuid::new_v4().simple().to_string();
+    let builder_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO builders (id, name, public_key, arch) VALUES ($1, $2, $3, 'x86_64-linux')",
+    )
+    .bind(builder_id)
+    .bind(format!("waiting-builder-{suffix}"))
+    .bind(format!("waiting-key-{suffix}"))
+    .execute(&pool)
+    .await
+    .expect("remote builder should be inserted");
+    let derivation_id: i32 = sqlx::query_scalar(
+        "INSERT INTO derivations (derivation_type, derivation_name, status_id, attempt_count) VALUES ('nixos', $1, 3, 0) RETURNING id",
+    )
+    .bind(format!("waiting-lifecycle-{suffix}"))
+    .fetch_one(&pool)
+    .await
+    .expect("waiting derivation should be inserted");
+    let outcome = enqueue_exact_cve_scan(&pool, derivation_id, "vulnix", None)
+        .await
+        .expect("exact waiting scan should enqueue")
+        .expect("NixOS derivation should be eligible");
+    let state: (String, Option<String>) =
+        sqlx::query_as("SELECT status, source_trigger FROM cve_scans WHERE id = $1")
+            .bind(outcome.scan_id)
+            .fetch_one(&pool)
+            .await
+            .expect("waiting scan state should load");
+    assert_eq!(
+        state,
+        ("awaiting_build".to_string(), Some("manual".to_string()))
+    );
+
+    sqlx::query("UPDATE derivations SET store_path = $2 WHERE id = $1")
+        .bind(derivation_id)
+        .bind(format!("/nix/store/{suffix}-system"))
+        .execute(&pool)
+        .await
+        .expect("output identity should become available without its derivation");
+    assert_eq!(
+        promote_waiting_cve_scans(&pool, 10)
+            .await
+            .expect("incomplete build identity should not promote"),
+        0
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM cve_scans WHERE id = $1")
+        .bind(outcome.scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("incomplete waiting state should load");
+    assert_eq!(status, "awaiting_build");
+
+    sqlx::query("UPDATE derivations SET derivation_path = $2 WHERE id = $1")
+        .bind(derivation_id)
+        .bind(format!("/nix/store/{suffix}.drv"))
+        .execute(&pool)
+        .await
+        .expect("recorded derivation identity should become available");
+    sqlx::query(
+        "INSERT INTO build_jobs (derivation_id, builder_id, status, completed_at) VALUES ($1, $2, 'success', NOW())",
+    )
+    .bind(derivation_id)
+    .bind(builder_id)
+    .execute(&pool)
+    .await
+    .expect("remote build provenance should be inserted");
+    assert_eq!(
+        promote_waiting_cve_scans(&pool, 10)
+            .await
+            .expect("remote build prerequisite should promote"),
+        1
+    );
+    let state: (String, Option<String>) =
+        sqlx::query_as("SELECT status, source_trigger FROM cve_scans WHERE id = $1")
+            .bind(outcome.scan_id)
+            .fetch_one(&pool)
+            .await
+            .expect("closure wait state should load");
+    assert_eq!(
+        state,
+        ("awaiting_closure".to_string(), Some("manual".to_string()))
+    );
+
+    let cache_name = format!("waiting-cache-{suffix}");
+    sqlx::query(
+        "INSERT INTO cache_destinations (name, cache_type, push_to) VALUES ($1, 'Nix', $2)",
+    )
+    .bind(&cache_name)
+    .bind(format!("https://cache.example.test/{suffix}"))
+    .execute(&pool)
+    .await
+    .expect("cache destination should be inserted");
+    sqlx::query(
+        "INSERT INTO cache_push_jobs (derivation_id, status, completed_at, cache_destination) VALUES ($1, 'completed', NOW(), $2)",
+    )
+    .bind(derivation_id)
+    .bind(&cache_name)
+    .execute(&pool)
+    .await
+    .expect("completed closure publication should be inserted");
+    let first_pool = pool.clone();
+    let second_pool = pool.clone();
+    let (first_promotion, second_promotion) = tokio::join!(
+        promote_waiting_cve_scans(&first_pool, 10),
+        promote_waiting_cve_scans(&second_pool, 10),
+    );
+    assert_eq!(
+        first_promotion.expect("first closure promoter should succeed")
+            + second_promotion.expect("second closure promoter should succeed"),
+        1,
+        "concurrent promoters must advance the waiting row exactly once"
+    );
+    sqlx::query("UPDATE cve_scans SET created_at = '1800-01-01'::timestamptz WHERE id = $1")
+        .bind(outcome.scan_id)
+        .execute(&pool)
+        .await
+        .expect("fixture should be first in the shared pending queue");
+    let claims = claim_queued_cve_scans(&pool, 1)
+        .await
+        .expect("runnable scan should be claimable");
+    let claim = claims
+        .into_iter()
+        .find(|claim| claim.scan_id == outcome.scan_id)
+        .expect("exact waiting scan should be claimed");
+    assert!(
+        requeue_cve_scan_execution(&pool, claim.scan_id, claim.execution_id, "test")
+            .await
+            .expect("owned scan should requeue")
+    );
+    let state: (String, Option<String>) =
+        sqlx::query_as("SELECT status, source_trigger FROM cve_scans WHERE id = $1")
+            .bind(outcome.scan_id)
+            .fetch_one(&pool)
+            .await
+            .expect("requeued scan state should load");
+    assert_eq!(state, ("pending".to_string(), Some("manual".to_string())));
+
+    sqlx::query("DELETE FROM cve_scans WHERE derivation_id = $1")
+        .bind(derivation_id)
+        .execute(&pool)
+        .await
+        .expect("scan fixture should be deleted");
+    sqlx::query("DELETE FROM cache_push_jobs WHERE derivation_id = $1")
+        .bind(derivation_id)
+        .execute(&pool)
+        .await
+        .expect("cache fixture should be deleted");
+    sqlx::query("DELETE FROM build_jobs WHERE derivation_id = $1")
+        .bind(derivation_id)
+        .execute(&pool)
+        .await
+        .expect("build job fixture should be deleted");
+    sqlx::query("DELETE FROM derivations WHERE id = $1")
+        .bind(derivation_id)
+        .execute(&pool)
+        .await
+        .expect("derivation fixture should be deleted");
+    sqlx::query("DELETE FROM cache_destinations WHERE name = $1")
+        .bind(&cache_name)
+        .execute(&pool)
+        .await
+        .expect("cache destination fixture should be deleted");
+    sqlx::query("DELETE FROM builders WHERE id = $1")
+        .bind(builder_id)
+        .execute(&pool)
+        .await
+        .expect("builder fixture should be deleted");
+}
+
+/// Ensures a server-local build is runnable before cache publication.
+#[tokio::test]
+#[ignore = "requires live database connection"]
+async fn local_build_without_cache_enqueues_as_pending() {
+    use crate::queries::cve_scans::enqueue_exact_cve_scan;
+
+    let pool = test_pool_from_env().await;
+    let suffix = Uuid::new_v4().simple().to_string();
+    let derivation_id: i32 = sqlx::query_scalar(
+        r#"
+        INSERT INTO derivations (
+            derivation_type, derivation_name, derivation_path, store_path,
+            status_id, completed_at, attempt_count
+        ) VALUES ('nixos', $1, $2, $3, 5, NOW(), 0)
+        RETURNING id
+        "#,
+    )
+    .bind(format!("local-scan-{suffix}"))
+    .bind(format!("/nix/store/{suffix}.drv"))
+    .bind(format!("/nix/store/{suffix}-system"))
+    .fetch_one(&pool)
+    .await
+    .expect("local derivation should be inserted");
+
+    let outcome = enqueue_exact_cve_scan(&pool, derivation_id, "vulnix", None)
+        .await
+        .expect("local scan should enqueue")
+        .expect("local NixOS derivation should be eligible");
+    let status: String = sqlx::query_scalar("SELECT status FROM cve_scans WHERE id = $1")
+        .bind(outcome.scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("local scan status should load");
+    assert_eq!(status, "pending");
+
+    sqlx::query("DELETE FROM cve_scans WHERE derivation_id = $1")
+        .bind(derivation_id)
+        .execute(&pool)
+        .await
+        .expect("local scan fixture should be deleted");
+    sqlx::query("DELETE FROM derivations WHERE id = $1")
+        .bind(derivation_id)
+        .execute(&pool)
+        .await
+        .expect("local derivation fixture should be deleted");
+}
+
+/// Ensures terminal archive state is separate, idempotent, and reflected in
+/// complete history metadata.
+#[tokio::test]
+#[ignore = "requires live database connection"]
+async fn terminal_archive_filters_and_restores_without_mutating_scan() {
+    let pool = test_pool_from_env().await;
+    let suffix = Uuid::new_v4().simple().to_string();
+    let actor_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (username, first_name, last_name, email) VALUES ($1, 'Scan', 'Admin', $2) RETURNING id",
+    )
+    .bind(format!("scan-admin-{suffix}"))
+    .bind(format!("scan-admin-{suffix}@example.test"))
+    .fetch_one(&pool)
+    .await
+    .expect("archive actor should be inserted");
+    let derivation_id: i32 = sqlx::query_scalar(
+        "INSERT INTO derivations (derivation_type, derivation_name, status_id, attempt_count) VALUES ('nixos', $1, 5, 0) RETURNING id",
+    )
+    .bind(format!("archive-scan-{suffix}"))
+    .fetch_one(&pool)
+    .await
+    .expect("archive derivation should be inserted");
+    let scan_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO cve_scans (derivation_id, scanner_name, status, source_trigger, completed_at, scan_metadata) VALUES ($1, 'vulnix', 'failed', $2, NOW(), jsonb_build_object('error', 'safe failure')) RETURNING id",
+    )
+    .bind(derivation_id)
+    .bind("future-trigger")
+    .fetch_one(&pool)
+    .await
+    .expect("terminal scan should be inserted");
+
+    assert_eq!(
+        set_scan_archive_state(&pool, &[scan_id], true, actor_id)
+            .await
+            .expect("terminal scan should archive"),
+        1
+    );
+    assert_eq!(
+        set_scan_archive_state(&pool, &[scan_id], true, actor_id)
+            .await
+            .expect("archive retry should be idempotent"),
+        0
+    );
+    let visible = get_scan_records(&pool, ScanRecordCollection::Completed, false, None, 500)
+        .await
+        .expect("visible completed records should load");
+    assert!(visible.rows.iter().all(|row| row.scan_id != scan_id));
+    assert!(visible.hidden_archived >= 1);
+    let all = get_scan_records(&pool, ScanRecordCollection::Completed, true, None, 500)
+        .await
+        .expect("archived completed records should load");
+    let archived = all
+        .rows
+        .iter()
+        .find(|row| row.scan_id == scan_id)
+        .expect("archived scan should be returned explicitly");
+    assert!(archived.archived_at.is_some());
+    assert_eq!(archived.source_trigger.as_deref(), Some("future-trigger"));
+    assert!(!archived.cancellable);
+    assert_eq!(archived.failure.as_deref(), Some("safe failure"));
+
+    assert_eq!(
+        set_scan_archive_state(&pool, &[scan_id], false, actor_id)
+            .await
+            .expect("terminal scan should restore"),
+        1
+    );
+    assert_eq!(
+        set_scan_archive_state(&pool, &[scan_id], false, actor_id)
+            .await
+            .expect("restore retry should be idempotent"),
+        0
+    );
+    let restored = get_scan_records(&pool, ScanRecordCollection::Completed, false, None, 500)
+        .await
+        .expect("restored completed records should load");
+    assert!(restored.rows.iter().any(|row| row.scan_id == scan_id));
+
+    sqlx::query("DELETE FROM cve_scans WHERE id = $1")
+        .bind(scan_id)
+        .execute(&pool)
+        .await
+        .expect("terminal scan fixture should be deleted");
+    sqlx::query("DELETE FROM derivations WHERE id = $1")
+        .bind(derivation_id)
+        .execute(&pool)
+        .await
+        .expect("archive derivation should be deleted");
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(actor_id)
+        .execute(&pool)
+        .await
+        .expect("archive actor should be deleted");
 }
 
 #[tokio::test]
@@ -295,11 +619,13 @@ async fn scan_stats_count_worker_eligible_waiting_targets() {
         update_scan_schedule_policy(&pool, &test_policy)
             .await
             .expect("should set test policy");
-        for (derivation_id, status, completed_at) in [
+        let lifecycle_fixtures: [(i32, &str, Option<&str>); 4] = [
             (pending_id, "pending", None),
-            (stale_id, "completed", Some("NOW() - INTERVAL '2 hours'")),
+            (initial_id, "awaiting_build", None),
+            (stale_id, "awaiting_closure", None),
             (active_id, "in_progress", None),
-        ] {
+        ];
+        for (derivation_id, status, completed_at) in lifecycle_fixtures {
             let completed_at_sql = completed_at.unwrap_or("NULL");
             sqlx::query(&format!(
                 "INSERT INTO cve_scans (derivation_id, scanner_name, status, completed_at) \
@@ -322,7 +648,9 @@ async fn scan_stats_count_worker_eligible_waiting_targets() {
         }
 
         let stats = get_scan_stats(&pool).await.expect("should read scan stats");
-        assert!(stats.queued >= 3, "pending, initial, and stale targets must wait");
+        assert!(stats.queued >= 1, "the runnable pending target must be queued");
+        assert!(stats.awaiting_build >= 1);
+        assert!(stats.awaiting_closure >= 1);
         assert!(stats.scanning >= 1, "in-progress target must scan now");
 
         sqlx::query("UPDATE cve_scans SET status = 'in_progress' WHERE derivation_id = $1 AND status = 'pending'")
@@ -342,9 +670,8 @@ async fn scan_stats_count_worker_eligible_waiting_targets() {
         let completed = get_scan_stats(&pool).await.expect("should update scan stats");
         assert_eq!(completed.scanning, stats.scanning);
 
-        // The failed target has five recent failures, and the active target has
-        // an active execution. Neither is eligible for the waiting backlog.
-        assert!(completed.queued >= 2);
+        assert!(completed.awaiting_build >= 1);
+        assert!(completed.awaiting_closure >= 1);
         assert_ne!(initial_id, stale_id);
     })
     .catch_unwind()
@@ -611,7 +938,7 @@ async fn system_scan_scope_uses_exact_flake_configuration_and_current_store_path
     assert!(current.is_current);
     assert_eq!(current.source_trigger.as_deref(), Some("manual"));
     assert!(!history.is_current);
-    assert_eq!(history.source_trigger.as_deref(), Some("fleet"));
+    assert_eq!(history.source_trigger.as_deref(), Some("manual"));
     assert!(current.rescan_eligible);
     assert!(history.rescan_eligible);
     assert!(!unbuilt.rescan_eligible);

@@ -13,6 +13,79 @@ use sqlx::Row;
 use tracing::debug;
 use uuid::Uuid;
 
+/// Identifies the durable source that created a CVE scan lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanTrigger {
+    /// An administrator requested the scan directly.
+    Manual,
+    /// A successful build created the scan.
+    PostBuild,
+    /// Scan policy selected a stale result for periodic refresh.
+    Periodic,
+    /// No reliable source exists for this compatibility path.
+    Legacy,
+}
+
+impl ScanTrigger {
+    /// Returns the immutable database representation for this trigger.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::PostBuild => "post_build",
+            Self::Periodic => "periodic",
+            Self::Legacy => "legacy",
+        }
+    }
+}
+
+/// Returns the canonical trigger label exposed by scanning APIs.
+///
+/// Legacy `NULL` and `legacy` values remain distinguishable. Unknown values
+/// pass through unchanged so a newer producer does not become lossy when read
+/// by this server version.
+pub fn present_scan_trigger(value: Option<&str>) -> Option<String> {
+    value.map(|value| match value {
+        "immediate" | "manual" | "fleet" => "manual".to_string(),
+        "post_build" => "post-build".to_string(),
+        "periodic" => "scheduled".to_string(),
+        other => other.to_string(),
+    })
+}
+
+#[cfg(test)]
+mod trigger_presentation_tests {
+    use super::present_scan_trigger;
+
+    #[test]
+    fn canonicalizes_known_triggers_without_losing_compatibility_values() {
+        assert_eq!(
+            present_scan_trigger(Some("immediate")).as_deref(),
+            Some("manual")
+        );
+        assert_eq!(
+            present_scan_trigger(Some("fleet")).as_deref(),
+            Some("manual")
+        );
+        assert_eq!(
+            present_scan_trigger(Some("post_build")).as_deref(),
+            Some("post-build")
+        );
+        assert_eq!(
+            present_scan_trigger(Some("periodic")).as_deref(),
+            Some("scheduled")
+        );
+        assert_eq!(
+            present_scan_trigger(Some("legacy")).as_deref(),
+            Some("legacy")
+        );
+        assert_eq!(
+            present_scan_trigger(Some("future-trigger")).as_deref(),
+            Some("future-trigger")
+        );
+        assert_eq!(present_scan_trigger(None), None);
+    }
+}
+
 /// Identifies a derivation that an API request can scan.
 #[derive(Debug, Clone)]
 pub struct CveScanEligibleTarget {
@@ -360,7 +433,7 @@ pub async fn get_targets_needing_cve_scan(
             AND NOT EXISTS (
                 SELECT 1 FROM cve_scans cs
                 WHERE cs.derivation_id = d.id
-                AND cs.status IN ('pending', 'in_progress')
+                AND cs.status IN ('awaiting_build', 'awaiting_closure', 'pending', 'in_progress')
             )
             -- Exclude derivations only when there are 5+ consecutive failures
             -- AND the backoff window hasn't elapsed yet (min(30min × failures,
@@ -427,6 +500,32 @@ pub async fn create_cve_scan(
     scanner_name: &str,
     scanner_version: Option<String>,
 ) -> Result<CreateCveScanOutcome> {
+    create_cve_scan_with_trigger(
+        pool,
+        derivation_id,
+        scanner_name,
+        scanner_version,
+        ScanTrigger::Legacy,
+    )
+    .await
+}
+
+/// Creates a token-owned CVE scan with immutable trigger provenance.
+///
+/// Active work is reused without changing the existing row's trigger. A new
+/// row starts in `in_progress` and owns all later writes through its execution
+/// token.
+///
+/// # Errors
+///
+/// Returns an error when claim creation or composite persistence fails.
+pub async fn create_cve_scan_with_trigger(
+    pool: &PgPool,
+    derivation_id: i32,
+    scanner_name: &str,
+    scanner_version: Option<String>,
+    source_trigger: ScanTrigger,
+) -> Result<CreateCveScanOutcome> {
     let scan_id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
@@ -442,7 +541,7 @@ pub async fn create_cve_scan(
             id, derivation_id, scanner_name, scanner_version,
             status, total_packages, total_vulnerabilities,
             critical_count, high_count, medium_count, low_count,
-            attempts, scan_metadata
+            attempts, scan_metadata, source_trigger
         ) VALUES (
             $1, $2, $3, $4,
             'in_progress', 0, 0,
@@ -452,9 +551,11 @@ pub async fn create_cve_scan(
                 'execution_id', gen_random_uuid(),
                 'execution_started_at', NOW(),
                 'execution_heartbeat_at', NOW()
-            )
+            ), $5
         )
-        ON CONFLICT (derivation_id) WHERE status IN ('pending', 'in_progress')
+        ON CONFLICT (derivation_id) WHERE status IN (
+            'awaiting_build', 'awaiting_closure', 'pending', 'in_progress'
+        )
         DO NOTHING
         RETURNING
             id AS scan_id,
@@ -466,6 +567,7 @@ pub async fn create_cve_scan(
     .bind(derivation_id)
     .bind(scanner_name)
     .bind(scanner_version)
+    .bind(source_trigger.as_str())
     .fetch_optional(&mut *tx)
     .await?;
 
@@ -480,7 +582,7 @@ pub async fn create_cve_scan(
             SELECT id FROM cve_scans
             WHERE derivation_id = $1
             ORDER BY
-              CASE WHEN status IN ('pending', 'in_progress') THEN 0 ELSE 1 END,
+              CASE WHEN status IN ('awaiting_build', 'awaiting_closure', 'pending', 'in_progress') THEN 0 ELSE 1 END,
               created_at DESC,
               id DESC
             LIMIT 1
@@ -1792,7 +1894,7 @@ pub async fn get_active_scan_for_derivation(
         SELECT id
         FROM cve_scans
         WHERE derivation_id = $1
-          AND status IN ('pending', 'in_progress')
+          AND status IN ('awaiting_build', 'awaiting_closure', 'pending', 'in_progress')
         ORDER BY created_at DESC
         LIMIT 1
         "#,
@@ -1813,8 +1915,11 @@ pub async fn get_active_scan_for_derivation(
 ///
 /// # Returns
 ///
-/// Returns `None` when `derivation_id` does not identify a built NixOS
-/// derivation. Otherwise, returns the new or reused durable scan identity.
+/// Returns `None` when `derivation_id` does not identify a NixOS derivation.
+/// A target without both recorded scan-input identities waits in
+/// `awaiting_build`. A remote-built target without a usable completed cache
+/// publication waits in `awaiting_closure`. A server-local target or a
+/// cache-restorable remote target starts in `pending`.
 ///
 /// # Errors
 ///
@@ -1836,25 +1941,40 @@ pub async fn enqueue_exact_cve_scan(
     )
     .await?;
 
-    let eligible = sqlx::query_scalar::<_, bool>(
+    let initial_status = sqlx::query_scalar::<_, String>(
         r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM derivations
-            WHERE id = $1
-              AND derivation_type = 'nixos'
-              AND store_path IS NOT NULL
-              AND BTRIM(store_path) <> ''
-        )
+        -- INVARIANT: API builder completions retain a builder-owned successful
+        -- job. The legacy worker writes the completed derivation directly, so
+        -- no such job means the server produced and retained the local inputs.
+        SELECT CASE
+            WHEN store_path IS NULL OR BTRIM(store_path) = ''
+              OR derivation_path IS NULL OR BTRIM(derivation_path) = ''
+                THEN 'awaiting_build'
+            WHEN EXISTS (
+                SELECT 1 FROM build_jobs job
+                WHERE job.derivation_id = derivations.id
+                  AND job.status = 'success'
+                  AND job.builder_id IS NOT NULL
+            ) AND NOT EXISTS (
+                SELECT 1 FROM cache_push_jobs push
+                WHERE push.derivation_id = derivations.id
+                  AND push.status = 'completed'
+                  AND push.cache_destination IS NOT NULL
+                  AND BTRIM(push.cache_destination) <> ''
+            ) THEN 'awaiting_closure'
+            ELSE 'pending'
+        END
+        FROM derivations
+        WHERE id = $1 AND derivation_type = 'nixos'
         "#,
     )
     .bind(derivation_id)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
-    if !eligible {
+    let Some(initial_status) = initial_status else {
         tx.commit().await?;
         return Ok(None);
-    }
+    };
 
     let scan_id = Uuid::new_v4();
     let inserted = sqlx::query_scalar::<_, Uuid>(
@@ -1866,11 +1986,13 @@ pub async fn enqueue_exact_cve_scan(
             attempts, source_trigger
         ) VALUES (
             $1, $2, $3, $4,
-            'pending', 0, 0,
+            $5, 0, 0,
             0, 0, 0, 0,
             0, 'manual'
         )
-        ON CONFLICT (derivation_id) WHERE status IN ('pending', 'in_progress')
+        ON CONFLICT (derivation_id) WHERE status IN (
+            'awaiting_build', 'awaiting_closure', 'pending', 'in_progress'
+        )
         DO NOTHING
         RETURNING id
         "#,
@@ -1879,6 +2001,7 @@ pub async fn enqueue_exact_cve_scan(
     .bind(derivation_id)
     .bind(scanner_name)
     .bind(scanner_version)
+    .bind(initial_status)
     .fetch_optional(&mut *tx)
     .await?;
 
@@ -1899,7 +2022,7 @@ pub async fn enqueue_exact_cve_scan(
         SELECT id
         FROM cve_scans
         WHERE derivation_id = $1
-          AND status IN ('pending', 'in_progress')
+          AND status IN ('awaiting_build', 'awaiting_closure', 'pending', 'in_progress')
         ORDER BY created_at DESC, id DESC
         LIMIT 1
         "#,
@@ -1947,12 +2070,22 @@ pub async fn resolve_flake_config_cve_scan_target(
             d.derivation_name AS config_name,
             (SELECT hostname FROM latest_host) AS hostname,
             CASE
-                WHEN d.store_path IS NULL THEN 'Build output is unavailable for this configuration.'
-                WHEN NOT EXISTS (
+                WHEN d.store_path IS NULL OR BTRIM(d.store_path) = ''
+                  OR d.derivation_path IS NULL OR BTRIM(d.derivation_path) = ''
+                    THEN 'Build output is unavailable for this configuration.'
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM build_jobs job
+                    WHERE job.derivation_id = d.id
+                      AND job.status = 'success'
+                      AND job.builder_id IS NOT NULL
+                ) AND NOT EXISTS (
                     SELECT 1
                     FROM cache_push_jobs cpj
                     WHERE cpj.derivation_id = d.id
                       AND cpj.status = 'completed'
+                      AND cpj.cache_destination IS NOT NULL
+                      AND BTRIM(cpj.cache_destination) <> ''
                 ) THEN 'CVE scan requires a completed cache push for this configuration.'
                 ELSE NULL
             END AS blocked_reason
@@ -2015,12 +2148,22 @@ pub async fn resolve_system_cve_scan_target(
             ss.config_name,
             ss.hostname,
             CASE
-                WHEN d.store_path IS NULL THEN 'Build output is unavailable for this system configuration.'
-                WHEN NOT EXISTS (
+                WHEN d.store_path IS NULL OR BTRIM(d.store_path) = ''
+                  OR d.derivation_path IS NULL OR BTRIM(d.derivation_path) = ''
+                    THEN 'Build output is unavailable for this system configuration.'
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM build_jobs job
+                    WHERE job.derivation_id = d.id
+                      AND job.status = 'success'
+                      AND job.builder_id IS NOT NULL
+                ) AND NOT EXISTS (
                     SELECT 1
                     FROM cache_push_jobs cpj
                     WHERE cpj.derivation_id = d.id
                       AND cpj.status = 'completed'
+                      AND cpj.cache_destination IS NOT NULL
+                      AND BTRIM(cpj.cache_destination) <> ''
                 ) THEN 'CVE scan requires a completed cache push for this system configuration.'
                 ELSE NULL
             END AS blocked_reason
@@ -2075,6 +2218,7 @@ const FLEET_TARGET_SELECT: &str = r#"
     WHERE s.is_active = TRUE
       AND d.derivation_type = 'nixos'
       AND d.store_path IS NOT NULL
+      AND BTRIM(d.store_path) <> ''
       AND COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
           = d.derivation_name
       AND d.store_path = (
@@ -2161,11 +2305,33 @@ pub async fn enqueue_fleet_cve_scans(
             )
             SELECT
                 gen_random_uuid(), t.derivation_id, $1, $2,
-                'pending', 0, 0,
+                -- INVARIANT: A builder-owned successful job identifies a
+                -- remote output. Server-local builds have no successful API
+                -- build job and do not need cache publication before scanning.
+                CASE
+                    WHEN derivation.derivation_path IS NULL
+                      OR BTRIM(derivation.derivation_path) = '' THEN 'awaiting_build'
+                    WHEN NOT EXISTS (
+                        SELECT 1 FROM build_jobs job
+                        WHERE job.derivation_id = t.derivation_id
+                          AND job.status = 'success'
+                          AND job.builder_id IS NOT NULL
+                    ) OR EXISTS (
+                        SELECT 1 FROM cache_push_jobs push
+                        WHERE push.derivation_id = t.derivation_id
+                          AND push.status = 'completed'
+                          AND push.cache_destination IS NOT NULL
+                          AND BTRIM(push.cache_destination) <> ''
+                    ) THEN 'pending'
+                    ELSE 'awaiting_closure'
+                END, 0, 0,
                 0, 0, 0, 0,
                 0, 'fleet'
             FROM targets t
-            ON CONFLICT (derivation_id) WHERE status IN ('pending', 'in_progress')
+            JOIN derivations derivation ON derivation.id = t.derivation_id
+            ON CONFLICT (derivation_id) WHERE status IN (
+                'awaiting_build', 'awaiting_closure', 'pending', 'in_progress'
+            )
             DO NOTHING
             RETURNING 1
         )
@@ -2314,6 +2480,158 @@ async fn defer_locked_revocation(
 /// of concurrently draining workers; it is not a scan budget, because at most
 /// `limit` claims are ever returned.
 const CLAIM_CANDIDATE_OVERSCAN: i64 = 8;
+
+/// Advances waiting scans whose exact build or closure prerequisite now exists.
+///
+/// The function uses the established CVE writer lock order for each bounded
+/// candidate. Waiting rows have no execution owner or lease. The guarded
+/// update therefore cannot revoke or replace running work, and trigger
+/// provenance is never rewritten.
+///
+/// # Errors
+///
+/// Returns an error when candidate selection, locking, transition persistence,
+/// or composite recomputation fails.
+pub async fn promote_waiting_cve_scans(pool: &PgPool, limit: i64) -> Result<i64> {
+    if limit <= 0 {
+        return Ok(0);
+    }
+    let candidates: Vec<(Uuid, i32, String)> = sqlx::query_as(
+        r#"
+        SELECT
+            scan.id,
+            scan.derivation_id,
+            -- INVARIANT: Build provenance and cache publication are re-read
+            -- here and in the guarded update. A prerequisite change between
+            -- selection and locking therefore cannot promote stale evidence.
+            CASE
+                WHEN derivation.store_path IS NULL
+                  OR BTRIM(derivation.store_path) = ''
+                  OR derivation.derivation_path IS NULL
+                  OR BTRIM(derivation.derivation_path) = '' THEN 'awaiting_build'
+                WHEN EXISTS (
+                    SELECT 1 FROM build_jobs job
+                    WHERE job.derivation_id = scan.derivation_id
+                      AND job.status = 'success'
+                      AND job.builder_id IS NOT NULL
+                ) AND NOT EXISTS (
+                    SELECT 1 FROM cache_push_jobs push
+                    WHERE push.derivation_id = scan.derivation_id
+                      AND push.status = 'completed'
+                      AND push.cache_destination IS NOT NULL
+                      AND BTRIM(push.cache_destination) <> ''
+                ) THEN 'awaiting_closure'
+                ELSE 'pending'
+            END AS next_status
+        FROM cve_scans scan
+        JOIN derivations derivation ON derivation.id = scan.derivation_id
+        WHERE scan.status IN ('awaiting_build', 'awaiting_closure')
+          AND (
+              (scan.status = 'awaiting_build'
+               AND derivation.store_path IS NOT NULL
+               AND BTRIM(derivation.store_path) <> ''
+               AND derivation.derivation_path IS NOT NULL
+               AND BTRIM(derivation.derivation_path) <> '')
+              OR (scan.status = 'awaiting_closure' AND (
+                  NOT EXISTS (
+                      SELECT 1 FROM build_jobs job
+                      WHERE job.derivation_id = scan.derivation_id
+                        AND job.status = 'success'
+                        AND job.builder_id IS NOT NULL
+                  ) OR EXISTS (
+                      SELECT 1 FROM cache_push_jobs push
+                      WHERE push.derivation_id = scan.derivation_id
+                        AND push.status = 'completed'
+                        AND push.cache_destination IS NOT NULL
+                        AND BTRIM(push.cache_destination) <> ''
+                  )
+              ))
+          )
+        ORDER BY scan.created_at, scan.id
+        LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    let mut promoted = 0;
+    for (scan_id, derivation_id, next_status) in candidates {
+        let mut tx = pool.begin().await?;
+        crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+            &mut tx,
+            derivation_id,
+            &[],
+        )
+        .await?;
+        let result = sqlx::query(
+            r#"
+            UPDATE cve_scans
+            SET status = $2
+            WHERE id = $1
+              AND status IN ('awaiting_build', 'awaiting_closure')
+              AND (
+                  ($2 = 'awaiting_closure' AND EXISTS (
+                      SELECT 1 FROM derivations derivation
+                      WHERE derivation.id = cve_scans.derivation_id
+                        AND derivation.store_path IS NOT NULL
+                        AND BTRIM(derivation.store_path) <> ''
+                        AND derivation.derivation_path IS NOT NULL
+                        AND BTRIM(derivation.derivation_path) <> ''
+                        AND EXISTS (
+                            SELECT 1 FROM build_jobs job
+                            WHERE job.derivation_id = derivation.id
+                              AND job.status = 'success'
+                              AND job.builder_id IS NOT NULL
+                        )
+                        AND NOT EXISTS (
+                            SELECT 1 FROM cache_push_jobs push
+                            WHERE push.derivation_id = derivation.id
+                              AND push.status = 'completed'
+                              AND push.cache_destination IS NOT NULL
+                              AND BTRIM(push.cache_destination) <> ''
+                        )
+                  ))
+                  OR ($2 = 'pending'
+                      AND EXISTS (
+                          SELECT 1 FROM derivations derivation
+                          WHERE derivation.id = cve_scans.derivation_id
+                            AND derivation.store_path IS NOT NULL
+                            AND BTRIM(derivation.store_path) <> ''
+                            AND derivation.derivation_path IS NOT NULL
+                            AND BTRIM(derivation.derivation_path) <> ''
+                            AND (
+                                NOT EXISTS (
+                                    SELECT 1 FROM build_jobs job
+                                    WHERE job.derivation_id = derivation.id
+                                      AND job.status = 'success'
+                                      AND job.builder_id IS NOT NULL
+                                ) OR EXISTS (
+                                    SELECT 1 FROM cache_push_jobs push
+                                    WHERE push.derivation_id = derivation.id
+                                      AND push.status = 'completed'
+                                      AND push.cache_destination IS NOT NULL
+                                      AND BTRIM(push.cache_destination) <> ''
+                                )
+                            )
+                      ))
+              )
+            "#,
+        )
+        .bind(scan_id)
+        .bind(&next_status)
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() == 0 {
+            tx.rollback().await?;
+            continue;
+        }
+        crate::services::composite_enforcement::persist_scan_phase_in_tx(&mut tx, scan_id).await?;
+        tx.commit().await?;
+        promoted += 1;
+    }
+    Ok(promoted)
+}
 
 /// Atomically claim queued CVE scans for execution.
 ///
@@ -3070,7 +3388,7 @@ pub async fn get_targets_needing_cve_rescan(
             AND NOT EXISTS (
                 SELECT 1 FROM cve_scans cs
                 WHERE cs.derivation_id = d.id
-                  AND cs.status IN ('pending', 'in_progress')
+                  AND cs.status IN ('awaiting_build', 'awaiting_closure', 'pending', 'in_progress')
             )
             -- Exclude derivations only when there are 5+ consecutive failures
             -- AND the backoff window hasn't elapsed yet (min(30min × failures,
@@ -3279,16 +3597,19 @@ mod tests {
 
         let config_name = format!("shared-config-{suffix}");
         let running_path = format!("/nix/store/{suffix}-running");
+        let running_derivation_path = format!("/nix/store/{suffix}-running.drv");
         let newer_path = format!("/nix/store/{suffix}-newer");
+        let newer_derivation_path = format!("/nix/store/{suffix}-newer.drv");
         let running = insert_derivation(pool, Some(&commit), &config_name, "nixos")
             .await
             .expect("running derivation should be inserted");
         sqlx::query(
-            "UPDATE derivations SET status_id = $2, completed_at = NOW() - INTERVAL '1 day', store_path = $3 WHERE id = $1",
+            "UPDATE derivations SET status_id = $2, completed_at = NOW() - INTERVAL '1 day', store_path = $3, derivation_path = $4 WHERE id = $1",
         )
         .bind(running.id)
         .bind(EvaluationStatus::BuildComplete.as_id())
         .bind(&running_path)
+        .bind(&running_derivation_path)
         .execute(pool)
         .await
         .expect("running derivation should be build-complete");
@@ -3319,11 +3640,12 @@ mod tests {
             .await
             .expect("newer derivation should be inserted");
         sqlx::query(
-            "UPDATE derivations SET status_id = $2, completed_at = NOW(), store_path = $3 WHERE id = $1",
+            "UPDATE derivations SET status_id = $2, completed_at = NOW(), store_path = $3, derivation_path = $4 WHERE id = $1",
         )
         .bind(newer.id)
         .bind(EvaluationStatus::BuildComplete.as_id())
         .bind(&newer_path)
+        .bind(&newer_derivation_path)
         .execute(pool)
         .await
         .expect("newer derivation should be build-complete");

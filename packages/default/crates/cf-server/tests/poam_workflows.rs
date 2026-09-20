@@ -2,7 +2,8 @@ use axum::{Router, routing::get};
 use chrono::{DateTime, NaiveDate, TimeDelta, TimeZone, Utc};
 use crystal_forge::api::models::{
     CveEnvironmentDisposition, CveEnvironmentTriageAction, CveFilters, FleetCveMutationDetailScope,
-    FleetCvePoamRequest, FleetCveTriageRequest, FleetCveTriageRollup,
+    FleetCvePoamRequest, FleetCveTriageRequest, FleetCveTriageRollup, SystemCveTriageAction,
+    SystemCveTriageRequest, SystemCveTriageScopeKind,
 };
 use crystal_forge::auth::extractors::AuthenticatedUser;
 use crystal_forge::auth::session::{
@@ -1569,6 +1570,342 @@ async fn fleet_cve_triage_is_atomic_environment_scoped_and_semantically_idempote
             ..
         }) if *restored_id == poam_id
     ));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn system_cve_triage_derives_full_environment_and_preserves_shared_poam_subjects(
+    pool: PgPool,
+) {
+    let first = assessment_fixture(&pool).await;
+    let peer = assessment_fixture(&pool).await;
+    let foreign = assessment_fixture(&pool).await;
+    let actor = admin_actor(first.user_id);
+    sync_user_role(&pool, actor.user_id, AuthRole::Admin)
+        .await
+        .unwrap();
+    let clock = FixedClock(Utc::now());
+    let cve_id = "CVE-2026-32620";
+    let package_name = "system-detail-package";
+    let selected_environment =
+        assign_environment(&pool, "system-triage-production", &[&first, &peer]).await;
+    let foreign_environment = assign_environment(&pool, "system-triage-staging", &[&foreign]).await;
+    for fixture in [&first, &peer, &foreign] {
+        seal_exact_cve_scan(
+            &pool,
+            fixture,
+            clock.now(),
+            Some((cve_id, package_name, "1.0.0", false)),
+        )
+        .await;
+    }
+
+    let scheduled = poam_service::triage_fleet_cve(
+        &pool,
+        &actor,
+        cve_id,
+        FleetCveTriageRequest {
+            canonical_package_name: package_name.into(),
+            actions: vec![
+                CveEnvironmentTriageAction::SchedulePatch {
+                    environment_id: selected_environment,
+                },
+                CveEnvironmentTriageAction::SchedulePatch {
+                    environment_id: foreign_environment,
+                },
+            ],
+            poam: Some(fleet_poam_request(actor.user_id, &clock)),
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    let shared_poam_id = scheduled.poam_id.unwrap();
+
+    let detail = poam_service::system_cve_triage_detail(
+        &pool,
+        &actor,
+        first.system_id,
+        cve_id,
+        package_name,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        detail.scope.kind,
+        SystemCveTriageScopeKind::CurrentExactAffectedHostsInEnvironment
+    );
+    assert_eq!(detail.scope.environment_id, selected_environment);
+    assert_eq!(detail.scope.exact_affected_system_count, 2);
+    assert_eq!(
+        detail
+            .systems
+            .iter()
+            .map(|system| system.system_id)
+            .collect::<std::collections::BTreeSet<_>>(),
+        [first.system_id, peer.system_id].into_iter().collect()
+    );
+
+    let reused = poam_service::triage_system_cve(
+        &pool,
+        &actor,
+        first.system_id,
+        cve_id,
+        SystemCveTriageRequest {
+            canonical_package_name: package_name.into(),
+            action: SystemCveTriageAction::SchedulePatch,
+            poam: Some(fleet_poam_request(actor.user_id, &clock)),
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(reused.poam_id, Some(shared_poam_id));
+    assert!(reused.poam_reused);
+    assert_eq!(reused.detail.scope.exact_affected_system_count, 2);
+
+    let accepted = poam_service::triage_system_cve(
+        &pool,
+        &actor,
+        first.system_id,
+        cve_id,
+        SystemCveTriageRequest {
+            canonical_package_name: package_name.into(),
+            action: SystemCveTriageAction::AcceptRisk {
+                justification: "The production environment has compensating controls".into(),
+                review_date: Some(clock.today() + TimeDelta::days(14)),
+            },
+            poam: None,
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        accepted.detail.disposition,
+        Some(CveEnvironmentDisposition::Accepted { .. })
+    ));
+    let active_systems: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT system_id FROM poam_cve_finding_links WHERE poam_id=$1 AND retired_at IS NULL ORDER BY system_id",
+    )
+    .bind(shared_poam_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(active_systems, vec![foreign.system_id]);
+    let fleet = poam_service::fleet_cve_detail(&pool, &actor, cve_id, package_name)
+        .await
+        .unwrap();
+    assert!(matches!(
+        fleet
+            .environments
+            .iter()
+            .find(|environment| environment.environment_id == foreign_environment)
+            .and_then(|environment| environment.disposition.as_ref()),
+        Some(CveEnvironmentDisposition::Scheduled { poam_id, .. }) if *poam_id == shared_poam_id
+    ));
+    let verification_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM poam_cve_verification_items")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(verification_count, 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn system_cve_triage_serializes_concurrent_environment_decisions_and_rejects_non_exact_rows(
+    pool: PgPool,
+) {
+    let first = assessment_fixture(&pool).await;
+    let peer = assessment_fixture(&pool).await;
+    let whitelisted = assessment_fixture(&pool).await;
+    let no_scan = assessment_fixture(&pool).await;
+    let stale = assessment_fixture(&pool).await;
+    let actor = admin_actor(first.user_id);
+    sync_user_role(&pool, actor.user_id, AuthRole::Admin)
+        .await
+        .unwrap();
+    let clock = FixedClock(Utc::now());
+    let cve_id = "CVE-2026-32621";
+    let package_name = "concurrent-system-package";
+    assign_environment(&pool, "system-triage-concurrent", &[&first, &peer]).await;
+    assign_environment(&pool, "system-triage-whitelisted", &[&whitelisted]).await;
+    assign_environment(&pool, "system-triage-no-scan", &[&no_scan]).await;
+    assign_environment(&pool, "system-triage-stale", &[&stale]).await;
+    for fixture in [&first, &peer] {
+        seal_exact_cve_scan(
+            &pool,
+            fixture,
+            clock.now(),
+            Some((cve_id, package_name, "2.0.0", false)),
+        )
+        .await;
+    }
+    seal_exact_cve_scan(
+        &pool,
+        &whitelisted,
+        clock.now(),
+        Some((cve_id, package_name, "2.0.0", true)),
+    )
+    .await;
+    seal_exact_cve_scan(
+        &pool,
+        &stale,
+        clock.now(),
+        Some((cve_id, package_name, "2.0.0", false)),
+    )
+    .await;
+    deploy_store_path(&pool, &stale, "/nix/store/system-triage-new-generation").await;
+    for ineligible_system_id in [whitelisted.system_id, no_scan.system_id, stale.system_id] {
+        assert!(matches!(
+            poam_service::system_cve_triage_detail(
+                &pool,
+                &actor,
+                ineligible_system_id,
+                cve_id,
+                package_name
+            )
+            .await,
+            Err(PoamError::NotFound)
+        ));
+    }
+
+    let request = || SystemCveTriageRequest {
+        canonical_package_name: package_name.into(),
+        action: SystemCveTriageAction::AcceptRisk {
+            justification: "Concurrent operators accept the documented environment risk".into(),
+            review_date: None,
+        },
+        poam: None,
+    };
+    let (left, right) = tokio::join!(
+        poam_service::triage_system_cve(&pool, &actor, first.system_id, cve_id, request(), &clock),
+        poam_service::triage_system_cve(&pool, &actor, peer.system_id, cve_id, request(), &clock)
+    );
+    assert!(matches!(
+        left.unwrap().detail.disposition,
+        Some(CveEnvironmentDisposition::Accepted { .. })
+    ));
+    assert!(matches!(
+        right.unwrap().detail.disposition,
+        Some(CveEnvironmentDisposition::Accepted { .. })
+    ));
+    let active_dispositions: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cve_environment_dispositions WHERE canonical_cve_id=$1 AND canonical_package_name=$2 AND retired_at IS NULL",
+    )
+    .bind(cve_id)
+    .bind(package_name)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(active_dispositions, 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn system_cve_triage_http_contract_enforces_scope_roles_and_csrf(pool: PgPool) {
+    let fixture = assessment_fixture(&pool).await;
+    let peer = assessment_fixture(&pool).await;
+    let environment_id = assign_environment(&pool, "system-triage-http", &[&fixture, &peer]).await;
+    let cve_id = "CVE-2026-32622";
+    let package_name = "http-system-package";
+    for exact in [&fixture, &peer] {
+        seal_exact_cve_scan(
+            &pool,
+            exact,
+            Utc::now(),
+            Some((cve_id, package_name, "3.0.0", false)),
+        )
+        .await;
+    }
+    sqlx::query("INSERT INTO user_environment_memberships(user_id,environment_id) VALUES($1,$2)")
+        .bind(fixture.user_id)
+        .bind(environment_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let token = session(&pool, fixture.user_id, AuthRole::Viewer).await;
+    let hidden_token = session(&pool, peer.user_id, AuthRole::Viewer).await;
+    let base = poam_http_server(pool.clone()).await;
+    let url = format!(
+        "{base}/api/v1/systems/{}/cves/{cve_id}/triage?package={package_name}",
+        fixture.system_id
+    );
+    let client = reqwest::Client::new();
+
+    let visible = http_request(&client, reqwest::Method::GET, url.clone(), &token, None)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(visible.status(), reqwest::StatusCode::OK);
+    let visible: serde_json::Value = visible.json().await.unwrap();
+    assert_eq!(
+        visible["scope"]["environment_id"],
+        environment_id.to_string()
+    );
+    assert_eq!(visible["scope"]["exact_affected_system_count"], 2);
+    assert_eq!(
+        visible["scope"]["kind"],
+        "current_exact_affected_hosts_in_environment"
+    );
+
+    let hidden = http_request(
+        &client,
+        reqwest::Method::GET,
+        url.clone(),
+        &hidden_token,
+        None,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(hidden.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let body = serde_json::json!({
+        "canonical_package_name": package_name,
+        "action": "accept_risk",
+        "justification": "The environment has documented compensating controls",
+        "review_date": null,
+        "poam": null
+    });
+    let viewer = http_request(
+        &client,
+        reqwest::Method::POST,
+        url.clone(),
+        &token,
+        Some("system-triage-viewer"),
+    )
+    .json(&body)
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(viewer.status(), reqwest::StatusCode::FORBIDDEN);
+
+    sync_user_role(&pool, fixture.user_id, AuthRole::Operator)
+        .await
+        .unwrap();
+    let missing_csrf = http_request(&client, reqwest::Method::POST, url.clone(), &token, None)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+    let accepted = http_request(
+        &client,
+        reqwest::Method::POST,
+        url,
+        &token,
+        Some("system-triage-operator"),
+    )
+    .json(&body)
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(accepted.status(), reqwest::StatusCode::OK);
+    let accepted: serde_json::Value = accepted.json().await.unwrap();
+    assert_eq!(
+        accepted["detail"]["scope"]["exact_affected_system_count"],
+        2
+    );
+    assert_eq!(accepted["detail"]["disposition"]["state"], "accepted");
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -7036,6 +7373,10 @@ async fn poam_http_server(pool: PgPool) -> String {
         .route(
             "/api/v1/systems/:id/cves/:cve_id/justification",
             axum::routing::put(system_handlers::save_system_cve_justification),
+        )
+        .route(
+            "/api/v1/systems/:id/cves/:cve_id/triage",
+            get(poam_handlers::system_cve_triage_detail).post(poam_handlers::triage_system_cve),
         )
         .route(
             "/api/v1/systems/:id",

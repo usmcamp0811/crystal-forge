@@ -440,6 +440,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/scanning/stats", get(scanning::get_scanning_stats))
         .route("/api/v1/scanning/queue", get(scanning::get_scanning_queue))
         .route(
+            "/api/v1/scanning/scans",
+            get(scanning::get_scanning_scan_records).patch(scanning::update_scanning_archive),
+        )
+        .route(
             "/api/v1/scanning/scans/:scan_id",
             get(scanning::get_scanning_scan_detail),
         )
@@ -495,6 +499,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/systems/:id/cves/:cve_id/justification",
             put(systems::save_system_cve_justification),
+        )
+        .route(
+            "/api/v1/systems/:id/cves/:cve_id/triage",
+            get(poam::system_cve_triage_detail).post(poam::triage_system_cve),
         )
         .route(
             "/api/v1/systems/:id/cve-scan-eligibility",

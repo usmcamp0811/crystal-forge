@@ -829,15 +829,17 @@ mod fleet_rescan_authorization_tests {
                 .expect("authorization fixture commit model should resolve");
             let config_name = format!("auth-config-{suffix}");
             let store_path = format!("/nix/store/{suffix}-auth-running");
+            let derivation_path = format!("/nix/store/{suffix}-auth-running.drv");
             let derivation = insert_derivation(pool, Some(&commit), &config_name, "nixos")
                 .await
                 .expect("authorization fixture derivation should be inserted");
             sqlx::query(
-                "UPDATE derivations SET status_id = $2, completed_at = NOW(), store_path = $3 WHERE id = $1",
+                "UPDATE derivations SET status_id = $2, completed_at = NOW(), store_path = $3, derivation_path = $4 WHERE id = $1",
             )
             .bind(derivation.id)
             .bind(EvaluationStatus::BuildComplete.as_id())
             .bind(&store_path)
+            .bind(&derivation_path)
             .execute(pool)
             .await
             .expect("authorization fixture derivation should be build-complete");

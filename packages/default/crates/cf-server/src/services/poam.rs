@@ -17,6 +17,8 @@ use crate::api::models::{
     CveEnvironmentDisposition, CveEnvironmentTriageAction, CveTriageConflictSubject,
     FleetCveDetail, FleetCvePoamRequest, FleetCveTriageRequest, FleetCveTriageResponse,
     FleetCveTriageRollup, ScheduledPoamMetadata, SystemCveInventoryAuthority,
+    SystemCveTriageAction, SystemCveTriageDetail, SystemCveTriageRequest, SystemCveTriageResponse,
+    SystemCveTriageScope, SystemCveTriageScopeKind,
 };
 use crate::compliance::canonical::semantic_digest;
 use crate::compliance::resolver::{
@@ -4118,6 +4120,7 @@ async fn compatible_existing_fleet_poam_tx(
     expected_system_ids: &BTreeSet<Uuid>,
     cve_id: &str,
     package_name: &str,
+    allow_same_identity_superset: bool,
 ) -> Result<bool, PoamError> {
     let row: Option<(
         String,
@@ -4171,7 +4174,163 @@ async fn compatible_existing_fleet_poam_tx(
         .iter()
         .map(|system_id| (*system_id, cve_id.to_owned(), package_name.to_owned()))
         .collect::<BTreeSet<_>>();
-    Ok(active_policy_count == 0 && active_exact_subjects == expected_subjects)
+    let exact_subjects_match = if allow_same_identity_superset {
+        // CONCURRENCY: The canonical CVE lock serializes changes to every
+        // same-CVE link before this read. A System Detail action can therefore
+        // reuse the selected environment's subset without retiring or adopting
+        // the compatible POA&M subjects owned by another environment.
+        expected_subjects.is_subset(&active_exact_subjects)
+            && active_exact_subjects
+                .iter()
+                .all(|row| row.1 == cve_id && row.2 == package_name)
+    } else {
+        active_exact_subjects == expected_subjects
+    };
+    Ok(active_policy_count == 0 && exact_subjects_match)
+}
+
+fn system_cve_triage_detail_from_subjects(
+    selected_system_id: Uuid,
+    cve_id: &str,
+    package_name: &str,
+    subjects: &[FleetCveSubject],
+    disposition: Option<CveEnvironmentDisposition>,
+) -> Result<SystemCveTriageDetail, PoamError> {
+    let selected = subjects
+        .iter()
+        .find(|subject| subject.system_id == selected_system_id)
+        .ok_or(PoamError::NotFound)?;
+    let systems = subjects
+        .iter()
+        .map(|subject| CveAffectedSystemDetail {
+            system_id: subject.system_id,
+            hostname: subject.hostname.clone(),
+            environment_id: Some(subject.environment_id),
+            environment: Some(subject.environment_name.clone()),
+            primary_ip_address: subject.primary_ip_address.clone(),
+            flake_name: subject.flake_name.clone(),
+            flake_id: subject.flake_id,
+            commit_hash: subject.commit_hash.clone(),
+            deployment_policy: subject.deployment_policy.clone(),
+            current_package_version: Some(subject.observed_package_version.clone()),
+            inventory_authority: SystemCveInventoryAuthority::Exact,
+        })
+        .collect::<Vec<_>>();
+    Ok(SystemCveTriageDetail {
+        canonical_cve_id: cve_id.to_owned(),
+        canonical_package_name: package_name.to_owned(),
+        scope: SystemCveTriageScope {
+            kind: SystemCveTriageScopeKind::CurrentExactAffectedHostsInEnvironment,
+            selected_system_id,
+            environment_id: selected.environment_id,
+            environment_name: selected.environment_name.clone(),
+            exact_affected_system_count: systems.len() as i64,
+        },
+        systems,
+        disposition,
+    })
+}
+
+async fn system_cve_triage_detail_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: &PoamActor,
+    selected_system_id: Uuid,
+    cve_id: &str,
+    package_name: &str,
+) -> Result<SystemCveTriageDetail, PoamError> {
+    if !actor_can_access_systems_tx(tx, actor, &[selected_system_id]).await? {
+        return Err(PoamError::NotFound);
+    }
+    let environment_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT environment_id FROM systems WHERE id=$1 AND is_active")
+            .bind(selected_system_id)
+            .fetch_optional(&mut **tx)
+            .await?
+            .flatten();
+    let environment_id = environment_id.ok_or(PoamError::NotFound)?;
+    let subjects =
+        fleet_cve_subjects_tx(tx, actor, cve_id, package_name, Some(&[environment_id])).await?;
+    if !subjects
+        .iter()
+        .any(|subject| subject.system_id == selected_system_id)
+    {
+        return Err(PoamError::NotFound);
+    }
+    let mut dispositions =
+        fleet_cve_dispositions_tx(tx, cve_id, package_name, &[environment_id]).await?;
+    retain_coherent_scheduled_dispositions_tx(
+        tx,
+        &mut dispositions,
+        &subjects,
+        cve_id,
+        package_name,
+    )
+    .await?;
+    system_cve_triage_detail_from_subjects(
+        selected_system_id,
+        cve_id,
+        package_name,
+        &subjects,
+        dispositions.remove(&environment_id),
+    )
+}
+
+/// Returns System Detail triage state for one current exact occurrence.
+///
+/// The server derives the selected system's current environment and includes
+/// every current exact affected host in that environment. Legacy, stale,
+/// whitelisted, and no-scan inventory cannot produce this detail.
+///
+/// # Errors
+///
+/// Returns not found when the system is hidden or lacks the selected current
+/// exact occurrence. Returns validation or database errors for invalid input or
+/// persistence failures.
+pub async fn system_cve_triage_detail(
+    pool: &PgPool,
+    actor: &PoamActor,
+    selected_system_id: Uuid,
+    cve_id: &str,
+    package_name: &str,
+) -> Result<SystemCveTriageDetail, PoamError> {
+    let cve_id = cve_id.trim().to_ascii_uppercase();
+    let package_name = package_name.trim();
+    if !is_canonical_cve_id(&cve_id) || package_name.is_empty() {
+        return Err(PoamError::Validation(
+            "invalid_cve_identity",
+            "A canonical CVE ID and package name are required".into(),
+        ));
+    }
+    validate_text_length(
+        package_name,
+        MAX_SHORT_TEXT_BYTES,
+        "text_too_long",
+        "package",
+    )?;
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    let actor = current_reading_actor_tx(&mut tx, actor).await?;
+    let detail =
+        system_cve_triage_detail_tx(&mut tx, &actor, selected_system_id, &cve_id, package_name)
+            .await?;
+    tx.commit().await?;
+    Ok(detail)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CveTriageMutationScope {
+    Fleet,
+    System {
+        selected_system_id: Uuid,
+        environment_id: Uuid,
+    },
+}
+
+enum CveTriageMutationResult {
+    Fleet(FleetCveTriageResponse),
+    System(SystemCveTriageResponse),
 }
 
 /// Applies environment-scoped exact-CVE triage in one transaction.
@@ -4194,23 +4353,117 @@ pub async fn triage_fleet_cve(
     clock: &dyn PoamClock,
 ) -> Result<FleetCveTriageResponse, PoamError> {
     for retry in 0..3 {
-        match triage_fleet_cve_once(pool, actor, cve_id, request.clone(), clock).await {
+        match triage_cve_once(
+            pool,
+            actor,
+            cve_id,
+            request.clone(),
+            CveTriageMutationScope::Fleet,
+            clock,
+        )
+        .await
+        {
             Err(PoamError::Database(error)) if retry < 2 && is_serialization_failure(&error) => {
                 continue;
             }
-            result => return result,
+            Ok(CveTriageMutationResult::Fleet(response)) => return Ok(response),
+            Ok(CveTriageMutationResult::System(_)) => {
+                return Err(PoamError::Database(anyhow::anyhow!(
+                    "fleet CVE triage returned system detail"
+                )));
+            }
+            Err(error) => return Err(error),
         }
     }
     unreachable!()
 }
 
-async fn triage_fleet_cve_once(
+/// Applies one disposition to the selected system's derived environment.
+///
+/// The request cannot provide an environment action list. The service derives
+/// the environment from the selected system's current exact occurrence, then
+/// the shared fleet transaction applies the action to all current exact
+/// affected hosts in that environment.
+///
+/// # Errors
+///
+/// Returns authorization, validation, bounded typed conflict, not-found, or
+/// database errors when the environment-wide mutation cannot commit atomically.
+pub async fn triage_system_cve(
+    pool: &PgPool,
+    actor: &PoamActor,
+    selected_system_id: Uuid,
+    cve_id: &str,
+    request: SystemCveTriageRequest,
+    clock: &dyn PoamClock,
+) -> Result<SystemCveTriageResponse, PoamError> {
+    let current = system_cve_triage_detail(
+        pool,
+        actor,
+        selected_system_id,
+        cve_id,
+        &request.canonical_package_name,
+    )
+    .await?;
+    let environment_id = current.scope.environment_id;
+    let action = match request.action {
+        SystemCveTriageAction::LeaveOpen => {
+            CveEnvironmentTriageAction::LeaveOpen { environment_id }
+        }
+        SystemCveTriageAction::AcceptRisk {
+            justification,
+            review_date,
+        } => CveEnvironmentTriageAction::AcceptRisk {
+            environment_id,
+            justification,
+            review_date,
+        },
+        SystemCveTriageAction::SchedulePatch => {
+            CveEnvironmentTriageAction::SchedulePatch { environment_id }
+        }
+    };
+    let fleet_request = FleetCveTriageRequest {
+        canonical_package_name: request.canonical_package_name,
+        actions: vec![action],
+        poam: request.poam,
+    };
+    for retry in 0..3 {
+        match triage_cve_once(
+            pool,
+            actor,
+            cve_id,
+            fleet_request.clone(),
+            CveTriageMutationScope::System {
+                selected_system_id,
+                environment_id,
+            },
+            clock,
+        )
+        .await
+        {
+            Err(PoamError::Database(error)) if retry < 2 && is_serialization_failure(&error) => {
+                continue;
+            }
+            Ok(CveTriageMutationResult::System(response)) => return Ok(response),
+            Ok(CveTriageMutationResult::Fleet(_)) => {
+                return Err(PoamError::Database(anyhow::anyhow!(
+                    "system CVE triage returned fleet detail"
+                )));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
+}
+
+async fn triage_cve_once(
     pool: &PgPool,
     actor: &PoamActor,
     cve_id: &str,
     request: FleetCveTriageRequest,
+    mutation_scope: CveTriageMutationScope,
     clock: &dyn PoamClock,
-) -> Result<FleetCveTriageResponse, PoamError> {
+) -> Result<CveTriageMutationResult, PoamError> {
     require_mutator(actor)?;
     let cve_id = cve_id.trim().to_ascii_uppercase();
     let package_name = request.canonical_package_name.trim().to_owned();
@@ -4289,7 +4542,34 @@ async fn triage_fleet_cve_once(
         .bind(&cve_id)
         .execute(&mut *tx)
         .await?;
-    let before = fleet_cve_subjects_tx(&mut tx, actor, &cve_id, &package_name, None).await?;
+    let environment_filter = match mutation_scope {
+        CveTriageMutationScope::Fleet => None,
+        CveTriageMutationScope::System { environment_id, .. } => Some(vec![environment_id]),
+    };
+    // CONCURRENCY: Both scopes use the same CVE -> environment -> system ->
+    // finding lock order. The system scope changes only subject derivation; it
+    // does not introduce a host-only mutation path.
+    let before = fleet_cve_subjects_tx(
+        &mut tx,
+        actor,
+        &cve_id,
+        &package_name,
+        environment_filter.as_deref(),
+    )
+    .await?;
+    if let CveTriageMutationScope::System {
+        selected_system_id, ..
+    } = mutation_scope
+        && !before
+            .iter()
+            .any(|subject| subject.system_id == selected_system_id)
+    {
+        return Err(PoamError::Conflict(
+            "cve_evidence_changed",
+            "The selected system no longer has the current exact occurrence; refresh and retry"
+                .into(),
+        ));
+    }
     let environment_ids = before
         .iter()
         .map(|subject| subject.environment_id)
@@ -4327,7 +4607,14 @@ async fn triage_fleet_cve_once(
         .execute(&mut *tx)
         .await?;
     let actor = current_mutating_actor_tx(&mut tx, actor).await?;
-    let subjects = fleet_cve_subjects_tx(&mut tx, &actor, &cve_id, &package_name, None).await?;
+    let subjects = fleet_cve_subjects_tx(
+        &mut tx,
+        &actor,
+        &cve_id,
+        &package_name,
+        environment_filter.as_deref(),
+    )
+    .await?;
     if before
         .iter()
         .map(|row| row.system_id)
@@ -4340,6 +4627,20 @@ async fn triage_fleet_cve_once(
         return Err(PoamError::Conflict(
             "cve_evidence_changed",
             "Affected systems changed while triage acquired locks; retry the request".into(),
+        ));
+    }
+    if let CveTriageMutationScope::System {
+        selected_system_id,
+        environment_id,
+    } = mutation_scope
+        && !subjects.iter().any(|subject| {
+            subject.system_id == selected_system_id && subject.environment_id == environment_id
+        })
+    {
+        return Err(PoamError::Conflict(
+            "cve_evidence_changed",
+            "The selected system's exact occurrence or environment changed; refresh and retry"
+                .into(),
         ));
     }
     let affected_environments = subjects
@@ -4461,6 +4762,7 @@ async fn triage_fleet_cve_once(
                 &expected_existing_system_ids,
                 &cve_id,
                 &package_name,
+                matches!(mutation_scope, CveTriageMutationScope::System { .. }),
             )
             .await?
             {
@@ -4617,32 +4919,67 @@ async fn triage_fleet_cve_once(
             }
         }
     }
+    let audit_action = match mutation_scope {
+        CveTriageMutationScope::Fleet => "fleet_cve_triaged",
+        CveTriageMutationScope::System { .. } => "system_environment_cve_triaged",
+    };
     sqlx::query(
         r#"INSERT INTO admin_audit_events(
               actor_user_id,actor_identifier,action,target,request_origin,metadata)
-           VALUES($1,$2,'fleet_cve_triaged',$3,$4,$5)"#,
+           VALUES($1,$2,$3,$4,$5,$6)"#,
     )
     .bind(actor.user_id)
     .bind(&actor.identifier)
+    .bind(audit_action)
     .bind(format!("cve:{cve_id}:{package_name}"))
     .bind(actor.request_origin.as_deref())
     .bind(json!({
         "canonical_cve_id":cve_id,"canonical_package_name":package_name,
         "environment_ids":environment_ids,"affected_system_count":subjects.len(),
-        "poam_id":poam_id,"poam_reused":poam_reused
+        "poam_id":poam_id,"poam_reused":poam_reused,
+        "scope":audit_action
     }))
     .execute(&mut *tx)
     .await?;
     // Build the authoritative response before commit. A later read race cannot
     // turn a committed triage mutation into an HTTP failure.
-    let detail = fleet_cve_detail_tx(&mut tx, &actor, &cve_id, &package_name).await?;
+    let result = match mutation_scope {
+        CveTriageMutationScope::Fleet => CveTriageMutationResult::Fleet(FleetCveTriageResponse {
+            detail: fleet_cve_detail_tx(&mut tx, &actor, &cve_id, &package_name).await?,
+            detail_scope: crate::api::models::FleetCveMutationDetailScope::ExactMutationSubjects,
+            poam_id,
+            poam_reused,
+        }),
+        CveTriageMutationScope::System {
+            selected_system_id,
+            environment_id,
+        } => {
+            let mut dispositions =
+                fleet_cve_dispositions_tx(&mut tx, &cve_id, &package_name, &[environment_id])
+                    .await?;
+            retain_coherent_scheduled_dispositions_tx(
+                &mut tx,
+                &mut dispositions,
+                &subjects,
+                &cve_id,
+                &package_name,
+            )
+            .await?;
+            CveTriageMutationResult::System(SystemCveTriageResponse {
+                detail: system_cve_triage_detail_from_subjects(
+                    selected_system_id,
+                    &cve_id,
+                    &package_name,
+                    &subjects,
+                    dispositions.remove(&environment_id),
+                )?,
+                poam_id,
+                poam_reused,
+            })
+        }
+    };
     tx.commit().await?;
-    Ok(FleetCveTriageResponse {
-        detail,
-        detail_scope: crate::api::models::FleetCveMutationDetailScope::ExactMutationSubjects,
-        poam_id,
-        poam_reused,
-    })
+    Ok(result)
 }
 
 fn is_canonical_cve_id(value: &str) -> bool {

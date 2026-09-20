@@ -9,13 +9,18 @@ use tracing::error;
 use crate::api::models::{
     ScanSchedulePolicyResponse, ScanningActivityItemResponse, ScanningDeployedResponse,
     ScanningQueueItemResponse, ScanningScanDetailResponse, ScanningScanDiagnosticEventResponse,
-    ScanningStatsResponse, ScanningSystemsItemResponse, UpdateScanSchedulePolicyRequest,
+    ScanningScanRecordResponse, ScanningScanRecordsResponse, ScanningStatsResponse,
+    ScanningSystemsItemResponse, UpdateScanSchedulePolicyRequest, UpdateScanningArchiveRequest,
+    UpdateScanningArchiveResponse,
 };
+use crate::auth::extractors::RequireAdmin;
+use crate::handlers::api::auth_session::RequireCsrf;
 use crate::handlers::api::rbac::require_admin;
 use crate::queries::scanning::{
-    InvalidCursorError, ScanSchedulePolicyRow, get_scan_activity, get_scan_deployed,
-    get_scan_queue, get_scan_queue_for_system, get_scan_schedule_policy, get_scan_stats,
-    get_scan_systems, update_scan_schedule_policy,
+    InvalidCursorError, ScanRecordCollection, ScanSchedulePolicyRow, get_scan_activity,
+    get_scan_deployed, get_scan_queue, get_scan_queue_for_system, get_scan_records,
+    get_scan_schedule_policy, get_scan_stats, get_scan_systems, set_scan_archive_state,
+    update_scan_schedule_policy,
 };
 
 #[derive(Debug, Deserialize, Default)]
@@ -26,6 +31,27 @@ pub struct ScanningListParams {
     /// from the previous response to retrieve the next page.
     #[serde(default)]
     pub after: Option<String>,
+}
+
+/// Controls exact scan lifecycle history returned to an administrator.
+#[derive(Debug, Deserialize)]
+pub struct ScanningRecordParams {
+    /// Selects `active`, `completed`, or `history` rows.
+    #[serde(default = "default_record_collection")]
+    pub collection: String,
+    /// Includes archive-marked terminal rows when true.
+    #[serde(default)]
+    pub include_archived: bool,
+    /// Restricts history to one active system's exact flake and configuration.
+    #[serde(default)]
+    pub system_id: Option<uuid::Uuid>,
+    /// Bounds the response size.
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+}
+
+fn default_record_collection() -> String {
+    "active".to_string()
 }
 
 fn default_limit() -> i64 {
@@ -46,6 +72,8 @@ pub async fn get_scanning_stats(
             Json(ScanningStatsResponse {
                 scanning: row.scanning,
                 queued: row.queued,
+                awaiting_build: row.awaiting_build,
+                awaiting_closure: row.awaiting_closure,
                 stale: row.stale,
                 never_scanned: row.never_scanned,
                 failed: row.failed,
@@ -56,6 +84,110 @@ pub async fn get_scanning_stats(
         Err(e) => {
             error!("scanning stats query failed: {e:#}");
             internal_error("Failed to load scanning stats")
+        }
+    }
+}
+
+/// Returns exact active, completed, or complete scan history for administrators.
+pub async fn get_scanning_scan_records(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Query(params): Query<ScanningRecordParams>,
+) -> impl IntoResponse {
+    if require_admin(&pool, &headers).await.is_none() {
+        return forbidden_admin();
+    }
+    let collection = match params.collection.as_str() {
+        "active" => ScanRecordCollection::Active,
+        "completed" => ScanRecordCollection::Completed,
+        "history" => ScanRecordCollection::History,
+        _ => {
+            return validation_error("collection must be active, completed, or history".into())
+                .into_response();
+        }
+    };
+    match get_scan_records(
+        &pool,
+        collection,
+        params.include_archived,
+        params.system_id,
+        params.limit.clamp(1, 500),
+    )
+    .await
+    {
+        Ok(result) => (
+            StatusCode::OK,
+            Json(ScanningScanRecordsResponse {
+                items: result
+                    .rows
+                    .into_iter()
+                    .map(|row| ScanningScanRecordResponse {
+                        scan_id: row.scan_id,
+                        derivation_id: row.derivation_id,
+                        hostname: row.hostname,
+                        flake_name: row.flake_name,
+                        commit_hash: row.commit_hash,
+                        status: row.status,
+                        source_trigger: row.source_trigger,
+                        created_at: row.created_at,
+                        scheduled_at: row.scheduled_at,
+                        completed_at: row.completed_at,
+                        scanner_name: row.scanner_name,
+                        scanner_version: row.scanner_version,
+                        executor: row.executor,
+                        failure: row.failure,
+                        wait_reason: row.wait_reason,
+                        total_packages: row.total_packages,
+                        total_vulnerabilities: row.total_vulnerabilities,
+                        critical_count: row.critical_count,
+                        high_count: row.high_count,
+                        medium_count: row.medium_count,
+                        low_count: row.low_count,
+                        scan_duration_ms: row.scan_duration_ms,
+                        attempts: row.attempts,
+                        archived_at: row.archived_at,
+                        cancellable: row.cancellable,
+                    })
+                    .collect(),
+                total: result.total,
+                hidden_archived: result.hidden_archived,
+            }),
+        )
+            .into_response(),
+        Err(error) => {
+            error!("scan record query failed: {error:#}");
+            internal_error("Failed to load scan records")
+        }
+    }
+}
+
+/// Applies bounded idempotent archive or restore state to terminal scans.
+pub async fn update_scanning_archive(
+    State(pool): State<PgPool>,
+    RequireAdmin(user): RequireAdmin,
+    _csrf: RequireCsrf,
+    Json(payload): Json<UpdateScanningArchiveRequest>,
+) -> impl IntoResponse {
+    let mut scan_ids = payload.scan_ids;
+    scan_ids.sort_unstable();
+    scan_ids.dedup();
+    if scan_ids.is_empty() || scan_ids.len() > 100 {
+        return validation_error("scan_ids must contain between 1 and 100 unique values".into())
+            .into_response();
+    }
+    match set_scan_archive_state(&pool, &scan_ids, payload.archived, user.user_id).await {
+        Ok(changed) => (
+            StatusCode::OK,
+            Json(UpdateScanningArchiveResponse {
+                requested: scan_ids.len(),
+                changed,
+                archived: payload.archived,
+            }),
+        )
+            .into_response(),
+        Err(error) => {
+            error!("scan archive update failed: {error:#}");
+            internal_error("Failed to update scan archive state")
         }
     }
 }
@@ -260,10 +392,30 @@ pub async fn get_scanning_scan_detail(
             StatusCode::OK,
             Json(ScanningScanDetailResponse {
                 scan_id,
+                derivation_id: detail.derivation_id,
+                hostname: detail.hostname,
+                flake_name: detail.flake_name,
+                commit_hash: detail.commit_hash,
                 status: detail.status,
                 scanner_name: detail.scanner_name,
                 scanner_version: detail.scanner_version,
                 source_trigger: detail.source_trigger,
+                created_at: detail.created_at,
+                scheduled_at: detail.scheduled_at,
+                completed_at: detail.completed_at,
+                scan_duration_ms: detail.scan_duration_ms,
+                attempts: detail.attempts,
+                total_packages: detail.total_packages,
+                total_vulnerabilities: detail.total_vulnerabilities,
+                critical_count: detail.critical_count,
+                high_count: detail.high_count,
+                medium_count: detail.medium_count,
+                low_count: detail.low_count,
+                failure: detail.failure,
+                wait_reason: detail.wait_reason,
+                executor: detail.executor,
+                archived_at: detail.archived_at,
+                cancellable: false,
                 events: detail
                     .events
                     .into_iter()
