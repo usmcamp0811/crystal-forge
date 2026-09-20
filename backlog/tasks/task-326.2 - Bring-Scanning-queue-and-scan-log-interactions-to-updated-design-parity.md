@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-20 21:45'
+updated_date: '2026-09-20 22:06'
 labels:
   - scanning
   - web-ui
@@ -157,6 +157,10 @@ Expand focused PostgreSQL coverage across enabled/disabled policy, idempotent an
 Backend post-build intent follow-up: add one transaction-local helper that inserts `awaiting_build` post-build intent only for supplied NixOS derivations when persisted `on_build` is enabled, using the active partial conflict target and `DO NOTHING`. Make all four authoritative build admission functions use exact `RETURNING` derivation IDs and call the helper in the same transaction only for inserted jobs. Reshape successful build completion to attach the completed job and transition the existing post-build intent to `pending` for local output or `awaiting_closure` for remote output without cache publication; retain policy/type-gated repair for legacy missing intent and never mutate manual/fleet provenance. Add focused ignored PostgreSQL regressions for admission gates, idempotency/provenance, completion states, non-claimable waits, failures, and retry/replacement behavior. Run targeted rustfmt and the smallest dedicated PostgreSQL test selection.
 
 Authority correction: keep completion transaction logic limited to eligible missing-intent repair and `completed_build_job_id` attachment while preserving `awaiting_build`. Invoke `promote_waiting_cve_scans` only after successful commits at API-builder completion, legacy/server-local completion, and cache-push completion; promotion failures are logged and do not fail the completed build/cache operation. Update PostgreSQL regressions to assert completion attachment leaves `awaiting_build`, then explicitly invoke the authority helper to prove local `pending`, remote `awaiting_closure`, and cache-published remote `pending`.
+
+Final pre-commit review correction: restore the specified policy/type-gated completion repair for an eligible successful build that predates admission-time intent creation. The repair must insert only when no scan history exists for the derivation, preserve active manual/fleet work through the active uniqueness conflict target, leave terminal history unchanged, attach the exact successful job, and leave lifecycle promotion to promote_waiting_cve_scans. Add a focused PostgreSQL regression for the pre-existing build case.
+
+Make local-build waiting-scan promotion independent of GC-root creation success while retaining post-commit warning-only failure semantics. Run targeted rustfmt, the focused post-build PostgreSQL tests, SQLX_OFFLINE server check, and diff hygiene. Because these corrections alter backend behavior after the passing browser build, do not claim the existing 16c VM result as exact-head evidence; request explicit authorization before another VM run if final review requires it.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
