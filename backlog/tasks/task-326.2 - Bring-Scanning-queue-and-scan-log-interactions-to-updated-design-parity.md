@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-20 05:42'
+updated_date: '2026-09-20 13:06'
 labels:
   - scanning
   - web-ui
@@ -25,12 +25,36 @@ documentation:
   - docs/design/CrystalForge/components/CvesView.jsx
   - docs/design/CrystalForge/data-scanning.js
 modified_files:
+  - checks/web-ui/tests/integration-test.js
+  - packages/default/.sqlx/query-43a8f1b05cacc24d800c9e8e393b1c5c666c277bb0.json
+  - packages/default/.sqlx/query-90fc9f824b565ab238a995ad4a4c5a85dea79525ee.json
+  - >-
+    packages/default/crates/cf-server/migrations/0269_scanning_lifecycle_archive.sql
+  - packages/default/crates/cf-server/src/api/models.rs
+  - packages/default/crates/cf-server/src/bin/server.rs
+  - packages/default/crates/cf-server/src/builder/cve_worker.rs
+  - packages/default/crates/cf-server/src/handlers/api/cves.rs
+  - packages/default/crates/cf-server/src/handlers/api/poam.rs
+  - packages/default/crates/cf-server/src/handlers/api/scanning.rs
+  - packages/default/crates/cf-server/src/handlers/api/systems.rs
+  - packages/default/crates/cf-server/src/models/cve_scans.rs
+  - packages/default/crates/cf-server/src/queries/cve_scan_diagnostics.rs
+  - packages/default/crates/cf-server/src/queries/cve_scan_leases.rs
+  - packages/default/crates/cf-server/src/queries/cve_scans.rs
+  - packages/default/crates/cf-server/src/queries/scanning.rs
+  - packages/default/crates/cf-server/src/queries/scanning_tests.rs
+  - packages/default/crates/cf-server/src/services/cve_scans.rs
+  - packages/default/crates/cf-server/src/services/poam.rs
+  - packages/default/crates/cf-server/tests/poam_workflows.rs
+  - packages/web-ui/assets/app.css
+  - packages/web-ui/src/api/client.rs
+  - packages/web-ui/src/api/models.rs
+  - packages/web-ui/src/components/cve/mod.rs
+  - packages/web-ui/src/components/cve/triage.rs
+  - packages/web-ui/src/views/cves.rs
+  - packages/web-ui/src/views/poam_api.rs
   - packages/web-ui/src/views/scanning.rs
   - packages/web-ui/src/views/system_detail.rs
-  - packages/web-ui/src/components/cve/mod.rs
-  - packages/web-ui/src/api/models.rs
-  - packages/web-ui/assets/app.css
-  - checks/web-ui/tests/integration-test.js
 parent_task_id: TASK-326
 priority: high
 type: enhancement
@@ -81,18 +105,18 @@ Replace separate Justify + Create POA&M with one CveTriageModal (extracted from 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Active/Completed/BySystem tabs with correct state classification, selection semantics, and no activity side panel; Live indicator and Schedule button in header
-- [ ] #2 Active: scanning/queued/awaiting; Completed: terminal + history with archive/restore; BySystem: per-revision newest-first with superseded terminology
-- [ ] #3 Filters: text search, status, revision/freshness, latest-per-flake; sortable deterministic columns; visible result count; resettable empty state
-- [ ] #4 Detail tray: real status, trigger, scanner identity, findings, failure context, bounded log (no fake progress); log has search/download; running state shows elapsed time
-- [ ] #5 Failed stat card actionable (count > 0): click jumps to Completed tab, opens log; stale/failed rows show Check now/Retry/Build with exact deep links
-- [ ] #6 Selection guards: Active limits to scanning/queued (cancellation); Completed allows all (archive/restore); BySystem no selection
-- [ ] #7 Archive/restore on Completed: rows hidden not deleted, archived visually distinct, filtered counts honest, retention-caused empty states labeled
-- [ ] #8 System Detail CVE: unified triage modal (extracted from fleet view), environment-scoped, with Triage column and row action; no separate Justify/Create buttons
-- [ ] #9 Triage modal: outstanding/accepted/scheduled per environment; accepted needs justification; scheduled creates/reuses POA&M with owner/due/plan/milestones; typed assignee
-- [ ] #10 Authority: exact current evidence supports triage, legacy not promoted, missing/no-scan explicit, accepted/scheduled do NOT false-claim remediation/verification
-- [ ] #11 Browser assertions: Active/Completed switching, wait state rendering, failure actionability, archive/restore selection, log content, triage disposition, POA&M reuse, responsive/narrow/dark behavior
-- [ ] #12 Playwright: Active/Completed filtering, wait/failed transitions, log drawer, triage modal outstanding→accepted→scheduled, POA&M reuse, responsive tests; desktop/narrow/light/dark screenshots
+- [x] #1 Active/Completed/BySystem tabs with correct state classification, selection semantics, and no activity side panel; Live indicator and Schedule button in header
+- [x] #2 Active: scanning/queued/awaiting; Completed: terminal + history with archive/restore; BySystem: per-revision newest-first with superseded terminology
+- [x] #3 Filters: text search, status, revision/freshness, latest-per-flake; sortable deterministic columns; visible result count; resettable empty state
+- [x] #4 Detail tray: real status, trigger, scanner identity, findings, failure context, bounded log (no fake progress); log has search/download; running state shows elapsed time
+- [x] #5 Failed stat card actionable (count > 0): click jumps to Completed tab, opens log; stale/failed rows show Check now/Retry/Build with exact deep links
+- [x] #6 Selection guards: Active limits to scanning/queued (cancellation); Completed allows all (archive/restore); BySystem no selection
+- [x] #7 Archive/restore on Completed: rows hidden not deleted, archived visually distinct, filtered counts honest, retention-caused empty states labeled
+- [x] #8 System Detail CVE: unified triage modal (extracted from fleet view), environment-scoped, with Triage column and row action; no separate Justify/Create buttons
+- [x] #9 Triage modal: outstanding/accepted/scheduled per environment; accepted needs justification; scheduled creates/reuses POA&M with owner/due/plan/milestones; typed assignee
+- [x] #10 Authority: exact current evidence supports triage, legacy not promoted, missing/no-scan explicit, accepted/scheduled do NOT false-claim remediation/verification
+- [x] #11 Browser assertions: Active/Completed switching, wait state rendering, failure actionability, archive/restore selection, log content, triage disposition, POA&M reuse, responsive/narrow/dark behavior
+- [x] #12 Playwright: Active/Completed filtering, wait/failed transitions, log drawer, triage modal outstanding→accepted→scheduled, POA&M reuse, responsive tests; desktop/narrow/light/dark screenshots
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -132,4 +156,29 @@ Closed the seven Scanning review gaps. The server now exposes nullable authorita
 Committed the finalized Scanning administration slice as `2c0d10e7`. Review fixes include queued terminology, lexicographic severity ordering, live-refresh-safe failed-stat opening, authoritative per-derivation relation labels in By system, and unique schedule-control accessible names. Verification after the fixes: focused Scanning tests passed (9/9), Web UI WASM cargo check passed with existing warnings, server offline cargo check passed with existing warnings, and `git diff --check` passed. Repository-wide Web UI `cargo fmt --check` remains blocked by pre-existing formatting differences in unrelated files; the changed Scanning file was formatted directly with rustfmt. Preview remains waived and TASK-440 processes were untouched.
 
 Committed unified System Detail CVE triage as `1ca41260`. The Web UI now mirrors the system-context triage GET/POST contract, extracts shared fleet/system draft validation and scheduled metadata hydration, renders authoritative environment-scoped Outstanding/Accepted/Scheduled states after bounded expanded-package hydration, and replaces separate Justify/Create POA&M controls with one triage dialog. Scheduled reuse metadata is read-only, typed assignees preserve identity, default milestones apply only to new POA&Ms, inventory revision changes invalidate cached state, and async hydration/manual-open responses use per-row generation guards. Legacy/no-scan/conflict/whitelisted states remain explicit and non-actionable; accepted/scheduled copy does not claim remediation or verification. Owner verification: focused CVE tests passed (13/13), targeted rustfmt check passed, and `git diff --check` passed. The implementation agent also ran the full Web UI suite (436 passed, 1 ignored) and WASM cargo check successfully with existing warnings. Browser workflows remain outstanding.
+
+Final verification completed. The authoritative focused NixOS browser check passed workflows `16c-scanning-view`, `12h-system-detail-cves-grouped-justification`, `12ha-system-detail-cve-inventory-fallbacks`, and `16-cves`, producing `/nix/store/6lnyyalkw4v52y9sni9a5dijkh91qcdb-vm-test-run-crystal-forge-web-ui-mega-integration` with 37 task-relevant screenshots. Representative desktop, narrow-desktop, tablet, light, and dark images were inspected. Static contracts, JavaScript syntax, targeted Rust formatting, `git diff --check`, Web UI tests/WASM checks, server offline checks, and server/Web UI documentation builds passed. Documentation builds retain unrelated existing warnings; the task-local private rustdoc link was corrected in `664a5bd8`. Host preview remained waived and TASK-440 ports/processes were not touched.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+## Summary
+- Adds durable Scanning lifecycle, wait-state, archive/restore, trigger, diagnostic, and per-system history contracts.
+- Rebuilds the Scanning administration view around Active, Completed, and By system workflows with deterministic filtering, sorting, exact details, retention-aware counts, schedule controls, and accessible responsive interactions.
+- Extracts shared CVE triage behavior and adds environment-scoped Outstanding, Accepted, and Scheduled decisions to System Detail while preserving exact-evidence authority and POA&M reuse rules.
+- Adds focused authoritative browser coverage for Scanning, System Detail CVE triage and inventory fallbacks, and fleet CVE triage.
+
+## Verification
+- Web UI Rust tests and WASM checks passed.
+- Server offline checks and focused database-backed CVE tests passed.
+- JavaScript syntax and static UI contracts passed.
+- Focused NixOS browser workflows passed and produced 37 inspected task screenshots.
+- Server and Web UI documentation builds passed with unrelated existing warnings.
+- Targeted rustfmt checks and `git diff --check` passed.
+
+## Risk and compatibility
+- Scan cancellation remains unsupported and the UI does not expose a false cancellation control.
+- Accepted and Scheduled dispositions do not claim remediation or verification. Closure still requires later exact scan evidence.
+- Host preview was explicitly waived to preserve the TASK-440 fixed-port stack; isolated NixOS browser verification supplied the authoritative UI evidence.
+<!-- SECTION:FINAL_SUMMARY:END -->
