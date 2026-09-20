@@ -291,7 +291,7 @@ pub fn CvesTab(
                 },
                 Some(SystemCveInventoryAuthority::Legacy) => rsx! {
                     div { class: "sd-callout sd-callout-warning", "data-testid": "system-cves-legacy",
-                        strong { if total_findings == 0 { "Legacy scan clean. " } else { "Legacy scan findings. " } }
+                        strong { if total_findings == 0 { "Historical scan clean. " } else { "Historical scan findings. " } }
                         "The current evaluated deployment and a schema-1 CVE scan are required for environment triage, POA&M, patch scheduling, verification, and closure. Existing ordinary inventory justification is not a triage disposition and is never shown as accepted risk."
                         if let Some(reason) = exact_authority_failure {
                             div { class: "text-xs", "Exact authority unavailable: {exact_authority_reason_label(reason)}." }
@@ -1053,7 +1053,7 @@ impl SystemTriageRowState {
             Self::Scheduled => "Scheduled",
             Self::AcceptedEnvironment => "Accepted · env",
             Self::ScheduledEnvironment => "Scheduled · env",
-            Self::Legacy => "Legacy inventory",
+            Self::Legacy => "Historical inventory",
             Self::NoScan => "No scan",
             Self::Conflict => "Conflict",
             Self::Whitelisted => "Whitelisted",

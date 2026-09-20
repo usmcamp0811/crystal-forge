@@ -10297,11 +10297,16 @@ const steps = [
             scope: {
               kind: "current_exact_affected_hosts_in_environment",
               selected_system_id: "00000000-0000-0000-0000-0000000000a1",
+              selected_system_hostname: "warning-system-01",
               environment_id: "00000000-0000-0000-0000-0000000000e1",
               environment_name: "Production",
               exact_affected_system_count: 1,
             },
             systems: [],
+            host_disposition: null,
+            environment_disposition: null,
+            effective_disposition: null,
+            effective_source: "none",
             disposition: null,
           }),
         });
@@ -10422,8 +10427,8 @@ const steps = [
         const legacy = page.getByTestId("system-cves-legacy");
         await assertVisible(legacy, "Expected legacy CVE inventory state", 12000);
         await assertVisible(
-          legacy.getByText("Legacy scan findings.", { exact: false }),
-          "Expected legacy findings guidance",
+          legacy.getByText("Historical scan findings.", { exact: false }),
+          "Expected historical findings guidance",
         );
         await assertVisible(
           page.getByText("legacy-openssl", { exact: true }),
@@ -10431,13 +10436,13 @@ const steps = [
         );
         await page.getByRole("button", { name: /legacy-openssl/ }).click();
         await assertVisible(
-          page.getByTestId("system-cve-triage-state").filter({ hasText: "Legacy inventory" }),
-          "Expected legacy row to retain truthful authority labeling",
+          page.getByTestId("system-cve-triage-state").filter({ hasText: "Historical inventory" }),
+          "Expected historical row to retain truthful authority labeling",
         );
         await assertCount(
           page.getByTestId("system-cve-triage-open"),
           0,
-          "Legacy inventory must not open environment triage",
+          "Historical inventory must not open environment triage",
         );
 
         inventoryState = "exact-clean";
@@ -10451,8 +10456,8 @@ const steps = [
         inventoryState = "legacy-clean";
         await openCves();
         await assertVisible(
-          page.getByTestId("system-cves-legacy").getByText("Legacy scan clean.", { exact: false }),
-          "Expected legacy-clean state to remain distinct from no scan",
+          page.getByTestId("system-cves-legacy").getByText("Historical scan clean.", { exact: false }),
+          "Expected historical-clean state to remain distinct from no scan",
           12000,
         );
         await assertVisible(
@@ -12500,7 +12505,7 @@ const steps = [
       await assertCount(environmentCards.filter({ has: page.getByText("Archive", { exact: true }) }), 0, "Legacy-only environments must not imply a triage disposition");
       await assertVisible(drawer.getByTestId("cve-fleet-legacy"), "Expected display-only legacy fleet warning");
       await assertVisible(drawer.getByTestId("cve-fleet-no-scan"), "Expected no-scan fleet warning");
-      await assertVisible(archiveInventory.getByText("LEGACY", { exact: true }), "Expected legacy host authority label");
+      await assertVisible(archiveInventory.getByText("HISTORICAL", { exact: true }), "Expected historical host authority label");
       for (let index = 0; index < await affectedEnvironmentCards.count(); index += 1) {
         const card = affectedEnvironmentCards.nth(index);
         const declared = Number((await card.locator("header .mono").textContent()).match(/(\d+) host/)?.[1]);
@@ -21213,7 +21218,7 @@ function runStaticHarnessContracts() {
     'await page.keyboard.press("Escape")',
     'routeStandaloneUiBootstrap(viewerPage, "Viewer")',
     'available — version pending',
-    'filter({ hasText: "Legacy inventory" })',
+    'filter({ hasText: "Historical inventory" })',
     'getByTestId("system-cves-no-scan")',
   ]) {
     assertContract(scenario12h.includes(contract), `12h System Detail triage workflow is missing ${contract}`);

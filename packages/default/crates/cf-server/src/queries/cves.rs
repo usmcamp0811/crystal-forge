@@ -2796,7 +2796,27 @@ mod tests {
             r#"INSERT INTO system_states(
                  hostname,change_reason,store_path,generation,
                  generation_matches_current_store_path,timestamp)
-               VALUES($1,'startup',$2,8,false,now()+interval '1 minute')"#,
+               VALUES($1,'startup',$2,8,true,now()+interval '1 minute')"#,
+        )
+        .bind(&legacy_system.hostname)
+        .bind(&store_path)
+        .execute(&pool)
+        .await
+        .expect("unretained current state should persist");
+        let unretained = fetch_system_cve_inventory(&pool, legacy_system.id)
+            .await
+            .expect("unretained inventory should fall back");
+        assert_eq!(unretained.authority, SystemCveInventoryAuthority::Legacy);
+        assert_eq!(
+            unretained.exact_authority_failure,
+            Some(ExactCveAuthorityFailureReason::RetainedGenerationUnavailable)
+        );
+
+        sqlx::query(
+            r#"INSERT INTO system_states(
+                 hostname,change_reason,store_path,generation,
+                 generation_matches_current_store_path,timestamp)
+               VALUES($1,'startup',$2,9,false,now()+interval '2 minutes')"#,
         )
         .bind(&legacy_system.hostname)
         .bind(&store_path)
@@ -2849,7 +2869,7 @@ mod tests {
             r#"INSERT INTO evaluation_generation_snapshots(
                  system_id,generation,snapshot_id,derivation_id,commit_id,
                  source_store_path,configuration_name,lineage_verified)
-               VALUES($1,9,$2,$3,$4,$5,$6,false)"#,
+               VALUES($1,10,$2,$3,$4,$5,$6,false)"#,
         )
         .bind(legacy_system.id)
         .bind(snapshot_id)
@@ -2868,7 +2888,7 @@ mod tests {
             r#"INSERT INTO system_states(
                  hostname,change_reason,store_path,generation,
                  generation_matches_current_store_path,timestamp)
-               VALUES($1,'startup',$2,9,true,now()+interval '2 minutes')"#,
+               VALUES($1,'startup',$2,10,true,now()+interval '3 minutes')"#,
         )
         .bind(&legacy_system.hostname)
         .bind(&store_path)

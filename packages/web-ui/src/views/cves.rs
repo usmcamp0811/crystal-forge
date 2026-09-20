@@ -927,7 +927,7 @@ fn CveRow(
                     }
                     span {
                         class: "mono",
-                        title: "{cve.exact_affected_count} exact · {cve.legacy_affected_count} legacy inventory",
+                        title: "{cve.exact_affected_count} exact · {cve.legacy_affected_count} historical inventory",
                         style: if cve.affected_count > 0 { "font-size: 12px; font-weight: 600; color: var(--cf-text-primary);" } else { "font-size: 12px; font-weight: 600; color: var(--cf-text-muted);" },
                         "{cve.affected_count}"
                     }
@@ -1417,7 +1417,7 @@ fn CveRowInGroup(
                     }
                     span {
                         class: "mono",
-                        title: "{cve.exact_affected_count} exact · {cve.legacy_affected_count} legacy inventory",
+                        title: "{cve.exact_affected_count} exact · {cve.legacy_affected_count} historical inventory",
                         style: if cve.affected_count > 0 { "font-size: 12px; font-weight: 600; color: var(--cf-text-primary);" } else { "font-size: 12px; font-weight: 600; color: var(--cf-text-muted);" },
                         "{cve.affected_count}"
                     }
@@ -1758,12 +1758,12 @@ fn FleetCveDetailBody(detail: poam_api::FleetCveDetail) -> Element {
         div { class: "cve-authority-strip", "data-testid": "cve-authority-details",
             div { span { "Exact evidence" } strong { "{detail.exact_affected_system_count}" } }
             div { span { "Actionable" } strong { "{detail.exact_mutation_target_count}" } }
-            div { span { "Legacy inventory" } strong { "{detail.legacy_affected_system_count}" } }
+            div { span { "Historical inventory" } strong { "{detail.legacy_affected_system_count}" } }
             div { span { "Exact rollup" } strong { class: "chip {fleet_rollup_class(detail.rollup)}", "{fleet_rollup_label(detail.rollup)}" } }
         }
         if detail.legacy_affected_system_count > 0 {
             div { class: "sd-callout sd-callout-warn", "data-testid": "cve-fleet-legacy",
-                strong { "Legacy inventory cannot authorize fleet triage. " }
+                strong { "Historical inventory cannot authorize fleet triage. " }
                 "{detail.legacy_affected_system_count} affected host(s) do not have exact immutable evidence. Fleet accepted risk, scheduling, POA&M, verification, and closure remain unavailable for those hosts. Ordinary per-system justification remains separate."
             }
         }
@@ -1834,7 +1834,7 @@ fn FleetEnvironmentCard(environment: poam_api::CveAffectedEnvironment) -> Elemen
         article { class: "cve-fleet-env", "data-testid": "cve-fleet-environment", "data-state": "{status.to_ascii_lowercase()}",
             header { div { strong { "{environment.environment_name}" } span { class: "mono", " · {environment.affected_system_count} host(s)" } } span { class: "chip", "{status}" } }
             if environment.legacy_affected_system_count > 0 {
-                small { "{environment.exact_affected_system_count} exact · {environment.legacy_affected_system_count} legacy inventory host(s). Legacy hosts cannot be triaged." }
+                small { "{environment.exact_affected_system_count} exact · {environment.legacy_affected_system_count} historical inventory host(s). Historical hosts cannot be triaged." }
             }
             match &environment.disposition {
                 Some(poam_api::CveEnvironmentDisposition::Accepted { justification, review_date, actor, accepted_at }) => { let accepted_date = accepted_at.format("%Y-%m-%d").to_string(); rsx! {
@@ -1864,7 +1864,7 @@ fn FleetAffectedEnvironment(environment: poam_api::CveAffectedEnvironment) -> El
         article { class: "cve-inventory-env", "data-testid": "cve-affected-environment",
             header {
                 div { strong { "{environment.environment_name}" } span { class: "mono", "{environment.affected_system_count} host(s)" } }
-                span { class: "cve-inventory-authority", "{environment.exact_affected_system_count} exact · {environment.legacy_affected_system_count} legacy" }
+                span { class: "cve-inventory-authority", "{environment.exact_affected_system_count} exact · {environment.legacy_affected_system_count} historical" }
             }
             FleetHostRows { systems: environment.systems.clone() }
             if environment.systems.len() < environment.affected_system_count.max(0) as usize {
@@ -1884,7 +1884,7 @@ fn FleetHostRows(systems: Vec<crate::api::models::CveAffectedSystemDetail>) -> E
                     span { class: "mono truncate", title: "{system.flake_name.as_deref().unwrap_or(\"Unknown flake\")}", "{system.flake_name.as_deref().unwrap_or(\"Unknown flake\")}" }
                     span { class: "mono truncate", title: "{system.commit_hash.as_deref().unwrap_or(\"Unknown revision\")}", "{system.commit_hash.as_deref().unwrap_or(\"Unknown revision\")}" }
                     span { class: "mono", "{system.current_package_version.as_deref().unwrap_or(\"Unknown version\")}" }
-                    span { class: "chip", if system.inventory_authority == crate::api::models::SystemCveInventoryAuthority::Exact { "EXACT" } else { "LEGACY" } }
+                    span { class: "chip", if system.inventory_authority == crate::api::models::SystemCveInventoryAuthority::Exact { "EXACT" } else { "HISTORICAL" } }
                     Link { to: Route::SystemDetailView { id: system.system_id.to_string(), tab: "cves".to_string(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new() }, class: "btn-icon focus-ring", aria_label: "Open {system.hostname}", Icon { name: IconName::ArrowRight, size: 13 } }
                 }
             }
@@ -2009,7 +2009,7 @@ fn FleetCveTriageDialog(
         button { class: "modal-backdrop cve-triage-backdrop", aria_label: "Close {dialog_label}", tabindex: "-1", onclick: move |_| if !pending() { on_close.call(()) } }
         div { id: "cve-triage-dialog", class: "modal cve-triage-modal", role: "dialog", aria_modal: "true", aria_label: "{dialog_label}", "data-testid": "cve-triage-dialog", tabindex: "-1", onkeydown: move |event| if event.key() == Key::Escape && !pending() { event.stop_propagation(); on_close.call(()); },
             DialogFocusSentinel { dialog_id: "cve-triage-dialog", boundary: DialogFocusBoundary::Last }
-            div { class: "modal-head", div { h2 { "Triage {detail.cve.cve_id}" } p { "Decide per environment. Legacy inventory remains read-only." } } button { class: "btn-icon focus-ring", aria_label: "Close triage editor", autofocus: true, disabled: pending(), onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } } }
+            div { class: "modal-head", div { h2 { "Triage {detail.cve.cve_id}" } p { "Decide per environment. Historical inventory remains read-only." } } button { class: "btn-icon focus-ring", aria_label: "Close triage editor", autofocus: true, disabled: pending(), onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } } }
             div { class: "modal-body cve-triage-body",
                 p { "Choose one intention for every affected environment. The server recomputes exact host scope when you submit." }
                 div { class: "cve-triage-context", "data-testid": "cve-triage-context",
