@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-20 02:30'
+updated_date: '2026-09-20 04:05'
 labels:
   - scanning
   - web-ui
@@ -116,4 +116,6 @@ Started implementation in dedicated worktree `/home/mcamp/code/crystal-forge/TAS
 BLOCKED before implementation by the user-defined stop condition for unrelated worktree overlap. `/home/mcamp/code/crystal-forge/TASK-440-system-config-flake-parity` has uncommitted changes in TASK-326.2 files: `packages/default/crates/cf-server/src/api/models.rs`, `handlers/api/scanning.rs`, `queries/scanning.rs`, `packages/web-ui/src/api/models.rs`, `views/scanning.rs`, and `views/system_detail.rs` (plus unrelated config explorer/flakes files and untracked generated CSS). No TASK-326.2 source edits or preview startup occurred. The dedicated task worktree remains clean at base `e304867c`. Awaiting user direction that preserves TASK-440 work before overlapping implementation proceeds.
 
 User explicitly waived the other-worktree overlap stop condition and directed implementation to continue without touching TASK-440 leftovers. Re-fetch confirmed task HEAD and `origin/dev` both remain `e304867c43abc8a7d8efe1f01e71af64cca67d8b`; the task worktree is clean. Live preview startup is currently blocked because fixed ports 8080 and 3445 are owned by TASK-440 processes. Those processes will not be stopped or reused. Backend work can proceed while preview remains blocked; no browser-visible edit will be made without resolving the standing preview requirement or receiving an explicit exception.
+
+Backend contract commit `0913ea87` adds migration 0269, durable `awaiting_build`/`awaiting_closure` states, automatic prerequisite promotion, immutable canonical trigger provenance, complete exact lifecycle history, bounded archive/restore metadata, richer exact details, and a System Detail environment-scoped triage API that reuses TASK-440 locking/evidence/POA&M semantics. Cancellation remains deliberately unsupported and all rows report `cancellable=false`; the future UI must not imply cancellation. Direct verification by the task owner: `nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --all -- --check` passed; `git diff --check` passed; `SQLX_OFFLINE=true nix develop -c cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml --tests` passed with existing warnings; `nix run .#devScripts.cve-test -- up --tui=false` passed and shut down its isolated database. Preview remains blocked by the untouched TASK-440 fixed-port stack.
 <!-- SECTION:NOTES:END -->
