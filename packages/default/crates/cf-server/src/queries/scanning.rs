@@ -127,6 +127,8 @@ pub struct ScanRecordRow {
     pub created_at: DateTime<Utc>,
     /// Contains the requested schedule time when available.
     pub scheduled_at: Option<DateTime<Utc>>,
+    /// Contains the authoritative execution start time when execution began.
+    pub started_at: Option<DateTime<Utc>>,
     /// Contains the terminal time when available.
     pub completed_at: Option<DateTime<Utc>>,
     /// Contains the scanner implementation name.
@@ -355,6 +357,10 @@ pub async fn get_scan_records(
             derivation.derivation_name AS hostname,
             flake.name AS flake_name, commit.git_commit_hash AS commit_hash,
             scan.status, scan.source_trigger, scan.created_at, scan.scheduled_at,
+            COALESCE(
+                scan.lease_started_at,
+                (scan.scan_metadata ->> 'execution_started_at')::timestamptz
+            ) AS started_at,
             scan.completed_at, scan.scanner_name, scan.scanner_version,
             COALESCE(builder.name,
                 CASE WHEN scan.scan_metadata ? 'execution_id' THEN 'server-local' END
@@ -410,6 +416,7 @@ pub async fn get_scan_records(
                 ),
                 created_at: row.get("created_at"),
                 scheduled_at: row.get("scheduled_at"),
+                started_at: row.get("started_at"),
                 completed_at: row.get("completed_at"),
                 scanner_name: row.get("scanner_name"),
                 scanner_version: row.get("scanner_version"),

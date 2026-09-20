@@ -135,6 +135,36 @@ pub async fn fetch_scanning_queue(
     fetch_json(&url).await
 }
 
+/// Fetches an authoritative active, completed, or per-system history collection.
+pub async fn fetch_scanning_scan_records(
+    collection: &str,
+    include_archived: bool,
+    system_id: Option<&Uuid>,
+    limit: Option<i64>,
+) -> Result<ScanningScanRecordsResponse, ApiClientError> {
+    let mut url = format!(
+        "{}/scanning/scans?collection={}&include_archived={}&limit={}",
+        base_url(),
+        js_sys::encode_uri_component(collection),
+        include_archived,
+        limit.unwrap_or(500).clamp(1, 500)
+    );
+    if let Some(system_id) = system_id {
+        url.push_str(&format!("&system_id={system_id}"));
+    }
+    fetch_json(&url).await
+}
+
+/// Archives or restores exact terminal scan lifecycles.
+pub async fn update_scanning_archive_state(
+    scan_ids: Vec<Uuid>,
+    archived: bool,
+) -> Result<UpdateScanningArchiveResponse, ApiClientError> {
+    let url = format!("{}/scanning/scans", base_url());
+    let request = UpdateScanningArchiveRequest { scan_ids, archived };
+    send_json_with_csrf("PATCH", &url, Some(&request)).await
+}
+
 pub async fn fetch_scanning_scan_detail(
     scan_id: &Uuid,
 ) -> Result<ScanningScanDetailResponse, ApiClientError> {

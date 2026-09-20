@@ -57,6 +57,7 @@ pub(crate) struct ScanDiagnosticDetail {
     pub(crate) source_trigger: Option<String>,
     pub(crate) created_at: DateTime<Utc>,
     pub(crate) scheduled_at: Option<DateTime<Utc>>,
+    pub(crate) started_at: Option<DateTime<Utc>>,
     pub(crate) completed_at: Option<DateTime<Utc>>,
     pub(crate) scan_duration_ms: Option<i32>,
     pub(crate) attempts: i32,
@@ -236,6 +237,10 @@ pub(crate) async fn get_scan_diagnostics(
                flake.name AS flake_name, commit.git_commit_hash AS commit_hash,
                scan.status, scan.scanner_name, scan.scanner_version,
                scan.source_trigger, scan.created_at, scan.scheduled_at,
+               COALESCE(
+                   scan.lease_started_at,
+                   (scan.scan_metadata ->> 'execution_started_at')::timestamptz
+               ) AS started_at,
                scan.completed_at, scan.scan_duration_ms, scan.attempts,
                scan.total_packages, scan.total_vulnerabilities,
                scan.critical_count, scan.high_count, scan.medium_count,
@@ -303,6 +308,7 @@ pub(crate) async fn get_scan_diagnostics(
         ),
         created_at: metadata.get("created_at"),
         scheduled_at: metadata.get("scheduled_at"),
+        started_at: metadata.get("started_at"),
         completed_at: metadata.get("completed_at"),
         scan_duration_ms: metadata.get("scan_duration_ms"),
         attempts: metadata.get("attempts"),

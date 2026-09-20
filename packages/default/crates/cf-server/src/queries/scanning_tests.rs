@@ -360,7 +360,7 @@ async fn terminal_archive_filters_and_restores_without_mutating_scan() {
     .await
     .expect("archive derivation should be inserted");
     let scan_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO cve_scans (derivation_id, scanner_name, status, source_trigger, completed_at, scan_metadata) VALUES ($1, 'vulnix', 'failed', $2, NOW(), jsonb_build_object('error', 'safe failure')) RETURNING id",
+        "INSERT INTO cve_scans (derivation_id, scanner_name, status, source_trigger, completed_at, scan_metadata) VALUES ($1, 'vulnix', 'failed', $2, NOW(), jsonb_build_object('error', 'safe failure', 'execution_started_at', NOW() - INTERVAL '1 minute')) RETURNING id",
     )
     .bind(derivation_id)
     .bind("future-trigger")
@@ -397,6 +397,7 @@ async fn terminal_archive_filters_and_restores_without_mutating_scan() {
     assert_eq!(archived.source_trigger.as_deref(), Some("future-trigger"));
     assert!(!archived.cancellable);
     assert_eq!(archived.failure.as_deref(), Some("safe failure"));
+    assert!(archived.started_at.is_some());
 
     assert_eq!(
         set_scan_archive_state(&pool, &[scan_id], false, actor_id)

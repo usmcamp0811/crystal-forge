@@ -359,6 +359,8 @@ pub struct ScanningScanRecordResponse {
     pub created_at: DateTime<Utc>,
     /// Contains requested schedule time when available.
     pub scheduled_at: Option<DateTime<Utc>>,
+    /// Contains authoritative execution start time when execution began.
+    pub started_at: Option<DateTime<Utc>>,
     /// Contains terminal time when available.
     pub completed_at: Option<DateTime<Utc>>,
     /// Contains the scanner implementation name.
@@ -509,6 +511,8 @@ pub struct ScanningScanDetailResponse {
     pub created_at: DateTime<Utc>,
     /// Contains requested schedule time when available.
     pub scheduled_at: Option<DateTime<Utc>>,
+    /// Contains authoritative execution start time when execution began.
+    pub started_at: Option<DateTime<Utc>>,
     /// Contains terminal time when available.
     pub completed_at: Option<DateTime<Utc>>,
     /// Contains scanner duration in milliseconds when recorded.

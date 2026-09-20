@@ -602,14 +602,113 @@ pub struct UpdateScanSchedulePolicyRequest {
     pub rebuild_to_scan: bool,
 }
 
+/// Reports authoritative fleet scan coverage and lifecycle counts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScanningStatsResponse {
+    /// Counts scans currently owned by an executor.
     pub scanning: i64,
+    /// Counts runnable scans waiting for executor ownership.
     pub queued: i64,
+    /// Counts scans waiting for an exact build output.
+    pub awaiting_build: i64,
+    /// Counts scans waiting for an exact cache closure.
+    pub awaiting_closure: i64,
+    /// Counts completed evidence older than its rescan interval.
     pub stale: i64,
+    /// Counts configurations without completed scan evidence.
     pub never_scanned: i64,
+    /// Counts configurations whose latest lifecycle failed.
     pub failed: i64,
+    /// Reports configuration coverage as an integer percentage.
     pub coverage_percent: i64,
+}
+
+/// Returns one bounded archive-aware collection of exact scan lifecycles.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScanningScanRecordsResponse {
+    /// Contains rows in the server's deterministic collection order.
+    pub items: Vec<ScanningScanRecordResponse>,
+    /// Counts matching rows before response limiting and archive filtering.
+    pub total: i64,
+    /// Counts archived rows omitted when archived records are not requested.
+    pub hidden_archived: i64,
+}
+
+/// Describes one exact persisted scan lifecycle.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScanningScanRecordResponse {
+    /// Identifies the immutable scan lifecycle.
+    pub scan_id: Uuid,
+    /// Identifies the exact derivation.
+    pub derivation_id: i32,
+    /// Contains the configuration name.
+    pub hostname: String,
+    /// Contains the owning flake name when available.
+    pub flake_name: Option<String>,
+    /// Contains the full immutable revision when available.
+    pub commit_hash: Option<String>,
+    /// Contains the persisted lifecycle status.
+    pub status: String,
+    /// Contains canonical trigger provenance when recorded.
+    pub source_trigger: Option<String>,
+    /// Contains lifecycle creation time.
+    pub created_at: DateTime<Utc>,
+    /// Contains requested schedule time when available.
+    pub scheduled_at: Option<DateTime<Utc>>,
+    /// Contains authoritative execution start time when execution began.
+    pub started_at: Option<DateTime<Utc>>,
+    /// Contains terminal time when available.
+    pub completed_at: Option<DateTime<Utc>>,
+    /// Contains the scanner implementation name.
+    pub scanner_name: String,
+    /// Contains the scanner version when recorded.
+    pub scanner_version: Option<String>,
+    /// Contains bounded executor identity when recorded.
+    pub executor: Option<String>,
+    /// Contains a bounded redacted failure summary.
+    pub failure: Option<String>,
+    /// Explains why a waiting lifecycle is not runnable.
+    pub wait_reason: Option<String>,
+    /// Counts examined packages.
+    pub total_packages: i32,
+    /// Counts all vulnerability findings.
+    pub total_vulnerabilities: i32,
+    /// Counts critical findings.
+    pub critical_count: i32,
+    /// Counts high findings.
+    pub high_count: i32,
+    /// Counts medium findings.
+    pub medium_count: i32,
+    /// Counts low findings.
+    pub low_count: i32,
+    /// Contains scanner duration in milliseconds when recorded.
+    pub scan_duration_ms: Option<i32>,
+    /// Counts execution attempts.
+    pub attempts: i32,
+    /// Contains archive time when hidden by an administrator.
+    pub archived_at: Option<DateTime<Utc>>,
+    /// Is false until the server can enforce execution-owner cancellation.
+    pub cancellable: bool,
+}
+
+/// Requests an idempotent archive-state change for terminal scans.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateScanningArchiveRequest {
+    /// Selects at most 100 exact terminal scan identities.
+    pub scan_ids: Vec<Uuid>,
+    /// Archives rows when true and restores rows when false.
+    pub archived: bool,
+}
+
+/// Reports an archive-state update result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateScanningArchiveResponse {
+    /// Counts unique scan identities accepted by the server.
+    pub requested: usize,
+    /// Counts archive metadata records inserted or removed.
+    pub changed: u64,
+    /// Contains the requested resulting archive state.
+    pub archived: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -684,6 +783,14 @@ pub struct ScanningActivityItemResponse {
 pub struct ScanningScanDetailResponse {
     /// Exact scan identity.
     pub scan_id: Uuid,
+    /// Identifies the exact derivation scanned.
+    pub derivation_id: i32,
+    /// Contains the configuration identity.
+    pub hostname: String,
+    /// Contains the owning flake name when available.
+    pub flake_name: Option<String>,
+    /// Contains the full immutable revision when available.
+    pub commit_hash: Option<String>,
     /// Current scan lifecycle status.
     pub status: String,
     /// Scanner implementation name.
@@ -691,7 +798,41 @@ pub struct ScanningScanDetailResponse {
     /// Scanner version, when recorded.
     pub scanner_version: Option<String>,
     /// Durable trigger provenance.
-    pub source_trigger: String,
+    pub source_trigger: Option<String>,
+    /// Contains lifecycle creation time.
+    pub created_at: DateTime<Utc>,
+    /// Contains requested schedule time when available.
+    pub scheduled_at: Option<DateTime<Utc>>,
+    /// Contains authoritative execution start time when execution began.
+    pub started_at: Option<DateTime<Utc>>,
+    /// Contains terminal time when available.
+    pub completed_at: Option<DateTime<Utc>>,
+    /// Contains scanner duration in milliseconds when recorded.
+    pub scan_duration_ms: Option<i32>,
+    /// Counts execution attempts.
+    pub attempts: i32,
+    /// Counts examined packages.
+    pub total_packages: i32,
+    /// Counts all vulnerability findings.
+    pub total_vulnerabilities: i32,
+    /// Counts critical findings.
+    pub critical_count: i32,
+    /// Counts high findings.
+    pub high_count: i32,
+    /// Counts medium findings.
+    pub medium_count: i32,
+    /// Counts low findings.
+    pub low_count: i32,
+    /// Contains a bounded redacted failure summary.
+    pub failure: Option<String>,
+    /// Explains why the lifecycle is waiting.
+    pub wait_reason: Option<String>,
+    /// Contains bounded executor identity when recorded.
+    pub executor: Option<String>,
+    /// Contains archive time when hidden by an administrator.
+    pub archived_at: Option<DateTime<Utc>>,
+    /// Is false until the server can enforce execution-owner cancellation.
+    pub cancellable: bool,
     /// Chronologically ordered diagnostic events.
     pub events: Vec<ScanningScanDiagnosticEventResponse>,
     /// Is `true` when the fixed API response omitted later events.
