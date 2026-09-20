@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.6-terra
 created_date: '2026-06-10 13:35'
-updated_date: '2026-09-20 03:24'
+updated_date: '2026-09-20 03:28'
 labels:
   - design-parity
   - environments
@@ -114,20 +114,12 @@ No backend implementation dependency is currently required for the modal parity 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Audit the current committed EnvironmentsView design, active Dioxus modal path, API clients/models, assignment hydration/save flows, delete contract, and existing `14-environments`, `14a-environments-add-modal`, and `14b-environments-config-warning` workflows; confirm `edit_environment_modal.rs` is unused and remove stale assumptions from this task.
-2. Normalize the shared modal state and section model for Create/Edit: authoritative hydration, draft preservation, section badges, validation ownership, loading/error/retry states, in-flight save state, and refresh-after-success behavior.
-3. Implement the persistent design shell and Basics/Danger sections with real validation, production metadata, accessible navigation, delete eligibility, and existing safety semantics.
-4. Wire Binary cache to the existing authenticated environment-cache read and admin assignment APIs, including no-cache, selection/clear, metadata, assignment failure/retry, and explicit separation from cache creation.
-5. Align Deployment and Policy enforcement presentation while preserving persisted deployment values, gate policy assignment, versioned published bundle identity, overlays, enforcement modes, CAS/version behavior, and authorization.
-6. Extend the existing environment browser workflows with semantic Create/Edit/save/reopen/error/delete/auth assertions and desktop/narrow light/dark evidence; do not add duplicate workflows unless the existing manifest cannot represent the required state transitions.
-7. Verify focused Rust/WASM/API checks and one focused authoritative environment workflow after fast checks stabilize; update task notes with any proven API gap rather than inventing a frontend fallback.
-
-Verification plan:
-- `nix develop -c cargo fmt -- --check`
-- `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`
-- `node --check checks/web-ui/tests/integration-test.js`
-- Focused environment component/API tests and the existing `14-environments`, `14a-environments-add-modal`, and `14b-environments-config-warning` workflows.
-- One focused authoritative environment browser run after fast checks stabilize, with semantic assertions plus desktop/narrow light/dark screenshots; do not run the full unrelated Web UI suite merely for this task.
+1. Replace the active shared `EnvironmentFormModal` single-scroll layout with the committed-design editor shell: contextual header, keyboard-accessible rail, one selected section body, and persistent summary/footer. Reuse the shared dialog focus restore, initial focus, and focus sentinels.
+2. Keep the one Create/Edit draft. Extend it with explicit cache destination IDs, not a singular fixture cache. Load the cache catalog and explicit assignments while Edit hydration is pending; retain global/effective cache visibility as read-only metadata. Reconcile changed cache IDs with the existing per-cache read-modify-replace API while preserving other environments.
+3. Preserve existing server-owned basics/deployment/policy/bundle/delete semantics. Fix gate-policy search and replace obsolete deployment placeholder text. Keep versioned bundle reconciliation and prevent save until authoritative Edit hydration is ready.
+4. Update the environments view lifecycle for cache/catalog loading, combined authoritative hydration, save-in-flight/error behavior, and refresh after successful operations; do not change cards/table behavior outside modal entry/refresh.
+5. Add narrow scoped editor CSS in `app.css`, then extend workflow 14a and its manifest coverage with semantic Create/Edit/accessibility/error/responsive checks using method-specific mocks.
+6. Run format, WASM check, JavaScript static check, focused workflow checks, and one selected authoritative environment workflow run. Update task notes, commit, push, open an MR to `dev`, and move the task to Review only with verified evidence.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
