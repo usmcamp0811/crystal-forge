@@ -7871,6 +7871,7 @@ tr.attention-flash {
 .cve-triage-env legend,
 .cve-triage-poam legend { padding: 0 5px; font-size: 12px; font-weight: 650; }
 .cve-triage-env .seg { width: fit-content; max-width: 100%; flex-wrap: wrap; }
+.cve-triage-poam-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .cve-triage-foot { gap: 8px; }
 .cve-triage-outcome { margin-right: auto; color: var(--cf-text-muted); font-size: 11px; }
 
@@ -7891,6 +7892,7 @@ tr.attention-flash {
   .cve-triage-context-grid > div:nth-last-child(-n+2) { border-bottom: 0; }
   .cve-triage-modal { width: calc(100vw - 16px); max-height: calc(100vh - 16px); }
   .cve-triage-body { padding: 14px; }
+  .cve-triage-poam-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 480px) {

@@ -959,6 +959,21 @@ pub fn SystemDetailView(
     }
     let vulnerabilities_loading = vulnerabilities_resource.read_unchecked().is_none();
     let cve_inventory = cve_pagination.read().inventory.clone();
+    let cve_tab_key = cve_inventory
+        .as_ref()
+        .map(|inventory| {
+            format!(
+                "{:?}:{}:{}",
+                inventory.authority,
+                inventory
+                    .source
+                    .as_ref()
+                    .map(|source| source.scan_id.to_string())
+                    .unwrap_or_else(|| "no-scan".to_string()),
+                inventory.inventory_revision,
+            )
+        })
+        .unwrap_or_else(|| "no-cve-inventory".to_string());
     let vulnerabilities = cve_inventory
         .as_ref()
         .map(|inventory| inventory.vulnerabilities.clone())
@@ -1505,6 +1520,7 @@ pub fn SystemDetailView(
                     },
                     Tab::Cves => rsx! {
                         CvesTab {
+                            key: "{cve_tab_key}",
                             system_id: system.id,
                             hostname: system.hostname.clone(),
                             vulnerabilities: vulnerabilities.clone(),

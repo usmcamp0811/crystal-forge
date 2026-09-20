@@ -383,6 +383,86 @@ pub struct FleetCveTriageResponse {
     pub poam_reused: bool,
 }
 
+/// Selects one disposition for the selected system's server-derived environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum SystemCveTriageAction {
+    /// Removes the environment disposition and leaves exact findings outstanding.
+    LeaveOpen,
+    /// Accepts risk without creating remediation or verification evidence.
+    AcceptRisk {
+        /// Gives the required environment-specific rationale.
+        justification: String,
+        /// Gives the optional date on which the risk must be reviewed.
+        review_date: Option<NaiveDate>,
+    },
+    /// Schedules all current exact affected hosts in the derived environment.
+    SchedulePatch,
+}
+
+/// Applies one disposition to the environment derived by the server.
+///
+/// The request intentionally contains no environment or host identifiers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveTriageRequest {
+    /// Gives the canonical package identity selected by the inventory row.
+    pub canonical_package_name: String,
+    /// Selects the disposition for the server-derived environment.
+    #[serde(flatten)]
+    pub action: SystemCveTriageAction,
+    /// Supplies POA&M metadata exactly when patching is scheduled.
+    pub poam: Option<FleetCvePoamRequest>,
+}
+
+/// Identifies the server-owned scope of a System Detail triage operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemCveTriageScopeKind {
+    /// Includes all current exact affected hosts in the derived environment.
+    CurrentExactAffectedHostsInEnvironment,
+}
+
+/// Describes the environment scope derived from the selected system.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveTriageScope {
+    /// Identifies the fixed server-owned scope rule.
+    pub kind: SystemCveTriageScopeKind,
+    /// Identifies the system from which the server derived the environment.
+    pub selected_system_id: Uuid,
+    /// Identifies the derived environment.
+    pub environment_id: Uuid,
+    /// Gives the server-derived environment name.
+    pub environment_name: String,
+    /// Counts all current exact affected hosts included in the scope.
+    pub exact_affected_system_count: i64,
+}
+
+/// Reports authoritative environment-scoped triage state for a System Detail row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemCveTriageDetail {
+    /// Gives the canonical CVE identity.
+    pub canonical_cve_id: String,
+    /// Gives the canonical package identity.
+    pub canonical_package_name: String,
+    /// Describes the environment-wide exact mutation scope.
+    pub scope: SystemCveTriageScope,
+    /// Lists every current exact affected host included in the scope.
+    pub systems: Vec<CveAffectedSystemDetail>,
+    /// Gives the current disposition. `None` means outstanding.
+    pub disposition: Option<CveEnvironmentDisposition>,
+}
+
+/// Reports the result of one System Detail environment-scoped mutation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemCveTriageResponse {
+    /// Gives transaction-owned state for the derived environment.
+    pub detail: SystemCveTriageDetail,
+    /// Identifies the created or reused POA&M when patching was scheduled.
+    pub poam_id: Option<Uuid>,
+    /// Indicates whether the server reused a compatible active POA&M.
+    pub poam_reused: bool,
+}
+
 /// Identifies the evidence scope returned by a fleet CVE mutation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1667,6 +1747,55 @@ pub async fn triage_fleet_cve(
     )
     .await?;
     Ok(response)
+}
+
+/// Fetches authoritative environment-scoped triage detail for a System Detail row.
+///
+/// # Errors
+///
+/// Returns [`PoamApiError`] when the row lacks current exact authority, is not
+/// visible, the request fails, or the response does not match the contract.
+pub async fn fetch_system_cve_triage_detail(
+    system_id: Uuid,
+    cve_id: &str,
+    package: &str,
+) -> Result<SystemCveTriageDetail, PoamApiError> {
+    request(
+        "GET",
+        &format!(
+            "{}/systems/{}/cves/{}/triage?package={}",
+            base_url(),
+            system_id,
+            encode_uri_component(cve_id),
+            encode_uri_component(package)
+        ),
+        None::<&()>,
+    )
+    .await
+}
+
+/// Applies one environment-scoped triage action from a System Detail row.
+///
+/// # Errors
+///
+/// Returns [`PoamApiError`] for validation, authorization, stale evidence,
+/// active-remediation conflicts, transport failures, or invalid responses.
+pub async fn triage_system_cve(
+    system_id: Uuid,
+    cve_id: &str,
+    body: &SystemCveTriageRequest,
+) -> Result<SystemCveTriageResponse, PoamApiError> {
+    request(
+        "POST",
+        &format!(
+            "{}/systems/{}/cves/{}/triage",
+            base_url(),
+            system_id,
+            encode_uri_component(cve_id)
+        ),
+        Some(body),
+    )
+    .await
 }
 
 macro_rules! poam_body_mutation {

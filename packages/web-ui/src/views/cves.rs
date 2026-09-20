@@ -17,6 +17,9 @@ use crate::alerts::{NAV_BADGES, acknowledge_with_cursor_and_ids, should_flash};
 
 use crate::api::client;
 use crate::api::models::{CveFilters, CveFleetStats, CveListItem, CvePackageGroup};
+use crate::components::cve::triage::{
+    CveTriageDraft, EnvironmentTriageChoice, catalog_contains_assignee, parse_risk, risk_value,
+};
 use crate::components::dialog_focus::{
     DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel, DialogInitialFocus,
 };
@@ -1496,294 +1499,6 @@ fn CveRowInGroup(
 // CVE Detail Drawer
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EnvironmentTriageChoice {
-    Open,
-    Accepted,
-    Scheduled,
-}
-
-impl EnvironmentTriageChoice {
-    fn value(self) -> &'static str {
-        match self {
-            Self::Open => "open",
-            Self::Accepted => "accepted",
-            Self::Scheduled => "scheduled",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct EnvironmentTriageDraft {
-    environment_id: uuid::Uuid,
-    environment_name: String,
-    choice: EnvironmentTriageChoice,
-    justification: String,
-    review_date: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct FleetTriageDraft {
-    environments: Vec<EnvironmentTriageDraft>,
-    title: String,
-    target_date: String,
-    plan: String,
-    assignee: String,
-    assignee_label: Option<String>,
-    risk: poam_api::PoamRisk,
-    preservation_error: Option<String>,
-    default_milestones: bool,
-}
-
-impl FleetTriageDraft {
-    fn from_detail(detail: &poam_api::FleetCveDetail) -> Self {
-        let environments = detail
-            .environments
-            .iter()
-            .filter(|environment| environment.exact_affected_system_count > 0)
-            .map(|environment| {
-                let (choice, justification, review_date) = match &environment.disposition {
-                    Some(poam_api::CveEnvironmentDisposition::Accepted {
-                        justification,
-                        review_date,
-                        ..
-                    }) => (
-                        EnvironmentTriageChoice::Accepted,
-                        justification.clone(),
-                        review_date.map(|date| date.to_string()).unwrap_or_default(),
-                    ),
-                    Some(poam_api::CveEnvironmentDisposition::Scheduled { .. }) => (
-                        EnvironmentTriageChoice::Scheduled,
-                        String::new(),
-                        String::new(),
-                    ),
-                    None => (EnvironmentTriageChoice::Open, String::new(), String::new()),
-                };
-                EnvironmentTriageDraft {
-                    environment_id: environment.environment_id,
-                    environment_name: environment.environment_name.clone(),
-                    choice,
-                    justification,
-                    review_date,
-                }
-            })
-            .collect();
-        let mut draft = Self {
-            environments,
-            title: format!(
-                "{} - patch {}",
-                detail.cve.cve_id, detail.canonical_package_name
-            ),
-            target_date: String::new(),
-            plan: String::new(),
-            assignee: String::new(),
-            assignee_label: None,
-            risk: fleet_risk(&detail.cve.severity),
-            preservation_error: None,
-            default_milestones: true,
-        };
-        let scheduled = detail
-            .environments
-            .iter()
-            .filter_map(|environment| match &environment.disposition {
-                Some(poam_api::CveEnvironmentDisposition::Scheduled { poam_id, poam, .. }) => {
-                    Some((*poam_id, poam.as_ref()))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        if scheduled.is_empty() {
-            return draft;
-        }
-        if scheduled.iter().any(|(_, poam)| poam.is_none()) {
-            draft.preservation_error = Some(
-                "Scheduled POA&M metadata is unavailable from this server version. Change all scheduled environments to OPEN or ACCEPTED, or retry after the server upgrade."
-                    .to_string(),
-            );
-            return draft;
-        }
-        let first_id = scheduled[0].0;
-        if scheduled.iter().any(|(poam_id, _)| *poam_id != first_id) {
-            draft.preservation_error = Some(
-                "Scheduled environments reference different POA&Ms. Change all scheduled environments to OPEN or ACCEPTED before submitting."
-                    .to_string(),
-            );
-            return draft;
-        }
-        let metadata = scheduled[0].1.expect("checked scheduled metadata");
-        if metadata.id != first_id
-            || scheduled
-                .iter()
-                .any(|(_, candidate)| candidate.is_some_and(|candidate| candidate != metadata))
-        {
-            draft.preservation_error = Some(
-                "Scheduled environments have conflicting POA&M metadata. Change all scheduled environments to OPEN or ACCEPTED before submitting."
-                    .to_string(),
-            );
-            return draft;
-        }
-        if metadata.title.trim().is_empty() || metadata.plan.trim().is_empty() {
-            draft.preservation_error = Some(
-                "The scheduled POA&M metadata cannot satisfy compatible reuse. Change all scheduled environments to OPEN or ACCEPTED before submitting."
-                    .to_string(),
-            );
-            return draft;
-        }
-        draft.title = metadata.title.clone();
-        draft.plan = metadata.plan.clone();
-        draft.target_date = metadata.target_date.to_string();
-        draft.risk = metadata.risk;
-        match scheduled_assignee_selection(&metadata.assignee) {
-            Ok((value, label)) => {
-                draft.assignee = value;
-                draft.assignee_label = Some(label);
-            }
-            Err(message) => draft.preservation_error = Some(message),
-        }
-        draft
-    }
-
-    fn set_choice(&mut self, environment_id: uuid::Uuid, choice: EnvironmentTriageChoice) {
-        if let Some(environment) = self
-            .environments
-            .iter_mut()
-            .find(|environment| environment.environment_id == environment_id)
-        {
-            environment.choice = choice;
-        }
-    }
-
-    fn request(&self, package: &str) -> Result<poam_api::FleetCveTriageRequest, String> {
-        let mut actions = Vec::with_capacity(self.environments.len());
-        let mut scheduled = false;
-        for environment in &self.environments {
-            let action = match environment.choice {
-                EnvironmentTriageChoice::Open => poam_api::CveEnvironmentTriageAction::LeaveOpen {
-                    environment_id: environment.environment_id,
-                },
-                EnvironmentTriageChoice::Accepted => {
-                    let justification = environment.justification.trim();
-                    if !(10..=2000).contains(&justification.len()) {
-                        return Err(format!(
-                            "Enter an acceptance justification of 10 to 2000 bytes for {}.",
-                            environment.environment_name
-                        ));
-                    }
-                    let review_date = if environment.review_date.trim().is_empty() {
-                        None
-                    } else {
-                        Some(
-                            chrono::NaiveDate::parse_from_str(
-                                environment.review_date.trim(),
-                                "%Y-%m-%d",
-                            )
-                            .map_err(|_| {
-                                format!(
-                                    "Enter a valid review date for {}.",
-                                    environment.environment_name
-                                )
-                            })?,
-                        )
-                    };
-                    poam_api::CveEnvironmentTriageAction::AcceptRisk {
-                        environment_id: environment.environment_id,
-                        justification: justification.to_string(),
-                        review_date,
-                    }
-                }
-                EnvironmentTriageChoice::Scheduled => {
-                    scheduled = true;
-                    poam_api::CveEnvironmentTriageAction::SchedulePatch {
-                        environment_id: environment.environment_id,
-                    }
-                }
-            };
-            actions.push(action);
-        }
-
-        let poam = if scheduled {
-            if let Some(message) = &self.preservation_error {
-                return Err(message.clone());
-            }
-            if self.title.trim().is_empty() {
-                return Err("Enter a POA&M title for scheduled patching.".to_string());
-            }
-            if self.plan.trim().is_empty() {
-                return Err("Enter a remediation plan for scheduled patching.".to_string());
-            }
-            let target_date =
-                chrono::NaiveDate::parse_from_str(self.target_date.trim(), "%Y-%m-%d")
-                    .map_err(|_| "Enter a valid POA&M target date.".to_string())?;
-            let assignee = parse_fleet_assignee(&self.assignee)?;
-            Some(poam_api::FleetCvePoamRequest {
-                title: self.title.trim().to_string(),
-                plan: self.plan.trim().to_string(),
-                assignee,
-                target_date,
-                risk: self.risk,
-                default_milestones: self.default_milestones,
-            })
-        } else {
-            None
-        };
-
-        Ok(poam_api::FleetCveTriageRequest {
-            canonical_package_name: package.to_string(),
-            actions,
-            poam,
-        })
-    }
-}
-
-fn scheduled_assignee_selection(
-    assignee: &poam_api::PoamAssigneeView,
-) -> Result<(String, String), String> {
-    match assignee {
-        poam_api::PoamAssigneeView::User {
-            user_id,
-            display,
-            available: true,
-        } => Ok((format!("user:{user_id}"), display.clone())),
-        poam_api::PoamAssigneeView::OidcGroup {
-            group_name,
-            display,
-            available: true,
-        } => Ok((format!("group:{group_name}"), display.clone())),
-        poam_api::PoamAssigneeView::User { .. }
-        | poam_api::PoamAssigneeView::OidcGroup { .. }
-        | poam_api::PoamAssigneeView::Unassigned
-        | poam_api::PoamAssigneeView::Legacy { .. } => Err(
-            "The scheduled POA&M assignee is no longer available for compatible reuse. Change all scheduled environments to OPEN or ACCEPTED before submitting."
-                .to_string(),
-        ),
-    }
-}
-
-fn parse_fleet_assignee(value: &str) -> Result<poam_api::PoamAssigneeRequest, String> {
-    if let Some(user_id) = value.strip_prefix("user:") {
-        return uuid::Uuid::parse_str(user_id)
-            .map(|user_id| poam_api::PoamAssigneeRequest::User { user_id })
-            .map_err(|_| "Select a valid POA&M assignee.".to_string());
-    }
-    if let Some(group_name) = value.strip_prefix("group:")
-        && !group_name.trim().is_empty()
-        && group_name == group_name.trim()
-    {
-        return Ok(poam_api::PoamAssigneeRequest::OidcGroup {
-            group_name: group_name.to_string(),
-        });
-    }
-    Err("Select a valid POA&M assignee.".to_string())
-}
-
-fn fleet_risk(severity: &str) -> poam_api::PoamRisk {
-    match severity.to_ascii_lowercase().as_str() {
-        "critical" | "high" => poam_api::PoamRisk::High,
-        "medium" => poam_api::PoamRisk::Medium,
-        _ => poam_api::PoamRisk::Low,
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 enum FleetDetailState {
     Loading,
@@ -2189,7 +1904,7 @@ fn FleetCveTriageDialog(
     on_success: EventHandler<poam_api::FleetCveTriageResponse>,
     on_conflict: EventHandler<String>,
 ) -> Element {
-    let mut draft = use_signal(|| FleetTriageDraft::from_detail(&detail));
+    let mut draft = use_signal(|| CveTriageDraft::from_fleet_detail(&detail));
     let mut catalog = use_signal(|| None::<Result<poam_api::PoamAssigneeCatalog, String>>);
     let mut error = use_signal(|| None::<String>);
     let mut pending = use_signal(|| false);
@@ -2207,6 +1922,15 @@ fn FleetCveTriageDialog(
         .environments
         .iter()
         .any(|environment| environment.choice == EnvironmentTriageChoice::Scheduled);
+    let existing_poam_reuse = scheduled && draft.read().reuses_existing_poam();
+    let hydrated_assignee = draft.read().hydrated_assignee.clone();
+    let hydrated_assignee_in_catalog = hydrated_assignee.as_ref().is_some_and(|assignee| {
+        catalog
+            .read()
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .is_some_and(|catalog| catalog_contains_assignee(catalog, &assignee.value))
+    });
     let accepted_count = draft
         .read()
         .environments
@@ -2246,7 +1970,10 @@ fn FleetCveTriageDialog(
     );
     let submit_detail = detail.clone();
     let submit = move |_: MouseEvent| {
-        let request = match draft.read().request(&submit_detail.canonical_package_name) {
+        let request = match draft
+            .read()
+            .fleet_request(&submit_detail.canonical_package_name)
+        {
             Ok(request) => request,
             Err(message) => {
                 error.set(Some(message));
@@ -2320,15 +2047,22 @@ fn FleetCveTriageDialog(
                 }
                 if scheduled {
                     fieldset { class: "cve-triage-poam", legend { "Shared POA&M for scheduled environments" }
-                        div { class: "sd-callout sd-callout-info", "The POA&M owns remediation for scheduled exact subjects. Verification and closure require a later exact scan that no longer reports this CVE and package." }
+                        if existing_poam_reuse {
+                            div { class: "sd-callout sd-callout-info", "This schedule will reuse the existing compatible POA&M. Its metadata and milestones are not changed. Verification and closure require a later exact scan that no longer reports this CVE and package." }
+                        } else {
+                            div { class: "sd-callout sd-callout-info", "The POA&M owns remediation for scheduled exact subjects. Verification and closure require a later exact scan that no longer reports this CVE and package." }
+                        }
                         if let Some(message) = &draft.read().preservation_error { div { class: "sd-callout sd-callout-warn", role: "alert", "{message}" } }
-                        label { class: "field", span { "Title" } input { value: "{draft.read().title}", "data-testid": "cve-poam-title", oninput: move |event| draft.write().title = event.value() } }
-                        label { class: "field", span { "Target completion" } input { r#type: "date", value: "{draft.read().target_date}", "data-testid": "cve-poam-target", oninput: move |event| draft.write().target_date = event.value() } }
-                        label { class: "field", span { "Remediation plan" } textarea { value: "{draft.read().plan}", "data-testid": "cve-poam-plan", oninput: move |event| draft.write().plan = event.value() } }
+                        label { class: "field", span { "Title" } input { value: "{draft.read().title}", "data-testid": "cve-poam-title", readonly: existing_poam_reuse, oninput: move |event| draft.write().title = event.value() } }
+                        div { class: "cve-triage-poam-grid",
+                            label { class: "field", span { "Target completion" } input { r#type: "date", value: "{draft.read().target_date}", "data-testid": "cve-poam-target", readonly: existing_poam_reuse, oninput: move |event| draft.write().target_date = event.value() } }
+                            label { class: "field", span { "Risk" } select { value: "{risk_value(draft.read().risk)}", "data-testid": "cve-poam-risk", disabled: existing_poam_reuse, onchange: move |event| draft.write().risk = parse_risk(&event.value()), option { value: "high", "CAT I - High" } option { value: "medium", "CAT II - Medium" } option { value: "low", "CAT III - Low" } } }
+                        }
+                        label { class: "field", span { "Remediation plan" } textarea { value: "{draft.read().plan}", "data-testid": "cve-poam-plan", readonly: existing_poam_reuse, oninput: move |event| draft.write().plan = event.value() } }
                         label { class: "field", span { "Assignee · required" }
-                            select { value: "{draft.read().assignee}", "data-testid": "cve-poam-assignee", disabled: catalog.read().is_none(), onchange: move |event| draft.write().assignee = event.value(),
+                            select { value: "{draft.read().assignee}", "data-testid": "cve-poam-assignee", disabled: existing_poam_reuse || catalog.read().is_none(), onchange: move |event| draft.write().assignee = event.value(),
                                 option { value: "", disabled: true, "Select a user or group" }
-                                if let Some(label) = &draft.read().assignee_label { option { value: "{draft.read().assignee}", "{label} (current)" } }
+                                if let Some(assignee) = hydrated_assignee.as_ref().filter(|_| !hydrated_assignee_in_catalog) { option { value: "{assignee.value}", "{assignee.label} (current)" } }
                                 if let Some(Ok(catalog)) = &*catalog.read() {
                                     optgroup { label: "People", for person in &catalog.people { option { value: "user:{person.user_id}", "{person.label}" } } }
                                     optgroup { label: "Groups", for group in &catalog.groups { option { value: "group:{group.group_name}", "{group.group_name}" } } }
@@ -2336,7 +2070,11 @@ fn FleetCveTriageDialog(
                             }
                             if let Some(Err(message)) = &*catalog.read() { small { role: "alert", "Assignees unavailable: {message}" } }
                         }
-                        label { class: "poam-check", input { r#type: "checkbox", checked: draft.read().default_milestones, onchange: move |event| draft.write().default_milestones = event.checked() } span { "Add the default vulnerability remediation milestones" } }
+                        if existing_poam_reuse {
+                            small { "Existing milestones remain unchanged." }
+                        } else {
+                            label { class: "poam-check", input { r#type: "checkbox", checked: draft.read().default_milestones, onchange: move |event| draft.write().default_milestones = event.checked() } span { "Add the default vulnerability remediation milestones" } }
+                        }
                     }
                 }
             }
@@ -2352,9 +2090,9 @@ fn FleetCveTriageDialog(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        EnvironmentTriageChoice, EnvironmentTriageDraft, FleetDetailState, FleetTriageDraft,
-        ToastLifecycle, fleet_error_state, request_token_is_current,
+    use super::{FleetDetailState, ToastLifecycle, fleet_error_state, request_token_is_current};
+    use crate::components::cve::triage::{
+        CveTriageDraft, EnvironmentTriageChoice, EnvironmentTriageDraft,
     };
     use crate::views::poam_api::{
         self, CveEnvironmentTriageAction, PoamApiError, PoamRisk, PoamServerError,
@@ -2375,8 +2113,8 @@ mod tests {
         }
     }
 
-    fn triage_draft() -> FleetTriageDraft {
-        FleetTriageDraft {
+    fn triage_draft() -> CveTriageDraft {
+        CveTriageDraft {
             environments: vec![
                 environment(
                     "00000000-0000-0000-0000-0000000000a1",
@@ -2398,10 +2136,11 @@ mod tests {
             target_date: "2026-10-15".to_string(),
             plan: "Promote the fixed package through environments.".to_string(),
             assignee: "group:platform-operators".to_string(),
-            assignee_label: None,
+            hydrated_assignee: None,
             risk: PoamRisk::High,
             preservation_error: None,
             default_milestones: true,
+            existing_poam_reuse: false,
         }
     }
 
@@ -2515,20 +2254,20 @@ mod tests {
     fn triage_validation_requires_environment_specific_acceptance_fields() {
         let mut draft = triage_draft();
         assert_eq!(
-            draft.request("openssl").unwrap_err(),
+            draft.fleet_request("openssl").unwrap_err(),
             "Enter an acceptance justification of 10 to 2000 bytes for Development."
         );
 
         draft.environments[0].justification = "too short".to_string();
         assert_eq!(
-            draft.request("openssl").unwrap_err(),
+            draft.fleet_request("openssl").unwrap_err(),
             "Enter an acceptance justification of 10 to 2000 bytes for Development."
         );
 
         draft.environments[0].justification = "Internal-only service.".to_string();
         draft.environments[0].review_date = "not-a-date".to_string();
         assert_eq!(
-            draft.request("openssl").unwrap_err(),
+            draft.fleet_request("openssl").unwrap_err(),
             "Enter a valid review date for Development."
         );
     }
@@ -2539,14 +2278,14 @@ mod tests {
         draft.environments[0].justification = "Internal-only service.".to_string();
         draft.plan.clear();
         assert_eq!(
-            draft.request("openssl").unwrap_err(),
+            draft.fleet_request("openssl").unwrap_err(),
             "Enter a remediation plan for scheduled patching."
         );
 
         draft.plan = "Promote and verify the fixed package.".to_string();
         draft.assignee = "platform-operators".to_string();
         assert_eq!(
-            draft.request("openssl").unwrap_err(),
+            draft.fleet_request("openssl").unwrap_err(),
             "Select a valid POA&M assignee."
         );
     }
@@ -2556,7 +2295,7 @@ mod tests {
         let mut draft = triage_draft();
         draft.environments[0].justification = "Internal-only service.".to_string();
         draft.environments[0].review_date = "2026-10-01".to_string();
-        let request = draft.request("openssl").unwrap();
+        let request = draft.fleet_request("openssl").unwrap();
 
         assert!(matches!(
             request.actions[0],
@@ -2602,15 +2341,29 @@ mod tests {
                 "group:platform-operators",
             ),
         ] {
-            let draft = FleetTriageDraft::from_detail(&scheduled_detail(assignee, true, None));
+            let mut draft =
+                CveTriageDraft::from_fleet_detail(&scheduled_detail(assignee, true, None));
             assert_eq!(draft.title, "Existing fleet remediation");
             assert_eq!(draft.plan, "Preserve the exact remediation plan.");
             assert_eq!(draft.target_date, "2026-11-20");
             assert_eq!(draft.risk, PoamRisk::Medium);
             assert_eq!(draft.assignee, expected);
+            assert!(draft.reuses_existing_poam());
+            let hydrated = draft.hydrated_assignee.as_ref().unwrap();
+            assert_eq!(hydrated.value, expected);
+            let hydrated_label = hydrated.label.clone();
+            draft.assignee = "group:replacement-owner".to_string();
+            assert_eq!(draft.hydrated_assignee.as_ref().unwrap().value, expected);
+            assert_eq!(
+                draft.hydrated_assignee.as_ref().unwrap().label,
+                hydrated_label
+            );
+            draft.assignee = expected.to_string();
             assert!(draft.preservation_error.is_none());
-            let request = draft.request("openssl").unwrap();
-            assert_eq!(request.poam.unwrap().risk, PoamRisk::Medium);
+            let request = draft.fleet_request("openssl").unwrap();
+            let poam = request.poam.unwrap();
+            assert_eq!(poam.risk, PoamRisk::Medium);
+            assert!(!poam.default_milestones);
         }
     }
 
@@ -2623,26 +2376,26 @@ mod tests {
             "available": true
         });
         let mut old_server =
-            FleetTriageDraft::from_detail(&scheduled_detail(assignee.clone(), false, None));
+            CveTriageDraft::from_fleet_detail(&scheduled_detail(assignee.clone(), false, None));
         assert!(
             old_server
-                .request("openssl")
+                .fleet_request("openssl")
                 .unwrap_err()
                 .contains("server version")
         );
         for environment in &mut old_server.environments {
             environment.choice = EnvironmentTriageChoice::Open;
         }
-        assert!(old_server.request("openssl").unwrap().poam.is_none());
+        assert!(old_server.fleet_request("openssl").unwrap().poam.is_none());
 
-        let conflicting = FleetTriageDraft::from_detail(&scheduled_detail(
+        let conflicting = CveTriageDraft::from_fleet_detail(&scheduled_detail(
             assignee,
             true,
             Some("00000000-0000-0000-0000-0000000000d2"),
         ));
         assert!(
             conflicting
-                .request("openssl")
+                .fleet_request("openssl")
                 .unwrap_err()
                 .contains("different POA&Ms")
         );
@@ -2656,10 +2409,11 @@ mod tests {
             }),
             serde_json::json!({"kind": "legacy", "display": "Historical owner"}),
         ] {
-            let draft = FleetTriageDraft::from_detail(&scheduled_detail(unavailable, true, None));
+            let draft =
+                CveTriageDraft::from_fleet_detail(&scheduled_detail(unavailable, true, None));
             assert!(
                 draft
-                    .request("openssl")
+                    .fleet_request("openssl")
                     .unwrap_err()
                     .contains("no longer available")
             );
@@ -2682,7 +2436,7 @@ mod tests {
         detail.environments[1].legacy_affected_system_count = 1;
         detail.environments[1].disposition = None;
 
-        let draft = FleetTriageDraft::from_detail(&detail);
+        let draft = CveTriageDraft::from_fleet_detail(&detail);
 
         assert_eq!(draft.environments.len(), 1);
         assert_eq!(draft.environments[0].environment_name, "Production");
