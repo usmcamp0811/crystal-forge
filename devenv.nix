@@ -289,6 +289,10 @@ in
       # the UI and API, not real Nix evaluation/build/scan execution.
       export CRYSTAL_FORGE__SERVER__EXECUTION_MODE=mock
       export RUST_LOG="info,crystal_forge::fixtures::seed=debug"
+      # Lets the server's CORS layer accept this worktree's dynamically
+      # allocated web UI origin (see server.rs's `allowed_dev_origins`),
+      # which is not guaranteed to be one of that layer's fixed ports.
+      export CRYSTAL_FORGE_CORS_DEV_ORIGIN="http://127.0.0.1:${toString webPort}"
       # The core backend (no embedded UI build): the Dioxus dev server
       # below provides the UI, so building an unused embedded copy of it
       # into the API server on every UI source change would be wasted
@@ -355,6 +359,23 @@ in
   # direct PostgreSQL precondition check. Neither web-ui-test.sh nor its
   # underlying integration-test.js needs to change to consume these; they
   # already read exactly this set of variables.
+  #
+  # CONCURRENCY: these Nix-evaluation-time values are this module's best
+  # guess, computed by the same port-allocation primop `devenv up`'s native
+  # process manager uses, but a *separate* CLI invocation (a fresh
+  # `devenv shell`, run independently of whichever invocation is actually
+  # managing the running processes) is not guaranteed to reevaluate that
+  # primop identically — verified empirically while implementing this task:
+  # a `devenv shell` invocation can report a stale/different port than the
+  # one a concurrently running `devenv up` actually bound, particularly
+  # across an orphaned previous process-manager session for this same
+  # worktree. `enterShell` below re-derives these three variables from
+  # `devenv processes list`'s live output whenever a manager is already
+  # running for this worktree, which is authoritative, so a shell entered
+  # after `devenv up` reflects what is actually listening. Before any
+  # process is started, or if no manager is running, these Nix-level
+  # defaults are what a subsequent `devenv up` will very likely (though, by
+  # the same caveat, not with an absolute guarantee) resolve to.
   env = {
     DB_HOST = dbHost;
     DB_PORT = toString dbPort;
@@ -365,13 +386,38 @@ in
     CF_UI_DEV_API_BASE_URL = "http://127.0.0.1:${toString apiPort}";
   };
 
-  enterShell = ''
+  # `lib.mkAfter`: must run after the flake-compat module's own
+  # `enterShell` (unordered relative to this file otherwise), which is what
+  # puts `devenv` itself on `PATH` inside this shell; `devenv processes
+  # list` below depends on that.
+  enterShell = lib.mkAfter ''
+    resolved_db_port="${toString dbPort}"
+    resolved_api_port="${toString apiPort}"
+    resolved_web_port="${toString webPort}"
+    # CONCURRENCY: prefer the running process manager's own live-bound
+    # ports over the static Nix-evaluation-time guess above whenever a
+    # manager is already up for this worktree (see the `env` comment
+    # above for why the two can disagree). `devenv processes list`
+    # queries the manager directly rather than re-evaluating Nix, so it is
+    # authoritative for an already-running stack.
+    if live_processes="$(devenv processes list 2>/dev/null)"; then
+      live_db="$(printf '%s\n' "$live_processes" | ${pkgs.gawk}/bin/awk '/^postgres[[:space:]]/ { for (i = 1; i <= NF; i++) if ($i ~ /^main:/) print $i }' | cut -d: -f2)"
+      live_api="$(printf '%s\n' "$live_processes" | ${pkgs.gawk}/bin/awk '/^api[[:space:]]/ { for (i = 1; i <= NF; i++) if ($i ~ /^http:/) print $i }' | cut -d: -f2)"
+      live_web="$(printf '%s\n' "$live_processes" | ${pkgs.gawk}/bin/awk '/^web[[:space:]]/ { for (i = 1; i <= NF; i++) if ($i ~ /^http:/) print $i }' | cut -d: -f2)"
+      [ -n "$live_db" ] && resolved_db_port="$live_db"
+      [ -n "$live_api" ] && resolved_api_port="$live_api"
+      [ -n "$live_web" ] && resolved_web_port="$live_web"
+    fi
+    export DB_PORT="$resolved_db_port"
+    export CF_UI_DEV_API_BASE_URL="http://127.0.0.1:$resolved_api_port"
+    export CF_UI_DEV_BASE_URL="http://127.0.0.1:$resolved_web_port"
+
     echo "🔮 Crystal Forge devenv workflow (TASK-462.1)"
     echo ""
     echo "  Worktree root:  ${config.devenv.root}"
-    echo "  PostgreSQL:     127.0.0.1:${toString dbPort} (crystal_forge/crystal_forge)"
-    echo "  API server:     http://127.0.0.1:${toString apiPort}"
-    echo "  Web UI:         http://127.0.0.1:${toString webPort}"
+    echo "  PostgreSQL:     127.0.0.1:$resolved_db_port (crystal_forge/crystal_forge)"
+    echo "  API server:     http://127.0.0.1:$resolved_api_port"
+    echo "  Web UI:         http://127.0.0.1:$resolved_web_port"
     echo ""
     echo "  devenv up          → start PostgreSQL + API server + web UI dev server"
     echo "  devenv processes list  → show resolved ports and process status"
