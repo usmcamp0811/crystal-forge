@@ -7,6 +7,89 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Selects a server-validated POA&M assignee.
+///
+/// User and group labels are not accepted from clients. The server resolves a
+/// display snapshot from the stable identity. `Unassigned` clears both the
+/// typed identity and the compatibility `owner` snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PoamAssigneeRequest {
+    /// Assigns an active human user by stable UUID.
+    User {
+        /// Identifies the user to assign.
+        user_id: Uuid,
+    },
+    /// Assigns a currently configured OIDC group by normalized name.
+    OidcGroup {
+        /// Gives the group name that the server must normalize and resolve.
+        group_name: String,
+    },
+    /// Removes the current assignment.
+    Unassigned,
+}
+
+/// Reports the typed or compatibility assignee represented by a POA&M.
+///
+/// `available` reports current catalog eligibility. The persisted stable
+/// identity and display snapshot remain available when a user is disabled or
+/// an OIDC mapping is removed. `Legacy` represents pre-typed owner text that
+/// the server did not infer into an identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PoamAssigneeView {
+    /// Reports a user assignment and its server-resolved display snapshot.
+    User {
+        /// Identifies the assigned user.
+        user_id: Uuid,
+        /// Contains the display label captured when the assignment changed.
+        display: String,
+        /// Indicates whether the user is currently active and human.
+        available: bool,
+    },
+    /// Reports an OIDC group assignment and its normalized display snapshot.
+    OidcGroup {
+        /// Contains the normalized stable group name.
+        group_name: String,
+        /// Contains the display label captured when the assignment changed.
+        display: String,
+        /// Indicates whether the group mapping is currently configured.
+        available: bool,
+    },
+    /// Reports an explicit or legacy unassigned POA&M.
+    Unassigned,
+    /// Reports compatibility owner text with no inferred stable identity.
+    Legacy {
+        /// Contains the preserved compatibility owner text.
+        display: String,
+    },
+}
+
+/// Identifies one active human user available for POA&M assignment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PoamAssigneePerson {
+    /// Identifies the user without exposing account or authorization metadata.
+    pub user_id: Uuid,
+    /// Gives the server-resolved safe display label.
+    pub label: String,
+}
+
+/// Identifies one configured OIDC group available for POA&M assignment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PoamAssigneeGroup {
+    /// Gives the normalized group name and no mapping authorization metadata.
+    pub group_name: String,
+}
+
+/// Provides the bounded POA&M assignee catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoamAssigneeCatalog {
+    /// Lists active human users in deterministic display order.
+    pub people: Vec<PoamAssigneePerson>,
+    /// Lists configured normalized OIDC groups in deterministic name order.
+    pub groups: Vec<PoamAssigneeGroup>,
+}
+
 /// Represents the persisted lifecycle state of a POA&M.
 ///
 /// `Open`, `InProgress`, and `Blocked` can transition among each other or to
@@ -85,9 +168,14 @@ pub struct CreatePoamRequest {
     /// Gives the remediation plan; an empty value records no plan yet.
     #[serde(default)]
     pub plan: String,
-    /// Identifies the responsible person or team; an empty value is unassigned.
+    /// Preserves the free-form compatibility owner for legacy clients.
+    ///
+    /// New clients use `assignee` and send this field as an empty string.
     #[serde(default)]
     pub owner: String,
+    /// Selects a typed assignee when present.
+    #[serde(default)]
+    pub assignee: Option<PoamAssigneeRequest>,
     /// Gives the planned completion date when one has been selected.
     pub target_date: Option<NaiveDate>,
     /// Classifies the remediation risk.
@@ -98,6 +186,64 @@ pub struct CreatePoamRequest {
     /// Links immutable assignment versions that define the remediation scope.
     #[serde(default)]
     pub assignment_version_ids: Vec<Uuid>,
+}
+
+/// Requests creation of a POA&M from one exact CVE occurrence.
+///
+/// The observation is issued by the CVE relationship endpoint. The server
+/// re-resolves every identity against current deployed schema-1 evidence.
+#[derive(Debug, Deserialize)]
+pub struct CreateCvePoamRequest {
+    /// Identifies the exact current scanner occurrence shown to the caller.
+    pub observation: CveObservationReference,
+    /// Gives the operator-facing remediation title.
+    pub title: String,
+    /// Gives the remediation plan; an empty value records no plan yet.
+    #[serde(default)]
+    pub plan: String,
+    /// Preserves the free-form compatibility owner for legacy clients.
+    #[serde(default)]
+    pub owner: String,
+    /// Selects a typed assignee when present.
+    #[serde(default)]
+    pub assignee: Option<PoamAssigneeRequest>,
+    /// Gives the planned completion date when one has been selected.
+    pub target_date: Option<NaiveDate>,
+    /// Classifies the remediation risk.
+    pub risk: PoamRisk,
+    /// Requests the server's standard milestone set when true.
+    #[serde(default = "default_true")]
+    pub default_milestones: bool,
+    /// Links immutable assignment versions that overlap the affected system.
+    #[serde(default)]
+    pub assignment_version_ids: Vec<Uuid>,
+}
+
+/// Identifies one immutable occurrence in a completed exact-evidence scan.
+///
+/// Clients must treat this value as opaque server-issued context. Package
+/// version is not part of stable finding identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CveObservationReference {
+    /// Identifies the affected system.
+    pub system_id: Uuid,
+    /// Identifies the latest completed schema-1 scan for the deployed target.
+    pub scan_id: Uuid,
+    /// Gives the exact package derivation path recorded by that scan.
+    pub occurrence_derivation_path: String,
+    /// Gives the canonical CVE identifier recorded by that scan.
+    pub canonical_cve_id: String,
+    /// Gives the canonical package pname that completes stable finding identity.
+    pub canonical_package_name: String,
+}
+
+/// Requests linking one current exact CVE occurrence to an existing POA&M.
+#[derive(Debug, Deserialize)]
+pub struct AddCveFindingRequest {
+    /// Requires the current POA&M revision to prevent lost links.
+    pub revision: i64,
+    /// Identifies the server-issued current occurrence to link.
+    pub observation: CveObservationReference,
 }
 
 fn default_true() -> bool {
@@ -113,8 +259,12 @@ pub struct UpdatePoamRequest {
     pub title: Option<String>,
     /// Replaces the remediation plan when present.
     pub plan: Option<String>,
-    /// Replaces the responsible owner when present.
+    /// Replaces the free-form compatibility owner when present.
+    ///
+    /// This field cannot be combined with `assignee`.
     pub owner: Option<String>,
+    /// Replaces the typed assignee when present.
+    pub assignee: Option<PoamAssigneeRequest>,
     /// Replaces, clears, or preserves the target date.
     pub target_date: Option<Option<NaiveDate>>,
     /// Replaces the risk classification when present.
@@ -394,7 +544,7 @@ pub struct HistoryCursor {
 }
 
 /// Summarizes one POA&M for lists and relationship responses.
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct PoamSummary {
     /// Identifies the POA&M internally.
     pub id: Uuid,
@@ -404,8 +554,11 @@ pub struct PoamSummary {
     pub title: String,
     /// Gives the current remediation plan.
     pub plan: String,
-    /// Identifies the responsible person or team.
+    /// Contains the compatibility display snapshot used by legacy clients.
     pub owner: String,
+    /// Reports typed identity, display snapshot, and current availability.
+    #[sqlx(json)]
+    pub assignee: PoamAssigneeView,
     /// Gives the planned completion date.
     pub target_date: Option<NaiveDate>,
     /// Gives the normalized risk classification.
@@ -418,6 +571,9 @@ pub struct PoamSummary {
     pub overdue: bool,
     /// Counts active findings, or the closure finding set for a completed POA&M.
     pub finding_count: i64,
+    /// Counts exact-CVE findings without changing policy finding semantics.
+    #[serde(default)]
+    pub cve_finding_count: i64,
     /// Records when the POA&M was created.
     pub created_at: DateTime<Utc>,
     /// Records the most recent POA&M mutation.
@@ -426,6 +582,44 @@ pub struct PoamSummary {
     pub closed_at: Option<DateTime<Utc>>,
     /// Identifies the verification attempt that closed the POA&M.
     pub closure_attempt_id: Option<Uuid>,
+}
+
+/// Reports active and historical POA&M links for an exact CVE occurrence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CvePoamRelationship {
+    /// Identifies the stable exact-CVE finding when it has been materialized.
+    pub cve_finding_id: Option<Uuid>,
+    /// Provides the server-issued current occurrence accepted by mutations.
+    pub observation: CveObservationReference,
+    /// Gives the observed package name.
+    pub observed_package_name: String,
+    /// Gives the observed package version as evidence, not finding identity.
+    pub observed_package_version: String,
+    /// Indicates whether scanner evidence whitelisted the occurrence.
+    pub is_whitelisted: bool,
+    /// Indicates whether a current system or fleet justification applies.
+    pub is_justified: bool,
+    /// Gives the single active remediation, if one exists.
+    pub active_poam: Option<PoamSummary>,
+    /// Gives the requested page of inactive historical remediations.
+    pub historical_poams: Vec<PoamSummary>,
+    /// Indicates that another historical page is available.
+    pub historical_has_more: bool,
+    /// Provides the offset for the next historical page.
+    pub historical_next_offset: Option<i64>,
+}
+
+/// Selects one current exact-CVE occurrence for relationship hydration.
+#[derive(Debug, Clone)]
+pub struct CveRelationshipRowKey {
+    /// Gives the canonical CVE identifier returned by the vulnerability row.
+    pub canonical_cve_id: String,
+    /// Gives the canonical package identity returned by the vulnerability row.
+    pub canonical_package_name: String,
+    /// Identifies the exact scan that supplied the row evidence.
+    pub scan_id: Uuid,
+    /// Identifies the exact package occurrence that supplied the row evidence.
+    pub occurrence_derivation_path: String,
 }
 
 /// Reports active and historical POA&M links for one finding.
@@ -534,6 +728,61 @@ pub struct FindingView {
     pub requirements: sqlx::types::Json<Vec<FindingRequirementView>>,
 }
 
+/// Reports one exact-CVE finding link and its current evidence context.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct CveFindingView {
+    /// Identifies the stable exact-CVE finding.
+    pub id: Uuid,
+    /// Identifies the affected system.
+    pub system_id: Uuid,
+    /// Gives the system hostname used for display.
+    pub hostname: String,
+    /// Identifies the system environment when assigned.
+    pub environment_id: Option<Uuid>,
+    /// Gives the canonical CVE identifier.
+    pub canonical_cve_id: String,
+    /// Gives the canonical package pname.
+    pub canonical_package_name: String,
+    /// Identifies this POA&M-to-finding link.
+    pub link_id: Uuid,
+    /// Records when the finding was linked.
+    pub linked_at: DateTime<Utc>,
+    /// Identifies the user who linked the finding.
+    pub linked_by: Uuid,
+    /// Records when this link stopped being active.
+    pub retired_at: Option<DateTime<Utc>>,
+    /// Identifies the user who retired the link.
+    pub retired_by: Option<Uuid>,
+    /// Explains why the link was retired.
+    pub retirement_reason: Option<String>,
+    /// Indicates whether this link participates in current remediation.
+    pub link_active: bool,
+    /// Identifies the immutable scan captured when the finding was linked.
+    pub baseline_scan_id: Uuid,
+    /// Records when the immutable baseline scan completed.
+    pub baseline_scan_completed_at: DateTime<Utc>,
+    /// Gives the retained deployed generation captured at link time.
+    pub baseline_generation: i32,
+    /// Gives the retained deployed store path captured at link time.
+    pub baseline_target_store_path: String,
+    /// Gives the exact immutable package occurrence captured at link time.
+    pub baseline_occurrence_derivation_path: String,
+    /// Gives the scanner-observed package version captured at link time.
+    pub baseline_observed_package_version: String,
+    /// Identifies the current deployed derivation when resolvable.
+    pub current_derivation_id: Option<i32>,
+    /// Gives the current deployed store path when resolvable.
+    pub current_target_store_path: Option<String>,
+    /// Identifies the latest completed schema-1 scan for that derivation.
+    pub current_scan_id: Option<Uuid>,
+    /// Gives the current exact occurrence path when present.
+    pub current_occurrence_derivation_path: Option<String>,
+    /// Gives the current observed package version when present.
+    pub current_observed_package_version: Option<String>,
+    /// Gives the current exact-CVE resolution state.
+    pub resolution_state: String,
+}
+
 /// Reports one ordered remediation milestone.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct MilestoneView {
@@ -603,6 +852,64 @@ pub struct VerificationAttemptView {
     pub attempted_at: DateTime<Utc>,
     /// Reports the immutable per-finding observations in the attempt.
     pub items: Vec<VerificationItemView>,
+    /// Reports immutable exact-CVE results without changing `items` semantics.
+    #[serde(default)]
+    pub cve_items: Vec<CveVerificationItemView>,
+}
+
+/// Reports one immutable exact-CVE verification result.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct CveVerificationItemView {
+    /// Identifies the parent verification attempt.
+    pub attempt_id: Uuid,
+    /// Identifies the stable exact-CVE finding.
+    pub cve_finding_id: Uuid,
+    /// Identifies the affected system.
+    pub system_id: Uuid,
+    /// Gives the canonical CVE identifier.
+    pub canonical_cve_id: String,
+    /// Gives the canonical package pname.
+    pub canonical_package_name: String,
+    /// Identifies the immutable scan that supplied the linked occurrence.
+    pub baseline_scan_id: Uuid,
+    /// Identifies the immutable link-time deployed derivation.
+    pub baseline_scan_derivation_id: i32,
+    /// Records when the immutable baseline scan completed.
+    pub baseline_scan_completed_at: DateTime<Utc>,
+    /// Identifies the retained generation row used at link time.
+    pub baseline_generation_snapshot_id: Uuid,
+    /// Gives the deployed generation number used at link time.
+    pub baseline_generation: i32,
+    /// Gives the deployed store path used at link time.
+    pub baseline_target_store_path: String,
+    /// Gives the exact occurrence derivation path linked for remediation.
+    pub baseline_occurrence_derivation_path: String,
+    /// Gives the package version observed by the baseline scan.
+    pub baseline_observed_package_version: String,
+    /// Gives the normalized verification result.
+    pub result: String,
+    /// Identifies the authoritative scan when one exists.
+    pub scan_id: Option<Uuid>,
+    /// Identifies the scanned deployed derivation when one exists.
+    pub scan_derivation_id: Option<i32>,
+    /// Records when the authoritative scan completed.
+    pub scan_completed_at: Option<DateTime<Utc>>,
+    /// Identifies the retained generation row used for current verification.
+    pub generation_snapshot_id: Option<Uuid>,
+    /// Gives the deployed generation number used for current verification.
+    pub generation: Option<i32>,
+    /// Gives the exact deployed store path that was verified.
+    pub target_store_path: Option<String>,
+    /// Indicates whether the exact occurrence remained present.
+    pub occurrence_present: bool,
+    /// Gives the occurrence derivation path when present.
+    pub occurrence_derivation_path: Option<String>,
+    /// Gives the immutable package version observed by the cited scan.
+    pub observed_package_version: Option<String>,
+    /// Records when verification observed the evidence.
+    pub observed_at: DateTime<Utc>,
+    /// Explains the result.
+    pub detail: String,
 }
 
 /// Reports one immutable finding observation from a verification attempt.
@@ -679,14 +986,17 @@ pub struct ActivityView {
     pub created_at: DateTime<Utc>,
 }
 
-/// Reports a POA&M with bounded independent evidence and activity histories.
+/// Reports a POA&M with bounded evidence and activity histories.
 #[derive(Debug, Serialize)]
 pub struct PoamDetail {
     /// Provides the POA&M's current summary and optimistic revision.
     #[serde(flatten)]
     pub poam: PoamSummary,
-    /// Gives the requested page of linked findings.
+    /// Gives policy links selected by the shared finding-history page.
     pub findings: Vec<FindingView>,
+    /// Gives exact-CVE links selected by the shared finding-history page.
+    #[serde(default)]
+    pub cve_findings: Vec<CveFindingView>,
     /// Indicates that an older findings page is available.
     pub findings_has_more: bool,
     /// Selects the next older findings page when present.

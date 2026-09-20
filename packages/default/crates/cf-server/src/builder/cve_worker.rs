@@ -38,12 +38,14 @@ use crate::queries::cve_scans::{
     acquire_execution_lock, claim_queued_cve_scans, create_cve_scan,
     get_targets_needing_cve_rescan, get_targets_needing_cve_scan, heartbeat_cve_scan_execution,
     mark_cve_scan_failed_by_id_for_execution, mark_cve_scan_failed_for_execution,
-    recover_stale_scans, release_execution_lock_or_close, requeue_cve_scan_execution,
-    save_scan_results_for_execution,
+    mark_cve_scan_failed_with_diagnostics_for_execution, recover_stale_scans,
+    release_execution_lock_or_close, requeue_cve_scan_execution,
+    save_scan_results_with_diagnostics_for_execution,
 };
 use crate::queries::derivations::get_derivation_by_id;
 use crate::queries::scanning::get_scan_schedule_policy;
 use crate::server::jobs::BackgroundJobHandle;
+use crate::vulnix::process_group::{ScannerProcessGroup, isolate};
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::{Context, Result};
 use axum::async_trait;
@@ -70,7 +72,10 @@ trait CveScanRunner {
         pool: &PgPool,
         derivation_id: i32,
         vulnix_version: Option<String>,
-    ) -> Result<crate::vulnix::vulnix_parser::VulnixScanOutput>;
+    ) -> std::result::Result<
+        crate::vulnix::vulnix_runner::VulnixScanExecution,
+        crate::vulnix::vulnix_runner::VulnixScanExecutionError,
+    >;
 }
 
 #[async_trait]
@@ -80,8 +85,12 @@ impl CveScanRunner for VulnixRunner {
         pool: &PgPool,
         derivation_id: i32,
         vulnix_version: Option<String>,
-    ) -> Result<crate::vulnix::vulnix_parser::VulnixScanOutput> {
-        VulnixRunner::scan_derivation(self, pool, derivation_id, vulnix_version).await
+    ) -> std::result::Result<
+        crate::vulnix::vulnix_runner::VulnixScanExecution,
+        crate::vulnix::vulnix_runner::VulnixScanExecutionError,
+    > {
+        VulnixRunner::scan_derivation_with_diagnostics(self, pool, derivation_id, vulnix_version)
+            .await
     }
 }
 
@@ -208,6 +217,14 @@ pub async fn run_cve_scan_loop(
     let mut enabled_changed_rx = job.state.enabled_changed_tx.subscribe();
 
     loop {
+        // Remote lease recovery is server coordination. It must continue when
+        // the optional server-local vulnix executor is disabled or unavailable.
+        match crate::queries::cve_scan_leases::requeue_expired_remote_cve_scans(&pool, 32).await {
+            Ok(n) if n > 0 => warn!("Recovered {n} expired remote CVE scan lease(s)"),
+            Ok(_) => {}
+            Err(e) => error!("Failed to recover remote CVE scan leases: {e}"),
+        }
+
         // Honour the enabled flag — sleep the full interval and skip work when disabled.
         let enabled = *enabled_rx.read().await;
         if !enabled {
@@ -986,16 +1003,58 @@ async fn execute_scan_inner_with_nix_program<R: CveScanRunner + Sync>(
     }
 
     let start = std::time::Instant::now();
+    let attempt_started = cf_protocol::builder::CveScanDiagnostic {
+        occurred_at: Utc::now(),
+        level: "info".to_string(),
+        source: "server".to_string(),
+        event_type: "attempt_started".to_string(),
+        message: "Local CVE scan attempt started.".to_string(),
+        truncated: false,
+    };
     match vulnix_runner
         .scan_derivation(pool, derivation.id, vulnix_version)
         .await
     {
-        Ok(entries) => {
+        Ok(output) => {
             let elapsed_ms = Some(start.elapsed().as_millis() as i32);
-            let stats = crate::vulnix::vulnix_parser::VulnixParser::calculate_stats(&entries);
-            if let Err(err) =
-                save_scan_results_for_execution(pool, scan_id, &entries, elapsed_ms, execution_id)
-                    .await
+            let stats =
+                crate::vulnix::vulnix_parser::VulnixParser::calculate_stats(&output.entries);
+            let mut raw_diagnostics = vec![attempt_started];
+            if !output.stderr.trim().is_empty() {
+                raw_diagnostics.push(cf_protocol::builder::CveScanDiagnostic {
+                    occurred_at: Utc::now(),
+                    level: "warning".to_string(),
+                    source: "vulnix".to_string(),
+                    event_type: "output".to_string(),
+                    message: output.stderr,
+                    truncated: output.stderr_truncated,
+                });
+            }
+            raw_diagnostics.push(cf_protocol::builder::CveScanDiagnostic {
+                occurred_at: Utc::now(),
+                level: "info".to_string(),
+                source: "server".to_string(),
+                event_type: "attempt_completed".to_string(),
+                message: format!(
+                    "Vulnix exited with code {} and produced {} package entries.",
+                    output
+                        .exit_code
+                        .map_or_else(|| "signal".to_string(), |code| code.to_string()),
+                    output.entries.len()
+                ),
+                truncated: false,
+            });
+            let diagnostics =
+                crate::queries::cve_scan_diagnostics::prepare_diagnostics(&raw_diagnostics);
+            if let Err(err) = save_scan_results_with_diagnostics_for_execution(
+                pool,
+                scan_id,
+                &output.entries,
+                elapsed_ms,
+                execution_id,
+                &diagnostics,
+            )
+            .await
             {
                 mark_scan_failed_for_owner(
                     pool,
@@ -1013,16 +1072,45 @@ async fn execute_scan_inner_with_nix_program<R: CveScanRunner + Sync>(
             );
         }
         Err(e) => {
+            let redacted_error = crate::security::snapshot_redaction::redact_text(&e.to_string());
+            let error_truncated = redacted_error.chars().count()
+                > crate::queries::cve_scan_diagnostics::MAX_DIAGNOSTIC_CHARS;
+            let safe_error = redacted_error
+                .chars()
+                .take(crate::queries::cve_scan_diagnostics::MAX_DIAGNOSTIC_CHARS)
+                .collect::<String>();
             error!(
                 "❌ CVE scan failed for {}: {}",
-                derivation.derivation_name, e
+                derivation.derivation_name, safe_error
             );
-            mark_cve_scan_failed_for_execution(
+            let mut raw_diagnostics = vec![attempt_started];
+            if !e.stderr.trim().is_empty() {
+                raw_diagnostics.push(cf_protocol::builder::CveScanDiagnostic {
+                    occurred_at: Utc::now(),
+                    level: "error".to_string(),
+                    source: "vulnix".to_string(),
+                    event_type: "output".to_string(),
+                    message: e.stderr,
+                    truncated: e.stderr_truncated,
+                });
+            }
+            raw_diagnostics.push(cf_protocol::builder::CveScanDiagnostic {
+                occurred_at: Utc::now(),
+                level: "error".to_string(),
+                source: "vulnix".to_string(),
+                event_type: "attempt_failed".to_string(),
+                message: safe_error.clone(),
+                truncated: error_truncated,
+            });
+            let diagnostics =
+                crate::queries::cve_scan_diagnostics::prepare_diagnostics(&raw_diagnostics);
+            mark_cve_scan_failed_with_diagnostics_for_execution(
                 pool,
                 scan_id,
                 derivation,
-                &e.to_string(),
+                &safe_error,
                 execution_id,
+                &diagnostics,
             )
             .await
             .context("Failed to persist CVE scanner failure")?;
@@ -1281,12 +1369,12 @@ async fn copy_path_from_cache_with_program(
         command.env("NIX_CONFIG", source.nix_config_lines.join("\n") + "\n");
     }
 
-    // `kill_on_drop` prevents a timed-out cache copy from outliving the worker.
-    let mut child = command
-        .arg(store_path)
-        .kill_on_drop(true)
+    command.arg(store_path);
+    isolate(&mut command);
+    let child = command
         .spawn()
         .with_context(|| format!("Failed to spawn nix copy from {}", source.from_url))?;
+    let mut child = ScannerProcessGroup::new(child, "CVE nix copy")?;
 
     let wait_result = match timeout(copy_timeout, child.wait()).await {
         Ok(result) => result?,
@@ -1297,11 +1385,11 @@ async fn copy_path_from_cache_with_program(
                 copy_timeout.as_secs(),
                 store_path
             );
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            child.terminate().await;
             return Ok(false);
         }
     };
+    child.disarm();
 
     if !wait_result.success() {
         warn!(
@@ -1405,10 +1493,126 @@ mod tests {
             _pool: &PgPool,
             _derivation_id: i32,
             _vulnix_version: Option<String>,
-        ) -> Result<crate::vulnix::vulnix_parser::VulnixScanOutput> {
+        ) -> std::result::Result<
+            crate::vulnix::vulnix_runner::VulnixScanExecution,
+            crate::vulnix::vulnix_runner::VulnixScanExecutionError,
+        > {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(vec![])
+            Ok(crate::vulnix::vulnix_runner::VulnixScanExecution {
+                entries: vec![],
+                stderr: String::new(),
+                stderr_truncated: false,
+                exit_code: Some(0),
+            })
         }
+    }
+
+    struct FailingDiagnosticRunner;
+
+    #[async_trait]
+    impl CveScanRunner for FailingDiagnosticRunner {
+        async fn scan_derivation(
+            &self,
+            _pool: &PgPool,
+            _derivation_id: i32,
+            _vulnix_version: Option<String>,
+        ) -> std::result::Result<
+            crate::vulnix::vulnix_runner::VulnixScanExecution,
+            crate::vulnix::vulnix_runner::VulnixScanExecutionError,
+        > {
+            Err(
+                crate::vulnix::vulnix_runner::VulnixScanExecutionError::test_fixture(
+                    "vulnix timed out after 1 seconds",
+                    "Authorization: Bearer local-timeout-secret\nretained timeout context",
+                    false,
+                ),
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn local_failure_persists_redacted_stderr_without_double_counting_attempt() {
+        let Some(pool) = db_test_pool().await else {
+            return;
+        };
+        let directory = tempdir().expect("local diagnostic fixture directory");
+        let store_path = directory.path().join("system-output");
+        let derivation_path = directory.path().join("system.drv");
+        tokio::fs::write(&store_path, b"output")
+            .await
+            .expect("output fixture should exist");
+        tokio::fs::write(&derivation_path, b"derivation")
+            .await
+            .expect("derivation fixture should exist");
+        let derivation = insert_derivation(
+            &pool,
+            None,
+            &format!("local-diagnostic-{}", Uuid::new_v4()),
+            "nixos",
+        )
+        .await
+        .expect("diagnostic derivation should be inserted");
+        sqlx::query(
+            "UPDATE derivations SET store_path=$2, derivation_path=$3, status_id=$4, completed_at=NOW() WHERE id=$1",
+        )
+        .bind(derivation.id)
+        .bind(store_path.to_string_lossy().to_string())
+        .bind(derivation_path.to_string_lossy().to_string())
+        .bind(EvaluationStatus::BuildComplete.as_id())
+        .execute(&pool)
+        .await
+        .expect("diagnostic derivation paths should persist");
+        let derivation = get_derivation_by_id(&pool, derivation.id)
+            .await
+            .expect("diagnostic derivation should reload");
+        let claim = match create_cve_scan(&pool, derivation.id, "vulnix", Some("test".into()))
+            .await
+            .expect("local diagnostic claim should persist")
+        {
+            CreateCveScanOutcome::Created(claim) => claim,
+            CreateCveScanOutcome::Existing(_) => panic!("diagnostic fixture must create a scan"),
+        };
+
+        execute_scan(
+            &pool,
+            &FailingDiagnosticRunner,
+            Some("test".to_string()),
+            &derivation,
+            claim.scan_id,
+            claim.execution_id,
+        )
+        .await
+        .expect("scanner failure should persist as a terminal scan outcome");
+
+        let (status, attempts): (String, i32) =
+            sqlx::query_as("SELECT status, attempts FROM cve_scans WHERE id=$1")
+                .bind(claim.scan_id)
+                .fetch_one(&pool)
+                .await
+                .expect("failed scan should be queryable");
+        assert_eq!((status.as_str(), attempts), ("failed", 1));
+        let diagnostics: Vec<String> = sqlx::query_scalar(
+            "SELECT message FROM cve_scan_diagnostic_events WHERE scan_id=$1 ORDER BY id",
+        )
+        .bind(claim.scan_id)
+        .fetch_all(&pool)
+        .await
+        .expect("local diagnostics should be queryable");
+        let diagnostics = diagnostics.join("\n");
+        assert!(diagnostics.contains("retained timeout context"));
+        assert!(diagnostics.contains("[REDACTED]"));
+        assert!(!diagnostics.contains("local-timeout-secret"));
+
+        sqlx::query("DELETE FROM cve_scans WHERE id=$1")
+            .bind(claim.scan_id)
+            .execute(&pool)
+            .await
+            .expect("diagnostic scan cleanup should succeed");
+        sqlx::query("DELETE FROM derivations WHERE id=$1")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("diagnostic derivation cleanup should succeed");
     }
 
     /// Proves a deployed output that reports `unknown-deriver` still uses the
@@ -1678,7 +1882,10 @@ mod tests {
             _pool: &PgPool,
             _derivation_id: i32,
             _vulnix_version: Option<String>,
-        ) -> Result<crate::vulnix::vulnix_parser::VulnixScanOutput> {
+        ) -> std::result::Result<
+            crate::vulnix::vulnix_runner::VulnixScanExecution,
+            crate::vulnix::vulnix_runner::VulnixScanExecutionError,
+        > {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_active.fetch_max(active, Ordering::SeqCst);
@@ -1695,7 +1902,12 @@ mod tests {
                 .context("blocking test runner semaphore closed")?;
             permit.forget();
             guard.completed = true;
-            Ok(vec![])
+            Ok(crate::vulnix::vulnix_runner::VulnixScanExecution {
+                entries: vec![],
+                stderr: String::new(),
+                stderr_truncated: false,
+                exit_code: Some(0),
+            })
         }
     }
 

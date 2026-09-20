@@ -21,18 +21,53 @@ WITH generation_rows AS (
 SELECT
     gr.generation,
     gr.store_path,
-    commit_link.commit_hash,
-    gr.first_seen_at AS timestamp
+    COALESCE(retained_commit.git_commit_hash, commit_link.commit_hash) AS commit_hash,
+    gr.first_seen_at AS timestamp,
+    retained.id AS generation_snapshot_id,
+    COALESCE(
+      retained.id IS NOT NULL
+      AND retained.lineage_verified
+      AND retained.source_store_path IS NOT NULL
+      AND BTRIM(retained.source_store_path) <> ''
+       AND artifact.lifecycle = 'available'
+       AND artifact.integrity_version = 1
+      AND derivation.id IS NOT NULL
+      AND derivation.derivation_type = 'nixos'
+      AND retained.source_store_path = COALESCE(
+        derivation.store_path, derivation.expected_store_path
+      ),
+      FALSE
+    ) AS rollback_eligible
 FROM generation_rows gr
+LEFT JOIN evaluation_generation_snapshots retained
+  ON retained.system_id = $1 AND retained.generation = gr.generation
+LEFT JOIN evaluation_snapshots artifact ON artifact.id = retained.snapshot_id
+LEFT JOIN commits retained_commit
+  ON retained_commit.id = retained.commit_id
+ AND retained_commit.git_commit_hash ~ '^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$'
+LEFT JOIN derivations derivation
+  ON derivation.id = retained.derivation_id
+ AND derivation.commit_id = retained.commit_id
+ AND derivation.derivation_name = retained.configuration_name
 LEFT JOIN LATERAL (
-  SELECT c.git_commit_hash AS commit_hash
-  FROM derivations d
-  JOIN commits c ON c.id = d.commit_id
-  WHERE gr.store_path IS NOT NULL
-    AND gr.store_path = COALESCE(d.store_path, d.expected_store_path)
-    AND d.derivation_type = 'nixos'
-  ORDER BY d.id DESC
-  LIMIT 1
+  SELECT MIN(candidate.git_commit_hash) AS commit_hash
+  FROM (
+    SELECT DISTINCT c.id, c.git_commit_hash
+    FROM systems system
+    JOIN commits c ON c.flake_id = system.flake_id
+    JOIN derivations d ON d.commit_id = c.id
+    WHERE system.id = $1
+      AND gr.store_path IS NOT NULL
+      AND BTRIM(gr.store_path) <> ''
+      AND gr.store_path = COALESCE(d.store_path, d.expected_store_path)
+      AND d.derivation_type = 'nixos'
+      AND c.source_archived = FALSE
+      AND c.git_commit_hash ~ '^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$'
+      AND BTRIM(d.derivation_name) = COALESCE(
+        NULLIF(BTRIM(system.system_configuration_name), ''), system.hostname
+      )
+  ) candidate
+  HAVING COUNT(*) = 1
 ) commit_link ON TRUE
 ORDER BY gr.generation DESC
 "#;
@@ -183,13 +218,36 @@ pub async fn get_latest_system_state_id(pool: &PgPool, hostname: &str) -> Result
     Ok(row)
 }
 
-/// Row type for system generation history
+/// Describes one observed system generation and its retained Config identity.
+///
+/// The generation number is local to the owning system. The server-issued
+/// [`Self::generation_snapshot_id`] identifies the retained artifact row and is
+/// authoritative when a client supplies an artifact identity. Neither
+/// [`Self::store_path`] nor [`Self::commit_hash`] grants access or authorizes a
+/// rollback. [`Self::rollback_eligible`] reports a separate lineage decision; a
+/// complete retained artifact remains Config-readable when legacy deployment or
+/// store lineage cannot be verified.
 #[derive(Debug, sqlx::FromRow)]
 pub struct SystemGenerationRow {
+    /// System-local generation number reported by the agent.
     pub generation: i32,
+    /// First non-empty store path observed for the generation, when reported.
     pub store_path: Option<String>,
+    /// Full commit SHA associated with the retained artifact or derivation.
     pub commit_hash: Option<String>,
+    /// Time when the server first observed the generation.
     pub timestamp: DateTime<Utc>,
+    /// Server-issued retained-row identity for Config and rollback requests.
+    ///
+    /// The value is absent when no retained artifact is associated with the
+    /// observed generation. The server still verifies system ownership and
+    /// caller authorization when a client returns this identity.
+    pub generation_snapshot_id: Option<Uuid>,
+    /// Indicates whether exact artifact, derivation, and store lineage permits rollback.
+    ///
+    /// This value does not control Config readability. Clients must not infer
+    /// eligibility from the presence of another field.
+    pub rollback_eligible: bool,
 }
 
 /// Fetch historical generations for a system by its UUID
@@ -274,6 +332,12 @@ mod tests {
             !FETCH_SYSTEM_GENERATIONS_SQL.contains("ss.generation DESC, ss.timestamp DESC"),
             "generation query must not order per-generation selection by latest timestamp"
         );
+        assert!(
+            FETCH_SYSTEM_GENERATIONS_SQL.contains("JOIN commits c ON c.flake_id = system.flake_id")
+                && FETCH_SYSTEM_GENERATIONS_SQL.contains("HAVING COUNT(*) = 1")
+                && FETCH_SYSTEM_GENERATIONS_SQL.contains("BTRIM(d.derivation_name) = COALESCE("),
+            "legacy generation links must stay on the system flake and exact effective configuration and fail closed when ambiguous"
+        );
     }
 
     #[tokio::test]
@@ -283,14 +347,20 @@ mod tests {
         let suffix = Uuid::new_v4().simple().to_string();
         let hostname = format!("task294-gen-test-{suffix}");
         let repo_url = format!("https://example.com/task294-{suffix}.git");
-        let commit_hash = format!("task294{suffix}");
+        let commit_hash = format!("{:0>40}", &suffix[..32]);
 
         let key = SigningKey::from_bytes(&[7u8; 32]);
         let public_key = PublicKey::from_verifying_key(key.verifying_key());
 
-        let flake = insert_flake(&pool, &format!("flake-{suffix}"), &repo_url, "main", "full")
-            .await
-            .expect("insert_flake should succeed");
+        let flake = insert_flake(
+            &pool,
+            &format!("flake-{suffix}"),
+            &repo_url,
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("insert_flake should succeed");
 
         let system = System {
             id: Uuid::new_v4(),
@@ -307,7 +377,7 @@ mod tests {
             deployment_policy: "manual".to_string(),
         };
 
-        insert_system(&pool, &system)
+        let system = insert_system(&pool, &system)
             .await
             .expect("insert_system should succeed");
 
@@ -322,7 +392,7 @@ mod tests {
         let mut state_without_commit = SystemStateBuilder::new().build();
         state_without_commit.hostname = hostname.clone();
         state_without_commit.generation = Some(100);
-        state_without_commit.store_path = None;
+        state_without_commit.store_path = Some(format!("/nix/store/{suffix}-gen100-system"));
         insert_system_state(&pool, &state_without_commit, true, None, None)
             .await
             .expect("insert_system_state without store_path should succeed");
@@ -353,6 +423,58 @@ mod tests {
             .await
             .expect("updating derivation store_path should succeed");
 
+        let foreign_repo = format!("https://example.com/task294-foreign-{suffix}.git");
+        insert_flake(
+            &pool,
+            &format!("foreign-{suffix}"),
+            &foreign_repo,
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("insert foreign flake");
+        insert_commit_with_metadata(
+            &pool,
+            &format!("f{:0>39}", &suffix[..32]),
+            &foreign_repo,
+            Utc::now(),
+            None,
+            None,
+        )
+        .await
+        .expect("insert foreign commit");
+        let foreign_commit = get_commit_by_hash(&pool, &format!("f{:0>39}", &suffix[..32]))
+            .await
+            .expect("get foreign commit");
+        let foreign_derivation =
+            insert_derivation(&pool, Some(&foreign_commit), &hostname, "nixos")
+                .await
+                .expect("insert foreign derivation");
+        sqlx::query("UPDATE derivations SET store_path = $1 WHERE id = $2")
+            .bind(state_with_commit.store_path.clone())
+            .bind(foreign_derivation.id)
+            .execute(&pool)
+            .await
+            .expect("set foreign derivation store");
+
+        let wrong_hash = format!("e{:0>39}", &suffix[..32]);
+        insert_commit_with_metadata(&pool, &wrong_hash, &repo_url, Utc::now(), None, None)
+            .await
+            .expect("insert wrong-configuration commit");
+        let wrong_commit = get_commit_by_hash(&pool, &wrong_hash)
+            .await
+            .expect("get wrong-configuration commit");
+        let wrong_derivation =
+            insert_derivation(&pool, Some(&wrong_commit), "other-config", "nixos")
+                .await
+                .expect("insert wrong-configuration derivation");
+        sqlx::query("UPDATE derivations SET store_path = $1 WHERE id = $2")
+            .bind(state_with_commit.store_path.clone())
+            .bind(wrong_derivation.id)
+            .execute(&pool)
+            .await
+            .expect("set wrong-configuration derivation store");
+
         let generations = fetch_system_generations(&pool, system.id)
             .await
             .expect("fetch_system_generations should succeed");
@@ -362,13 +484,115 @@ mod tests {
             .find(|g| g.generation == 101)
             .expect("generation 101 should exist");
         assert_eq!(gen_101.commit_hash.as_deref(), Some(commit_hash.as_str()));
+        assert!(
+            !gen_101.rollback_eligible,
+            "an observational legacy mapping must not grant rollback eligibility"
+        );
 
         let gen_100 = generations
             .iter()
             .find(|g| g.generation == 100)
             .expect("generation 100 should exist");
-        assert!(gen_100.store_path.is_none());
+        assert_eq!(gen_100.store_path, state_without_commit.store_path);
         assert!(gen_100.commit_hash.is_none());
+
+        let invalid_retained_hash = format!("short-{suffix}");
+        insert_commit_with_metadata(
+            &pool,
+            &invalid_retained_hash,
+            &repo_url,
+            Utc::now(),
+            None,
+            None,
+        )
+        .await
+        .expect("insert invalid retained commit identity");
+        let invalid_retained_commit = get_commit_by_hash(&pool, &invalid_retained_hash)
+            .await
+            .expect("get invalid retained commit identity");
+        let invalid_retained_derivation =
+            insert_derivation(&pool, Some(&invalid_retained_commit), &hostname, "nixos")
+                .await
+                .expect("insert invalid retained derivation");
+        sqlx::query("UPDATE derivations SET store_path = $1 WHERE id = $2")
+            .bind(state_without_commit.store_path.clone())
+            .bind(invalid_retained_derivation.id)
+            .execute(&pool)
+            .await
+            .expect("set invalid retained derivation store");
+        let invalid_retained_snapshot: Uuid = sqlx::query_scalar(
+            "INSERT INTO evaluation_snapshots (
+                commit_id, configuration_name, schema_version, lifecycle,
+                option_count, module_count, content_bytes
+             ) VALUES ($1, $2, 1, 'available', 0, 0, 0) RETURNING id",
+        )
+        .bind(invalid_retained_commit.id)
+        .bind(&hostname)
+        .fetch_one(&pool)
+        .await
+        .expect("insert invalid retained snapshot identity");
+        sqlx::query("UPDATE evaluation_snapshots SET integrity_version = 1 WHERE id = $1")
+            .bind(invalid_retained_snapshot)
+            .execute(&pool)
+            .await
+            .expect("certify invalid retained snapshot identity");
+        sqlx::query(
+            "INSERT INTO evaluation_generation_snapshots (
+                system_id, generation, snapshot_id, derivation_id, commit_id,
+                configuration_name, source_store_path, lineage_verified
+             ) VALUES ($1, 100, $2, $3, $4, $5, $6, TRUE)",
+        )
+        .bind(system.id)
+        .bind(invalid_retained_snapshot)
+        .bind(invalid_retained_derivation.id)
+        .bind(invalid_retained_commit.id)
+        .bind(&hostname)
+        .bind(state_without_commit.store_path.clone())
+        .execute(&pool)
+        .await
+        .expect("retain invalid full-SHA navigation identity");
+        let generations = fetch_system_generations(&pool, system.id)
+            .await
+            .expect("refetch retained invalid identity");
+        let gen_100 = generations
+            .iter()
+            .find(|generation| generation.generation == 100)
+            .expect("retained generation 100 should remain readable");
+        assert!(gen_100.commit_hash.is_none());
+        assert!(
+            gen_100.rollback_eligible,
+            "invalid navigation identity must not weaken exact retained rollback evidence"
+        );
+
+        let ambiguous_hash = format!("d{:0>39}", &suffix[..32]);
+        insert_commit_with_metadata(&pool, &ambiguous_hash, &repo_url, Utc::now(), None, None)
+            .await
+            .expect("insert ambiguous same-flake commit");
+        let ambiguous_commit = get_commit_by_hash(&pool, &ambiguous_hash)
+            .await
+            .expect("get ambiguous commit");
+        let ambiguous_derivation =
+            insert_derivation(&pool, Some(&ambiguous_commit), &hostname, "nixos")
+                .await
+                .expect("insert ambiguous derivation");
+        sqlx::query("UPDATE derivations SET store_path = $1 WHERE id = $2")
+            .bind(state_with_commit.store_path.clone())
+            .bind(ambiguous_derivation.id)
+            .execute(&pool)
+            .await
+            .expect("set ambiguous derivation store");
+        let generations = fetch_system_generations(&pool, system.id)
+            .await
+            .expect("refetch ambiguous generations");
+        assert!(
+            generations
+                .iter()
+                .find(|generation| generation.generation == 101)
+                .expect("generation 101 should remain readable")
+                .commit_hash
+                .is_none(),
+            "ambiguous fallback commits must remain unmapped"
+        );
     }
 
     #[test]

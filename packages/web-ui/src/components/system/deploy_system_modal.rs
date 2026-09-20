@@ -3,7 +3,7 @@
 //! Matches the design DeployModal layout: flake select, branch select,
 //! and a commit radio-button list.
 
-use crate::api::models::{CommitInfo, DeploySystemRequest};
+use crate::api::models::{CommitInfo, DeploySystemRequest, ManualDeploymentAction};
 use dioxus::prelude::*;
 
 /// Branch options for the deploy branch select.
@@ -49,6 +49,8 @@ pub fn DeploySystemModal(
 
         let request = DeploySystemRequest {
             commit_sha: selected_commit.read().clone(),
+            action: ManualDeploymentAction::Deploy,
+            request_id: Some(uuid::Uuid::new_v4()),
         };
 
         on_deploy.call(request);

@@ -94,6 +94,22 @@ Agent State + Builder Evaluation → Server Comparison → Compliance Alert
 
 Current system state compared against latest evaluated configuration to detect unauthorized changes.
 
+#### 4. Evaluation and Flake Snapshot Flow
+
+PRIMARY evaluates system derivations and policies. It also emits one
+revision-scoped flake-output projection without per-host exploration. A separate
+durable Config Inspector worker can extract complete option metadata, safe
+values, and module provenance for an exact commit and configuration after
+PRIMARY succeeds. Config Explorer first reuses exact certified V2 or scoped
+observations. It queues bounded observational Nix only when persisted evidence
+cannot answer the requested scope. Explorer data never becomes policy or
+deployment input. See
+[Evaluation and Flake Snapshot Architecture](./evaluation-flake-snapshots.md)
+for ownership, lifecycle, comparison, retention, redaction, authorization, and
+compatibility contracts. See
+[Config Explorer Architecture](./config-explorer-architecture.md) for lazy
+observation, failure containment, cache, and authority boundaries.
+
 ### Event-Driven Queue Architecture
 
 Crystal Forge uses an event-driven architecture for both evaluation and build queues, replacing polling-based approaches with immediate notifications.
@@ -177,7 +193,11 @@ Eval Complete → create_build_jobs() → notify_build_queue() → Build Workers
 3. **Rust implementation**: Memory safety and performance for security-critical deployment
 4. **Event-driven queues**: Immediate processing with coalesced wakeups and fallback polling
 5. **Flake-native**: Direct integration with modern Nix ecosystem
-6. **Option metadata authority**: Packaged NixOS option metadata is an authoring baseline, while each target flake's evaluation remains authoritative. See [NixOS Option Metadata Authority](./nixos-option-metadata.md).
+6. **Isolated snapshot exploration**: PRIMARY emits the revision-scoped flake
+   projection but does not inspect per-host option trees or module graphs. The
+   durable Config Inspector worker runs separately, and inspection failure does
+   not block builds or deployments.
+7. **Option metadata authority**: Packaged NixOS option metadata is an authoring baseline, while each target flake's evaluation remains authoritative. See [NixOS Option Metadata Authority](./nixos-option-metadata.md).
 
 ### Observability Points
 

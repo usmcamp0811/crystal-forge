@@ -1,14 +1,30 @@
 ---
 id: TASK-463
 title: Add README documentation to each flake check
-status: To Do
+status: Review
 assignee: []
 created_date: '2026-09-19 15:12'
-updated_date: '2026-09-19 15:12'
+updated_date: '2026-09-19 15:15'
 labels: []
 dependencies: []
+references:
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/328'
+  - git commit b74a5585
 documentation:
   - checks/web-ui/baselines/README.md
+modified_files:
+  - checks/oidc-auth/README.md
+  - checks/integration/README.md
+  - checks/server-regressions/README.md
+  - checks/nixos-options-metadata/README.md
+  - checks/oscal-export/README.md
+  - checks/xccdf-schema/README.md
+  - checks/stig/README.md
+  - checks/run-ui-dev-db-check/README.md
+  - checks/web-ui-reconciliation/README.md
+  - checks/ui-screenshots/README.md
+  - checks/web-ui-test-runner/README.md
+  - checks/web-ui/README.md
 priority: low
 type: docs
 ordinal: 481000
@@ -44,10 +60,26 @@ This is a documentation-only task. Do not change check behavior, `.gitlab-ci.yml
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Every top-level directory directly under `checks/` that contains a `default.nix` (i.e., is a discovered flake check attribute) has a `README.md`.
-- [ ] #2 Each README states what the check verifies, why it is a separate check, how to run it with the exact `nix build .#checks.x86_64-linux.<name>` invocation (including any required flags/env vars), and any intentionally out-of-scope behavior.
-- [ ] #3 Each README accurately reflects the check's actual current implementation (VM vs. non-VM, core vs. production server build, CI matrix membership) as read from its `default.nix` and `.gitlab-ci.yml`; no fabricated details.
-- [ ] #4 No `default.nix`, `flake.nix`, or `.gitlab-ci.yml` behavior is modified.
-- [ ] #5 The existing `checks/web-ui/baselines/README.md` is left untouched.
-- [ ] #6 Markdown is well-formed and passes `git diff --check` (no trailing whitespace / whitespace errors).
+- [x] #1 Every top-level directory directly under `checks/` that contains a `default.nix` (i.e., is a discovered flake check attribute) has a `README.md`.
+- [x] #2 Each README states what the check verifies, why it is a separate check, how to run it with the exact `nix build .#checks.x86_64-linux.<name>` invocation (including any required flags/env vars), and any intentionally out-of-scope behavior.
+- [x] #3 Each README accurately reflects the check's actual current implementation (VM vs. non-VM, core vs. production server build, CI matrix membership) as read from its `default.nix` and `.gitlab-ci.yml`; no fabricated details.
+- [x] #4 No `default.nix`, `flake.nix`, or `.gitlab-ci.yml` behavior is modified.
+- [x] #5 The existing `checks/web-ui/baselines/README.md` is left untouched.
+- [x] #6 Markdown is well-formed and passes `git diff --check` (no trailing whitespace / whitespace errors).
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Read every checks/<name>/default.nix to extract accurate behavior (VM vs. non-VM, server build variant, timeouts, env vars). Cross-reference .gitlab-ci.yml's flake-check matrix to state CI membership accurately. Write one README.md per check directory in the repository's documentation style. Verify with git diff --check and a visual read-through; do not run nix flake check for a docs-only change unless a formatting concern arises.
+<!-- SECTION:PLAN:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added a `README.md` to each of the 12 flake check directories under `checks/` (every directory with a `default.nix`, i.e. every check attribute snowfall-lib discovers). Each README documents what the check verifies, why it exists as a distinct check, the exact `nix build .#checks.x86_64-linux.<name>` invocation with required flags/env vars, intentionally out-of-scope behavior, and `.gitlab-ci.yml` `flake-check` matrix membership. Content was derived directly from each check's `default.nix` and cross-referenced against `.gitlab-ci.yml`; no behavior, `default.nix`, `flake.nix`, or CI file was changed, and the existing `checks/web-ui/baselines/README.md` was left untouched.
+
+Verification: `git diff --check` (clean), and a directory-by-directory confirmation that every `checks/<name>/default.nix` now has a matching `README.md` and that no `default.nix`/`flake.nix`/`.gitlab-ci.yml` file changed. This is a documentation-only change with no behavior to test at runtime, so no Nix build/check was required beyond the diff/whitespace verification.
+
+Committed as `b74a5585` (`TASK-463: Add README to each flake check`) on branch `TASK-463-checks-readme`, pushed, and opened as MR !328 against `dev`.
+<!-- SECTION:FINAL_SUMMARY:END -->

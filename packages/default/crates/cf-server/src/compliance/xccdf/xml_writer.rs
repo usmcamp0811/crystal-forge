@@ -40,6 +40,7 @@ use super::super::interchange::{
     CANONICALIZATION_VERSION, CF_NIX_FIX_SYSTEM, CF_POLICY_CHECK_SYSTEM, CF_XCCDF_NAMESPACE,
     DIGEST_ALGORITHM, XCCDF_1_2_NAMESPACE,
 };
+use super::custom_check::{CURRENT_BINDING, CURRENT_CONTEXT, CustomCheckRuleProjection};
 use super::export_models::{
     XccdfBundleExport, XccdfCheckBodyPart, XccdfGroupExport, XccdfPolicyExport, XccdfSourceMapping,
     XccdfStandardCheck,
@@ -349,6 +350,20 @@ fn write_cf_policy(
     writer: &mut Writer<Cursor<&mut Vec<u8>>>,
     pv: &XccdfPolicyExport,
 ) -> Result<(), XccdfWriterError> {
+    let strict = if pv.policy_type == "require_cve_check"
+        && pv.implementation_state == ImplementationState::Native
+    {
+        serde_json::from_value::<crate::models::deployment_policies::CveCheckConfig>(
+            pv.config.clone(),
+        )
+        .map_err(|_| XccdfWriterError::MissingConfig {
+            policy_type: pv.policy_type.clone(),
+            field: "valid require_cve_check config",
+        })?
+        .strict
+    } else {
+        true
+    };
     let mut policy = BytesStart::new("cf:policy");
     policy.push_attribute(("schema-version", "1"));
     if pv.implementation_state != ImplementationState::Native {
@@ -358,7 +373,7 @@ fn write_cf_policy(
 
     let mut exec = BytesStart::new("cf:execution");
     exec.push_attribute(("phase", pv.execution_phase.as_str()));
-    exec.push_attribute(("strict", "true"));
+    exec.push_attribute(("strict", strict.to_string().as_str()));
     writer.write_event(Event::Empty(exec))?;
 
     write_implementation(writer, pv)?;
@@ -375,8 +390,8 @@ fn write_cf_policy(
 
 /// Write `<cf:implementation>` for a policy with `Native` implementation state.
 ///
-/// Returns `XccdfWriterError::MissingConfig` when a required configuration
-/// field is absent or has the wrong type rather than substituting a default.
+/// Returns `XccdfWriterError::MissingConfig` when required configuration is
+/// absent or malformed. Policy types with server defaults use those defaults.
 fn write_implementation(
     writer: &mut Writer<Cursor<&mut Vec<u8>>>,
     pv: &XccdfPolicyExport,
@@ -441,36 +456,27 @@ fn write_implementation(
             cf_empty(writer, "composite")?;
         }
         "require_cve_check" => {
-            let max_crit = pv
-                .config
-                .get("max_critical")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| XccdfWriterError::MissingConfig {
+            let config =
+                serde_json::from_value::<crate::models::deployment_policies::CveCheckConfig>(
+                    pv.config.clone(),
+                )
+                .map_err(|_| XccdfWriterError::MissingConfig {
                     policy_type: pv.policy_type.clone(),
-                    field: "max_critical",
+                    field: "valid require_cve_check config",
                 })?;
-            let req_just = pv
-                .config
-                .get("require_high_justification")
-                .and_then(|v| v.as_bool())
-                .ok_or_else(|| XccdfWriterError::MissingConfig {
-                    policy_type: pv.policy_type.clone(),
-                    field: "require_high_justification",
-                })?;
-            let no_scan = pv
-                .config
-                .get("when_no_scan")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| XccdfWriterError::MissingConfig {
-                    policy_type: pv.policy_type.clone(),
-                    field: "when_no_scan",
-                })?;
+            let no_scan = match config.when_no_scan {
+                crate::models::deployment_policies::WhenNoScan::Block => "block",
+                crate::models::deployment_policies::WhenNoScan::Skip => "skip",
+            };
             let mut elem = BytesStart::new("cf:require-cve-check");
-            elem.push_attribute(("max-critical", max_crit.to_string().as_str()));
-            elem.push_attribute(("require-high-justification", req_just.to_string().as_str()));
+            elem.push_attribute(("max-critical", config.max_critical.to_string().as_str()));
+            elem.push_attribute((
+                "require-high-justification",
+                config.require_high_justification.to_string().as_str(),
+            ));
             elem.push_attribute(("when-no-scan", no_scan));
             writer.write_event(Event::Start(elem))?;
-            if let Some(max_high) = pv.config.get("max_high").and_then(|v| v.as_u64()) {
+            if let Some(max_high) = config.max_high {
                 cf_el(writer, "max-high", &max_high.to_string())?;
             }
             writer.write_event(Event::End(BytesEnd::new("cf:require-cve-check")))?;
@@ -755,89 +761,25 @@ fn write_custom_check(
     writer: &mut Writer<Cursor<&mut Vec<u8>>>,
     pv: &XccdfPolicyExport,
 ) -> Result<(), XccdfWriterError> {
-    let rules = pv.config.get("rules").and_then(|v| v.as_array());
-    let has_rules = rules.map(|r| !r.is_empty()).unwrap_or(false);
-
-    let mode = pv
-        .config
-        .get("mode")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| XccdfWriterError::MissingConfig {
-            policy_type: pv.policy_type.clone(),
-            field: "mode",
-        })?;
-    if !matches!(mode, "all" | "any") {
-        return Err(XccdfWriterError::MissingConfig {
-            policy_type: pv.policy_type.clone(),
-            field: "mode (must be all or any)",
-        });
-    }
-    let context = pv
-        .config
-        .get("context")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| XccdfWriterError::MissingConfig {
-            policy_type: pv.policy_type.clone(),
-            field: "context",
-        })?;
-    let binding = pv
-        .config
-        .get("binding")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| XccdfWriterError::MissingConfig {
-            policy_type: pv.policy_type.clone(),
-            field: "binding",
-        })?;
+    let projection = super::custom_check::project_custom_check(
+        &pv.name,
+        pv.policy_id,
+        pv.description.as_deref(),
+        &pv.config,
+    )
+    .map_err(|_| XccdfWriterError::MissingConfig {
+        policy_type: pv.policy_type.clone(),
+        field: "valid custom_check config",
+    })?;
 
     let mut elem = BytesStart::new("cf:custom-check");
-    elem.push_attribute(("mode", mode));
-    elem.push_attribute(("context", context));
-    elem.push_attribute(("binding", binding));
+    elem.push_attribute(("mode", projection.mode.as_str()));
+    elem.push_attribute(("context", CURRENT_CONTEXT));
+    elem.push_attribute(("binding", CURRENT_BINDING));
     writer.write_event(Event::Start(elem))?;
 
-    if has_rules {
-        for rule in rules.unwrap() {
-            write_custom_check_rule(writer, pv, rule)?;
-        }
-    } else {
-        // Legacy single-expression form.
-        let field_name = pv
-            .config
-            .get("field_name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| XccdfWriterError::MissingConfig {
-                policy_type: pv.policy_type.clone(),
-                field: "field_name",
-            })?;
-        let strict = pv
-            .config
-            .get("strict")
-            .and_then(|v| v.as_bool())
-            .ok_or_else(|| XccdfWriterError::MissingConfig {
-                policy_type: pv.policy_type.clone(),
-                field: "strict",
-            })?;
-        let expr = pv
-            .config
-            .get("expression")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| XccdfWriterError::MissingConfig {
-                policy_type: pv.policy_type.clone(),
-                field: "expression",
-            })?;
-        let mut rule_elem = BytesStart::new("cf:rule");
-        rule_elem.push_attribute(("field-name", field_name));
-        rule_elem.push_attribute(("strict", strict.to_string().as_str()));
-        writer.write_event(Event::Start(rule_elem))?;
-        if let Some(desc) = pv.config.get("description").and_then(|v| v.as_str()) {
-            cf_el(writer, "description", desc)?;
-        }
-        let mut expr_elem = BytesStart::new("cf:expression");
-        expr_elem.push_attribute(("language", "nix"));
-        writer.write_event(Event::Start(expr_elem))?;
-        writer.write_event(Event::Text(BytesText::new(expr)))?;
-        writer.write_event(Event::End(BytesEnd::new("cf:expression")))?;
-        writer.write_event(Event::End(BytesEnd::new("cf:rule")))?;
+    for rule in &projection.rules {
+        write_custom_check_rule(writer, rule)?;
     }
 
     writer.write_event(Event::End(BytesEnd::new("cf:custom-check")))?;
@@ -846,41 +788,17 @@ fn write_custom_check(
 
 fn write_custom_check_rule(
     writer: &mut Writer<Cursor<&mut Vec<u8>>>,
-    pv: &XccdfPolicyExport,
-    rule: &serde_json::Value,
+    rule: &CustomCheckRuleProjection,
 ) -> Result<(), XccdfWriterError> {
-    let field_name = rule
-        .get("field_name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| XccdfWriterError::MissingConfig {
-            policy_type: pv.policy_type.clone(),
-            field: "rules[].field_name",
-        })?;
-    let strict = rule
-        .get("strict")
-        .and_then(|v| v.as_bool())
-        .ok_or_else(|| XccdfWriterError::MissingConfig {
-            policy_type: pv.policy_type.clone(),
-            field: "rules[].strict",
-        })?;
-    let expr = rule
-        .get("expression")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| XccdfWriterError::MissingConfig {
-            policy_type: pv.policy_type.clone(),
-            field: "rules[].expression",
-        })?;
     let mut elem = BytesStart::new("cf:rule");
-    elem.push_attribute(("field-name", field_name));
-    elem.push_attribute(("strict", strict.to_string().as_str()));
+    elem.push_attribute(("field-name", rule.field_name.as_str()));
+    elem.push_attribute(("strict", rule.strict.to_string().as_str()));
     writer.write_event(Event::Start(elem))?;
-    if let Some(desc) = rule.get("description").and_then(|v| v.as_str()) {
-        cf_el(writer, "description", desc)?;
-    }
+    cf_el(writer, "description", &rule.description)?;
     let mut expr_elem = BytesStart::new("cf:expression");
     expr_elem.push_attribute(("language", "nix"));
     writer.write_event(Event::Start(expr_elem))?;
-    writer.write_event(Event::Text(BytesText::new(expr)))?;
+    writer.write_event(Event::Text(BytesText::new(&rule.expression)))?;
     writer.write_event(Event::End(BytesEnd::new("cf:expression")))?;
     writer.write_event(Event::End(BytesEnd::new("cf:rule")))?;
     Ok(())
@@ -2139,28 +2057,35 @@ mod tests {
     }
 
     #[test]
-    fn custom_check_single_expression() {
-        let pv = test_policy(
-            "custom_check",
-            ImplementationState::Native,
-            json!({
-                "expression": "cfg.config.networking.firewall.enable",
-                "description": "Firewall enabled",
-                "field_name": "firewallEnabled",
-                "strict": true,
-                "mode": "all",
-                "context": "nixos-configuration-v1",
-                "binding": "cfg"
-            }),
-        );
+    fn custom_check_legacy_expression_without_mode_exports_one_rule_as_all() {
+        let config = json!({
+            "expression": "config.networking.firewall.enable",
+            "description": "Firewall enabled",
+            "field_name": "firewallEnabled",
+            "strict": true
+        });
+        let pv = test_policy("custom_check", ImplementationState::Native, config.clone());
+        let expected_digest = pv.semantic_digest.clone();
         let snap = make_single_policy_snapshot(vec![pv]);
         let xml = write_bundle_xccdf_export(&snap).unwrap();
-        assert!(xml.contains("cf:custom-check"));
-        assert!(xml.contains("cf:rule"));
-        assert!(xml.contains("cf:expression"));
-        assert!(xml.contains("language=\"nix\""));
-        assert!(xml.contains("cfg.config.networking.firewall.enable"));
-        assert!(xml.contains("firewallEnabled"));
+        assert!(xml.contains("<cf:custom-check mode=\"all\""));
+        assert!(xml.contains("context=\"nixos-configuration-v2\" binding=\"config\""));
+        assert_eq!(xml.matches("<cf:rule ").count(), 1);
+        assert!(xml.contains("field-name=\"firewallEnabled\""));
+        assert!(xml.contains("strict=\"true\""));
+        assert!(xml.contains(
+            "<cf:expression language=\"nix\">config.networking.firewall.enable</cf:expression>"
+        ));
+
+        let parsed = parse_xccdf(
+            xml.as_bytes(),
+            Some("legacy-custom-check.xml"),
+            &InterchangeLimits::default(),
+        )
+        .unwrap();
+        let metadata = parsed.rules[0].cf_policy_meta.as_ref().unwrap();
+        assert_eq!(metadata.config.as_ref(), Some(&config));
+        assert_eq!(metadata.digest.as_deref(), Some(expected_digest.as_str()));
     }
 
     #[test]
@@ -2170,8 +2095,6 @@ mod tests {
             ImplementationState::Native,
             json!({
                 "mode": "all",
-                "context": "nixos-configuration-v1",
-                "binding": "cfg",
                 "rules": [
                     {"expression": "a", "description": "Rule A", "field_name": "a", "strict": true},
                     {"expression": "b", "description": "Rule B", "field_name": "b", "strict": false}
@@ -2188,14 +2111,30 @@ mod tests {
     }
 
     #[test]
+    fn custom_check_multi_rule_without_mode_defaults_to_all() {
+        let pv = test_policy(
+            "custom_check",
+            ImplementationState::Native,
+            json!({
+                "rules": [
+                    {"expression": "a", "field_name": "a", "strict": true},
+                    {"expression": "b", "field_name": "b", "strict": false}
+                ]
+            }),
+        );
+        let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![pv])).unwrap();
+
+        assert!(xml.contains("<cf:custom-check mode=\"all\""));
+        assert_eq!(xml.matches("<cf:rule ").count(), 2);
+    }
+
+    #[test]
     fn custom_check_multi_rule_any() {
         let pv = test_policy(
             "custom_check",
             ImplementationState::Native,
             json!({
                 "mode": "any",
-                "context": "nixos-configuration-v1",
-                "binding": "cfg",
                 "rules": [{"expression": "x", "field_name": "x", "strict": true}]
             }),
         );
@@ -2205,35 +2144,237 @@ mod tests {
     }
 
     #[test]
-    fn require_cve_check_policy_type() {
+    fn custom_check_single_expression_ignores_irrelevant_mode() {
+        let pv = test_policy(
+            "custom_check",
+            ImplementationState::Native,
+            json!({
+                "mode": false,
+                "expression": "true",
+                "field_name": "enabled",
+                "strict": true
+            }),
+        );
+
+        let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![pv])).unwrap();
+        assert!(xml.contains("<cf:custom-check mode=\"all\""));
+    }
+
+    #[test]
+    fn custom_check_empty_all_exports_without_dummy_rule() {
+        let config = json!({"mode": "all", "rules": []});
+        let pv = test_policy("custom_check", ImplementationState::Native, config.clone());
+        let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![pv])).unwrap();
+
+        assert!(xml.contains(
+            "<cf:custom-check mode=\"all\" context=\"nixos-configuration-v2\" binding=\"config\"></cf:custom-check>"
+        ));
+        assert!(!xml.contains("<cf:rule "));
+        assert!(xml.contains("<cf:config-json>{&quot;mode&quot;:&quot;all&quot;,&quot;rules&quot;:[]}</cf:config-json>"));
+    }
+
+    #[test]
+    fn custom_check_empty_any_is_rejected() {
+        let pv = test_policy(
+            "custom_check",
+            ImplementationState::Native,
+            json!({"mode": "any", "rules": []}),
+        );
+
+        assert!(write_bundle_xccdf_export(&make_single_policy_snapshot(vec![pv])).is_err());
+    }
+
+    #[test]
+    fn current_custom_checks_round_trip_through_real_native_import() {
+        use crate::compliance::digest::{
+            BundleMembershipEntry, BundleVersionCanonical, PolicyVersionCanonical,
+        };
+        use crate::compliance::xccdf::importer::validate_cf_native_document;
+
+        for config in [
+            json!({
+                "expression": "config.networking.firewall.enable",
+                "description": "Firewall enabled",
+                "field_name": "firewallEnabled",
+                "strict": true
+            }),
+            json!({
+                "mode": "any",
+                "rules": [
+                    {"expression": "config.services.openssh.enable", "description": "SSH", "field_name": "ssh", "strict": true},
+                    {"expression": "config.services.nginx.enable", "description": "Nginx", "field_name": "nginx", "strict": false}
+                ]
+            }),
+            json!({"mode": "all", "rules": []}),
+        ] {
+            let mut policy =
+                test_policy("custom_check", ImplementationState::Native, config.clone());
+            policy.semantic_digest = PolicyVersionCanonical {
+                name: policy.name.clone(),
+                description: policy.description.clone(),
+                policy_type: policy.policy_type.clone(),
+                implementation_state: "native".into(),
+                execution_phase: policy.execution_phase.clone(),
+                config: config.clone(),
+                compliance_metadata: policy.compliance_metadata.clone(),
+                dependencies: policy.dependencies.clone(),
+                opaque_xml_digest: None,
+                enabled_by_default: Some(policy.enabled_default),
+            }
+            .compute_digest();
+            let expected_digest = policy.semantic_digest.clone();
+            let policy_version_id = policy.policy_version_id;
+            let mut snapshot = make_single_policy_snapshot(vec![policy]);
+            snapshot.semantic_digest = BundleVersionCanonical {
+                name: snapshot.name.clone(),
+                framework: snapshot.framework.clone(),
+                framework_version: snapshot.framework_version.clone(),
+                description: snapshot.description.clone(),
+                layer: snapshot.layer.clone(),
+                owner: snapshot.owner.clone(),
+                members: vec![BundleMembershipEntry {
+                    policy_version_id,
+                    selected: true,
+                }],
+            }
+            .compute_digest();
+
+            let xml = write_bundle_xccdf_export(&snapshot).unwrap();
+            let parsed = parse_xccdf(
+                xml.as_bytes(),
+                Some("current-custom-check.xml"),
+                &InterchangeLimits::default(),
+            )
+            .unwrap();
+            let (_, records) = validate_cf_native_document(&parsed).unwrap();
+
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].config, config);
+            assert_eq!(
+                records[0].semantic_digest.as_deref(),
+                Some(expected_digest.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn require_cve_check_explicit_values_are_preserved() {
         let pv = test_policy(
             "require_cve_check",
             ImplementationState::Native,
             json!({
-                "max_critical": 0,
+                "max_critical": 2,
                 "require_high_justification": true,
-                "when_no_scan": "block",
-                "max_high": 5
+                "strict": false,
+                "when_no_scan": "skip",
+                "max_high": 5,
             }),
         );
         let snap = make_single_policy_snapshot(vec![pv]);
         let xml = write_bundle_xccdf_export(&snap).unwrap();
         assert!(xml.contains("cf:require-cve-check"));
-        assert!(xml.contains("max-critical=\"0\""));
+        assert!(xml.contains("max-critical=\"2\""));
         assert!(xml.contains("require-high-justification=\"true\""));
-        assert!(xml.contains("when-no-scan=\"block\""));
-        assert!(xml.contains("cf:max-high"));
+        assert!(xml.contains("when-no-scan=\"skip\""));
+        assert!(xml.contains("<cf:max-high>5</cf:max-high>"));
+        assert!(xml.contains("<cf:execution phase=\"nix-evaluation\" strict=\"false\"/>"));
+        assert!(xml.contains("&quot;strict&quot;:false"));
     }
 
     #[test]
-    fn require_cve_check_missing_config_is_error() {
-        // Missing required fields
+    fn require_cve_check_complete_and_minimal_configs_use_the_same_defaults() {
+        let complete = test_policy(
+            "require_cve_check",
+            ImplementationState::Native,
+            json!({
+                "max_critical": 0,
+                "max_high": null,
+                "require_high_justification": false,
+                "strict": true,
+                "when_no_scan": "block",
+            }),
+        );
         let pv = test_policy("require_cve_check", ImplementationState::Native, json!({}));
-        let snap = make_single_policy_snapshot(vec![pv]);
-        assert!(matches!(
-            write_bundle_xccdf_export(&snap),
-            Err(XccdfWriterError::MissingConfig { .. })
-        ));
+        let complete_xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![complete]))
+            .expect("complete CVE config");
+        let minimal_xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![pv]))
+            .expect("minimal CVE config");
+
+        for xml in [&complete_xml, &minimal_xml] {
+            assert!(xml.contains("max-critical=\"0\""));
+            assert!(xml.contains("require-high-justification=\"false\""));
+            assert!(xml.contains("when-no-scan=\"block\""));
+            assert!(!xml.contains("<cf:max-high>"));
+            assert!(xml.contains("<cf:execution phase=\"nix-evaluation\" strict=\"true\"/>"));
+        }
+        assert!(minimal_xml.contains("<cf:config-json>{}</cf:config-json>"));
+    }
+
+    #[test]
+    fn require_cve_check_each_missing_field_uses_its_server_default() {
+        let fields = [
+            "max_critical",
+            "max_high",
+            "require_high_justification",
+            "strict",
+            "when_no_scan",
+        ];
+        for field in fields {
+            let mut config = json!({
+                "max_critical": 4,
+                "max_high": 7,
+                "require_high_justification": true,
+                "strict": false,
+                "when_no_scan": "skip",
+            });
+            config.as_object_mut().unwrap().remove(field);
+            let pv = test_policy("require_cve_check", ImplementationState::Native, config);
+            let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![pv]))
+                .unwrap_or_else(|error| panic!("missing {field} must use its default: {error}"));
+
+            assert!(xml.contains(if field == "max_critical" {
+                "max-critical=\"0\""
+            } else {
+                "max-critical=\"4\""
+            }));
+            assert!(xml.contains(if field == "require_high_justification" {
+                "require-high-justification=\"false\""
+            } else {
+                "require-high-justification=\"true\""
+            }));
+            assert!(xml.contains(if field == "when_no_scan" {
+                "when-no-scan=\"block\""
+            } else {
+                "when-no-scan=\"skip\""
+            }));
+            assert_eq!(
+                xml.contains("<cf:max-high>7</cf:max-high>"),
+                field != "max_high"
+            );
+            assert!(!xml.contains(&format!("&quot;{field}&quot;")));
+        }
+    }
+
+    #[test]
+    fn require_cve_check_malformed_members_are_rejected() {
+        let cases = [
+            json!({"max_critical": "0"}),
+            json!({"max_critical": -1}),
+            json!({"max_high": false}),
+            json!({"require_high_justification": "false"}),
+            json!({"strict": "true"}),
+            json!({"when_no_scan": "allow"}),
+        ];
+        for config in cases {
+            let pv = test_policy("require_cve_check", ImplementationState::Native, config);
+            assert!(matches!(
+                write_bundle_xccdf_export(&make_single_policy_snapshot(vec![pv])),
+                Err(XccdfWriterError::MissingConfig {
+                    field: "valid require_cve_check config",
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]
@@ -2243,12 +2384,12 @@ mod tests {
             (
                 "custom_check",
                 json!({
-                    "mode": "sometimes",
+                    "mode": "all",
                     "context": "nixos-configuration-v1",
                     "binding": "cfg",
                     "expression": "true",
                     "field_name": "enabled",
-                    "strict": true
+                    "strict": "invalid"
                 }),
             ),
             (
@@ -3028,13 +3169,13 @@ mod tests {
                         "binding": "cfg",
                         "rules": [
                             {
-                                "expression": "cfg.config.networking.firewall.enable",
+                                "expression": "config.networking.firewall.enable",
                                 "description": "Firewall enabled",
                                 "field_name": "firewallEnabled",
                                 "strict": true
                             },
                             {
-                                "expression": "cfg.config.services.openssh.enable",
+                                "expression": "config.services.openssh.enable",
                                 "description": "SSH enabled",
                                 "field_name": "sshEnabled",
                                 "strict": false

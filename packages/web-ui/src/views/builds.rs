@@ -157,6 +157,8 @@ fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> Buil
     BuildItem {
         id: (idx + 1) as i32,
         job_id: item.job_id,
+        commit_id: item.commit_id,
+        server_failure_code: item.server_failure_code.clone(),
         system_id: item.system_id,
         hostname: item.hostname.clone(),
         environment: item.environment.clone(),
@@ -217,12 +219,140 @@ fn build_matches_search(build: &BuildItem, search: &str) -> bool {
         .any(|value| value.contains(search))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RetryBuildOutcome {
+    Created {
+        attempt_id: uuid::Uuid,
+        attempt_number: i32,
+    },
+    Reused {
+        attempt_id: uuid::Uuid,
+        attempt_number: i32,
+    },
+    ReevaluationQueued {
+        commit_id: i32,
+    },
+    ReevaluationReused {
+        commit_id: i32,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RetryBuildFailure {
+    Skipped(String),
+    Failed(String),
+}
+
+async fn retry_terminal_build(
+    build: &BuildItem,
+    is_admin: bool,
+) -> Result<RetryBuildOutcome, RetryBuildFailure> {
+    let job_id = build
+        .job_id
+        .ok_or_else(|| RetryBuildFailure::Skipped("Build row has no job identity".to_string()))?;
+    let response = match api::client::requeue_build_job(&job_id).await {
+        Ok(response) => response,
+        Err(api::client::RequeueBuildJobError::EvaluatorContractObsolete { commit_id }) => {
+            if !is_admin {
+                return Err(RetryBuildFailure::Skipped(format!(
+                    "job {job_id}: an administrator must re-evaluate commit {commit_id}"
+                )));
+            }
+            let response = api::client::re_evaluate_commit(commit_id)
+                .await
+                .map_err(|error| {
+                    RetryBuildFailure::Failed(format!(
+                        "commit {commit_id} re-evaluation failed: {error}"
+                    ))
+                })?;
+            return Ok(if response.queued {
+                RetryBuildOutcome::ReevaluationQueued { commit_id }
+            } else {
+                RetryBuildOutcome::ReevaluationReused { commit_id }
+            });
+        }
+        Err(api::client::RequeueBuildJobError::LifecycleConflict { status }) => {
+            return Err(RetryBuildFailure::Skipped(format!(
+                "job {job_id}: no longer terminal (status: {status})"
+            )));
+        }
+        Err(api::client::RequeueBuildJobError::Request(api::client::ApiClientError::Status {
+            code: 404,
+            ..
+        })) => {
+            return Err(RetryBuildFailure::Skipped(format!(
+                "job {job_id}: no longer available or authorized"
+            )));
+        }
+        Err(error) => {
+            return Err(RetryBuildFailure::Failed(format!("job {job_id}: {error}")));
+        }
+    };
+    match response.outcome.as_str() {
+        "created" => Ok(RetryBuildOutcome::Created {
+            attempt_id: response.attempt_id,
+            attempt_number: response.attempt_number,
+        }),
+        "reused" => Ok(RetryBuildOutcome::Reused {
+            attempt_id: response.attempt_id,
+            attempt_number: response.attempt_number,
+        }),
+        outcome => Err(RetryBuildFailure::Failed(format!(
+            "job {job_id}: server returned unknown requeue outcome {outcome}"
+        ))),
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct BulkRetrySummary {
+    created: usize,
+    reused: usize,
+    reevaluations_queued: usize,
+    reevaluations_reused: usize,
+    skipped: Vec<String>,
+    failures: Vec<String>,
+}
+
+impl BulkRetrySummary {
+    fn record(&mut self, result: Result<RetryBuildOutcome, RetryBuildFailure>) {
+        match result {
+            Ok(RetryBuildOutcome::Created { .. }) => self.created += 1,
+            Ok(RetryBuildOutcome::Reused { .. }) => self.reused += 1,
+            Ok(RetryBuildOutcome::ReevaluationQueued { .. }) => self.reevaluations_queued += 1,
+            Ok(RetryBuildOutcome::ReevaluationReused { .. }) => self.reevaluations_reused += 1,
+            Err(RetryBuildFailure::Skipped(reason)) => self.skipped.push(reason),
+            Err(RetryBuildFailure::Failed(error)) => self.failures.push(error),
+        }
+    }
+
+    fn activated(&self) -> usize {
+        self.created + self.reused
+    }
+
+    fn scheduled(&self) -> usize {
+        self.activated() + self.reevaluations_queued + self.reevaluations_reused
+    }
+
+    fn message(&self) -> String {
+        format!(
+            "Build recovery: {} created, {} reused, {} re-evaluations queued, {} already active, {} skipped, {} failed",
+            self.created,
+            self.reused,
+            self.reevaluations_queued,
+            self.reevaluations_reused,
+            self.skipped.len(),
+            self.failures.len()
+        )
+    }
+}
+
 /// Builds control center page.
 #[component]
 pub fn BuildsView() -> Element {
     let app_state = use_context::<Signal<AppState>>();
     let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
     let can_requeue = auth::is_operator_or_above(&app_state.read().auth);
+    let is_admin = auth::is_admin(&app_state.read().auth);
 
     let mut workers = use_signal(Vec::<WorkerItem>::new);
     let mut active_refresh_trigger = use_signal(|| 0_u64);
@@ -230,6 +360,7 @@ pub fn BuildsView() -> Element {
     let mut active_view = use_signal(|| BuildsTab::ActiveQueue);
     let mut latest_filter = use_signal(LatestFilterState::default);
     let mut selected_build = use_signal(|| None::<uuid::Uuid>);
+    let mut pending_reveal_attempt = use_signal(|| None::<uuid::Uuid>);
     let mut log_open = use_signal(|| false);
 
     // Auto-refresh: bump the relevant refresh signal every 5 s depending on
@@ -269,11 +400,11 @@ pub fn BuildsView() -> Element {
     // Reset to page 1 limit whenever filters change so accumulated rows are cleared.
     // NB: `refresh_trigger` is deliberately excluded — polling ticks every 5 s
     // and must not erase previously loaded rows (review finding #8).
-    // Navigation focus also changes filters, but must not override FETCH_LIMIT_MAX.
-    // Use peek() to read navigation_focus *without* subscribing: when the focus
-    // handler clears navigation_focus after finding a match, this effect must NOT
-    // rerun and overwrite FETCH_LIMIT_MAX with PAGE_SIZE. read_unchecked() still
-    // subscribes the current reactive scope in Dioxus 0.7 — only peek() avoids that.
+    // Navigation and retry reveal also change filters, but must not override
+    // FETCH_LIMIT_MAX. Use peek() to read their markers without subscribing: when
+    // a handler clears its marker after finding a match, this effect must not rerun
+    // and overwrite FETCH_LIMIT_MAX with PAGE_SIZE. read_unchecked() still
+    // subscribes the current reactive scope in Dioxus 0.7; only peek() avoids that.
     use_effect(move || {
         let _ = (
             filter_status(),
@@ -284,7 +415,7 @@ pub fn BuildsView() -> Element {
             search_query(),
             latest_filter().enabled(),
         );
-        if navigation_focus.peek().is_some() {
+        if navigation_focus.peek().is_some() || pending_reveal_attempt.peek().is_some() {
             return;
         }
         fetch_limit.set(PAGE_SIZE);
@@ -383,7 +514,7 @@ pub fn BuildsView() -> Element {
             search_query(),
             latest_filter().enabled(),
         );
-        if navigation_focus.peek().is_none() {
+        if navigation_focus.peek().is_none() && pending_reveal_attempt.peek().is_none() {
             build_history_fetch_limit.set(100);
         }
     });
@@ -461,6 +592,8 @@ pub fn BuildsView() -> Element {
                     BuildItem {
                         id: -((idx as i32) + 1),
                         job_id: item.job_id,
+                        commit_id: item.commit_id,
+                        server_failure_code: item.server_failure_code.clone(),
                         system_id: item.system_id,
                         hostname: item.hostname.clone(),
                         environment: item.environment.clone(),
@@ -554,6 +687,7 @@ pub fn BuildsView() -> Element {
     let mut pending_action = use_signal(|| None::<PendingAction>);
     let mut last_action_note = use_signal(|| None::<String>);
     let mut action_error = use_signal(|| None::<String>);
+    let mut requeue_pending = use_signal(|| false);
 
     let queue_data = builds.read().clone();
     let worker_data = workers.read().clone();
@@ -678,6 +812,29 @@ pub fn BuildsView() -> Element {
     });
 
     let selected = selected_build_data(selected_build.read().to_owned(), &visible_rows);
+
+    let reveal_active_rows = queue_data.clone();
+    let reveal_completed_rows = completed_rows.clone();
+    use_effect(move || {
+        let Some(attempt_id) = pending_reveal_attempt() else {
+            return;
+        };
+        if reveal_active_rows
+            .iter()
+            .any(|build| build.job_id == Some(attempt_id))
+        {
+            active_view.set(BuildsTab::ActiveQueue);
+            selected_build.set(Some(attempt_id));
+            pending_reveal_attempt.set(None);
+        } else if reveal_completed_rows
+            .iter()
+            .any(|build| build.job_id == Some(attempt_id))
+        {
+            active_view.set(BuildsTab::Completed);
+            selected_build.set(Some(attempt_id));
+            pending_reveal_attempt.set(None);
+        }
+    });
 
     // The server applies search/latest before pagination. Marker matching below
     // prevents stale rows from flashing while a changed request is in flight.
@@ -971,9 +1128,13 @@ pub fn BuildsView() -> Element {
                         } {
                             span {
                                 class: "ms-hint",
-                                title: "Shift-click to toggle row selection",
-                                kbd { "⇧" }
-                                "-click to select"
+                                title: if active_view() == BuildsTab::Completed { "Use row checkboxes to select completed builds" } else { "Shift-click to toggle row selection" },
+                                if active_view() == BuildsTab::Completed {
+                                    "Use checkboxes to select"
+                                } else {
+                                    kbd { "⇧" }
+                                    "-click to select"
+                                }
                             }
                         }
                         button {
@@ -1033,6 +1194,20 @@ pub fn BuildsView() -> Element {
                     }
                     }
                 }
+                if let Some(note) = last_action_note.read().as_ref() {
+                    div {
+                        role: "status",
+                        class: "mx-4 mt-3 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200",
+                        "{note}"
+                    }
+                }
+                if let Some(error) = action_error.read().as_ref() {
+                    div {
+                        role: "alert",
+                        class: "mx-4 mt-3 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200",
+                        "{error}"
+                    }
+                }
                 // JSX: {filteredList.length === 0 ? <EmptyState/> : <BuildQueueTable .../>}
                 if if active_view() == BuildsTab::ActiveQueue {
                     queue_domain_total() == 0
@@ -1081,6 +1256,7 @@ pub fn BuildsView() -> Element {
                         selected_id: selected_build,
                         flash_failed: flash_hist_rows(),
                         can_requeue,
+                        rerun_pending: requeue_pending(),
                         allow_reorder: active_view() == BuildsTab::ActiveQueue && !latest_only && search_q.is_empty(),
                         on_build_action: move |(job_id, action)| {
                             match action {
@@ -1152,37 +1328,94 @@ pub fn BuildsView() -> Element {
                         },
                         on_bulk_rerun: {
                             move |build_ids: Vec<uuid::Uuid>| {
+                                if requeue_pending() {
+                                    return;
+                                }
+                                last_action_note.set(None);
+                                action_error.set(None);
+                                requeue_pending.set(true);
                                 let mut action_error = action_error;
                                 let mut last_action_note = last_action_note;
                                 let mut active_refresh_trigger = active_refresh_trigger;
                                 let mut history_refresh_trigger = history_refresh_trigger;
                                 let mut active_view = active_view;
+                                let mut filter_status = filter_status;
+                                let mut latest_filter = latest_filter;
+                                let mut search_query = search_query;
+                                let mut pending_reveal_attempt = pending_reveal_attempt;
+                                let mut fetch_limit = fetch_limit;
+                                let mut build_history_fetch_limit = build_history_fetch_limit;
+                                let mut requeue_pending = requeue_pending;
                                 let filtered = filtered_list.clone();
                                 spawn(async move {
-                                    let count = build_ids.len();
-                                    for id in &build_ids {
-                                        if let Some(build) = filtered.iter().find(|b| b.job_id == Some(*id)) {
-                                            if let Some(jid) = build.job_id {
-                                                let _ = api::client::requeue_build_job(&jid).await;
-                                            }
+                                    let mut summary = BulkRetrySummary::default();
+                                    let mut seen = std::collections::HashSet::new();
+                                    let mut first_attempt = None;
+                                    let mut activated_sources = Vec::new();
+                                    for id in build_ids {
+                                        if !seen.insert(id) {
+                                            continue;
                                         }
+                                        let Some(build) = filtered.iter().find(|build| build.job_id == Some(id)) else {
+                                            summary.skipped.push(format!("job {id}: row is no longer visible"));
+                                            continue;
+                                        };
+                                        let result = retry_terminal_build(build, is_admin).await;
+                                        if let Ok(
+                                            RetryBuildOutcome::Created { attempt_id, .. }
+                                            | RetryBuildOutcome::Reused { attempt_id, .. },
+                                        ) = &result
+                                        {
+                                            first_attempt.get_or_insert(*attempt_id);
+                                            activated_sources.push(build.clone());
+                                        }
+                                        summary.record(result);
                                     }
-                                    action_error.set(None);
-                                    let suffix = if count == 1 { "" } else { "s" };
-                                    last_action_note.set(Some(format!("Re-queued {count} build{suffix}")));
-                                    active_view.set(BuildsTab::ActiveQueue);
+                                    let mut note = summary.message();
+                                    if !summary.skipped.is_empty() {
+                                        note.push_str(&format!(". Skipped: {}", summary.skipped.join("; ")));
+                                    }
+                                    if summary.scheduled() == 0 {
+                                        last_action_note.set(None);
+                                        let mut reasons = summary.skipped.clone();
+                                        reasons.extend(summary.failures.clone());
+                                        action_error.set(Some(format!(
+                                            "No builds were recovered{}",
+                                            if reasons.is_empty() {
+                                                String::new()
+                                            } else {
+                                                format!(": {}", reasons.join("; "))
+                                            }
+                                        )));
+                                    } else {
+                                        last_action_note.set(Some(note));
+                                        action_error.set((!summary.failures.is_empty()).then(|| {
+                                            format!("Build recovery failures: {}", summary.failures.join("; "))
+                                        }));
+                                    }
+                                    if summary.activated() > 0 {
+                                        if activated_sources.iter().any(|build| !build.is_latest_per_flake) {
+                                            latest_filter.with_mut(LatestFilterState::clear);
+                                        }
+                                        let search = search_query.read().trim().to_lowercase();
+                                        if !search.is_empty()
+                                            && !activated_sources
+                                                .iter()
+                                                .any(|build| build_matches_search(build, &search))
+                                        {
+                                            search_query.set(String::new());
+                                        }
+                                        active_view.set(BuildsTab::ActiveQueue);
+                                        filter_status.set("queued,building,cancelling".to_string());
+                                        fetch_limit.set(FETCH_LIMIT_MAX);
+                                        build_history_fetch_limit.set(FETCH_LIMIT_MAX);
+                                        pending_reveal_attempt.set(first_attempt);
+                                    }
                                     active_refresh_trigger.set(active_refresh_trigger() + 1);
                                     history_refresh_trigger.set(history_refresh_trigger() + 1);
+                                    requeue_pending.set(false);
                                 });
                             }
-                        },
-                        on_bulk_download_logs: move |_build_ids| {
-                            // TODO: Download logs as a single archive
-                            action_error.set(Some("Download logs not yet implemented".to_string()));
-                        },
-                        on_bulk_delete: move |_build_ids| {
-                            // TODO: Delete build history entries
-                            action_error.set(Some("Delete builds not yet implemented".to_string()));
                         },
                     }
                     // Infinite-scroll sentinel — grows the paged slice when scrolled into view.
@@ -1216,6 +1449,7 @@ pub fn BuildsView() -> Element {
                     BuildDetailPane {
                         selected: selected.clone(),
                         can_requeue,
+                        retry_pending: requeue_pending(),
                         on_close: move |_| {
                             selected_build.set(None);
                             log_open.set(false);
@@ -1339,9 +1573,32 @@ pub fn BuildsView() -> Element {
             if let Some(action) = pending_action.read().clone() {
                 ConfirmActionModal {
                     action: action.clone(),
-                    on_cancel: move |_| pending_action.set(None),
+                    pending: requeue_pending(),
+                    on_cancel: move |_| {
+                        if !requeue_pending() {
+                            pending_action.set(None);
+                        }
+                    },
                     on_confirm: move |_| {
-                        if let Some(next_action) = pending_action.read().clone() {
+                        let next_action = { pending_action.read().clone() };
+                        if let Some(next_action) = next_action {
+                            let is_retry = matches!(
+                                &next_action,
+                                PendingAction::Build {
+                                    action: BuildAction::Restart,
+                                    ..
+                                }
+                            );
+                            if is_retry && requeue_pending() {
+                                return;
+                            }
+                            last_action_note.set(None);
+                            action_error.set(None);
+                            if is_retry {
+                                requeue_pending.set(true);
+                            } else {
+                                pending_action.set(None);
+                            }
                             match next_action.clone() {
                                 PendingAction::Queue(queue_action) => {
                                     let builders_snapshot = workers.read().clone();
@@ -1429,12 +1686,22 @@ pub fn BuildsView() -> Element {
                                     let mut active_refresh_trigger = active_refresh_trigger;
                                     let mut history_refresh_trigger = history_refresh_trigger;
                                     let mut active_view = active_view;
+                                    let mut filter_status = filter_status;
+                                    let mut latest_filter = latest_filter;
+                                    let mut search_query = search_query;
+                                    let mut pending_reveal_attempt = pending_reveal_attempt;
+                                    let mut fetch_limit = fetch_limit;
+                                    let mut build_history_fetch_limit = build_history_fetch_limit;
+                                    let mut requeue_pending = requeue_pending;
+                                    let mut pending_action = pending_action;
                                     spawn(async move {
                                         // Check both active queue and completed history
                                         let selected = queue_snapshot.iter().find(|b| b.job_id == Some(job_id))
                                             .or_else(|| history_snapshot.iter().find(|b| b.job_id == Some(job_id)));
                                         let Some(selected) = selected else {
                                             action_error.set(Some(format!("Build job {} not found", job_id)));
+                                            requeue_pending.set(false);
+                                            pending_action.set(None);
                                             return;
                                         };
 
@@ -1459,24 +1726,63 @@ pub fn BuildsView() -> Element {
                                             BuildAction::Restart => {
                                                 // Prefer direct requeue if we have a job_id (terminal statuses).
                                                 // Fall back to system sync for statuses without a job_id.
-                                                if let Some(ref jid) = selected.job_id {
-                                                    match api::client::requeue_build_job(jid).await {
-                                                        Ok(_) => {
+                                                if selected.job_id.is_some() {
+                                                    match retry_terminal_build(selected, is_admin).await {
+                                                        Ok(outcome) => {
                                                             action_error.set(None);
-                                                            last_action_note.set(Some("Build re-queued".to_string()));
-                                                            active_view.set(BuildsTab::ActiveQueue);
+                                                            match outcome {
+                                                                 RetryBuildOutcome::Created { attempt_id, attempt_number } => {
+                                                                     last_action_note.set(Some(format!("Created build attempt #{attempt_number} ({attempt_id})")));
+                                                                     pending_reveal_attempt.set(Some(attempt_id));
+                                                                     if !selected.is_latest_per_flake {
+                                                                         latest_filter.with_mut(LatestFilterState::clear);
+                                                                    }
+                                                                    let search = search_query.read().trim().to_lowercase();
+                                                                    if !search.is_empty() && !build_matches_search(selected, &search) {
+                                                                        search_query.set(String::new());
+                                                                    }
+                                                                    active_view.set(BuildsTab::ActiveQueue);
+                                                                     filter_status.set("queued,building,cancelling".to_string());
+                                                                     fetch_limit.set(FETCH_LIMIT_MAX);
+                                                                     build_history_fetch_limit.set(FETCH_LIMIT_MAX);
+                                                                 }
+                                                                 RetryBuildOutcome::Reused { attempt_id, attempt_number } => {
+                                                                     last_action_note.set(Some(format!("Using active build attempt #{attempt_number} ({attempt_id})")));
+                                                                     pending_reveal_attempt.set(Some(attempt_id));
+                                                                     if !selected.is_latest_per_flake {
+                                                                         latest_filter.with_mut(LatestFilterState::clear);
+                                                                    }
+                                                                    let search = search_query.read().trim().to_lowercase();
+                                                                    if !search.is_empty() && !build_matches_search(selected, &search) {
+                                                                        search_query.set(String::new());
+                                                                    }
+                                                                    active_view.set(BuildsTab::ActiveQueue);
+                                                                     filter_status.set("queued,building,cancelling".to_string());
+                                                                     fetch_limit.set(FETCH_LIMIT_MAX);
+                                                                     build_history_fetch_limit.set(FETCH_LIMIT_MAX);
+                                                                 }
+                                                                RetryBuildOutcome::ReevaluationQueued { commit_id } => last_action_note.set(Some(format!("Queued authoritative re-evaluation for commit {commit_id}. A replacement build attempt is queued automatically after evaluation succeeds."))),
+                                                                RetryBuildOutcome::ReevaluationReused { commit_id } => last_action_note.set(Some(format!("Authoritative re-evaluation is already active for commit {commit_id}. A replacement build attempt is queued automatically after evaluation succeeds."))),
+                                                            }
                                                             active_refresh_trigger.set(active_refresh_trigger() + 1);
                                                             history_refresh_trigger.set(history_refresh_trigger() + 1);
                                                         }
-                                                        Err(e) => {
-                                                            action_error.set(Some(format!("Failed to requeue: {}", e)));
+                                                        Err(RetryBuildFailure::Skipped(reason)) => {
+                                                            action_error.set(Some(reason));
+                                                        }
+                                                        Err(RetryBuildFailure::Failed(error)) => {
+                                                            action_error.set(Some(format!("Failed to requeue: {error}")));
                                                         }
                                                     }
+                                                    requeue_pending.set(false);
+                                                    pending_action.set(None);
                                                 } else {
-                                                    let Some(system_id) = selected.system_id else {
-                                                        action_error.set(Some("Queue item has no system id; cannot trigger build".to_string()));
-                                                        return;
-                                                    };
+                                                     let Some(system_id) = selected.system_id else {
+                                                         action_error.set(Some("Queue item has no system id; cannot trigger build".to_string()));
+                                                         requeue_pending.set(false);
+                                                         pending_action.set(None);
+                                                         return;
+                                                     };
                                                     match api::client::request_system_sync(&system_id).await {
                                                         Ok(_) => {
                                                             action_error.set(None);
@@ -1533,7 +1839,6 @@ pub fn BuildsView() -> Element {
                                 }
                             }
                         }
-                        pending_action.set(None);
                     }
                 }
             }
@@ -1734,5 +2039,80 @@ fn BuildQueueFullTable(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bulk_retry_summary_preserves_partial_failures() {
+        let mut summary = BulkRetrySummary::default();
+        summary.record(Ok(RetryBuildOutcome::Created {
+            attempt_id: uuid::Uuid::from_u128(1),
+            attempt_number: 2,
+        }));
+        summary.record(Ok(RetryBuildOutcome::Reused {
+            attempt_id: uuid::Uuid::from_u128(2),
+            attempt_number: 3,
+        }));
+        summary.record(Err(RetryBuildFailure::Failed(
+            "job three: blocked".to_string(),
+        )));
+
+        assert_eq!(summary.created, 1);
+        assert_eq!(summary.reused, 1);
+        assert_eq!(summary.failures, ["job three: blocked"]);
+        assert!(summary.message().contains("1 failed"));
+    }
+
+    #[test]
+    fn bulk_retry_summary_reports_obsolete_re_evaluation_and_skips() {
+        let mut summary = BulkRetrySummary {
+            skipped: vec!["job 40: no longer terminal".to_string()],
+            ..BulkRetrySummary::default()
+        };
+        summary.record(Ok(RetryBuildOutcome::ReevaluationQueued { commit_id: 41 }));
+        summary.record(Ok(RetryBuildOutcome::ReevaluationReused { commit_id: 41 }));
+
+        assert_eq!(summary.reevaluations_queued, 1);
+        assert_eq!(summary.reevaluations_reused, 1);
+        assert_eq!(summary.scheduled(), 2);
+        assert!(summary.message().contains("1 skipped"));
+    }
+
+    #[test]
+    fn bulk_retry_summary_does_not_replace_all_failures_with_success() {
+        let mut summary = BulkRetrySummary::default();
+        summary.record(Err(RetryBuildFailure::Failed(
+            "job one: rejected".to_string(),
+        )));
+        summary.record(Err(RetryBuildFailure::Failed(
+            "job two: unavailable".to_string(),
+        )));
+
+        assert_eq!(summary.created, 0);
+        assert_eq!(summary.reused, 0);
+        assert_eq!(summary.scheduled(), 0);
+        assert_eq!(summary.failures.len(), 2);
+        assert!(summary.message().contains("2 failed"));
+    }
+
+    #[test]
+    fn bulk_retry_summary_all_success_activates_navigation() {
+        let mut summary = BulkRetrySummary::default();
+        summary.record(Ok(RetryBuildOutcome::Created {
+            attempt_id: uuid::Uuid::from_u128(1),
+            attempt_number: 2,
+        }));
+        summary.record(Ok(RetryBuildOutcome::Reused {
+            attempt_id: uuid::Uuid::from_u128(2),
+            attempt_number: 4,
+        }));
+
+        assert_eq!(summary.activated(), 2);
+        assert!(summary.failures.is_empty());
+        assert!(summary.skipped.is_empty());
     }
 }

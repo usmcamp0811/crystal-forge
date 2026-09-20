@@ -202,6 +202,11 @@ function EvalPolicyTab({ ev, onOpenSystem, onOpenPolicy, onOpenFinding, restoreS
     return { key: "prefix:" + key, label: key, framework: null, unbundled: true };
   };
   const bundles = React.useMemo(() => {
+    /* When the matrix declares its bundles (one flake spanning several
+       environments pulls in several bundles), use that list as-is: a control
+       required by two bundles belongs to BOTH columns, which a policy→bundle
+       map cannot express. */
+    if (matrix.bundles && matrix.bundles.length) return matrix.bundles;
     const map = new Map();
     policies.forEach((p, i) => {
       const b = bundleOf(p);
@@ -209,10 +214,12 @@ function EvalPolicyTab({ ev, onOpenSystem, onOpenPolicy, onOpenFinding, restoreS
       map.get(b.key).idxs.push(i);
     });
     return [...map.values()];
-  }, [policies, bundleIndex]);
+  }, [policies, bundleIndex, matrix.bundles]);
   const dense = policies.length > 14;          // bundle-scale, not a handful
   const [colMode, setColMode] = React.useState(restoreState?.colMode || (dense ? "bundles" : "controls"));
   const [failingColsOnly, setFailingColsOnly] = React.useState(restoreState ? restoreState.failingColsOnly : dense);
+  // Drilling into one bundle scopes Controls mode to that bundle's controls.
+  const [bundleFocus, setBundleFocus] = React.useState(restoreState?.bundleFocus || null);
   React.useEffect(() => { setColMode(dense ? "bundles" : "controls"); setFailingColsOnly(dense); }, [dense]);
 
   // Annotate rows with counts
@@ -257,14 +264,15 @@ function EvalPolicyTab({ ev, onOpenSystem, onOpenPolicy, onOpenFinding, restoreS
      that pin every column open defeats the trim. Its own row still renders every
      column, and the callout explains the state. */
   const visibleCols = React.useMemo(() => {
-    const all = policies.map((p, i) => i);
+    const focus = bundleFocus ? bundles.find(b => b.key === bundleFocus) : null;
+    const all = focus ? focus.idxs.slice() : policies.map((p, i) => i);
     if (!failingColsOnly) return all;
     const basis = filtered.length ? filtered : annotated;
     const hardened = basis.filter(r => !r.greenfield);
     const baseline = hardened.length ? hardened : basis;
     const bad = all.filter(i => baseline.some(r => r.results[i] !== "pass"));
     return bad.length ? bad : all;
-  }, [policies, failingColsOnly, filtered, annotated]);
+  }, [policies, failingColsOnly, filtered, annotated, bundleFocus, bundles]);
 
   // Per-host roll-up for one bundle — what a bundle column shows.
   const bundleCell = (row, b) => {
@@ -280,6 +288,10 @@ function EvalPolicyTab({ ev, onOpenSystem, onOpenPolicy, onOpenFinding, restoreS
 
   // Failure highlights — surface top issues
   const topIssues = policyStats.filter(s => s.fail > 0).sort((a,b) => b.fail - a.fail).slice(0, 3);
+  const focusBundle = bundleFocus ? bundles.find(b => b.key === bundleFocus) : null;
+  const colScopeTotal = focusBundle ? focusBundle.idxs.length : policies.length;
+  // Which bundles require a given control — a control can be required by several.
+  const bundlesForCol = (i) => bundles.filter(b => !b.unbundled && b.idxs.includes(i));
 
   const counts = {
     fail:  annotated.filter(r => r.fail > 0).length,
@@ -332,12 +344,39 @@ function EvalPolicyTab({ ev, onOpenSystem, onOpenPolicy, onOpenFinding, restoreS
               <button className={colMode==="bundles"?"active":""} onClick={()=>setColMode("bundles")} title="One roll-up column per compliance bundle">Bundles <span className="pm-count">{bundles.length}</span></button>
               <button className={colMode==="controls"?"active":""} onClick={()=>setColMode("controls")} title="One column per control">Controls <span className="pm-count">{policies.length}</span></button>
             </div>
+            {colMode === "bundles" && bundles.length > 1 && (() => {
+              /* Several bundles on one flake overlap; say how much, or the column
+                 totals look inflated against the control count. */
+              const shared = policies.filter((p, i) => bundlesForCol(i).length > 1).length;
+              return (
+                <span className="pm-col-note" style={{ cursor:"default" }}
+                  title={`Each bundle column counts every control it requires. ${shared} control(s) are required by more than one bundle, so the column totals add up to more than ${policies.length}.`}>
+                  {policies.length} controls{shared ? ` · ${shared} shared across bundles` : ""}
+                </span>
+              );
+            })()}
             {colMode === "controls" && (
-              <button className={`btn btn-ghost xs focus-ring${failingColsOnly?" active-filter":""}`}
-                onClick={()=>setFailingColsOnly(v=>!v)}
-                title="Hide controls that pass on every system">
-                Failing only
-              </button>
+              <React.Fragment>
+                {focusBundle && (
+                  <button className="btn btn-ghost xs focus-ring active-filter" onClick={()=>setBundleFocus(null)}
+                    title="Show controls from every bundle">
+                    {focusBundle.label} <Icon name="x" size={10} style={{ marginLeft:4 }}/>
+                  </button>
+                )}
+                <button className={`btn btn-ghost xs focus-ring${failingColsOnly?" active-filter":""}`}
+                  onClick={()=>setFailingColsOnly(v=>!v)}
+                  title="Hide controls that pass on every system">
+                  Failing only
+                </button>
+                {/* The trim is the one place columns disappear without a visible
+                    summary of their own — say how many, and how to get them back. */}
+                {failingColsOnly && visibleCols.length < colScopeTotal && (
+                  <button className="pm-col-note focus-ring" onClick={()=>setFailingColsOnly(false)}
+                    title="Show every control column">
+                    {visibleCols.length} of {colScopeTotal} columns · <span className="pm-col-note-hidden">{colScopeTotal - visibleCols.length} all-passing hidden</span>
+                  </button>
+                )}
+              </React.Fragment>
             )}
           </React.Fragment>
         ) : null}
@@ -357,7 +396,9 @@ function EvalPolicyTab({ ev, onOpenSystem, onOpenPolicy, onOpenFinding, restoreS
               <th className="pm-th-health">Health</th>
               {colMode === "bundles"
                 ? bundleStats.map(b => (
-                    <th key={b.name} className="pm-th-bundle" title={`${b.label}${b.framework?` (${b.framework})`:""} — ${b.idxs.length} controls, ${b.hostsFailing} system(s) failing`}>
+                    <th key={b.name} className="pm-th-bundle" title={`${b.label}${b.framework?` (${b.framework})`:""} — ${b.idxs.length} controls, ${b.hostsFailing} system(s) failing${b.envs?.length?`\nrequired in ${b.envs.join(", ")}`:""}\nClick to see only this bundle's controls`}
+                      style={{ cursor:"pointer" }}
+                      onClick={()=>{ setBundleFocus(b.key); setColMode("controls"); }}>
                       <div className="pm-th-bundle-inner">
                         <span className="pm-th-bundle-name" title={b.label}>{b.label}</span>
                         <span className="pm-th-bundle-sub">{b.framework ? `${b.framework} · ` : ""}{b.idxs.length} controls</span>
@@ -373,14 +414,22 @@ function EvalPolicyTab({ ev, onOpenSystem, onOpenPolicy, onOpenFinding, restoreS
                     const p = policies[i];
                     const st = policyStats.find(x=>x.name===p);
                     const isFiltered = policyFilter === p;
+                    /* Controls mode columns are bundle policy ids; the registry
+                       carries the STIG rule id and requirement text worth showing. */
+                    const reg = (typeof POLICIES !== "undefined" ? POLICIES : []).find(x => x.id === p);
+                    const head = [reg?.stigId || (reg?.clause && `ISO 9001 clause ${reg.clause}`), reg?.description].filter(Boolean).join(" — ");
+                    const owners = bundlesForCol(i);
+                    const ownerLine = owners.length > 1
+                      ? `required by ${owners.length} bundles: ${owners.map(b=>b.framework || b.label).join(", ")}`
+                      : owners.length === 1 ? `required by ${owners[0].label}` : "";
                     return (
                       <th key={p}
                         className={`pm-th-policy${isFiltered?" filtered":""}`}
-                        title={`${p} — ${st.fail} fail / ${st.warn} warn / ${st.pass} pass`}
+                        title={`${p}${head?`\n${head}`:""}${ownerLine?`\n${ownerLine}`:""}\n${st.fail} fail / ${st.warn} warn / ${st.pass} pass`}
                         onClick={()=>setPolicyFilter(policyFilter === p ? null : p)}
                       >
                         <div className="pm-th-policy-inner">
-                          <span className="pm-th-policy-label">{p}</span>
+                          <span className="pm-th-policy-label">{reg?.stigId || reg?.clauseLabel || reg?.clause || p}</span>
                         </div>
                         <div className="pm-th-policy-bar">
                           <div style={{ width: `${(st.fail/st.total)*100}%`, background:"#f87171" }}/>
@@ -423,8 +472,8 @@ function EvalPolicyTab({ ev, onOpenSystem, onOpenPolicy, onOpenFinding, restoreS
                           const worst = c.fail ? "fail" : c.warn ? "warn" : "pass";
                           return (
                             <td key={b.name} className={`pm-td-bundle pm-${worst}`}
-                              title={`${b.label}: ${c.pass}/${c.total} pass${c.fail?`, ${c.fail} fail`:""}${c.warn?`, ${c.warn} warn`:""} — click to expand this bundle's controls`}
-                              onClick={e => { e.stopPropagation(); setColMode("controls"); }}
+                              title={`${b.label}: ${c.pass}/${c.total} pass${c.fail?`, ${c.fail} fail`:""}${c.warn?`, ${c.warn} warn`:""} — click to see only this bundle's controls`}
+                              onClick={e => { e.stopPropagation(); setBundleFocus(b.key); setColMode("controls"); }}
                             >
                               <span className="mono pm-bundle-num">{c.pass}/{c.total}</span>
                               {c.fail > 0 && <span className="pm-bundle-fail">{c.fail}</span>}
@@ -662,26 +711,42 @@ function EVAL_DEFAULT_POLICY(ev) {
      assigned, the matrix carries that bundle's full control set — ~100 controls,
      which is what a real DISA STIG bundle looks like. This is the case the
      bundle roll-up columns exist for. */
-  const bundle = (typeof COMPLIANCE_BUNDLES !== "undefined" ? COMPLIANCE_BUNDLES : []).find(b => b.framework === "DISA STIG" && b.publicationState !== "deprecated");
-  const bundleScale = !!bundle;
-  let policies, bundleOfMap = null;
-  if (bundleScale) {
-    // Use the bundle's REAL policy ids (not invented ones) so a control here
-    // is the same control the Compliance view's evidence drawer can focus.
-    policies = bundle.policyIds.slice();
-    bundleOfMap = {};
-    policies.forEach(pid => { bundleOfMap[pid] = bundle.id; });
-    // A few Crystal Forge platform checks sit outside the bundle.
-    ["cf.hb","cf.cve","cf.cache"].forEach(p => policies.push(p));
-  } else {
-    policies = ["stig.audit","stig.fw","stig.sshd","stig.tls","cf.hb","cf.cve","cf.cache"];
-  }
   // Use real fleet hostnames (not invented ones) so "Open system" always resolves.
   const hosts = SYSTEMS.filter(s => s.flake === ev.flake).map(s => s.hostname).slice(0, ev.systemCount);
   const usedHostnames = new Set(hosts);
   const fallbackPool = SYSTEMS.map(s => s.hostname).filter(h => !usedHostnames.has(h));
   let fbIdx = 0;
   while (hosts.length < ev.systemCount && fbIdx < fallbackPool.length) { hosts.push(fallbackPool[fbIdx]); usedHostnames.add(fallbackPool[fbIdx]); fbIdx++; }
+  /* One flake, several environments: the eval covers every system on the flake,
+     so the control set is the UNION of every bundle required by any environment
+     those systems sit in (STIG + 800-53 + ISO 9001 + internal baseline, say).
+     Controls shared between bundles are evaluated once and counted by each
+     bundle that requires them — which is the whole point of the roll-up columns. */
+  const envs = [...new Set(hosts.map(h => SYSTEMS.find(s => s.hostname === h)?.environment).filter(Boolean))];
+  const applicable = (typeof COMPLIANCE_BUNDLES !== "undefined" ? COMPLIANCE_BUNDLES : [])
+    .filter(b => b.publicationState === "current" && (b.requiredEnvs || []).some(e => envs.includes(e)));
+  const bundleScale = applicable.length > 0;
+  let policies, bundleOfMap = null, bundleGroups = null;
+  if (bundleScale) {
+    // Use the bundles' REAL policy ids (not invented ones) so a control here
+    // is the same control the Compliance view's evidence drawer can focus.
+    policies = [...new Set(applicable.flatMap(b => b.policyIds))];
+    bundleOfMap = {};
+    applicable.forEach(b => b.policyIds.forEach(pid => { if (!bundleOfMap[pid]) bundleOfMap[pid] = b.id; }));
+    const idxOf = new Map(policies.map((p, i) => [p, i]));
+    bundleGroups = applicable.map(b => ({
+      key: b.id, name: b.id, label: b.name, framework: b.framework,
+      envs: (b.requiredEnvs || []).filter(e => envs.includes(e)),
+      idxs: [...new Set(b.policyIds)].map(p => idxOf.get(p)).filter(i => i !== undefined),
+    }));
+    // A few Crystal Forge platform checks sit outside every bundle.
+    const platform = ["cf.hb","cf.cve","cf.cache"];
+    bundleGroups.push({ key:"cf-platform", name:"cf-platform", label:"Crystal Forge platform", framework:null, unbundled:true,
+      idxs: platform.map((p, k) => policies.length + k) });
+    platform.forEach(p => policies.push(p));
+  } else {
+    policies = ["stig.audit","stig.fw","stig.sshd","stig.tls","cf.hb","cf.cve","cf.cache"];
+  }
   /* One host in every bundle-scale eval is GREENFIELD: newly provisioned, with
      the bundle assigned but almost none of it implemented yet. That is the state
      an operator actually works through when hardening a new system, and it is
@@ -716,7 +781,7 @@ function EVAL_DEFAULT_POLICY(ev) {
     });
     return { host:h, results, greenfield: isNew };
   });
-  return { policies, rows, bundleOf: bundleOfMap };
+  return { policies, rows, bundleOf: bundleOfMap, bundles: bundleGroups, envs };
 }
 
 function EVAL_DEFAULT_GRAPH(ev) {

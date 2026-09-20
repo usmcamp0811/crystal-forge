@@ -28,7 +28,7 @@ use crate::handlers::api::auth_session::RequireCsrf;
 use crate::models::deployment_policies::validate_policy_type_config;
 use crate::models::deployment_policies::{
     CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
-    is_reserved_policy_result_field, validate_policy_type_config_async,
+    validate_policy_type_config_async,
 };
 use crate::queries::deployment_policies;
 use crate::queries::deployment_policies::PolicyDeleteOutcome;
@@ -117,34 +117,6 @@ fn normalize_required_packages(packages: &[Value]) -> Result<Vec<String>, (Statu
     Ok(normalized)
 }
 
-/// Validate and normalize a Nix expression for custom policy checks.
-///
-/// This function ensures expressions use the canonical `config.` variable scope.
-/// Legacy `cfg.config.` expressions are normalized for compatibility.
-///
-/// Returns the normalized expression or an error if validation fails.
-fn validate_and_normalize_nix_expression(expr: &str) -> Result<String, (StatusCode, String)> {
-    let trimmed = expr.trim();
-
-    if trimmed.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Expression cannot be empty".to_string(),
-        ));
-    }
-
-    let (normalized, changed) = crate::server::normalize_custom_policy_expression(trimmed);
-    if changed {
-        tracing::warn!(
-            "Normalized legacy policy expression from 'cfg.config.' to 'config.': {} -> {}",
-            trimmed,
-            normalized
-        );
-    }
-
-    Ok(normalized)
-}
-
 fn validate_policy_config_fields(
     policy_type: &str,
     config: &Value,
@@ -161,7 +133,9 @@ fn validate_policy_config_fields(
         "Policy config must be a JSON object".to_string(),
     ))?;
 
-    if let Some(strict) = obj.get("strict") {
+    if policy_type != "custom_check"
+        && let Some(strict) = obj.get("strict")
+    {
         if !strict.is_boolean() {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -203,151 +177,12 @@ fn validate_policy_config_fields(
             }
         }
         "custom_check" => {
-            let has_expression = obj
-                .get("expression")
-                .and_then(|v| v.as_str())
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false);
-
-            let has_rules = obj
-                .get("rules")
-                .and_then(|v| v.as_array())
-                .map(|a| !a.is_empty())
-                .unwrap_or(false);
-
-            let explicit_empty_rules = obj
-                .get("rules")
-                .and_then(|v| v.as_array())
-                .is_some_and(|rules| rules.is_empty());
-
-            if !has_expression && !has_rules && !explicit_empty_rules {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "custom_check policy requires config.expression or config.rules[]".to_string(),
-                ));
-            }
-
-            // `mode` is meaningful for both populated and explicitly empty rule
-            // sets, so it is validated before either branch. An explicit empty
-            // rule set is the canonical "no enforcement" representation; it must
-            // not be able to carry a nonsense aggregation mode.
-            if let Some(mode) = obj.get("mode") {
-                let mode_str = mode.as_str().ok_or((
-                    StatusCode::BAD_REQUEST,
-                    "config.mode must be a string (\"all\" or \"any\")".to_string(),
-                ))?;
-                if mode_str != "all" && mode_str != "any" {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        "config.mode must be \"all\" or \"any\"".to_string(),
-                    ));
-                }
-            }
-
-            if has_expression && !has_rules {
-                // Single-expression (legacy) path — normalize expression and validate field_name.
-                let expression = obj
-                    .get("expression")
-                    .and_then(|v| v.as_str())
-                    .map(str::trim)
-                    .unwrap();
-                let normalized_expr = validate_and_normalize_nix_expression(expression)?;
-                if let Some(config_obj) = validated_config.as_object_mut() {
-                    config_obj.insert("expression".to_string(), Value::String(normalized_expr));
-                }
-
-                if let Some(field_name) = obj
-                    .get("field_name")
-                    .and_then(|v| v.as_str())
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    if is_reserved_policy_result_field(field_name) {
-                        return Err((
-                            StatusCode::BAD_REQUEST,
-                            format!(
-                                "config.field_name '{}' is reserved for built-in evaluator metadata",
-                                field_name
-                            ),
-                        ));
-                    }
-                }
-            }
-
-            if has_rules {
-                // Multi-rule path — validate each rule
-                let rules = obj.get("rules").and_then(|v| v.as_array()).unwrap();
-                let mut seen_field_names: HashSet<String> = HashSet::new();
-                let mut normalized_rule_expressions: Vec<String> = Vec::with_capacity(rules.len());
-                for (i, rule) in rules.iter().enumerate() {
-                    let rule_obj = rule.as_object().ok_or((
-                        StatusCode::BAD_REQUEST,
-                        format!("config.rules[{}] must be an object", i),
-                    ))?;
-
-                    let expr = rule_obj
-                        .get("expression")
-                        .and_then(|v| v.as_str())
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .ok_or((
-                            StatusCode::BAD_REQUEST,
-                            format!("config.rules[{}].expression must be a non-empty string", i),
-                        ))?;
-                    let normalized_expr = validate_and_normalize_nix_expression(expr)?;
-                    normalized_rule_expressions.push(normalized_expr);
-
-                    let field_name = rule_obj
-                        .get("field_name")
-                        .and_then(|v| v.as_str())
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .ok_or((
-                            StatusCode::BAD_REQUEST,
-                            format!("config.rules[{}].field_name must be a non-empty string", i),
-                        ))?;
-
-                    if !seen_field_names.insert(field_name.to_string()) {
-                        return Err((
-                            StatusCode::BAD_REQUEST,
-                            format!(
-                                "config.rules[{}].field_name duplicates existing field_name '{}'",
-                                i, field_name
-                            ),
-                        ));
-                    }
-
-                    if is_reserved_policy_result_field(field_name) {
-                        return Err((
-                            StatusCode::BAD_REQUEST,
-                            format!(
-                                "config.rules[{}].field_name '{}' is reserved for built-in evaluator metadata",
-                                i, field_name
-                            ),
-                        ));
-                    }
-                }
-
-                if let Some(config_obj) = validated_config.as_object_mut() {
-                    if let Some(validated_rules) =
-                        config_obj.get_mut("rules").and_then(|v| v.as_array_mut())
-                    {
-                        for (i, normalized_expr) in
-                            normalized_rule_expressions.into_iter().enumerate()
-                        {
-                            if let Some(rule_obj) = validated_rules
-                                .get_mut(i)
-                                .and_then(|rule| rule.as_object_mut())
-                            {
-                                rule_obj.insert(
-                                    "expression".to_string(),
-                                    Value::String(normalized_expr),
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+            validated_config = crate::models::custom_check::validate_and_normalize_config(
+                config,
+                crate::models::custom_check::ExpressionBinding::Compatible,
+                false,
+            )
+            .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
         }
         "require_cve_check" => {
             // Validate by attempting deserialization into CveCheckConfig
@@ -1362,6 +1197,17 @@ mod tests {
     }
 
     #[test]
+    fn validate_policy_config_rejects_empty_any_custom_check() {
+        let err = validate_policy_config(
+            "custom_check",
+            &serde_json::json!({"mode": "any", "rules": []}),
+        )
+        .expect_err("any mode requires an effective rule");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("requires at least one rule"));
+    }
+
+    #[test]
     fn validate_policy_config_rejects_non_strict_require_cf_agent() {
         let err = validate_policy_config("require_cf_agent", &serde_json::json!({"strict": false}))
             .expect_err("strict false must be rejected");
@@ -1382,6 +1228,31 @@ mod tests {
             result.get("expression").and_then(|v| v.as_str()),
             Some("config.services.ssh.enable")
         );
+    }
+
+    #[test]
+    fn validate_policy_config_ignores_superseded_single_expression_fields() {
+        let config = serde_json::json!({
+            "mode": "any",
+            "strict": "not effective",
+            "expression": {"malformed": true},
+            "field_name": 42,
+            "description": false,
+            "rules": [{
+                "field_name": "effectiveRule",
+                "expression": "cfg.config.services.ssh.enable",
+                "strict": true
+            }]
+        });
+        let validated = validate_policy_config("custom_check", &config)
+            .expect("API validation must follow runtime non-empty-rules precedence");
+
+        assert_eq!(
+            validated["rules"][0]["expression"],
+            "config.services.ssh.enable"
+        );
+        assert_eq!(validated["expression"], config["expression"]);
+        assert_eq!(validated["strict"], config["strict"]);
     }
 
     #[test]

@@ -132,6 +132,11 @@ WHERE environment_id IN (
 
 **Exception:** Admins can see all systems regardless of environment.
 
+Snapshot APIs preserve non-disclosure. An unknown resource, a resource in a
+hidden environment, and a revision outside the resource's active source use the
+same not-found response. See [Evaluation and Flake Snapshot
+Architecture](../evaluation-flake-snapshots.md#flake-outputs-and-count-authority).
+
 ---
 
 ## Systems API
@@ -152,6 +157,20 @@ Systems are the NixOS machines CF manages.
 | POST | `/systems/:id/sync` | Operator+ | Sync flake |
 | GET | `/systems/:id/deployments` | Viewer+ | Deployment history |
 | GET | `/systems/:id/logs` | Viewer+ | Deployment logs |
+| GET | `/systems/:id/evaluated-options` | Viewer+ | Read cached revision options |
+| GET | `/systems/:id/evaluation-summary` | Viewer+ | Read cached scalar revision summary |
+| GET | `/systems/:id/evaluation-module-sources` | Viewer+ | Read cached bounded module-source pages |
+| POST | `/systems/:id/config-inspections/:revision` | Admin | Queue or reuse targeted Config inspection |
+| POST | `/systems/:id/evaluations/:revision` | Admin | Explicit whole-commit evaluation prerequisite |
+
+`PATCH /systems/:id` applies authorization, environment and system locking,
+metadata changes, and response construction in one transaction. An Operator
+must have current membership in both the source and destination environments.
+Admin is not environment-scoped. The transaction re-reads the active user,
+roles, and memberships after it acquires the environment and system locks, so a
+concurrent revocation prevents the move. Unknown and unauthorized environments
+use the same not-found behavior for scoped callers. The success body is built
+from the transaction's updated row before commit.
 
 ### Query Parameters
 
@@ -203,19 +222,41 @@ GET /api/v1/systems?environment=prod
 ```bash
 POST /api/v1/systems/sys-123/deploy
 {
-  "flake_id": "flake-456",
-  "commit_sha": "def5678"
+  "commit_sha": "def56789abcdef0123456789abcdef0123456789",
+  "action": "convert_to_manual",
+  "request_id": "7ce63e03-935d-4903-ae9f-903f14242cab"
 }
 ```
+
+Manual deployment requests also accept `action` and `request_id`. The action is
+`deploy`, `continue_auto_latest`, or `convert_to_manual`. An `auto_latest`
+system requires one of the latter two explicit outcomes. New clients reuse one
+UUID `request_id` for retries. The UUID is bound immutably to the system, full
+commit SHA, and action. A conflicting reuse returns HTTP 409 before policy
+conversion. If conversion succeeds but queueing fails, the response reports the
+persisted manual policy separately from the failed deployment state. Legacy
+clients that omit `request_id` use a server-derived 24-hour replay window.
+
+A deployment target expires after two hours if no matching agent state report
+arrives. For 24 hours after terminal completion, an `expired` deployment remains
+eligible for exact evaluation-generation retention when system, store path,
+derivation, commit, configuration, artifact, and report timestamp all match. A
+delayed successful activation does not change the deployment row from `expired`
+to `succeeded`; it records a correlated `cf_deployment_succeeded` state event.
+Failed and superseded deployments are not eligible for this delayed correlation
+or retention. Matching selects the newest same-path deployment issued no later
+than the report before it checks status, so a newer failed or superseded request
+cannot fall back to older work.
 
 **Response:**
 ```json
 {
-  "data": {
-    "deployment_id": "deploy-789",
-    "status": "started",
-    "message": "Deployment queued"
-  }
+  "status": "accepted",
+  "policy": "manual",
+  "conversion": "converted",
+  "deployment": "queued",
+  "deployment_id": "79ea0220-5715-49ce-8e73-74c09a5ea289",
+  "message": "System policy is manual. Deployment requested"
 }
 ```
 
@@ -236,6 +277,8 @@ Flakes are git repositories that contain NixOS configurations.
 | DELETE | `/flakes/:id` | Operator+ | Remove from registry |
 | POST | `/flakes/:id/sync` | Operator+ | Trigger git sync |
 | GET | `/flakes/:id/commits` | Viewer+ | Get commit timeline |
+| GET | `/flakes/:id/revisions/:revision/outputs` | Viewer+ | Read cached revision outputs |
+| GET | `/flakes/:id/revisions/:revision/modules/:module/declarations` | Viewer+ | Read cached exported-module declarations |
 
 ### Example: Get Commit Timeline
 
@@ -259,6 +302,326 @@ GET /api/v1/flakes/flake-456/commits
   ]
 }
 ```
+
+## Evaluation and Flake Snapshot API
+
+These endpoints read persisted snapshots only. GET requests do not evaluate
+Nix, inspect Git, fetch repositories, enqueue work, or perform per-host work.
+All `revision` values are complete 40- or 64-character hexadecimal SHAs.
+
+### GET `/systems/:id/evaluated-options`
+
+Query parameters:
+
+| Parameter | Contract |
+| --- | --- |
+| `revision` | Required full SHA in commit mode. |
+| `mode` | `commit` or `generation`; defaults to `commit`. |
+| `generation` | Required retained generation number in generation mode. |
+| `search` | Case-insensitive redacted search text; truncated to 256 characters. |
+| `filter` | `all`, `overridden`, or `changed`. |
+| `limit` | Clamped to 1-100; defaults to 50. |
+| `offset` | Clamped to 0-100,000; defaults to 0. |
+| `snapshot_token` | Optional on offset 0; required and a 64-character hexadecimal digest when `offset` is greater than 0. |
+
+The response lifecycle is `queued`, `running`, `failed`, `available`, or
+`unavailable`. `counts` is revision-global and independent of search/filter.
+Every response includes `option_inventory_state`, which is `complete`,
+`partial`, or `unavailable`, and bounded `option_inventory_diagnostics`. Each
+partial diagnostic contains redacted `path_components`, a stable `code`, and a
+redacted `message`. The server canonicalizes and deduplicates path components
+after redaction. `option_inventory_diagnostics_truncated` is true when the
+128-entry bound or redaction collisions omit diagnostic detail. Traversal
+continues after the detail budget is full. A partial available response contains
+only options observed outside unreadable prefixes. Its counts, total, and module
+totals describe that observed corpus.
+Commit mode selects only schema-V2 Config Inspector artifacts through
+`config_snapshot_selections`. It does not fall back to a schema-V1 commit
+artifact. Generation mode retains schema-V1 selection through the exact retained
+generation identity.
+Generation-mode Config validity is independent of rollback lineage. A complete
+pre-0248 retained artifact remains readable after migration even though its
+unverified deployment/store lineage makes rollback ineligible.
+`total` is the number of rows for the active search/filter. Changed data and
+`counts.changed` are absent when the selected inventory is partial or when no
+valid first-parent or preceding retained generation snapshot exists. A
+`changed` filter over a partial inventory returns no rows. Drift and other
+selected-versus-baseline facts are unavailable for a partial inventory.
+`module_count` is the exact count of distinct
+`(source_input, source_revision, source_path)` tuples after redaction and
+per-option bounding; it is not derived from the bounded option page.
+An available response includes an opaque `snapshot_token`. In commit mode, the
+token binds the selected and first-parent V2 artifacts, first-parent state, and
+the selected and first-parent flake-output digests used for tracked provenance.
+It also binds inventory completeness, retained diagnostics, and the certified
+truncation state.
+In generation mode, the token binds the exact selected artifact, retained
+identity, and comparison baseline identity. Generation responses also return
+`baseline_generation` when comparison is available. Continuations
+send page one's token. A replaced selected artifact, replaced baseline, or
+removed retained identity returns HTTP 409 `snapshot_changed`; counts, total,
+rows, baseline, and provenance are read from one read-only `REPEATABLE READ`
+transaction.
+A request revalidates the system-local selected generation or exact commit and
+selects its mode-specific first-parent V2 or nearest preceding usable-generation
+V1 baseline inside
+that transaction. It requires the immutable integrity marker computed by
+recursive full-artifact validation before publication, then decodes only the
+bounded page. Malformed content outside the requested search, offset, or limit
+prevents certification and returns lifecycle `unavailable`, zero counts and
+total, no token, and no rows. The response limit remains 100 rows.
+The scalar safe-value variant accepts JSON strings, numbers, Booleans, and null.
+It rejects arrays and objects; collections require their declared structured
+variant.
+A supplied token also returns `snapshot_changed` when the replacement is
+failed, unavailable, or absent. The endpoint does not return replacement
+lifecycle data before it rejects the stale token.
+
+### GET `/systems/:id/evaluation-summary`
+
+This endpoint uses the same mode-specific `revision`, `mode`, and `generation` selection and
+non-disclosing system authorization as evaluated-options. The response is
+scalar. It does not contain module-source or definition rows.
+Unverified retained generation lineage does not affect a valid Config summary;
+it affects rollback eligibility only.
+The optional `snapshot_token` query parameter binds the summary to an artifact
+selected by another Config response. An available response returns the same
+token. The token also binds the exact comparison baseline. Generation responses
+return `baseline_generation` when comparison is available. A stale token or
+replaced selected/baseline identity returns HTTP 409 `snapshot_changed`.
+A supplied stale token takes precedence over failed, unavailable, or absent
+replacement lifecycle responses.
+Snapshot integrity, derivation facts, latest state, and
+seven-day observations use one read-only `REPEATABLE READ` transaction.
+
+The response returns lifecycle, safe error, persisted completion time,
+evaluation duration, option total, `module_source_total`, exact selected NixOS
+toplevel store path, existing closure package count, exact latest running store
+path, agent-reported profile match, and drift. `module_source_total` is the exact
+count of distinct `(source_input, source_revision, source_path)` tuples after
+redaction and per-option bounding. Response-only tracked identities do not
+affect the count. Drift is `matches` only when selected and running store paths
+are exactly equal, `differs` only when both paths exist and differ, and
+`unavailable` otherwise. A partial option inventory always reports drift and
+comparison-derived summary facts as unavailable. Scalar facts that do not
+require a complete inventory remain available.
+
+In generation mode, `host_delta_count` is materialized from the schema-V1 usable
+configuration snapshots at the selected commit. For each option path, the server
+selects the most frequent complete safe content digest, including definition
+provenance; missing is also a state, and bytewise state identity breaks ties. The
+count is the selected snapshot's differences from that modal corpus. A usable
+one-configuration corpus returns zero. Commit-mode V2 snapshots remain outside
+that corpus and return null. Null otherwise means no usable materialized result
+exists.
+
+`closure_size_bytes` is the sum of `narSize` for every unique store path from
+one successful complete recursive Nix query of the selected toplevel output.
+Null means no complete local measurement was persisted. The server does not
+substitute derivation size, snapshot size, or a partial query.
+
+`agent_fingerprint` compares the exact selected and latest agent-reported store
+paths. It is `matches`, `differs`, or `unavailable` when either path is absent.
+`seven_day_drift` is `no_observed_drift` or `observed_drift` only when persisted
+state and heartbeat observations span the full trailing seven days, every
+boundary or adjacent gap is at most four hours, and all observations have an
+exact store path. The observation before the window establishes coverage but
+does not contribute drift. Otherwise it is `insufficient_coverage`.
+
+Completion time, duration, selected and running paths, closure counts, profile
+match, and other optional facts are null when their named persisted source is
+absent. A non-available lifecycle returns no summary facts and zero totals.
+Clients MUST render unavailable states. They MUST NOT infer one metric from
+another field or replace null, unavailable, failed, or insufficient coverage
+with zero or success.
+
+### GET `/systems/:id/evaluation-module-sources`
+
+This endpoint uses the same selected-revision and non-disclosure contract as
+evaluated-options.
+
+| Parameter | Contract |
+| --- | --- |
+| `revision` | Required full SHA in commit mode. |
+| `mode` | `commit` or `generation`; defaults to `commit`. |
+| `generation` | Required retained generation number in generation mode. |
+| `limit` | Clamped to 1-100; defaults to 50. |
+| `offset` | Clamped to 0-100,000; defaults to 0. |
+| `snapshot_token` | Optional on offset 0; required and a 64-character hexadecimal digest when `offset` is greater than 0. |
+
+The response lifecycle is `queued`, `running`, `failed`, `available`, or
+`unavailable`. Non-available responses contain no token or rows and return a
+zero total. An available response returns one bounded page and a
+snapshot-version token. `total` is the exact complete-snapshot tuple count even
+when `sources` is empty because the offset is past the final row.
+Unverified retained generation lineage does not affect module-source reads from
+a valid artifact; it affects rollback eligibility only.
+
+Rows are ordered by `won_count` descending, `defined_count` descending, then
+`source_input`, `source_revision`, and `source_path` in ascending bytewise
+order. Null input and revision values sort last. Each row contains the exact
+tuple, snapshot-wide counts for that tuple, and optional server-issued
+`tracked_flake` identity.
+
+The first request omits `snapshot_token`. Every continuation request sends the
+token from the first page. If the persisted snapshot is replaced, the endpoint
+returns HTTP 409 with `snapshot_changed` and no rows. The client discards all
+loaded rows and restarts at offset 0.
+
+The module-source token uses the same selected-and-baseline identity as the
+options and summary endpoints. A baseline replacement therefore also returns
+HTTP 409 instead of mixing Config data from different comparisons.
+Failed, unavailable, and absent replacements use the same precedence when the
+request supplies a stale token.
+
+### GET `/systems/:id/generations`
+
+Each generation row includes `generation_snapshot_id` and `rollback_eligible`.
+Eligibility is true only when the retained row resolves an available immutable
+artifact, exact derivation lineage, and non-empty server-side source store path.
+Legacy retained rows with unverifiable deployment/store lineage remain
+queryable but are not rollback-eligible.
+Clients MUST NOT advertise rollback for an ineligible row.
+
+### POST `/systems/:id/rollback-generation`
+
+The request MUST contain `generation_snapshot_id` or the system-local
+`generation`. `store_path` is optional and, when present, only narrows the
+retained lookup. A store path alone never authorizes rollback. The server carries
+the retained derivation identity into
+composite authorization; a newer derivation with the same store path cannot
+replace it. Foreign retained
+identities, failed artifacts, and mismatched artifact/derivation lineage fail
+closed.
+
+`tracked_flake` is response-only and is never persisted in evaluator content.
+For `self`, the source revision must equal the page's exact active context
+revision. For an external input, the context revision's persisted lock snapshot
+must match the exact input name, repository URL, and full locked revision. The
+identity is returned only when this mapping resolves unambiguously to one
+non-deleted registered flake and non-archived commit visible through an active
+managed system. Hidden, stale, unmatched, deleted, archived, and ambiguous
+identities remain absent. Repository URLs are sanitized before serialization.
+
+The same response-only resolver decorates every selected and baseline
+definition returned by `/evaluated-options`, using the selected or baseline
+revision as that definition's context. The browser independently loads summary,
+module-source, and option pages. It MUST NOT infer identities or derive a
+snapshot-wide module count from a bounded page.
+
+This GET is database-only. It does not evaluate Nix, inspect Git, fetch a
+repository, enqueue work, mutate snapshot state, or perform per-host work.
+
+### POST `/systems/:id/config-inspections/:revision`
+
+This mutation requires administrator authority and matching CSRF credentials.
+Authorization and environment visibility checks occur before revision
+validation or resolution. The server atomically resolves the system's exact
+active flake commit, effective configuration name, completed NixOS derivation,
+and non-empty carrier `.drv` path. It then queues or reuses only the exact
+Config Inspector target. A queued or running job is reused, and terminal history
+permits a retry. An available complete V2 artifact suppresses work only when it
+is comparison-ready. A certified partial V2 artifact also suppresses work
+because retrying cannot make its observed corpus more complete without a source
+change. A complete artifact with unavailable global provenance or Stage 2 does
+not suppress a retry. In both reusable states, the carrier path must match
+exactly. The enqueue decision acquires the
+snapshot-writer transaction lock before target row locks and readiness checks.
+If active work has a different derivation ID or carrier path, the endpoint
+returns retryable HTTP 409 with `error: config_inspection_target_conflict` and
+does not mutate that work.
+
+If the exact completed carrier is absent, the endpoint returns HTTP 409 with
+`error: config_inspection_prerequisite`. This response does not queue primary
+evaluation. The endpoint does not change commit evaluation status or attempts,
+notify primary evaluator or build queues, invoke Nix, or inspect another
+configuration. Unknown systems and revisions outside the system's flake return
+the same non-disclosing not-found response.
+
+### POST `/systems/:id/evaluations/:revision` (explicit prerequisite)
+
+This mutation requires administrator authority because the evaluator processes
+the complete commit, and it requires matching CSRF credentials. It queues a
+missing terminal evaluation or reuses
+available, queued, or running work. The `queued` response field is true only
+when this request performed the queue transition. The System Config UI does not
+call this route. A caller uses it only as an explicitly named whole-commit
+prerequisite when the targeted Config inspection route reports a missing
+carrier. Completion does not guarantee carrier reconstruction: the primary
+evaluator must discover and persist the exact successful NixOS target.
+
+### GET `/flakes/:id/revisions/:revision/outputs`
+
+Query parameters:
+
+| Parameter | Contract |
+| --- | --- |
+| `system_filter` | `all`, `declared_unmanaged`, or `managed_undeclared`; defaults to `all`. |
+| `limit` | Clamped to 1-100; applies independently to each top-level collection and to filtered reconciliation. |
+| `offset` | Clamped to 0-100,000; applies independently to each top-level collection and to filtered reconciliation. |
+| `snapshot_token` | Optional opaque token returned by the endpoint. When supplied, it binds the request to the selected output and usable first-parent comparison state. |
+
+The server applies `system_filter` before the reconciliation offset and limit.
+`pagination.system_total` is the visible total for the active filter, and
+`pagination.systems_has_more` reports whether that filtered sequence has a next
+row. The aggregate reconciliation counts, collapse count, pinned count, and
+stale-input count remain revision-global. Clients request continuation pages
+and retain these authoritative totals. A response larger than the 2 MiB safe
+response bound is `unavailable` rather than silently truncated.
+
+Token-aware clients send the first page's `snapshot_token` on continuation
+requests. The server returns `409 snapshot_changed` if a supplied token is
+stale or malformed because the selected output, first-parent identity or state,
+or usable first-parent output changed. The client then discards accumulated
+rows and restarts at offset 0. For compatibility with existing clients, a
+positive offset without `snapshot_token` retains the prior bounded offset
+semantics and does not receive this replacement guarantee. HTTP 409 applies
+only when the request supplied a stale or malformed token.
+
+`managed_system_count` is the authoritative visible active fleet count. It can
+exceed the bounded `systems` array. Non-admin responses remove hidden systems,
+configuration names, and module consumers. A caller without a visible active
+managed system for the flake receives not-found.
+
+Exported-module entries in this response are summaries. `declaration_count`
+remains authoritative. `declarations` is empty, and `declarations_complete` is
+false when declaration details exist. Clients use the dedicated declaration
+endpoint instead of treating the summary as a complete nested collection.
+
+An exported module's `source_input`, `source_revision`, and `source_path`
+describe only the location of its `nixosModules` attribute binding. The
+evaluator uses the Nix attribute position and requires one unambiguous longest
+matching input root; `source_path` is relative to that root. Missing positions
+and ambiguous roots produce null. These fields are not module value provenance
+and do not authorize navigation. Declaration `source_paths` are the declaration
+locations.
+
+Input rows expose `direct_descendant_count` for immediate lock-graph children
+and `transitive_descendant_count` for all unique recursive descendants of a
+direct root input. Both counts use the complete lock graph, not the response
+page. They are null for non-direct nodes or unavailable counts. Clients that
+describe transitive reach MUST use `transitive_descendant_count`.
+
+### GET `/flakes/:id/revisions/:revision/modules/:module/declarations`
+
+This endpoint returns declarations for one exact exported module from one
+persisted flake-output JSONB snapshot. `limit` is clamped to 1-100 and `offset`
+to 0-100,000. The response contains the authoritative `total`, applied
+`offset` and `limit`, deterministic declaration rows, explicit snapshot
+`lifecycle` and safe `error`, and a content-digest `snapshot_token`.
+
+The first request omits `snapshot_token`. Every continuation request sends the
+token returned by page one. If re-evaluation replaces the selected snapshot,
+the endpoint returns `409 snapshot_changed`. The client must discard loaded
+rows and restart at offset 0. Unknown active revisions and module names return
+not-found. Unauthorized or hidden flakes use the same non-disclosing behavior
+as the top-level output endpoint. The query is database-only and does not
+mutate evaluation or snapshot state.
+
+See [Evaluation and Flake Snapshot
+Architecture](../evaluation-flake-snapshots.md) for extraction ownership,
+identity, comparison, persistence, retention, redaction, and verification
+requirements.
 
 ---
 
@@ -473,6 +836,346 @@ GET /api/v1/admin/audit?start_date=2024-01-01&end_date=2024-01-31&actor=john
 | POST | `/admin/oidc-mappings` | Admin+ | Create mapping |
 | PATCH | `/admin/oidc-mappings/:id` | Admin+ | Update mapping |
 | DELETE | `/admin/oidc-mappings/:id` | Admin+ | Delete mapping |
+
+---
+
+## CVE Scan Operations
+
+### Scan Diagnostics
+
+| Method | Endpoint | Role | Description |
+|--------|----------|------|-------------|
+| GET | `/scanning/scans/:scan_id` | Admin | Return bounded diagnostics for one exact CVE scan |
+
+The endpoint returns `scan_id`, current `status`, `scanner_name`, optional
+`scanner_version`, `source_trigger`, an `events` array, and `truncated`. Each
+event contains an immutable row `id`, immutable `execution_id`, and one-based
+`attempt_number` identity, `occurred_at`, normalized `level`, `source`,
+`event_type`, redacted `message`, and an event-level `truncated` flag.
+
+The response uses a fixed chronological limit of 500 events. `truncated=true`
+means later persisted events exist. This endpoint does not provide cursor or
+offset pagination. Clients must not infer that a truncated response contains the
+complete attempt history. Unknown scan IDs return `404`. Non-admin callers
+receive the standard admin authorization failure.
+
+Diagnostic messages are untrusted operational data. Builders can omit the
+optional diagnostics field for backward compatibility. The server accepts at
+most 256 prepared events per terminal report, persists at most 2,048 Unicode
+scalar values per event, removes control characters, and applies canonical
+secret redaction before the first database write. Upgraded builders also apply
+their shared credential-redaction policy before request serialization.
+Diagnostics are independent
+from canonical CVE evidence and are not included in the schema-1 evidence digest.
+
+---
+
+## Fleet CVE Triage
+
+Fleet triage uses exact deployed evidence. The identity is a canonical CVE ID
+plus a canonical package name. Package version is evidence context and is not
+part of the stable finding identity.
+
+### System CVE Inventory
+
+| Method | Endpoint | Role | Description |
+|--------|----------|------|-------------|
+| GET | `/systems/:id/cves` | Viewer+ | Return the compatible bare array of current exact findings |
+| GET | `/systems/:id/cve-inventory` | Viewer+ | Return the complete compatibility inventory up to 1,000 rows |
+| GET | `/systems/:id/cve-inventory-page` | Viewer+ | Return a bounded typed exact, legacy, or no-scan inventory page |
+
+The paged inventory response contains `authority`,
+`exact_authority_failure`, `source`, `vulnerabilities`, `metadata`, `has_more`,
+`inventory_revision`, and `next_cursor`. `authority` is `exact`, `legacy`, or `no_scan`. `source`
+contains the real scan ID, scanner name and optional version, and completion
+time. The server selects exact authority independently of finding count in one
+read-only repeatable-read transaction. An exact clean scan therefore cannot
+fall back to stale legacy findings.
+
+When exact authority is unavailable, the server selects the latest completed
+legacy scan under the bounded `view_system_vulnerabilities` semantics. A
+completed legacy scan with no findings returns `legacy` with an empty array. No
+usable completed scan returns `no_scan`. Sources are never unioned. Legacy
+findings can include ordinary system justification state, but never
+server-issued exact remediation context. The pre-existing ordinary system
+justification API continues to accept a qualifying legacy finding. That write
+does not create exact remediation authority. POA&M creation, patch scheduling,
+finding attach/link/reopen, verification, and closure continue to resolve
+retained generation, store path, verified lineage, certified snapshot,
+schema-1 scan, and immutable observation authority independently and fail
+closed for legacy or no-scan input.
+
+The paged route accepts `limit` from 1 through 500 with a default of 100, an opaque
+`after` cursor, `q` up to 200 normalized characters, comma-separated `severity`
+values (`critical`, `high`, `medium`, `low`, or `unknown`), and comma-separated
+fix-availability `status` values (`open` or `fix_available`). Status does not
+represent triage state. SQL applies filters before full-scope metadata and page
+selection. Severity metadata includes the active severity filter.
+
+Rows use C-collated keyset order by canonical CVE ID and canonical package
+name. Each row exposes both values as its stable identity. The versioned cursor
+binds the system, authority, scan, normalized filters, inventory revision, and
+last identity. The revision covers the selected source and every mutable field
+that affects stable identity, search, severity and fix-availability filters,
+order, or totals. Description, CVSS changes within one severity, justification,
+and exact remediation state do not invalidate membership pagination. The server
+hydrates those display and remediation fields from current authorized state for
+only the returned rows. The cursor position is unsigned and non-authoritative;
+tampering can only skip rows within an inventory that the caller can already
+read.
+Malformed cursors return 400 after system authorization. Source, system, or
+filter mismatch returns `inventory_changed` with status 409. Hidden and absent
+systems return the same 404 before cursor validation. Requests without query
+parameters receive the bounded first page; clients that need the full
+inventory must follow `next_cursor`. Exact remediation context is loaded only
+for exact rows in the returned page. Legacy rows never receive it.
+
+The compatibility route keeps the original DTO and severity-first order. It
+returns the complete selected inventory when there are at most 1,000 stable
+rows and returns HTTP 400 above that bound. Rolling deployments can therefore
+serve old clients from the compatibility route while the current Web UI uses
+the paged route. Unknown or unrecognized source severity serializes as `low` on
+the compatibility route; the paged route preserves the explicit `unknown`
+value.
+
+### Exact-CVE POA&M Routes
+
+| Method | Endpoint | Role | Description |
+|--------|----------|------|-------------|
+| POST | `/poams/cves` | Operator+ | Create a POA&M from one server-issued exact occurrence |
+| GET | `/poams/relationships/cves?system_id=:id` | Viewer+ | Return bounded current exact occurrences and POA&M relationships |
+| POST | `/poams/:id/cve-findings` | Operator+ | Link one current exact occurrence |
+| DELETE | `/poams/:id/cve-findings/:finding_id?revision=:revision` | Operator+ | Retire one exact finding link |
+| POST | `/poams/:id/verify` | Operator+ | Seal exact current verification evidence |
+| POST | `/poams/:id/close` | Operator+ | Verify and close atomically |
+| POST | `/poams/:id/reopen` | Operator+ | Restore the exact closure finding set |
+
+All routes require an authenticated session. Mutation routes require matching
+CSRF cookie and header values. Operator and Admin roles can mutate. Viewer can
+read visible relationships but cannot mutate. A typed POA&M assignee does not
+grant environment access or mutation authority. Unknown resources and resources
+outside the caller's environment scope return the same `404` response. Create,
+link, and system-CVE justification transactions re-read the caller's active-user
+state, roles, and environment memberships after they acquire their writer
+locks. Revocation during a concurrent request prevents mutation even when the
+request-time actor snapshot was authorized.
+
+The create and link bodies contain an opaque `observation` with `system_id`,
+`scan_id`, `occurrence_derivation_path`, `canonical_cve_id`, and
+`canonical_package_name`. The server re-resolves this context against the latest
+completed evidence-schema-1 scan for the exact retained deployed generation.
+Clients must not construct or modify this context. Create accepts at most 100
+assignment-version references. A POA&M accepts at most 100 active findings.
+Relationship history defaults to 100 rows, accepts a limit from 1 through 100,
+and returns no more than 1,000 current exact occurrence rows.
+
+Exact-CVE unlink, verify, close, and reopen operations and fleet triage also
+re-read the active user, roles, and memberships after their domain writer
+locks. A concurrent role or membership revocation therefore cannot authorize a
+waiting mutation.
+
+Link, unlink, verify, close, reopen, update, and transition operations use the
+current POA&M `revision`. A stale revision returns `409 stale_revision`. Exact
+finding links retain an immutable server-resolved link-time baseline: scan,
+derivation, completion time, retained generation, target store path, occurrence
+derivation path, and observed package version. The API does not accept baseline
+fields from clients. Exact verification returns `pass` only when a strictly
+newer authoritative schema-1 scan for unchanged retained deployment lineage
+omits the exact CVE/package occurrence. The baseline scan and scans completed
+before it cannot pass verification. Present, whitelisted, justified, missing,
+legacy, changed-deployment, or inconsistent evidence does not pass. No newer
+evidence and changed lineage return `missing`. A rejected close records and
+returns the committed verification attempt as `412 closure_not_ready`; clients
+must continue with the returned committed revision.
+
+POA&M detail and verification responses are rolling-compatible. `findings` and
+`items` retain policy-finding meanings. New servers add `cve_findings` to POA&M
+detail and `cve_items` to verification attempts and verify/close results. Older
+clients must ignore these fields. New clients must default absent fields to an
+empty array while servers are upgraded. Exact finding rows include stable
+system/CVE/package identity and evidence context. Exact verification rows also
+include the observed package version, scan, deployed generation binding,
+result, and bounded diagnostic detail. Each row distinguishes the immutable
+baseline evidence from the current verification evidence. Both cited scans are
+retained for audit while their finding or verification records exist.
+
+POA&M detail returns active and retired exact finding links. Retired rows retain
+their link-time scan, scan completion time, deployed generation, target store
+path, occurrence path, observed package version, retirement time, and retirement
+reason. Retired rows are immutable and cannot be unlinked again. Completed
+POA&Ms retain these rows as their exact-vulnerability audit display.
+
+Important exact-CVE errors include `invalid_cve_identity`,
+`stale_cve_observation`, `cve_occurrence_whitelisted`,
+`cve_occurrence_justified`, `finding_already_managed`, `incompatible_finding`,
+`too_many_findings`, `finding_required`, `concurrent_finding_change`,
+`invalid_transition`, `stale_revision`, and `closure_not_ready`. Validation
+errors use HTTP 400, authorization uses 403, hidden or absent resources use 404,
+stale/lifecycle conflicts use 409, and failed closure preconditions use 412.
+
+| Method | Endpoint | Role | Description |
+|--------|----------|------|-------------|
+| GET | `/cves/:cve_id/fleet?package=:pname` | Viewer+ | Return visible affected environments and current dispositions |
+| POST | `/cves/:cve_id/triage` | Operator+ | Apply environment actions atomically |
+
+The GET response contains `cve`, `canonical_package_name`, `rollup`, total,
+exact, legacy-affected, no-scan, and unassigned system counts, `environments`,
+and bounded `unassigned_systems`. Each
+environment contains its UUID, name, total, exact, and legacy-affected counts,
+bounded system details, and an optional tagged `disposition`. Each system row
+identifies `inventory_authority` as `exact` or `legacy`. A missing disposition
+means OPEN only for that environment's exact subjects. A legacy-only environment is
+inventory-only and cannot be triaged. `rollup` is `outstanding`, `accepted`,
+`scheduled`, or `partial` and describes exact dispositions only. Admin-visible
+unassigned systems are returned as inventory-only because fleet triage is
+environment-scoped. The endpoint rejects more than 1,000 affected systems
+instead of returning a partial drawer. The endpoint
+returns `404` when no current exact or legacy finding is visible. It does not
+reveal hidden environment names or counts.
+
+A `scheduled` disposition always includes the referenced active POA&M as nested
+`poam` metadata on a new server:
+
+```json
+{
+  "state": "scheduled",
+  "poam_id": "...",
+  "poam": {
+    "id": "...",
+    "human_id": "POAM-0042",
+    "title": "Remediate CVE-2026-12345",
+    "plan": "Promote the fixed package through environments",
+    "target_date": "2026-10-15",
+    "risk": "high",
+    "assignee": {
+      "kind": "user",
+      "user_id": "...",
+      "display": "Fleet owner",
+      "available": true
+    }
+  },
+  "actor": {"user_id": "...", "display": "Scheduling operator"},
+  "scheduled_at": "2026-09-13T12:00:00Z"
+}
+```
+
+The nested value contains the exact title, plan, target date, risk, and typed
+assignee required for semantic POA&M reuse. `id` is the stable UUID and
+`human_id` is the stable operator-facing label. The assignee can be `user`,
+`oidc_group`, `unassigned`, or `legacy`. For typed assignees, `available`
+reports current catalog eligibility only. An unavailable or compatibility
+assignee remains visible as historical ownership but cannot be selected for a
+new fleet scheduling request. An assignee never grants authorization. Fleet
+reads fail closed instead of returning SCHEDULED when the referenced POA&M is
+completed or lacks compatible metadata.
+
+The nested `poam` field is additive for rolling upgrades. New Web UI clients
+accept an absent field from an old server. If scheduled rows omit it, refer to
+different POA&Ms, or contain an assignee that cannot be reused, the editor shows
+a non-destructive upgrade or ownership conflict and blocks submission while any
+environment remains scheduled. The operator can still change all scheduled
+environments to OPEN or ACCEPTED and submit when POA&M lifecycle rules permit.
+When scheduled rows share one reusable POA&M, the editor initializes the shared
+draft from this metadata so an unchanged scheduled row survives mixed edits.
+
+The POST body contains one action for every currently visible affected
+environment:
+
+```json
+{
+  "canonical_package_name": "openssl",
+  "actions": [
+    {"action": "accept_risk", "environment_id": "...", "justification": "...", "review_date": "2026-10-01"},
+    {"action": "schedule_patch", "environment_id": "..."},
+    {"action": "leave_open", "environment_id": "..."}
+  ],
+  "poam": {
+    "title": "Remediate CVE-2026-12345",
+    "plan": "Promote the fixed package through environments",
+    "assignee": {"kind": "user", "user_id": "..."},
+    "target_date": "2026-10-15",
+    "risk": "high",
+    "default_milestones": true
+  }
+}
+```
+
+`poam` is required exactly when at least one action is `schedule_patch`. The
+assignee must be a server-validated user or OIDC group. Clients do not send host
+IDs. After writer locks and a fresh actor-membership check, the server recomputes
+the complete visible affected-environment set. The request environment IDs must
+equal that set. Omitted, extra, forged, hidden, or duplicate IDs return the same
+typed evidence conflict without mutation and without identifying hidden
+environments. The server includes every current exact subject in each
+environment. All scheduled subjects use one POA&M. ACCEPTED records operator
+rationale only; it does not create remediation links or PASS evidence.
+
+Authenticated CVE dashboard reads combine retained deployed-generation
+schema-1 occurrences with bounded legacy inventory for systems that lack exact
+authority. An exact clean scan suppresses stale legacy findings. Rows and fleet
+statistics expose separate exact and legacy-affected counts; fleet statistics
+also count visible active no-scan systems. Active dispositions apply only to
+exact canonical CVE, canonical package, and environment identities. A row with
+any legacy subject is `inventory_only` and cannot imply accepted risk or
+scheduled remediation. Legacy `system_cve_justifications` rows do not determine
+list status. Admin reads cover the fleet. Viewer and Operator reads first limit
+subjects to current `user_environment_memberships`. Scoped reads exclude
+unassigned systems and do not disclose hidden environment names, counts,
+statuses, package names, CVE presence, or fleet-wide justification rows. The
+legacy `GET /cves/:cve_id` returns the alphabetically first visible canonical
+package row and returns `404` when the CVE is absent or hidden. Lists return only
+visible rows.
+
+A row is `accepted` only when all affected environments are
+ACCEPTED. A row is `scheduled` only when all affected environments are
+SCHEDULED. Any OPEN or mixed state is `outstanding`. Grouped counts, list
+filters, export/list responses, and fleet statistics consume this conservative
+summary. Package cards count distinct affected systems per package after active
+filters. Fleet statistics count distinct affected systems across scoped mixed
+inventory; they do not sum per-CVE counts. CVE totals count canonical
+CVE/package inventory rows. The exact mutation rollup keeps its more precise
+`partial`/MIXED state and exact-matches both the canonical CVE and canonical
+package when it loads installed version, fixed version, and fix status.
+
+The successful response contains transaction-owned `detail`, `detail_scope`,
+`poam_id`, and `poam_reused`; response construction completes before the
+mutation commits. `detail_scope` is `exact_mutation_subjects`. The returned
+`detail` excludes legacy and unassigned inventory rows. A client must refetch
+the fleet inventory endpoint after success before it renders the drawer again.
+Repeating an identical accepted-risk request does not retire and recreate its
+disposition history. Repeating a schedule request reuses an existing POA&M only
+when its complete active exact-finding set equals the recomputed scheduled
+subjects plus links that another action in the same request explicitly retires.
+This permits one atomic request to retain scheduled coverage in one environment
+and accept or open another environment. All CVE, package, domain, and semantic
+POA&M metadata must also match. A schedule-only subset never reuses a stale
+superset.
+
+Closing a fleet-created POA&M retires its active SCHEDULED dispositions with
+its exact links. A later recurrence therefore reads as OPEN, not SCHEDULED by a
+completed POA&M. Reopen restores SCHEDULED only when each environment's current
+exact subject set equals its closure set and no active disposition conflicts.
+Systems without an environment restore their exact links without an
+environment disposition. Unlinking an environment's final active exact link
+retires that environment's SCHEDULED disposition and does not change another
+environment's disposition. Fleet reads suppress a SCHEDULED disposition when
+its POA&M is completed or its active links no longer equal current exact
+subjects.
+
+The following conflict codes are significant:
+
+| HTTP | Error | Meaning |
+|------|-------|---------|
+| 404 | `not_found` | An environment is unknown or outside the caller's scope |
+| 409 | `environment_not_affected` | A selected environment has no current exact subject |
+| 409 | `cve_evidence_changed` | Current affected systems changed while locks were acquired |
+| 409 | `cve_subjects_already_managed` | Subjects are partially owned or POA&M metadata is incompatible |
+| 409 | `cve_disposition_conflict` | Reopen cannot restore exact environment coverage |
+| 409 | `poam_final_subject` | The action would leave an active POA&M without a finding |
+
+Conflict responses use
+`{"error":"code","message":"...","details":{...}}`. Subject conflict
+details are bounded. Every conflict rolls back all requested actions.
 
 ---
 

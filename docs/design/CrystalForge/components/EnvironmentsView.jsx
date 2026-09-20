@@ -98,6 +98,7 @@ function EnvironmentsView({ defaultView, onOpenCache, onOpenSystem, onOpenBundle
     onClearFocusEnv?.();
   }, [focusEnv]);
   const [addOpen, setAddOpen] = React.useState(false);
+  const [atoEnv, setAtoEnv] = React.useState(null);
   const envNeedsAttention = (name) => SYSTEMS.some(s => s.environment === name && (s.health === "critical" || s.health === "offline"));
   const flashAttention = useAttentionFlash("environments", ENVIRONMENTS.some(e => envNeedsAttention(e.name)));
 
@@ -127,6 +128,10 @@ function EnvironmentsView({ defaultView, onOpenCache, onOpenSystem, onOpenBundle
           </p>
         </div>
         <div style={{ display:"flex", gap:8 }}>
+          <button className="btn btn-ghost focus-ring" onClick={() => setAtoEnv(ENVIRONMENTS[0]?.name || "")}
+            title="Export the compliance evidence package for one environment — OSCAL, XCCDF, CSV, report">
+            <Icon name="download" size={14}/> Export evidence package
+          </button>
           <button className="btn btn-primary focus-ring" data-coach-target="env" onClick={() => setAddOpen(true)}>
             <Icon name="plus" size={14}/> Add environment
           </button>
@@ -188,8 +193,11 @@ function EnvironmentsView({ defaultView, onOpenCache, onOpenSystem, onOpenBundle
         </div>
       )}
 
+      {atoEnv !== null && window.AtoPackageModal && (
+        <window.AtoPackageModal initialEnv={atoEnv} onClose={() => setAtoEnv(null)}/>
+      )}
       {viewEnv && (
-        <EnvPanel env={viewEnv} onClose={() => setViewEnv(null)} onEdit={() => { setEditEnv(viewEnv); }} onOpenCache={onOpenCache} onOpenSystem={onOpenSystem} onOpenBundle={onOpenBundle} onOpenFlake={onOpenFlake} />
+        <EnvPanel env={viewEnv} onClose={() => setViewEnv(null)} onExportAto={() => setAtoEnv(viewEnv.name)} onEdit={() => { setEditEnv(viewEnv); }} onOpenCache={onOpenCache} onOpenSystem={onOpenSystem} onOpenBundle={onOpenBundle} onOpenFlake={onOpenFlake} />
       )}
       {(editEnv || addOpen) && (
         <EnvFormModal
@@ -359,7 +367,7 @@ function EnvCard({ env, onEdit, flash }) {
 }
 
 // Side panel — environment reference peek, with Edit handing off to the form modal
-function EnvPanel({ env, onClose, onEdit, onOpenCache, onOpenSystem, onOpenBundle, onOpenFlake }) {
+function EnvPanel({ env, onClose, onEdit, onExportAto, onOpenCache, onOpenSystem, onOpenBundle, onOpenFlake }) {
   const total = env.stats.total || 1;
   const sys = SYSTEMS.filter(s => s.environment === env.name);
   return (
@@ -386,6 +394,11 @@ function EnvPanel({ env, onClose, onEdit, onOpenCache, onOpenSystem, onOpenBundl
               {env.autoSync ? <span className="chip chip-healthy">auto-sync on</span> : <span className="chip chip-unknown">auto-sync off</span>}
               {env.requiresApproval ? <span className="chip chip-warning">approval required</span> : <span className="chip chip-healthy">no approval needed</span>}
             </div>
+            {onExportAto && (
+              <button className="btn btn-ghost focus-ring" onClick={onExportAto} style={{ marginTop:10, width:"100%", justifyContent:"center" }}>
+                <Icon name="download" size={13}/> Export compliance evidence package
+              </button>
+            )}
           </section>
 
           {env.stats.pendingApprovals.length > 0 && (

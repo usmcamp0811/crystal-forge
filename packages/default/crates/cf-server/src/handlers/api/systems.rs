@@ -4,20 +4,23 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
-use sqlx::Row;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::api::models::{
     ApiError, AuditAction, CommitInfo, CreateSystemRequest, CveScanEligibilityResponse,
     CveScanStatusResponse, CveScanTriggerResponse, CveSummary, DeploySystemRequest,
-    DeploymentStatus, FieldUpdate, PipelineStage, SaveSystemCveJustificationRequest, SortOrder,
-    SystemAgentEvent, SystemCommitsResponse, SystemDeploymentProgress, SystemDetail,
-    SystemGeneration, SystemGenerationsResponse, SystemHardwareInfo, SystemHistoryEntry,
-    SystemMutationResponse, SystemNetworkInfo, SystemRollbackGenerationRequest,
-    SystemRollbackRequest, SystemSecurityInfo, SystemSummary, SystemVulnerability,
-    SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
+    DeploymentStatus, FieldUpdate, ManualDeploymentAction, ManualDeploymentConversionState,
+    ManualDeploymentPolicyState, ManualDeploymentRequestState, ManualDeploymentResponse,
+    PipelineStage, SaveSystemCveJustificationRequest, SortOrder, SystemAgentEvent,
+    SystemCommitsResponse, SystemCveInventoryPageResponse, SystemCveInventoryParams,
+    SystemCveInventoryResponse, SystemCveInventoryRowIdentity, SystemCveInventoryVulnerability,
+    SystemDeploymentProgress, SystemDetail, SystemGeneration, SystemGenerationsResponse,
+    SystemHardwareInfo, SystemHistoryEntry, SystemMutationResponse, SystemNetworkInfo,
+    SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo, SystemSummary,
+    SystemVulnerability, SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
     VerifyGenerationClosureRequest, VerifyGenerationClosureResponse,
 };
 use crate::auth::models::Role;
@@ -27,8 +30,29 @@ use crate::handlers::api::rbac::{
     authenticated_user_roles, extract_request_origin, require_viewer_or_above,
 };
 use crate::models::auth_identity::AuthRole;
+use crate::models::config_observations::{
+    ConfigObservationLifecycle, ConfigObservationRequestResponse, CreateConfigObservationRequest,
+};
+use crate::models::config_snapshot_artifact::{
+    ConfigDefinitionArtifactV2, ConfigDefinitionStatusV2, ConfigOptionArtifactV2,
+    ConfigOptionMetadataArtifactV2, ConfigOptionProvenanceArtifactV2,
+};
+use crate::models::evaluation_snapshots::{
+    AgentFingerprintStatus, EvaluatedOption, EvaluatedOptionCounts, EvaluatedOptionRow,
+    EvaluatedOptionsPage, EvaluatedOptionsParams, EvaluationDrift, EvaluationModuleSourcesPage,
+    EvaluationModuleSourcesParams, EvaluationModuleSummary, OptionChangeKind,
+    OptionDefinitionProvenance, OptionInventoryDiagnostic, OptionInventoryState,
+    SelectedEvaluationSummary, SelectedEvaluationSummaryParams, SevenDayDriftStatus,
+    SnapshotLifecycle, SnapshotRevisionMode, TrackedFlakeIdentity, typed_option_diff,
+};
+use crate::models::poam::CveRelationshipRowKey;
 use crate::queries::build_jobs::enqueue_build_job_for_derivation;
 use crate::queries::cve_scans::{get_scan_by_id, resolve_system_cve_scan_target};
+use crate::queries::cves::{
+    SystemCveInventoryPageError, SystemCveInventoryPageRequest,
+    fetch_authorized_system_cve_inventory_tx, fetch_exact_system_vulnerabilities,
+    system_cve_inventory_page_error,
+};
 use crate::queries::derivations::reset_derivation_for_rebuild;
 use crate::queries::system_events::{
     deployment_progress_kind, deployment_progress_stage, get_system_deployment_progress_row,
@@ -38,14 +62,15 @@ use crate::queries::system_states::{
     fetch_system_generations, find_generation_store_path_last_seen,
 };
 use crate::queries::systems::{
-    FqdnUpdate, HeartbeatIntervalUpdate, SystemAccessRow, SystemDetailRow, SystemListRow,
-    commit_belongs_to_system_flake, deactivate_system, find_system_access_row,
+    FqdnUpdate, HeartbeatIntervalUpdate, ManualPolicyConversion, SystemAccessRow, SystemDetailRow,
+    SystemListRow, commit_belongs_to_system_flake, deactivate_system, find_system_access_row,
     find_system_deployment_derivation, get_system_detail_by_id,
     get_user_environment_membership_ids, list_recent_commits_for_system, list_system_access_rows,
-    list_system_agent_event_rows, list_system_history_rows, touch_system_updated_at,
-    update_public_key, update_system_metadata,
+    list_system_agent_event_rows, list_system_history_rows, resolve_observational_current_revision,
+    touch_system_updated_at, update_public_key, update_system_metadata,
 };
 use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan};
+use crate::services::poam::{self as poam_service, PoamActor, SystemClock};
 use crate::services::systems::SystemsListContext;
 
 /// Allowed CVE justification categories (server-side validation).
@@ -111,7 +136,6 @@ pub async fn create_system(
     if !caller_role.can_mutate_systems() {
         return forbidden_mutation();
     }
-
     // Validate required fields
     let hostname = payload.hostname.trim();
     if hostname.is_empty() {
@@ -249,6 +273,1187 @@ pub async fn get_system(
     (StatusCode::OK, Json(detail)).into_response()
 }
 
+/// Returns a bounded page of cached evaluated options for one system revision.
+///
+/// This read path is database-only. It never invokes Nix, Git, or network work.
+/// Hidden systems and revisions from another flake return the same 404 response.
+pub async fn get_system_evaluated_options(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+    Query(params): Query<EvaluatedOptionsParams>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+    let memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+    let access = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    if !caller_role.can_access_system_environment(access.environment_id, &memberships) {
+        return not_found();
+    }
+
+    if params.mode == SnapshotRevisionMode::Commit && !is_full_commit_sha(&params.revision) {
+        return bad_request("revision must be a full 40- or 64-character commit SHA");
+    }
+    if let Err(message) = validate_evaluated_options_params(&params) {
+        return bad_request(message);
+    }
+    if params.mode == SnapshotRevisionMode::Commit {
+        return get_commit_evaluated_options_v2(
+            &pool,
+            system_id,
+            (caller_role != Role::Admin).then_some(user_id),
+            &params,
+        )
+        .await;
+    }
+    let Some(generation) = params.generation else {
+        return bad_request("generation is required in generation mode");
+    };
+    let selected = crate::queries::evaluation_snapshots::select_generation_snapshot(
+        &pool, system_id, generation,
+    )
+    .await;
+    let selected = match selected {
+        Ok(Some(value)) => value,
+        Ok(None) if params.snapshot_token.is_some() => {
+            return evaluation_snapshot_changed(
+                "Evaluation snapshot changed; reload options from offset 0",
+            );
+        }
+        Ok(None) => {
+            return (
+                StatusCode::OK,
+                Json(empty_options_page(
+                    &params,
+                    (SnapshotLifecycle::Unavailable, None),
+                )),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to select evaluation snapshot");
+            return internal_error("Failed to load evaluation snapshot");
+        }
+    };
+
+    match crate::queries::evaluation_snapshots::query_options_page_with_token(
+        &pool,
+        system_id,
+        &selected,
+        (caller_role != Role::Admin).then_some(user_id),
+        &params.search,
+        params.filter,
+        params.snapshot_token.as_deref(),
+        params.limit.unwrap_or(50),
+        params.offset.unwrap_or(0),
+    )
+    .await
+    {
+        Ok(crate::queries::evaluation_snapshots::EvaluatedOptionsQuery::Page(page)) => {
+            (StatusCode::OK, Json(page)).into_response()
+        }
+        Ok(crate::queries::evaluation_snapshots::EvaluatedOptionsQuery::SnapshotChanged) => {
+            evaluation_snapshot_changed("Evaluation snapshot changed; reload options from offset 0")
+        }
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to query evaluated options");
+            internal_error("Failed to load evaluated options")
+        }
+    }
+}
+
+/// Returns complete selected-revision module, evaluation, and drift metadata.
+///
+/// This endpoint is database-only and applies system authorization before it
+/// selects a snapshot or resolves any registered provenance identity.
+pub async fn get_system_evaluation_summary(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+    Query(params): Query<SelectedEvaluationSummaryParams>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+    let memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+    let access = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    if !caller_role.can_access_system_environment(access.environment_id, &memberships) {
+        return not_found();
+    }
+
+    if params.mode == SnapshotRevisionMode::Commit && !is_full_commit_sha(&params.revision) {
+        return bad_request("revision must be a full 40- or 64-character commit SHA");
+    }
+    if params.snapshot_token.as_deref().is_some_and(|token| {
+        token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return bad_request("snapshot_token must be a 64-character hexadecimal digest");
+    }
+    if params.mode == SnapshotRevisionMode::Commit {
+        return get_commit_evaluation_summary_v2(&pool, system_id, &params).await;
+    }
+    let Some(generation) = params.generation else {
+        return bad_request("generation is required in generation mode");
+    };
+    let selected = crate::queries::evaluation_snapshots::select_generation_snapshot(
+        &pool, system_id, generation,
+    )
+    .await;
+    let selected = match selected {
+        Ok(Some(value)) => value,
+        Ok(None) if params.snapshot_token.is_some() => {
+            return evaluation_snapshot_changed("Evaluation snapshot changed; reload Config data");
+        }
+        Ok(None) => {
+            return (
+                StatusCode::OK,
+                Json(empty_evaluation_summary(
+                    &params,
+                    (SnapshotLifecycle::Unavailable, None),
+                )),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to select evaluation summary snapshot");
+            return internal_error("Failed to load evaluation summary");
+        }
+    };
+
+    match crate::queries::evaluation_snapshots::get_selected_evaluation_summary_with_token(
+        &pool,
+        system_id,
+        &selected,
+        params.snapshot_token.as_deref(),
+    )
+    .await
+    {
+        Ok(crate::queries::evaluation_snapshots::SelectedEvaluationSummaryQuery::Summary(
+            summary,
+        )) => (StatusCode::OK, Json(summary)).into_response(),
+        Ok(
+            crate::queries::evaluation_snapshots::SelectedEvaluationSummaryQuery::SnapshotChanged,
+        ) => evaluation_snapshot_changed("Evaluation snapshot changed; reload Config data"),
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to load evaluation summary");
+            internal_error("Failed to load evaluation summary")
+        }
+    }
+}
+
+/// Returns one bounded page of exact module sources for a selected evaluation.
+///
+/// The endpoint applies non-disclosing system authorization before snapshot
+/// selection. Reads are database-only, and pagination is clamped to the same
+/// bounds as evaluated options.
+pub async fn get_system_evaluation_module_sources(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+    Query(params): Query<EvaluationModuleSourcesParams>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+    let memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+    let access = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    if !caller_role.can_access_system_environment(access.environment_id, &memberships) {
+        return not_found();
+    }
+    if params.mode == SnapshotRevisionMode::Commit && !is_full_commit_sha(&params.revision) {
+        return bad_request("revision must be a full 40- or 64-character commit SHA");
+    }
+    if let Err(message) = validate_evaluation_module_sources_params(&params) {
+        return bad_request(message);
+    }
+    if params.mode == SnapshotRevisionMode::Commit {
+        return get_commit_evaluation_module_sources_v2(
+            &pool,
+            system_id,
+            (caller_role != Role::Admin).then_some(user_id),
+            &params,
+        )
+        .await;
+    }
+    let Some(generation) = params.generation else {
+        return bad_request("generation is required in generation mode");
+    };
+    let selected = crate::queries::evaluation_snapshots::select_generation_snapshot(
+        &pool, system_id, generation,
+    )
+    .await;
+    let selected = match selected {
+        Ok(Some(value)) => value,
+        Ok(None) if params.snapshot_token.is_some() => {
+            return evaluation_snapshot_changed(
+                "Evaluation snapshot changed; reload module sources from offset 0",
+            );
+        }
+        Ok(None) => {
+            return (
+                StatusCode::OK,
+                Json(empty_evaluation_module_sources(
+                    &params,
+                    (SnapshotLifecycle::Unavailable, None),
+                )),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to select evaluation module sources snapshot");
+            return internal_error("Failed to load evaluation module sources");
+        }
+    };
+
+    match crate::queries::evaluation_snapshots::get_evaluation_module_sources_page(
+        &pool,
+        system_id,
+        &selected,
+        (caller_role != Role::Admin).then_some(user_id),
+        params.snapshot_token.as_deref(),
+        params.limit.unwrap_or(50),
+        params.offset.unwrap_or(0),
+    )
+    .await
+    {
+        Ok(crate::queries::evaluation_snapshots::EvaluationModuleSourcesQuery::Page(page)) => {
+            (StatusCode::OK, Json(page)).into_response()
+        }
+        Ok(crate::queries::evaluation_snapshots::EvaluationModuleSourcesQuery::SnapshotChanged) => {
+            evaluation_snapshot_changed(
+                "Evaluation snapshot changed; reload module sources from offset 0",
+            )
+        }
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to query evaluation module sources");
+            internal_error("Failed to load evaluation module sources")
+        }
+    }
+}
+
+async fn get_commit_evaluated_options_v2(
+    pool: &PgPool,
+    system_id: Uuid,
+    visibility_user: Option<Uuid>,
+    params: &EvaluatedOptionsParams,
+) -> axum::response::Response {
+    match crate::queries::evaluation_snapshots::query_config_options_page_v2_for_user(
+        pool,
+        system_id,
+        &params.revision,
+        visibility_user,
+        &params.search,
+        params.filter,
+        params.snapshot_token.as_deref(),
+        params.limit.unwrap_or(50),
+        params.offset.unwrap_or(0),
+    )
+    .await
+    {
+        Ok(crate::queries::evaluation_snapshots::ConfigOptionsPageQueryV2::Page(page)) => {
+            (StatusCode::OK, Json(config_options_page_v2_to_api(page))).into_response()
+        }
+        Ok(crate::queries::evaluation_snapshots::ConfigOptionsPageQueryV2::NoSnapshot) => {
+            commit_missing_options_response(pool, system_id, params).await
+        }
+        Ok(crate::queries::evaluation_snapshots::ConfigOptionsPageQueryV2::SnapshotChanged) => {
+            evaluation_snapshot_changed("Evaluation snapshot changed; reload options from offset 0")
+        }
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to query V2 evaluated options");
+            internal_error("Failed to load evaluated options")
+        }
+    }
+}
+
+async fn get_commit_evaluation_summary_v2(
+    pool: &PgPool,
+    system_id: Uuid,
+    params: &SelectedEvaluationSummaryParams,
+) -> axum::response::Response {
+    match crate::queries::evaluation_snapshots::get_config_summary_v2_with_token(
+        pool,
+        system_id,
+        &params.revision,
+        params.snapshot_token.as_deref(),
+    )
+    .await
+    {
+        Ok(crate::queries::evaluation_snapshots::ConfigSummaryQueryV2::Summary(summary)) => {
+            (StatusCode::OK, Json(config_summary_v2_to_api(summary))).into_response()
+        }
+        Ok(crate::queries::evaluation_snapshots::ConfigSummaryQueryV2::NoSnapshot) => {
+            commit_missing_summary_response(pool, system_id, params).await
+        }
+        Ok(crate::queries::evaluation_snapshots::ConfigSummaryQueryV2::SnapshotChanged) => {
+            evaluation_snapshot_changed("Evaluation snapshot changed; reload Config data")
+        }
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to query V2 evaluation summary");
+            internal_error("Failed to load evaluation summary")
+        }
+    }
+}
+
+async fn get_commit_evaluation_module_sources_v2(
+    pool: &PgPool,
+    system_id: Uuid,
+    visibility_user: Option<Uuid>,
+    params: &EvaluationModuleSourcesParams,
+) -> axum::response::Response {
+    match crate::queries::evaluation_snapshots::get_config_module_sources_v2_for_user(
+        pool,
+        system_id,
+        &params.revision,
+        visibility_user,
+        params.snapshot_token.as_deref(),
+        params.limit.unwrap_or(50),
+        params.offset.unwrap_or(0),
+    )
+    .await
+    {
+        Ok(crate::queries::evaluation_snapshots::ConfigModuleSourcesQueryV2::Page(page)) => {
+            (StatusCode::OK, Json(config_module_sources_v2_to_api(page))).into_response()
+        }
+        Ok(crate::queries::evaluation_snapshots::ConfigModuleSourcesQueryV2::NoSnapshot) => {
+            commit_missing_module_sources_response(pool, system_id, params).await
+        }
+        Ok(crate::queries::evaluation_snapshots::ConfigModuleSourcesQueryV2::SnapshotChanged) => {
+            evaluation_snapshot_changed(
+                "Evaluation snapshot changed; reload module sources from offset 0",
+            )
+        }
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to query V2 evaluation module sources");
+            internal_error("Failed to load evaluation module sources")
+        }
+    }
+}
+
+async fn commit_missing_options_response(
+    pool: &PgPool,
+    system_id: Uuid,
+    params: &EvaluatedOptionsParams,
+) -> axum::response::Response {
+    match crate::queries::evaluation_snapshots::missing_config_snapshot_lifecycle_v2(
+        pool,
+        system_id,
+        &params.revision,
+    )
+    .await
+    {
+        Ok(Some(lifecycle)) => {
+            (StatusCode::OK, Json(empty_options_page(params, lifecycle))).into_response()
+        }
+        Ok(None) => not_found(),
+        Err(_) => internal_error("Failed to load evaluation lifecycle"),
+    }
+}
+
+async fn commit_missing_summary_response(
+    pool: &PgPool,
+    system_id: Uuid,
+    params: &SelectedEvaluationSummaryParams,
+) -> axum::response::Response {
+    match crate::queries::evaluation_snapshots::missing_config_snapshot_lifecycle_v2(
+        pool,
+        system_id,
+        &params.revision,
+    )
+    .await
+    {
+        Ok(Some(lifecycle)) => (
+            StatusCode::OK,
+            Json(empty_evaluation_summary(params, lifecycle)),
+        )
+            .into_response(),
+        Ok(None) => not_found(),
+        Err(_) => internal_error("Failed to load evaluation lifecycle"),
+    }
+}
+
+async fn commit_missing_module_sources_response(
+    pool: &PgPool,
+    system_id: Uuid,
+    params: &EvaluationModuleSourcesParams,
+) -> axum::response::Response {
+    match crate::queries::evaluation_snapshots::missing_config_snapshot_lifecycle_v2(
+        pool,
+        system_id,
+        &params.revision,
+    )
+    .await
+    {
+        Ok(Some(lifecycle)) => (
+            StatusCode::OK,
+            Json(empty_evaluation_module_sources(params, lifecycle)),
+        )
+            .into_response(),
+        Ok(None) => not_found(),
+        Err(_) => internal_error("Failed to load evaluation lifecycle"),
+    }
+}
+
+fn config_options_page_v2_to_api(
+    page: crate::queries::evaluation_snapshots::ConfigOptionsPageV2,
+) -> EvaluatedOptionsPage {
+    let (
+        option_inventory_state,
+        option_inventory_diagnostics,
+        option_inventory_diagnostics_truncated,
+    ) = config_inventory_v2_to_api(&page.selected);
+    let comparison_available = matches!(
+        page.selected.comparison,
+        crate::queries::evaluation_snapshots::ConfigComparisonStateV2::Available { .. }
+    );
+    let baseline_revision = match &page.selected.comparison {
+        crate::queries::evaluation_snapshots::ConfigComparisonStateV2::Available {
+            baseline_revision,
+            ..
+        } => Some(baseline_revision.clone()),
+        crate::queries::evaluation_snapshots::ConfigComparisonStateV2::Unavailable { .. } => None,
+    };
+    let available = page.selected.lifecycle == SnapshotLifecycle::Available;
+    EvaluatedOptionsPage {
+        lifecycle: page.selected.lifecycle,
+        option_inventory_state,
+        option_inventory_diagnostics,
+        option_inventory_diagnostics_truncated,
+        revision: page.selected.revision,
+        generation: None,
+        generation_snapshot_id: None,
+        snapshot_token: available.then_some(page.snapshot_token),
+        baseline_revision,
+        baseline_generation: None,
+        comparison_available,
+        error: page.selected.error,
+        module_count: if available {
+            page.selected.module_count
+        } else {
+            0
+        },
+        evaluation_duration_ms: available
+            .then_some(page.selected.evaluation_duration_ms)
+            .flatten(),
+        counts: EvaluatedOptionCounts {
+            all: page.counts.all,
+            overridden: page.counts.overridden,
+            changed: page.counts.changed,
+        },
+        total: page.total,
+        offset: page.offset,
+        limit: page.limit,
+        options: page
+            .options
+            .into_iter()
+            .map(|row| {
+                let option = row
+                    .option
+                    .map(|option| config_option_v2_to_api(option, row.option_tracked_flakes));
+                let before = row
+                    .before
+                    .map(|option| config_option_v2_to_api(option, row.before_tracked_flakes));
+                let diff = comparison_available.then(|| {
+                    config_option_diff_v2_to_api(before.as_ref(), option.as_ref(), row.changed)
+                });
+                EvaluatedOptionRow {
+                    diff,
+                    option,
+                    before,
+                    changed: row.changed,
+                }
+            })
+            .collect(),
+    }
+}
+
+fn config_inventory_v2_to_api(
+    selected: &crate::queries::evaluation_snapshots::ConfigSelectedSnapshotV2,
+) -> (OptionInventoryState, Vec<OptionInventoryDiagnostic>, bool) {
+    if selected.lifecycle != SnapshotLifecycle::Available {
+        return (OptionInventoryState::Unavailable, Vec::new(), false);
+    }
+    let state = match selected.option_inventory_complete {
+        Some(true) => OptionInventoryState::Complete,
+        Some(false) => OptionInventoryState::Partial,
+        None => OptionInventoryState::Unavailable,
+    };
+    let diagnostics = selected
+        .option_inventory_diagnostics
+        .iter()
+        .map(|diagnostic| OptionInventoryDiagnostic {
+            path_components: diagnostic.path.clone(),
+            code: diagnostic.code.clone(),
+            message: diagnostic.message.clone(),
+        })
+        .collect();
+    (
+        state,
+        diagnostics,
+        selected
+            .option_inventory_diagnostics_truncated
+            .unwrap_or(false),
+    )
+}
+
+fn config_option_diff_v2_to_api(
+    before: Option<&EvaluatedOption>,
+    option: Option<&EvaluatedOption>,
+    changed: Option<bool>,
+) -> crate::models::evaluation_snapshots::TypedOptionDiff {
+    let mut diff = typed_option_diff(before, option);
+    // INVARIANT: V2 content digests include metadata and provenance that the
+    // compatibility DTO cannot represent. The database comparison therefore
+    // remains authoritative for the row-level change classification.
+    diff.kind = match (before.is_some(), option.is_some(), changed) {
+        (false, true, _) => OptionChangeKind::Added,
+        (true, false, _) => OptionChangeKind::Removed,
+        (true, true, Some(true)) => OptionChangeKind::Modified,
+        _ => OptionChangeKind::Unchanged,
+    };
+    diff
+}
+
+fn config_option_v2_to_api(
+    option: ConfigOptionArtifactV2,
+    tracked_flakes: Vec<Option<TrackedFlakeIdentity>>,
+) -> EvaluatedOption {
+    let (declared_type, metadata_error) = match option.metadata {
+        ConfigOptionMetadataArtifactV2::Available { declared_type, .. } => (declared_type, None),
+        ConfigOptionMetadataArtifactV2::Failed { error } => (None, Some(error)),
+    };
+    let (definitions, overridden) = match option.provenance {
+        ConfigOptionProvenanceArtifactV2::Available {
+            definitions,
+            override_state,
+        } => (
+            definitions
+                .into_iter()
+                .zip(tracked_flakes.into_iter().chain(std::iter::repeat(None)))
+                .map(|(definition, tracked_flake)| {
+                    config_definition_v2_to_api(definition, tracked_flake)
+                })
+                .collect(),
+            Some(override_state),
+        ),
+        ConfigOptionProvenanceArtifactV2::Unavailable => (Vec::new(), None),
+    };
+    EvaluatedOption {
+        path: config_option_path_v2_to_api(&option.path_components),
+        declared_type,
+        metadata_error,
+        value: option.effective_value,
+        definitions,
+        overridden,
+    }
+}
+
+// INVARIANT: Quoting non-identifier components keeps the display path and the
+// existing API row identity injective when a literal component contains a dot.
+fn config_option_path_v2_to_api(path_components: &[String]) -> String {
+    path_components
+        .iter()
+        .map(|component| {
+            let mut chars = component.chars();
+            let starts_like_identifier = chars
+                .next()
+                .is_some_and(|character| character.is_ascii_alphabetic() || character == '_');
+            let remains_identifier = chars.all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '\'')
+            });
+            if starts_like_identifier && remains_identifier {
+                component.clone()
+            } else {
+                serde_json::Value::String(component.clone()).to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn config_definition_v2_to_api(
+    definition: ConfigDefinitionArtifactV2,
+    tracked_flake: Option<TrackedFlakeIdentity>,
+) -> OptionDefinitionProvenance {
+    let (winning, status) = match definition.status {
+        ConfigDefinitionStatusV2::ActiveSurviving => (true, "winning"),
+        ConfigDefinitionStatusV2::PriorityDiscarded => (false, "overridden"),
+    };
+    OptionDefinitionProvenance {
+        source_path: definition.source_path,
+        source_input: definition.source_input,
+        source_revision: definition.source_revision,
+        value: definition
+            .value
+            .and_then(|value| serde_json::to_value(value).ok()),
+        winning,
+        priority: Some(definition.priority),
+        status: Some(status.to_string()),
+        winner_note: None,
+        tracked_flake,
+    }
+}
+
+fn config_summary_v2_to_api(
+    summary: crate::queries::evaluation_snapshots::ConfigSummaryV2,
+) -> SelectedEvaluationSummary {
+    let (
+        option_inventory_state,
+        option_inventory_diagnostics,
+        option_inventory_diagnostics_truncated,
+    ) = config_inventory_v2_to_api(&summary.selected);
+    let inventory_complete = option_inventory_state == OptionInventoryState::Complete;
+    let drift = if inventory_complete {
+        summary.drift
+    } else {
+        EvaluationDrift::Unavailable
+    };
+    let agent_fingerprint = match drift {
+        EvaluationDrift::Matches => AgentFingerprintStatus::Matches,
+        EvaluationDrift::Differs => AgentFingerprintStatus::Differs,
+        EvaluationDrift::Unavailable => AgentFingerprintStatus::Unavailable,
+    };
+    SelectedEvaluationSummary {
+        lifecycle: summary.selected.lifecycle,
+        option_inventory_state,
+        option_inventory_diagnostics,
+        option_inventory_diagnostics_truncated,
+        revision: summary.selected.revision,
+        generation: None,
+        error: summary.selected.error,
+        snapshot_token: summary.snapshot_token,
+        baseline_generation: None,
+        module_source_total: summary.module_source_total,
+        completed_at: summary.completed_at,
+        evaluation_duration_ms: summary.evaluation_duration_ms,
+        option_total: summary.option_total,
+        selected_store_path: summary.selected_store_path,
+        closure_package_count: summary.closure_package_count,
+        closure_size_bytes: summary.closure_size_bytes,
+        running_store_path: summary.running_store_path,
+        running_profile_matches: summary.running_profile_matches,
+        // INVARIANT: Host deltas are materialized only for schema-V1 snapshots
+        // selected by evaluation_snapshot_selections. Targeted schema-V2 Config
+        // snapshots never join that primary same-commit host corpus.
+        host_delta_count: None,
+        agent_fingerprint,
+        seven_day_drift: if inventory_complete {
+            summary.seven_day_drift
+        } else {
+            SevenDayDriftStatus::InsufficientCoverage
+        },
+        drift,
+    }
+}
+
+fn config_module_sources_v2_to_api(
+    page: crate::queries::evaluation_snapshots::ConfigModuleSourcesPageV2,
+) -> EvaluationModuleSourcesPage {
+    let (
+        option_inventory_state,
+        option_inventory_diagnostics,
+        option_inventory_diagnostics_truncated,
+    ) = config_inventory_v2_to_api(&page.selected);
+    EvaluationModuleSourcesPage {
+        lifecycle: page.selected.lifecycle,
+        option_inventory_state,
+        option_inventory_diagnostics,
+        option_inventory_diagnostics_truncated,
+        revision: page.selected.revision,
+        generation: None,
+        error: page.selected.error,
+        snapshot_token: page.snapshot_token,
+        total: page.total,
+        offset: page.offset,
+        limit: page.limit,
+        sources: page
+            .sources
+            .into_iter()
+            .map(|source| EvaluationModuleSummary {
+                source_input: source.source_input,
+                source_revision: source.source_revision,
+                source_path: source.source_path,
+                defined_count: source.definition_count,
+                won_count: source.winning_option_count,
+                tracked_flake: source.tracked_flake,
+            })
+            .collect(),
+    }
+}
+
+fn evaluation_snapshot_changed(message: &str) -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiError {
+            error: "snapshot_changed".to_string(),
+            message: message.to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
+/// Explicitly queues missing revision evaluation or reuses existing work.
+///
+/// The action requires administrator privileges because evaluation processes
+/// the complete commit. It applies non-disclosing system authorization first.
+pub async fn queue_system_evaluation_prerequisite(
+    State(state): State<CFState>,
+    headers: HeaderMap,
+    Path((system_id, revision)): Path<(Uuid, String)>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&state.pool, &headers).await else {
+        return forbidden();
+    };
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+    if !caller_role.can_mutate_systems() {
+        return forbidden_mutation();
+    }
+    // SECURITY: The existing evaluator operates on the complete commit. Until
+    // it has a configuration-scoped worker contract, only an administrator,
+    // who can see every environment, may trigger this whole-commit action.
+    if caller_role != Role::Admin {
+        return forbidden_mutation();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
+    let memberships = match load_membership_environment_ids(&state.pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+    let access = match find_system_access_row(&state.pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    if !caller_role.can_access_system_environment(access.environment_id, &memberships) {
+        return not_found();
+    }
+    if !is_full_commit_sha(&revision) {
+        return bad_request("revision must be a full 40- or 64-character commit SHA");
+    }
+
+    match crate::queries::evaluation_snapshots::queue_or_reuse_evaluation(
+        &state.pool,
+        system_id,
+        &revision,
+    )
+    .await
+    {
+        Ok(Some(response)) => {
+            if response.queued {
+                state.queue_notifier.notify_eval_queue();
+            }
+            (StatusCode::OK, Json(response)).into_response()
+        }
+        Ok(None) => not_found(),
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to queue evaluation snapshot");
+            internal_error("Failed to queue evaluation")
+        }
+    }
+}
+
+fn config_inspection_prerequisite() -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiError {
+            error: "config_inspection_prerequisite".to_string(),
+            message: "The exact completed NixOS carrier is not available for this system revision. Complete the explicitly named whole-commit evaluation prerequisite before inspecting this configuration.".to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
+fn config_inspection_target_conflict() -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiError {
+            error: "config_inspection_target_conflict".to_string(),
+            message: "Active configuration inspection work targets an obsolete derivation or carrier. Retry after that work reaches a terminal state.".to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
+/// Queues or reuses targeted Config Inspector work for one exact system target.
+///
+/// Authorization and environment visibility checks run before revision
+/// validation or target resolution. The mutation requires an existing carrier
+/// from completed primary evaluation and never queues primary evaluation.
+pub async fn queue_system_config_inspection(
+    State(state): State<CFState>,
+    headers: HeaderMap,
+    Path((system_id, revision)): Path<(Uuid, String)>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&state.pool, &headers).await else {
+        return forbidden();
+    };
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+    if caller_role != Role::Admin {
+        return forbidden_mutation();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
+    let memberships = match load_membership_environment_ids(&state.pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+    let access = match find_system_access_row(&state.pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    if !caller_role.can_access_system_environment(access.environment_id, &memberships) {
+        return not_found();
+    }
+    if !is_full_commit_sha(&revision) {
+        return bad_request("revision must be a full 40- or 64-character commit SHA");
+    }
+
+    match crate::queries::config_inspections::queue_or_reuse_targeted_config_inspection(
+        &state.pool,
+        system_id,
+        &revision,
+    )
+    .await
+    {
+        Ok(crate::queries::config_inspections::TargetedConfigInspectionOutcome::Resolved(
+            response,
+        )) => (StatusCode::OK, Json(response)).into_response(),
+        Ok(crate::queries::config_inspections::TargetedConfigInspectionOutcome::NotFound) => {
+            not_found()
+        }
+        Ok(crate::queries::config_inspections::TargetedConfigInspectionOutcome::PrerequisiteMissing) => {
+            config_inspection_prerequisite()
+        }
+        Ok(crate::queries::config_inspections::TargetedConfigInspectionOutcome::ActiveTargetConflict) => {
+            config_inspection_target_conflict()
+        }
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to queue targeted Config Inspector work");
+            internal_error("Failed to queue configuration inspection")
+        }
+    }
+}
+
+/// Creates or reuses one scoped Config Explorer observation request.
+///
+/// Authentication, Admin authorization, CSRF, and environment visibility run
+/// before revision or observation validation. The browser supplies only a
+/// closed operation enum, structured path components, and a bounded child offset.
+pub async fn create_system_config_observation(
+    State(state): State<CFState>,
+    headers: HeaderMap,
+    Path((system_id, revision)): Path<(Uuid, String)>,
+    Json(request): Json<CreateConfigObservationRequest>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&state.pool, &headers).await else {
+        return forbidden();
+    };
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+    if caller_role != Role::Admin {
+        return forbidden_mutation();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
+    let memberships = match load_membership_environment_ids(&state.pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+    let access = match find_system_access_row(&state.pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    if !caller_role.can_access_system_environment(access.environment_id, &memberships) {
+        return not_found();
+    }
+    if !is_full_commit_sha(&revision) {
+        return bad_request("revision must be a full 40- or 64-character commit SHA");
+    }
+    if crate::models::config_observations::validate_config_observation_identity(
+        request.kind,
+        &request.path_components,
+        request.child_offset,
+    )
+    .is_err()
+    {
+        return bad_request("Config observation path or child offset is invalid");
+    }
+    if request.automatic
+        && request.kind != crate::models::config_observations::ConfigObservationKind::Option
+    {
+        return bad_request("Only an exact option request may be marked automatic");
+    }
+
+    match crate::queries::config_observations::create_or_reuse_config_observation_request(
+        &state.pool,
+        system_id,
+        &revision,
+        request.kind,
+        &request.path_components,
+        request.child_offset,
+        request.automatic,
+    )
+    .await
+    {
+        Ok(crate::queries::config_observations::CreateConfigObservationOutcome::Resolved(
+            response,
+        )) => {
+            let status = config_observation_post_status(&response);
+            (status, Json(response)).into_response()
+        }
+        Ok(crate::queries::config_observations::CreateConfigObservationOutcome::NotFound) => {
+            not_found()
+        }
+        Ok(crate::queries::config_observations::CreateConfigObservationOutcome::PrerequisiteMissing) => {
+            config_inspection_prerequisite()
+        }
+        Err(error) => {
+            tracing::error!(system_id = %system_id, %error, "failed to create scoped Config observation");
+            internal_error("Failed to create configuration observation")
+        }
+    }
+}
+
+fn config_observation_post_status(response: &ConfigObservationRequestResponse) -> StatusCode {
+    if response.lifecycle == ConfigObservationLifecycle::Succeeded
+        && response.observation_id.is_some()
+    {
+        StatusCode::OK
+    } else {
+        StatusCode::ACCEPTED
+    }
+}
+
+/// Returns one scoped request lifecycle without enqueueing work.
+pub async fn get_system_config_observation_request(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path((system_id, request_id)): Path<(Uuid, Uuid)>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+    let memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+    let access = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    if !caller_role.can_access_system_environment(access.environment_id, &memberships) {
+        return not_found();
+    }
+    match crate::queries::config_observations::get_config_observation_request(
+        &pool, system_id, request_id,
+    )
+    .await
+    {
+        Ok(Some(response)) => (StatusCode::OK, Json(response)).into_response(),
+        Ok(None) => not_found(),
+        Err(error) => {
+            tracing::error!(system_id = %system_id, request_id = %request_id, %error, "failed to read Config observation request");
+            internal_error("Failed to read configuration observation request")
+        }
+    }
+}
+
+/// Returns one immutable scoped observation without enqueueing work.
+pub async fn get_system_config_observation(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path((system_id, observation_id)): Path<(Uuid, Uuid)>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+    let memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+    let access = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    if !caller_role.can_access_system_environment(access.environment_id, &memberships) {
+        return not_found();
+    }
+    match crate::queries::config_observations::get_config_observation(
+        &pool,
+        system_id,
+        observation_id,
+    )
+    .await
+    {
+        Ok(Some(response)) => (StatusCode::OK, Json(response)).into_response(),
+        Ok(None) => not_found(),
+        Err(error) => {
+            tracing::error!(system_id = %system_id, observation_id = %observation_id, %error, "failed to read Config observation");
+            internal_error("Failed to read configuration observation")
+        }
+    }
+}
+
+fn empty_options_page(
+    params: &EvaluatedOptionsParams,
+    (lifecycle, error): (SnapshotLifecycle, Option<String>),
+) -> EvaluatedOptionsPage {
+    EvaluatedOptionsPage {
+        lifecycle,
+        option_inventory_state: OptionInventoryState::Unavailable,
+        option_inventory_diagnostics: Vec::new(),
+        option_inventory_diagnostics_truncated: false,
+        revision: params.revision.clone(),
+        generation: params.generation,
+        generation_snapshot_id: None,
+        snapshot_token: None,
+        baseline_revision: None,
+        baseline_generation: None,
+        comparison_available: false,
+        error,
+        module_count: 0,
+        evaluation_duration_ms: None,
+        counts: EvaluatedOptionCounts::default(),
+        total: 0,
+        offset: params.offset.unwrap_or(0).clamp(0, 100_000),
+        limit: params.limit.unwrap_or(50).clamp(1, 100),
+        options: Vec::new(),
+    }
+}
+
+fn empty_evaluation_summary(
+    params: &SelectedEvaluationSummaryParams,
+    (lifecycle, error): (SnapshotLifecycle, Option<String>),
+) -> SelectedEvaluationSummary {
+    SelectedEvaluationSummary {
+        lifecycle,
+        option_inventory_state: OptionInventoryState::Unavailable,
+        option_inventory_diagnostics: Vec::new(),
+        option_inventory_diagnostics_truncated: false,
+        revision: params.revision.clone(),
+        generation: params.generation,
+        error,
+        snapshot_token: None,
+        baseline_generation: None,
+        module_source_total: 0,
+        completed_at: None,
+        evaluation_duration_ms: None,
+        option_total: 0,
+        selected_store_path: None,
+        closure_package_count: None,
+        closure_size_bytes: None,
+        running_store_path: None,
+        running_profile_matches: None,
+        host_delta_count: None,
+        agent_fingerprint: AgentFingerprintStatus::Unavailable,
+        seven_day_drift: SevenDayDriftStatus::InsufficientCoverage,
+        drift: EvaluationDrift::Unavailable,
+    }
+}
+
+fn empty_evaluation_module_sources(
+    params: &EvaluationModuleSourcesParams,
+    (lifecycle, error): (SnapshotLifecycle, Option<String>),
+) -> EvaluationModuleSourcesPage {
+    EvaluationModuleSourcesPage {
+        lifecycle,
+        option_inventory_state: OptionInventoryState::Unavailable,
+        option_inventory_diagnostics: Vec::new(),
+        option_inventory_diagnostics_truncated: false,
+        revision: params.revision.clone(),
+        generation: params.generation,
+        error,
+        snapshot_token: None,
+        total: 0,
+        offset: params.offset.unwrap_or(0).clamp(0, 100_000),
+        limit: params.limit.unwrap_or(50).clamp(1, 100),
+        sources: Vec::new(),
+    }
+}
+
+fn validate_evaluation_module_sources_params(
+    params: &EvaluationModuleSourcesParams,
+) -> Result<(), &'static str> {
+    if params.offset.unwrap_or(0) > 0 && params.snapshot_token.is_none() {
+        return Err("snapshot_token is required when offset is greater than 0");
+    }
+    if params.snapshot_token.as_deref().is_some_and(|token| {
+        token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return Err("snapshot_token must be a 64-character hexadecimal digest");
+    }
+    Ok(())
+}
+
+fn validate_evaluated_options_params(params: &EvaluatedOptionsParams) -> Result<(), &'static str> {
+    if params.offset.unwrap_or(0) > 0 && params.snapshot_token.is_none() {
+        return Err("snapshot_token is required when offset is greater than 0");
+    }
+    if params.snapshot_token.as_deref().is_some_and(|token| {
+        token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return Err("snapshot_token must be a 64-character hexadecimal digest");
+    }
+    Ok(())
+}
+
+fn is_full_commit_sha(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 pub async fn get_system_cves(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -279,67 +1484,70 @@ pub async fn get_system_cves(
         return not_found();
     }
 
-    let rows = match sqlx::query(
-        r#"
-        WITH deduped AS (
-            SELECT DISTINCT ON (v.cve_id, v.package_name, v.package_version)
-                v.cve_id,
-                lower(v.severity) AS severity,
-                v.cvss_v3_score::double precision AS cvss_score,
-                COALESCE(v.description, '') AS description,
-                v.package_name,
-                v.package_version AS installed_version,
-                v.fixed_version,
-                v.completed_at AS first_seen,
-                c.published_date::timestamptz AS published_at,
-                -- 'fix_available' = upstream patched version exists; does NOT mean system is patched.
-                -- 'open' = no upstream fix known yet.
-                CASE WHEN v.fixed_version IS NULL THEN 'open' ELSE 'fix_available' END AS status,
-                j.category AS justification_category,
-                j.reason AS justification_reason,
-                j.updated_at AS justification_updated_at
-            FROM view_system_vulnerabilities v
-            JOIN systems s ON s.hostname = v.hostname
-            LEFT JOIN cves c ON c.id = v.cve_id
-            LEFT JOIN system_cve_justifications j
-                ON j.system_id = s.id
-               AND j.cve_id = v.cve_id
-            WHERE s.id = $1
-            ORDER BY v.cve_id, v.package_name, v.package_version, v.completed_at DESC
-        )
-        SELECT *
-        FROM deduped
-        ORDER BY cvss_score DESC NULLS LAST, cve_id ASC, package_name ASC, installed_version ASC
-        "#,
+    let actor = PoamActor {
+        user_id,
+        identifier: user_id.to_string(),
+        is_admin: matches!(caller_role, Role::Admin),
+        can_mutate: caller_role.can_mutate_systems(),
+        environment_ids: environment_memberships.iter().copied().collect(),
+        request_origin: None,
+    };
+    let rows = match fetch_exact_system_vulnerabilities(&pool, system_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load system CVEs"),
+    };
+    let relationship_keys = rows
+        .iter()
+        .map(|row| CveRelationshipRowKey {
+            canonical_cve_id: row.cve_id.clone(),
+            canonical_package_name: row.canonical_package_name.clone(),
+            scan_id: row.scan_id,
+            occurrence_derivation_path: row.occurrence_derivation_path.clone(),
+        })
+        .collect::<Vec<_>>();
+    let relationships = match poam_service::cve_relationships_for_rows(
+        &pool,
+        &actor,
+        system_id,
+        &relationship_keys,
+        None,
+        None,
+        &SystemClock,
     )
-    .bind(system_id)
-    .fetch_all(&pool)
     .await
     {
         Ok(value) => value,
-        Err(_) => return internal_error("Failed to load system CVEs"),
+        Err(_) => return internal_error("Failed to load CVE remediation context"),
     };
 
     let vulnerabilities = rows
         .into_iter()
         .map(|row| {
-            let severity_raw: String = row.get("severity");
-            let severity = parse_cve_severity(&severity_raw);
+            let severity = parse_cve_severity(&row.severity);
+            let remediation = relationships
+                .iter()
+                .find(|relationship| {
+                    relationship.observation.canonical_cve_id == row.cve_id
+                        && relationship.observation.canonical_package_name
+                            == row.canonical_package_name
+                })
+                .cloned();
 
             SystemVulnerability {
-                cve_id: row.get("cve_id"),
+                cve_id: row.cve_id,
                 severity,
-                cvss_score: row.get("cvss_score"),
-                description: row.get("description"),
-                package_name: row.get("package_name"),
-                installed_version: row.get("installed_version"),
-                fixed_version: row.get("fixed_version"),
-                first_seen: row.get("first_seen"),
-                published_at: row.get("published_at"),
-                status: row.get("status"),
-                justification_category: row.get("justification_category"),
-                justification_reason: row.get("justification_reason"),
-                justification_updated_at: row.get("justification_updated_at"),
+                cvss_score: row.cvss_score,
+                description: row.description,
+                package_name: row.package_name,
+                installed_version: row.installed_version,
+                fixed_version: row.fixed_version,
+                first_seen: row.first_seen,
+                published_at: row.published_at,
+                status: row.status,
+                justification_category: row.justification_category,
+                justification_reason: row.justification_reason,
+                justification_updated_at: row.justification_updated_at,
+                remediation,
             }
         })
         .collect::<Vec<_>>();
@@ -347,37 +1555,314 @@ pub async fn get_system_cves(
     (StatusCode::OK, Json(vulnerabilities)).into_response()
 }
 
+/// Returns the complete compatibility CVE inventory for one visible system.
+///
+/// The response preserves the original DTO and rejects inventories above 1,000
+/// stable rows. New browser clients use [`get_system_cve_inventory_page`].
+pub async fn get_system_cve_inventory(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+    let actor = PoamActor {
+        user_id,
+        identifier: user_id.to_string(),
+        is_admin: matches!(caller_role, Role::Admin),
+        can_mutate: caller_role.can_mutate_systems(),
+        environment_ids: environment_memberships.iter().copied().collect(),
+        request_origin: None,
+    };
+    let mut transaction = match pool.begin().await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load system CVE inventory"),
+    };
+    if sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *transaction)
+        .await
+        .is_err()
+    {
+        return internal_error("Failed to load system CVE inventory");
+    }
+    let mut inventory = match fetch_authorized_system_cve_inventory_tx(
+        &mut transaction,
+        system_id,
+        user_id,
+        &SystemCveInventoryPageRequest::legacy_complete(),
+    )
+    .await
+    {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system CVE inventory"),
+    };
+    if inventory.has_more {
+        return bad_request("CVE inventory exceeds the 1000-row limit");
+    }
+    // COMPATIBILITY: The legacy endpoint retains its severity-first order. The
+    // paged endpoint uses canonical keyset order instead.
+    inventory.rows.sort_by(|left, right| {
+        right
+            .cvss_score
+            .partial_cmp(&left.cvss_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.cve_id.cmp(&right.cve_id))
+            .then_with(|| {
+                left.canonical_package_name
+                    .cmp(&right.canonical_package_name)
+            })
+    });
+    let keys = inventory_relationship_keys(inventory.authority, &inventory.rows);
+    let relationships = if keys.is_empty() {
+        Vec::new()
+    } else {
+        match poam_service::cve_relationships_for_rows_tx(
+            &mut transaction,
+            &actor,
+            system_id,
+            &keys,
+            None,
+            None,
+            &SystemClock,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(_) => return internal_error("Failed to load CVE remediation context"),
+        }
+    };
+    if transaction.commit().await.is_err() {
+        return internal_error("Failed to load system CVE inventory");
+    }
+    let vulnerabilities = inventory
+        .rows
+        .into_iter()
+        .map(|row| {
+            let remediation = relationships
+                .iter()
+                .find(|relationship| {
+                    relationship.observation.canonical_cve_id == row.cve_id
+                        && relationship.observation.canonical_package_name
+                            == row.canonical_package_name
+                })
+                .cloned();
+            SystemVulnerability {
+                cve_id: row.cve_id,
+                severity: parse_legacy_cve_severity(&row.severity),
+                cvss_score: row.cvss_score,
+                description: row.description,
+                package_name: row.package_name,
+                installed_version: row.installed_version,
+                fixed_version: row.fixed_version,
+                first_seen: row.first_seen,
+                published_at: row.published_at,
+                status: row.status,
+                justification_category: row.justification_category,
+                justification_reason: row.justification_reason,
+                justification_updated_at: row.justification_updated_at,
+                remediation,
+            }
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        Json(SystemCveInventoryResponse {
+            authority: inventory.authority,
+            exact_authority_failure: inventory.exact_authority_failure,
+            source: inventory.source,
+            vulnerabilities,
+        }),
+    )
+        .into_response()
+}
+
+/// Returns one bounded typed CVE inventory page for one visible system.
+///
+/// The response separates display inventory authority from exact remediation
+/// authority. Legacy findings remain visible but never receive exact
+/// relationship context. Authentication and environment failures remain
+/// non-disclosing, consistent with the existing system CVE endpoint.
+pub async fn get_system_cve_inventory_page(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+    Query(params): Query<SystemCveInventoryParams>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+    let actor = PoamActor {
+        user_id,
+        identifier: user_id.to_string(),
+        is_admin: matches!(caller_role, Role::Admin),
+        can_mutate: caller_role.can_mutate_systems(),
+        environment_ids: environment_memberships.iter().copied().collect(),
+        request_origin: None,
+    };
+    let page = match SystemCveInventoryPageRequest::from_params(params) {
+        Ok(value) => value,
+        Err(error) => {
+            let message = system_cve_inventory_page_error(&error)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "Invalid inventory query".to_string());
+            return bad_request(&message);
+        }
+    };
+    let mut transaction = match pool.begin().await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load system CVE inventory"),
+    };
+    if sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *transaction)
+        .await
+        .is_err()
+    {
+        return internal_error("Failed to load system CVE inventory");
+    }
+    let inventory =
+        match fetch_authorized_system_cve_inventory_tx(&mut transaction, system_id, user_id, &page)
+            .await
+        {
+            Ok(Some(value)) => value,
+            Ok(None) => return not_found(),
+            Err(error) => return system_cve_inventory_page_error_response(&error),
+        };
+    // SECURITY: Relationship authority is resolved only for exact rows
+    // returned in this page. A cursor cannot cause legacy evidence or an
+    // off-page identity to receive remediation context.
+    let keys = inventory_relationship_keys(inventory.authority, &inventory.rows);
+    let relationships = if keys.is_empty() {
+        Vec::new()
+    } else {
+        match poam_service::cve_relationships_for_rows_tx(
+            &mut transaction,
+            &actor,
+            system_id,
+            &keys,
+            None,
+            None,
+            &SystemClock,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(_) => return internal_error("Failed to load CVE remediation context"),
+        }
+    };
+    if transaction.commit().await.is_err() {
+        return internal_error("Failed to load system CVE inventory");
+    }
+    let vulnerabilities = inventory
+        .rows
+        .into_iter()
+        .map(|row| {
+            let remediation = relationships
+                .iter()
+                .find(|relationship| {
+                    relationship.observation.canonical_cve_id == row.cve_id
+                        && relationship.observation.canonical_package_name
+                            == row.canonical_package_name
+                })
+                .cloned();
+            SystemCveInventoryVulnerability {
+                stable_identity: SystemCveInventoryRowIdentity {
+                    canonical_cve_id: row.cve_id.clone(),
+                    canonical_package_name: row.canonical_package_name.clone(),
+                },
+                cve_id: row.cve_id,
+                canonical_package_name: row.canonical_package_name,
+                severity: parse_cve_severity(&row.severity),
+                cvss_score: row.cvss_score,
+                description: row.description,
+                package_name: row.package_name,
+                installed_version: row.installed_version,
+                fixed_version: row.fixed_version,
+                first_seen: row.first_seen,
+                published_at: row.published_at,
+                status: row.status,
+                justification_category: row.justification_category,
+                justification_reason: row.justification_reason,
+                justification_updated_at: row.justification_updated_at,
+                remediation,
+            }
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        Json(SystemCveInventoryPageResponse {
+            authority: inventory.authority,
+            exact_authority_failure: inventory.exact_authority_failure,
+            source: inventory.source,
+            vulnerabilities,
+            metadata: inventory.metadata,
+            inventory_revision: inventory.inventory_revision,
+            has_more: inventory.has_more,
+            next_cursor: inventory.next_cursor,
+        }),
+    )
+        .into_response()
+}
+
+fn system_cve_inventory_page_error_response(error: &anyhow::Error) -> axum::response::Response {
+    match system_cve_inventory_page_error(error) {
+        Some(SystemCveInventoryPageError::InvalidCursor) => {
+            bad_request("Invalid or malformed pagination cursor")
+        }
+        Some(SystemCveInventoryPageError::InventoryChanged) => inventory_changed(),
+        _ => internal_error("Failed to load system CVE inventory"),
+    }
+}
+
+fn inventory_relationship_keys(
+    authority: crate::api::models::SystemCveInventoryAuthority,
+    rows: &[crate::queries::cves::ExactSystemVulnerabilityRow],
+) -> Vec<CveRelationshipRowKey> {
+    if authority != crate::api::models::SystemCveInventoryAuthority::Exact {
+        return Vec::new();
+    }
+    rows.iter()
+        .map(|row| CveRelationshipRowKey {
+            canonical_cve_id: row.cve_id.clone(),
+            canonical_package_name: row.canonical_package_name.clone(),
+            scan_id: row.scan_id,
+            occurrence_derivation_path: row.occurrence_derivation_path.clone(),
+        })
+        .collect()
+}
+
+/// Saves or revokes one system-scoped CVE justification.
+///
+/// The handler preserves the ordinary legacy inventory justification contract.
+/// A current exact or qualifying legacy finding can be justified. This write
+/// does not create exact remediation authority. The handler locks the shared
+/// CVE scope and rechecks active role and environment membership before write.
 pub async fn save_system_cve_justification(
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path((system_id, cve_id)): Path<(Uuid, String)>,
     Json(payload): Json<SaveSystemCveJustificationRequest>,
 ) -> impl IntoResponse {
-    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, _)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
-
-    let Some(caller_role) = highest_role(&roles) else {
-        return forbidden();
-    };
-
-    if !caller_role.can_mutate_systems() {
-        return forbidden_mutation();
-    }
-
-    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
-        Ok(value) => value,
-        Err(_) => return internal_error("Failed to load environment memberships"),
-    };
-
-    let row = match find_system_access_row(&pool, system_id).await {
-        Ok(Some(value)) => value,
-        Ok(None) => return not_found(),
-        Err(_) => return internal_error("Failed to load system"),
-    };
-
-    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
-        return not_found();
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
 
     let cve_id = cve_id.trim().to_string();
@@ -408,42 +1893,145 @@ pub async fn save_system_cve_justification(
         return bad_request("Invalid justification category");
     }
 
-    let cve_present_on_system = match sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM view_system_vulnerabilities v
-            JOIN systems s ON s.hostname = v.hostname
-            WHERE s.id = $1
-              AND v.cve_id = $2
-        )
-        "#,
+    // SECURITY: Authentication identifies the session before the transaction,
+    // but role, membership, system scope, and current inventory are all re-read
+    // under the mutation locks below.
+    let mut tx = match pool.begin().await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to begin transaction"),
+    };
+    // CONCURRENCY: A current justification changes exact-CVE verification.
+    // Use the global CVE, system, policy, then exact-finding lock order.
+    if crate::services::composite_enforcement::lock_poam_cve_scope_for_systems_tx(
+        &mut tx,
+        &cve_id,
+        &[system_id],
+    )
+    .await
+    .is_err()
+    {
+        let _ = tx.rollback().await;
+        return internal_error("Failed to lock CVE remediation state");
+    }
+
+    // CONCURRENCY: UPDATE takes the system row lock before changing its
+    // environment. If a move wins, this read observes the new environment. If
+    // this read wins, the move waits until the justification commits.
+    let row = match sqlx::query_as::<_, (Uuid, String, Option<Uuid>)>(
+        "SELECT id,hostname,environment_id FROM systems WHERE id=$1 FOR UPDATE",
+    )
+    .bind(system_id)
+    .fetch_optional(&mut *tx)
+    .await
+    {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    let is_active =
+        match sqlx::query_scalar::<_, bool>("SELECT is_active FROM users WHERE id=$1 FOR SHARE")
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await
+        {
+            Ok(value) => value,
+            Err(_) => return internal_error("Failed to load current user"),
+        };
+    if is_active != Some(true) {
+        return forbidden();
+    }
+    let current_roles = match sqlx::query_scalar::<_, AuthRole>(
+        "SELECT role FROM user_role_assignments WHERE user_id=$1 ORDER BY role FOR SHARE",
+    )
+    .bind(user_id)
+    .fetch_all(&mut *tx)
+    .await
+    {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load current role"),
+    };
+    let Some(caller_role) = highest_role(&current_roles) else {
+        return forbidden();
+    };
+    if !caller_role.can_mutate_systems() {
+        return forbidden_mutation();
+    }
+    let memberships = match sqlx::query_scalar::<_, Uuid>(
+        "SELECT environment_id FROM user_environment_memberships WHERE user_id=$1 ORDER BY environment_id FOR SHARE",
+    )
+    .bind(user_id)
+    .fetch_all(&mut *tx)
+    .await
+    {
+        Ok(value) => value.into_iter().collect::<BTreeSet<_>>(),
+        Err(_) => return internal_error("Failed to load current environment memberships"),
+    };
+    if !caller_role.can_access_system_environment(row.2, &memberships) {
+        return not_found();
+    }
+
+    let cve_present_on_system: bool = match sqlx::query_scalar(
+        r#"SELECT EXISTS(
+             SELECT 1 FROM systems system
+             JOIN LATERAL (
+               SELECT state.store_path,state.generation FROM system_states state
+               WHERE state.hostname=system.hostname AND state.store_path IS NOT NULL
+                 AND state.generation IS NOT NULL
+                 AND state.generation_matches_current_store_path IS TRUE
+                 AND btrim(state.store_path)<>''
+               ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
+             ) deployed ON true
+             JOIN evaluation_generation_snapshots retained
+               ON retained.system_id=system.id
+              AND retained.generation=deployed.generation
+              AND retained.source_store_path=deployed.store_path
+              AND retained.lineage_verified
+             JOIN evaluation_snapshots artifact
+               ON artifact.id=retained.snapshot_id
+              AND artifact.commit_id=retained.commit_id
+              AND artifact.configuration_name=retained.configuration_name
+              AND artifact.lifecycle='available' AND artifact.integrity_version=1
+             JOIN derivations derivation
+               ON derivation.id=retained.derivation_id
+              AND derivation.commit_id=retained.commit_id
+              AND derivation.derivation_name=retained.configuration_name
+              AND derivation.derivation_type='nixos'
+              AND COALESCE(derivation.store_path,derivation.expected_store_path)=
+                  retained.source_store_path
+             JOIN LATERAL (
+               SELECT scan.id FROM cve_scans scan
+               WHERE scan.derivation_id=derivation.id AND scan.status='completed'
+                 AND scan.evidence_schema_version=1
+               ORDER BY scan.completed_at DESC,scan.id DESC LIMIT 1
+             ) scan ON true
+             JOIN cve_scan_vulnerability_observations observation
+               ON observation.scan_id=scan.id
+              AND observation.canonical_cve_id=$2
+              AND NOT observation.is_whitelisted
+              WHERE system.id=$1)
+            OR EXISTS(
+              SELECT 1 FROM view_system_vulnerabilities vulnerability
+              JOIN systems system ON system.hostname=vulnerability.hostname
+              WHERE system.id=$1 AND vulnerability.cve_id=$2)"#,
     )
     .bind(system_id)
     .bind(&cve_id)
-    .fetch_one(&pool)
+    .fetch_one(&mut *tx)
     .await
     {
         Ok(value) => value,
         Err(_) => return internal_error("Failed to validate system CVE"),
     };
-
     if !cve_present_on_system {
         return bad_request("CVE was not found for this system");
     }
-
-    // Begin transaction to ensure atomic write + audit
-    let mut tx = match pool.begin().await {
-        Ok(value) => value,
-        Err(_) => return internal_error("Failed to begin transaction"),
-    };
 
     // Upsert justification
     if sqlx::query(
         r#"
         INSERT INTO system_cve_justifications (system_id, cve_id, category, reason, updated_by, updated_at)
         VALUES ($1, $2, $3, $4, $5, NOW())
-        ON CONFLICT (system_id, cve_id)
+        ON CONFLICT (system_id, cve_id) WHERE system_id IS NOT NULL
         DO UPDATE SET
             category = EXCLUDED.category,
             reason = EXCLUDED.reason,
@@ -487,12 +2075,12 @@ pub async fn save_system_cve_justification(
     .bind(user_id)
     .bind(&actor_identifier)
     .bind("user_updated")
-    .bind(format!("{} ({})", row.hostname, row.id))
+    .bind(format!("{} ({})", row.1, row.0))
     .bind(extract_request_origin(&headers))
     .bind(serde_json::json!({
         "operation": "cve_justification_saved",
-        "system_id": row.id,
-        "hostname": row.hostname,
+        "system_id": row.0,
+        "hostname": row.1,
         "cve_id": cve_id,
         "category": category,
         "reason_length": reason.len()
@@ -677,7 +2265,7 @@ pub async fn get_cve_scan_status(
     headers: HeaderMap,
     Path(scan_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
 
@@ -736,10 +2324,36 @@ fn parse_cve_severity(value: &str) -> crate::api::models::CveSeverity {
         "critical" => crate::api::models::CveSeverity::Critical,
         "high" => crate::api::models::CveSeverity::High,
         "medium" => crate::api::models::CveSeverity::Medium,
-        _ => crate::api::models::CveSeverity::Low,
+        "low" => crate::api::models::CveSeverity::Low,
+        _ => crate::api::models::CveSeverity::Unknown,
     }
 }
 
+fn parse_legacy_cve_severity(value: &str) -> crate::api::models::CveSeverity {
+    match parse_cve_severity(value) {
+        // COMPATIBILITY: The original inventory DTO predates `unknown`. Older
+        // clients deserialize only the four established severity values.
+        crate::api::models::CveSeverity::Unknown => crate::api::models::CveSeverity::Low,
+        severity => severity,
+    }
+}
+
+/// Updates system metadata and returns the committed representation.
+///
+/// The handler locks the source and destination environments before the system
+/// remediation sentinel and row. It then reloads the user's active state,
+/// roles, and memberships. A scoped Operator must retain access to both
+/// environments. A matching double-submit CSRF token is required before payload
+/// validation or transaction work. The response is built in the same
+/// transaction before commit.
+///
+/// # Errors
+///
+/// Returns `403 Forbidden` for invalid authentication, authorization, or CSRF
+/// credentials. Returns `404 Not Found` when the system is absent or outside
+/// the caller's environment scope. Returns `400 Bad Request` for invalid system
+/// metadata. Returns `500 Internal Server Error` when locking, persistence, or
+/// response loading fails.
 pub async fn update_system_handler(
     State(state): State<CFState>,
     State(pool): State<PgPool>,
@@ -747,7 +2361,7 @@ pub async fn update_system_handler(
     Path(system_id): Path<Uuid>,
     Json(payload): Json<UpdateSystemRequest>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
 
@@ -757,6 +2371,9 @@ pub async fn update_system_handler(
 
     if !caller_role.can_mutate_systems() {
         return forbidden_mutation();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
 
     let hostname = payload.hostname.trim();
@@ -806,82 +2423,263 @@ pub async fn update_system_handler(
         return bad_request("Invalid deployment policy (must be: manual, auto_latest, or pinned)");
     }
 
-    // Resolve environment name → id.
-    // A non-empty name that does not match any environment is a 400, not a silent NULL.
-    let environment_id = if let Some(env_name) = payload.environment.as_ref() {
-        let env_name_trimmed = env_name.trim();
-        if !env_name_trimmed.is_empty() {
-            match sqlx::query_scalar::<_, Uuid>("SELECT id FROM environments WHERE name = $1")
-                .bind(env_name_trimmed)
-                .fetch_optional(&pool)
-                .await
-            {
-                Ok(Some(id)) => Some(id),
-                Ok(None) => {
-                    return bad_request(&format!("Environment '{}' not found", env_name_trimmed));
-                }
-                Err(_) => return internal_error("Failed to lookup environment"),
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let environment_name = payload
+        .environment
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let flake_name = payload
+        .flake_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
 
-    // Resolve flake name → id.
-    // A non-empty name that does not match any registered flake is a 400, not a silent NULL.
-    let flake_id = if let Some(flake_name) = payload.flake_name.as_ref() {
-        let flake_name_trimmed = flake_name.trim();
-        if !flake_name_trimmed.is_empty() {
-            match sqlx::query_scalar::<_, i32>(
-                "SELECT id FROM flakes WHERE name = $1 AND deleted_at IS NULL",
-            )
-            .bind(flake_name_trimmed)
-            .fetch_optional(&pool)
+    for retry in 0..3 {
+        let mut tx = match pool.begin().await {
+            Ok(value) => value,
+            Err(_) => return internal_error("Failed to begin system update"),
+        };
+        let preliminary_environment_id = match sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT environment_id FROM systems WHERE id=$1",
+        )
+        .bind(system_id)
+        .fetch_optional(&mut *tx)
+        .await
+        {
+            Ok(Some(value)) => value,
+            Ok(None) => return not_found(),
+            Err(_) => return internal_error("Failed to load system"),
+        };
+        let canonical_cve_keys = match sqlx::query_scalar::<_, String>(
+            r#"SELECT DISTINCT canonical_cve_id
+               FROM poam_cve_findings
+               WHERE system_id=$1
+               ORDER BY canonical_cve_id"#,
+        )
+        .bind(system_id)
+        .fetch_all(&mut *tx)
+        .await
+        {
+            Ok(value) => value,
+            Err(_) => return internal_error("Failed to load system CVE remediation keys"),
+        };
+        // CONCURRENCY: Canonical CVE locks precede environment and system
+        // locks. The metadata trigger reacquires these locks and fails with
+        // 40001 if a newly committed key was not in this preliminary set.
+        if sqlx::query(
+            r#"SELECT lock_poam_cve_key(key.cve_id)
+               FROM (SELECT unnest($1::text[]) AS cve_id ORDER BY cve_id) key"#,
+        )
+        .bind(&canonical_cve_keys)
+        .execute(&mut *tx)
+        .await
+        .is_err()
+        {
+            return internal_error("Failed to lock system CVE remediation scope");
+        }
+        let environment_id = match environment_name {
+            Some(name) => {
+                match sqlx::query_scalar::<_, Uuid>("SELECT id FROM environments WHERE name=$1")
+                    .bind(name)
+                    .fetch_optional(&mut *tx)
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(_) => return internal_error("Failed to lookup environment"),
+                }
+            }
+            None => None,
+        };
+        let environment_lock_ids = preliminary_environment_id
+            .into_iter()
+            .chain(environment_id)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        // CONCURRENCY: Fleet triage locks requested environments before sorted
+        // system sentinels. A move locks source and destination in the same
+        // order, so no exact subject can enter or leave a triage scope midway.
+        if sqlx::query("SELECT id FROM environments WHERE id=ANY($1) ORDER BY id FOR UPDATE")
+            .bind(&environment_lock_ids)
+            .execute(&mut *tx)
             .await
-            {
-                Ok(Some(id)) => Some(id),
-                Ok(None) => {
-                    return bad_request(&format!("Flake '{}' not found", flake_name_trimmed));
-                }
-                Err(_) => return internal_error("Failed to lookup flake"),
-            }
-        } else {
-            None
+            .is_err()
+        {
+            return internal_error("Failed to lock environment scope");
         }
-    } else {
-        None
-    };
+        if crate::services::composite_enforcement::lock_poam_system_key_tx(&mut tx, system_id)
+            .await
+            .is_err()
+        {
+            return internal_error("Failed to lock system remediation scope");
+        }
+        if sqlx::query(
+            r#"SELECT lock_poam_finding_key(key.system_id,key.policy_lineage_id)
+               FROM (
+                 SELECT finding.system_id,finding.policy_lineage_id
+                 FROM poam_findings finding WHERE finding.system_id=$1
+                 ORDER BY finding.system_id,finding.policy_lineage_id
+               ) key"#,
+        )
+        .bind(system_id)
+        .execute(&mut *tx)
+        .await
+        .is_err()
+        {
+            return internal_error("Failed to lock system policy remediation scope");
+        }
+        if sqlx::query(
+            r#"SELECT lock_poam_cve_finding_key(
+                        key.system_id,key.canonical_cve_id,key.canonical_package_name)
+               FROM (
+                 SELECT finding.system_id,finding.canonical_cve_id,
+                        finding.canonical_package_name
+                 FROM poam_cve_findings finding WHERE finding.system_id=$1
+                 ORDER BY finding.system_id,finding.canonical_cve_id,
+                          finding.canonical_package_name
+               ) key"#,
+        )
+        .bind(system_id)
+        .execute(&mut *tx)
+        .await
+        .is_err()
+        {
+            return internal_error("Failed to lock system exact-CVE remediation scope");
+        }
+        let current_environment_id = match sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT environment_id FROM systems WHERE id=$1 FOR UPDATE",
+        )
+        .bind(system_id)
+        .fetch_optional(&mut *tx)
+        .await
+        {
+            Ok(Some(value)) => value,
+            Ok(None) => return not_found(),
+            Err(_) => return internal_error("Failed to lock system"),
+        };
+        if current_environment_id != preliminary_environment_id {
+            continue;
+        }
 
-    if update_system_metadata(
-        &pool,
-        system_id,
-        hostname,
-        fqdn,
-        environment_id,
-        flake_id,
-        payload
-            .system_configuration_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty()),
-        &payload.deployment_policy,
-        heartbeat_interval,
-    )
-    .await
-    .is_err()
-    {
-        return internal_error("Failed to update system");
+        // SECURITY: Request-time authentication is only an identity hint. The
+        // active user, roles, and memberships are locked and reloaded after the
+        // writer scope so a waiting request cannot use revoked authorization.
+        let active = match sqlx::query_scalar::<_, bool>(
+            "SELECT is_active FROM users WHERE id=$1 FOR SHARE",
+        )
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        {
+            Ok(value) => value,
+            Err(_) => return internal_error("Failed to load current user"),
+        };
+        if active != Some(true) {
+            return forbidden();
+        }
+        let current_roles = match sqlx::query_scalar::<_, AuthRole>(
+            "SELECT role FROM user_role_assignments WHERE user_id=$1 ORDER BY role FOR SHARE",
+        )
+        .bind(user_id)
+        .fetch_all(&mut *tx)
+        .await
+        {
+            Ok(value) => value,
+            Err(_) => return internal_error("Failed to load current role"),
+        };
+        let Some(current_role) = highest_role(&current_roles) else {
+            return forbidden();
+        };
+        if !current_role.can_mutate_systems() {
+            return forbidden_mutation();
+        }
+        let memberships = match sqlx::query_scalar::<_, Uuid>(
+            "SELECT environment_id FROM user_environment_memberships WHERE user_id=$1 ORDER BY environment_id FOR SHARE",
+        )
+        .bind(user_id)
+        .fetch_all(&mut *tx)
+        .await
+        {
+            Ok(value) => value.into_iter().collect::<BTreeSet<_>>(),
+            Err(_) => return internal_error("Failed to load current environment memberships"),
+        };
+        if !current_role.can_access_system_environment(current_environment_id, &memberships)
+            || !current_role.can_access_system_environment(environment_id, &memberships)
+        {
+            return not_found();
+        }
+        if environment_name.is_some() && environment_id.is_none() {
+            return bad_request(&format!(
+                "Environment '{}' not found",
+                environment_name.unwrap_or_default()
+            ));
+        }
+        let flake_id = match resolve_update_flake_id(&mut tx, flake_name).await {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
+        if let Err(error) = update_system_metadata(
+            &mut *tx,
+            system_id,
+            hostname,
+            fqdn,
+            environment_id,
+            flake_id,
+            payload
+                .system_configuration_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            &payload.deployment_policy,
+            heartbeat_interval,
+        )
+        .await
+        {
+            if retry < 2 && is_system_metadata_serialization_failure(&error) {
+                continue;
+            }
+            return internal_error("Failed to update system");
+        }
+        let detail = match get_system_detail_by_id(&mut *tx, system_id).await {
+            Ok(Some(row)) => {
+                detail_row_to_api_model(row, state.server_config.heartbeat_interval_secs)
+            }
+            Ok(None) => return not_found(),
+            Err(_) => return internal_error("Failed to load updated system"),
+        };
+        if tx.commit().await.is_err() {
+            return internal_error("Failed to commit system update");
+        }
+        return (StatusCode::OK, Json(detail)).into_response();
     }
+    internal_error("System environment changed repeatedly; retry the update")
+}
 
-    let detail = match get_system_detail_by_id(&pool, system_id).await {
-        Ok(Some(row)) => detail_row_to_api_model(row, state.server_config.heartbeat_interval_secs),
-        Ok(None) => return not_found(),
-        Err(_) => return internal_error("Failed to load updated system"),
+fn is_system_metadata_serialization_failure(error: &anyhow::Error) -> bool {
+    matches!(
+        error
+            .downcast_ref::<sqlx::Error>()
+            .and_then(|error| error.as_database_error())
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("40001")
+    )
+}
+
+async fn resolve_update_flake_id(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    flake_name: Option<&str>,
+) -> Result<Option<i32>, axum::response::Response> {
+    let Some(name) = flake_name else {
+        return Ok(None);
     };
-
-    (StatusCode::OK, Json(detail)).into_response()
+    sqlx::query_scalar::<_, i32>("SELECT id FROM flakes WHERE name=$1 AND deleted_at IS NULL")
+        .bind(name)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| internal_error("Failed to lookup flake"))?
+        .map(Some)
+        .ok_or_else(|| bad_request(&format!("Flake '{name}' not found")))
 }
 
 pub async fn sync_system(
@@ -1032,6 +2830,29 @@ pub async fn rollback_system(
         .into_response()
 }
 
+/// Requests rollback to an exact retained generation artifact.
+///
+/// `system_id` establishes the ownership boundary. Within that system, the
+/// server-issued `generation_snapshot_id` or the system-local `generation`
+/// selects retained identity. The handler resolves the deployment store path
+/// from verified lineage. A supplied `store_path` is only a narrowing predicate
+/// and never grants authority.
+///
+/// The caller must have an authenticated system-mutator role, a valid CSRF
+/// token, and visibility of the system's environment. Hidden and foreign systems
+/// use the same not-found response, so this endpoint does not disclose their
+/// existence. A Config-readable retained artifact can still be ineligible for
+/// rollback when its deployment, derivation, or store lineage is unverified.
+///
+/// # Errors
+///
+/// Returns `403 Forbidden` for missing authentication, an insufficient role, or
+/// failed CSRF validation. Returns `404 Not Found` for an absent or invisible
+/// system without distinguishing those cases. Returns `400 Bad Request` when no
+/// retained identity is supplied, retained lineage is absent or ineligible, or
+/// composite policy denies deployment. Returns `409 Conflict` when the target
+/// is not cached. Returns `500 Internal Server Error` for database,
+/// policy-evaluation, deployment-queue, or audit persistence failures.
 pub async fn rollback_system_generation(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -1053,11 +2874,6 @@ pub async fn rollback_system_generation(
         return response;
     }
 
-    let store_path = payload.store_path.trim();
-    if store_path.is_empty() {
-        return bad_request("store_path is required");
-    }
-
     let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
         Ok(value) => value,
         Err(_) => return internal_error("Failed to load environment memberships"),
@@ -1072,12 +2888,36 @@ pub async fn rollback_system_generation(
     if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
         return not_found();
     }
+    if payload.generation_snapshot_id.is_none() && payload.generation.is_none() {
+        return bad_request("generation_snapshot_id or generation is required");
+    }
 
-    match crate::services::composite_enforcement::authorize_and_set_system_target(
+    // SECURITY: Resolve the deployment path from retained server-side lineage.
+    // The legacy path can only match an artifact already owned by this system.
+    let target = match crate::queries::systems::resolve_retained_generation_deployment_target(
         &pool,
         system_id,
-        store_path,
+        payload.generation_snapshot_id,
+        payload.generation,
+        payload.store_path.as_deref(),
+    )
+    .await
+    {
+        Ok(Some(target)) => target,
+        Ok(None) => return bad_request("retained generation artifact was not found"),
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to resolve retained rollback target");
+            return internal_error("Failed to resolve retained rollback target");
+        }
+    };
+
+    match crate::services::composite_enforcement::authorize_and_set_system_target_with_artifact(
+        &pool,
+        system_id,
+        &target.store_path,
         "manual_rollback_generation",
+        target.evaluation_snapshot_id,
+        target.derivation_id,
     )
     .await
     {
@@ -1089,7 +2929,7 @@ pub async fn rollback_system_generation(
             }
             tracing::warn!(
                 system_id = %system_id,
-                target = %store_path,
+                target = %target.store_path,
                 "Composite generation rollback authorization failed closed: {error:#}"
             );
             return internal_error("Composite deployment authorization failed");
@@ -1102,7 +2942,11 @@ pub async fn rollback_system_generation(
         AuditAction::SystemRollbackRequested,
         format!("{} ({})", row.hostname, row.id),
         extract_request_origin(&headers),
-        serde_json::json!({ "operation": "rollback_generation", "store_path": store_path }),
+        serde_json::json!({
+            "operation": "rollback_generation",
+            "generation_snapshot_id": payload.generation_snapshot_id,
+            "generation": payload.generation
+        }),
     )
     .await
     .is_err()
@@ -1466,6 +3310,18 @@ fn bad_request(message: &str) -> axum::response::Response {
         .into_response()
 }
 
+fn inventory_changed() -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiError {
+            error: "inventory_changed".to_string(),
+            message: "The inventory source or filters changed; restart pagination".to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
 fn deployment_target_unavailable(message: &str) -> axum::response::Response {
     (
         StatusCode::CONFLICT,
@@ -1678,8 +3534,8 @@ fn validate_target_commit(value: &str) -> Result<(), String> {
         return Err("Target commit is required".to_string());
     }
 
-    if !(7..=64).contains(&value.len()) {
-        return Err("Target commit must be between 7 and 64 hex characters".to_string());
+    if !matches!(value.len(), 40 | 64) {
+        return Err("Target commit must be a full 40- or 64-character SHA".to_string());
     }
 
     if !value.chars().all(|ch| ch.is_ascii_hexdigit()) {
@@ -1687,6 +3543,115 @@ fn validate_target_commit(value: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManualDeploymentPlan {
+    Keep(ManualDeploymentPolicyState),
+    ConvertToManual,
+}
+
+fn plan_manual_deployment(
+    policy: &str,
+    action: ManualDeploymentAction,
+) -> Result<ManualDeploymentPlan, &'static str> {
+    match (policy, action) {
+        ("manual", ManualDeploymentAction::Deploy) => Ok(ManualDeploymentPlan::Keep(
+            ManualDeploymentPolicyState::Manual,
+        )),
+        ("pinned", ManualDeploymentAction::Deploy) => Ok(ManualDeploymentPlan::Keep(
+            ManualDeploymentPolicyState::Pinned,
+        )),
+        ("auto_latest", ManualDeploymentAction::ContinueAutoLatest) => Ok(
+            ManualDeploymentPlan::Keep(ManualDeploymentPolicyState::AutoLatest),
+        ),
+        ("auto_latest" | "manual", ManualDeploymentAction::ConvertToManual) => {
+            Ok(ManualDeploymentPlan::ConvertToManual)
+        }
+        ("auto_latest", ManualDeploymentAction::Deploy) => {
+            Err("Choose Continue on auto_latest or Convert to manual and deploy")
+        }
+        ("auto_latest", ManualDeploymentAction::Legacy) => {
+            Err("Choose Continue on auto_latest or Convert to manual and deploy")
+        }
+        ("manual", ManualDeploymentAction::Legacy) => Ok(ManualDeploymentPlan::Keep(
+            ManualDeploymentPolicyState::Manual,
+        )),
+        ("pinned", ManualDeploymentAction::Legacy) => Ok(ManualDeploymentPlan::Keep(
+            ManualDeploymentPolicyState::Pinned,
+        )),
+        _ => Err("The requested deployment action is not valid for the system policy"),
+    }
+}
+
+fn manual_deployment_response(
+    status: StatusCode,
+    policy: ManualDeploymentPolicyState,
+    conversion: ManualDeploymentConversionState,
+    deployment: ManualDeploymentRequestState,
+    deployment_id: Option<Uuid>,
+    message: String,
+) -> axum::response::Response {
+    (
+        status,
+        Json(ManualDeploymentResponse {
+            status: match deployment {
+                ManualDeploymentRequestState::Queued => "accepted",
+                ManualDeploymentRequestState::AlreadyQueued => "accepted",
+                ManualDeploymentRequestState::Failed => "failed",
+                ManualDeploymentRequestState::Conflict => "conflict",
+            }
+            .to_string(),
+            policy,
+            conversion,
+            deployment,
+            deployment_id,
+            message,
+        }),
+    )
+        .into_response()
+}
+
+fn manual_deployment_failure_message(
+    _policy: ManualDeploymentPolicyState,
+    _conversion: ManualDeploymentConversionState,
+    failure: &str,
+) -> String {
+    format!("Deployment failed: {failure}")
+}
+
+fn deployment_request_identity(
+    request_id: Option<Uuid>,
+    system_id: Uuid,
+    commit_sha: &str,
+    action: ManualDeploymentAction,
+) -> String {
+    request_id.map_or_else(
+        // COMPATIBILITY: Legacy clients omit request_id. Their stable intent is
+        // replay-safe across pending and terminal states for the database's
+        // conservative 24-hour window. After that window the same derived
+        // identity can create an intentional redeployment. Explicit request_id
+        // remains the unambiguous durable contract without a time boundary.
+        || {
+            let mut digest = Sha256::new();
+            digest.update(system_id.as_bytes());
+            digest.update([0]);
+            digest.update(commit_sha.as_bytes());
+            digest.update([0]);
+            digest.update(deployment_request_action(action).as_bytes());
+            format!("legacy:v1:{:x}", digest.finalize())
+        },
+        |id| format!("explicit:{id}"),
+    )
+}
+
+fn deployment_request_action(action: ManualDeploymentAction) -> &'static str {
+    match action {
+        ManualDeploymentAction::Legacy => "legacy",
+        ManualDeploymentAction::Deploy => "deploy",
+        ManualDeploymentAction::ContinueAutoLatest => "continue_auto_latest",
+        ManualDeploymentAction::ConvertToManual => "convert_to_manual",
+    }
 }
 
 pub async fn deploy_system(
@@ -1711,11 +3676,6 @@ pub async fn deploy_system(
         return response;
     }
 
-    let commit_sha = payload.commit_sha.trim();
-    if let Err(message) = validate_target_commit(commit_sha) {
-        return bad_request(&message);
-    }
-
     let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
         Ok(value) => value,
         Err(_) => return internal_error("Failed to load environment memberships"),
@@ -1731,26 +3691,100 @@ pub async fn deploy_system(
         return not_found();
     }
 
-    // Validate deployment policy - only manual and pinned allow manual deployments
-    if !matches!(row.deployment_policy.as_str(), "manual" | "pinned") {
-        return bad_request("Manual deployment is not allowed for auto_latest systems");
+    // SECURITY: Resolve authorization before validating target details. An
+    // unknown or hidden system must not disclose request-shape information.
+    let commit_sha = payload.commit_sha.trim().to_ascii_lowercase();
+    if let Err(message) = validate_target_commit(&commit_sha) {
+        return bad_request(&message);
     }
 
-    let belongs_to_flake = match commit_belongs_to_system_flake(&pool, system_id, commit_sha).await
+    let request_identity =
+        deployment_request_identity(payload.request_id, system_id, &commit_sha, payload.action);
+    let request_action = deployment_request_action(payload.action);
+    let belongs_to_flake = match commit_belongs_to_system_flake(&pool, system_id, &commit_sha).await
     {
         Ok(value) => value,
         Err(_) => return internal_error("Failed to validate requested commit"),
     };
-
     if !belongs_to_flake {
         return bad_request("Requested commit is not available for this system");
     }
-
-    match crate::services::composite_enforcement::authorize_and_set_system_target(
+    if let Some(request_id) = payload.request_id {
+        match crate::queries::systems::reserve_explicit_deployment_request(
+            &pool,
+            system_id,
+            request_id,
+            &commit_sha,
+            request_action,
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(error) => {
+                if let Some(conflict) = error
+                    .downcast_ref::<crate::queries::systems::DeploymentRequestIdentityConflict>(
+                ) {
+                    return manual_deployment_response(
+                        StatusCode::CONFLICT,
+                        match row.deployment_policy.as_str() {
+                            "auto_latest" => ManualDeploymentPolicyState::AutoLatest,
+                            "pinned" => ManualDeploymentPolicyState::Pinned,
+                            _ => ManualDeploymentPolicyState::Manual,
+                        },
+                        ManualDeploymentConversionState::NotRequested,
+                        ManualDeploymentRequestState::Conflict,
+                        conflict.deployment_id,
+                        "The request_id is already bound to a different system, commit, or deployment action. Use a new request_id for a new deployment intent.".to_string(),
+                    );
+                }
+                tracing::error!(system_id = %system_id, error = %error, "failed to reserve deployment request identity");
+                return internal_error("Failed to reserve deployment request identity");
+            }
+        }
+    }
+    let plan = match plan_manual_deployment(&row.deployment_policy, payload.action) {
+        Ok(plan) => plan,
+        Err(message) => return bad_request(message),
+    };
+    // TRANSACTION: Conversion commits before deployment resolution. A missing
+    // target therefore cannot roll back the requested policy change.
+    let conversion_result = if matches!(plan, ManualDeploymentPlan::ConvertToManual) {
+        match crate::queries::systems::convert_auto_latest_system_to_manual_for_request(
+            &pool,
+            system_id,
+            payload.request_id,
+        )
+        .await
+        {
+            Ok(conversion) => Some(conversion),
+            Err(error) => {
+                tracing::error!(system_id = %system_id, error = %error, "failed to convert deployment policy");
+                return manual_deployment_response(
+                    StatusCode::CONFLICT,
+                    ManualDeploymentPolicyState::AutoLatest,
+                    ManualDeploymentConversionState::NotRequested,
+                    ManualDeploymentRequestState::Failed,
+                    None,
+                    manual_deployment_failure_message(
+                        ManualDeploymentPolicyState::AutoLatest,
+                        ManualDeploymentConversionState::NotRequested,
+                        "The deployment policy could not be converted to manual.",
+                    ),
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let expected_policy = if conversion_result.is_some() {
+        "manual"
+    } else {
+        row.deployment_policy.as_str()
+    };
+    match crate::services::composite_enforcement::authorize_system_target(
         &pool,
         system_id,
-        commit_sha,
-        "manual_deploy",
+        &commit_sha,
     )
     .await
     {
@@ -1759,7 +3793,7 @@ pub async fn deploy_system(
         Err(error) => {
             if is_uncached_deployment_target_error(&error) {
                 let message =
-                    queue_deployment_target_prerequisite(&state, system_id, commit_sha).await;
+                    queue_deployment_target_prerequisite(&state, system_id, &commit_sha).await;
                 return deployment_target_unavailable(&message);
             }
             tracing::warn!(
@@ -1770,6 +3804,146 @@ pub async fn deploy_system(
             return internal_error("Composite deployment authorization failed");
         }
     }
+    let queue_result = crate::queries::systems::queue_manual_deployment_atomic(
+        &pool,
+        system_id,
+        &commit_sha,
+        "manual_deploy",
+        &request_identity,
+        request_action,
+        expected_policy,
+    )
+    .await;
+    let queue_outcome = match queue_result {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            if let Some(conflict) =
+                error.downcast_ref::<crate::queries::systems::DeploymentRequestIdentityConflict>()
+            {
+                let (policy, conversion) = match conversion_result {
+                    Some(ManualPolicyConversion::Converted) => (
+                        ManualDeploymentPolicyState::Manual,
+                        ManualDeploymentConversionState::Converted,
+                    ),
+                    Some(ManualPolicyConversion::AlreadyManual) => (
+                        ManualDeploymentPolicyState::Manual,
+                        ManualDeploymentConversionState::AlreadyManual,
+                    ),
+                    None => (
+                        match row.deployment_policy.as_str() {
+                            "auto_latest" => ManualDeploymentPolicyState::AutoLatest,
+                            "pinned" => ManualDeploymentPolicyState::Pinned,
+                            _ => ManualDeploymentPolicyState::Manual,
+                        },
+                        ManualDeploymentConversionState::NotRequested,
+                    ),
+                };
+                return manual_deployment_response(
+                    StatusCode::CONFLICT,
+                    policy,
+                    conversion,
+                    ManualDeploymentRequestState::Conflict,
+                    conflict.deployment_id,
+                    "The request_id is already bound to a different commit or deployment action. Use a new request_id for a new deployment intent.".to_string(),
+                );
+            }
+            let (policy, conversion) = match conversion_result {
+                Some(ManualPolicyConversion::Converted) => (
+                    ManualDeploymentPolicyState::Manual,
+                    ManualDeploymentConversionState::Converted,
+                ),
+                Some(ManualPolicyConversion::AlreadyManual) => (
+                    ManualDeploymentPolicyState::Manual,
+                    ManualDeploymentConversionState::AlreadyManual,
+                ),
+                None => match plan {
+                    ManualDeploymentPlan::Keep(policy) => {
+                        (policy, ManualDeploymentConversionState::NotRequested)
+                    }
+                    ManualDeploymentPlan::ConvertToManual => {
+                        unreachable!("conversion result is present")
+                    }
+                },
+            };
+            let message = if is_uncached_deployment_target_error(&error) {
+                queue_deployment_target_prerequisite(&state, system_id, &commit_sha).await
+            } else {
+                tracing::error!(system_id = %system_id, error = %error, "failed to request deployment");
+                "The deployment could not be queued because the server failed to persist the request."
+                    .to_string()
+            };
+            if let Some(request_id) = payload.request_id {
+                if let Err(state_error) =
+                    crate::queries::systems::update_explicit_deployment_request_state(
+                        &pool,
+                        system_id,
+                        request_id,
+                        "deploy_failed",
+                        None,
+                    )
+                    .await
+                {
+                    tracing::error!(system_id = %system_id, error = %state_error, "failed to persist deployment request partial state");
+                }
+            }
+            let message = manual_deployment_failure_message(policy, conversion, &message);
+            if conversion != ManualDeploymentConversionState::NotRequested
+                && record_system_mutation_audit(
+                    &pool,
+                    user_id,
+                    AuditAction::SystemDeployRequested,
+                    format!("{} ({})", row.hostname, row.id),
+                    extract_request_origin(&headers),
+                    serde_json::json!({
+                        "operation": "convert_policy_and_deploy",
+                        "target_commit": &commit_sha,
+                        "persisted_policy": policy,
+                        "policy_conversion": conversion,
+                        "deployment_state": ManualDeploymentRequestState::Failed,
+                    }),
+                )
+                .await
+                .is_err()
+            {
+                tracing::error!(system_id = %system_id, "failed to audit persisted policy conversion after deployment failure");
+            }
+            return manual_deployment_response(
+                if is_uncached_deployment_target_error(&error) {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                },
+                policy,
+                conversion,
+                ManualDeploymentRequestState::Failed,
+                None,
+                message,
+            );
+        }
+    };
+    let (policy, conversion) = match plan {
+        ManualDeploymentPlan::Keep(policy) => {
+            (policy, ManualDeploymentConversionState::NotRequested)
+        }
+        ManualDeploymentPlan::ConvertToManual => (
+            ManualDeploymentPolicyState::Manual,
+            match conversion_result {
+                Some(ManualPolicyConversion::Converted) => {
+                    ManualDeploymentConversionState::Converted
+                }
+                Some(ManualPolicyConversion::AlreadyManual) => {
+                    ManualDeploymentConversionState::AlreadyManual
+                }
+                None => ManualDeploymentConversionState::NotRequested,
+            },
+        ),
+    };
+
+    let deployment = if queue_outcome.created {
+        ManualDeploymentRequestState::Queued
+    } else {
+        ManualDeploymentRequestState::AlreadyQueued
+    };
 
     if record_system_mutation_audit(
         &pool,
@@ -1777,25 +3951,57 @@ pub async fn deploy_system(
         AuditAction::SystemDeployRequested,
         format!("{} ({})", row.hostname, row.id),
         extract_request_origin(&headers),
-        serde_json::json!({ "operation": "deploy", "target_commit": commit_sha }),
+        serde_json::json!({
+            "operation": "deploy",
+            "target_commit": commit_sha,
+            "requested_action": payload.action,
+            "persisted_policy": policy,
+            "policy_conversion": conversion,
+            "deployment_state": deployment,
+            "deployment_id": queue_outcome.deployment_id,
+        }),
     )
     .await
     .is_err()
     {
-        return internal_error("Failed to write audit event");
+        // Queueing is already durable. Report the truthful accepted state even
+        // when the secondary audit sink is temporarily unavailable.
+        tracing::error!(system_id = %system_id, deployment_id = %queue_outcome.deployment_id, "deployment queued but audit persistence failed");
     }
 
-    (
+    let deployment_message = match deployment {
+        ManualDeploymentRequestState::Queued => format!(
+            "Deployment requested for {} to commit {}",
+            row.hostname, commit_sha
+        ),
+        ManualDeploymentRequestState::AlreadyQueued => format!(
+            "Deployment for {} to commit {} is already queued",
+            row.hostname, commit_sha
+        ),
+        ManualDeploymentRequestState::Failed | ManualDeploymentRequestState::Conflict => {
+            unreachable!("failure and conflict return before audit")
+        }
+    };
+    let message = match (policy, conversion) {
+        (
+            ManualDeploymentPolicyState::Manual,
+            ManualDeploymentConversionState::Converted
+            | ManualDeploymentConversionState::AlreadyManual,
+        ) => format!("System policy is manual. {deployment_message}"),
+        (
+            ManualDeploymentPolicyState::AutoLatest,
+            ManualDeploymentConversionState::NotRequested,
+        ) => format!("System remains on auto_latest. {deployment_message}"),
+        _ => deployment_message,
+    };
+    manual_deployment_response(
         StatusCode::ACCEPTED,
-        Json(SystemMutationResponse {
-            status: "accepted".to_string(),
-            message: format!(
-                "Deployment requested for {} to commit {}",
-                row.hostname, commit_sha
-            ),
-        }),
+        policy,
+        conversion,
+        deployment,
+        Some(queue_outcome.deployment_id),
+        message,
     )
-        .into_response()
 }
 
 pub async fn get_system_commits(
@@ -1891,6 +4097,7 @@ pub async fn get_system_commits(
                     message: row.message.unwrap_or_default(),
                     author: row.author.unwrap_or_else(|| "unknown".to_string()),
                     timestamp: row.timestamp.to_rfc3339(),
+                    config_inspectable: row.config_inspectable,
                 }
             })
             .collect::<Vec<_>>(),
@@ -1907,9 +4114,13 @@ pub async fn get_system_commits(
         }
     };
 
+    let current_commit = match resolve_observational_current_revision(&pool, system_id).await {
+        Ok(revision) => revision,
+        Err(_) => return internal_error("Failed to resolve current system revision"),
+    };
     let response = SystemCommitsResponse {
         commits,
-        current_commit: None,
+        current_commit,
     };
 
     (StatusCode::OK, Json(response)).into_response()
@@ -2027,6 +4238,8 @@ pub async fn get_system_generations(
             commit_hash: row.commit_hash,
             timestamp: row.timestamp,
             is_current: Some(row.generation) == current_generation,
+            generation_snapshot_id: row.generation_snapshot_id,
+            rollback_eligible: row.rollback_eligible,
         })
         .collect::<Vec<_>>();
 
@@ -2467,11 +4680,28 @@ async fn record_system_mutation_audit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::session::{SESSION_COOKIE_NAME, hash_token};
+    use crate::auth::session::{
+        CSRF_COOKIE_NAME, CSRF_HEADER_NAME, SESSION_COOKIE_NAME, hash_token,
+    };
     use crate::models::auth_identity::AuthRole;
+    use crate::models::config_inspector::{OptionInventoryDiagnostic, option_key};
+    use crate::models::config_snapshot_artifact::{
+        CONFIG_OPTION_ARTIFACT_SCHEMA_VERSION_V2, ConfigInspectionArtifactV2,
+        ConfigProvenanceArtifactStateV2, DefinitionValueArtifactStateV2,
+    };
+    use crate::models::evaluation_snapshots::{SafeEvaluationError, SafeOptionValue};
     use crate::models::public_key::PublicKey;
     use crate::models::systems::System;
     use crate::queries::auth_identity::{create_user_session, sync_user_role};
+    use crate::queries::commits::{get_commit_by_hash, insert_commit_with_metadata};
+    use crate::queries::derivations::insert_derivation;
+    use crate::queries::environments::create_environment;
+    use crate::queries::evaluation_snapshots::{
+        ConfigComparisonStateV2, ConfigComparisonUnavailableReasonV2, ConfigSelectedSnapshotV2,
+        persist_available_snapshot_tx, persist_config_artifact_v2_tx,
+        persist_flake_output_snapshot_tx,
+    };
+    use crate::queries::flakes::insert_flake;
     use crate::queries::systems::insert_system;
     use crate::queries::users::insert_user;
     use axum::extract::State;
@@ -2479,6 +4709,136 @@ mod tests {
     use chrono::Utc;
     use ed25519_dalek::SigningKey;
     use sqlx::postgres::PgPoolOptions;
+
+    async fn response_json<T: serde::de::DeserializeOwned>(
+        response: axum::response::Response,
+    ) -> T {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        serde_json::from_slice(&bytes).expect("response body should decode")
+    }
+
+    #[test]
+    fn config_inventory_mapping_preserves_partial_truncated_state() {
+        let selected = ConfigSelectedSnapshotV2 {
+            id: Uuid::new_v4(),
+            commit_id: 1,
+            revision: "a".repeat(40),
+            configuration_name: "host".to_string(),
+            lifecycle: SnapshotLifecycle::Available,
+            error: None,
+            target_key: Some("b".repeat(64)),
+            source_out_path: Some("/nix/store/source".to_string()),
+            carrier_drv_path: Some("/nix/store/system.drv".to_string()),
+            provenance_state: None,
+            comparison_ready: Some(false),
+            option_inventory_complete: Some(false),
+            option_inventory_diagnostics: vec![OptionInventoryDiagnostic {
+                path: vec!["services".to_string(), "poison".to_string()],
+                code: "unreadable_option_subtree".to_string(),
+                message: "Option subtree could not be inspected".to_string(),
+            }],
+            option_inventory_diagnostics_truncated: Some(true),
+            option_count: 1,
+            module_count: 0,
+            completed_at: Some(Utc::now()),
+            evaluation_duration_ms: None,
+            provenance_lock_digest: None,
+            baseline_provenance_lock_digest: None,
+            first_parent_resolved: true,
+            first_parent_revision: None,
+            comparison: ConfigComparisonStateV2::Unavailable {
+                reason: ConfigComparisonUnavailableReasonV2::SelectedNotComparisonReady,
+                baseline_revision: None,
+            },
+        };
+
+        let (state, diagnostics, truncated) = config_inventory_v2_to_api(&selected);
+        assert_eq!(state, OptionInventoryState::Partial);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].path_components, vec!["services", "poison"]);
+        assert!(truncated);
+    }
+
+    async fn mutation_headers(pool: &PgPool, role: AuthRole, suffix: &str) -> HeaderMap {
+        let short_suffix = &suffix[..suffix.len().min(24)];
+        let user = insert_user(
+            pool,
+            &format!("{short_suffix}@inspection.test"),
+            Some("Config Inspection Tester"),
+        )
+        .await
+        .expect("mutation user should persist");
+        sync_user_role(pool, user.id, role)
+            .await
+            .expect("mutation role should persist");
+        let session_token = format!("config-inspection-session-{suffix}");
+        create_user_session(
+            pool,
+            user.id,
+            hash_token(&session_token),
+            Utc::now() + chrono::Duration::hours(1),
+            None,
+            None,
+            "local".into(),
+        )
+        .await
+        .expect("mutation session should persist");
+        let csrf = format!("config-inspection-csrf-{suffix}");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("{SESSION_COOKIE_NAME}={session_token}; {CSRF_COOKIE_NAME}={csrf}")
+                .parse()
+                .expect("cookie should parse"),
+        );
+        headers.insert(
+            CSRF_HEADER_NAME.clone(),
+            csrf.parse().expect("CSRF header should parse"),
+        );
+        headers
+    }
+
+    #[test]
+    fn snapshot_revisions_require_full_immutable_sha_identity() {
+        let shared_prefix = "abcdef0";
+        let first = format!("{shared_prefix}{}", "1".repeat(33));
+        let second = format!("{shared_prefix}{}", "2".repeat(33));
+
+        assert!(is_full_commit_sha(&first));
+        assert!(is_full_commit_sha(&second));
+        assert_ne!(first, second);
+        assert!(!is_full_commit_sha(shared_prefix));
+        assert!(!is_full_commit_sha(&format!("{}z", "a".repeat(39))));
+    }
+
+    #[test]
+    fn v2_digest_change_remains_modified_after_compatibility_mapping() {
+        let mapped = EvaluatedOption {
+            path: "services.example.enable".into(),
+            declared_type: Some("boolean".into()),
+            metadata_error: None,
+            value: SafeOptionValue::Scalar(serde_json::json!(true)),
+            definitions: Vec::new(),
+            overridden: Some(false),
+        };
+
+        let diff = config_option_diff_v2_to_api(Some(&mapped), Some(&mapped), Some(true));
+
+        assert_eq!(diff.kind, OptionChangeKind::Modified);
+    }
+
+    #[test]
+    fn v2_api_paths_preserve_structured_component_identity() {
+        let quoted_component = config_option_path_v2_to_api(&["a.b".to_string(), "c".to_string()]);
+        let separate_components =
+            config_option_path_v2_to_api(&["a".to_string(), "b.c".to_string()]);
+
+        assert_eq!(quoted_component, "\"a.b\".c");
+        assert_eq!(separate_components, "a.\"b.c\"");
+        assert_ne!(quoted_component, separate_components);
+    }
 
     #[test]
     fn startup_row_with_changed_generation_classifies_as_local_rebuild() {
@@ -2660,6 +5020,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_system_cve_inventory_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = get_system_cve_inventory(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_system_cve_inventory_page_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = get_system_cve_inventory_page(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
+            Query(SystemCveInventoryParams::default()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn system_cve_inventory_handlers_map_validation_and_non_disclosure(pool: PgPool) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let headers = mutation_headers(&pool, AuthRole::Admin, &suffix).await;
+        let absent_system = Uuid::new_v4();
+
+        let invalid_query = get_system_cve_inventory_page(
+            State(pool.clone()),
+            headers.clone(),
+            Path(absent_system),
+            Query(SystemCveInventoryParams {
+                limit: Some(0),
+                ..SystemCveInventoryParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(invalid_query.status(), StatusCode::BAD_REQUEST);
+
+        let absent_legacy =
+            get_system_cve_inventory(State(pool.clone()), headers.clone(), Path(absent_system))
+                .await
+                .into_response();
+        assert_eq!(absent_legacy.status(), StatusCode::NOT_FOUND);
+
+        let absent_with_malformed_cursor = get_system_cve_inventory_page(
+            State(pool),
+            headers,
+            Path(absent_system),
+            Query(SystemCveInventoryParams {
+                after: Some("not-a-cursor".into()),
+                ..SystemCveInventoryParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(absent_with_malformed_cursor.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn system_cve_inventory_page_errors_map_to_http_statuses() {
+        let invalid_cursor: anyhow::Error = SystemCveInventoryPageError::InvalidCursor.into();
+        assert_eq!(
+            system_cve_inventory_page_error_response(&invalid_cursor).status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let inventory_changed: anyhow::Error = SystemCveInventoryPageError::InventoryChanged.into();
+        assert_eq!(
+            system_cve_inventory_page_error_response(&inventory_changed).status(),
+            StatusCode::CONFLICT
+        );
+
+        assert_eq!(
+            system_cve_inventory_page_error_response(&anyhow::anyhow!("database failure")).status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn inventory_remediation_keys_are_exact_and_page_local() {
+        let row = crate::queries::cves::ExactSystemVulnerabilityRow {
+            scan_id: Uuid::new_v4(),
+            occurrence_derivation_path: "/nix/store/page-row.drv".into(),
+            cve_id: "CVE-2099-0001".into(),
+            canonical_package_name: "page-package".into(),
+            package_name: "observed-page-package".into(),
+            installed_version: "1.0".into(),
+            severity: "high".into(),
+            cvss_score: Some(8.0),
+            description: "page finding".into(),
+            fixed_version: None,
+            first_seen: Some(chrono::Utc::now()),
+            published_at: None,
+            status: "open".into(),
+            justification_category: None,
+            justification_reason: None,
+            justification_updated_at: None,
+        };
+        let exact = inventory_relationship_keys(
+            crate::api::models::SystemCveInventoryAuthority::Exact,
+            std::slice::from_ref(&row),
+        );
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].canonical_cve_id, row.cve_id);
+        assert_eq!(exact[0].canonical_package_name, row.canonical_package_name);
+        let legacy = inventory_relationship_keys(
+            crate::api::models::SystemCveInventoryAuthority::Legacy,
+            &[row],
+        );
+        assert!(legacy.is_empty());
+    }
+
+    #[tokio::test]
     async fn save_system_cve_justification_requires_authenticated_role() {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
@@ -2768,7 +5257,37 @@ mod tests {
         );
         assert_eq!(
             parse_cve_severity("unknown"),
-            crate::api::models::CveSeverity::Low
+            crate::api::models::CveSeverity::Unknown
+        );
+    }
+
+    #[test]
+    fn legacy_inventory_serializes_unrecognized_severity_as_low() {
+        let response = SystemCveInventoryResponse {
+            authority: crate::api::models::SystemCveInventoryAuthority::Legacy,
+            exact_authority_failure: None,
+            source: None,
+            vulnerabilities: vec![SystemVulnerability {
+                cve_id: "CVE-2099-0001".into(),
+                severity: parse_legacy_cve_severity("unrecognized"),
+                cvss_score: None,
+                description: "Unknown severity".into(),
+                package_name: "example".into(),
+                installed_version: "1.0".into(),
+                fixed_version: None,
+                first_seen: None,
+                published_at: None,
+                status: "open".into(),
+                justification_category: None,
+                justification_reason: None,
+                justification_updated_at: None,
+                remediation: None,
+            }],
+        };
+
+        assert_eq!(
+            serde_json::to_string(&response).expect("legacy response should serialize"),
+            r#"{"authority":"legacy","exact_authority_failure":null,"source":null,"vulnerabilities":[{"cve_id":"CVE-2099-0001","severity":"low","cvss_score":null,"description":"Unknown severity","package_name":"example","installed_version":"1.0","fixed_version":null,"first_seen":null,"published_at":null,"status":"open","justification_category":null,"justification_reason":null,"justification_updated_at":null}]}"#
         );
     }
 
@@ -2787,6 +5306,1511 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn evaluated_options_read_requires_authentication_before_database_access() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+        let response = get_system_evaluated_options(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::nil()),
+            Query(EvaluatedOptionsParams {
+                revision: "a".repeat(40),
+                ..EvaluatedOptionsParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn evaluation_summary_requires_authentication_before_database_access() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+        let response = get_system_evaluation_summary(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::nil()),
+            Query(SelectedEvaluationSummaryParams {
+                revision: "a".repeat(40),
+                ..SelectedEvaluationSummaryParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn evaluation_module_sources_require_authentication_before_database_access() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+        let response = get_system_evaluation_module_sources(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::nil()),
+            Query(EvaluationModuleSourcesParams {
+                revision: "a".repeat(40),
+                ..EvaluationModuleSourcesParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn evaluation_module_source_empty_page_applies_request_bounds() {
+        let page = empty_evaluation_module_sources(
+            &EvaluationModuleSourcesParams {
+                revision: "a".repeat(40),
+                limit: Some(i64::MAX),
+                offset: Some(i64::MAX),
+                ..EvaluationModuleSourcesParams::default()
+            },
+            (SnapshotLifecycle::Unavailable, None),
+        );
+        assert_eq!(page.limit, 100);
+        assert_eq!(page.offset, 100_000);
+        assert_eq!(page.total, 0);
+        assert!(page.sources.is_empty());
+    }
+
+    #[test]
+    fn evaluation_module_source_continuations_require_valid_snapshot_tokens() {
+        let missing = EvaluationModuleSourcesParams {
+            offset: Some(1),
+            ..EvaluationModuleSourcesParams::default()
+        };
+        assert_eq!(
+            validate_evaluation_module_sources_params(&missing),
+            Err("snapshot_token is required when offset is greater than 0")
+        );
+
+        for token in ["", "0", "-1", "not-a-version", &"g".repeat(64)] {
+            let malformed = EvaluationModuleSourcesParams {
+                snapshot_token: Some(token.to_string()),
+                ..EvaluationModuleSourcesParams::default()
+            };
+            assert_eq!(
+                validate_evaluation_module_sources_params(&malformed),
+                Err("snapshot_token must be a 64-character hexadecimal digest")
+            );
+        }
+
+        let valid = EvaluationModuleSourcesParams {
+            offset: Some(100),
+            snapshot_token: Some("a".repeat(64)),
+            ..EvaluationModuleSourcesParams::default()
+        };
+        assert_eq!(validate_evaluation_module_sources_params(&valid), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn queue_snapshot_action_requires_authentication_before_revision_disclosure() {
+        let state = test_cf_state();
+        let response = queue_system_evaluation_prerequisite(
+            State(state),
+            HeaderMap::new(),
+            Path((Uuid::nil(), "a".repeat(40))),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an isolated migrated database"]
+    async fn whole_commit_prerequisite_requires_matching_csrf_credentials() {
+        let pool = test_pool_from_env().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let flake_id: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+        )
+        .bind(format!("prerequisite-csrf-{suffix}"))
+        .bind(format!(
+            "https://example.test/prerequisite-csrf-{suffix}.git"
+        ))
+        .fetch_one(&pool)
+        .await
+        .expect("CSRF fixture flake should persist");
+        let revision = format!("{:0>40}", &suffix[..suffix.len().min(32)]);
+        let commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, evaluation_status) VALUES ($1, $2, now(), 'complete') RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(&revision)
+        .fetch_one(&pool)
+        .await
+        .expect("CSRF fixture commit should persist");
+        let system_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO systems (hostname, public_key, flake_id, derivation) VALUES ($1, 'test-public-key', $2, '') RETURNING id",
+        )
+        .bind(format!("prerequisite-csrf-{suffix}"))
+        .bind(flake_id)
+        .fetch_one(&pool)
+        .await
+        .expect("CSRF fixture system should persist");
+        let valid_headers = mutation_headers(&pool, AuthRole::Admin, &suffix).await;
+        let state = CFState::new(
+            pool.clone(),
+            crate::config::ServerConfig::default(),
+            std::sync::Arc::new(crate::queue::QueueNotifier::new()),
+            crate::server::jobs::BackgroundJobRegistry::new(),
+        );
+        let initial_attempt_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM evaluation_attempts WHERE commit_id = $1")
+                .bind(commit_id)
+                .fetch_one(&pool)
+                .await
+                .expect("initial attempt count should load");
+        assert_eq!(initial_attempt_count, 1);
+
+        let mut missing = valid_headers.clone();
+        missing.remove(&CSRF_HEADER_NAME);
+        let missing_response = queue_system_evaluation_prerequisite(
+            State(state.clone()),
+            missing,
+            Path((system_id, revision.clone())),
+        )
+        .await
+        .into_response();
+        assert_eq!(missing_response.status(), StatusCode::FORBIDDEN);
+        let missing_body: ApiError = response_json(missing_response).await;
+        assert_eq!(missing_body.error, "csrf_validation_failed");
+
+        let mut mismatched = valid_headers.clone();
+        mismatched.insert(
+            CSRF_HEADER_NAME.clone(),
+            "different-csrf-token"
+                .parse()
+                .expect("mismatched CSRF header should parse"),
+        );
+        let mismatch_response = queue_system_evaluation_prerequisite(
+            State(state.clone()),
+            mismatched,
+            Path((system_id, revision.clone())),
+        )
+        .await
+        .into_response();
+        assert_eq!(mismatch_response.status(), StatusCode::FORBIDDEN);
+        let mismatch_body: ApiError = response_json(mismatch_response).await;
+        assert_eq!(mismatch_body.error, "csrf_validation_failed");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM evaluation_attempts WHERE commit_id = $1",
+            )
+            .bind(commit_id)
+            .fetch_one(&pool)
+            .await
+            .expect("rejected attempt count should load"),
+            initial_attempt_count
+        );
+
+        let valid_response = queue_system_evaluation_prerequisite(
+            State(state),
+            valid_headers,
+            Path((system_id, revision)),
+        )
+        .await
+        .into_response();
+        assert_eq!(valid_response.status(), StatusCode::OK);
+        let valid_body: crate::models::evaluation_snapshots::QueueEvaluationResponse =
+            response_json(valid_response).await;
+        assert_eq!(valid_body.lifecycle, SnapshotLifecycle::Queued);
+        assert!(valid_body.queued);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM evaluation_attempts WHERE commit_id = $1",
+            )
+            .bind(commit_id)
+            .fetch_one(&pool)
+            .await
+            .expect("accepted attempt count should load"),
+            initial_attempt_count + 1
+        );
+    }
+
+    #[tokio::test]
+    async fn config_inspection_action_requires_authentication_before_revision_disclosure() {
+        let state = test_cf_state();
+        let response = queue_system_config_inspection(
+            State(state),
+            HeaderMap::new(),
+            Path((Uuid::nil(), "not-a-revision".to_string())),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn scoped_config_observation_post_requires_authentication_before_validation() {
+        let state = test_cf_state();
+        let response = create_system_config_observation(
+            State(state),
+            HeaderMap::new(),
+            Path((Uuid::nil(), "not-a-revision".to_string())),
+            Json(CreateConfigObservationRequest {
+                kind: crate::models::config_observations::ConfigObservationKind::Root,
+                path_components: vec!["invalid-for-root".to_string()],
+                child_offset: 0,
+                automatic: false,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn scoped_config_observation_gets_require_authentication_before_database_access() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+        let request = get_system_config_observation_request(
+            State(pool.clone()),
+            HeaderMap::new(),
+            Path((Uuid::nil(), Uuid::nil())),
+        )
+        .await
+        .into_response();
+        let observation = get_system_config_observation(
+            State(pool),
+            HeaderMap::new(),
+            Path((Uuid::nil(), Uuid::nil())),
+        )
+        .await
+        .into_response();
+        assert_eq!(request.status(), StatusCode::FORBIDDEN);
+        assert_eq!(observation.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn scoped_config_observation_post_status_tracks_terminal_availability() {
+        let mut response = ConfigObservationRequestResponse {
+            request_id: Uuid::new_v4(),
+            revision: "a".repeat(40),
+            configuration_name: "host".to_string(),
+            kind: crate::models::config_observations::ConfigObservationKind::Root,
+            path_components: Vec::new(),
+            child_offset: 0,
+            lifecycle: ConfigObservationLifecycle::Queued,
+            observation_id: None,
+            error: None,
+            attempts: 0,
+            heartbeat_at: None,
+            reused: true,
+        };
+        for lifecycle in [
+            ConfigObservationLifecycle::Queued,
+            ConfigObservationLifecycle::WaitingForCapacity,
+            ConfigObservationLifecycle::Running,
+            ConfigObservationLifecycle::Failed,
+        ] {
+            response.lifecycle = lifecycle;
+            assert_eq!(
+                config_observation_post_status(&response),
+                StatusCode::ACCEPTED
+            );
+        }
+        response.lifecycle = ConfigObservationLifecycle::Succeeded;
+        response.observation_id = Some(Uuid::new_v4());
+        assert_eq!(config_observation_post_status(&response), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an isolated migrated database"]
+    async fn targeted_config_inspection_api_preserves_primary_state_and_nondisclosure() {
+        let pool = test_pool_from_env().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let flake_id: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+        )
+        .bind(format!("targeted-api-{suffix}"))
+        .bind(format!("https://example.test/targeted-api-{suffix}.git"))
+        .fetch_one(&pool)
+        .await
+        .expect("API flake should persist");
+        let revision = format!("{:0>40}", &suffix[..suffix.len().min(32)]);
+        let commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, evaluation_status, evaluation_attempt_count) VALUES ($1, $2, now(), 'complete', 4) RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(&revision)
+        .fetch_one(&pool)
+        .await
+        .expect("API commit should persist");
+        let configuration_name = format!("config-{suffix}");
+        let system_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO systems (hostname, public_key, flake_id, derivation, system_configuration_name) VALUES ($1, 'test-public-key', $2, '', $3) RETURNING id",
+        )
+        .bind(format!("host-{suffix}"))
+        .bind(flake_id)
+        .bind(&configuration_name)
+        .fetch_one(&pool)
+        .await
+        .expect("API system should persist");
+        let carrier_drv_path = format!("/nix/store/{suffix}-{configuration_name}.drv");
+        let derivation_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, status_id, attempt_count, completed_at) VALUES ($1, 'nixos', $2, $3, 5, 0, now()) RETURNING id",
+        )
+        .bind(commit_id)
+        .bind(&configuration_name)
+        .bind(&carrier_drv_path)
+        .fetch_one(&pool)
+        .await
+        .expect("API carrier should persist");
+        let headers = mutation_headers(&pool, AuthRole::Admin, &suffix).await;
+        let notifier = std::sync::Arc::new(crate::queue::QueueNotifier::new());
+        let state = CFState::new(
+            pool.clone(),
+            crate::config::ServerConfig::default(),
+            notifier.clone(),
+            crate::server::jobs::BackgroundJobRegistry::new(),
+        );
+        let primary_before: (String, Option<i32>, i64) = sqlx::query_as(
+            "SELECT evaluation_status, evaluation_attempt_count, (SELECT COUNT(*) FROM evaluation_attempts WHERE commit_id = commits.id) FROM commits WHERE id = $1",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("initial primary API state should load");
+
+        let response = queue_system_config_inspection(
+            State(state.clone()),
+            headers.clone(),
+            Path((system_id, revision.clone())),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: crate::models::evaluation_snapshots::QueueConfigInspectionResponse =
+            response_json(response).await;
+        assert_eq!(body.revision, revision);
+        assert_eq!(body.configuration_name, configuration_name);
+        assert_eq!(body.lifecycle, SnapshotLifecycle::Queued);
+        assert!(body.queued);
+        let target: (i32, i32, String, String) = sqlx::query_as(
+            "SELECT commit_id, derivation_id, configuration_name, carrier_drv_path FROM config_inspection_jobs WHERE commit_id = $1",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("exact API job should persist");
+        assert_eq!(
+            target,
+            (
+                commit_id,
+                derivation_id,
+                configuration_name.clone(),
+                carrier_drv_path
+            )
+        );
+        let primary: (String, Option<i32>, i64) = sqlx::query_as(
+            "SELECT evaluation_status, evaluation_attempt_count, (SELECT COUNT(*) FROM evaluation_attempts WHERE commit_id = commits.id) FROM commits WHERE id = $1",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("primary API state should load");
+        assert_eq!(primary, primary_before);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                notifier.wait_for_eval_work(),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                notifier.wait_for_build_work(),
+            )
+            .await
+            .is_err()
+        );
+
+        let replacement_carrier = format!("/nix/store/{suffix}-{configuration_name}-new.drv");
+        sqlx::query("UPDATE derivations SET derivation_type = 'package' WHERE id = $1")
+            .bind(derivation_id)
+            .execute(&pool)
+            .await
+            .expect("original carrier should stop being the current NixOS result");
+        sqlx::query(
+            "INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, status_id, attempt_count, completed_at) VALUES ($1, 'nixos', $2, $3, 5, 0, now())",
+        )
+        .bind(commit_id)
+        .bind(&configuration_name)
+        .bind(&replacement_carrier)
+        .execute(&pool)
+        .await
+        .expect("replacement carrier should persist");
+        let conflict = queue_system_config_inspection(
+            State(state.clone()),
+            headers.clone(),
+            Path((system_id, revision.clone())),
+        )
+        .await
+        .into_response();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let conflict_body: ApiError = response_json(conflict).await;
+        assert_eq!(conflict_body.error, "config_inspection_target_conflict");
+        assert_eq!(
+            sqlx::query_as::<_, (i32, i32, String, String)>(
+                "SELECT commit_id, derivation_id, configuration_name, carrier_drv_path FROM config_inspection_jobs WHERE commit_id = $1",
+            )
+            .bind(commit_id)
+            .fetch_one(&pool)
+            .await
+            .expect("conflicting API job should remain unchanged"),
+            target
+        );
+
+        let prerequisite_revision = "e".repeat(40);
+        let prerequisite_commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, evaluation_status) VALUES ($1, $2, now(), 'complete') RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(&prerequisite_revision)
+        .fetch_one(&pool)
+        .await
+        .expect("prerequisite commit should persist");
+        let prerequisite = queue_system_config_inspection(
+            State(state.clone()),
+            headers.clone(),
+            Path((system_id, prerequisite_revision)),
+        )
+        .await
+        .into_response();
+        assert_eq!(prerequisite.status(), StatusCode::CONFLICT);
+        let prerequisite_body: ApiError = response_json(prerequisite).await;
+        assert_eq!(prerequisite_body.error, "config_inspection_prerequisite");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM config_inspection_jobs WHERE commit_id = $1",
+            )
+            .bind(prerequisite_commit_id)
+            .fetch_one(&pool)
+            .await
+            .expect("job count should load"),
+            0
+        );
+
+        let foreign_flake_id: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+        )
+        .bind(format!("foreign-target-{suffix}"))
+        .bind(format!("https://example.test/foreign-target-{suffix}.git"))
+        .fetch_one(&pool)
+        .await
+        .expect("foreign flake should persist");
+        let foreign_revision = "d".repeat(40);
+        sqlx::query(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, evaluation_status) VALUES ($1, $2, now(), 'complete')",
+        )
+        .bind(foreign_flake_id)
+        .bind(&foreign_revision)
+        .execute(&pool)
+        .await
+        .expect("foreign commit should persist");
+        for (target_id, target_revision) in [
+            (system_id, foreign_revision),
+            (Uuid::new_v4(), "c".repeat(40)),
+        ] {
+            let hidden = queue_system_config_inspection(
+                State(state.clone()),
+                headers.clone(),
+                Path((target_id, target_revision)),
+            )
+            .await
+            .into_response();
+            assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+        }
+
+        let operator_headers =
+            mutation_headers(&pool, AuthRole::Operator, &format!("operator-{suffix}")).await;
+        for target_id in [system_id, Uuid::new_v4()] {
+            let hidden = queue_system_config_inspection(
+                State(state.clone()),
+                operator_headers.clone(),
+                Path((target_id, "not-a-revision".to_string())),
+            )
+            .await
+            .into_response();
+            assert_eq!(hidden.status(), StatusCode::FORBIDDEN);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an isolated migrated database"]
+    async fn hidden_environment_snapshot_read_is_non_disclosing() {
+        let pool = test_pool_from_env().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let visible = create_environment(
+            &pool,
+            &format!("visible-{suffix}"),
+            None,
+            "#111111",
+            true,
+            "manual",
+            false,
+            false,
+            false,
+        )
+        .await
+        .expect("visible environment should insert");
+        let hidden = create_environment(
+            &pool,
+            &format!("hidden-{suffix}"),
+            None,
+            "#222222",
+            true,
+            "manual",
+            false,
+            false,
+            false,
+        )
+        .await
+        .expect("hidden environment should insert");
+        let user = insert_user(
+            &pool,
+            &format!("snapshot-{suffix}@example.test"),
+            Some("Snapshot Viewer"),
+        )
+        .await
+        .expect("user should insert");
+        sync_user_role(&pool, user.id, AuthRole::Viewer)
+            .await
+            .expect("viewer role should persist");
+        sqlx::query(
+            "INSERT INTO user_environment_memberships (user_id, environment_id) VALUES ($1, $2)",
+        )
+        .bind(user.id)
+        .bind(visible.id)
+        .execute(&pool)
+        .await
+        .expect("membership should persist");
+
+        let key = SigningKey::from_bytes(&[44; 32]);
+        let flake = insert_flake(
+            &pool,
+            &format!("hidden-snapshot-{suffix}"),
+            &format!("https://example.test/hidden-snapshot-{suffix}.git"),
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("hidden flake should insert");
+        let system = insert_system(
+            &pool,
+            &System {
+                id: Uuid::new_v4(),
+                hostname: format!("hidden-system-{suffix}"),
+                environment_id: Some(hidden.id),
+                is_active: true,
+                public_key: PublicKey::from_verifying_key(key.verifying_key()),
+                flake_id: Some(flake.id),
+                derivation: String::new(),
+                system_configuration_name: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                desired_target: None,
+                deployment_policy: "manual".into(),
+            },
+        )
+        .await
+        .expect("hidden system should insert");
+        let session_token = format!("snapshot-session-{suffix}");
+        create_user_session(
+            &pool,
+            user.id,
+            hash_token(&session_token),
+            Utc::now() + chrono::Duration::hours(1),
+            None,
+            None,
+            "local".into(),
+        )
+        .await
+        .expect("session should persist");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("{}={}", SESSION_COOKIE_NAME, session_token)
+                .parse()
+                .expect("cookie should parse"),
+        );
+
+        let response = get_system_evaluated_options(
+            State(pool.clone()),
+            headers.clone(),
+            Path(system.id),
+            Query(EvaluatedOptionsParams {
+                revision: "a".repeat(40),
+                ..EvaluatedOptionsParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let response = get_system_evaluation_summary(
+            State(pool.clone()),
+            headers.clone(),
+            Path(system.id),
+            Query(SelectedEvaluationSummaryParams {
+                revision: "a".repeat(40),
+                ..SelectedEvaluationSummaryParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let response = get_system_evaluation_module_sources(
+            State(pool.clone()),
+            headers.clone(),
+            Path(system.id),
+            Query(EvaluationModuleSourcesParams {
+                revision: "a".repeat(40),
+                ..EvaluationModuleSourcesParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let response = crate::handlers::api::flakes::get_flake_module_declarations(
+            State(pool.clone()),
+            headers,
+            Path((flake.id, "a".repeat(40), "module".to_string())),
+            Query(crate::models::evaluation_snapshots::FlakeModuleDeclarationsParams::default()),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user.id)
+            .execute(&pool)
+            .await
+            .expect("user cleanup should succeed");
+        sqlx::query("DELETE FROM systems WHERE id = $1")
+            .bind(system.id)
+            .execute(&pool)
+            .await
+            .expect("system cleanup should succeed");
+        sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake.id)
+            .execute(&pool)
+            .await
+            .expect("flake cleanup should succeed");
+        sqlx::query("DELETE FROM environments WHERE id = ANY($1)")
+            .bind(vec![visible.id, hidden.id])
+            .execute(&pool)
+            .await
+            .expect("environment cleanup should succeed");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn commit_config_handlers_serve_only_selected_v2_artifacts(pool: PgPool) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let hostname = format!("v2-api-{suffix}");
+        let repo_url = format!("https://example.test/v2-api-{suffix}.git");
+        let parent_revision = "b".repeat(40);
+        let revision = "c".repeat(40);
+        let hidden_revision = "d".repeat(40);
+        let user = insert_user(
+            &pool,
+            &format!("v2-api-{suffix}@example.test"),
+            Some("V2 API Test"),
+        )
+        .await
+        .expect("test user should persist");
+        sync_user_role(&pool, user.id, AuthRole::Viewer)
+            .await
+            .expect("viewer role should persist");
+        let environment = create_environment(
+            &pool,
+            &format!("v2-api-{suffix}"),
+            None,
+            "#112233",
+            true,
+            "manual",
+            false,
+            false,
+            false,
+        )
+        .await
+        .expect("test environment should persist");
+        sqlx::query(
+            "INSERT INTO user_environment_memberships (user_id, environment_id) VALUES ($1, $2)",
+        )
+        .bind(user.id)
+        .bind(environment.id)
+        .execute(&pool)
+        .await
+        .expect("viewer environment membership should persist");
+        let session_token = format!("v2-api-session-{suffix}");
+        create_user_session(
+            &pool,
+            user.id,
+            hash_token(&session_token),
+            Utc::now() + chrono::Duration::hours(1),
+            None,
+            None,
+            "local".into(),
+        )
+        .await
+        .expect("session should persist");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("{}={}", SESSION_COOKIE_NAME, session_token)
+                .parse()
+                .expect("cookie should parse"),
+        );
+
+        let flake = insert_flake(
+            &pool,
+            &format!("v2-api-{suffix}"),
+            &repo_url,
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("test flake should persist");
+        let key = SigningKey::from_bytes(&[45; 32]);
+        let system = insert_system(
+            &pool,
+            &System {
+                id: Uuid::new_v4(),
+                hostname: hostname.clone(),
+                environment_id: Some(environment.id),
+                is_active: true,
+                public_key: PublicKey::from_verifying_key(key.verifying_key()),
+                flake_id: Some(flake.id),
+                derivation: String::new(),
+                system_configuration_name: Some(hostname.clone()),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                desired_target: None,
+                deployment_policy: "manual".into(),
+            },
+        )
+        .await
+        .expect("test system should persist");
+        let hidden_environment = create_environment(
+            &pool,
+            &format!("v2-api-hidden-{suffix}"),
+            None,
+            "#445566",
+            true,
+            "manual",
+            false,
+            false,
+            false,
+        )
+        .await
+        .expect("hidden environment should persist");
+        let hidden_repo_url = format!("https://example.test/v2-api-hidden-{suffix}.git");
+        let hidden_flake = insert_flake(
+            &pool,
+            &format!("v2-api-hidden-{suffix}"),
+            &hidden_repo_url,
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("hidden flake should persist");
+        let hidden_key = SigningKey::from_bytes(&[46; 32]);
+        insert_system(
+            &pool,
+            &System {
+                id: Uuid::new_v4(),
+                hostname: format!("v2-api-hidden-{suffix}"),
+                environment_id: Some(hidden_environment.id),
+                is_active: true,
+                public_key: PublicKey::from_verifying_key(hidden_key.verifying_key()),
+                flake_id: Some(hidden_flake.id),
+                derivation: String::new(),
+                system_configuration_name: Some(format!("v2-api-hidden-{suffix}")),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                desired_target: None,
+                deployment_policy: "manual".into(),
+            },
+        )
+        .await
+        .expect("hidden system should persist");
+        insert_commit_with_metadata(
+            &pool,
+            &parent_revision,
+            &repo_url,
+            Utc::now() - chrono::Duration::minutes(1),
+            Some("V2 API parent fixture"),
+            Some("test"),
+        )
+        .await
+        .expect("test parent commit should persist");
+        insert_commit_with_metadata(
+            &pool,
+            &revision,
+            &repo_url,
+            Utc::now(),
+            Some("V2 API fixture"),
+            Some("test"),
+        )
+        .await
+        .expect("test commit should persist");
+        insert_commit_with_metadata(
+            &pool,
+            &hidden_revision,
+            &hidden_repo_url,
+            Utc::now(),
+            Some("V2 API hidden provenance fixture"),
+            Some("test"),
+        )
+        .await
+        .expect("hidden commit should persist");
+        let commit = get_commit_by_hash(&pool, &revision)
+            .await
+            .expect("test commit should load");
+        let parent_commit = get_commit_by_hash(&pool, &parent_revision)
+            .await
+            .expect("test parent commit should load");
+        sqlx::query(
+            "UPDATE commits SET first_parent_sha = $2, first_parent_resolved = true WHERE id = $1",
+        )
+        .bind(commit.id)
+        .bind(&parent_revision)
+        .execute(&pool)
+        .await
+        .expect("test first-parent identity should persist");
+        let derivation = insert_derivation(&pool, Some(&commit), &hostname, "nixos")
+            .await
+            .expect("test derivation should persist");
+        let carrier_drv_path = format!("/nix/store/{suffix}-v2-api.drv");
+        sqlx::query(
+            "UPDATE derivations SET derivation_path = $2, completed_at = now() WHERE id = $1",
+        )
+        .bind(derivation.id)
+        .bind(&carrier_drv_path)
+        .execute(&pool)
+        .await
+        .expect("carrier path should persist");
+        let parent_derivation = insert_derivation(&pool, Some(&parent_commit), &hostname, "nixos")
+            .await
+            .expect("parent derivation should persist");
+        let parent_carrier_drv_path = format!("/nix/store/{suffix}-v2-api-parent.drv");
+        sqlx::query("UPDATE derivations SET derivation_path = $2 WHERE id = $1")
+            .bind(parent_derivation.id)
+            .bind(&parent_carrier_drv_path)
+            .execute(&pool)
+            .await
+            .expect("parent carrier path should persist");
+
+        let v1_option = EvaluatedOption {
+            path: "v1.only".into(),
+            declared_type: Some("string".into()),
+            metadata_error: None,
+            value: SafeOptionValue::Scalar(serde_json::json!("legacy")),
+            definitions: Vec::new(),
+            overridden: Some(false),
+        };
+        let path_components = vec!["services".to_string(), "v2-api".to_string()];
+        let selected_option_key = option_key(&path_components);
+        let definition = ConfigDefinitionArtifactV2 {
+            option_key: selected_option_key.clone(),
+            ordinal: 0,
+            source_path: None,
+            source_input: Some("self".into()),
+            source_revision: Some(revision.clone()),
+            module_key: None,
+            priority: 100,
+            status: ConfigDefinitionStatusV2::ActiveSurviving,
+            surviving_merge_order: Some(0),
+            value: Some(SafeOptionValue::Scalar(serde_json::json!(true))),
+        };
+        let second_surviving_definition = ConfigDefinitionArtifactV2 {
+            ordinal: 1,
+            surviving_merge_order: Some(1),
+            ..definition.clone()
+        };
+        let artifact = ConfigInspectionArtifactV2 {
+            artifact_version: CONFIG_OPTION_ARTIFACT_SCHEMA_VERSION_V2,
+            option_inventory_complete: true,
+            option_inventory_diagnostics: Vec::new(),
+            option_inventory_diagnostics_truncated: false,
+            target_key: "a".repeat(64),
+            source_out_path: format!("/nix/store/{suffix}-source"),
+            carrier_drv_path: carrier_drv_path.clone(),
+            provenance_state: ConfigProvenanceArtifactStateV2::Available {
+                adapter_version: 1,
+                target_lib_version: None,
+                target_module_system_path: None,
+                provenance_digest: "b".repeat(64),
+                definition_value_enrichment: DefinitionValueArtifactStateV2::Available {
+                    adapter_version: 1,
+                    provenance_digest: "b".repeat(64),
+                },
+            },
+            options: vec![
+                ConfigOptionArtifactV2 {
+                    option_key: selected_option_key,
+                    path_components,
+                    metadata: ConfigOptionMetadataArtifactV2::Available {
+                        option_type: Some("option".into()),
+                        loc: vec!["services".into(), "v2-api".into()],
+                        declared_type: None,
+                        declarations: Vec::new(),
+                        declaration_positions: Vec::new(),
+                        highest_prio: Some(100),
+                        is_defined: true,
+                        surviving_definition_sources: Vec::new(),
+                    },
+                    effective_value: SafeOptionValue::Scalar(serde_json::json!(true)),
+                    provenance: ConfigOptionProvenanceArtifactV2::Available {
+                        definitions: vec![definition, second_surviving_definition],
+                        override_state: false,
+                    },
+                },
+                ConfigOptionArtifactV2 {
+                    option_key: option_key(&[
+                        "services".to_string(),
+                        "v2-api-metadata-failed".to_string(),
+                    ]),
+                    path_components: vec![
+                        "services".to_string(),
+                        "v2-api-metadata-failed".to_string(),
+                    ],
+                    metadata: ConfigOptionMetadataArtifactV2::Failed {
+                        error: SafeEvaluationError {
+                            code: "metadata_not_evaluated".into(),
+                            message: "Option metadata did not evaluate".into(),
+                        },
+                    },
+                    effective_value: SafeOptionValue::Scalar(serde_json::json!(false)),
+                    provenance: ConfigOptionProvenanceArtifactV2::Available {
+                        definitions: Vec::new(),
+                        override_state: false,
+                    },
+                },
+                ConfigOptionArtifactV2 {
+                    option_key: option_key(&[
+                        "services".to_string(),
+                        "zz-v2-api-hidden".to_string(),
+                    ]),
+                    path_components: vec!["services".to_string(), "zz-v2-api-hidden".to_string()],
+                    metadata: ConfigOptionMetadataArtifactV2::Available {
+                        option_type: Some("option".into()),
+                        loc: vec!["services".into(), "zz-v2-api-hidden".into()],
+                        declared_type: Some("boolean".into()),
+                        declarations: Vec::new(),
+                        declaration_positions: Vec::new(),
+                        highest_prio: Some(100),
+                        is_defined: true,
+                        surviving_definition_sources: Vec::new(),
+                    },
+                    effective_value: SafeOptionValue::Scalar(serde_json::json!(true)),
+                    provenance: ConfigOptionProvenanceArtifactV2::Available {
+                        definitions: vec![ConfigDefinitionArtifactV2 {
+                            option_key: option_key(&[
+                                "services".to_string(),
+                                "zz-v2-api-hidden".to_string(),
+                            ]),
+                            ordinal: 0,
+                            source_path: Some("modules/hidden.nix".into()),
+                            source_input: Some("hidden".into()),
+                            source_revision: Some(hidden_revision.clone()),
+                            module_key: None,
+                            priority: 100,
+                            status: ConfigDefinitionStatusV2::ActiveSurviving,
+                            surviving_merge_order: Some(0),
+                            value: Some(SafeOptionValue::Scalar(serde_json::json!(true))),
+                        }],
+                        override_state: false,
+                    },
+                },
+            ],
+        };
+        let mut parent_artifact = artifact.clone();
+        parent_artifact.target_key = "e".repeat(64);
+        parent_artifact.source_out_path = format!("/nix/store/{suffix}-parent-source");
+        parent_artifact.carrier_drv_path = parent_carrier_drv_path;
+        parent_artifact.options[0].effective_value =
+            SafeOptionValue::Scalar(serde_json::json!(false));
+        if let ConfigOptionProvenanceArtifactV2::Available { definitions, .. } =
+            &mut parent_artifact.options[0].provenance
+        {
+            definitions[0].source_revision = Some(parent_revision.clone());
+        }
+        let mut parent_tx = pool
+            .begin()
+            .await
+            .expect("parent V2 snapshot transaction should begin");
+        persist_config_artifact_v2_tx(&mut parent_tx, parent_commit.id, &hostname, parent_artifact)
+            .await
+            .expect("parent V2 snapshot should persist");
+        parent_tx
+            .commit()
+            .await
+            .expect("parent V2 snapshot should commit");
+
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("snapshot transaction should begin");
+        persist_flake_output_snapshot_tx(
+            &mut tx,
+            commit.id,
+            &serde_json::json!({
+                "declared_systems": [hostname.clone()],
+                "exported_modules": [],
+                "inputs": [{
+                    "node": "hidden",
+                    "names": ["hidden"],
+                    "source": hidden_repo_url,
+                    "locked_revision": hidden_revision,
+                }],
+            }),
+        )
+        .await
+        .expect("selected flake output should persist");
+        persist_available_snapshot_tx(&mut tx, commit.id, &hostname, vec![v1_option])
+            .await
+            .expect("V1 snapshot should persist");
+        tx.commit().await.expect("V1 snapshot should commit");
+        sqlx::query("UPDATE commits SET evaluation_status = 'complete' WHERE id = $1")
+            .bind(commit.id)
+            .execute(&pool)
+            .await
+            .expect("V1 evaluation lifecycle should complete");
+
+        let v1_only_response = get_system_evaluated_options(
+            State(pool.clone()),
+            headers.clone(),
+            Path(system.id),
+            Query(EvaluatedOptionsParams {
+                revision: revision.clone(),
+                ..EvaluatedOptionsParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(v1_only_response.status(), StatusCode::OK);
+        let v1_only: EvaluatedOptionsPage = response_json(v1_only_response).await;
+        assert_eq!(v1_only.lifecycle, SnapshotLifecycle::Unavailable);
+        assert!(v1_only.options.is_empty());
+        let config_jobs: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM config_inspection_jobs WHERE commit_id = $1")
+                .bind(commit.id)
+                .fetch_one(&pool)
+                .await
+                .expect("Config job count should load");
+        assert_eq!(
+            config_jobs, 0,
+            "Config reads must not enqueue inspection work"
+        );
+
+        let config_job_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO config_inspection_jobs (commit_id, derivation_id, configuration_name, carrier_drv_path, status) VALUES ($1, $2, $3, $4, 'queued') RETURNING id",
+        )
+        .bind(commit.id)
+        .bind(derivation.id)
+        .bind(&hostname)
+        .bind(&carrier_drv_path)
+        .fetch_one(&pool)
+        .await
+        .expect("queued Config job should persist");
+        let queued_response = get_system_evaluated_options(
+            State(pool.clone()),
+            headers.clone(),
+            Path(system.id),
+            Query(EvaluatedOptionsParams {
+                revision: revision.clone(),
+                ..EvaluatedOptionsParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(queued_response.status(), StatusCode::OK);
+        let queued: EvaluatedOptionsPage = response_json(queued_response).await;
+        assert_eq!(queued.lifecycle, SnapshotLifecycle::Queued);
+        sqlx::query(
+            "UPDATE config_inspection_jobs SET status = 'succeeded', started_at = now(), completed_at = now(), updated_at = now() WHERE id = $1",
+        )
+        .bind(config_job_id)
+        .execute(&pool)
+        .await
+        .expect("Config job should become terminal");
+
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("V2 snapshot transaction should begin");
+        persist_config_artifact_v2_tx(&mut tx, commit.id, &hostname, artifact)
+            .await
+            .expect("V2 snapshot should persist");
+        tx.commit().await.expect("V2 snapshot should commit");
+        let persisted_v2_host_delta: Option<i64> = sqlx::query_scalar(
+            "SELECT snapshot.host_delta_count FROM config_snapshot_selections selection JOIN evaluation_snapshots snapshot ON snapshot.id = selection.current_snapshot_id WHERE selection.commit_id = $1 AND selection.configuration_name = $2",
+        )
+        .bind(commit.id)
+        .bind(&hostname)
+        .fetch_one(&pool)
+        .await
+        .expect("V2 host delta state should load");
+        assert_eq!(
+            persisted_v2_host_delta, None,
+            "targeted V2 snapshots are excluded from the primary host corpus"
+        );
+
+        let options_response = get_system_evaluated_options(
+            State(pool.clone()),
+            headers.clone(),
+            Path(system.id),
+            Query(EvaluatedOptionsParams {
+                revision: revision.clone(),
+                ..EvaluatedOptionsParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(options_response.status(), StatusCode::OK);
+        let options: EvaluatedOptionsPage = response_json(options_response).await;
+        assert_eq!(options.counts.all, 3);
+        assert_eq!(options.counts.changed, Some(1));
+        assert!(options.comparison_available);
+        assert_eq!(options.options.len(), 3);
+        let option = options.options[0]
+            .option
+            .as_ref()
+            .expect("selected V2 option should exist");
+        assert_eq!(option.path, "services.v2-api");
+        assert_ne!(option.path, "v1.only");
+        assert_eq!(option.declared_type, None);
+        assert!(option.metadata_error.is_none());
+        assert_eq!(option.overridden, Some(false));
+        assert_eq!(
+            options.options[0]
+                .before
+                .as_ref()
+                .map(|before| &before.value),
+            Some(&SafeOptionValue::Scalar(serde_json::json!(false)))
+        );
+        assert_eq!(options.options[0].changed, Some(true));
+        assert_eq!(
+            options.options[0].diff.as_ref().map(|diff| diff.kind),
+            Some(OptionChangeKind::Modified)
+        );
+        assert_eq!(option.definitions[0].status.as_deref(), Some("winning"));
+        assert_eq!(option.definitions[0].source_path, None);
+        assert_eq!(
+            option.definitions[0]
+                .tracked_flake
+                .as_ref()
+                .map(|identity| identity.revision.as_str()),
+            Some(revision.as_str())
+        );
+        let failed_metadata = options.options[1]
+            .option
+            .as_ref()
+            .expect("metadata-failed V2 option should exist");
+        assert_eq!(failed_metadata.declared_type, None);
+        assert_eq!(
+            failed_metadata
+                .metadata_error
+                .as_ref()
+                .map(|error| error.code.as_str()),
+            Some("metadata_not_evaluated")
+        );
+        assert_eq!(failed_metadata.overridden, Some(false));
+        let hidden_option = options.options[2]
+            .option
+            .as_ref()
+            .expect("hidden-provenance V2 option should exist");
+        assert_eq!(hidden_option.path, "services.zz-v2-api-hidden");
+        assert!(hidden_option.definitions[0].tracked_flake.is_none());
+        let options_json = serde_json::to_value(&options).expect("V2 page should serialize");
+        assert_eq!(
+            options_json["options"][0]["option"]["declared_type"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            options_json["options"][0]["option"]["metadata_error"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            options_json["options"][0]["option"]["definitions"][0]["source_path"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            options_json["options"][0]["option"]["overridden"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            options_json["options"][1]["option"]["metadata_error"]["code"],
+            serde_json::json!("metadata_not_evaluated")
+        );
+        assert_eq!(
+            options_json["options"][1]["option"]["overridden"],
+            serde_json::json!(false)
+        );
+        let encoded_options = serde_json::to_string(&options_json).expect("V2 JSON should encode");
+        for placeholder in [
+            "Declared type unavailable",
+            "Source path unavailable",
+            "Override status unavailable",
+            "unknown",
+        ] {
+            assert!(!encoded_options.contains(placeholder));
+        }
+        let token = options
+            .snapshot_token
+            .clone()
+            .expect("available V2 page should have a token");
+
+        let summary_response = get_system_evaluation_summary(
+            State(pool.clone()),
+            headers.clone(),
+            Path(system.id),
+            Query(SelectedEvaluationSummaryParams {
+                revision: revision.clone(),
+                snapshot_token: Some(token.clone()),
+                ..SelectedEvaluationSummaryParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(summary_response.status(), StatusCode::OK);
+        let summary: SelectedEvaluationSummary = response_json(summary_response).await;
+        assert_eq!(summary.snapshot_token.as_deref(), Some(token.as_str()));
+        assert_eq!(summary.option_total, 3);
+        assert_eq!(summary.module_source_total, 2);
+        assert_eq!(summary.host_delta_count, None);
+
+        let sources_response = get_system_evaluation_module_sources(
+            State(pool.clone()),
+            headers.clone(),
+            Path(system.id),
+            Query(EvaluationModuleSourcesParams {
+                revision: revision.clone(),
+                snapshot_token: Some(token.clone()),
+                ..EvaluationModuleSourcesParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(sources_response.status(), StatusCode::OK);
+        let sources: EvaluationModuleSourcesPage = response_json(sources_response).await;
+        assert_eq!(sources.snapshot_token.as_deref(), Some(token.as_str()));
+        assert_eq!(sources.total, 2);
+        let self_source = sources
+            .sources
+            .iter()
+            .find(|source| source.source_input.as_deref() == Some("self"))
+            .expect("self module source should exist");
+        assert_eq!(self_source.source_path, None);
+        assert_eq!(self_source.defined_count, 2);
+        assert_eq!(self_source.won_count, 1);
+        assert_eq!(
+            self_source
+                .tracked_flake
+                .as_ref()
+                .map(|identity| identity.revision.as_str()),
+            Some(revision.as_str())
+        );
+        let hidden_source = sources
+            .sources
+            .iter()
+            .find(|source| source.source_input.as_deref() == Some("hidden"))
+            .expect("hidden module source should exist");
+        assert!(hidden_source.tracked_flake.is_none());
+
+        let replacement_path = vec!["services".to_string(), "stage-two-unavailable".to_string()];
+        let diagnostic_secret = "api_token=typed-diagnostic-secret";
+        let long_diagnostic_component = "x".repeat(257);
+        let replacement = ConfigInspectionArtifactV2 {
+            artifact_version: CONFIG_OPTION_ARTIFACT_SCHEMA_VERSION_V2,
+            option_inventory_complete: false,
+            option_inventory_diagnostics: (0..128)
+                .map(
+                    |index| crate::models::config_inspector::OptionInventoryDiagnostic {
+                        path: vec![match index {
+                            0 => diagnostic_secret.to_string(),
+                            1 => long_diagnostic_component.clone(),
+                            2 => String::new(),
+                            _ => format!("poison{index:03}"),
+                        }],
+                        code: "unreadable_option_subtree".to_string(),
+                        message: "Option subtree could not be inspected".to_string(),
+                    },
+                )
+                .collect(),
+            option_inventory_diagnostics_truncated: true,
+            target_key: "d".repeat(64),
+            source_out_path: format!("/nix/store/{suffix}-source"),
+            carrier_drv_path: carrier_drv_path.clone(),
+            provenance_state: ConfigProvenanceArtifactStateV2::Unavailable {
+                reason_code: "stage2_unavailable".into(),
+                diagnostic: None,
+            },
+            options: vec![ConfigOptionArtifactV2 {
+                option_key: option_key(&replacement_path),
+                path_components: replacement_path,
+                metadata: ConfigOptionMetadataArtifactV2::Available {
+                    option_type: Some("option".into()),
+                    loc: vec!["services".into(), "stage-two-unavailable".into()],
+                    declared_type: Some("boolean".into()),
+                    declarations: Vec::new(),
+                    declaration_positions: Vec::new(),
+                    highest_prio: Some(100),
+                    is_defined: true,
+                    surviving_definition_sources: Vec::new(),
+                },
+                effective_value: SafeOptionValue::Scalar(serde_json::json!(false)),
+                provenance: ConfigOptionProvenanceArtifactV2::Unavailable,
+            }],
+        };
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("replacement transaction should begin");
+        persist_config_artifact_v2_tx(&mut tx, commit.id, &hostname, replacement)
+            .await
+            .expect("replacement V2 snapshot should persist");
+        tx.commit().await.expect("replacement should commit");
+        let persisted_diagnostics: serde_json::Value = sqlx::query_scalar(
+            "SELECT option_inventory_diagnostics FROM evaluation_snapshots WHERE commit_id = $1 AND configuration_name = $2 AND target_key = $3",
+        )
+        .bind(commit.id)
+        .bind(&hostname)
+        .bind("d".repeat(64))
+        .fetch_one(&pool)
+        .await
+        .expect("replacement diagnostics should persist");
+        let persisted_diagnostics = persisted_diagnostics.to_string();
+        assert!(!persisted_diagnostics.contains(diagnostic_secret));
+        assert!(!persisted_diagnostics.contains(&long_diagnostic_component));
+
+        let stale_response = get_system_evaluated_options(
+            State(pool.clone()),
+            headers.clone(),
+            Path(system.id),
+            Query(EvaluatedOptionsParams {
+                revision: revision.clone(),
+                snapshot_token: Some(token.clone()),
+                ..EvaluatedOptionsParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(stale_response.status(), StatusCode::CONFLICT);
+        let stale: ApiError = response_json(stale_response).await;
+        assert_eq!(stale.error, "snapshot_changed");
+
+        let stale_summary_response = get_system_evaluation_summary(
+            State(pool.clone()),
+            headers.clone(),
+            Path(system.id),
+            Query(SelectedEvaluationSummaryParams {
+                revision: revision.clone(),
+                snapshot_token: Some(token.clone()),
+                ..SelectedEvaluationSummaryParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(stale_summary_response.status(), StatusCode::CONFLICT);
+        let stale_summary: ApiError = response_json(stale_summary_response).await;
+        assert_eq!(stale_summary.error, "snapshot_changed");
+
+        let stale_sources_response = get_system_evaluation_module_sources(
+            State(pool.clone()),
+            headers.clone(),
+            Path(system.id),
+            Query(EvaluationModuleSourcesParams {
+                revision: revision.clone(),
+                snapshot_token: Some(token),
+                ..EvaluationModuleSourcesParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(stale_sources_response.status(), StatusCode::CONFLICT);
+        let stale_sources: ApiError = response_json(stale_sources_response).await;
+        assert_eq!(stale_sources.error, "snapshot_changed");
+
+        let unavailable_provenance_response = get_system_evaluated_options(
+            State(pool),
+            headers,
+            Path(system.id),
+            Query(EvaluatedOptionsParams {
+                revision,
+                ..EvaluatedOptionsParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(unavailable_provenance_response.status(), StatusCode::OK);
+        let unavailable_provenance: EvaluatedOptionsPage =
+            response_json(unavailable_provenance_response).await;
+        assert_eq!(
+            unavailable_provenance.lifecycle,
+            SnapshotLifecycle::Available
+        );
+        assert_eq!(
+            unavailable_provenance.option_inventory_state,
+            OptionInventoryState::Partial
+        );
+        assert_eq!(
+            unavailable_provenance.option_inventory_diagnostics.len(),
+            126
+        );
+        assert!(unavailable_provenance.option_inventory_diagnostics_truncated);
+        assert!(!unavailable_provenance.comparison_available);
+        assert_eq!(unavailable_provenance.counts.changed, None);
+        assert_eq!(unavailable_provenance.options.len(), 1);
+        assert!(
+            unavailable_provenance.options[0]
+                .option
+                .as_ref()
+                .expect("replacement option should exist")
+                .definitions
+                .is_empty()
+        );
+        let unavailable_option = unavailable_provenance.options[0]
+            .option
+            .as_ref()
+            .expect("replacement option should exist");
+        assert_eq!(unavailable_option.overridden, None);
+        let unavailable_json =
+            serde_json::to_value(&unavailable_provenance).expect("V2 page should serialize");
+        assert_eq!(
+            unavailable_json["options"][0]["option"]["overridden"],
+            serde_json::Value::Null
+        );
+        let encoded_unavailable =
+            serde_json::to_string(&unavailable_json).expect("V2 JSON should encode");
+        assert!(!encoded_unavailable.contains(diagnostic_secret));
+        assert!(!encoded_unavailable.contains(&long_diagnostic_component));
+        for placeholder in [
+            "Declared type unavailable",
+            "Source path unavailable",
+            "Override status unavailable",
+            "unknown",
+        ] {
+            assert!(!encoded_unavailable.contains(placeholder));
+        }
     }
 
     #[tokio::test]
@@ -2820,7 +6844,9 @@ mod tests {
             HeaderMap::new(),
             Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
             Json(SystemRollbackGenerationRequest {
-                store_path: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system".to_string(),
+                generation_snapshot_id: None,
+                generation: None,
+                store_path: None,
             }),
         )
         .await
@@ -2874,13 +6900,23 @@ mod tests {
 
         let signing_key = SigningKey::from_bytes(&[9u8; 32]);
         let public_key = PublicKey::from_verifying_key(signing_key.verifying_key());
+        let repo_url = format!("https://example.test/rollback-{suffix}.git");
+        let flake = insert_flake(
+            &pool,
+            &format!("rollback-{suffix}"),
+            &repo_url,
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("rollback flake should persist");
         let system = System {
             id: Uuid::new_v4(),
             hostname: hostname.clone(),
             environment_id: None,
             is_active: true,
             public_key,
-            flake_id: None,
+            flake_id: Some(flake.id),
             derivation: String::new(),
             system_configuration_name: Some(hostname.clone()),
             created_at: Utc::now(),
@@ -2892,6 +6928,57 @@ mod tests {
         insert_system(&pool, &system)
             .await
             .expect("insert_system should succeed");
+
+        let revision = "a".repeat(40);
+        insert_commit_with_metadata(
+            &pool,
+            &revision,
+            &repo_url,
+            Utc::now(),
+            Some("retained rollback fixture"),
+            Some("test"),
+        )
+        .await
+        .expect("rollback commit should persist");
+        let commit = get_commit_by_hash(&pool, &revision)
+            .await
+            .expect("rollback commit should load");
+        let derivation = insert_derivation(&pool, Some(&commit), &hostname, "nixos")
+            .await
+            .expect("rollback derivation should persist");
+        sqlx::query(
+            "UPDATE derivations SET store_path = $2, expected_store_path = $2, \
+             policy_requirements_met = true WHERE id = $1",
+        )
+        .bind(derivation.id)
+        .bind(&store_path)
+        .execute(&pool)
+        .await
+        .expect("rollback derivation target should persist");
+        let mut snapshot_tx = pool
+            .begin()
+            .await
+            .expect("snapshot transaction should begin");
+        let snapshot_id =
+            persist_available_snapshot_tx(&mut snapshot_tx, commit.id, &hostname, Vec::new())
+                .await
+                .expect("rollback snapshot should persist");
+        snapshot_tx.commit().await.expect("snapshot should commit");
+        let generation_snapshot_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO evaluation_generation_snapshots (\
+                 system_id, generation, snapshot_id, derivation_id, commit_id, \
+                 source_store_path, configuration_name\
+             ) VALUES ($1, 7, $2, $3, $4, $5, $6) RETURNING id",
+        )
+        .bind(system.id)
+        .bind(snapshot_id)
+        .bind(derivation.id)
+        .bind(commit.id)
+        .bind(&store_path)
+        .bind(&hostname)
+        .fetch_one(&pool)
+        .await
+        .expect("retained rollback generation should persist");
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -2906,7 +6993,9 @@ mod tests {
             headers,
             Path(system.id),
             Json(SystemRollbackGenerationRequest {
-                store_path: store_path.clone(),
+                generation_snapshot_id: Some(generation_snapshot_id),
+                generation: Some(7),
+                store_path: Some(store_path.clone()),
             }),
         )
         .await
@@ -2937,12 +7026,123 @@ mod tests {
             Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
             Json(DeploySystemRequest {
                 commit_sha: "a1b2c3d".to_string(),
+                action: ManualDeploymentAction::Deploy,
+                request_id: None,
             }),
         )
         .await
         .into_response();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn auto_latest_requires_an_explicit_manual_deployment_choice() {
+        assert_eq!(
+            plan_manual_deployment("auto_latest", ManualDeploymentAction::Deploy),
+            Err("Choose Continue on auto_latest or Convert to manual and deploy")
+        );
+        assert_eq!(
+            plan_manual_deployment("auto_latest", ManualDeploymentAction::Legacy),
+            Err("Choose Continue on auto_latest or Convert to manual and deploy")
+        );
+        assert_eq!(
+            plan_manual_deployment("auto_latest", ManualDeploymentAction::ContinueAutoLatest,),
+            Ok(ManualDeploymentPlan::Keep(
+                ManualDeploymentPolicyState::AutoLatest
+            ))
+        );
+        assert_eq!(
+            plan_manual_deployment("auto_latest", ManualDeploymentAction::ConvertToManual),
+            Ok(ManualDeploymentPlan::ConvertToManual)
+        );
+    }
+
+    #[test]
+    fn legacy_identities_are_stable_intents_while_explicit_ids_are_unambiguous() {
+        let system_id = Uuid::new_v4();
+        let sha = "a".repeat(40);
+        let first =
+            deployment_request_identity(None, system_id, &sha, ManualDeploymentAction::Deploy);
+        let retry =
+            deployment_request_identity(None, system_id, &sha, ManualDeploymentAction::Deploy);
+        let later =
+            deployment_request_identity(None, system_id, &sha, ManualDeploymentAction::Deploy);
+        let explicit_id = Uuid::new_v4();
+        let explicit_first = deployment_request_identity(
+            Some(explicit_id),
+            system_id,
+            &sha,
+            ManualDeploymentAction::Deploy,
+        );
+        let explicit_later = deployment_request_identity(
+            Some(explicit_id),
+            system_id,
+            &sha,
+            ManualDeploymentAction::Deploy,
+        );
+
+        assert_eq!(first, retry);
+        assert_eq!(first, later);
+        assert!(first.starts_with("legacy:v1:"));
+        assert_ne!(
+            first,
+            deployment_request_identity(
+                None,
+                system_id,
+                &sha,
+                ManualDeploymentAction::ConvertToManual,
+            ),
+            "the derived identity includes the action"
+        );
+        assert_eq!(explicit_first, explicit_later);
+        assert!(explicit_first.starts_with("explicit:"));
+        assert_ne!(
+            explicit_first,
+            deployment_request_identity(
+                Some(Uuid::new_v4()),
+                system_id,
+                &sha,
+                ManualDeploymentAction::Deploy,
+            ),
+            "a new explicit ID is the intentional redeployment boundary"
+        );
+    }
+
+    #[test]
+    fn deployment_request_conflict_has_a_stable_typed_wire_value() {
+        assert_eq!(
+            serde_json::to_value(ManualDeploymentRequestState::Conflict).unwrap(),
+            serde_json::json!("conflict")
+        );
+    }
+
+    #[test]
+    fn deployment_targets_require_full_object_format_identity() {
+        assert!(validate_target_commit(&"a".repeat(40)).is_ok());
+        assert!(validate_target_commit(&"b".repeat(64)).is_ok());
+        assert!(validate_target_commit("abcdef0").is_err());
+        assert!(validate_target_commit(&"c".repeat(41)).is_err());
+    }
+
+    #[test]
+    fn converted_manual_retry_remains_valid() {
+        assert_eq!(
+            plan_manual_deployment("manual", ManualDeploymentAction::ConvertToManual),
+            Ok(ManualDeploymentPlan::ConvertToManual)
+        );
+    }
+
+    #[test]
+    fn deployment_failure_does_not_claim_rolled_back_conversion() {
+        assert_eq!(
+            manual_deployment_failure_message(
+                ManualDeploymentPolicyState::Manual,
+                ManualDeploymentConversionState::Converted,
+                "target is unavailable",
+            ),
+            "Deployment failed: target is unavailable"
+        );
     }
 
     #[test]
@@ -3028,7 +7228,8 @@ mod tests {
         assert!(validate_target_commit("").is_err());
         assert!(validate_target_commit("abc").is_err());
         assert!(validate_target_commit("zzzzzzz").is_err());
-        assert!(validate_target_commit("a1b2c3d").is_ok());
+        assert!(validate_target_commit("a1b2c3d").is_err());
+        assert!(validate_target_commit(&"a".repeat(40)).is_ok());
         assert!(validate_target_commit(&"a".repeat(65)).is_err());
     }
 
@@ -3107,6 +7308,154 @@ mod tests {
         insert_system(pool, &system)
             .await
             .expect("insert_system should succeed")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn system_commits_reports_only_an_unambiguous_observational_current_revision() {
+        let pool = test_pool_from_env().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let flake = insert_flake(
+            &pool,
+            &format!("commits-api-{suffix}"),
+            &format!("https://example.com/commits-api-{suffix}.git"),
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("insert commits API flake");
+        let (_key, public_key) = rotation_key_material(61);
+        let mut system =
+            rotation_insert_system(&pool, &format!("commits-api-{suffix}"), &public_key, None)
+                .await;
+        system.flake_id = Some(flake.id);
+        system.system_configuration_name = Some("api-config".to_string());
+        system = insert_system(&pool, &system)
+            .await
+            .expect("attach commits API system to flake");
+        let revision = format!("{:0>40}", &suffix[..32]);
+        let store_path = format!("/nix/store/{suffix}-api-system");
+        let commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (
+                flake_id, git_commit_hash, commit_timestamp, evaluation_status
+             ) VALUES ($1, $2, NOW(), 'complete') RETURNING id",
+        )
+        .bind(flake.id)
+        .bind(&revision)
+        .fetch_one(&pool)
+        .await
+        .expect("insert commits API revision");
+        sqlx::query(
+            "INSERT INTO derivations (
+                commit_id, derivation_type, derivation_name, status_id,
+                store_path, derivation_path, completed_at
+             ) VALUES ($1, 'nixos', 'api-config', 10, $2, $3, NOW())",
+        )
+        .bind(commit_id)
+        .bind(&store_path)
+        .bind(format!("{store_path}.drv"))
+        .execute(&pool)
+        .await
+        .expect("insert commits API derivation");
+        sqlx::query(
+            "INSERT INTO system_states (
+                hostname, change_reason, store_path, generation,
+                generation_matches_current_store_path, timestamp
+             ) VALUES ($1, 'startup', $2, 4, TRUE, NOW())",
+        )
+        .bind(&system.hostname)
+        .bind(&store_path)
+        .execute(&pool)
+        .await
+        .expect("insert matching commits API observation");
+        let headers = rotation_session_headers(&pool, &suffix, AuthRole::Admin).await;
+
+        let response = get_system_commits(State(pool.clone()), headers.clone(), Path(system.id))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: SystemCommitsResponse = response_json(response).await;
+        assert_eq!(body.current_commit.as_deref(), Some(revision.as_str()));
+        assert_eq!(body.commits.len(), 1);
+        assert!(body.commits[0].config_inspectable);
+
+        for index in 0_i64..50 {
+            let sequence = index + 1;
+            let newer_revision = format!("{sequence:08x}{}", &suffix[..32]);
+            sqlx::query(
+                "INSERT INTO commits (
+                    flake_id, git_commit_hash, commit_timestamp, evaluation_status
+                 ) VALUES ($1, $2, NOW() + ($3 * INTERVAL '1 second'), 'complete')",
+            )
+            .bind(flake.id)
+            .bind(newer_revision)
+            .bind(sequence)
+            .execute(&pool)
+            .await
+            .expect("insert newer bounded timeline commit");
+        }
+        let response = get_system_commits(State(pool.clone()), headers.clone(), Path(system.id))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: SystemCommitsResponse = response_json(response).await;
+        assert_eq!(body.current_commit.as_deref(), Some(revision.as_str()));
+        assert_eq!(body.commits.len(), 50);
+        assert!(body.commits.iter().all(|commit| commit.sha != revision));
+
+        sqlx::query(
+            "INSERT INTO system_states (
+                hostname, change_reason, store_path, generation,
+                generation_matches_current_store_path, timestamp
+             ) VALUES ($1, 'startup', $2, 4, FALSE, NOW() + INTERVAL '1 second')",
+        )
+        .bind(&system.hostname)
+        .bind(&store_path)
+        .execute(&pool)
+        .await
+        .expect("insert mismatched commits API observation");
+        let response = get_system_commits(State(pool.clone()), headers, Path(system.id))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: SystemCommitsResponse = response_json(response).await;
+        assert!(body.current_commit.is_none());
+
+        let hidden_environment = create_environment(
+            &pool,
+            &format!("commits-hidden-{suffix}"),
+            None,
+            "#112233",
+            true,
+            "manual",
+            false,
+            false,
+            false,
+        )
+        .await
+        .expect("insert commits API hidden environment");
+        sqlx::query("UPDATE systems SET environment_id = $1 WHERE id = $2")
+            .bind(hidden_environment.id)
+            .bind(system.id)
+            .execute(&pool)
+            .await
+            .expect("scope commits API system to hidden environment");
+        let viewer_headers =
+            rotation_session_headers(&pool, &format!("viewer-{suffix}"), AuthRole::Viewer).await;
+        let hidden =
+            get_system_commits(State(pool.clone()), viewer_headers.clone(), Path(system.id))
+                .await
+                .into_response();
+        let unknown = get_system_commits(State(pool), viewer_headers, Path(Uuid::new_v4()))
+            .await
+            .into_response();
+        assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+        let hidden_body: ApiError = response_json(hidden).await;
+        let unknown_body: ApiError = response_json(unknown).await;
+        assert_eq!(hidden_body.error, unknown_body.error);
+        assert_eq!(hidden_body.message, unknown_body.message);
+        assert_eq!(hidden_body.details, unknown_body.details);
     }
 
     #[test]

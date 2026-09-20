@@ -142,11 +142,11 @@ Example config:
 
 Config fields:
 
-- `max_critical` (required): maximum allowed critical CVEs.
-- `max_high` (optional): maximum allowed high CVEs.
-- `require_high_justification` (optional bool): if true, high CVEs must have `whitelist_reason`.
+- `max_critical` (optional non-negative integer, defaults to `0`): maximum allowed critical CVEs.
+- `max_high` (optional non-negative integer, defaults to no limit): maximum allowed high CVEs.
+- `require_high_justification` (optional bool, defaults to `false`): if true, high CVEs must have `whitelist_reason`.
 - `strict` (optional bool, defaults to true): blocking vs warning-only behavior.
-- `when_no_scan` (`block` or `skip`): explicit behavior when no completed scan exists.
+- `when_no_scan` (optional `block` or `skip`, defaults to `block`): behavior when no completed scan exists.
 
 Deployment flow position:
 

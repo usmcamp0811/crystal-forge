@@ -4,10 +4,10 @@ use dioxus::prelude::*;
 
 use crate::views::flakes_list::FlakesListViewNew;
 
-/// The flakes list page - now using the rebuilt pixel-perfect design.
+/// Renders the flakes list while preserving URL-backed tray state.
 #[component]
-pub fn FlakesView() -> Element {
+pub fn FlakesView(query: String) -> Element {
     rsx! {
-        FlakesListViewNew {}
+        FlakesListViewNew { initial_query: query }
     }
 }

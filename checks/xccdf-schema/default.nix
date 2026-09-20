@@ -154,14 +154,27 @@ pkgs.runCommand "xccdf-schema-validation" {
   <cf:policy xmlns:cf="urn:crystal-forge:xccdf:1" schema-version="1">
     <cf:execution phase="nix-evaluation" strict="true"/>
     <cf:implementation state="native">
-      <cf:custom-check mode="all" context="nixos-configuration-v1" binding="cfg">
+      <cf:custom-check mode="all" context="nixos-configuration-v2" binding="config">
         <cf:rule field-name="firewallEnabled" strict="true">
           <cf:description>Check that the host firewall is enabled in the NixOS configuration.</cf:description>
-          <cf:expression language="nix">cfg.config.networking.firewall.enable</cf:expression>
+          <cf:expression language="nix">config.networking.firewall.enable</cf:expression>
         </cf:rule>
       </cf:custom-check>
     </cf:implementation>
     <cf:config-json>{"mode":"all"}</cf:config-json>
+    <cf:compliance-metadata-json>{}</cf:compliance-metadata-json>
+    <cf:dependencies-json>[]</cf:dependencies-json>
+  </cf:policy>
+  XML
+
+  cat > cf-policy-empty-custom-check.xml <<'XML'
+  <?xml version="1.0" encoding="UTF-8"?>
+  <cf:policy xmlns:cf="urn:crystal-forge:xccdf:1" schema-version="1">
+    <cf:execution phase="nix-evaluation" strict="true"/>
+    <cf:implementation state="native">
+      <cf:custom-check mode="all" context="nixos-configuration-v2" binding="config"/>
+    </cf:implementation>
+    <cf:config-json>{"mode":"all","rules":[]}</cf:config-json>
     <cf:compliance-metadata-json>{}</cf:compliance-metadata-json>
     <cf:dependencies-json>[]</cf:dependencies-json>
   </cf:policy>
@@ -279,10 +292,10 @@ pkgs.runCommand "xccdf-schema-validation" {
         <cf:policy xmlns:cf="urn:crystal-forge:xccdf:1" schema-version="1">
           <cf:execution phase="nix-evaluation" strict="true"/>
           <cf:implementation state="native">
-            <cf:custom-check mode="all" context="nixos-configuration-v1" binding="cfg">
+            <cf:custom-check mode="all" context="nixos-configuration-v2" binding="config">
               <cf:rule field-name="appEnabled" strict="true">
                 <cf:description>Check that the application is enabled.</cf:description>
-                <cf:expression language="nix">cfg.config.services.app.enable</cf:expression>
+                <cf:expression language="nix">config.services.app.enable</cf:expression>
               </cf:rule>
           </cf:custom-check>
           </cf:implementation>
@@ -306,6 +319,7 @@ pkgs.runCommand "xccdf-schema-validation" {
   # --- Validation: CF extension elements against CF-XCCDF schema ---
   xmllint --noout --schema ${cfSchema} cf-policy-agent.xml
   xmllint --noout --schema ${cfSchema} cf-policy-custom-check.xml
+  xmllint --noout --schema ${cfSchema} cf-policy-empty-custom-check.xml
   xmllint --noout --schema ${cfSchema} cf-policy-identity.xml
 
   # --- Validation: Full writer-shaped output against XCCDF 1.2 ---

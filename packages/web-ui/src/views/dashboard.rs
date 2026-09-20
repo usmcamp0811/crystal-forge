@@ -1545,13 +1545,21 @@ fn WidgetPicker(
 /// Map a widget `nav` slug to a concrete route.
 fn route_for_nav(route: &str) -> Option<Route> {
     Some(match route {
-        "systems" => Route::SystemsView {},
-        "flakes" => Route::FlakesView {},
+        "systems" => Route::SystemsView {
+            query: String::new(),
+        },
+        "flakes" => Route::FlakesView {
+            query: String::new(),
+        },
         "builds" => Route::BuildsView {},
         "evals" => Route::EvaluationsView {},
-        "cves" => Route::CvesView {},
+        "cves" => Route::CvesView {
+            query: String::new(),
+        },
         "caches" => Route::CachesView {},
-        "environments" => Route::EnvironmentsView {},
+        "environments" => Route::EnvironmentsView {
+            query: String::new(),
+        },
         "compliance" => compliance_route(None),
         _ => return None,
     })
@@ -1720,12 +1728,14 @@ mod tests {
             title: "Rotate signing material".into(),
             plan: "Use the approved rotation procedure".into(),
             owner: "Platform Security".into(),
+            assignee: None,
             target_date: Some(chrono::NaiveDate::from_ymd_opt(2026, 9, 15).unwrap()),
             risk: poam_api::PoamRisk::High,
             status: poam_api::PoamStatus::Blocked,
             revision: 4,
             overdue: true,
             finding_count: 1,
+            cve_finding_count: 0,
             created_at: timestamp,
             updated_at: timestamp,
             closed_at: None,

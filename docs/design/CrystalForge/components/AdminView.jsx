@@ -21,6 +21,7 @@ function AdminView({ onNavigate, coach, classif, onClassif }) {
             { k:"roles", l:"Roles",        i:"key" },
             { k:"oidc",  l:"OIDC Mappings",i:"link" },
             { k:"jobs",  l:"Background Jobs",i:"sync" },
+            { k:"retention", l:"Retention", i:"archive" },
             { k:"audit", l:"Audit Log",    i:"history" },
             { k:"server",l:"Server",       i:"gear" },
           ].map(t => (
@@ -33,6 +34,7 @@ function AdminView({ onNavigate, coach, classif, onClassif }) {
         {tab === "roles"  && <AdminRoles/>}
         {tab === "oidc"   && <AdminOidc/>}
         {tab === "jobs"   && <AdminJobs/>}
+        {tab === "retention" && <AdminRetention/>}
         {tab === "audit"  && <AdminAudit/>}
         {tab === "server" && <AdminServer coach={coach} classif={classif} onClassif={onClassif}/>}
       </div>

@@ -1,10 +1,11 @@
 // Scanning view — CVE scan pipeline status + schedule config
 
 function ScanningView({ onNavigate }) {
-  const [tab, setTab] = React.useState("deployed");
+  const [tab, setTab] = React.useState("active");
   const [configOpen, setConfigOpen] = React.useState(false);
   const [logCfg, setLogCfg] = React.useState(null);
   const scanSel = useMultiSelect(tab);
+  const doneArc = useArchive("scans", SCAN_DONE);
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
@@ -15,11 +16,11 @@ function ScanningView({ onNavigate }) {
             CVE scanning · vulnix {SCAN_POLICY.vulnixVersion} · DB updated {SCAN_POLICY.dbAge}
           </p>
         </div>
-        <div style={{ display:"flex", gap:8 }}>
+        <div style={{ display:"flex", gap:12, alignItems:"center" }}>
+          <LiveIndicator />
           <button className="btn btn-ghost focus-ring" onClick={()=>setConfigOpen(true)}>
             <Icon name="gear" size={14}/> Schedule
           </button>
-          <button className="btn btn-primary focus-ring"><Icon name="sync" size={14}/> Rescan all</button>
         </div>
       </div>
 
@@ -42,7 +43,7 @@ function ScanningView({ onNavigate }) {
           <div className="stat-value" style={{ color:"#9ca3af" }}>{SCAN_STATS.unscanned}</div>
         </div>
         <div className="stat" style={{ cursor: SCAN_STATS.failed>0 ? "pointer" : undefined }}
-          onClick={SCAN_STATS.failed>0 ? () => { setTab("all"); const f = SCAN_CONFIGS.find(s=>s.status==="failed"); if (f) setLogCfg(f); } : undefined}
+          onClick={SCAN_STATS.failed>0 ? () => { setTab("completed"); const f = SCAN_CONFIGS.find(s=>s.status==="failed"); if (f) setLogCfg(f); } : undefined}
           title={SCAN_STATS.failed>0 ? "Open the failing scan's log" : undefined}>
           <span className="stat-accent" style={{ "--stat-color":"#f87171" }}/>
           <div className="stat-label">Failed</div>
@@ -60,9 +61,9 @@ function ScanningView({ onNavigate }) {
       <div className="card" style={{ overflow:"hidden" }}>
         <div className="sd-tabs" style={{ padding:"0 16px", borderBottom:"1px solid var(--cf-card-border)", display:"flex", alignItems:"center" }}>
           {[
-            { k:"deployed", l:"Deployed",  n:SCAN_CONFIGS.filter(x=>x.freshness==="deployed").length },
-            { k:"all",      l:"All scans", n:SCAN_CONFIGS.length },
-            { k:"systems",  l:"By system", n:(typeof SCAN_HISTORY!=="undefined"?SCAN_HISTORY.length:0) },
+            { k:"active",    l:"Active",    n:SCAN_ACTIVE.length },
+            { k:"completed", l:"Completed", n:doneArc.include ? SCAN_DONE.length : SCAN_DONE.length - doneArc.archived.size },
+            { k:"systems",   l:"By system", n:(typeof SCAN_HISTORY!=="undefined"?SCAN_HISTORY.length:0) },
           ].map(t => (
             <button key={t.k} className={`sd-tab focus-ring${tab===t.k?" active":""}`} onClick={()=>setTab(t.k)}>
               {t.l} <span className="sd-tab-badge">{t.n}</span>
@@ -73,7 +74,8 @@ function ScanningView({ onNavigate }) {
           ? <ScanAllConfigs onNavigate={onNavigate} onOpenLog={setLogCfg}/>
           : <ScanQueue
               scope={tab}
-              rows={tab === "deployed" ? SCAN_CONFIGS.filter(x=>x.freshness==="deployed") : SCAN_CONFIGS}
+              rows={tab === "active" ? SCAN_ACTIVE : SCAN_DONE}
+              arc={tab === "completed" ? doneArc : null}
               onNavigate={onNavigate} sel={scanSel} onOpenLog={setLogCfg}/>}
       </div>
 
@@ -82,14 +84,35 @@ function ScanningView({ onNavigate }) {
       {configOpen && <ScanScheduleModal onClose={()=>setConfigOpen(false)}/>}
 
       <BulkBar count={scanSel.size} onClear={scanSel.clear}>
-        <button className="btn btn-danger xs focus-ring"
-          onClick={() => { alert(`Cancelling ${scanSel.size} scan${scanSel.size===1?"":"s"}…`); scanSel.clear(); }}>
-          <Icon name="x" size={12} /> Cancel {scanSel.size} scan{scanSel.size===1?"":"s"}
-        </button>
+        {tab === "completed" ? (() => {
+          const ids = [...scanSel.ids];
+          const allArchived = ids.length > 0 && ids.every(id => doneArc.archived.has(id));
+          return (
+            <button className="btn btn-ghost xs focus-ring"
+              title={allArchived ? "Bring these back into the default list" : "Hide from the default list · results are kept"}
+              onClick={()=>{ allArchived ? cfRetention.restore("scans", ids) : cfRetention.archive("scans", ids); scanSel.clear(); }}>
+              <Icon name="archive" size={12} /> {allArchived ? `Restore ${ids.length}` : `Archive ${ids.length}`}
+            </button>
+          );
+        })() : (
+          <button className="btn btn-danger xs focus-ring"
+            onClick={() => { alert(`Cancelling ${scanSel.size} scan${scanSel.size===1?"":"s"}…`); scanSel.clear(); }}>
+            <Icon name="x" size={12} /> Cancel {scanSel.size} scan{scanSel.size===1?"":"s"}
+          </button>
+        )}
       </BulkBar>
     </div>
   );
 }
+
+// A scan is "active" while it's in the pipeline: running, waiting for a slot,
+// or blocked on a build/cache push it needs before it can run at all.
+const SCAN_ACTIVE_STATUSES = ["scanning","queued","awaiting"];
+const SCAN_ACTIVE = SCAN_CONFIGS.filter(s => SCAN_ACTIVE_STATUSES.includes(s.status));
+const SCAN_DONE   = [
+  ...SCAN_CONFIGS.filter(s => !SCAN_ACTIVE_STATUSES.includes(s.status)),
+  ...(typeof SCAN_COMPLETED_HISTORY !== "undefined" ? SCAN_COMPLETED_HISTORY : []),
+];
 
 // Relative timestamps sort by age, so "12m ago" ranks ahead of "3d ago".
 function scanAgeMins(v) {
@@ -107,7 +130,7 @@ function scanAgeMins(v) {
 const SCAN_SEV = (f) => f ? f.crit * 10000 + f.high * 100 + f.med : -1;
 const SCAN_STATUS_ORDER = ["failed","awaiting","scanning","queued","stale","complete","unscanned"];
 
-function ScanQueue({ rows, scope, onNavigate, sel, onOpenLog }) {
+function ScanQueue({ rows, scope, onNavigate, sel, onOpenLog, arc }) {
   const [query, setQuery] = React.useState("");
   const [status, setStatus] = React.useState("all");
   const [fresh, setFresh] = React.useState("all");
@@ -119,7 +142,7 @@ function ScanQueue({ rows, scope, onNavigate, sel, onOpenLog }) {
   const latestIds = React.useMemo(
     () => (typeof latestPerFlake === "function" ? latestPerFlake(rows) : new Set()), [rows]);
 
-  const filtered = rows.filter(r =>
+  const filtered = (arc ? arc.visible(rows) : rows).filter(r =>
     (status === "all" || r.status === status) &&
     (fresh === "all" || r.freshness === fresh) &&
     (!latestOnly || latestIds.has(r.id)) &&
@@ -147,14 +170,21 @@ function ScanQueue({ rows, scope, onNavigate, sel, onOpenLog }) {
   }, [filtered, sort]);
 
   const statuses = SCAN_STATUS_ORDER.filter(k => rows.some(r => r.status === k));
-  const selectable = sorted.filter(r => r.status === "scanning" || r.status === "queued");
+  const selectable = scope === "completed" ? sorted : sorted.filter(r => r.status === "scanning" || r.status === "queued");
+  // Count what retention is hiding from the rows the other filters would keep.
+  const archivedHidden = arc ? rows.filter(r =>
+    arc.archived.has(r.id) &&
+    (status === "all" || r.status === status) &&
+    (fresh === "all" || r.freshness === fresh) &&
+    (!q || r.name.toLowerCase().includes(q) || r.flake.toLowerCase().includes(q) || (r.commit||"").toLowerCase().includes(q))
+  ).length : 0;
 
   return (
     <>
       <div className="scan-toolbar">
         <div className="q-search" style={{ maxWidth:250 }}>
           <Icon name="search" size={13}/>
-          <input className="q-search-input" placeholder={scope==="deployed"?"Search deployed configs…":"Search all scans…"}
+          <input className="q-search-input" placeholder={scope==="active"?"Search the scan queue…":"Search completed scans…"}
             value={query} onChange={e=>setQuery(e.target.value)}/>
           {q && <button className="btn-icon xs focus-ring" title="Clear search" onClick={()=>setQuery("")}><Icon name="x" size={13}/></button>}
         </div>
@@ -162,12 +192,12 @@ function ScanQueue({ rows, scope, onNavigate, sel, onOpenLog }) {
           <option value="all">All statuses</option>
           {statuses.map(k => <option key={k} value={k}>{SCAN_STATUS_META[k].label}</option>)}
         </select>
-        {scope !== "deployed" && (
+        {rows.length > 0 && rows.some(r => r.freshness !== rows[0].freshness) && (
           <select className="input filter-select focus-ring" style={{ width:"auto" }} value={fresh} onChange={e=>setFresh(e.target.value)}>
             <option value="all">All revisions</option>
             <option value="deployed">Deployed</option>
             <option value="recent">Recent</option>
-            <option value="archived">Archived</option>
+            <option value="archived">Superseded</option>
           </select>
         )}
         <button className={`btn btn-ghost xs focus-ring${latestOnly?" active-filter":""}`} onClick={()=>setLatestOnly(v=>!v)}
@@ -175,30 +205,38 @@ function ScanQueue({ rows, scope, onNavigate, sel, onOpenLog }) {
           <Icon name="star" size={12}/> Latest per flake
         </button>
         <span className="filter-count" style={{ marginLeft:"auto" }}>{sorted.length} of {rows.length}</span>
+        {arc && <ArchiveControls kind="scans" arc={arc} hidden={archivedHidden} label="scans"/>}
         {selectable.length > 0 && <MultiSelectHint />}
       </div>
       {sorted.length === 0 ? (
+        rows.length === 0 && scope === "active" ? (
+          <div className="empty" style={{ margin:24 }}><h3>Nothing in the scan queue</h3><div>Every tracked config has a result. New scans are enqueued on build and on the schedule.</div></div>
+        ) : archivedHidden > 0 && !arc.include ? (
+          <div className="q-empty"><Icon name="archive" size={20}/><div>{archivedHidden.toLocaleString()} matching scan{archivedHidden===1?" is":"s are"} archived under the current retention rules.</div><button className="btn btn-ghost xs focus-ring" onClick={()=>arc.setInclude(true)}>Include archived</button></div>
+        ) : (
         <div className="q-empty">
           <Icon name="search" size={20}/>
           <div>No scans match these filters.</div>
           <button className="btn btn-ghost xs focus-ring" onClick={()=>{ setQuery(""); setStatus("all"); setFresh("all"); setLatestOnly(false); }}>Reset filters</button>
         </div>
+        )
       ) : (
-        <ScanTable rows={sorted} onNavigate={onNavigate} sel={sel} onOpenLog={onOpenLog} sort={sort} onSort={setSort} showFreshness={scope!=="deployed"}/>
+        <ScanTable rows={sorted} onNavigate={onNavigate} sel={sel} onOpenLog={onOpenLog} sort={sort} onSort={setSort} showFreshness={true} arc={arc} selectAll={scope==="completed"}/>
       )}
     </>
   );
 }
 
-function ScanTable({ rows, onNavigate, sel, onOpenLog, sort, onSort, showFreshness = true }) {
+function ScanTable({ rows, onNavigate, sel, onOpenLog, sort, onSort, showFreshness = true, arc, selectAll }) {
   const latestIds = React.useMemo(() => (typeof latestPerFlake === "function" ? latestPerFlake(rows) : new Set()), [rows]);
   const freshChip = (f) => {
-    const map = { deployed:["chip-healthy","deployed"], recent:["chip-info","recent"], archived:["chip-unknown","archived"] };
+    const map = { deployed:["chip-healthy","deployed"], recent:["chip-info","recent"], archived:["chip-unknown","superseded"] };
     const [cls,label] = map[f] || ["chip-unknown",f];
     return <span className={`chip ${cls}`} style={{ fontSize:10 }}>{label}</span>;
   };
   const isCancellable = (s) => s.status === "scanning" || s.status === "queued";
-  const cancellableIds = sel ? rows.filter(isCancellable).map(s => s.id) : [];
+  const isSelectable = (s) => selectAll || isCancellable(s);
+  const cancellableIds = sel ? rows.filter(isSelectable).map(s => s.id) : [];
   const SortTh = ({ k, children, align }) => {
     if (!onSort) return <th style={align?{textAlign:align}:undefined}>{children}</th>;
     const on = sort && sort.key === k;
@@ -232,7 +270,7 @@ function ScanTable({ rows, onNavigate, sel, onOpenLog, sort, onSort, showFreshne
           const checked = sel && sel.has(s.id);
           return (
             <tr key={s.id}
-              className={`row-clickable ${sel && isCancellable(s) ? "selectable " : ""}${checked ? "row-checked" : ""}`}
+              className={`row-clickable ${sel && isSelectable(s) ? "selectable " : ""}${checked ? "row-checked" : ""}${arc?.isArchived(s) ? " q-row-archived" : ""}`}
               onMouseDown={sel ? (e)=>{ if(e.shiftKey) e.preventDefault(); } : undefined}
               onClick={sel ? (e)=>{ if (e.shiftKey || e.metaKey || e.ctrlKey) { sel.handleClick(e, s.id, cancellableIds); } else { onOpenLog?.(s); } } : ()=>onOpenLog?.(s)}>
               <td>
@@ -242,10 +280,11 @@ function ScanTable({ rows, onNavigate, sel, onOpenLog, sort, onSort, showFreshne
               {showFreshness && <td>{freshChip(s.freshness)}</td>}
               <td>
                 <span className={`chip ${meta.cls}`}><span className="chip-dot" style={{ background:meta.color }}/>{meta.label}</span>
+                {arc?.isArchived(s) && <ArchivedChip reason={arc.reason(s)}/>}
                 {/* vulnix reports no progress — only that it is running. Show elapsed instead of a fake bar. */}
                 {s.status==="scanning" && s.startedAgo && (
                   <div style={{ fontSize:10, color:"var(--cf-text-muted)", marginTop:3, display:"flex", alignItems:"center", gap:5 }}>
-                    <span className="scan-pulse"/> running {s.startedAgo}
+                    <span className="scan-pulse"/> running <LiveDuration dur={s.startedAgo} live style={{ fontSize:10, color:"var(--cf-text-muted)" }}/>
                   </div>
                 )}
                 {s.status==="awaiting" && s.awaitingDetail && (
@@ -467,6 +506,10 @@ function ScanAllConfigs({ onNavigate, onOpenLog }) {
   const [query, setQuery] = React.useState("");
   const [envFilter, setEnvFilter] = React.useState("all");
   const [expanded, setExpanded] = React.useState(null);
+  // Scan history follows the same retention rules as builds and evals: older
+  // results are hidden, never removed. Keyed per system so expanding one
+  // long-lived host doesn't unhide every other.
+  const scanArc = useArchive("scans", React.useMemo(() => SCAN_HISTORY.flatMap(s => s.commits || []), []));
 
   const rows = SCAN_HISTORY.filter(s =>
     (envFilter === "all" || s.environment === envFilter) &&
@@ -474,7 +517,7 @@ function ScanAllConfigs({ onNavigate, onOpenLog }) {
   ).sort((a,b) => b.totalConfigs - a.totalConfigs);
 
   const freshChip = (f) => {
-    const map = { deployed:["chip-healthy","deployed"], recent:["chip-info","recent"], archived:["chip-unknown","archived"] };
+    const map = { deployed:["chip-healthy","deployed"], recent:["chip-info","recent"], archived:["chip-unknown","superseded"] };
     const [cls,label] = map[f] || ["chip-unknown",f];
     return <span className={`chip ${cls}`} style={{ fontSize:10 }}>{label}</span>;
   };
@@ -554,17 +597,35 @@ function ScanAllConfigs({ onNavigate, onOpenLog }) {
                     </div>
                   </td>
                 </tr>
-                {isOpen && (
+                {isOpen && (() => {
+                  const shownCommits = scanArc.visible(s.commits);
+                  const hiddenCommits = s.commits.length - shownCommits.length;
+                  return (
                   <tr className="scan-sys-expand-row">
                     <td colSpan={6} style={{ padding:0 }}>
                       <div className="scan-sys-expand">
                         <div className="scan-sys-expand-head">
                           <span>
-                            {s.commits.length} config{s.commits.length===1?"":"s"} for this system{s.commits.length>8 ? " · newest first" : ""}
+                            {shownCommits.length} config{shownCommits.length===1?"":"s"} for this system{shownCommits.length>8 ? " · newest first" : ""}
+                            {hiddenCommits > 0 && (
+                              <>
+                                {" · "}
+                                <button className="scan-arc-link focus-ring" onClick={e=>{e.stopPropagation();scanArc.setInclude(v=>!v);}}
+                                  title="Older scan results are hidden by retention, not deleted">
+                                  {hiddenCommits} older hidden by retention
+                                </button>
+                              </>
+                            )}
+                            {scanArc.include && (
+                              <>
+                                {" · "}
+                                <button className="scan-arc-link focus-ring" onClick={e=>{e.stopPropagation();scanArc.setInclude(false);}}>hide old scans again</button>
+                              </>
+                            )}
                           </span>
                           <button className="btn btn-ghost focus-ring xs"><Icon name="sync" size={10}/> Rescan all</button>
                         </div>
-                        <div className="scan-sys-expand-table-wrap" style={{ maxHeight: s.commits.length > 8 ? 300 : "none", overflowY: s.commits.length > 8 ? "auto" : "visible" }}>
+                        <div className="scan-sys-expand-table-wrap" style={{ maxHeight: shownCommits.length > 8 ? 300 : "none", overflowY: shownCommits.length > 8 ? "auto" : "visible" }}>
                         <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
                           <thead style={{ position:"sticky", top:0, zIndex:1 }}>
                             <tr style={{ color:"var(--cf-text-muted)", fontSize:10, textTransform:"uppercase", letterSpacing:"0.06em", background:"var(--cf-card-bg)" }}>
@@ -577,7 +638,7 @@ function ScanAllConfigs({ onNavigate, onOpenLog }) {
                             </tr>
                           </thead>
                           <tbody>
-                            {s.commits.map((c, i) => {
+                            {shownCommits.map((c, i) => {
                               const meta = SCAN_STATUS_META[c.status];
                               const openable = c.status !== "needs-build" && c.status !== "unscanned";
                               const openLog = () => onOpenLog && onOpenLog({
@@ -626,7 +687,8 @@ function ScanAllConfigs({ onNavigate, onOpenLog }) {
                       </div>
                     </td>
                   </tr>
-                )}
+                  );
+                })()}
               </React.Fragment>
             );
           })}
@@ -673,13 +735,13 @@ function ScanScheduleModal({ onClose }) {
           <Row title="Recent configs" desc="Built in the last 30 days but not currently deployed.">
             <IntervalSelect value={form.recentInterval} onChange={v=>set("recentInterval",v)}/>
           </Row>
-          <Row title="Archived configs" desc="Old / superseded configs no longer in rotation. Scan rarely (or never) to save builder time.">
+          <Row title="Superseded configs" desc="Old configs no longer in rotation. Scan rarely (or never) to save builder time.">
             <div style={{ display:"flex", alignItems:"center", gap:8 }}>
               <input type="checkbox" checked={form.archivedEnabled} onChange={e=>set("archivedEnabled",e.target.checked)} style={{ accentColor:"var(--cf-brand-purple)" }}/>
               <IntervalSelect value={form.archivedInterval} onChange={v=>set("archivedInterval",v)} disabled={!form.archivedEnabled}/>
             </div>
           </Row>
-          <Row title="Rebuild to scan old configs" desc="vulnix needs a realised derivation. Archived configs evicted from cache must be rebuilt before they can be scanned — this can be expensive. Off = skip uncached configs instead of building them.">
+          <Row title="Rebuild to scan old configs" desc="vulnix needs a realised derivation. Superseded configs evicted from cache must be rebuilt before they can be scanned — this can be expensive. Off = skip uncached configs instead of building them.">
             <label style={{ display:"flex", gap:8, alignItems:"center", fontSize:13, cursor:"pointer" }}>
               <input type="checkbox" checked={form.rebuildToScan ?? false} onChange={e=>set("rebuildToScan",e.target.checked)} style={{ accentColor:"var(--cf-brand-purple)" }}/>
               <span>{form.rebuildToScan ? "On" : "Off"}</span>

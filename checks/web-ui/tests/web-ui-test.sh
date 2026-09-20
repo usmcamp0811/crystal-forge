@@ -225,6 +225,14 @@ seeded commit. Restart the development stack to reseed the fixture data:
 EOF
     exit 1
   fi
+  # The browser harness uses the same connection for SQL-backed fixture setup
+  # and cleanup. Export the resolved defaults so host runs do not fall back to
+  # the NixOS VM's passwordless sudo path.
+  export DB_HOST="$reset_db_host"
+  export DB_PORT="$reset_db_port"
+  export DB_USER="$reset_db_user"
+  export DB_PASSWORD="$reset_db_password"
+  export DB_NAME="$reset_db_name"
 fi
 
 # The Dioxus development server answers HTTP before its first WebAssembly

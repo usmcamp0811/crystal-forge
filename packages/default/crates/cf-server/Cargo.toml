@@ -89,5 +89,9 @@ path = "src/bin/xccdf-export-fixture.rs"
 name = "hardening-worker"
 path = "src/bin/hardening-worker.rs"
 
+[[bin]]
+name = "config-inspector-worker"
+path = "src/bin/config-inspector-worker.rs"
+
 [package.metadata.sqlx]
 offline = true

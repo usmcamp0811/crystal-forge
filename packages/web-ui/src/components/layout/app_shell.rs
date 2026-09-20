@@ -8,12 +8,14 @@ use crate::api::client::{
 };
 use crate::api::models::{
     AuthContext, AuthMode, AuthUser, ClassificationBannerConfig, Role, UpdateUserPreferences,
-    UserNotificationDto, UserPreferencesDto,
+    UserPreferencesDto,
 };
 use crate::components::layout::sidebar::{
     MobileDrawer, PreferencesContext, SidebarContext, SidebarNav,
 };
-use crate::components::layout::topbar::load_account_notifications;
+use crate::components::layout::topbar::{
+    NotificationFeed, NotificationOwner, load_account_notifications,
+};
 use crate::components::layout::{AccountNotificationsContext, TopBar};
 use crate::components::layout::{
     BannerPlacement, DEV_MODE_BANNER_HEIGHT_PX, DevModeBanner, use_dev_mode_enabled,
@@ -79,10 +81,8 @@ fn ui_check_mock_auth_context() -> AuthContext {
 }
 
 fn should_show_admin_denied(route: &Route, auth_context: &Option<AuthContext>) -> bool {
-    matches!(
-        route,
-        Route::AdminView { .. } | Route::CvesView { .. } | Route::ScanningView { .. }
-    ) && !auth::is_admin(auth_context)
+    matches!(route, Route::AdminView { .. } | Route::ScanningView { .. })
+        && !auth::is_admin(auth_context)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,12 +169,7 @@ pub fn AppShell() -> Element {
     let mut preference_save_in_flight = use_signal(|| false);
     let mut preference_save_user_id = use_signal(|| None::<String>);
     let mut preference_save_generation = use_signal(|| 0_u64);
-    let mut notification_items = use_signal(Vec::<UserNotificationDto>::new);
-    let mut unread_count = use_signal(|| 0_i64);
-    let mut notification_next_cursor = use_signal(|| None::<String>);
-    let mut notifications_loading = use_signal(|| false);
-    let mut notifications_loading_more = use_signal(|| false);
-    let mut notifications_error = use_signal(|| None::<String>);
+    let mut notification_feed = use_signal(NotificationFeed::default);
     let mut notification_poll_owner = use_signal(|| 0_u64);
     let save_update = Callback::new(move |update: UpdateUserPreferences| {
         save_error.set(None);
@@ -202,12 +197,7 @@ pub fn AppShell() -> Element {
     });
 
     use_context_provider(|| AccountNotificationsContext {
-        items: notification_items,
-        unread_count,
-        next_cursor: notification_next_cursor,
-        loading: notifications_loading,
-        loading_more: notifications_loading_more,
-        error: notifications_error,
+        feed: notification_feed,
     });
 
     let notification_auth = use_memo(move || {
@@ -228,41 +218,26 @@ pub fn AppShell() -> Element {
     use_effect(move || {
         let (auth_user_id, auth_generation) = notification_auth();
 
-        let owner = (*notification_poll_owner.peek()).saturating_add(1);
-        notification_poll_owner.set(owner);
-        let notification_ctx = AccountNotificationsContext {
-            items: notification_items,
-            unread_count,
-            next_cursor: notification_next_cursor,
-            loading: notifications_loading,
-            loading_more: notifications_loading_more,
-            error: notifications_error,
-        };
+        let poll_owner = (*notification_poll_owner.peek()).saturating_add(1);
+        notification_poll_owner.set(poll_owner);
+        let owner = auth_user_id.map(|user_id| NotificationOwner::new(user_id, auth_generation));
+        notification_feed.write().reset(owner.clone());
 
-        // Account-scoped request flags belong to the previous poll owner. A
-        // stale response cannot clear them after an authentication change.
-        notifications_loading.set(false);
-        notifications_loading_more.set(false);
-        notifications_error.set(None);
-
-        let Some(user_id) = auth_user_id else {
-            notification_items.set(Vec::new());
-            unread_count.set(0);
-            notification_next_cursor.set(None);
+        let Some(owner) = owner else {
             return;
         };
 
         spawn(async move {
             loop {
-                if *notification_poll_owner.peek() != owner {
+                if *notification_poll_owner.peek() != poll_owner {
                     break;
                 }
                 load_account_notifications(
-                    notification_ctx,
-                    app_state,
-                    Some(user_id.clone()),
-                    auth_generation,
-                    None,
+                    AccountNotificationsContext {
+                        feed: notification_feed,
+                    },
+                    owner.clone(),
+                    false,
                     false,
                 );
                 gloo_timers::future::TimeoutFuture::new(30_000).await;
@@ -903,22 +878,18 @@ mod tests {
     }
 
     #[test]
-    fn cve_route_denied_for_non_admin() {
-        let route = Route::CvesView {};
-        assert!(should_show_admin_denied(
+    fn cve_route_uses_authenticated_api_visibility_for_every_role() {
+        let route = Route::CvesView {
+            query: String::new(),
+        };
+        assert!(!should_show_admin_denied(
             &route,
             &auth_context(true, vec![Role::Operator])
         ));
-        assert!(should_show_admin_denied(
+        assert!(!should_show_admin_denied(
             &route,
             &auth_context(true, vec![Role::Viewer])
         ));
-        assert!(should_show_admin_denied(&route, &None));
-    }
-
-    #[test]
-    fn cve_route_allowed_for_admin() {
-        let route = Route::CvesView {};
         assert!(!should_show_admin_denied(
             &route,
             &auth_context(true, vec![Role::Admin])

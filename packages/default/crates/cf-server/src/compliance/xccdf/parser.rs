@@ -396,6 +396,7 @@ struct ParserState {
     current_profile: Option<ParsedProfile>,
     current_group: Option<ParsedGroup>,
     current_check: Option<PendingCheck>,
+    current_cf_custom_rule: Option<CfCustomCheckRule>,
     current_fix: Option<FixContent>,
     current_ident: Option<StandardIdentifier>,
     current_ref: Option<Reference>,
@@ -446,6 +447,7 @@ impl ParserState {
             current_profile: None,
             current_group: None,
             current_check: None,
+            current_cf_custom_rule: None,
             current_fix: None,
             current_ident: None,
             current_ref: None,
@@ -627,12 +629,55 @@ impl ParserState {
                 self.saw_supported_cf_content = true;
                 ParseControl::Continue
             }
+            (ElementNamespace::CrystalForge, b"custom-check") => {
+                self.saw_supported_cf_content = true;
+                if let Some(meta) = self
+                    .current_rule
+                    .as_mut()
+                    .and_then(|rule| rule.cf_policy_meta.as_mut())
+                {
+                    meta.policy_type
+                        .get_or_insert_with(|| "custom_check".into());
+                    meta.custom_check = Some(CfCustomCheck {
+                        mode: attr(&attrs, b"mode").map(str::to_owned),
+                        context: attr(&attrs, b"context").map(str::to_owned),
+                        binding: attr(&attrs, b"binding").map(str::to_owned),
+                        rules: Vec::new(),
+                    });
+                }
+                ParseControl::Continue
+            }
+            (ElementNamespace::CrystalForge, b"rule") => {
+                self.saw_supported_cf_content = true;
+                if self
+                    .current_rule
+                    .as_ref()
+                    .and_then(|rule| rule.cf_policy_meta.as_ref())
+                    .and_then(|meta| meta.custom_check.as_ref())
+                    .is_some()
+                {
+                    self.current_cf_custom_rule = Some(CfCustomCheckRule {
+                        field_name: attr(&attrs, b"field-name").map(str::to_owned),
+                        strict: attr(&attrs, b"strict").and_then(parse_xsd_boolean),
+                        description: None,
+                        expression: None,
+                        language: None,
+                    });
+                }
+                ParseControl::Continue
+            }
+            (ElementNamespace::CrystalForge, b"expression") => {
+                self.saw_supported_cf_content = true;
+                if let Some(rule) = self.current_cf_custom_rule.as_mut() {
+                    rule.language = attr(&attrs, b"language").map(str::to_owned);
+                }
+                ParseControl::Continue
+            }
             (ElementNamespace::CrystalForge, implementation)
                 if matches!(
                     implementation,
                     b"require-crystal-forge-agent"
                         | b"require-packages"
-                        | b"custom-check"
                         | b"composite"
                         | b"require-cve-check"
                         | b"time-window"
@@ -710,9 +755,7 @@ impl ParserState {
             // config-json / compliance-metadata-json / dependencies-json and
             // in identity attributes, so the parser only has to recognise them
             // (never treat them as unknown) to keep classification exact.
-            (ElementNamespace::CrystalForge, b"rule")
-            | (ElementNamespace::CrystalForge, b"description")
-            | (ElementNamespace::CrystalForge, b"expression")
+            (ElementNamespace::CrystalForge, b"description")
             | (ElementNamespace::CrystalForge, b"dependencies")
             | (ElementNamespace::CrystalForge, b"nix-option")
             | (ElementNamespace::CrystalForge, b"module-ref")
@@ -763,8 +806,12 @@ impl ParserState {
                 }
             }
             (ElementNamespace::Xccdf, b"description") => {
-                if let Some(ref mut bm) = self.benchmark {
-                    bm.description = bm.description.clone().or(Some(self.current_text.clone()));
+                if self.current_rule.is_none()
+                    && self.current_group.is_none()
+                    && self.current_profile.is_none()
+                    && let Some(ref mut bm) = self.benchmark
+                {
+                    bm.description = Some(self.current_text.clone());
                 }
                 if let Some(ref mut rule) = self.current_rule {
                     rule.description = Some(self.current_text.clone());
@@ -958,6 +1005,27 @@ impl ParserState {
                     .and_then(|r| r.cf_policy_meta.as_mut())
                 {
                     meta.version = Some(self.current_text.clone());
+                }
+            }
+            (ElementNamespace::CrystalForge, b"description") => {
+                if let Some(rule) = self.current_cf_custom_rule.as_mut() {
+                    rule.description = Some(self.current_text.clone());
+                }
+            }
+            (ElementNamespace::CrystalForge, b"expression") => {
+                if let Some(rule) = self.current_cf_custom_rule.as_mut() {
+                    rule.expression = Some(self.current_text.clone());
+                }
+            }
+            (ElementNamespace::CrystalForge, b"rule") => {
+                if let Some(custom_rule) = self.current_cf_custom_rule.take()
+                    && let Some(custom_check) = self
+                        .current_rule
+                        .as_mut()
+                        .and_then(|rule| rule.cf_policy_meta.as_mut())
+                        .and_then(|meta| meta.custom_check.as_mut())
+                {
+                    custom_check.rules.push(custom_rule);
                 }
             }
             (ElementNamespace::CrystalForge, b"config-json") => {
@@ -1332,6 +1400,7 @@ impl ParserState {
                 execution_phase: None,
                 strict: None,
                 policy_type: None,
+                custom_check: None,
                 config: None,
                 compliance_metadata: None,
                 dependencies: None,

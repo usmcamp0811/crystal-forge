@@ -152,6 +152,16 @@ async fn create_system_assignment(
     bundle_version_id: Uuid,
     system_id: Uuid,
 ) {
+    create_system_assignment_by(pool, bundle_id, bundle_version_id, system_id, None).await;
+}
+
+async fn create_system_assignment_by(
+    pool: &PgPool,
+    bundle_id: Uuid,
+    bundle_version_id: Uuid,
+    system_id: Uuid,
+    created_by: Option<Uuid>,
+) {
     // Create the assignment lineage row
     let assignment_id = Uuid::new_v4();
     sqlx::query(
@@ -173,13 +183,14 @@ async fn create_system_assignment(
     let version_id = Uuid::new_v4();
     sqlx::query(
         r#"INSERT INTO compliance_bundle_assignment_versions
-           (id, assignment_id, version_number, bundle_version_id, enforcement_mode,
-            assignment_overlay_digest, created_at)
-           VALUES ($1, $2, 1, $3, 'enforce', 'test-digest', CURRENT_TIMESTAMP)"#,
+            (id, assignment_id, version_number, bundle_version_id, enforcement_mode,
+             assignment_overlay_digest, created_by, created_at)
+            VALUES ($1, $2, 1, $3, 'enforce', 'test-digest', $4, CURRENT_TIMESTAMP)"#,
     )
     .bind(version_id)
     .bind(assignment_id)
     .bind(bundle_version_id)
+    .bind(created_by)
     .execute(pool)
     .await
     .expect("create assignment version");
@@ -191,6 +202,22 @@ async fn create_system_assignment(
         .execute(pool)
         .await
         .expect("set current_version_id");
+}
+
+async fn create_user(pool: &PgPool, username: &str, email: &str) -> Uuid {
+    let user_id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO users
+           (id, username, email, first_name, last_name, user_type, is_active)
+           VALUES ($1, $2, $3, 'Assignment', 'Tester', 'human', true)"#,
+    )
+    .bind(user_id)
+    .bind(username)
+    .bind(email)
+    .execute(pool)
+    .await
+    .expect("create assignment actor");
+    user_id
 }
 
 async fn create_system_assignment_with_reason(
@@ -555,6 +582,29 @@ async fn test_assignment_status_current_version(pool: PgPool) {
         rollup.assignment_status,
         Some("current".to_string()),
         "System assigned to current published version should have status 'current'"
+    );
+}
+
+#[sqlx::test]
+async fn test_bundle_systems_resolves_assignment_actor_username(pool: PgPool) {
+    let bundle_id = create_bundle(&pool, "assignment-actor", "NIST CSF").await;
+    let version_id =
+        create_bundle_version(&pool, bundle_id, "1.0", "accepted", "Test version").await;
+    set_current_published(&pool, bundle_id, version_id).await;
+
+    let system_id = create_system(&pool, "assignment-actor-system", None).await;
+    let actor_id = create_user(&pool, "assignment-approver", "approver@example.invalid").await;
+    create_system_assignment_by(&pool, bundle_id, version_id, system_id, Some(actor_id)).await;
+
+    let response = list_bundle_systems_for_version(&pool, bundle_id, version_id)
+        .await
+        .expect("query systems with assignment actor")
+        .expect("bundle/version exists");
+
+    assert_eq!(response.systems.len(), 1);
+    assert_eq!(
+        response.systems[0].assignment_approved_by.as_deref(),
+        Some("assignment-approver")
     );
 }
 

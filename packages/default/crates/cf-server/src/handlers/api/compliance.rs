@@ -2383,20 +2383,21 @@ async fn persist_assignment_inner(
     // Assignment uniqueness is defined by bundle lineage + target, not by a
     // mutable/draft bundle-version row. Lock the target identity while checking
     // it so concurrent creates cannot silently create ambiguous assignments.
-    let duplicate_assignment: Option<Uuid> = sqlx::query_scalar(
-        r#"SELECT a.id
+    let duplicate_assignment: Option<(Uuid, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+        r#"SELECT a.id, a.current_version_id, av.id
            FROM compliance_bundle_assignments a
-           JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
-           JOIN compliance_bundle_versions bv ON bv.id = av.bundle_version_id
+           LEFT JOIN compliance_bundle_assignment_versions av
+             ON av.id = a.current_version_id
+            AND av.assignment_id = a.id
            WHERE a.active
-             AND bv.bundle_id = (
+             AND a.bundle_id = (
                SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1
-           )
+            )
              AND a.scope_type = $2
              AND (($2 = 'environment' AND a.environment_id = $3)
                OR ($2 = 'system' AND a.system_id = $3))
               AND ($4::uuid IS NULL OR a.id <> $4)
-           FOR UPDATE"#,
+           FOR UPDATE OF a"#,
     )
     .bind(authoritative_bundle_version_id)
     .bind(scope_type)
@@ -2406,8 +2407,27 @@ async fn persist_assignment_inner(
     .await
     .map_err(|_| internal_error("Failed to validate assignment uniqueness"))?;
 
-    if duplicate_assignment.is_some() {
+    if let Some((lineage_id, current_version_id, authoritative_version_id)) = duplicate_assignment {
         let _ = tx.rollback().await;
+        if current_version_id.is_none() || authoritative_version_id.is_none() {
+            tracing::error!(
+                assignment_id = %lineage_id,
+                current_version_id = ?current_version_id,
+                bundle_id = %bundle_lineage_id,
+                scope_type,
+                scope_id = %payload.scope_id,
+                "active assignment lineage has no authoritative current version"
+            );
+            return Err((
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "Assignment lineage incomplete",
+                    "message": "The existing assignment lineage has no authoritative current version",
+                    "code": "ASSIGNMENT_LINEAGE_INCOMPLETE"
+                })),
+            )
+                .into_response());
+        }
         return Err((
             StatusCode::CONFLICT,
             Json(serde_json::json!({
@@ -2498,7 +2518,18 @@ async fn persist_assignment_inner(
         .await;
         if let Err(error) = inserted {
             let _ = tx.rollback().await;
-            tracing::error!("Failed to create assignment lineage: {error}");
+            if let Some(database_error) = error.as_database_error() {
+                let message: String = database_error.message().chars().take(512).collect();
+                tracing::error!(
+                    code = ?database_error.code(),
+                    message,
+                    constraint = ?database_error.constraint(),
+                    table = ?database_error.table(),
+                    "failed to create assignment lineage"
+                );
+            } else {
+                tracing::error!(error = %error, "failed to create assignment lineage");
+            }
             return Err(internal_error("Failed to create assignment"));
         }
         if failure_point == Some("after_lineage_insert") {
@@ -8005,7 +8036,9 @@ fn is_body_limit_error(err: &axum::extract::multipart::MultipartError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::session::{SESSION_COOKIE_NAME, hash_token};
+    use crate::auth::session::{
+        CSRF_COOKIE_NAME, CSRF_HEADER_NAME, SESSION_COOKIE_NAME, hash_token,
+    };
     use crate::compliance::canonical::{ImplementationState, PublicationState};
     use crate::compliance::interchange::{MAX_XCCDF_MULTIPART_BYTES, MAX_XCCDF_XML_BYTES};
     use crate::models::auth_identity::AuthRole;
@@ -8694,6 +8727,10 @@ mod tests {
                 "/api/v1/compliance/bundle-versions/:version_id/publish",
                 post(publish_bundle_version),
             )
+            .route(
+                "/api/v1/compliance/bundle-versions/:version_id/xccdf",
+                get(export_bundle_xccdf),
+            )
             // Draft derivation
             .route(
                 "/api/v1/policies/:policy_id/drafts",
@@ -8777,15 +8814,35 @@ mod tests {
     /// Create a minimal draft policy and return (policy_id, version_id, digest).
     /// Does NOT insert a manual version — relies on the trigger to create '0.1.0'.
     async fn make_draft_policy(pool: &PgPool, name: &str) -> (Uuid, Uuid, String) {
+        make_draft_policy_with_config(
+            pool,
+            name,
+            &serde_json::json!({
+                "mode": "all",
+                "context": "nixos-configuration-v1",
+                "binding": "cfg",
+                "rules": []
+            }),
+        )
+        .await
+    }
+
+    /// Creates a minimal draft policy with the specified custom-check config.
+    async fn make_draft_policy_with_config(
+        pool: &PgPool,
+        name: &str,
+        config: &serde_json::Value,
+    ) -> (Uuid, Uuid, String) {
         use crate::compliance::digest::PolicyVersionCanonical;
 
         let policy_id = Uuid::new_v4();
         sqlx::query(
             r#"INSERT INTO deployment_policies (id, name, policy_type, enabled, config)
-               VALUES ($1, $2, 'custom_check', false, '{"mode":"all","context":"nixos-configuration-v1","binding":"cfg","rules":[]}')"#,
+               VALUES ($1, $2, 'custom_check', false, $3)"#,
         )
         .bind(policy_id)
         .bind(name)
+        .bind(config)
         .execute(pool)
         .await
         .expect("insert deployment_policy");
@@ -8847,25 +8904,80 @@ mod tests {
     }
 
     async fn make_draft_cve_policy(pool: &PgPool, name: &str) -> (Uuid, Uuid) {
+        make_draft_cve_policy_with_config(
+            pool,
+            name,
+            &serde_json::json!({
+                "max_critical": 0,
+                "max_high": null,
+                "require_high_justification": false,
+                "strict": true,
+                "when_no_scan": "block",
+            }),
+        )
+        .await
+    }
+
+    async fn make_draft_cve_policy_with_config(
+        pool: &PgPool,
+        name: &str,
+        config: &serde_json::Value,
+    ) -> (Uuid, Uuid) {
         let policy_id = Uuid::new_v4();
         sqlx::query(
             r#"INSERT INTO deployment_policies (id, name, policy_type, enabled, config)
-               VALUES ($1, $2, 'require_cve_check', false,
-                       '{"max_critical":0,"max_high":null,"require_high_justification":false,"strict":true,"when_no_scan":"block"}')"#,
+               VALUES ($1, $2, 'require_cve_check', false, $3)"#,
         )
         .bind(policy_id)
         .bind(name)
+        .bind(config)
         .execute(pool)
         .await
         .expect("insert cve deployment_policy");
-        let version_id: Uuid = sqlx::query_scalar(
-            "SELECT id FROM deployment_policy_versions WHERE policy_id = $1 AND version = '0.1.0'",
+        let version_row: (
+            Uuid,
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            serde_json::Value,
+            serde_json::Value,
+            serde_json::Value,
+            Option<String>,
+            Option<bool>,
+        ) = sqlx::query_as(
+            r#"SELECT id, name, description, policy_type, implementation_state,
+                      execution_phase, config, compliance_metadata, dependencies,
+                      opaque_xml, enabled_by_default
+               FROM deployment_policy_versions
+               WHERE policy_id = $1 AND version = '0.1.0'"#,
         )
         .bind(policy_id)
         .fetch_one(pool)
         .await
         .expect("fetch cve version");
-        (policy_id, version_id)
+        let canonical = crate::compliance::digest::PolicyVersionCanonical {
+            name: version_row.1,
+            description: version_row.2,
+            policy_type: version_row.3,
+            implementation_state: version_row.4,
+            execution_phase: version_row.5,
+            config: version_row.6,
+            compliance_metadata: version_row.7,
+            dependencies: version_row.8,
+            opaque_xml_digest: crate::compliance::digest::PolicyVersionCanonical::digest_opaque_xml(
+                version_row.9.as_deref(),
+            ),
+            enabled_by_default: version_row.10,
+        };
+        sqlx::query("UPDATE deployment_policy_versions SET semantic_digest = $1 WHERE id = $2")
+            .bind(canonical.compute_digest())
+            .bind(version_row.0)
+            .execute(pool)
+            .await
+            .expect("update CVE fixture digest");
+        (policy_id, version_row.0)
     }
 
     /// Publish the given policy version via direct DB write (used in fixture setup).
@@ -8908,6 +9020,42 @@ mod tests {
         .expect("set published pointer");
 
         tx.commit().await.expect("commit db_publish_policy_version");
+    }
+
+    /// Publishes a bundle version directly for assignment fixture setup.
+    async fn db_publish_bundle_version(pool: &PgPool, version_id: Uuid) {
+        let mut tx = pool.begin().await.expect("begin bundle publication");
+        sqlx::query(
+            "UPDATE compliance_bundles
+             SET current_draft_version_id = NULL
+             WHERE current_draft_version_id = $1",
+        )
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await
+        .expect("clear bundle draft pointer");
+        sqlx::query(
+            "UPDATE compliance_bundle_versions
+             SET publication_state = 'accepted', published_at = now(),
+                 trust_state = 'trusted', trusted_at = now()
+             WHERE id = $1",
+        )
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await
+        .expect("publish bundle version");
+        sqlx::query(
+            "UPDATE compliance_bundles
+             SET current_published_version_id = $1
+             WHERE id = (
+                 SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1
+             )",
+        )
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await
+        .expect("set bundle published pointer");
+        tx.commit().await.expect("commit bundle publication");
     }
 
     /// Create a draft bundle with the given set of already-published policy version IDs.
@@ -9635,11 +9783,14 @@ mod tests {
         // Publish via API first
         let base = spawn_phase1_server(pool.clone()).await;
         let client = reqwest::Client::new();
+        let csrf = format!("policy-draft-csrf-{}", Uuid::new_v4().simple());
+        let cookie = format!("{SESSION_COOKIE_NAME}={token}; {CSRF_COOKIE_NAME}={csrf}");
         let pub_r = client
             .post(format!(
                 "{base}/api/v1/policy-versions/{version_id}/publish"
             ))
-            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .header("cookie", &cookie)
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
             .json(&serde_json::json!({"expected_semantic_digest": digest}))
             .send()
             .await
@@ -9649,7 +9800,8 @@ mod tests {
         // Create draft
         let draft_r = client
             .post(format!("{base}/api/v1/policies/{policy_id}/drafts"))
-            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .header("cookie", &cookie)
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
             .json(&serde_json::json!({"new_version": "2.0.0-draft"}))
             .send()
             .await
@@ -9776,7 +9928,8 @@ mod tests {
 
         let second = client
             .post(format!("{base}/api/v1/policies/{policy_id}/drafts"))
-            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .header("cookie", &cookie)
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
             .json(&serde_json::json!({"new_version": "3.0.0-draft"}))
             .send()
             .await
@@ -9880,6 +10033,180 @@ mod tests {
         .expect("membership");
         assert_eq!(member_count, 1);
         assert_eq!(member_order, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn publish_bundle_with_seed_shaped_cve_policy_commits_and_exports() {
+        let pool = test_pool_from_env().await;
+        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let sparse_config = serde_json::json!({
+            "max_critical": 0,
+            "strict": true,
+            "when_no_scan": "block",
+        });
+        let (policy_id, policy_version_id) = make_draft_cve_policy_with_config(
+            &pool,
+            &format!("seed-cve-{}", Uuid::new_v4().simple()),
+            &sparse_config,
+        )
+        .await;
+        db_trust_policy_version(&pool, policy_version_id, admin_id).await;
+        db_publish_policy_version(&pool, policy_id, policy_version_id).await;
+        let (bundle_id, bundle_version_id, digest) = make_draft_bundle(
+            &pool,
+            &format!("seed-cve-bundle-{}", Uuid::new_v4().simple()),
+            &[policy_version_id],
+        )
+        .await;
+        db_trust_bundle_version(&pool, bundle_version_id, admin_id).await;
+
+        let base = spawn_phase1_server(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let csrf = format!("seed-cve-csrf-{}", Uuid::new_v4().simple());
+        let cookie = format!("{SESSION_COOKIE_NAME}={token}; {CSRF_COOKIE_NAME}={csrf}");
+        let publish = client
+            .post(format!(
+                "{base}/api/v1/compliance/bundle-versions/{bundle_version_id}/publish"
+            ))
+            .header("cookie", &cookie)
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
+            .json(&serde_json::json!({"expected_semantic_digest": digest}))
+            .send()
+            .await
+            .expect("publish sparse CVE bundle");
+        let publish_status = publish.status().as_u16();
+        let publish_body = publish.text().await.expect("read publication response");
+        assert_eq!(publish_status, 200, "publication response: {publish_body}");
+
+        let persisted: (String, Option<Uuid>, Option<Uuid>, serde_json::Value) = sqlx::query_as(
+            r#"SELECT bv.publication_state, b.current_draft_version_id,
+                      b.current_published_version_id, pv.config
+               FROM compliance_bundle_versions bv
+               JOIN compliance_bundles b ON b.id = bv.bundle_id
+               JOIN compliance_bundle_version_policies bvp ON bvp.bundle_version_id = bv.id
+               JOIN deployment_policy_versions pv ON pv.id = bvp.policy_version_id
+               WHERE bv.id = $1"#,
+        )
+        .bind(bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load committed publication state");
+        assert_eq!(persisted.0, "accepted");
+        assert_eq!(persisted.1, None);
+        assert_eq!(persisted.2, Some(bundle_version_id));
+        assert_eq!(
+            persisted.3, sparse_config,
+            "sparse config must remain exact"
+        );
+
+        let export = client
+            .get(format!(
+                "{base}/api/v1/compliance/bundle-versions/{bundle_version_id}/xccdf"
+            ))
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .expect("export committed sparse CVE bundle");
+        assert_eq!(export.status().as_u16(), 200);
+        let xml = export.text().await.expect("read XCCDF export");
+        assert!(xml.contains("max-critical=\"0\""));
+        assert!(xml.contains("require-high-justification=\"false\""));
+        assert!(xml.contains("when-no-scan=\"block\""));
+        assert!(!xml.contains("<cf:max-high>"));
+
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM admin_audit_events WHERE action = 'bundle_version_published' AND target = $1",
+        )
+        .bind(bundle_version_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("count committed publication audit");
+        assert_eq!(audit_count, 1);
+        let published_pointer: Option<Uuid> = sqlx::query_scalar(
+            "SELECT current_published_version_id FROM compliance_bundles WHERE id = $1",
+        )
+        .bind(bundle_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load published bundle pointer");
+        assert_eq!(published_pointer, Some(bundle_version_id));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn publish_bundle_with_malformed_cve_config_rolls_back() {
+        let pool = test_pool_from_env().await;
+        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (policy_id, policy_version_id) = make_draft_cve_policy_with_config(
+            &pool,
+            &format!("malformed-cve-{}", Uuid::new_v4().simple()),
+            &serde_json::json!({"strict": "true"}),
+        )
+        .await;
+        db_trust_policy_version(&pool, policy_version_id, admin_id).await;
+        db_publish_policy_version(&pool, policy_id, policy_version_id).await;
+        let (bundle_id, bundle_version_id, digest) = make_draft_bundle(
+            &pool,
+            &format!("malformed-cve-bundle-{}", Uuid::new_v4().simple()),
+            &[policy_version_id],
+        )
+        .await;
+        db_trust_bundle_version(&pool, bundle_version_id, admin_id).await;
+
+        let csrf = format!("malformed-cve-csrf-{}", Uuid::new_v4().simple());
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{}/api/v1/compliance/bundle-versions/{bundle_version_id}/publish",
+                spawn_phase1_server(pool.clone()).await
+            ))
+            .header(
+                "cookie",
+                format!("{SESSION_COOKIE_NAME}={token}; {CSRF_COOKIE_NAME}={csrf}"),
+            )
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
+            .json(&serde_json::json!({"expected_semantic_digest": digest}))
+            .send()
+            .await
+            .expect("publish malformed CVE bundle");
+        assert_eq!(response.status().as_u16(), 500);
+
+        let state: (
+            String,
+            Option<chrono::DateTime<Utc>>,
+            Option<Uuid>,
+            Option<Uuid>,
+        ) = sqlx::query_as(
+            r#"SELECT bv.publication_state, bv.published_at,
+                          b.current_draft_version_id, b.current_published_version_id
+                   FROM compliance_bundle_versions bv
+                   JOIN compliance_bundles b ON b.id = bv.bundle_id
+                   WHERE bv.id = $1"#,
+        )
+        .bind(bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load rolled-back publication state");
+        assert_eq!(state.0, "draft");
+        assert_eq!(state.1, None);
+        assert_eq!(state.2, Some(bundle_version_id));
+        assert_eq!(state.3, None);
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM admin_audit_events WHERE action = 'bundle_version_published' AND target = $1",
+        )
+        .bind(bundle_version_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("count rolled-back publication audits");
+        assert_eq!(audit_count, 0);
+        let draft_pointer: Option<Uuid> = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1",
+        )
+        .bind(bundle_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load restored bundle draft pointer");
+        assert_eq!(draft_pointer, Some(bundle_version_id));
     }
 
     #[tokio::test]
@@ -12462,33 +12789,26 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
     #[ignore = "requires live database connection"]
     async fn assignment_create_failure_points_roll_back_all_rows() {
         let pool = test_pool_from_env().await;
-        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (admin_id, _token) = session_token_for_role(&pool, AuthRole::Admin).await;
         let (baseline_a, baseline_a_version) =
             make_draft_cve_policy(&pool, &format!("rollback-a-{}", Uuid::new_v4().simple())).await;
         let (baseline_b, baseline_b_version) =
             make_draft_cve_policy(&pool, &format!("rollback-b-{}", Uuid::new_v4().simple())).await;
         let (addition, addition_version, _) =
             make_draft_policy(&pool, &format!("rollback-add-{}", Uuid::new_v4().simple())).await;
+        db_trust_policy_version(&pool, baseline_a_version, admin_id).await;
+        db_trust_policy_version(&pool, baseline_b_version, admin_id).await;
+        db_trust_policy_version(&pool, addition_version, admin_id).await;
         db_publish_policy_version(&pool, baseline_a, baseline_a_version).await;
         db_publish_policy_version(&pool, baseline_b, baseline_b_version).await;
         db_publish_policy_version(&pool, addition, addition_version).await;
-        let (_, bundle_version_id, bundle_digest) = make_draft_bundle(
+        let (_, bundle_version_id, _) = make_draft_bundle(
             &pool,
             &format!("rollback-bundle-{}", Uuid::new_v4().simple()),
             &[baseline_a_version, baseline_b_version],
         )
         .await;
-        let base = spawn_phase1_server(pool.clone()).await;
-        let publish = reqwest::Client::new()
-            .post(format!(
-                "{base}/api/v1/compliance/bundle-versions/{bundle_version_id}/publish"
-            ))
-            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
-            .json(&serde_json::json!({"expected_semantic_digest": bundle_digest}))
-            .send()
-            .await
-            .expect("publish bundle");
-        assert_eq!(publish.status(), 200);
+        db_publish_bundle_version(&pool, bundle_version_id).await;
         let environment_id = Uuid::new_v4();
         sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
             .bind(environment_id)
@@ -12553,8 +12873,7 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
 
         // ── Barrier-synchronized concurrent create ────────────────────────────
         // Two creates for the same target + bundle lineage. The barrier ensures
-        // both reach the critical section (after advisory locks, before the
-        // FOR UPDATE uniqueness check) simultaneously.
+        // both start the transaction and advisory-lock path simultaneously.
         let concurrent_environment_id = Uuid::new_v4();
         sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
             .bind(concurrent_environment_id)
@@ -12598,6 +12917,7 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
         } else {
             first.unwrap_err()
         };
+        assert_eq!(conflict_resp.status(), StatusCode::CONFLICT);
         // The failure must be a typed ASSIGNMENT_ALREADY_EXISTS, not an
         // unclassified 500 or raw SQL unique-constraint violation.
         let body = axum::body::to_bytes(conflict_resp.into_body(), usize::MAX)
@@ -12648,6 +12968,118 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
             create_audit_count, 1,
             "exactly one create audit event after concurrent create"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn assignment_create_rejects_incomplete_active_lineage() {
+        let pool = test_pool_from_env().await;
+        let (admin_id, _token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (_, bundle_version_id, _) = make_draft_bundle(
+            &pool,
+            &format!("zombie-bundle-{}", Uuid::new_v4().simple()),
+            &[],
+        )
+        .await;
+        let mut publish_tx = pool.begin().await.expect("begin bundle publication");
+        sqlx::query(
+            "UPDATE compliance_bundle_versions
+             SET publication_state='accepted', published_at=now(),
+                 trust_state='trusted', trusted_at=now()
+             WHERE id=$1",
+        )
+        .bind(bundle_version_id)
+        .execute(&mut *publish_tx)
+        .await
+        .expect("publish bundle version");
+        sqlx::query(
+            "UPDATE compliance_bundles
+             SET current_published_version_id=$1, current_draft_version_id=NULL
+             WHERE id=(SELECT bundle_id FROM compliance_bundle_versions WHERE id=$1)",
+        )
+        .bind(bundle_version_id)
+        .execute(&mut *publish_tx)
+        .await
+        .expect("select published bundle version");
+        publish_tx
+            .commit()
+            .await
+            .expect("commit bundle publication");
+        let environment_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+            .bind(environment_id)
+            .bind(format!("zombie-{}", environment_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert zombie environment");
+        let zombie_id: Uuid = sqlx::query_scalar(
+            r#"INSERT INTO compliance_bundle_assignments
+               (bundle_id, bundle_version_id, scope_type, environment_id,
+                enforcement_mode, assignment_overlay_digest)
+               VALUES ((SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1),
+                       $1, 'environment', $2, 'enforce', 'pending')
+               RETURNING id"#,
+        )
+        .bind(bundle_version_id)
+        .bind(environment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert incomplete lineage");
+        let payload = crate::api::models::CreateAssignmentRequest {
+            bundle_version_id,
+            scope_type: "environment".to_string(),
+            scope_id: environment_id,
+            enforcement_mode: None,
+            exclusions: None,
+            additions: None,
+            value_overrides: None,
+            reason: None,
+        };
+
+        let conflict = persist_assignment(&pool, admin_id, &payload, None, None)
+            .await
+            .expect_err("incomplete lineage must conflict");
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(conflict.into_body(), usize::MAX)
+            .await
+            .expect("read incomplete-lineage response");
+        let body_json: serde_json::Value =
+            serde_json::from_slice(&body).expect("parse incomplete-lineage response");
+        assert_eq!(body_json["code"], "ASSIGNMENT_LINEAGE_INCOMPLETE");
+
+        sqlx::query("UPDATE compliance_bundle_assignments SET active=false WHERE id=$1")
+            .bind(zombie_id)
+            .execute(&pool)
+            .await
+            .expect("deactivate incomplete lineage");
+        let replacement = persist_assignment(&pool, admin_id, &payload, None, None)
+            .await
+            .expect("create healthy replacement");
+        assert_ne!(replacement.id, zombie_id);
+        assert_ne!(replacement.current_version_id, Uuid::nil());
+
+        let update_payload = crate::api::models::CreateAssignmentRequest {
+            enforcement_mode: Some("report_only".to_string()),
+            ..payload
+        };
+        let updated = persist_assignment(
+            &pool,
+            admin_id,
+            &update_payload,
+            Some(replacement.id),
+            Some(replacement.current_version_id),
+        )
+        .await
+        .expect("update healthy replacement");
+        assert_ne!(updated.current_version_id, replacement.current_version_id);
+        let version_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_bundle_assignment_versions WHERE assignment_id=$1",
+        )
+        .bind(replacement.id)
+        .fetch_one(&pool)
+        .await
+        .expect("count immutable assignment versions");
+        assert_eq!(version_count, 2);
     }
 
     // ── Environment and system combined resolution tests ───────────────────────
@@ -14058,7 +14490,7 @@ packages = ["git"]
     #[ignore = "requires live database connection"]
     async fn assignment_list_contract_and_deactivation_safety() {
         let pool = test_pool_from_env().await;
-        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
 
         // Create two separate bundle+policy fixtures.
         let (p1, pv1, _) = make_draft_policy(
@@ -14066,6 +14498,7 @@ packages = ["git"]
             &format!("list-contract-p1-{}", Uuid::new_v4().simple()),
         )
         .await;
+        db_trust_policy_version(&pool, pv1, admin_id).await;
         db_publish_policy_version(&pool, p1, pv1).await;
         let (_, bv1, _) = make_draft_bundle(
             &pool,
@@ -14078,6 +14511,7 @@ packages = ["git"]
             &format!("list-contract-p2-{}", Uuid::new_v4().simple()),
         )
         .await;
+        db_trust_policy_version(&pool, pv2, admin_id).await;
         db_publish_policy_version(&pool, p2, pv2).await;
         let (_, bv2, _) = make_draft_bundle(
             &pool,
@@ -14112,12 +14546,17 @@ packages = ["git"]
         }
 
         let base = spawn_assignment_test_server(pool.clone()).await;
+        let csrf = format!("assignment-list-csrf-{}", Uuid::new_v4().simple());
+        let cookie = format!("{SESSION_COOKIE_NAME}={token}; {CSRF_COOKIE_NAME}={csrf}");
 
         // Create a unique system UUID for this test.
         let system_id = Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO systems (id, hostname, environment_id, is_active, flake_id, deployment_policy)
-             VALUES ($1, $2, NULL, TRUE, NULL, 'manual')",
+            "INSERT INTO systems
+                 (id, hostname, environment_id, is_active, flake_id,
+                  deployment_policy, public_key, derivation)
+             VALUES ($1, $2, NULL, TRUE, NULL, 'manual', 'test-key',
+                     '/nix/store/test')",
         )
         .bind(system_id)
         .bind(format!("list-contract-sys-{}", Uuid::new_v4().simple()))
@@ -14134,7 +14573,8 @@ packages = ["git"]
         });
         let resp1 = reqwest::Client::new()
             .post(format!("{base}/api/v1/compliance/assignments"))
-            .header("cookie", format!("cf_session={token}"))
+            .header("cookie", &cookie)
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
             .json(&body1)
             .send()
             .await
@@ -14155,7 +14595,8 @@ packages = ["git"]
         });
         let resp2 = reqwest::Client::new()
             .post(format!("{base}/api/v1/compliance/assignments"))
-            .header("cookie", format!("cf_session={token}"))
+            .header("cookie", &cookie)
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
             .json(&body2)
             .send()
             .await
@@ -14169,7 +14610,7 @@ packages = ["git"]
             .get(format!(
                 "{base}/api/v1/systems/{system_id}/compliance-assignments"
             ))
-            .header("cookie", format!("cf_session={token}"))
+            .header("cookie", &cookie)
             .send()
             .await
             .expect("list assignments");
@@ -14196,7 +14637,8 @@ packages = ["git"]
         // Deactivate assignment 1.
         let deact_resp = reqwest::Client::new()
             .delete(format!("{base}/api/v1/compliance/assignments/{a1_id}"))
-            .header("cookie", format!("cf_session={token}"))
+            .header("cookie", &cookie)
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
             .query(&[("expected_version_id", a1_version_id.to_string())])
             .send()
             .await
@@ -14212,7 +14654,7 @@ packages = ["git"]
             .get(format!(
                 "{base}/api/v1/systems/{system_id}/compliance-assignments"
             ))
-            .header("cookie", format!("cf_session={token}"))
+            .header("cookie", &cookie)
             .send()
             .await
             .expect("list after deactivation");
@@ -14238,7 +14680,7 @@ packages = ["git"]
         // GET the deactivated assignment — must return 410, not 500.
         let deact_get = reqwest::Client::new()
             .get(format!("{base}/api/v1/compliance/assignments/{a1_id}"))
-            .header("cookie", format!("cf_session={token}"))
+            .header("cookie", &cookie)
             .send()
             .await
             .expect("get deactivated assignment");
@@ -14439,6 +14881,230 @@ packages = ["git"]
         // regressed to pool.begin(), the snapshot would fail to see the
         // auto-published member state in the SAME transaction, and the
         // validation would not have happened correctly.
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn bundle_publication_and_xccdf_export_support_custom_check_without_projection_fields() {
+        let pool = test_pool_from_env().await;
+        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let csrf = format!("legacy-xccdf-csrf-{}", Uuid::new_v4().simple());
+        let custom_check_config = serde_json::json!({
+            "expression": "config.networking.firewall.enable",
+            "description": "Firewall enabled",
+            "field_name": "firewallEnabled",
+            "strict": true
+        });
+        let (_, policy_version_id, policy_digest) = make_draft_policy_with_config(
+            &pool,
+            &format!("legacy-xccdf-{}", Uuid::new_v4().simple()),
+            &custom_check_config,
+        )
+        .await;
+        db_trust_policy_version(&pool, policy_version_id, admin_id).await;
+
+        let (_, bundle_version_id, bundle_digest) = make_draft_bundle(
+            &pool,
+            &format!("legacy-xccdf-bundle-{}", Uuid::new_v4().simple()),
+            &[policy_version_id],
+        )
+        .await;
+        db_trust_bundle_version(&pool, bundle_version_id, admin_id).await;
+
+        let publish_base = spawn_phase1_server(pool.clone()).await;
+        let publish = reqwest::Client::new()
+            .post(format!(
+                "{publish_base}/api/v1/compliance/bundle-versions/{bundle_version_id}/publish"
+            ))
+            .header(
+                "cookie",
+                format!("{SESSION_COOKIE_NAME}={token}; {CSRF_COOKIE_NAME}={csrf}"),
+            )
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
+            .json(&serde_json::json!({
+                "auto_publish_draft_policies": true,
+                "expected_semantic_digest": bundle_digest
+            }))
+            .send()
+            .await
+            .expect("publish legacy custom-check bundle");
+        let publish_status = publish.status();
+        let publish_body = publish.text().await.expect("publication response body");
+        assert_eq!(
+            publish_status.as_u16(),
+            200,
+            "publication must succeed: {publish_body}"
+        );
+
+        let (policy_state, stored_version_config, stored_policy_config, stored_policy_digest): (
+            String,
+            serde_json::Value,
+            serde_json::Value,
+            String,
+        ) = sqlx::query_as(
+            r#"SELECT dpv.publication_state, dpv.config, dp.config, dpv.semantic_digest
+               FROM deployment_policy_versions dpv
+               JOIN deployment_policies dp ON dp.id = dpv.policy_id
+               WHERE dpv.id = $1"#,
+        )
+        .bind(policy_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load published legacy policy");
+        let (bundle_state, stored_bundle_digest): (String, String) = sqlx::query_as(
+            "SELECT publication_state, semantic_digest FROM compliance_bundle_versions WHERE id = $1",
+        )
+        .bind(bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load published legacy bundle");
+
+        assert_eq!(policy_state, "accepted");
+        assert_eq!(bundle_state, "accepted");
+        assert_eq!(stored_version_config, custom_check_config);
+        assert_eq!(stored_policy_config, custom_check_config);
+        assert_eq!(stored_policy_digest, policy_digest);
+        assert_eq!(stored_bundle_digest, bundle_digest);
+
+        let export_base = spawn_export_server(pool).await;
+        let export = reqwest::Client::new()
+            .get(format!(
+                "{export_base}/api/v1/compliance/bundle-versions/{bundle_version_id}/xccdf"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("export published legacy custom-check bundle");
+        let export_status = export.status();
+        let xccdf = export.text().await.expect("XCCDF response body");
+        assert_eq!(
+            export_status.as_u16(),
+            200,
+            "XCCDF export must succeed: {xccdf}"
+        );
+        assert!(xccdf.contains("<cf:custom-check mode=\"all\""));
+        assert!(xccdf.contains("context=\"nixos-configuration-v2\" binding=\"config\""));
+        assert_eq!(xccdf.matches("<cf:rule ").count(), 1);
+        assert!(xccdf.contains("field-name=\"firewallEnabled\""));
+        assert!(xccdf.contains("strict=\"true\""));
+        assert!(xccdf.contains(
+            "<cf:expression language=\"nix\">config.networking.firewall.enable</cf:expression>"
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn bundle_publication_rolls_back_when_custom_check_xccdf_is_invalid() {
+        let pool = test_pool_from_env().await;
+        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let csrf = format!("invalid-xccdf-csrf-{}", Uuid::new_v4().simple());
+        let invalid_config = serde_json::json!({
+            "mode": "all",
+            "expression": "true",
+            "field_name": "enabled",
+            "strict": "invalid",
+            "context": "nixos-configuration-v1",
+            "binding": "cfg"
+        });
+        let (policy_id, policy_version_id, policy_digest) = make_draft_policy_with_config(
+            &pool,
+            &format!("invalid-xccdf-{}", Uuid::new_v4().simple()),
+            &invalid_config,
+        )
+        .await;
+        db_trust_policy_version(&pool, policy_version_id, admin_id).await;
+
+        let (bundle_id, bundle_version_id, bundle_digest) = make_draft_bundle(
+            &pool,
+            &format!("invalid-xccdf-bundle-{}", Uuid::new_v4().simple()),
+            &[policy_version_id],
+        )
+        .await;
+        db_trust_bundle_version(&pool, bundle_version_id, admin_id).await;
+        let audit_count_before: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM admin_audit_events WHERE target IN ($1, $2)")
+                .bind(policy_version_id.to_string())
+                .bind(bundle_version_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .expect("count publication audits before failure");
+
+        let base = spawn_phase1_server(pool.clone()).await;
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{base}/api/v1/compliance/bundle-versions/{bundle_version_id}/publish"
+            ))
+            .header(
+                "cookie",
+                format!("{SESSION_COOKIE_NAME}={token}; {CSRF_COOKIE_NAME}={csrf}"),
+            )
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
+            .json(&serde_json::json!({
+                "auto_publish_draft_policies": true,
+                "expected_semantic_digest": bundle_digest
+            }))
+            .send()
+            .await
+            .expect("publish invalid custom-check bundle");
+        assert_eq!(response.status().as_u16(), 500);
+
+        let (policy_state, policy_published_at, stored_policy_digest, stored_policy_config): (
+            String,
+            Option<chrono::DateTime<chrono::Utc>>,
+            String,
+            serde_json::Value,
+        ) = sqlx::query_as(
+            "SELECT publication_state, published_at, semantic_digest, config FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(policy_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load rolled-back policy state");
+        let (bundle_state, bundle_published_at, stored_bundle_digest): (
+            String,
+            Option<chrono::DateTime<chrono::Utc>>,
+            String,
+        ) = sqlx::query_as(
+            "SELECT publication_state, published_at, semantic_digest FROM compliance_bundle_versions WHERE id = $1",
+        )
+        .bind(bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load rolled-back bundle state");
+        let (policy_draft, policy_published): (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+            "SELECT current_draft_version_id, current_published_version_id FROM deployment_policies WHERE id = $1",
+        )
+        .bind(policy_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load rolled-back policy pointers");
+        let (bundle_draft, bundle_published): (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+            "SELECT current_draft_version_id, current_published_version_id FROM compliance_bundles WHERE id = $1",
+        )
+        .bind(bundle_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load rolled-back bundle pointers");
+        let audit_count_after: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM admin_audit_events WHERE target IN ($1, $2)")
+                .bind(policy_version_id.to_string())
+                .bind(bundle_version_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .expect("count publication audits after failure");
+
+        assert_eq!(policy_state, "draft");
+        assert_eq!(policy_published_at, None);
+        assert_eq!(stored_policy_digest, policy_digest);
+        assert_eq!(stored_policy_config, invalid_config);
+        assert_eq!(bundle_state, "draft");
+        assert_eq!(bundle_published_at, None);
+        assert_eq!(stored_bundle_digest, bundle_digest);
+        assert_eq!(policy_draft, Some(policy_version_id));
+        assert_eq!(policy_published, None);
+        assert_eq!(bundle_draft, Some(bundle_version_id));
+        assert_eq!(bundle_published, None);
+        assert_eq!(audit_count_after, audit_count_before);
     }
 
     /// Stale digest on accepted member should block bundle publication

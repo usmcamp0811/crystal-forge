@@ -3,6 +3,7 @@ id: doc-22
 title: Compliance UI Redesign Spec (design commit 23c88aba)
 type: specification
 created_date: '2026-08-15 17:40'
+updated_date: '2026-09-12 21:10'
 tags:
   - compliance
   - web-ui
@@ -791,3 +792,5 @@ server contract and the reusable drawer must exist first.
 - The Policies view's own layout, cards, editor modal and Mappings tab.
 - Waiver workflow, evidence taxonomy and export format changes.
 - Any new compliance evaluation logic; scores must keep coming from the existing rollup query.
+
+> **Supersession note (2026-09-12, TASK-440 residual cleanup):** The §5.2 instruction to retain or relocate the bundle-detail `Assign bundle` panel is superseded. Assignment creation, update, and removal belong to the Environment editor. Bundle detail retains read-only Systems assignment metadata and existing-assignment maintenance only. Backend assignment APIs remain unchanged.

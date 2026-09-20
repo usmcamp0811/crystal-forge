@@ -482,10 +482,11 @@ function buildRoutes(fixtures) {
 
     // ── scanning ──────────────────────────────────────────────────────────────
     { pattern: matchPath("/api/v1/scanning/stats"),                        body: scanningStatsResponse },
+    { pattern: matchPath("/api/v1/scanning/deployed"),                     body: { items: [], total: 0, has_more: false, next_cursor: null } },
     { pattern: matchPath("/api/v1/scanning/queue"),                        body: [] },
     { pattern: matchPath("/api/v1/scanning/systems"),                      body: [] },
     { pattern: matchPath("/api/v1/scanning/activity"),                     body: [] },
-    { pattern: matchPath("/api/v1/scanning/schedule"),                     body: { interval_minutes: 1440, enabled: false } },
+    { pattern: matchPath("/api/v1/scanning/schedule"),                     body: { on_build: true, deployed_interval: "24h", recent_interval: "24h", archived_interval: "168h", archived_enabled: true, rebuild_to_scan: false, updated_at: now } },
     { pattern: matchPrefix("/api/v1/scanning/"),                           body: {} },
 
     // ── hardening ─────────────────────────────────────────────────────────────
