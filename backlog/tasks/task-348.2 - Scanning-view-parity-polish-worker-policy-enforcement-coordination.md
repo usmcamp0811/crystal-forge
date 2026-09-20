@@ -4,6 +4,7 @@ title: 'Scanning: view parity polish + worker policy enforcement coordination'
 status: Backlog
 assignee: []
 created_date: '2026-06-10 13:34'
+updated_date: '2026-09-20 02:08'
 labels:
   - design-parity
   - scanning
@@ -69,3 +70,12 @@ Polish the Scanning view to full parity with `CrystalForgelatest/components/Scan
 - [ ] #4 Any worker behavior gaps are captured under TASK-327 (not implemented here)
 - [ ] #5 Step 16c-scanning-view passes with parity assertions
 <!-- AC:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+created: 2026-09-20 02:08
+---
+Superseded by TASK-326.2 (Bring Scanning and per-system CVE triage to updated design parity). TASK-326.2 is now the canonical implementation task covering both Scanning view alignment (Active/Completed/BySystem tabs, wait states, archive/restore) and System Detail CVE triage integration. Do not implement TASK-348.2; use TASK-326.2 as source of truth.
+---
+<!-- COMMENTS:END -->
