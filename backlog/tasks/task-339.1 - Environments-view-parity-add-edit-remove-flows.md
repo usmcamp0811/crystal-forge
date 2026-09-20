@@ -1,11 +1,10 @@
 ---
 id: TASK-339.1
 title: Bring Environment Add/Edit modal to current design parity
-status: In Progress
-assignee:
-  - gpt-5.6-terra
+status: To Do
+assignee: []
 created_date: '2026-06-10 13:35'
-updated_date: '2026-09-20 13:20'
+updated_date: '2026-09-20 03:16'
 labels:
   - design-parity
   - environments
