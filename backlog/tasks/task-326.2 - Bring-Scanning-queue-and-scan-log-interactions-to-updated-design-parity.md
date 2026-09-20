@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-20 17:26'
+updated_date: '2026-09-20 17:41'
 labels:
   - scanning
   - web-ui
@@ -145,6 +145,14 @@ Review follow-up at `7c4c27d3`: add a private filesystem-identity helper in both
 Extend the existing PostgreSQL inventory regression to prove the strict authority sequence Exact -> RetainedGenerationUnavailable -> CurrentStoreMismatch while keeping the latest-state-first query unchanged. Treat the newly discovered migration-0259 stale-state defect as a separate schema/security scope decision; do not silently add a migration in this follow-up.
 
 Replace only user-visible CVE fallback terminology with Historical wording. Preserve backend wire variants, `legacy_*` fields, test fixture identifiers, and read-only authority behavior. Update focused browser/static text assertions, then run focused Rust/UI/static checks before deciding whether one final authoritative browser run is required.
+
+Scanning workflow parity repair from current pushed head `19352160`: centralize `on_build` scan-intent creation in one transaction-local query helper. Every production build-job insertion path calls it only for rows actually inserted. The helper gates on persisted `on_build`, accepts only NixOS derivations, inserts immutable `post_build` provenance in `awaiting_build`, and uses the existing active partial uniqueness constraint with conflict-do-nothing so manual/fleet provenance wins.
+
+Adjust successful build completion to advance an existing `awaiting_build/post_build` intent through the existing prerequisite rules without creating another state machine. Keep build failure as a truthful waiting prerequisite so Vulnix is never blamed or claimed; retries and restarts reuse the durable active row. Preserve remote closure gating and add prompt calls to the authoritative bounded promotion helper where completion/publication events already have a safe post-commit hook.
+
+Reshape the production Scanning drawer around configuration identity, a concise real lifecycle strip, typed wait/failure callouts, and accessible Log/Details tabs. Keep bounded persisted diagnostics, redaction, search/navigation/highlighting/export, stale-request fencing, and all advanced metadata. Render diagnostics as terminal-style lines. Add only real retry and exact build navigation actions backed by server-issued identity.
+
+Expand focused PostgreSQL coverage across enabled/disabled policy, idempotent and concurrent insertion, local/remote promotion, non-claimable waits, build failure/retry/restart persistence, existing manual/fleet provenance, and completed-evidence semantics. Update only the 16c browser workflow for failed, waiting, running, completed, responsive, focus, Log/Details, and focused screenshots. Run cheap gates first, then exactly one final 16c VM command at candidate HEAD.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
