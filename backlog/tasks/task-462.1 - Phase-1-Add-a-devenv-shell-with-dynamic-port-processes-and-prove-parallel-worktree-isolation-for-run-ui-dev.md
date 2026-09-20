@@ -3,7 +3,7 @@ id: TASK-462.1
 title: >-
   Phase 1: Add a devenv shell with dynamic-port processes and prove
   parallel-worktree isolation for run-ui-dev
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-09-19 14:51'
 updated_date: '2026-09-20 18:03'
@@ -19,6 +19,7 @@ references:
   - docs/agents/worktrees.md
   - docs/agents/database-safety.md
   - docs/agents/verification.md
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/330'
 parent_task_id: TASK-462
 priority: high
 type: enhancement
@@ -190,3 +191,15 @@ This failure is judged unrelated to TASK-462.1: `git diff --stat origin/dev` tou
 
 No other check in the full `--keep-going` run failed (exactly one `error:` line total, for `checks.x86_64-linux.web-ui`).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added an additive, devenv-native (devenv.yaml + devenv.nix, real `devenv` CLI, NOT `devenv.lib.mkShell` flake integration — see devenv.nix's own comment for the empirical reason) reproduction of `run-ui-dev` with per-worktree dynamic port allocation for PostgreSQL, the API server, and the Dioxus web UI dev server. `devShells.default` and every existing `nix develop` alias/script are unmodified.
+
+Proven with two real, concurrent Git worktrees: fully independent PostgreSQL/API/UI ports, DB isolation (marker-row test), and `web-ui-test.sh` (unmodified) passing concurrently against both. Two narrow, backward-compatible env-var additions were required and added once dynamic ports were actually exercised end-to-end: `packages/web-ui/src/api/client.rs`'s dev-mode API-origin detection, and `crates/cf-server/src/bin/server.rs`'s CORS allowlist — both inert unless this workflow sets their new env var.
+
+`nix flake check --keep-going` passed except one pre-existing, unrelated visual-baseline diff (filed as TASK-465). Portless is wired and its Nix config verified, but live verification is blocked in this environment (no passwordless sudo); disabled by default, and every other criterion passed with it disabled.
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/330 (not merged; awaiting review).
+<!-- SECTION:FINAL_SUMMARY:END -->
