@@ -1508,12 +1508,22 @@ function CvesTab({ sys }) {
   // or schedule the patch and open a POA&M. Scoped to this host's environment.
   const [triageCve, setTriageCve] = React.useState(null);
   const [, bumpTriage] = React.useReducer(x => x + 1, 0);
-  const dispOf = (c) => (c.dispositions && c.dispositions[sys.environment]) || null;
+  // Host-level decisions override the environment default for this machine.
+  const dispOf = (c) => {
+    const d = c.dispositions;
+    if (!d) return null;
+    return (d.hosts && d.hosts[sys.id]) || d[sys.environment] || null;
+  };
+  const scopeOf = (c) => {
+    const d = c.dispositions;
+    return d && d.hosts && d.hosts[sys.id] ? "host" : "env";
+  };
   const triageChip = (c) => {
     const d = dispOf(c);
     if (!d) return <span className="chip chip-unknown" style={{ fontSize:10 }}>outstanding</span>;
-    if (d.state === "accepted") return <span className="chip chip-healthy" style={{ fontSize:10 }} title={d.justification ? `Risk accepted · ${d.justification}` : "Risk accepted"}>accepted</span>;
-    return <span className="chip chip-info" style={{ fontSize:10 }} title={`Patch scheduled · ${d.owner || "unassigned"}${d.due ? ` · due ${d.due}` : ""}`}>scheduled</span>;
+    const where = scopeOf(c) === "host" ? "this host" : `all of ${sys.environment}`;
+    if (d.state === "accepted") return <span className="chip chip-healthy" style={{ fontSize:10 }} title={`Risk accepted for ${where}${d.justification ? ` · ${d.justification}` : ""}`}>accepted{scopeOf(c) === "env" ? " · env" : ""}</span>;
+    return <span className="chip chip-info" style={{ fontSize:10 }} title={`Patch scheduled for ${where} · ${d.owner || "unassigned"}${d.due ? ` · due ${d.due}` : ""}`}>scheduled{scopeOf(c) === "env" ? " · env" : ""}</span>;
   };
 
   return (
@@ -1602,15 +1612,17 @@ function CvesTab({ sys }) {
           cve={{
             id: triageCve.id, pkg: triageCve.pkg,
             cvss: parseFloat(triageCve.score), severity: triageCve.level,
-            fix: triageCve.fix, fixedIn: triageCve.fixedIn || "the patched release",
+            fix: triageCve.fix, fixedIn: triageCve.fixedIn || null,
             exploited: false,
           }}
           affectedSystems={[sys]}
+          envSystems={(typeof SYSTEMS !== "undefined" ? SYSTEMS.filter(s => s.environment === sys.environment) : [sys])}
+          hostScope={sys}
           initial={triageCve.dispositions || {}}
           onClose={() => setTriageCve(null)}
           onSubmit={(next) => {
             triageCve.dispositions = next;
-            const d = next[sys.environment];
+            const d = (next.hosts && next.hosts[sys.id]) || next[sys.environment];
             triageCve.acceptance = d ? d.state : "outstanding";
             setTriageCve(null);
             bumpTriage();

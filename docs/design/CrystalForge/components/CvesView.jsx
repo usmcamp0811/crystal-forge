@@ -816,20 +816,39 @@ const CVE_CHOICES = [
   { v:"scheduled", label:"Schedule patch" },
 ];
 
-function CveTriageModal({ cve, affectedSystems, initial, onClose, onSubmit }) {
+function CveTriageModal({ cve, affectedSystems, envSystems, initial, onClose, onSubmit, hostScope }) {
+  // Opened from a host, the default blast radius is that host alone — deciding for
+  // a whole environment from one machine's page is rarely what you meant.
+  const [scope, setScope] = React.useState("host");
+  const hostScoped = !!hostScope && scope === "host";
+  // `affectedSystems` is the set the CVE was actually found on. The env roster is
+  // separate: an env-scoped decision covers the environment prospectively, so it
+  // must not enumerate unscanned hosts as evidence.
+  const envRoster = envSystems || affectedSystems;
+  const targetSystems = hostScoped
+    ? [hostScope]
+    : (hostScope ? affectedSystems.filter(s => s.environment === hostScope.environment) : affectedSystems);
   const envCounts = React.useMemo(() => {
     const m = {};
-    affectedSystems.forEach(s => { m[s.environment] = (m[s.environment] || 0) + 1; });
+    targetSystems.forEach(s => { m[s.environment] = (m[s.environment] || 0) + 1; });
     return m;
-  }, [affectedSystems]);
+  }, [targetSystems]);
   const allEnvs = Object.keys(envCounts);
+  const hostDisp = (initial && initial.hosts) || {};
+  const readInitial = (env) => hostScoped ? hostDisp[hostScope.id] : (initial && initial[env]);
 
   const [choice, setChoice] = React.useState(() => {
     const o = {};
-    allEnvs.forEach(e => { o[e] = (initial && initial[e] && initial[e].state) || "open"; });
+    allEnvs.forEach(e => { o[e] = (readInitial(e) || {}).state || "open"; });
     return o;
   });
-  const seeded = allEnvs.map(e => initial && initial[e]).filter(Boolean);
+  // Re-seed when the scope flips: the two scopes have independent dispositions.
+  React.useEffect(() => {
+    const o = {};
+    allEnvs.forEach(e => { o[e] = (readInitial(e) || {}).state || "open"; });
+    setChoice(o);
+  }, [scope]);
+  const seeded = allEnvs.map(e => readInitial(e)).filter(Boolean);
   const seedAccepted = seeded.find(d => d.state === "accepted");
   const seedScheduled = seeded.find(d => d.state === "scheduled");
 
@@ -846,12 +865,21 @@ function CveTriageModal({ cve, affectedSystems, initial, onClose, onSubmit }) {
   const acceptedEnvs = allEnvs.filter(e => choice[e] === "accepted");
   const scheduledEnvs = allEnvs.filter(e => choice[e] === "scheduled");
   const openEnvs = allEnvs.filter(e => choice[e] === "open");
-  const scheduledHosts = affectedSystems.filter(s => scheduledEnvs.includes(s.environment));
-  const acceptedHosts = affectedSystems.filter(s => acceptedEnvs.includes(s.environment));
+  const scheduledHosts = targetSystems.filter(s => scheduledEnvs.includes(s.environment));
+  const acceptedHosts = targetSystems.filter(s => acceptedEnvs.includes(s.environment));
+  const scopeLabel = hostScoped ? hostScope.hostname : null;
+  const envWide = !!hostScope && !hostScoped;
+  // One phrasing for the fix target, used by the context grid, the plan
+  // placeholder and the generated plan text — gated on having a version, not on
+  // the advisory merely saying a fix exists.
+  const fixTarget = cve.fixedIn || (cve.fix === "available" ? "a patched release" : "a patched release once available");
 
   const acceptNeedsText = acceptedEnvs.length > 0 && justification.trim().length < 10;
   const scheduleNeedsFields = scheduledEnvs.length > 0 && (!owner || !due);
-  const touched = acceptedEnvs.length + scheduledEnvs.length > 0;
+  // Host-scoped revoke: clearing an existing host override back to "open" is a
+  // real change, even though nothing is accepted or scheduled.
+  const revoking = hostScoped && seeded.length > 0 && openEnvs.length > 0;
+  const touched = acceptedEnvs.length + scheduledEnvs.length > 0 || revoking;
   const canSubmit = touched && !acceptNeedsText && !scheduleNeedsFields;
 
   React.useEffect(() => {
@@ -863,34 +891,45 @@ function CveTriageModal({ cve, affectedSystems, initial, onClose, onSubmit }) {
   const submit = () => {
     if (!canSubmit) return;
     const next = { ...(initial || {}) };
-    openEnvs.forEach(e => { delete next[e]; });
+    // Host-scoped decisions live in their own map so they override the
+    // environment default without rewriting it for every other host.
+    const hosts = { ...((initial && initial.hosts) || {}) };
+    const put = (env, rec) => { if (hostScoped) hosts[hostScope.id] = { ...rec, env }; else next[env] = rec; };
+    if (hostScoped) { if (openEnvs.length) delete hosts[hostScope.id]; }
+    else openEnvs.forEach(e => { delete next[e]; });
 
     if (acceptedEnvs.length) {
       acceptedEnvs.forEach(e => {
-        next[e] = { state:"accepted", justification: justification.trim(), reviewDate: reviewDate || null, by:"mreyes", at:"just now" };
+        put(e, { state:"accepted", justification: justification.trim(), reviewDate: reviewDate || null, by:"mreyes", at:"just now" });
       });
     }
     if (scheduledEnvs.length) {
       let poamId = seedScheduled && seedScheduled.poamId;
       if (!poamId && typeof poamCreate === "function") {
+        const where = hostScoped ? hostScope.hostname : scheduledEnvs.join(", ");
+        const covers = envWide
+          ? `${scheduledEnvs.join(", ")} — every host in the environment, current and future`
+          : `${scheduledHosts.length} host${scheduledHosts.length === 1 ? "" : "s"}`;
         const item = poamCreate({
-          title: `${cve.id} — patch ${cve.pkg} in ${scheduledEnvs.join(", ")}`,
+          title: `${cve.id} — patch ${cve.pkg} in ${where}`,
           owner, due,
           severity: cve.severity === "critical" || cve.severity === "high" ? "high" : cve.severity === "medium" ? "medium" : "low",
           status: "open",
-          plan: plan.trim() || `Upgrade ${cve.pkg} to ${cve.fix === "available" ? cve.fixedIn : "a patched release once available"} across ${scheduledEnvs.join(", ")}.`,
+          plan: plan.trim() || `Upgrade ${cve.pkg} to ${fixTarget} across ${where}.`,
+          // Only hosts the CVE was actually found on are attached as evidence.
           cveRefs: scheduledHosts.map(s => ({ id: cve.id, pkg: cve.pkg, sysId: s.id, hostname: s.hostname })),
           milestones: withMilestones ? poamPatchMilestones({
             due, pkg: cve.pkg, fixAvailable: cve.fix === "available",
-            rolloutText: `Roll out to ${scheduledHosts.length} host${scheduledHosts.length === 1 ? "" : "s"} in ${scheduledEnvs.join(", ")}`,
+            rolloutText: hostScoped ? `Roll out to ${hostScope.hostname}` : `Roll out to ${covers}`,
           }) : [],
         });
         poamId = item.id;
       }
       scheduledEnvs.forEach(e => {
-        next[e] = { state:"scheduled", poamId, owner, due, plan: plan.trim() || null, by:"mreyes", at:"just now" };
+        put(e, { state:"scheduled", poamId, owner, due, plan: plan.trim() || null, by:"mreyes", at:"just now" });
       });
     }
+    if (Object.keys(hosts).length) next.hosts = hosts; else delete next.hosts;
     onSubmit(next);
   };
 
@@ -900,7 +939,9 @@ function CveTriageModal({ cve, affectedSystems, initial, onClose, onSubmit }) {
         <div className="modal-head" style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:12 }}>
           <div>
             <h2>Triage {cve.id}</h2>
-            <p>Decide per environment. Hosts left open stay outstanding until someone dispositions them.</p>
+            <p>{hostScope
+              ? "Decide for this host alone, or for every host in its environment."
+              : "Decide per environment. Hosts left open stay outstanding until someone dispositions them."}</p>
           </div>
           <button className="btn-icon focus-ring" onClick={onClose}><Icon name="x" size={16}/></button>
         </div>
@@ -915,14 +956,36 @@ function CveTriageModal({ cve, affectedSystems, initial, onClose, onSubmit }) {
               <div><span>CVE</span><b className="mono">{cve.id}</b></div>
               <div><span>Package</span><b className="mono">{cve.pkg}</b></div>
               <div><span>CVSS</span><b>{cve.cvss.toFixed(1)} <span style={{ fontWeight:400, color:"var(--cf-text-muted)" }}>{cve.severity}</span></b></div>
-              <div><span>Affected hosts</span><b>{affectedSystems.length}</b></div>
-              <div><span>Fix</span><b className="mono">{cve.fix === "available" ? cve.fixedIn : "pending"}</b></div>
+              <div><span>Affected hosts</span><b>{targetSystems.length}{envWide ? <span style={{ fontWeight:400, color:"var(--cf-text-muted)" }}> of {envRoster.length} in {hostScope.environment}</span> : null}</b></div>
+              <div><span>Fix</span><b className="mono">{cve.fixedIn || (cve.fix === "available" ? "available — version pending" : "pending")}</b></div>
               <div><span>Exploited</span><b>{cve.exploited ? "yes — in the wild" : "not observed"}</b></div>
             </div>
           </div>
 
+          {hostScope && (
+            <div className="field" style={{ marginTop:0 }}>
+              <label>Applies to</label>
+              <div className="seg" style={{ width:"fit-content" }}>
+                <button className={scope === "host" ? "active" : ""} onClick={()=>setScope("host")}>
+                  {hostScope.hostname} only
+                </button>
+                <button className={scope === "env" ? "active" : ""} onClick={()=>setScope("env")}>
+                  All of {hostScope.environment}
+                </button>
+              </div>
+              <div className="help">
+                {hostScoped
+                  ? "A host-specific decision overrides the environment default for this machine only."
+                  : `Covers all ${envRoster.length} host${envRoster.length === 1 ? "" : "s"} in ${hostScope.environment}, including ones added later. Only hosts the CVE was found on are attached as evidence.`}
+                {hostScoped && hostDisp[hostScope.id] === undefined && initial && initial[hostScope.environment] && (
+                  <> This host currently follows the {hostScope.environment} decision ({initial[hostScope.environment].state}).</>
+                )}
+              </div>
+            </div>
+          )}
+
           <div className="field" style={{ marginTop:0 }}>
-            <label>Disposition by environment</label>
+            <label>{hostScoped ? "Disposition" : "Disposition by environment"}</label>
             <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
               {allEnvs.map(env => {
                 const envColor = (ENV_STYLE[env] && ENV_STYLE[env].fg) || "#9ca3af";
@@ -935,8 +998,8 @@ function CveTriageModal({ cve, affectedSystems, initial, onClose, onSubmit }) {
                   }}>
                     <span style={{ display:"flex", alignItems:"center", gap:8, minWidth:0, flex:1 }}>
                       <span style={{ width:8, height:8, borderRadius:99, background:envColor, flexShrink:0 }}/>
-                      <span style={{ fontSize:12.5, fontWeight:600 }}>{env}</span>
-                      <span className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{envCounts[env]} host{envCounts[env] === 1 ? "" : "s"}</span>
+                      <span style={{ fontSize:12.5, fontWeight:600 }}>{hostScoped ? hostScope.hostname : env}</span>
+                      <span className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{hostScoped ? env : `${envCounts[env]} host${envCounts[env] === 1 ? "" : "s"}`}</span>
                     </span>
                     <div className="seg" style={{ flexShrink:0 }}>
                       {CVE_CHOICES.map(o => (
@@ -948,7 +1011,7 @@ function CveTriageModal({ cve, affectedSystems, initial, onClose, onSubmit }) {
                 );
               })}
             </div>
-            {openEnvs.length > 0 && touched && (
+            {openEnvs.length > 0 && touched && !hostScoped && (
               <div className="help" style={{ marginTop:6, color:"#fbbf24" }}>
                 <Icon name="warn" size={10} style={{ verticalAlign:"middle" }}/> {openEnvs.join(", ")} stay{openEnvs.length === 1 ? "s" : ""} outstanding.
               </div>
@@ -958,7 +1021,7 @@ function CveTriageModal({ cve, affectedSystems, initial, onClose, onSubmit }) {
           {scheduledEnvs.length > 0 && (
             <div style={{ padding:"12px 13px", borderRadius:9, border:"1px solid rgba(96,165,250,0.3)", background:"rgba(96,165,250,0.06)", display:"flex", flexDirection:"column", gap:12 }}>
               <div style={{ display:"flex", alignItems:"center", gap:7, fontSize:11.5, fontWeight:600, textTransform:"uppercase", letterSpacing:".06em", color:"#60a5fa" }}>
-                <Icon name="plus" size={12}/> POA&M — {scheduledEnvs.join(", ")} · {scheduledHosts.length} host{scheduledHosts.length === 1 ? "" : "s"}
+                <Icon name="plus" size={12}/> POA&M — {scopeLabel || scheduledEnvs.join(", ")} · {envWide ? "all hosts" : `${scheduledHosts.length} host${scheduledHosts.length === 1 ? "" : "s"}`}
               </div>
               <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
                 <div className="field" style={{ marginTop:0 }}>
@@ -979,7 +1042,7 @@ function CveTriageModal({ cve, affectedSystems, initial, onClose, onSubmit }) {
               <div className="field" style={{ marginTop:0 }}>
                 <label>Remediation plan <span style={{ color:"var(--cf-text-muted)", fontWeight:400 }}>· optional now, expected before review</span></label>
                 <textarea className="input focus-ring" rows={2} value={plan} onChange={e=>setPlan(e.target.value)}
-                  placeholder={`Upgrade ${cve.pkg} to ${cve.fix === "available" ? cve.fixedIn : "a patched release"}, roll out, and verify the scan clears`}
+                  placeholder={`Upgrade ${cve.pkg} to ${fixTarget}, roll out, and verify the scan clears`}
                   style={{ resize:"vertical" }}/>
               </div>
               {!seedScheduled && (
@@ -999,7 +1062,7 @@ function CveTriageModal({ cve, affectedSystems, initial, onClose, onSubmit }) {
           {acceptedEnvs.length > 0 && (
             <div style={{ padding:"12px 13px", borderRadius:9, border:"1px solid rgba(167,139,250,0.3)", background:"rgba(167,139,250,0.06)", display:"flex", flexDirection:"column", gap:12 }}>
               <div style={{ display:"flex", alignItems:"center", gap:7, fontSize:11.5, fontWeight:600, textTransform:"uppercase", letterSpacing:".06em", color:"#a78bfa" }}>
-                <Icon name="check" size={12}/> Waiver — {acceptedEnvs.join(", ")} · {acceptedHosts.length} host{acceptedHosts.length === 1 ? "" : "s"}
+                <Icon name="check" size={12}/> Waiver — {scopeLabel || acceptedEnvs.join(", ")} · {envWide ? "all hosts" : `${acceptedHosts.length} host${acceptedHosts.length === 1 ? "" : "s"}`}
               </div>
               <div className="field" style={{ marginTop:0 }}>
                 <label>Justification <span style={{ color:"var(--cf-text-muted)", fontWeight:400 }}>· required</span></label>
@@ -1032,9 +1095,10 @@ function CveTriageModal({ cve, affectedSystems, initial, onClose, onSubmit }) {
         <div className="modal-foot">
           <div style={{ marginRight:"auto", fontSize:11.5, color:"var(--cf-text-muted)" }}>
             {!touched ? "Nothing dispositioned yet"
+              : revoking ? `${hostScope.hostname} reverts to the ${hostScope.environment} decision`
               : [scheduledEnvs.length ? (seedScheduled ? "updates 1 POA&M" : "creates 1 POA&M") : null,
-                 acceptedEnvs.length ? `1 waiver · ${acceptedHosts.length} host${acceptedHosts.length === 1 ? "" : "s"}` : null,
-                 openEnvs.length ? `${openEnvs.length} env${openEnvs.length === 1 ? "" : "s"} left open` : null,
+                 acceptedEnvs.length ? `1 waiver · ${envWide ? "all hosts" : `${acceptedHosts.length} host${acceptedHosts.length === 1 ? "" : "s"}`}` : null,
+                 !hostScoped && openEnvs.length ? `${openEnvs.length} env${openEnvs.length === 1 ? "" : "s"} left open` : null,
                 ].filter(Boolean).join(" · ")}
           </div>
           <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
