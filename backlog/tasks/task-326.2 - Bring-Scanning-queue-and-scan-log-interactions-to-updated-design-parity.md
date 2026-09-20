@@ -1,11 +1,11 @@
 ---
 id: TASK-326.2
 title: Bring Scanning and per-system CVE triage to updated design parity
-status: Review
+status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-20 16:31'
+updated_date: '2026-09-20 16:37'
 labels:
   - scanning
   - web-ui
@@ -183,6 +183,8 @@ Backend acceptance corrections completed without commit or push. Environment sch
 Focused host/environment triage follow-up committed and pushed to existing MR !329 as `0633e62f1838e7f944e5e6a517db89e0f39a2c93` (`TASK-326.2: Add host-scoped CVE triage`). Local and remote branch heads match, and the task worktree is clean. Final server review corrections include environment reopen ownership filtering and a typed conflict when a scheduled environment has no exact subject without a host override. Verification after those corrections passed: full `poam_workflows` 71/71 against a disposable PostgreSQL cluster on port 55484; Web UI tests 440 passed/1 ignored; JavaScript syntax and static browser contracts; touched-file rustfmt; and `git diff --check`. The earlier focused NixOS browser run passed `16-cves` but failed `12h-system-detail-cves-grouped-justification` because native trigger disabling dropped focus before dialog opener capture. Commit `0633e62f` fixes that path with guarded `aria-disabled`/`aria-busy` loading state. The user declined a post-fix VM rerun and directed commit/push, so real-browser verification of that focus fix remains outstanding. The task remains In Progress and MUST NOT return to Review until that required browser evidence is completed or explicitly waived as review-ready.
 
 Final browser regression correction and review evidence: commit `7c4c27d35f7ce7c80a897d84797342cd232112e4` updates only `checks/web-ui/tests/integration-test.js`. The shared `assertTriageChip` helper now waits for refreshed exact inventory, re-expands the target package through `showInventory`, waits for the expected hydrated label, and retains exact label and title assertions. No production file changed; the `aria-disabled`/`aria-busy` focus-restoration fix remains intact. Cheap verification passed: `node --check checks/web-ui/tests/integration-test.js`; `CF_UI_STATIC_CONTRACTS=1 node checks/web-ui/tests/integration-test.js`; and `git diff --check`. The host runner does not classify 12h as a dev-stack workflow, so no host 12h run was available. The single authorized final VM command `CF_UI_TEST_STEPS="12h-system-detail-cves-grouped-justification,16-cves" nix build --impure "path:.#checks.x86_64-linux.web-ui" --no-link -L` passed both requested workflows (2/2) and captured 18 dark/light screenshots. Full command output: `/home/mcamp/.local/share/opencode/tool-output/tool_0bfa5906b0013CvesGaPBzf8e0`. Commit `7c4c27d3` was pushed to existing MR !329; local and remote SHA match, the task worktree is clean, and TASK-326.2 is ready for Review.
+
+Review follow-up resumed at current branch head `7c4c27d35f7ce7c80a897d84797342cd232112e4` to fix filesystem-proven deploy-rs activatable NixOS wrapper equivalence and replace misleading user-facing Legacy CVE fallback wording with Historical wording. The task worktree is clean. Scope preserves exact-authority fail-closed lineage checks, historical scan immutability, existing triage focus restoration, and browser sequencing repair. Planned verification is focused agent/server/UI/unit/static coverage before any final browser decision.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
