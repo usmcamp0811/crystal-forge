@@ -3,17 +3,21 @@
     "cachix": {
       "inputs": {
         "devenv": [
+          "crystalForge",
           "devenv"
         ],
         "flake-compat": [
+          "crystalForge",
           "devenv",
           "flake-compat"
         ],
         "git-hooks": [
+          "crystalForge",
           "devenv",
           "git-hooks"
         ],
         "nixpkgs": [
+          "crystalForge",
           "devenv",
           "nixpkgs"
         ]
@@ -65,6 +69,29 @@
         "type": "github"
       }
     },
+    "crystalForge": {
+      "inputs": {
+        "crane": "crane",
+        "devenv": "devenv",
+        "flake-utils": "flake-utils",
+        "nixos-compose": "nixos-compose",
+        "nixpkgs": "nixpkgs_3",
+        "nixpkgs-dioxus-cli": "nixpkgs-dioxus-cli",
+        "nixpkgs-stable": "nixpkgs-stable",
+        "process-compose-flake": "process-compose-flake",
+        "services-flake": "services-flake",
+        "snowfall-lib": "snowfall-lib"
+      },
+      "locked": {
+        "path": ".",
+        "type": "path"
+      },
+      "original": {
+        "path": ".",
+        "type": "path"
+      },
+      "parent": []
+    },
     "devenv": {
       "inputs": {
         "cachix": "cachix",
@@ -87,6 +114,23 @@
         "type": "github"
       },
       "original": {
+        "owner": "cachix",
+        "repo": "devenv",
+        "type": "github"
+      }
+    },
+    "devenv_2": {
+      "locked": {
+        "dir": "src/modules",
+        "lastModified": 1789838634,
+        "narHash": "sha256-y2ksQa9nNo2lFEJ99uzwdLS+6xtkh8kxPu46gwOQJ6c=",
+        "owner": "cachix",
+        "repo": "devenv",
+        "rev": "87edd1692507101de0c72f602bed65ec044d92c9",
+        "type": "github"
+      },
+      "original": {
+        "dir": "src/modules",
         "owner": "cachix",
         "repo": "devenv",
         "type": "github"
@@ -127,6 +171,7 @@
     "flake-parts": {
       "inputs": {
         "nixpkgs-lib": [
+          "crystalForge",
           "devenv",
           "nixpkgs"
         ]
@@ -256,10 +301,12 @@
     "git-hooks": {
       "inputs": {
         "flake-compat": [
+          "crystalForge",
           "devenv",
           "flake-compat"
         ],
         "nixpkgs": [
+          "crystalForge",
           "devenv",
           "nixpkgs"
         ]
@@ -282,6 +329,7 @@
       "inputs": {
         "flake-utils": "flake-utils_3",
         "nixpkgs": [
+          "crystalForge",
           "nixos-compose",
           "nixpkgs"
         ]
@@ -304,25 +352,31 @@
     "nix": {
       "inputs": {
         "flake-compat": [
+          "crystalForge",
           "devenv",
           "flake-compat"
         ],
         "flake-parts": [
+          "crystalForge",
           "devenv",
           "flake-parts"
         ],
         "git-hooks-nix": [
+          "crystalForge",
           "devenv",
           "git-hooks"
         ],
         "nixpkgs": [
+          "crystalForge",
           "devenv",
           "nixpkgs"
         ],
         "nixpkgs-23-11": [
+          "crystalForge",
           "devenv"
         ],
         "nixpkgs-regression": [
+          "crystalForge",
           "devenv"
         ]
       },
@@ -344,10 +398,12 @@
     "nixd": {
       "inputs": {
         "flake-parts": [
+          "crystalForge",
           "devenv",
           "flake-parts"
         ],
         "nixpkgs": [
+          "crystalForge",
           "devenv",
           "nixpkgs"
         ],
@@ -457,6 +513,22 @@
         "type": "github"
       }
     },
+    "nixpkgsDioxusCli": {
+      "locked": {
+        "lastModified": 1774078191,
+        "narHash": "sha256-nyxxxW1/2ouu9dU0I02ul5pHrmUrE1JVFhfFlmYe3Lw=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "09061f748ee21f68a089cd5d91ec1859cd93d0be",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "09061f748ee21f68a089cd5d91ec1859cd93d0be",
+        "type": "github"
+      }
+    },
     "nixpkgs_2": {
       "locked": {
         "lastModified": 1768649915,
@@ -489,6 +561,22 @@
         "type": "github"
       }
     },
+    "nixpkgs_4": {
+      "locked": {
+        "lastModified": 1787134453,
+        "narHash": "sha256-L3btGaZ6c0pTRkj3h0t/+0KYVtLBqRixXP8YyOEy/a8=",
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "ee3132cea5c2a76873cb5fc0d20b7e66a432d22f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "ee3132cea5c2a76873cb5fc0d20b7e66a432d22f",
+        "type": "github"
+      }
+    },
     "process-compose-flake": {
       "locked": {
         "lastModified": 1782060835,
@@ -506,21 +594,16 @@
     },
     "root": {
       "inputs": {
-        "crane": "crane",
-        "devenv": "devenv",
-        "flake-utils": "flake-utils",
-        "nixos-compose": "nixos-compose",
-        "nixpkgs": "nixpkgs_3",
-        "nixpkgs-dioxus-cli": "nixpkgs-dioxus-cli",
-        "nixpkgs-stable": "nixpkgs-stable",
-        "process-compose-flake": "process-compose-flake",
-        "services-flake": "services-flake",
-        "snowfall-lib": "snowfall-lib"
+        "crystalForge": "crystalForge",
+        "devenv": "devenv_2",
+        "nixpkgs": "nixpkgs_4",
+        "nixpkgsDioxusCli": "nixpkgsDioxusCli"
       }
     },
     "rust-overlay": {
       "inputs": {
         "nixpkgs": [
+          "crystalForge",
           "devenv",
           "nixpkgs"
         ]
@@ -559,6 +642,7 @@
         "flake-compat": "flake-compat_2",
         "flake-utils-plus": "flake-utils-plus",
         "nixpkgs": [
+          "crystalForge",
           "nixpkgs"
         ]
       },
@@ -639,6 +723,7 @@
     "treefmt-nix": {
       "inputs": {
         "nixpkgs": [
+          "crystalForge",
           "devenv",
           "nixd",
           "nixpkgs"

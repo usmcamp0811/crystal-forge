@@ -1,6 +1,17 @@
 {
   description = "Simple flake exporting a Rust package";
 
+  # Lets `nix develop .#devenv` fetch the devenv CLI itself (and its own
+  # dependency closure) from devenv's binary cache instead of building it
+  # from source. Purely a speed optimization for that one additive shell;
+  # every other input/output in this flake is unaffected.
+  nixConfig = {
+    extra-substituters = [ "https://devenv.cachix.org" ];
+    extra-trusted-public-keys = [
+      "devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw="
+    ];
+  };
+
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/release-26.05";
     flake-utils.url = "github:numtide/flake-utils";
@@ -20,6 +31,12 @@
     # Dioxus CLI pinned to the application-compatible 0.7.3 release for the
     # incremental local UI development harness.
     nixpkgs-dioxus-cli.url = "github:NixOS/nixpkgs/09061f748ee21f68a089cd5d91ec1859cd93d0be";
+    # devenv (TASK-462.1): provides the real `devenv` CLI for the additive
+    # `devShells.devenv` shell below. The process definitions it drives
+    # live in this repository's own `devenv.yaml`/`devenv.nix` (devenv's
+    # native project format), not here; see devenv.nix's top comment for
+    # why flake integration (`devenv.lib.mkShell`) is not used instead.
+    devenv.url = "github:cachix/devenv";
   };
 
   outputs = inputs:
@@ -68,6 +85,30 @@
           lib = channels.nixpkgs.lib;
           pkgs = channels.nixpkgs;
           inherit inputs;
+        };
+
+        # nix develop .#devenv (TASK-462.1): additive, alongside the
+        # existing `devShells.default` (shells/default/default.nix), which
+        # this output does not modify, replace, or remove. This shell only
+        # puts the real `devenv` CLI on `PATH`; it does not itself define
+        # or evaluate any devenv processes. Run `devenv up` from this
+        # worktree's root once inside it to start the isolated
+        # PostgreSQL/API/web UI stack defined in this repository's
+        # `devenv.yaml`/`devenv.nix`. See docs/agents/devenv-workflow.md.
+        devShells.devenv = channels.nixpkgs.mkShell {
+          packages = [ inputs.devenv.packages.${channels.nixpkgs.stdenv.hostPlatform.system}.default ];
+          shellHook = ''
+            echo "🧪 Crystal Forge devenv workflow (TASK-462.1, additive, parallel-worktree-safe)"
+            echo ""
+            echo "  devenv up      → start PostgreSQL + API server + web UI dev server"
+            echo "                   with per-worktree dynamic ports (devenv.nix)"
+            echo "  devenv up -d   → same, detached"
+            echo "  devenv processes list  → show this worktree's resolved ports"
+            echo "  devenv down    → stop only this worktree's stack"
+            echo ""
+            echo "  Does not replace: nix develop / run-ui-dev / process-compose."
+            echo "  Docs: docs/agents/devenv-workflow.md"
+          '';
         };
       };
     };

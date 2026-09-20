@@ -5,6 +5,11 @@ mcamp
 modules/home/apps/rofi/config.rasi
 modules/home/cli/ranger/configs/plugins/__pycache__
 .direnv
+# devenv (TASK-462.1) per-worktree runtime/build state: process logs, the
+# generated per-worktree crystal-forge-config.toml, and PostgreSQL's data
+# directory. Never shared across worktrees and never committed; see
+# docs/agents/devenv-workflow.md.
+.devenv
 nixos-amazon-image-23.05.20230912.e5f018c-x86_64-linux.vhd
 .jupyter
 .ipynb_checkpoints
