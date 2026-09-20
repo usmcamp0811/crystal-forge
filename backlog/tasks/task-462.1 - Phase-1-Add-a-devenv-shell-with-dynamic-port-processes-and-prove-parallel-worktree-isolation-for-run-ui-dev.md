@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-09-19 14:51'
-updated_date: '2026-09-20 02:25'
+updated_date: '2026-09-20 14:04'
 labels: []
 milestone: m-1
 dependencies: []
@@ -92,3 +92,25 @@ Portless requests sudo authentication for its port-80 listener on Linux. This mu
 - [ ] #2 nix flake check --keep-going passes
 - [ ] #3 Existing nix develop shell and process-compose scripts verified unmodified in behavior after this change
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Implementation plan (as executed)
+
+1. Research devenv 2.3.2's actual capabilities against this repo's Snowfall/flake layout before writing config (Phase 2 requirement). Key finding: `devenv.lib.mkShell` (flake integration) does NOT provide genuine dynamic port allocation — `processes.<name>.ports.<port>.value` is resolved by a custom `allocatePort` Nix primop that only exists inside devenv's own compiled Rust CLI's embedded evaluator, never under plain `nix build`/`nix develop`. Verified empirically with a scratch flake: occupying a base port and evaluating `.value` through `devenv.lib.mkShell` still returned the occupied base, unchanged. The SAME module evaluated through devenv's native project format (`devenv.yaml` + `devenv.nix`, driven by the real `devenv` CLI) correctly skipped to the next free port.
+2. Pivoted architecture accordingly: `devenv.yaml` + `devenv.nix` (native format) hold the actual process definitions; `flake.nix` gets a small additive `devShells.devenv` output whose only job is to put the real `devenv` CLI on `PATH`. `devShells.default` is untouched.
+3. PostgreSQL isolation: tried a per-worktree Unix socket first (`listen_addresses = ""`, devenv's own default) since it avoids port allocation and Portless entirely. Found empirically that `crates/cf-server/src/config/database.rs` builds a plain `postgres://user:pass@host:port/name` URL that cannot represent a socket directory as `host` (server failed with "both host and hostaddr are missing"). Pivoted to a dynamically allocated TCP port instead (still per-worktree via a per-worktree data directory).
+4. Worktree identity: left `name` unset in devenv.nix. Confirmed via the upstream `devenv` CLI source (`devenv/src/proxy.rs::project_name`) that this falls back to the basename of `devenv.root` (the worktree's own absolute path) whenever `name` is at its module default. No bespoke Nix code needed.
+5. Single-stack proof, then two-worktree concurrent proof (see Verification section on the task).
+6. Found and fixed two narrow, pre-existing fixed-port assumptions in application dev-tooling code once dynamic ports were actually exercised end-to-end:
+   - `packages/web-ui/src/api/client.rs`: the WASM client's dev-mode API-origin heuristic was hardcoded to port 3445.
+   - `crates/cf-server/src/bin/server.rs`: the server's CORS allowlist was hardcoded to ports 8080/8081/8000; a worktree landing on any other port (observed with a real second worktree at 8082) had every browser-side API call rejected by CORS.
+   Both fixes are additive env-var opt-ins, inert (behavior unchanged) for every existing workflow that never sets the new variable.
+7. Found and fixed a devenv behavior during verification: a separately invoked `devenv shell` can report stale/different resolved ports than what an already-running `devenv up` actually bound to (the Nix-evaluation-time port primop and the native process manager's live allocation are not guaranteed to agree across separate CLI invocations). `enterShell` now re-derives the exported env vars from `devenv processes list`'s live output when a manager is already running.
+8. Documentation: `docs/agents/devenv-workflow.md` (new) and `docs/agents/database-safety.md` (updated).
+
+## devenv version/API actually used
+
+devenv 2.3.2 (`github:cachix/devenv/87edd1692507101de0c72f602bed65ec044d92c9`), driven through its **native project format** (`devenv.yaml` + `devenv.nix`, real `devenv` CLI), not `devenv.lib.mkShell` flake integration. See devenv.nix's own top-of-file comment for the empirical justification.
+<!-- SECTION:PLAN:END -->
