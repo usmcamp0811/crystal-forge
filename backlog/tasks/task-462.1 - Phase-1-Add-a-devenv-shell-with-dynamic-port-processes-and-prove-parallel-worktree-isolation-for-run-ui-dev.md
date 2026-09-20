@@ -88,9 +88,9 @@ Portless requests sudo authentication for its port-80 listener on Linux. This mu
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Two-worktree parallel isolation proof recorded with exact commands and resolved ports/hostnames for each worktree
+- [x] #1 Two-worktree parallel isolation proof recorded with exact commands and resolved ports/hostnames for each worktree
 - [ ] #2 nix flake check --keep-going passes
-- [ ] #3 Existing nix develop shell and process-compose scripts verified unmodified in behavior after this change
+- [x] #3 Existing nix develop shell and process-compose scripts verified unmodified in behavior after this change
 <!-- DOD:END -->
 
 ## Implementation Plan
