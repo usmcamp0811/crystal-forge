@@ -114,3 +114,23 @@ Portless requests sudo authentication for its port-80 listener on Linux. This mu
 
 devenv 2.3.2 (`github:cachix/devenv/87edd1692507101de0c72f602bed65ec044d92c9`), driven through its **native project format** (`devenv.yaml` + `devenv.nix`, real `devenv` CLI), not `devenv.lib.mkShell` flake integration. See devenv.nix's own top-of-file comment for the empirical justification.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+## Verification evidence (worktree A = TASK-462.1-devenv-parallel-worktrees, worktree B = disposable TASK-462.1-verify-b at the same commit, now removed after verification)
+
+### AC #1 — additive shell
+`nix eval .#devShells.x86_64-linux --apply builtins.attrNames` -> `[ "default" "devenv" "sqlx" ]`. `nix build .#devShells.x86_64-linux.devenv` succeeds. `nix develop` (default) still enters, banner unchanged, `shells/default/default.nix` verified byte-identical to origin/dev (`git diff origin/dev -- shells/` empty).
+
+### AC #2/#3/#4 — processes reproduce run-ui-dev, dynamic ports, PostgreSQL isolation
+Single-stack proof (worktree A), `devenv up -d`:
+```
+api        ready restarts: 0 ports: http:3447
+postgres   ready restarts: 0 ports: main:5432
+web        ready restarts: 0 ports: http:8081
+```
+3445/8080 were occupied by an unrelated worktree's stack on this shared dev machine at the time; devenv correctly skipped to 3447/8081. `curl http://127.0.0.1:3447/status` -> healthy JSON. WASM bundle verified served (JS+`\0asm` magic bytes) at the resolved UI port. `psql -p 5432 ... SELECT hostname FROM systems WHERE hostname='test.gray'` -> present (mock fixture seeded correctly through the resolved DB connection).
+
+PostgreSQL isolation mechanism: dynamically allocated TCP port (not a Unix socket — see devenv.nix's own comment for why a Unix socket was tried first and rejected: `crates/cf-server/src/config/database.rs` cannot represent a socket-dir host in its `postgres://` URL builder).
+<!-- SECTION:NOTES:END -->
