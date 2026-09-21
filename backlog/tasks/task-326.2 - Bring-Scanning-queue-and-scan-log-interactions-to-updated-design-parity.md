@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-21 01:31'
+updated_date: '2026-09-21 01:32'
 labels:
   - scanning
   - web-ui
@@ -130,6 +130,8 @@ Final functional pass at exact design-only head `05bcac367faa05c2b89e069c08256d7
 4. Add a compatibility-safe target-aware Hardening read contract. Resolve current and historical derivations through server-owned identities, prevent current fallback to superseded scans, and disable historical justification mutations. Reuse the shared revision scope bar.
 5. Replace the Completed archived checkbox with the design ghost filter and exact count, isolate contextual By-system archive state, bound inline failure previews, and update focused browser/static contracts with real archived fixtures.
 6. Run only focused cf-builder/cf-server/Web UI checks, WASM/static/JavaScript checks, and diff hygiene. Do not run the authoritative Web UI VM or full flake check. Commit, push, verify local/remote SHAs, report, and stop.
+
+P0 cf-builder scanner stabilization: extract a pure bounded normalizer for only the flat `nix derivation show` map and a direct top-level `derivations` map. Require exact requested absolute `.drv` keys in either map; retain canonical output-path validation, non-empty outputs, command output limits, and chunking. Add focused unit coverage for flat, wrapped, absent, malformed/invalid shape, unresolved output, and invalid output path. Run targeted rustfmt and cf-builder tests only; do not commit or push.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
