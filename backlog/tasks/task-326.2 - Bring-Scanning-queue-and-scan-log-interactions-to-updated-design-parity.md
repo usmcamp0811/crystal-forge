@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-21 18:35'
+updated_date: '2026-09-21 18:39'
 labels:
   - scanning
   - web-ui
@@ -140,6 +140,8 @@ Refactor the environment-scoped fleet CVE read CTE to classify mutually explicit
 Add focused isolated-PostgreSQL regressions for current-only, scheduled-only, current/scheduled overlap deduplication, historical-only exclusion from affected_count, expired/terminal/inexact deployment exclusion, environment RBAC, and current-only mutation scope. Correct package-specific drawer metadata if the touched query still selects metadata through the package-ambiguous legacy route.
 
 Verify touched Rust with targeted rustfmt, run SQLX_OFFLINE cf-server check/tests, and run database regressions only through a verified task-owned isolated PostgreSQL runner. Do not modify Web UI files, existing unrelated dirty files, or migration 0271.
+
+Step 6 Web UI slice: mirror the additive current/scheduled-deployment-target/historical inventory fields with presence-aware compatibility normalization; classify drawer rows by inventory section independently from exact/legacy authority; update fleet summary, grouped/flat counts, sorting copy, triage labels, and read-only inventory-only presentation; restrict draft/action eligibility to current exact environment-assigned subjects; update the 16-cves fixture/static assertions for overlap deduplication, scheduled-only and historical-only sections, Viewer/Admin RBAC, and mutation exclusion. Verify with targeted rustfmt, focused and full Web UI Rust tests where feasible, wasm32 check where feasible, JavaScript syntax/static contracts, and git diff --check. Do not run the authoritative Web UI VM and do not modify backend, migrations, or unrelated dirty files.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
