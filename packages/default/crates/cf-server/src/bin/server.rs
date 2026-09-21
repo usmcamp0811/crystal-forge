@@ -521,6 +521,10 @@ async fn main() -> anyhow::Result<()> {
             get(hardening::get_system_hardening),
         )
         .route(
+            "/api/v1/systems/:id/hardening-inventory",
+            get(hardening::get_system_hardening_inventory),
+        )
+        .route(
             "/api/v1/systems/:id/hardening/justifications",
             get(hardening::get_system_hardening_justifications),
         )

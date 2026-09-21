@@ -610,58 +610,132 @@ async fn resolve_drv_outputs<A: CveLeaseApi>(
                 "Nix package-output resolution failed",
             ));
         }
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|_| {
-            CveScanExecutionError::new(
-                CveScanFailureClass::Deterministic,
-                "Nix package-output resolution returned malformed JSON",
-            )
-        })?;
-        let object = value.as_object().ok_or_else(|| {
-            CveScanExecutionError::new(
-                CveScanFailureClass::Deterministic,
-                "Nix package-output resolution returned an invalid shape",
-            )
-        })?;
-        for drv_path in chunk {
-            let outputs = object
-                .get(drv_path)
-                .and_then(|drv| drv.get("outputs"))
-                .and_then(serde_json::Value::as_object)
+        resolved.extend(normalize_derivation_show_output(&output.stdout, chunk)?);
+    }
+    Ok(resolved)
+}
+
+fn normalize_derivation_show_output(
+    stdout: &[u8],
+    requested: &[String],
+) -> Result<BTreeMap<String, Vec<CveDerivationOutput>>, CveScanExecutionError> {
+    if requested.len() > DRV_QUERY_CHUNK {
+        return Err(CveScanExecutionError::new(
+            CveScanFailureClass::Deterministic,
+            "Nix package-output resolution exceeded the derivation chunk limit",
+        ));
+    }
+    for drv_path in requested {
+        validate_store_path(drv_path, true)?;
+    }
+
+    let value: serde_json::Value = serde_json::from_slice(stdout).map_err(|_| {
+        CveScanExecutionError::new(
+            CveScanFailureClass::Deterministic,
+            "Nix package-output resolution returned malformed JSON",
+        )
+    })?;
+    let root = value.as_object().ok_or_else(|| {
+        CveScanExecutionError::new(
+            CveScanFailureClass::Deterministic,
+            "Nix package-output resolution returned an unsupported shape",
+        )
+    })?;
+    let (shape, derivations) = match root.get("derivations") {
+        Some(value) => (
+            "wrapped",
+            value.as_object().ok_or_else(|| {
+                CveScanExecutionError::new(
+                    CveScanFailureClass::Deterministic,
+                    "Nix package-output resolution returned an unsupported shape",
+                )
+            })?,
+        ),
+        None => ("flat", root),
+    };
+    if derivations
+        .keys()
+        .any(|drv_path| !is_canonical_nix_store_path(drv_path, true))
+    {
+        return Err(CveScanExecutionError::new(
+            CveScanFailureClass::Deterministic,
+            "Nix package-output resolution returned an unsupported shape",
+        ));
+    }
+    let requested_paths = requested
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if requested
+        .iter()
+        .any(|drv_path| !derivations.contains_key(drv_path))
+    {
+        return Err(CveScanExecutionError::new(
+            CveScanFailureClass::Deterministic,
+            format!(
+                "Nix omitted requested package derivations (shape={shape}, entries={}, requested={})",
+                derivations.len(),
+                requested.len()
+            ),
+        ));
+    }
+    if derivations.len() != requested_paths.len()
+        || derivations
+            .keys()
+            .any(|drv_path| !requested_paths.contains(drv_path.as_str()))
+    {
+        return Err(CveScanExecutionError::new(
+            CveScanFailureClass::Deterministic,
+            format!(
+                "Nix returned unrequested package derivations (shape={shape}, entries={}, requested={})",
+                derivations.len(),
+                requested.len()
+            ),
+        ));
+    }
+
+    let mut normalized = BTreeMap::new();
+    for drv_path in requested {
+        let derivation = &derivations[drv_path];
+        let outputs = derivation
+            .as_object()
+            .and_then(|derivation| derivation.get("outputs"))
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                CveScanExecutionError::new(
+                    CveScanFailureClass::Deterministic,
+                    "Nix package-output resolution returned a malformed derivation entry",
+                )
+            })?;
+        let mut package_outputs = Vec::with_capacity(outputs.len());
+        for (name, output) in outputs {
+            let store_path = output
+                .as_object()
+                .and_then(|output| output.get("path"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|path| !path.is_empty())
                 .ok_or_else(|| {
                     CveScanExecutionError::new(
                         CveScanFailureClass::Deterministic,
-                        "Nix omitted a requested package derivation",
+                        "Nix returned an unresolved package output",
                     )
                 })?;
-            let mut package_outputs = Vec::with_capacity(outputs.len());
-            for (name, output) in outputs {
-                let store_path = output
-                    .get("path")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| {
-                        CveScanExecutionError::new(
-                            CveScanFailureClass::Deterministic,
-                            "Nix returned an unresolved package output",
-                        )
-                    })?;
-                validate_store_path(store_path, false)?;
-                package_outputs.push(CveDerivationOutput {
-                    name: name.clone(),
-                    store_path: store_path.to_string(),
-                });
-            }
-            package_outputs
-                .sort_by(|a, b| a.name.cmp(&b.name).then(a.store_path.cmp(&b.store_path)));
-            if package_outputs.is_empty() {
-                return Err(CveScanExecutionError::new(
-                    CveScanFailureClass::Deterministic,
-                    "package derivation has no resolved outputs",
-                ));
-            }
-            resolved.insert(drv_path.clone(), package_outputs);
+            validate_store_path(store_path, false)?;
+            package_outputs.push(CveDerivationOutput {
+                name: name.clone(),
+                store_path: store_path.to_string(),
+            });
         }
+        package_outputs.sort_by(|a, b| a.name.cmp(&b.name).then(a.store_path.cmp(&b.store_path)));
+        if package_outputs.is_empty() {
+            return Err(CveScanExecutionError::new(
+                CveScanFailureClass::Deterministic,
+                "package derivation has no resolved outputs",
+            ));
+        }
+        normalized.insert(drv_path.clone(), package_outputs);
     }
-    Ok(resolved)
+    Ok(normalized)
 }
 
 fn validate_store_path(value: &str, derivation: bool) -> Result<(), CveScanExecutionError> {
@@ -1154,6 +1228,159 @@ mod tests {
                 .message
                 .contains("exceeded")
         );
+    }
+
+    #[test]
+    fn derivation_output_normalizer_accepts_flat_shape_and_sorts_outputs() {
+        let drv_path = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv";
+        let normalized = normalize_derivation_show_output(
+            br#"{
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv": {
+                    "outputs": {
+                        "dev": {"path": "/nix/store/cccccccccccccccccccccccccccccccc-package-dev"},
+                        "out": {"path": "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-package"}
+                    }
+                }
+            }"#,
+            &[drv_path.to_string()],
+        )
+        .expect("canonical flat derivation output");
+
+        assert_eq!(
+            normalized[drv_path],
+            vec![
+                CveDerivationOutput {
+                    name: "dev".to_string(),
+                    store_path: "/nix/store/cccccccccccccccccccccccccccccccc-package-dev"
+                        .to_string(),
+                },
+                CveDerivationOutput {
+                    name: "out".to_string(),
+                    store_path: "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-package".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn derivation_output_normalizer_accepts_direct_wrapped_shape() {
+        let drv_path = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv";
+        let normalized = normalize_derivation_show_output(
+            br#"{
+                "derivations": {
+                    "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv": {
+                        "outputs": {
+                            "out": {"path": "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-package"}
+                        }
+                    }
+                },
+                "version": 1
+            }"#,
+            &[drv_path.to_string()],
+        )
+        .expect("direct wrapped derivation output");
+
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(normalized[drv_path][0].name, "out");
+    }
+
+    #[test]
+    fn derivation_output_normalizer_requires_exact_requested_key() {
+        let requested = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv";
+        let error = normalize_derivation_show_output(
+            br#"{
+                "/nix/store/dddddddddddddddddddddddddddddddd-package.drv": {
+                    "outputs": {
+                        "out": {"path": "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-package"}
+                    }
+                }
+            }"#,
+            &[requested.to_string()],
+        )
+        .expect_err("a basename key must not satisfy an absolute requested path");
+
+        assert_eq!(
+            error.message,
+            "Nix omitted requested package derivations (shape=flat, entries=1, requested=1)"
+        );
+        assert!(!error.message.contains("package.drv"));
+        assert!(!error.message.contains("/nix/store/"));
+    }
+
+    #[test]
+    fn derivation_output_normalizer_rejects_unrequested_absolute_drv_key() {
+        let requested = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv";
+        let error = normalize_derivation_show_output(
+            br#"{
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv": {
+                    "outputs": {
+                        "out": {"path": "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-package"}
+                    }
+                },
+                "/nix/store/dddddddddddddddddddddddddddddddd-extra.drv": {
+                    "outputs": {
+                        "out": {"path": "/nix/store/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-extra"}
+                    }
+                }
+            }"#,
+            &[requested.to_string()],
+        )
+        .expect_err("an extra absolute derivation key must fail");
+
+        assert_eq!(
+            error.message,
+            "Nix returned unrequested package derivations (shape=flat, entries=2, requested=1)"
+        );
+        assert!(!error.message.contains("extra.drv"));
+        assert!(!error.message.contains("/nix/store/"));
+    }
+
+    #[test]
+    fn derivation_output_normalizer_rejects_malformed_and_unsupported_shapes() {
+        let requested = vec!["/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv".to_string()];
+        let malformed = normalize_derivation_show_output(b"not-json", &requested)
+            .expect_err("malformed JSON must fail");
+        assert!(malformed.message.contains("malformed JSON"));
+
+        for unsupported in [
+            br#"[]"#.as_slice(),
+            br#"{"result":{"/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv":{"outputs":{}}}}"#.as_slice(),
+            br#"{"derivations":[]}"#.as_slice(),
+        ] {
+            let error = normalize_derivation_show_output(unsupported, &requested)
+                .expect_err("unsupported derivation shape must fail");
+            assert!(error.message.contains("unsupported shape"));
+        }
+    }
+
+    #[test]
+    fn derivation_output_normalizer_rejects_unresolved_and_empty_outputs() {
+        let requested = vec!["/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv".to_string()];
+        let unresolved = normalize_derivation_show_output(
+            br#"{"/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv":{"outputs":{"out":{"path":null}}}}"#,
+            &requested,
+        )
+        .expect_err("an unresolved output must fail");
+        assert!(unresolved.message.contains("unresolved"));
+
+        let empty = normalize_derivation_show_output(
+            br#"{"/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv":{"outputs":{}}}"#,
+            &requested,
+        )
+        .expect_err("an empty output set must fail");
+        assert!(empty.message.contains("no resolved outputs"));
+    }
+
+    #[test]
+    fn derivation_output_normalizer_rejects_invalid_output_path() {
+        let requested = vec!["/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv".to_string()];
+        let error = normalize_derivation_show_output(
+            br#"{"/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv":{"outputs":{"out":{"path":"/tmp/package"}}}}"#,
+            &requested,
+        )
+        .expect_err("a non-store output path must fail");
+
+        assert!(error.message.contains("invalid Nix store path"));
     }
 
     #[test]

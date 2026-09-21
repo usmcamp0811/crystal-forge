@@ -1161,7 +1161,9 @@ pub async fn peek_next_verified_source_job(
 /// The transition is conditional on `queued` state. A concurrent claim wins
 /// without being overwritten. A later authoritative evaluation can recognize
 /// the structured server failure code and create an immutable replacement child
-/// after source publication and authoritative evaluation succeed.
+/// after source publication and authoritative evaluation succeed. The exact
+/// post-build scan prerequisite becomes terminal in the same transaction only
+/// when the guarded job transition succeeds.
 ///
 /// # Errors
 ///
@@ -1171,6 +1173,20 @@ pub async fn mark_queued_verified_source_job_obsolete(
     job_id: &Uuid,
     reason: &str,
 ) -> Result<bool> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin obsolete verified-source job transition")?;
+    let derivation_id: Option<i32> =
+        sqlx::query_scalar("SELECT derivation_id FROM build_jobs WHERE id = $1")
+            .bind(job_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("Failed to identify obsolete verified-source job")?;
+    let Some(derivation_id) = derivation_id else {
+        return Ok(false);
+    };
+    lock_build_derivation(&mut tx, derivation_id).await?;
     let updated = sqlx::query_scalar::<_, Uuid>(
         r#"
         UPDATE build_jobs
@@ -1190,9 +1206,21 @@ pub async fn mark_queued_verified_source_job_obsolete(
     .bind(job_id)
     .bind(SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE)
     .bind(reason)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .context("Failed to retire obsolete verified-source job")?;
+    if updated.is_some() {
+        crate::queries::cve_scan_leases::fail_post_build_scan_for_terminal_build_tx(
+            &mut tx,
+            *job_id,
+            Some(reason),
+        )
+        .await
+        .context("Failed to terminalize post-build scan after obsolete build failure")?;
+    }
+    tx.commit()
+        .await
+        .context("Failed to commit obsolete verified-source job transition")?;
     Ok(updated.is_some())
 }
 
@@ -2005,6 +2033,14 @@ pub async fn mark_job_failed_with_retry(
         )
         .await
         .context("Failed to persist post-build scan intent for automatic build retry")?;
+    } else {
+        crate::queries::cve_scan_leases::fail_post_build_scan_for_terminal_build_tx(
+            &mut tx,
+            *job_id,
+            error_message,
+        )
+        .await
+        .context("Failed to terminalize post-build scan after build failure")?;
     }
 
     tx.commit()
@@ -2055,8 +2091,23 @@ pub async fn get_build_job_status(pool: &PgPool, job_id: &Uuid) -> Result<Option
 ///
 /// Returns the updated `BuildJob`, or an error if the transition is illegal.
 pub async fn cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
-    let job = get_build_job_by_id(pool, job_id)
-        .await?
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin build cancellation")?;
+    let derivation_id: i32 =
+        sqlx::query_scalar("SELECT derivation_id FROM build_jobs WHERE id = $1")
+            .bind(job_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("Failed to identify build job for cancellation")?
+            .ok_or_else(|| anyhow::anyhow!("Build job not found"))?;
+    lock_build_derivation(&mut tx, derivation_id).await?;
+    let job = sqlx::query_as::<_, BuildJobRow>("SELECT * FROM build_jobs WHERE id = $1 FOR UPDATE")
+        .bind(job_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("Failed to lock build job for cancellation")?
         .ok_or_else(|| anyhow::anyhow!("Build job not found"))?;
 
     let (new_status, set_completed_at) = match job.status.as_str() {
@@ -2082,9 +2133,20 @@ pub async fn cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> 
     .bind(job_id)
     .bind(new_status)
     .bind(set_completed_at)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .context("Failed to cancel build job")?;
+
+    if new_status == "cancelled" {
+        crate::queries::cve_scan_leases::fail_post_build_scan_for_terminal_build_tx(
+            &mut tx, *job_id, None,
+        )
+        .await
+        .context("Failed to terminalize post-build scan after build cancellation")?;
+    }
+    tx.commit()
+        .await
+        .context("Failed to commit build cancellation")?;
 
     Ok(updated)
 }
@@ -2102,6 +2164,19 @@ pub async fn cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> 
 ///
 /// Returns the updated `BuildJob`, or an error if the transition is illegal.
 pub async fn force_cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin forced build cancellation")?;
+    let derivation_id: Option<i32> =
+        sqlx::query_scalar("SELECT derivation_id FROM build_jobs WHERE id = $1")
+            .bind(job_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("Failed to identify build job for forced cancellation")?;
+    if let Some(derivation_id) = derivation_id {
+        lock_build_derivation(&mut tx, derivation_id).await?;
+    }
     // Atomic transition guard: only force-cancel while state is still
     // `cancelling`.
     let updated = sqlx::query_as::<_, BuildJobRow>(
@@ -2116,16 +2191,29 @@ pub async fn force_cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<Buil
         "#,
     )
     .bind(job_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .context("Failed to force-cancel build job")?;
 
     if let Some(updated) = updated {
+        crate::queries::cve_scan_leases::fail_post_build_scan_for_terminal_build_tx(
+            &mut tx, *job_id, None,
+        )
+        .await
+        .context("Failed to terminalize post-build scan after forced cancellation")?;
+        tx.commit()
+            .await
+            .context("Failed to commit forced build cancellation")?;
         info!("Force-cancelled job {} → 'cancelled'", job_id);
         return Ok(updated);
     }
 
-    let current_status = get_build_job_status(pool, job_id).await?;
+    let current_status =
+        sqlx::query_scalar::<_, String>("SELECT status FROM build_jobs WHERE id = $1")
+            .bind(job_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("Failed to fetch build job status")?;
     match current_status.as_deref() {
         None => bail!("Build job not found"),
         Some("queued") => bail!("Cannot force-cancel a queued job; use regular cancel instead"),
@@ -2154,6 +2242,31 @@ pub async fn finalize_cancelled_job(
     builder_id: &Uuid,
     builder_session_id: Option<&Uuid>,
 ) -> Result<BuildJob> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin cancelled build finalization")?;
+    let derivation_id: i32 = sqlx::query_scalar(
+        r#"
+        SELECT derivation_id FROM build_jobs
+        WHERE id = $1
+          AND builder_id = $2
+          AND (builder_session_id IS NULL OR builder_session_id = $3)
+          AND status IN ('cancelling', 'cancelled')
+        "#,
+    )
+    .bind(job_id)
+    .bind(builder_id)
+    .bind(builder_session_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("Failed to identify cancelled build job")?
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "Build job not found or no longer owned by this builder in cancellable state"
+        )
+    })?;
+    lock_build_derivation(&mut tx, derivation_id).await?;
     let result = sqlx::query(
         r#"
         UPDATE build_jobs
@@ -2169,7 +2282,7 @@ pub async fn finalize_cancelled_job(
     .bind(job_id)
     .bind(builder_id)
     .bind(builder_session_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .context("Failed to finalize cancelled job")?;
 
@@ -2177,9 +2290,22 @@ pub async fn finalize_cancelled_job(
         bail!("Build job not found or no longer owned by this builder in cancellable state");
     }
 
-    let job = get_build_job_by_id(pool, job_id).await?.ok_or_else(|| {
-        anyhow::anyhow!("Build job disappeared after successful finalize-cancelled transition")
-    })?;
+    crate::queries::cve_scan_leases::fail_post_build_scan_for_terminal_build_tx(
+        &mut tx, *job_id, None,
+    )
+    .await
+    .context("Failed to terminalize post-build scan after cancelled build finalization")?;
+    let job = sqlx::query_as::<_, BuildJobRow>("SELECT * FROM build_jobs WHERE id = $1")
+        .bind(job_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .map(BuildJob::from)
+        .ok_or_else(|| {
+            anyhow::anyhow!("Build job disappeared after successful finalize-cancelled transition")
+        })?;
+    tx.commit()
+        .await
+        .context("Failed to commit cancelled build finalization")?;
 
     Ok(job)
 }
@@ -2803,6 +2929,25 @@ mod tests {
         .execute(pool)
         .await
         .expect("Failed to update test job status");
+    }
+
+    async fn insert_post_build_scan(pool: &PgPool, job_id: Uuid) -> Uuid {
+        sqlx::query_scalar(
+            r#"
+            INSERT INTO cve_scans (
+                derivation_id, scanner_name, status, attempts, source_trigger,
+                completed_build_job_id
+            )
+            SELECT derivation_id, 'vulnix', 'awaiting_build', 0, 'post_build', id
+            FROM build_jobs
+            WHERE id = $1
+            RETURNING id
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(pool)
+        .await
+        .expect("post-build scan should be inserted")
     }
 
     async fn set_job_derivation_path(pool: &PgPool, job_id: Uuid, drv_path: &str) {
@@ -3529,6 +3674,372 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires test database creation privileges"]
+    async fn post_build_prerequisite_failure_terminalizes_only_without_replacement(pool: PgPool) {
+        let now = Utc::now();
+        let builder = create_active_test_builder(&pool, "post-build-terminal-failure").await;
+        let terminal_job = create_queued_job(
+            &pool,
+            &format!(
+                "https://example.com/post-build-terminal-{}.git",
+                Uuid::new_v4()
+            ),
+            &format!("post-build-terminal-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "post-build-terminal-system",
+            5.0,
+            now,
+        )
+        .await;
+        let terminal_scan = insert_post_build_scan(&pool, terminal_job).await;
+        sqlx::query(
+            "UPDATE build_jobs SET status = 'building', builder_id = $2, started_at = NOW() WHERE id = $1",
+        )
+        .bind(terminal_job)
+        .bind(builder.id)
+        .execute(&pool)
+        .await
+        .expect("terminal build should be assigned");
+        sqlx::query("UPDATE automatic_retry_policy SET max_build_retries = 0 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .expect("automatic retry should be disabled");
+        let secret = format!(
+            "https://operator:password@example.test/{}",
+            "ordinary failure detail ".repeat(300)
+        );
+
+        let transition = mark_job_failed_with_retry(
+            &pool,
+            &terminal_job,
+            &builder.id,
+            None,
+            Some(&secret),
+            RetryFailureClass::Deterministic,
+        )
+        .await
+        .expect("terminal build failure should persist");
+        assert!(transition.retry_job.is_none());
+        let terminal_state: (String, i32, Option<Uuid>, serde_json::Value) = sqlx::query_as(
+            "SELECT status, attempts, completed_build_job_id, scan_metadata FROM cve_scans WHERE id = $1",
+        )
+        .bind(terminal_scan)
+        .fetch_one(&pool)
+        .await
+        .expect("terminalized scan should load");
+        assert_eq!(terminal_state.0, "failed");
+        assert_eq!(terminal_state.1, 0);
+        assert_eq!(terminal_state.2, Some(terminal_job));
+        assert_eq!(
+            terminal_state.3["build_prerequisite"]["job_id"],
+            terminal_job.to_string()
+        );
+        assert_eq!(terminal_state.3["build_prerequisite"]["status"], "failed");
+        let detail = terminal_state.3["build_prerequisite"]["message"]
+            .as_str()
+            .expect("bounded prerequisite message should be present");
+        assert_eq!(
+            detail.chars().count(),
+            super::super::cve_scan_leases::MAX_FAILURE_CHARS
+        );
+        assert!(!detail.contains("operator:password"));
+
+        let retry_job = create_queued_job(
+            &pool,
+            &format!(
+                "https://example.com/post-build-retry-{}.git",
+                Uuid::new_v4()
+            ),
+            &format!("post-build-retry-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "post-build-retry-system",
+            5.0,
+            now,
+        )
+        .await;
+        let retry_scan = insert_post_build_scan(&pool, retry_job).await;
+        sqlx::query(
+            "UPDATE build_jobs SET status = 'building', builder_id = $2, started_at = NOW() WHERE id = $1",
+        )
+        .bind(retry_job)
+        .bind(builder.id)
+        .execute(&pool)
+        .await
+        .expect("retryable build should be assigned");
+        sqlx::query("UPDATE automatic_retry_policy SET max_build_retries = 2 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .expect("automatic retry should be enabled");
+        let replacement = mark_job_failed_with_retry(
+            &pool,
+            &retry_job,
+            &builder.id,
+            None,
+            Some("temporary failure"),
+            RetryFailureClass::Transient,
+        )
+        .await
+        .expect("retryable failure should persist")
+        .retry_job
+        .expect("retryable failure should create a replacement");
+        let rebound: (String, i32, Option<Uuid>) = sqlx::query_as(
+            "SELECT status, attempts, completed_build_job_id FROM cve_scans WHERE id = $1",
+        )
+        .bind(retry_scan)
+        .fetch_one(&pool)
+        .await
+        .expect("rebound scan should load");
+        assert_eq!(rebound, ("awaiting_build".into(), 0, Some(replacement.id)));
+
+        let mut delayed = pool.begin().await.expect("delayed event should begin");
+        assert!(
+            !crate::queries::cve_scan_leases::fail_post_build_scan_for_terminal_build_tx(
+                &mut delayed,
+                retry_job,
+                Some("delayed source failure"),
+            )
+            .await
+            .expect("delayed source failure should be ignored")
+        );
+        delayed.commit().await.expect("delayed event should commit");
+        assert_eq!(
+            sqlx::query_as::<_, (String, i32, Option<Uuid>)>(
+                "SELECT status, attempts, completed_build_job_id FROM cve_scans WHERE id = $1",
+            )
+            .bind(retry_scan)
+            .fetch_one(&pool)
+            .await
+            .expect("replacement-bound scan should remain active"),
+            ("awaiting_build".into(), 0, Some(replacement.id))
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn post_build_prerequisite_terminalizes_only_true_cancelled_paths(pool: PgPool) {
+        let now = Utc::now();
+        let queued_job = create_queued_job(
+            &pool,
+            &format!(
+                "https://example.com/post-build-queued-cancel-{}.git",
+                Uuid::new_v4()
+            ),
+            &format!("post-build-queued-cancel-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "post-build-queued-cancel-system",
+            5.0,
+            now,
+        )
+        .await;
+        let queued_scan = insert_post_build_scan(&pool, queued_job).await;
+        assert_eq!(
+            cancel_build_job(&pool, &queued_job)
+                .await
+                .expect("queued cancellation should succeed")
+                .status,
+            "cancelled"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT status FROM cve_scans WHERE id = $1")
+                .bind(queued_scan)
+                .fetch_one(&pool)
+                .await
+                .expect("queued-cancel scan should load"),
+            "failed"
+        );
+
+        let builder = create_active_test_builder(&pool, "post-build-cancel-builder").await;
+        let building_job = create_queued_job(
+            &pool,
+            &format!(
+                "https://example.com/post-build-building-cancel-{}.git",
+                Uuid::new_v4()
+            ),
+            &format!("post-build-building-cancel-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "post-build-building-cancel-system",
+            5.0,
+            now,
+        )
+        .await;
+        let building_scan = insert_post_build_scan(&pool, building_job).await;
+        sqlx::query(
+            "UPDATE build_jobs SET status = 'building', builder_id = $2, started_at = NOW() WHERE id = $1",
+        )
+        .bind(building_job)
+        .bind(builder.id)
+        .execute(&pool)
+        .await
+        .expect("cancellable build should be assigned");
+        assert_eq!(
+            cancel_build_job(&pool, &building_job)
+                .await
+                .expect("building cancellation request should succeed")
+                .status,
+            "cancelling"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT status FROM cve_scans WHERE id = $1")
+                .bind(building_scan)
+                .fetch_one(&pool)
+                .await
+                .expect("cancelling scan should load"),
+            "awaiting_build"
+        );
+        assert_eq!(
+            finalize_cancelled_job(&pool, &building_job, &builder.id, None)
+                .await
+                .expect("builder cancellation finalization should succeed")
+                .status,
+            "cancelled"
+        );
+        let cancelled_state: (String, i32, Option<Uuid>, serde_json::Value) = sqlx::query_as(
+            "SELECT status, attempts, completed_build_job_id, scan_metadata FROM cve_scans WHERE id = $1",
+        )
+        .bind(building_scan)
+        .fetch_one(&pool)
+        .await
+        .expect("cancelled scan should load");
+        assert_eq!(cancelled_state.0, "failed");
+        assert_eq!(cancelled_state.1, 0);
+        assert_eq!(cancelled_state.2, Some(building_job));
+        assert_eq!(
+            cancelled_state.3["build_prerequisite"]["status"],
+            "cancelled"
+        );
+
+        let forced_job = create_queued_job(
+            &pool,
+            &format!(
+                "https://example.com/post-build-force-cancel-{}.git",
+                Uuid::new_v4()
+            ),
+            &format!("post-build-force-cancel-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "post-build-force-cancel-system",
+            5.0,
+            now,
+        )
+        .await;
+        let forced_scan = insert_post_build_scan(&pool, forced_job).await;
+        set_build_job_status(&pool, forced_job, "cancelling").await;
+        assert_eq!(
+            force_cancel_build_job(&pool, &forced_job)
+                .await
+                .expect("forced cancellation should succeed")
+                .status,
+            "cancelled"
+        );
+        assert_eq!(
+            sqlx::query_as::<_, (String, i32, Option<Uuid>)>(
+                "SELECT status, attempts, completed_build_job_id FROM cve_scans WHERE id = $1",
+            )
+            .bind(forced_scan)
+            .fetch_one(&pool)
+            .await
+            .expect("force-cancelled scan should load"),
+            ("failed".into(), 0, Some(forced_job))
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn post_build_terminalization_preserves_guarded_scan_states(pool: PgPool) {
+        let now = Utc::now();
+        let mut fixtures = Vec::new();
+        for guard in ["attempted", "manual", "pending"] {
+            let job_id = create_queued_job(
+                &pool,
+                &format!(
+                    "https://example.com/post-build-{guard}-{}.git",
+                    Uuid::new_v4()
+                ),
+                &format!("post-build-{guard}-{}", Uuid::new_v4()),
+                &Uuid::new_v4().simple().to_string(),
+                now,
+                &format!("post-build-{guard}-system"),
+                5.0,
+                now,
+            )
+            .await;
+            let scan_id = insert_post_build_scan(&pool, job_id).await;
+            match guard {
+                "attempted" => {
+                    sqlx::query("UPDATE cve_scans SET attempts = 1 WHERE id = $1")
+                        .bind(scan_id)
+                        .execute(&pool)
+                        .await
+                        .expect("attempted scan fixture should update");
+                }
+                "manual" => {
+                    sqlx::query("UPDATE cve_scans SET source_trigger = 'manual' WHERE id = $1")
+                        .bind(scan_id)
+                        .execute(&pool)
+                        .await
+                        .expect("manual scan fixture should update");
+                }
+                "pending" => {
+                    sqlx::query("UPDATE cve_scans SET status = 'pending' WHERE id = $1")
+                        .bind(scan_id)
+                        .execute(&pool)
+                        .await
+                        .expect("pending scan fixture should update");
+                }
+                _ => unreachable!(),
+            }
+            fixtures.push((guard, job_id, scan_id));
+        }
+
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("terminalization transaction should begin");
+        for (_, job_id, _) in &fixtures {
+            sqlx::query(
+                "UPDATE build_jobs SET status = 'failed', completed_at = NOW() WHERE id = $1",
+            )
+            .bind(job_id)
+            .execute(&mut *tx)
+            .await
+            .expect("terminal build fixture should update");
+            assert!(
+                !crate::queries::cve_scan_leases::fail_post_build_scan_for_terminal_build_tx(
+                    &mut tx,
+                    *job_id,
+                    Some("terminal prerequisite"),
+                )
+                .await
+                .expect("guarded terminalization should execute")
+            );
+        }
+        tx.commit()
+            .await
+            .expect("terminalization transaction should commit");
+
+        for (guard, _, scan_id) in fixtures {
+            let state: (String, i32, String) = sqlx::query_as(
+                "SELECT status, attempts, source_trigger FROM cve_scans WHERE id = $1",
+            )
+            .bind(scan_id)
+            .fetch_one(&pool)
+            .await
+            .expect("guarded scan should load");
+            let expected = match guard {
+                "attempted" => ("awaiting_build".to_string(), 1, "post_build".to_string()),
+                "manual" => ("awaiting_build".to_string(), 0, "manual".to_string()),
+                "pending" => ("pending".to_string(), 0, "post_build".to_string()),
+                _ => unreachable!(),
+            };
+            assert_eq!(state, expected);
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
     async fn builder_log_marker_cannot_revive_an_ordinary_failed_job(pool: PgPool) {
         let now = Utc::now();
         let job_id = create_queued_job(
@@ -3847,6 +4358,7 @@ mod tests {
         )
         .await;
         set_job_derivation_path(&pool, old_job, "/nix/store/old-source-system.drv").await;
+        let old_scan = insert_post_build_scan(&pool, old_job).await;
         prioritize_build_job(&pool, &old_job)
             .await
             .expect("old job should become queue head");
@@ -3874,6 +4386,16 @@ mod tests {
             retired.server_failure_code.as_deref(),
             Some(SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE)
         );
+        let retired_scan: (String, Option<Uuid>, serde_json::Value) = sqlx::query_as(
+            "SELECT status, completed_build_job_id, scan_metadata FROM cve_scans WHERE id = $1",
+        )
+        .bind(old_scan)
+        .fetch_one(&pool)
+        .await
+        .expect("obsolete build's scan should load");
+        assert_eq!(retired_scan.0, "failed");
+        assert_eq!(retired_scan.1, Some(old_job));
+        assert_eq!(retired_scan.2["build_prerequisite"]["status"], "failed");
 
         // Replacement remains closed until authoritative evaluation republishes
         // the matching source and returns this derivation to

@@ -392,44 +392,8 @@ fn parse_inventory_selection(
     target: Option<&str>,
     target_id: Option<&str>,
 ) -> Result<SystemCveInventorySelection> {
-    match (target.unwrap_or("current"), target_id) {
-        ("current", None) => Ok(SystemCveInventorySelection::Current),
-        ("retained_generation", Some(value)) => Uuid::parse_str(value)
-            .map(
-                |generation_snapshot_id| SystemCveInventorySelection::RetainedGeneration {
-                    generation_snapshot_id,
-                },
-            )
-            .map_err(|_| {
-                SystemCveInventoryPageError::InvalidRequest(
-                    "target_id must be a retained generation UUID",
-                )
-                .into()
-            }),
-        ("exact_derivation", Some(value)) => value
-            .parse::<i32>()
-            .ok()
-            .filter(|value| *value > 0)
-            .map(|derivation_id| SystemCveInventorySelection::ExactDerivation { derivation_id })
-            .ok_or_else(|| {
-                SystemCveInventoryPageError::InvalidRequest(
-                    "target_id must be a positive derivation integer",
-                )
-                .into()
-            }),
-        ("current", Some(_)) => Err(SystemCveInventoryPageError::InvalidRequest(
-            "current target must not include target_id",
-        )
-        .into()),
-        ("retained_generation" | "exact_derivation", None) => Err(
-            SystemCveInventoryPageError::InvalidRequest("historical target requires target_id")
-                .into(),
-        ),
-        _ => Err(SystemCveInventoryPageError::InvalidRequest(
-            "target must be current, retained_generation, or exact_derivation",
-        )
-        .into()),
-    }
+    SystemCveInventorySelection::from_target_params(target, target_id)
+        .map_err(|message| SystemCveInventoryPageError::InvalidRequest(message).into())
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -9,17 +9,19 @@ use uuid::Uuid;
 
 use crate::api::models::{
     ApiError, HardeningFleetSummaryResponse, HardeningJustificationResponse,
-    HardeningScanEligibilityResponse, HardeningScanStatusResponse, HardeningScanTriggerResponse,
-    HardeningServiceResultResponse, HardeningSystemPostureResponse, HardeningTopServiceResponse,
-    SaveHardeningJustificationRequest, SystemMutationResponse,
+    HardeningScanEligibilityResponse, HardeningScanProvenanceResponse, HardeningScanStatusResponse,
+    HardeningScanTriggerResponse, HardeningServiceResultResponse, HardeningSystemPostureResponse,
+    HardeningTopServiceResponse, SaveHardeningJustificationRequest, SystemHardeningInventoryParams,
+    SystemHardeningInventoryResponse, SystemMutationResponse,
 };
 use crate::auth::models::Role;
 use crate::handlers::api::rbac::{authenticated_user_roles, require_admin};
 use crate::models::auth_identity::AuthRole;
 use crate::queries::hardening_scans::{
-    get_fleet_summary, get_justifications_for_system, get_scan_by_id, get_service_results,
-    get_system_posture, get_top_vulnerable_services, list_scan_environment_ids,
-    list_system_postures, resolve_system_hardening_scan_target, upsert_justification,
+    SystemHardeningTargetUnavailable, fetch_system_hardening_inventory, get_fleet_summary,
+    get_justifications_for_system, get_scan_by_id, get_top_vulnerable_services,
+    list_scan_environment_ids, list_system_postures, parse_system_hardening_selection,
+    resolve_system_hardening_scan_target, upsert_justification,
 };
 use crate::queries::systems::{find_system_access_row, get_user_environment_membership_ids};
 use crate::services::hardening_scans::{HardeningScanError, trigger_system_hardening_scan};
@@ -104,6 +106,10 @@ pub async fn hardening_system_postures(
     }
 }
 
+/// Returns the legacy service-row array for the exact current system state.
+///
+/// The response shape remains unchanged. The resolver does not fall back to a
+/// completed scan for an older derivation when current evidence is unavailable.
 pub async fn get_system_hardening(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -132,48 +138,130 @@ pub async fn get_system_hardening(
         return not_found();
     }
 
-    let posture = match get_system_posture(&pool, system_id).await {
-        Ok(value) => value,
-        Err(_) => return internal_error("Failed to load hardening posture"),
-    };
-
-    let Some(posture) = posture else {
-        return (
+    match fetch_system_hardening_inventory(
+        &pool,
+        system_id,
+        crate::api::models::SystemCveInventorySelection::Current,
+    )
+    .await
+    {
+        Ok(inventory) => (
             StatusCode::OK,
-            Json(Vec::<HardeningServiceResultResponse>::new()),
+            Json(map_service_results(inventory.services)),
         )
-            .into_response();
-    };
-
-    let Some(scan_id) = posture.latest_scan_id else {
-        return (
-            StatusCode::OK,
-            Json(Vec::<HardeningServiceResultResponse>::new()),
-        )
-            .into_response();
-    };
-
-    match get_service_results(&pool, scan_id).await {
-        Ok(results) => {
-            let payload = results
-                .into_iter()
-                .map(|item| HardeningServiceResultResponse {
-                    id: item.id,
-                    scan_id: item.scan_id,
-                    service_name: item.service_name,
-                    service_type: item.service_type,
-                    hardening_score: item.hardening_score,
-                    risk_level: risk_level_string(item.risk_level),
-                    directives_detail: item.directives_detail,
-                    enabled_directives_count: item.enabled_directives_count,
-                    disabled_directives_count: item.disabled_directives_count,
-                    missing_directives_count: item.missing_directives_count,
-                })
-                .collect::<Vec<_>>();
-            (StatusCode::OK, Json(payload)).into_response()
+            .into_response(),
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to load exact current hardening inventory");
+            internal_error("Failed to load service hardening results")
         }
-        Err(_) => internal_error("Failed to load service hardening results"),
     }
+}
+
+/// Returns target-aware hardening evidence for one visible system.
+///
+/// System RBAC runs before target parsing and resolution. An absent, hidden, or
+/// foreign historical identity therefore does not disclose its existence.
+pub async fn get_system_hardening_inventory(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+    Query(params): Query<SystemHardeningInventoryParams>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+    let environment_memberships = match get_user_environment_membership_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return not_found();
+    }
+
+    let selection = match parse_system_hardening_selection(
+        params.target.as_deref(),
+        params.target_id.as_deref(),
+    ) {
+        Ok(value) => value,
+        Err(message) => return bad_request(message),
+    };
+    match fetch_system_hardening_inventory(&pool, system_id, selection).await {
+        Ok(inventory) => {
+            let source = match inventory.source {
+                Some(scan) => {
+                    let Some(completed_at) = scan.completed_at else {
+                        tracing::error!(scan_id = %scan.id, "completed hardening inventory scan omitted completed_at");
+                        return internal_error("Failed to load hardening inventory");
+                    };
+                    Some(HardeningScanProvenanceResponse {
+                        scan_id: scan.id,
+                        scheduled_at: scan.scheduled_at,
+                        started_at: scan.started_at,
+                        completed_at,
+                        attempts: scan.attempts,
+                        total_services: scan.total_services,
+                        well_hardened_count: scan.well_hardened_count,
+                        moderately_hardened_count: scan.moderately_hardened_count,
+                        poorly_hardened_count: scan.poorly_hardened_count,
+                        vulnerable_count: scan.vulnerable_count,
+                        overall_score: scan.overall_score,
+                        scan_duration_ms: scan.scan_duration_ms,
+                    })
+                }
+                None => None,
+            };
+            (
+                StatusCode::OK,
+                Json(SystemHardeningInventoryResponse {
+                    selection: inventory.selection,
+                    derivation_id: inventory.derivation_id,
+                    source,
+                    services: map_service_results(inventory.services),
+                    read_only: inventory.read_only,
+                }),
+            )
+                .into_response()
+        }
+        Err(error)
+            if error
+                .downcast_ref::<SystemHardeningTargetUnavailable>()
+                .is_some() =>
+        {
+            not_found()
+        }
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to load hardening inventory");
+            internal_error("Failed to load hardening inventory")
+        }
+    }
+}
+
+fn map_service_results(
+    results: Vec<crate::hardening::types::ServiceHardeningResult>,
+) -> Vec<HardeningServiceResultResponse> {
+    results
+        .into_iter()
+        .map(|item| HardeningServiceResultResponse {
+            id: item.id,
+            scan_id: item.scan_id,
+            service_name: item.service_name,
+            service_type: item.service_type,
+            hardening_score: item.hardening_score,
+            risk_level: risk_level_string(item.risk_level),
+            directives_detail: item.directives_detail,
+            enabled_directives_count: item.enabled_directives_count,
+            disabled_directives_count: item.disabled_directives_count,
+            missing_directives_count: item.missing_directives_count,
+        })
+        .collect()
 }
 
 pub async fn get_system_hardening_justifications(

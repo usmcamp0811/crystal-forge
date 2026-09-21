@@ -27,7 +27,7 @@ const LEASE_SECONDS: i64 = 120;
 const MAX_STRING_CHARS: usize = 1024;
 const MAX_PATH_CHARS: usize = 4096;
 const MAX_SCANNER_ARGS: usize = 32;
-const MAX_FAILURE_CHARS: usize = 2048;
+pub(super) const MAX_FAILURE_CHARS: usize = 2048;
 const MAX_DURATION_MS: u64 = 24 * 60 * 60 * 1000;
 const CLOSURE_QUERY_SECONDS: u64 = 60;
 
@@ -217,6 +217,60 @@ pub(crate) async fn attach_completed_build_to_post_build_scan_tx(
     .fetch_optional(&mut **tx)
     .await?;
     Ok(attached.is_some())
+}
+
+/// Fails the exact post-build scan intent blocked on a terminal build attempt.
+///
+/// ATOMICITY: The caller must invoke this helper in the transaction that makes
+/// the build terminal. Build lifecycle paths lock the derivation and build job
+/// before this scan update, which preserves the existing lock order.
+///
+/// The exact job identity, `post_build` trigger, `awaiting_build` state, and
+/// zero-attempt guard prevent a delayed terminal event from failing a scan that
+/// was rebound to a replacement build or started by another trigger. A
+/// `cancelling` build is not terminal and cannot satisfy the update.
+///
+/// # Errors
+///
+/// Returns an error when the guarded scan update fails.
+pub(crate) async fn fail_post_build_scan_for_terminal_build_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    build_job_id: Uuid,
+    failure_detail: Option<&str>,
+) -> Result<bool> {
+    let failure_detail = failure_detail.map(sanitize_failure);
+    let failed_scan = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        UPDATE cve_scans scan
+        SET status = 'failed',
+            completed_at = NOW(),
+            scan_metadata = COALESCE(scan.scan_metadata, '{}'::jsonb)
+                || jsonb_build_object(
+                    'error', CASE job.status
+                        WHEN 'cancelled' THEN 'Prerequisite build was cancelled'
+                        ELSE 'Prerequisite build failed'
+                    END,
+                    'build_prerequisite', jsonb_strip_nulls(jsonb_build_object(
+                        'job_id', job.id,
+                        'status', job.status,
+                        'message', $2::text
+                    ))
+                )
+        FROM build_jobs job
+        WHERE job.id = $1
+          AND job.status IN ('failed', 'cancelled')
+          AND scan.completed_build_job_id = job.id
+          AND scan.source_trigger = 'post_build'
+          AND scan.status = 'awaiting_build'
+          AND scan.attempts = 0
+        RETURNING scan.id
+        "#,
+    )
+    .bind(build_job_id)
+    .bind(failure_detail)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(failed_scan.is_some())
 }
 
 /// Claims one queued scan for an authenticated scanner-capable builder.

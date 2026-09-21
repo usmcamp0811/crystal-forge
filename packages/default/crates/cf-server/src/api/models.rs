@@ -745,6 +745,39 @@ pub enum SystemCveInventorySelection {
     },
 }
 
+impl SystemCveInventorySelection {
+    /// Parses the shared system inventory target query syntax.
+    ///
+    /// # Errors
+    ///
+    /// Returns a static client-facing message when the target and target
+    /// identity do not form a supported selection.
+    pub(crate) fn from_target_params(
+        target: Option<&str>,
+        target_id: Option<&str>,
+    ) -> Result<Self, &'static str> {
+        match (target.unwrap_or("current"), target_id) {
+            ("current", None) => Ok(Self::Current),
+            ("retained_generation", Some(value)) => Uuid::parse_str(value)
+                .map(|generation_snapshot_id| Self::RetainedGeneration {
+                    generation_snapshot_id,
+                })
+                .map_err(|_| "target_id must be a retained generation UUID"),
+            ("exact_derivation", Some(value)) => value
+                .parse::<i32>()
+                .ok()
+                .filter(|value| *value > 0)
+                .map(|derivation_id| Self::ExactDerivation { derivation_id })
+                .ok_or("target_id must be a positive derivation integer"),
+            ("current", Some(_)) => Err("current target must not include target_id"),
+            ("retained_generation" | "exact_derivation", None) => {
+                Err("historical target requires target_id")
+            }
+            _ => Err("target must be current, retained_generation, or exact_derivation"),
+        }
+    }
+}
+
 /// Identifies how the selected scan's finding membership is represented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -3530,6 +3563,59 @@ pub struct HardeningServiceResultResponse {
     pub enabled_directives_count: i32,
     pub disabled_directives_count: i32,
     pub missing_directives_count: i32,
+}
+
+/// Selects one server-authorized hardening inventory target.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SystemHardeningInventoryParams {
+    /// Selects `current`, `retained_generation`, or `exact_derivation`.
+    pub target: Option<String>,
+    /// Gives the UUID or integer identity required by a historical target.
+    pub target_id: Option<String>,
+}
+
+/// Gives provenance and summary data for one completed hardening scan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HardeningScanProvenanceResponse {
+    /// Identifies the exact completed scan that supplied `services`.
+    pub scan_id: Uuid,
+    /// Gives the time at which the scan was scheduled.
+    pub scheduled_at: Option<DateTime<Utc>>,
+    /// Gives the time at which scan execution started.
+    pub started_at: Option<DateTime<Utc>>,
+    /// Gives the persisted completion time.
+    pub completed_at: DateTime<Utc>,
+    /// Gives the number of execution attempts.
+    pub attempts: i32,
+    /// Gives the number of service rows reported by the scan.
+    pub total_services: i32,
+    /// Gives the number of well-hardened services.
+    pub well_hardened_count: i32,
+    /// Gives the number of moderately hardened services.
+    pub moderately_hardened_count: i32,
+    /// Gives the number of poorly hardened services.
+    pub poorly_hardened_count: i32,
+    /// Gives the number of vulnerable services.
+    pub vulnerable_count: i32,
+    /// Gives the aggregate score when the scan produced one.
+    pub overall_score: Option<i32>,
+    /// Gives the persisted scan duration in milliseconds when available.
+    pub scan_duration_ms: Option<i32>,
+}
+
+/// Returns hardening service rows for one exact system-owned derivation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemHardeningInventoryResponse {
+    /// Gives the normalized server-validated target identity.
+    pub selection: SystemCveInventorySelection,
+    /// Identifies the exact derivation when the target resolves.
+    pub derivation_id: Option<i32>,
+    /// Gives the latest completed scan for the resolved derivation.
+    pub source: Option<HardeningScanProvenanceResponse>,
+    /// Contains rows from exactly `source`, or no rows when no scan exists.
+    pub services: Vec<HardeningServiceResultResponse>,
+    /// Is true for retained-generation and exact-derivation targets.
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

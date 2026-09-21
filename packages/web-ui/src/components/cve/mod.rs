@@ -181,6 +181,8 @@ struct PackageGroup {
 pub fn CvesTab(
     system_id: Uuid,
     hostname: String,
+    /// Identifies the selected inventory and invalidates revision-local UI state.
+    inventory_target_key: String,
     vulnerabilities: Vec<SystemCveInventoryVulnerability>,
     /// Gives authoritative totals over the complete server-selected scope.
     inventory_metadata: SystemCveInventoryMetadata,
@@ -190,6 +192,9 @@ pub fn CvesTab(
     inventory_source: Option<SystemCveInventorySource>,
     /// Reports why exact remediation authority was unavailable.
     exact_authority_failure: Option<ExactCveAuthorityFailureReason>,
+    /// Is true when the selected revision is historical and immutable.
+    #[props(default = false)]
+    read_only: bool,
     allow_mutations: bool,
     on_saved: EventHandler<()>,
     /// Opens the common POA&M detail route or tray.
@@ -228,6 +233,20 @@ pub fn CvesTab(
     let mut triage_hydration_generation = use_signal(|| 0_u64);
     let mut triage_hydration_tokens: Signal<HashMap<SystemCveInventoryRowIdentity, u64>> =
         use_signal(HashMap::new);
+    use_effect(use_reactive(&inventory_target_key, move |_| {
+        expanded_cve.set(None);
+        default_expansion_applied.set(false);
+        save_status.set(None);
+        triage_details.write().clear();
+        triage_target.set(None);
+        triage_dialog_detail.set(None);
+        triage_opening.set(None);
+        let next_open_generation = (*triage_open_generation.peek()).wrapping_add(1);
+        triage_open_generation.set(next_open_generation);
+        let next_hydration_generation = (*triage_hydration_generation.peek()).wrapping_add(1);
+        triage_hydration_generation.set(next_hydration_generation);
+        triage_hydration_tokens.write().clear();
+    }));
 
     // Package-first grouping matching the design reference. The System Detail CVE
     // example does not include a filter/search bar; filtering remains available on the
@@ -296,8 +315,9 @@ pub fn CvesTab(
             match inventory_authority {
                 Some(SystemCveInventoryAuthority::Exact) => rsx! {
                     div { class: "sd-callout sd-callout-success", "data-testid": "system-cves-exact",
-                        strong { if total_findings == 0 { "Exact scan clean. " } else { "Exact scan findings. " } }
-                        "This inventory is bound to the current evaluated deployment and supports exact remediation."
+                        strong { if read_only { if total_findings == 0 { "Historical exact scan clean. " } else { "Historical exact scan findings. " } } else if total_findings == 0 { "Exact scan clean. " } else { "Exact scan findings. " } }
+                        if read_only { "This inventory is bound to the selected historical derivation. Triage and remediation mutations are unavailable." }
+                        else { "This inventory is bound to the current evaluated deployment and supports exact remediation." }
                         if let Some(source) = inventory_source.as_ref() {
                             div { class: "text-xs", "Completed {source.completed_at} by {source.scanner_name}." }
                         }

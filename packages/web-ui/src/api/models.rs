@@ -4703,6 +4703,34 @@ pub struct HardeningServiceResultResponse {
     pub missing_directives_count: i32,
 }
 
+/// Identifies the completed hardening scan selected for one revision target.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemHardeningInventorySourceResponse {
+    /// Identifies the selected completed hardening scan.
+    pub scan_id: Uuid,
+    /// Gives the real scan completion time.
+    pub completed_at: DateTime<Utc>,
+    /// Gives the aggregate score persisted with the selected scan.
+    pub overall_score: Option<i32>,
+    /// Counts services persisted for the selected scan.
+    pub total_services: i32,
+}
+
+/// Returns hardening evidence for one server-authorized system revision target.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemHardeningInventoryResponse {
+    /// Echoes the server-validated target selection.
+    pub selection: SystemCveInventorySelection,
+    /// Identifies the exact derivation resolved by the server.
+    pub derivation_id: i32,
+    /// Gives selected scan provenance, or `None` when this target has no scan.
+    pub source: Option<SystemHardeningInventorySourceResponse>,
+    /// Contains only service rows from the selected scan.
+    pub services: Vec<HardeningServiceResultResponse>,
+    /// Is true when mutations cannot apply to the selected historical target.
+    pub read_only: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HardeningJustificationResponse {
     pub id: Uuid,

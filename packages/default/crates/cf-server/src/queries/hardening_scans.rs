@@ -1,15 +1,213 @@
 //! Database queries for hardening scans.
 
 use anyhow::Result;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::api::models::SystemCveInventorySelection;
 use crate::hardening::scanner::ScanResult;
 use crate::hardening::types::{
     FleetHardeningSummary, HardeningJustification, HardeningScan, RiskLevel,
     ServiceHardeningResult, SystemHardeningPosture, TopVulnerableService,
 };
 use crate::models::hardening_scans::ScanStatus;
+
+/// Contains one exact hardening inventory selection and its completed evidence.
+#[derive(Debug)]
+pub struct SystemHardeningInventory {
+    /// Gives the normalized server-validated target identity.
+    pub selection: SystemCveInventorySelection,
+    /// Identifies the exact derivation when target resolution succeeds.
+    pub derivation_id: Option<i32>,
+    /// Gives the latest completed scan for the exact derivation.
+    pub source: Option<HardeningScan>,
+    /// Contains service rows belonging to exactly `source`.
+    pub services: Vec<ServiceHardeningResult>,
+    /// Is true for every historical target.
+    pub read_only: bool,
+}
+
+/// Reports that a historical hardening target is not owned by the system.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SystemHardeningTargetUnavailable;
+
+impl std::fmt::Display for SystemHardeningTargetUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("system hardening target unavailable")
+    }
+}
+
+impl std::error::Error for SystemHardeningTargetUnavailable {}
+
+/// Parses the shared system inventory target syntax.
+///
+/// # Errors
+///
+/// Returns a static client-facing message when the target and target identity
+/// do not form a supported selection.
+pub fn parse_system_hardening_selection(
+    target: Option<&str>,
+    target_id: Option<&str>,
+) -> std::result::Result<SystemCveInventorySelection, &'static str> {
+    SystemCveInventorySelection::from_target_params(target, target_id)
+}
+
+/// Fetches hardening evidence for one exact server-authorized target.
+///
+/// Current selection uses only the latest system state. Its store path must
+/// equal the derivation's realized store path, and the derivation must match the
+/// system flake and effective configuration name. The query never falls back to
+/// an older derivation or scan. Historical selections revalidate the same
+/// system, flake, configuration, and NixOS boundaries as CVE inventory.
+///
+/// # Errors
+///
+/// Returns a database error when the consistent snapshot cannot be read.
+/// Returns [`SystemHardeningTargetUnavailable`] when a historical identity is
+/// absent or belongs outside the selected system boundary.
+pub async fn fetch_system_hardening_inventory(
+    pool: &PgPool,
+    system_id: Uuid,
+    selection: SystemCveInventorySelection,
+) -> Result<SystemHardeningInventory> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *transaction)
+        .await?;
+    let inventory =
+        fetch_system_hardening_inventory_tx(&mut transaction, system_id, selection).await?;
+    transaction.commit().await?;
+    Ok(inventory)
+}
+
+async fn fetch_system_hardening_inventory_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    system_id: Uuid,
+    selection: SystemCveInventorySelection,
+) -> Result<SystemHardeningInventory> {
+    // SECURITY: Browser-provided identities only narrow server-owned system,
+    // flake, effective configuration, and NixOS relationships.
+    let derivation_id = match selection {
+        SystemCveInventorySelection::Current => {
+            sqlx::query_scalar::<_, i32>(
+                r#"WITH selected_system AS (
+                     SELECT system.hostname,system.flake_id,
+                            COALESCE(NULLIF(BTRIM(system.system_configuration_name),''),
+                                     system.hostname) AS configuration_name
+                     FROM systems system WHERE system.id=$1
+                   ), latest_state AS (
+                     SELECT state.store_path
+                     FROM selected_system system
+                     LEFT JOIN LATERAL (
+                       SELECT candidate.store_path
+                       FROM system_states candidate
+                       WHERE candidate.hostname=system.hostname
+                       ORDER BY candidate.timestamp DESC NULLS LAST,candidate.id DESC
+                       LIMIT 1
+                     ) state ON true
+                   )
+                   SELECT derivation.id
+                   FROM selected_system system CROSS JOIN latest_state state
+                   JOIN derivations derivation
+                     ON derivation.store_path=state.store_path
+                    AND derivation.derivation_type='nixos'
+                    AND derivation.derivation_name=system.configuration_name
+                   JOIN commits commit ON commit.id=derivation.commit_id
+                    AND commit.flake_id=system.flake_id"#,
+            )
+            .bind(system_id)
+            .fetch_optional(&mut **transaction)
+            .await?
+        }
+        SystemCveInventorySelection::RetainedGeneration {
+            generation_snapshot_id,
+        } => {
+            sqlx::query_scalar::<_, i32>(
+                r#"SELECT derivation.id
+                   FROM evaluation_generation_snapshots retained
+                   JOIN systems system ON system.id=retained.system_id
+                   JOIN derivations derivation ON derivation.id=retained.derivation_id
+                    AND derivation.derivation_type='nixos'
+                    AND derivation.derivation_name=COALESCE(
+                      NULLIF(BTRIM(system.system_configuration_name),''),system.hostname)
+                   JOIN commits commit ON commit.id=derivation.commit_id
+                    AND commit.flake_id=system.flake_id
+                   WHERE retained.id=$2 AND retained.system_id=$1"#,
+            )
+            .bind(system_id)
+            .bind(generation_snapshot_id)
+            .fetch_optional(&mut **transaction)
+            .await?
+        }
+        SystemCveInventorySelection::ExactDerivation { derivation_id } => {
+            sqlx::query_scalar::<_, i32>(
+                r#"SELECT derivation.id
+                   FROM systems system
+                   JOIN derivations derivation
+                     ON derivation.id=$2 AND derivation.derivation_type='nixos'
+                    AND derivation.derivation_name=COALESCE(
+                      NULLIF(BTRIM(system.system_configuration_name),''),system.hostname)
+                   JOIN commits commit ON commit.id=derivation.commit_id
+                    AND commit.flake_id=system.flake_id
+                   WHERE system.id=$1"#,
+            )
+            .bind(system_id)
+            .bind(derivation_id)
+            .fetch_optional(&mut **transaction)
+            .await?
+        }
+    };
+
+    if selection != SystemCveInventorySelection::Current && derivation_id.is_none() {
+        return Err(SystemHardeningTargetUnavailable.into());
+    }
+    let Some(derivation_id) = derivation_id else {
+        return Ok(SystemHardeningInventory {
+            selection,
+            derivation_id: None,
+            source: None,
+            services: Vec::new(),
+            read_only: false,
+        });
+    };
+
+    let source = sqlx::query_as::<_, HardeningScan>(
+        r#"SELECT id,derivation_id,scheduled_at,started_at,completed_at,
+                  status,attempts,total_services,well_hardened_count,
+                  moderately_hardened_count,poorly_hardened_count,
+                  vulnerable_count,overall_score,scan_duration_ms,
+                  scan_metadata,created_at
+           FROM hardening_scans
+           WHERE derivation_id=$1 AND status='completed' AND completed_at IS NOT NULL
+           ORDER BY completed_at DESC,id DESC LIMIT 1"#,
+    )
+    .bind(derivation_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let services = match source.as_ref() {
+        Some(scan) => {
+            sqlx::query_as::<_, ServiceHardeningResult>(
+                r#"SELECT id,scan_id,service_name,service_type,hardening_score,
+                      risk_level,directives_detail,enabled_directives_count,
+                      disabled_directives_count,missing_directives_count,created_at
+               FROM service_hardening_results
+               WHERE scan_id=$1
+               ORDER BY hardening_score ASC,service_name ASC,id ASC"#,
+            )
+            .bind(scan.id)
+            .fetch_all(&mut **transaction)
+            .await?
+        }
+        None => Vec::new(),
+    };
+    Ok(SystemHardeningInventory {
+        selection,
+        derivation_id: Some(derivation_id),
+        source,
+        services,
+        read_only: selection != SystemCveInventorySelection::Current,
+    })
+}
 
 /// Idempotently enqueue a hardening scan for a derivation.
 ///

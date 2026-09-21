@@ -49,6 +49,8 @@ pub enum IconName {
     Maximize,
     /// Restores a maximized tray or drawer.
     Minimize,
+    /// Archive box icon for retained records.
+    Archive,
 }
 
 #[component]
@@ -98,6 +100,13 @@ pub fn Icon(name: IconName, #[props(default = 16)] size: u32) -> Element {
         IconName::Download => rsx! {
             path {
                 d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        IconName::Archive => rsx! {
+            path {
+                d: "M4 7h16v13H4zM3 4h18v3H3zM9 11h6",
                 stroke_linecap: "round",
                 stroke_linejoin: "round"
             }

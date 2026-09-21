@@ -8431,6 +8431,7 @@ const steps = [
     action: async (page) => {
       await routeConfigHealth(page, mockConfigHealthResponse());
       await routeSystemsWarningData(page);
+
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
       const warningBanner = page.locator("[data-testid='systems-missing-flake-warning']").first();
@@ -16213,6 +16214,7 @@ security.audit.enable = true;</fixtext>
     description: "Scanning view - authoritative lifecycle collections, diagnostics, retention, and system history",
     action: async (page) => {
       const systemId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      const buildRequiredSystemId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
       const ids = {
         running: "10000000-0000-4000-8000-000000000001",
         build: "10000000-0000-4000-8000-000000000002",
@@ -16263,15 +16265,15 @@ security.audit.enable = true;</fixtext>
         record(ids.build, 102, "alpha-build-wait", "core-fleet", "aaaa-build", "awaiting_build", 8, { wait_reason: "Build output is not available." }),
         record(ids.closure, 103, "beta-closure-wait", "core-fleet", "bbbb-closure", "awaiting_closure", 7, { wait_reason: "A completed cache closure is not available." }),
         record(ids.pending, 104, "gamma-queued", "lab-fleet", "cccc-queued", "pending", 6),
-        record(ids.failedBuild, 105, "delta-build-failed", "failed-build-fleet", "dddd-build-failed", "awaiting_build", 5, { build_status: "failed", wait_reason: "The associated build failed." }),
-        record(ids.cancelledBuild, 106, "epsilon-build-cancelled", "cancelled-build-fleet", "eeee-build-cancelled", "awaiting_build", 4, { build_status: "cancelled", wait_reason: "The associated build was cancelled." }),
       ];
       const completedRows = [
         record(ids.newest, 201, "alpha-current", "core-fleet", "zzzz-current", "completed", 15),
         record(ids.superseded, 202, "alpha-old", "core-fleet", "aaaa-old", "completed", 12),
         record(ids.failed, 203, "omega-new-failure", "failure-fleet", "ffff-failed", "failed", 14),
-        record(ids.oldFailure, 204, "omega-old-failure", "failure-fleet", "eeee-failed", "failed", 10),
+        record(ids.oldFailure, 204, "omega-old-failure", "failure-fleet", "eeee-failed", "failed", 10, { failure: `bounded failure ${"detail ".repeat(30)}` }),
         record(ids.retained, 205, "retained-archive", "archive-fleet", "dddd-archive", "completed", 5, { archived_at: timestamp(16) }),
+        record(ids.failedBuild, 105, "delta-build-failed", "failed-build-fleet", "dddd-build-failed", "failed", 5, { source_trigger: "post_build", attempts: 0, build_status: "failed", failure: "The associated build failed before vulnix started." }),
+        record(ids.cancelledBuild, 106, "epsilon-build-cancelled", "cancelled-build-fleet", "eeee-build-cancelled", "failed", 4, { source_trigger: "post_build", attempts: 0, build_status: "cancelled", failure: "The associated build was cancelled before vulnix started." }),
       ];
       const archivedIds = new Set([ids.retained]);
       const collectionRequests = [];
@@ -16285,7 +16287,7 @@ security.audit.enable = true;</fixtext>
       await page.route("**/api/v1/scanning/stats", async (route) => route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ scanning: 1, queued: 1, awaiting_build: 3, awaiting_closure: 1, stale: 2, never_scanned: 2, failed: 2, coverage_percent: 86 }),
+        body: JSON.stringify({ scanning: 1, queued: 1, awaiting_build: 1, awaiting_closure: 1, stale: 2, never_scanned: 2, failed: 4, coverage_percent: 86 }),
       }));
       await page.route(scansRoute, async (route) => {
         const request = route.request();
@@ -16299,15 +16301,17 @@ security.audit.enable = true;</fixtext>
         const url = new URL(request.url());
         const collection = url.searchParams.get("collection");
         const includeArchived = url.searchParams.get("include_archived") === "true";
+        const requestedLimit = Number.parseInt(url.searchParams.get("limit") || "0", 10);
         collectionRequests.push({ collection, includeArchived, systemId: url.searchParams.get("system_id"), limit: url.searchParams.get("limit") });
-        if (!["active", "completed", "history"].includes(collection) || url.searchParams.get("limit") !== "500") {
+        if (!["active", "completed", "history"].includes(collection) || !Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 500) {
           throw new Error(`Unexpected scanning collection contract: ${url.search}`);
         }
         let rows = collection === "active" ? activeRows : completedRows;
         if (collection === "history") rows = completedRows.filter((row) => [201, 202].includes(row.derivation_id));
-        const hiddenArchived = rows.filter((row) => archivedIds.has(row.scan_id)).length;
+        const hiddenArchived = includeArchived ? 0 : rows.filter((row) => archivedIds.has(row.scan_id)).length;
         const items = rows
           .filter((row) => includeArchived || !archivedIds.has(row.scan_id))
+          .slice(0, requestedLimit)
           .map((row) => ({ ...row, archived_at: archivedIds.has(row.scan_id) ? timestamp(16) : null }));
         await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items, total: rows.length, hidden_archived: hiddenArchived }) });
       });
@@ -16339,7 +16343,7 @@ security.audit.enable = true;</fixtext>
         contentType: "application/json",
         body: JSON.stringify([
           { system_id: systemId, hostname: "prod-server-01", environment: "production", total_configs: 5, scanned: 2, stale: 1, needs_build: 1, unscanned: 2, current_crit: 1, current_high: 2, current_derivation_id: 201 },
-          { system_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", hostname: "build-required-01", environment: "staging", total_configs: 1, scanned: 0, stale: 0, needs_build: 1, unscanned: 1, current_crit: 0, current_high: 0, current_derivation_id: null },
+          { system_id: buildRequiredSystemId, hostname: "build-required-01", environment: "staging", total_configs: 1, scanned: 0, stale: 0, needs_build: 1, unscanned: 1, current_crit: 0, current_high: 0, current_derivation_id: null },
         ]),
       }));
       await page.route(`**/api/v1/scanning/systems/${systemId}/scans?limit=500`, async (route) => route.fulfill({
@@ -16352,6 +16356,11 @@ security.audit.enable = true;</fixtext>
           { derivation_id: 303, rescan_eligible: true, scan_id: null, hostname: "prod-server-01", flake_name: "core-fleet", commit_hash: "aaaa-superseded", status: "never_scanned", completed_at: null, scheduled_at: null, critical_count: 0, high_count: 0, medium_count: 0, freshness: "archived", is_current: false, is_latest_per_flake: false, source_trigger: null },
         ]),
       }));
+      await page.route(`**/api/v1/scanning/systems/${buildRequiredSystemId}/scans?limit=500`, async (route) => route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([]),
+      }));
       await page.route("**/api/v1/environments", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(mockBuilderEnvironments()) }));
       await page.route("**/api/v1/scanning/schedule", async (route) => {
         const policy = { on_build: true, deployed_interval: "24h", recent_interval: "24h", archived_interval: "168h", archived_enabled: true, rebuild_to_scan: false, updated_at: timestamp(16) };
@@ -16363,7 +16372,7 @@ security.audit.enable = true;</fixtext>
         await page.goto(`${baseUrl}/scanning`, { timeout: LOAD_TIMEOUT });
         await assertVisible(page.getByRole("heading", { name: "Scanning" }), "Expected Scanning heading");
         for (const tab of ["Active", "Completed", "By system"]) await assertVisible(page.getByRole("tab", { name: new RegExp(`^${tab}`) }), `Expected ${tab} tab`);
-        await assertVisible(page.getByText("1 pending · 3 awaiting build · 1 awaiting closure"), "Expected prerequisite wait totals");
+        await assertVisible(page.getByText("1 pending · 1 awaiting build · 1 awaiting closure"), "Expected prerequisite wait totals");
         await assertVisible(page.getByText("Awaiting: Build output is not available."), "Expected build wait reason");
         await assertVisible(page.getByText("Awaiting: A completed cache closure is not available."), "Expected closure wait reason");
         await assertCount(page.getByRole("button", { name: /Cancel scan/i }), 0, "Scanning must not expose cancellation");
@@ -16390,7 +16399,7 @@ security.audit.enable = true;</fixtext>
         await page.getByRole("button", { name: "Latest per flake" }).click();
         await page.getByRole("button", { name: "Sort by Configuration" }).click();
         const sortedActive = await page.locator("#scan-active-panel tbody .scanning-config-name").allTextContents();
-        if (sortedActive.join(",") !== "alpha-build-wait,beta-closure-wait,delta-build-failed,epsilon-build-cancelled,gamma-queued,zeta-running") {
+        if (sortedActive.join(",") !== "alpha-build-wait,beta-closure-wait,gamma-queued,zeta-running") {
           throw new Error(`Configuration sorting was not deterministic: ${sortedActive.join(",")}`);
         }
 
@@ -16444,17 +16453,6 @@ security.audit.enable = true;</fixtext>
         await assertHidden(detail, "Escape should close scan detail");
         await assertFocused(waitingDetailButton, "Scan detail did not restore focus to its opener");
 
-        for (const [scanId, hostname, expectedTitle] of [
-          [ids.failedBuild, "delta-build-failed", "The prerequisite build failed"],
-          [ids.cancelledBuild, "epsilon-build-cancelled", "The prerequisite build was cancelled"],
-        ]) {
-          const terminalBuildRow = page.locator("#scan-active-panel tbody tr").filter({ hasText: hostname });
-          await terminalBuildRow.getByRole("button", { name: `Open details for scan ${scanId}` }).click();
-          detail = page.getByRole("dialog", { name: "Scan details" });
-          await assertVisible(detail.getByRole("alert").getByText(expectedTitle, { exact: true }), `Expected ${hostname} prerequisite callout`);
-          await detail.getByRole("button", { name: "Close exact scan detail" }).click();
-        }
-
         const closureRow = page.locator("#scan-active-panel tbody tr").filter({ hasText: "beta-closure-wait" });
         await closureRow.getByRole("button", { name: `Open details for scan ${ids.closure}` }).click();
         detail = page.getByRole("dialog", { name: "Scan details" });
@@ -16494,6 +16492,22 @@ security.audit.enable = true;</fixtext>
         await detail.getByRole("button", { name: "Close exact scan detail" }).click();
 
         await page.getByRole("tab", { name: /^Completed/ }).click();
+        for (const [scanId, hostname, expectedTitle] of [
+          [ids.failedBuild, "delta-build-failed", "Build failed before scan"],
+          [ids.cancelledBuild, "epsilon-build-cancelled", "Build cancelled before scan"],
+        ]) {
+          const terminalBuildRow = page.locator("#scan-completed-panel tbody tr").filter({ hasText: hostname });
+          await assertCount(terminalBuildRow.getByRole("button", { name: "Retry exact" }), 0, `${hostname} must not offer a misleading scan retry`);
+          await terminalBuildRow.getByRole("button", { name: `Open details for scan ${scanId}` }).click();
+          detail = page.getByRole("dialog", { name: "Scan details" });
+          await assertVisible(detail.getByRole("alert").getByText(expectedTitle, { exact: true }), `Expected ${hostname} prerequisite callout`);
+          await assertVisible(detail.getByRole("link", { name: "View build" }), `Expected ${hostname} primary build action`);
+          await assertCount(detail.getByRole("button", { name: "Retry scan" }), 0, `${hostname} detail must not offer scan retry`);
+          await detail.getByRole("button", { name: "Close exact scan detail" }).click();
+        }
+        const boundedFailure = page.locator("#scan-completed-panel tbody tr").filter({ hasText: "omega-old-failure" }).locator(".scanning-row-failure");
+        const boundedFailureText = await boundedFailure.textContent();
+        if (!boundedFailureText.endsWith("…") || [...boundedFailureText].length > 121) throw new Error(`Failure preview was not bounded: ${boundedFailureText}`);
         const revisionFilter = page.getByRole("combobox", { name: "Filter by revision freshness" });
         await revisionFilter.selectOption("superseded");
         await assertVisible(page.getByText("alpha-old", { exact: true }), "Expected superseded revision filter");
@@ -16512,22 +16526,24 @@ security.audit.enable = true;</fixtext>
         if (retryRequests.at(-1) !== 203) throw new Error(`Exact retry used derivation ${retryRequests.at(-1)} instead of 203`);
         await assertVisible(page.getByText("1 archived scans hidden by retention view"), "Expected retention hidden count");
 
-        for (const scanId of [ids.newest, ids.superseded, ids.failed, ids.oldFailure]) {
+        for (const scanId of [ids.newest, ids.superseded, ids.failed, ids.oldFailure, ids.failedBuild, ids.cancelledBuild]) {
           await page.getByRole("checkbox", { name: `Select scan ${scanId}` }).check();
         }
         const completedReload = page.waitForResponse((response) => response.url().includes("collection=completed&include_archived=false") && response.request().method() === "GET");
         await page.getByRole("button", { name: "Archive selected" }).click();
         await completedReload;
         await assertVisible(page.getByRole("heading", { name: "Completed scans are hidden" }), "Expected retention empty state");
-        await assertVisible(page.getByText("5 archived scan(s)"), "Expected retention empty count");
-        const includeArchived = page.getByText("Include archived").locator("input");
-        await includeArchived.check();
+        await assertVisible(page.getByText("7 archived scan(s)"), "Expected retention empty count");
+        const includeArchived = page.getByRole("button", { name: "Archived [7]" });
+        await includeArchived.click();
+        await assertAttribute(page.getByRole("button", { name: "Archived [7]" }), "aria-pressed", "true", "Archived filter should expose its active state");
         await assertVisible(page.getByText("retained-archive", { exact: true }), "Expected archived history to be reviewable");
         await page.getByRole("checkbox", { name: `Select scan ${ids.retained}` }).check();
         const restoreReload = page.waitForResponse((response) => response.url().includes("collection=completed&include_archived=true") && response.request().method() === "GET");
+        const restoreCountReload = page.waitForResponse((response) => response.url().includes("collection=completed&include_archived=false") && response.request().method() === "GET");
         await page.getByRole("button", { name: "Restore selected" }).click();
-        await restoreReload;
-        if (!archiveRequests.some((request) => request.archived === true && request.scan_ids.length === 4) || !archiveRequests.some((request) => request.archived === false && request.scan_ids.includes(ids.retained))) {
+        await Promise.all([restoreReload, restoreCountReload]);
+        if (!archiveRequests.some((request) => request.archived === true && request.scan_ids.length === 6) || !archiveRequests.some((request) => request.archived === false && request.scan_ids.includes(ids.retained))) {
           throw new Error(`Archive/restore selection requests were incomplete: ${JSON.stringify(archiveRequests)}`);
         }
 
@@ -16542,6 +16558,25 @@ security.audit.enable = true;</fixtext>
         await assertVisible(needsBuildRow.getByText("Needs build", { exact: true }), "Expected truthful needs-build revision row");
         await assertVisible(supersededRow.getByText("Superseded config", { exact: true }), "Expected superseded revision relation");
         if (!collectionRequests.some((request) => request.collection === "history" && request.systemId === systemId)) throw new Error("By-system expansion did not request scoped history collection");
+        const prodArchived = page.getByRole("checkbox", { name: "Include archived" });
+        if (await prodArchived.isChecked()) throw new Error("Completed archived state leaked into By-system history");
+        const prodArchivedReload = page.waitForResponse((response) => {
+          const url = new URL(response.url());
+          return url.pathname.endsWith("/api/v1/scanning/scans") &&
+            url.searchParams.get("collection") === "history" &&
+            url.searchParams.get("system_id") === systemId &&
+            url.searchParams.get("include_archived") === "true" &&
+            response.request().method() === "GET";
+        });
+        await prodArchived.check();
+        await prodArchivedReload;
+        await page.getByRole("button", { name: /build-required-01/ }).click();
+        const buildRequiredArchived = page.getByRole("checkbox", { name: "Include archived" });
+        if (await buildRequiredArchived.isChecked()) throw new Error("One system's archived state leaked into another system");
+        await page.getByRole("tab", { name: /^Completed/ }).click();
+        await assertAttribute(page.getByRole("button", { name: "Archived [6]" }), "aria-pressed", "true", "By-system archived state must not change Completed");
+        await page.getByRole("tab", { name: /^By system/ }).click();
+        await page.getByRole("button", { name: /prod-server-01/ }).click();
 
         await page.getByRole("button", { name: "Schedule" }).click();
         const scheduleDialog = page.getByRole("dialog", { name: "Scan schedule" });
@@ -16564,6 +16599,7 @@ security.audit.enable = true;</fixtext>
         await page.unroute(exactRetryRoute);
         await page.unroute("**/api/v1/scanning/systems?limit=500");
         await page.unroute(`**/api/v1/scanning/systems/${systemId}/scans?limit=500`);
+        await page.unroute(`**/api/v1/scanning/systems/${buildRequiredSystemId}/scans?limit=500`);
         await page.unroute("**/api/v1/environments");
         await page.unroute("**/api/v1/scanning/schedule");
       }
@@ -17269,6 +17305,35 @@ security.audit.enable = true;</fixtext>
 
       await routeSystemsWarningData(page);
 
+      const historicalGenerationId = "00000000-0000-4000-8000-000000000073";
+      await page.route(
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-inventory-sources",
+        async (route) => route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            items: [
+              { selection: { kind: "current" }, generation: 74, commit_hash: "1111111111111111111111111111111111111111", derivation_id: 42, is_current: true, is_latest_per_flake: true, source: null, evidence_representation: null, scan_available: true, read_only: false },
+              { selection: { kind: "retained_generation", generation_snapshot_id: historicalGenerationId }, generation: 73, commit_hash: "2222222222222222222222222222222222222222", derivation_id: 41, is_current: false, is_latest_per_flake: false, source: null, evidence_representation: null, scan_available: false, read_only: true },
+            ],
+          }),
+        }),
+      );
+      await page.route(
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/generations",
+        async (route) => route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            current_generation: 74,
+            generations: [
+              { generation: 74, store_path: "/nix/store/11111111111111111111111111111111-system", commit_hash: "1111111111111111111111111111111111111111", timestamp: "2026-04-07T08:10:00Z", is_current: true },
+              { generation: 73, store_path: "/nix/store/22222222222222222222222222222222-system", commit_hash: "2222222222222222222222222222222222222222", timestamp: "2026-04-06T22:00:00Z", is_current: false },
+            ],
+          }),
+        }),
+      );
+
       await page.route(
         "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening/justifications*",
         async (route) => {
@@ -17277,7 +17342,7 @@ security.audit.enable = true;</fixtext>
       );
 
       await page.route(
-        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening*",
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening-inventory*",
         async (route) => {
           const vulnerableDirectives = [
             { name: "PrivateTmp", enabled: false, value: false, points: 0, max_points: 5 },
@@ -17323,37 +17388,60 @@ security.audit.enable = true;</fixtext>
             { name: "RestrictAddressFamilies", enabled: true, value: ["AF_UNIX", "AF_INET"], points: 4, max_points: 4 },
           ];
 
+          const url = new URL(route.request().url());
+          const historical = url.searchParams.get("target") === "retained_generation";
+          if (historical) {
+            await route.fulfill({
+              status: 200,
+              contentType: "application/json",
+              body: JSON.stringify({
+                selection: { kind: "retained_generation", generation_snapshot_id: historicalGenerationId },
+                derivation_id: 41,
+                source: null,
+                services: [],
+                read_only: true,
+              }),
+            });
+            return;
+          }
+          const services = [
+            {
+              id: "00000000-0000-0000-0000-00000000c001",
+              scan_id: "00000000-0000-0000-0000-00000000b001",
+              service_name: "nginx.service",
+              service_type: "simple",
+              hardening_score: 34,
+              risk_level: "vulnerable",
+              enabled_directives_count: 4,
+              disabled_directives_count: 8,
+              missing_directives_count: 6,
+              directives_detail: vulnerableDirectives,
+              created_at: new Date().toISOString(),
+            },
+            {
+              id: "00000000-0000-0000-0000-00000000c002",
+              scan_id: "00000000-0000-0000-0000-00000000b001",
+              service_name: "sshd.service",
+              service_type: "notify",
+              hardening_score: 78,
+              risk_level: "moderately_hardened",
+              enabled_directives_count: 16,
+              disabled_directives_count: 3,
+              missing_directives_count: 1,
+              directives_detail: moderateDirectives,
+              created_at: new Date().toISOString(),
+            },
+          ];
           await route.fulfill({
             status: 200,
             contentType: "application/json",
-            body: JSON.stringify([
-              {
-                id: "00000000-0000-0000-0000-00000000c001",
-                scan_id: "00000000-0000-0000-0000-00000000b001",
-                service_name: "nginx.service",
-                service_type: "simple",
-                hardening_score: 34,
-                risk_level: "vulnerable",
-                enabled_directives_count: 4,
-                disabled_directives_count: 8,
-                missing_directives_count: 6,
-                directives_detail: vulnerableDirectives,
-                created_at: new Date().toISOString(),
-              },
-              {
-                id: "00000000-0000-0000-0000-00000000c002",
-                scan_id: "00000000-0000-0000-0000-00000000b001",
-                service_name: "sshd.service",
-                service_type: "notify",
-                hardening_score: 78,
-                risk_level: "moderately_hardened",
-                enabled_directives_count: 16,
-                disabled_directives_count: 3,
-                missing_directives_count: 1,
-                directives_detail: moderateDirectives,
-                created_at: new Date().toISOString(),
-              },
-            ]),
+            body: JSON.stringify({
+              selection: { kind: "current" },
+              derivation_id: 42,
+              source: { scan_id: "00000000-0000-0000-0000-00000000b001", completed_at: new Date().toISOString(), overall_score: 56, total_services: 2 },
+              services,
+              read_only: false,
+            }),
           });
         },
       );
@@ -17374,7 +17462,7 @@ security.audit.enable = true;</fixtext>
       await page.waitForTimeout(1200);
 
       await assertVisible(
-        page.getByText("Run Hardening Scan").first(),
+        page.getByRole("button", { name: "Check now" }).first(),
         "Expected hardening scan action to be visible on system detail",
       );
       await assertVisible(page.getByText("Avg score").first(), "Expected hardening summary stats row to be visible");
@@ -17387,6 +17475,14 @@ security.audit.enable = true;</fixtext>
         page.getByRole("button", { name: /^View details$/i }).first(),
         "Expected hardening table detail action to render",
       );
+      const hardeningRevision = page.getByRole("combobox", { name: "Audited config" });
+      await hardeningRevision.selectOption({ label: "gen #73 · 2222222222222222222222222222222222222222" });
+      await assertVisible(page.getByText("Historical hardening evidence is read-only."), "Expected historical hardening authority disclosure");
+      await assertVisible(page.getByRole("heading", { name: "No hardening scan for this revision" }), "Expected historical no-scan state without current fallback");
+      await assertCount(page.getByRole("button", { name: "Check now" }), 0, "Historical hardening must not expose Check now");
+      await assertCount(page.getByText("nginx.service", { exact: true }), 0, "Historical no-scan target must not retain current services");
+      await hardeningRevision.selectOption({ label: "gen #74 (current) · 1111111111111111111111111111111111111111" });
+      await assertVisible(page.getByText("nginx.service").first(), "Returning to current should restore current hardening evidence");
 
       await page.getByRole("button", { name: /^View details$/i }).first().click({ force: true });
       await assertVisible(
@@ -17410,8 +17506,10 @@ security.audit.enable = true;</fixtext>
       await page.unroute(
         "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening-scan-eligibility*",
       );
+      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-inventory-sources");
+      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/generations");
       await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening/justifications*");
-      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening*");
+      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening-inventory*");
       await unrouteSystemsWarningData(page);
     },
   },
@@ -21398,6 +21496,31 @@ function runStaticHarnessContracts() {
     assertContract(start >= 0 && end > start, `Could not isolate canonical workflow ${name}`);
     return source.slice(start, end);
   };
+  const scanningWorkflowSource = isolateWorkflow("16c-scanning-view");
+  for (const contract of [
+    'getByRole("button", { name: "Archived [7]" })',
+    '"Build failed before scan"',
+    '"Build cancelled before scan"',
+    'must not offer a misleading scan retry',
+    'Failure preview was not bounded',
+    'includeArchived ? 0 : rows.filter',
+    '.slice(0, requestedLimit)',
+    'Completed archived state leaked into By-system history',
+    "One system's archived state leaked into another system",
+    'name: "Archived [6]"',
+  ]) {
+    assertContract(scanningWorkflowSource.includes(contract), `16c Scanning workflow is missing ${contract}`);
+  }
+  const hardeningWorkflowSource = isolateWorkflow("28-system-hardening-tab");
+  for (const contract of [
+    'hardening-inventory*',
+    'name: "Audited config"',
+    '"Historical hardening evidence is read-only."',
+    '"No hardening scan for this revision"',
+    'Historical no-scan target must not retain current services',
+  ]) {
+    assertContract(hardeningWorkflowSource.includes(contract), `28 System Detail hardening workflow is missing ${contract}`);
+  }
   const notificationWorkflowSource = isolateWorkflow("09g-topbar-notifications-dark");
   assertContract(
     notificationWorkflowSource.includes('reopenedPanel.getByRole("button"') &&

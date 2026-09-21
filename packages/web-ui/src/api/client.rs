@@ -1121,6 +1121,45 @@ pub async fn fetch_system_hardening(
     fetch_json(&url).await
 }
 
+/// Fetches hardening evidence for one server-authorized revision target.
+///
+/// The browser sends only the opaque identity from
+/// [`SystemCveInventoryCandidatesResponse`]. It never submits a derivation path
+/// or derives a target identity from display metadata.
+pub async fn fetch_system_hardening_inventory_for_target(
+    id: &Uuid,
+    selection: SystemCveInventorySelection,
+) -> Result<SystemHardeningInventoryResponse, ApiClientError> {
+    let url = system_hardening_inventory_url(&base_url(), id, selection);
+    fetch_json(&url).await
+}
+
+fn system_hardening_inventory_url(
+    base: &str,
+    id: &Uuid,
+    selection: SystemCveInventorySelection,
+) -> String {
+    let target_id = match selection {
+        SystemCveInventorySelection::Current => None,
+        SystemCveInventorySelection::RetainedGeneration {
+            generation_snapshot_id,
+        } => Some(generation_snapshot_id.to_string()),
+        SystemCveInventorySelection::ExactDerivation { derivation_id } => {
+            Some(derivation_id.to_string())
+        }
+    };
+    let target = match selection {
+        SystemCveInventorySelection::Current => "current",
+        SystemCveInventorySelection::RetainedGeneration { .. } => "retained_generation",
+        SystemCveInventorySelection::ExactDerivation { .. } => "exact_derivation",
+    };
+    let mut url = format!("{base}/systems/{id}/hardening-inventory?target={target}");
+    if let Some(target_id) = target_id {
+        url.push_str(&format!("&target_id={target_id}"));
+    }
+    url
+}
+
 pub async fn fetch_system_hardening_justifications(
     id: &uuid::Uuid,
 ) -> Result<Vec<HardeningJustificationResponse>, ApiClientError> {
@@ -3448,6 +3487,34 @@ mod config_observation_tests {
             .expect("historical page URL should serialize"),
             format!(
                 "https://example.test/api/v1/systems/{id}/cve-inventory-page?limit=100&target=retained_generation&target_id={generation_snapshot_id}"
+            )
+        );
+    }
+
+    #[test]
+    fn hardening_inventory_url_uses_only_server_issued_target_identity() {
+        let id = Uuid::from_u128(440);
+        let generation_snapshot_id = Uuid::from_u128(441);
+        assert_eq!(
+            system_hardening_inventory_url(
+                "https://example.test/api/v1",
+                &id,
+                SystemCveInventorySelection::RetainedGeneration {
+                    generation_snapshot_id,
+                },
+            ),
+            format!(
+                "https://example.test/api/v1/systems/{id}/hardening-inventory?target=retained_generation&target_id={generation_snapshot_id}"
+            )
+        );
+        assert_eq!(
+            system_hardening_inventory_url(
+                "https://example.test/api/v1",
+                &id,
+                SystemCveInventorySelection::ExactDerivation { derivation_id: 42 },
+            ),
+            format!(
+                "https://example.test/api/v1/systems/{id}/hardening-inventory?target=exact_derivation&target_id=42"
             )
         );
     }

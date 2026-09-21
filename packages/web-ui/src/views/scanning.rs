@@ -96,11 +96,27 @@ enum SystemHistoryEntry {
     NoScan(ScanningQueueItemResponse),
 }
 
-fn visible_record_total(response: &ScanningScanRecordsResponse, include_archived: bool) -> i64 {
+fn visible_record_total(response: &ScanningScanRecordsResponse) -> i64 {
+    response.total.saturating_sub(response.hidden_archived)
+}
+
+fn archived_record_total(response_without_archived: &ScanningScanRecordsResponse) -> i64 {
+    response_without_archived.hidden_archived.max(0)
+}
+
+fn system_archive_visibility(states: &HashMap<Uuid, bool>, system_id: Uuid) -> bool {
+    states.get(&system_id).copied().unwrap_or(false)
+}
+
+fn set_system_archive_visibility(
+    states: &mut HashMap<Uuid, bool>,
+    system_id: Uuid,
+    include_archived: bool,
+) {
     if include_archived {
-        response.total
+        states.insert(system_id, true);
     } else {
-        response.total.saturating_sub(response.hidden_archived)
+        states.remove(&system_id);
     }
 }
 
@@ -235,6 +251,23 @@ fn revision_class(row: &ScanningScanRecordResponse) -> &'static str {
     } else {
         "superseded"
     }
+}
+
+fn bounded_failure_preview(value: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let mut chars = value.chars();
+    let preview = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{preview}…")
+    } else {
+        preview
+    }
+}
+
+fn is_prerequisite_build_failure(row: &ScanningScanRecordResponse) -> bool {
+    row.status == "failed"
+        && row.source_trigger.as_deref() == Some("post_build")
+        && row.attempts == 0
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -398,7 +431,7 @@ pub fn ScanningView() -> Element {
     let mut tab = use_signal(|| ScanTab::Active);
     let mut refresh = use_signal(|| 0_u64);
     let mut live_refresh = use_signal(|| 0_u64);
-    let mut include_archived = use_signal(|| false);
+    let mut completed_include_archived = use_signal(|| false);
     let mut query = use_signal(String::new);
     let mut status_filter = use_signal(|| "all".to_string());
     let mut revision_filter = use_signal(|| "all".to_string());
@@ -420,6 +453,7 @@ pub fn ScanningView() -> Element {
     let mut system_histories = use_signal(HashMap::<(Uuid, bool), SystemHistoryData>::new);
     let mut system_errors = use_signal(HashMap::<(Uuid, bool), String>::new);
     let mut loading_system = use_signal(|| Option::<(Uuid, bool)>::None);
+    let mut system_archive_states = use_signal(HashMap::<Uuid, bool>::new);
     let mut open_failed_when_loaded = use_signal(|| false);
 
     let mut policy_on_build = use_signal(|| true);
@@ -481,11 +515,8 @@ pub fn ScanningView() -> Element {
     });
     let mut completed = use_resource(move || {
         let _ = refresh();
-        let include_archived = include_archived();
-        async move {
-            fetch_scanning_scan_records("completed", include_archived, None, Some(RECORD_LIMIT))
-                .await
-        }
+        let _ = live_refresh();
+        async { fetch_scanning_scan_records("completed", false, None, Some(RECORD_LIMIT)).await }
     });
     let mut completed_with_archived = use_resource(move || {
         let _ = refresh();
@@ -529,12 +560,12 @@ pub fn ScanningView() -> Element {
 
     use_effect(move || {
         let _ = refresh();
-        let archived = include_archived();
         system_histories.write().clear();
         system_errors.write().clear();
         if tab() == ScanTab::Systems
             && let Some(system_id) = expanded_system()
         {
+            let archived = system_archive_visibility(&system_archive_states.peek(), system_id);
             reload_system_history(
                 system_id,
                 system_histories,
@@ -546,7 +577,24 @@ pub fn ScanningView() -> Element {
     });
 
     let active_value = resource_value(&active);
-    let completed_value = resource_value(&completed);
+    let completed_without_archived_value = resource_value(&completed);
+    let completed_with_archived_value = resource_value(&completed_with_archived);
+    let completed_value = if completed_include_archived() {
+        completed_with_archived_value.clone()
+    } else {
+        completed_without_archived_value.clone()
+    };
+    let completed_loading = if completed_include_archived() {
+        completed_with_archived.read().is_none()
+    } else {
+        completed.read().is_none()
+    };
+    let completed_error = if completed_include_archived() {
+        resource_error(&completed_with_archived)
+    } else {
+        resource_error(&completed)
+    };
+    let archived_count = archived_record_total(&completed_without_archived_value);
     let systems_value = systems
         .read()
         .as_ref()
@@ -574,7 +622,7 @@ pub fn ScanningView() -> Element {
                 .collect::<HashMap<_, _>>()
         })
         .unwrap_or_default();
-    let failed_rows = resource_value(&completed_with_archived).items;
+    let failed_rows = completed_with_archived_value.items.clone();
     let schedule_for_button = schedule_value.clone();
 
     use_effect(move || {
@@ -705,7 +753,7 @@ pub fn ScanningView() -> Element {
                         focus_element_by_id(scan_tab_id(next));
                     },
                     { scan_tab_button(tab, ScanTab::Active, "Active", active_value.total, "scan-active-panel") }
-                    { scan_tab_button(tab, ScanTab::Completed, "Completed", visible_record_total(&completed_value, include_archived()), "scan-completed-panel") }
+                    { scan_tab_button(tab, ScanTab::Completed, "Completed", visible_record_total(&completed_value), "scan-completed-panel") }
                     { scan_tab_button(tab, ScanTab::Systems, "By system", systems_value.len() as i64, "scan-systems-panel") }
                 }
                 match tab() {
@@ -716,7 +764,8 @@ pub fn ScanningView() -> Element {
                                 active.read().is_none(),
                                 resource_error(&active),
                                 false,
-                                include_archived,
+                                completed_include_archived,
+                                0,
                                 query,
                                 status_filter,
                                 revision_filter,
@@ -739,10 +788,11 @@ pub fn ScanningView() -> Element {
                         div { id: "scan-completed-panel", role: "tabpanel", aria_labelledby: "scan-completed-tab",
                             { records_panel(
                                 completed_value.clone(),
-                                completed.read().is_none(),
-                                resource_error(&completed),
+                                completed_loading,
+                                completed_error.clone(),
                                 true,
-                                include_archived,
+                                completed_include_archived,
+                                archived_count,
                                 query,
                                 status_filter,
                                 revision_filter,
@@ -757,7 +807,13 @@ pub fn ScanningView() -> Element {
                                 selected_scan,
                                 detail_state,
                                 detail_generation,
-                                move || completed.restart(),
+                                move || {
+                                    if completed_include_archived() {
+                                        completed_with_archived.restart();
+                                    } else {
+                                        completed.restart();
+                                    }
+                                },
                             ) }
                         }
                     },
@@ -774,7 +830,7 @@ pub fn ScanningView() -> Element {
                                 system_histories,
                                 system_errors,
                                 loading_system,
-                                include_archived,
+                                system_archive_states,
                                 exact_retry_pending,
                                 action_feedback,
                                 refresh,
@@ -898,6 +954,7 @@ fn records_panel(
     error: Option<String>,
     completed: bool,
     mut include_archived: Signal<bool>,
+    archived_count: i64,
     mut query: Signal<String>,
     mut status_filter: Signal<String>,
     mut revision_filter: Signal<String>,
@@ -944,7 +1001,7 @@ fn records_panel(
         .collect::<Vec<_>>();
     let filtered = rows.len();
     let loaded = response.items.len();
-    let available = visible_record_total(&response, include_archived());
+    let available = visible_record_total(&response);
     let capped = available > loaded as i64;
 
     rsx! {
@@ -969,7 +1026,15 @@ fn records_panel(
             button { class: if latest_only() { "btn btn-ghost xs focus-ring active-filter" } else { "btn btn-ghost xs focus-ring" }, aria_pressed: latest_only(), onclick: move |_| latest_only.toggle(), Icon { name: IconName::Star, size: 12 } " Latest per flake" }
             span { class: "filter-count", "{filtered} visible · {loaded} loaded" if capped { " · showing the first {loaded} of {available}; search and sorting apply to loaded records" } if response.total != available { " · {response.total} all" } }
             if completed {
-                label { class: "scanning-include-archived", input { r#type: "checkbox", checked: include_archived(), onchange: move |event| { include_archived.set(event.checked()); selected_rows.write().clear(); } } " Include archived" }
+                button {
+                    class: if include_archived() { "btn btn-ghost xs focus-ring active-filter scanning-archived-filter" } else { "btn btn-ghost xs focus-ring scanning-archived-filter" },
+                    aria_pressed: include_archived(),
+                    disabled: archived_count == 0 && !include_archived(),
+                    title: if include_archived() { "Hide archived scans" } else if archived_count == 0 { "No archived scans are available" } else { "Show archived scans" },
+                    onclick: move |_| { include_archived.toggle(); selected_rows.write().clear(); },
+                    Icon { name: IconName::Archive, size: 12 }
+                    " Archived [{archived_count}]"
+                }
             }
         }
 
@@ -1068,7 +1133,8 @@ fn record_row(
         scan_id: row.scan_id,
         label: format!("{} · {}", row.hostname, commit_label(&row.commit_hash)),
     };
-    let can_retry = row.status == "failed";
+    let prerequisite_build_failure = is_prerequisite_build_failure(&row);
+    let can_retry = row.status == "failed" && !prerequisite_build_failure;
     let relation = revision_class(&row);
     let relation_label = match relation {
         "deployed" => "Deployed",
@@ -1087,7 +1153,8 @@ fn record_row(
             td {
                 span { class: "chip {meta.class}", span { class: "chip-dot", style: "background:{meta.color};" } "{meta.label}" }
                 if let Some(reason) = row.wait_reason.as_deref() { div { class: "scanning-wait", "Awaiting: {reason}" } }
-                if row.archived_at.is_some() { div { class: "scanning-archived-label", "Archived" } }
+                if let Some(failure) = row.failure.as_deref() { div { class: "scanning-row-failure", title: "{failure}", "{bounded_failure_preview(failure)}" } }
+                if row.archived_at.is_some() { div { class: "scanning-archived-label", Icon { name: IconName::Archive, size: 9 } " Archived" } }
             }
             td { { findings(row.critical_count, row.high_count, row.medium_count, row.low_count, row.status == "completed") } }
             td { class: "scanning-last-scan", title: "{record_time(&row).to_rfc3339()}", "{relative_time(record_time(&row))}" }
@@ -1148,7 +1215,7 @@ fn systems_panel(
     histories: Signal<HashMap<(Uuid, bool), SystemHistoryData>>,
     errors: Signal<HashMap<(Uuid, bool), String>>,
     loading_system: Signal<Option<(Uuid, bool)>>,
-    mut include_archived: Signal<bool>,
+    mut archive_states: Signal<HashMap<Uuid, bool>>,
     retry_pending: Signal<HashSet<i32>>,
     feedback: Signal<Option<ScanActionFeedback>>,
     refresh: Signal<u64>,
@@ -1200,7 +1267,7 @@ fn systems_panel(
                     {
                         let system_id = system.system_id;
                         let open = expanded() == Some(system_id);
-                        let archive_state = include_archived();
+                        let archive_state = system_archive_visibility(&archive_states.read(), system_id);
                         let history = histories.read().get(&(system_id, archive_state)).cloned();
                         let history_error = errors.read().get(&(system_id, archive_state)).cloned();
                         rsx! {
@@ -1215,9 +1282,13 @@ fn systems_panel(
                                 div { class: "scan-sys-expand",
                                     div { class: "scan-sys-expand-head",
                                         span { "Exact revision history · newest first" }
-                                        label { class: "scanning-include-archived", input { r#type: "checkbox", checked: include_archived(), onchange: move |event| include_archived.set(event.checked()) } " Include archived" }
+                                        label { class: "scanning-include-archived", input { r#type: "checkbox", checked: archive_state, onchange: move |event| {
+                                            let include_archived = event.checked();
+                                            set_system_archive_visibility(&mut archive_states.write(), system_id, include_archived);
+                                            reload_system_history(system_id, histories, errors, loading_system, include_archived);
+                                        } } " Include archived" }
                                     }
-                                    if let Some(error) = history_error { { load_error_state("Revision history could not be loaded", &error, move || reload_system_history(system_id, histories, errors, loading_system, include_archived())) } }
+                                    if let Some(error) = history_error { { load_error_state("Revision history could not be loaded", &error, move || reload_system_history(system_id, histories, errors, loading_system, archive_state)) } }
                                     else if loading_system() == Some((system_id, archive_state)) { div { class: "q-empty scanning-system-state", role: "status", "Loading exact history…" } }
                                     else if let Some(history) = history {
                                         if history.scans.items.is_empty() && history.derivations.iter().all(|row| row.scan_id.is_some()) { div { class: "q-empty scanning-system-state", if history.scans.hidden_archived > 0 { "{history.scans.hidden_archived} archived scan(s) are hidden by the retention view." } else { "No exact scans or unscanned revisions are recorded for this system." } } }
@@ -1317,11 +1388,11 @@ fn system_history_table(
                     rsx! { tr { key: "history-{row.scan_id}", class: if row.archived_at.is_some() { "scanning-record archived" } else { "scanning-record" },
                         td { div { class: "scanning-full-revision mono", "{revision}" } }
                         td { span { class: if relation == "Deployed" { "chip chip-healthy" } else { "chip chip-unknown" }, "{relation}" } }
-                        td { span { class: "chip {meta.class}", "{meta.label}" } if let Some(reason) = row.wait_reason.as_deref() { div { class: "scanning-wait", "Awaiting: {reason}" } } if let Some(failure) = row.failure.as_deref() { div { class: "scanning-row-failure", "{failure}" } } }
+                        td { span { class: "chip {meta.class}", "{meta.label}" } if let Some(reason) = row.wait_reason.as_deref() { div { class: "scanning-wait", "Awaiting: {reason}" } } if let Some(failure) = row.failure.as_deref() { div { class: "scanning-row-failure", title: "{failure}", "{bounded_failure_preview(failure)}" } } if row.archived_at.is_some() { div { class: "scanning-archived-label", Icon { name: IconName::Archive, size: 9 } " Archived" } } }
                         td { { findings(row.critical_count, row.high_count, row.medium_count, row.low_count, row.status == "completed") } }
                         td { class: "scanning-last-scan", title: "{record_time(&row).to_rfc3339()}", "{relative_time(record_time(&row))}" }
                         td { div { class: "row-actions scanning-row-actions",
-                            if row.status == "failed" { button { class: "btn btn-ghost xs focus-ring", disabled: retry_pending.read().contains(&row.derivation_id), onclick: { let label = format!("{} {}", row.hostname, commit_label(&row.commit_hash)); move |_| retry_exact_scan(row.derivation_id, label.clone(), retry_pending, feedback, refresh) }, "Retry exact" } }
+                            if row.status == "failed" && !is_prerequisite_build_failure(&row) { button { class: "btn btn-ghost xs focus-ring", disabled: retry_pending.read().contains(&row.derivation_id), onclick: { let label = format!("{} {}", row.hostname, commit_label(&row.commit_hash)); move |_| retry_exact_scan(row.derivation_id, label.clone(), retry_pending, feedback, refresh) }, "Retry exact" } }
                             button { class: "btn-icon focus-ring", aria_label: format!("Open details for scan {}", row.scan_id), onclick: move |_| load_scan_detail(selection.clone(), selected_scan, detail_state, detail_generation), Icon { name: IconName::Terminal, size: 13 } }
                         } }
                     } }
@@ -1552,7 +1623,21 @@ fn detail_callout(
     refresh: Signal<u64>,
 ) -> Element {
     let build_terminal = matches!(detail.build_status.as_deref(), Some("failed" | "cancelled"));
-    let (kind, title, guidance) = if detail.status == "failed" {
+    let prerequisite_build_failure = detail.status == "failed"
+        && detail.source_trigger.as_deref() == Some("post_build")
+        && detail.attempts == 0
+        && build_terminal;
+    let (kind, title, guidance) = if prerequisite_build_failure {
+        (
+            "danger",
+            if detail.build_status.as_deref() == Some("cancelled") {
+                "Build cancelled before scan"
+            } else {
+                "Build failed before scan"
+            },
+            "Vulnix did not run. Review the exact prerequisite build for failure or cancellation details.",
+        )
+    } else if detail.status == "failed" {
         (
             "danger",
             detail
@@ -1593,8 +1678,8 @@ fn detail_callout(
                 strong { "{title}" }
                 p { "{guidance}" }
                 div { class: "row-actions",
-                    if let Some(build_job_id) = detail.build_job_id { a { class: "btn btn-ghost xs focus-ring", href: "/builds?job={build_job_id}", Icon { name: IconName::Build, size: 11 } " View build" } }
-                    if detail.status == "failed" { button { class: "btn btn-ghost xs focus-ring", disabled: retry_pending.read().contains(&detail.derivation_id), onclick: { let derivation_id = detail.derivation_id; let label = format!("{} {}", detail.hostname, commit_label(&detail.commit_hash)); move |_| { retry_exact_scan(derivation_id, label.clone(), retry_pending, feedback, refresh); close_scan_detail(selected, generation); } }, Icon { name: IconName::Sync, size: 11 } " Retry scan" } }
+                    if let Some(build_job_id) = detail.build_job_id { a { class: if prerequisite_build_failure { "btn btn-primary xs focus-ring" } else { "btn btn-ghost xs focus-ring" }, href: "/builds?job={build_job_id}", Icon { name: IconName::Build, size: 11 } " View build" } }
+                    if detail.status == "failed" && !prerequisite_build_failure { button { class: "btn btn-ghost xs focus-ring", disabled: retry_pending.read().contains(&detail.derivation_id), onclick: { let derivation_id = detail.derivation_id; let label = format!("{} {}", detail.hostname, commit_label(&detail.commit_hash)); move |_| { retry_exact_scan(derivation_id, label.clone(), retry_pending, feedback, refresh); close_scan_detail(selected, generation); } }, Icon { name: IconName::Sync, size: 11 } " Retry scan" } }
                 }
             }
         }
@@ -2102,6 +2187,28 @@ mod tests {
     }
 
     #[test]
+    fn prerequisite_build_failures_are_not_scan_retries() {
+        let mut failed = row("atlas", "failed", 1, 0);
+        failed.source_trigger = Some("post_build".to_string());
+        failed.attempts = 0;
+        assert!(is_prerequisite_build_failure(&failed));
+
+        failed.attempts = 1;
+        assert!(!is_prerequisite_build_failure(&failed));
+        failed.attempts = 0;
+        failed.source_trigger = Some("manual".to_string());
+        assert!(!is_prerequisite_build_failure(&failed));
+    }
+
+    #[test]
+    fn failure_preview_is_unicode_safe_and_bounded() {
+        let preview = bounded_failure_preview(&"å".repeat(121));
+        assert_eq!(preview.chars().count(), 121);
+        assert!(preview.ends_with('…'));
+        assert_eq!(bounded_failure_preview("short failure"), "short failure");
+    }
+
+    #[test]
     fn diagnostic_search_and_export_preserve_authorized_order_and_bounds() {
         let event = |id, message: &str| ScanningScanDiagnosticEventResponse {
             id,
@@ -2148,13 +2255,40 @@ mod tests {
 
     #[test]
     fn archive_aware_totals_distinguish_visible_and_all_rows() {
-        let response = ScanningScanRecordsResponse {
+        let without_archived = ScanningScanRecordsResponse {
             items: vec![row("atlas", "completed", 1, 0)],
             total: 12,
             hidden_archived: 5,
         };
-        assert_eq!(visible_record_total(&response, false), 7);
-        assert_eq!(visible_record_total(&response, true), 12);
+        let with_archived = ScanningScanRecordsResponse {
+            items: vec![row("atlas", "completed", 1, 0)],
+            total: 12,
+            hidden_archived: 0,
+        };
+        assert_eq!(visible_record_total(&without_archived), 7);
+        assert_eq!(visible_record_total(&with_archived), 12);
+        assert_eq!(archived_record_total(&without_archived), 5);
+        assert_ne!(
+            archived_record_total(&without_archived),
+            with_archived.items.len() as i64,
+            "the archived count must not come from the bounded included rows",
+        );
+    }
+
+    #[test]
+    fn by_system_archive_visibility_is_independent_per_system() {
+        let alpha = Uuid::from_u128(1);
+        let beta = Uuid::from_u128(2);
+        let mut states = HashMap::new();
+
+        set_system_archive_visibility(&mut states, alpha, true);
+        assert!(system_archive_visibility(&states, alpha));
+        assert!(!system_archive_visibility(&states, beta));
+
+        set_system_archive_visibility(&mut states, beta, true);
+        set_system_archive_visibility(&mut states, alpha, false);
+        assert!(!system_archive_visibility(&states, alpha));
+        assert!(system_archive_visibility(&states, beta));
     }
 
     #[test]

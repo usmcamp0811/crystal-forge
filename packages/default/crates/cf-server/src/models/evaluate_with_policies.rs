@@ -1979,21 +1979,29 @@ pub async fn persist_evaluated_system(
                     // not a build failure and must not raise a false
                     // build-failure alert.
                     if build_job_status == "queued" {
+                        let cancellation_reason =
+                            format!("Policy no longer satisfied for {}", result.system_name,);
                         sqlx::query(
                             "UPDATE build_jobs \
                              SET status = 'cancelled', \
-                                 error_message = $1, \
+                                 logs = COALESCE(logs, '') || E'\n\nCancelled: ' || $1, \
                                  completed_at = NOW(), \
                                  updated_at = NOW() \
                              WHERE id = $2 AND status = 'queued'",
                         )
-                        .bind(format!(
-                            "Policy no longer satisfied for {}",
-                            result.system_name,
-                        ))
+                        .bind(&cancellation_reason)
                         .bind(build_job_id)
                         .execute(&mut *tx)
                         .await?;
+                        crate::queries::cve_scan_leases::fail_post_build_scan_for_terminal_build_tx(
+                            &mut tx,
+                            build_job_id,
+                            Some(&cancellation_reason),
+                        )
+                        .await
+                        .context(
+                            "Failed to terminalize post-build scan after policy cancellation",
+                        )?;
                     }
                     // For already-building (or any other non-queued)
                     // jobs, leave them in place but do NOT return
@@ -7248,6 +7256,82 @@ mod tests {
             .bind(flake_id)
             .execute(&pool)
             .await;
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn policy_cancellation_terminalizes_exact_post_build_scan(pool: PgPool) {
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+        let system = successful_system("policy-cancel");
+
+        let first = finalize_evaluated_system(
+            &pool,
+            commit_id,
+            attempt,
+            &system,
+            &passing_policy_check("policy-cancel"),
+            &[],
+        )
+        .await
+        .expect("passing evaluation should queue a build");
+        let build_job_id = match first {
+            SystemFinalizeOutcome::Queued { build_job_id, .. } => build_job_id,
+            other => panic!("expected queued outcome, got {other:?}"),
+        };
+        let scan_id: uuid::Uuid = sqlx::query_scalar(
+            "SELECT id FROM cve_scans WHERE completed_build_job_id = $1 AND source_trigger = 'post_build'",
+        )
+        .bind(build_job_id)
+        .fetch_one(&pool)
+        .await
+        .expect("queued build should have an exact post-build intent");
+        sqlx::query(
+            "UPDATE derivations SET status_id = 7 WHERE id = (SELECT derivation_id FROM build_jobs WHERE id = $1)",
+        )
+        .bind(build_job_id)
+        .execute(&pool)
+        .await
+        .expect("fixture derivation should enter the build-active state");
+
+        let cancelled = finalize_evaluated_system(
+            &pool,
+            commit_id,
+            attempt,
+            &system,
+            &failing_policy_check("policy-cancel", true, "Require packages: git"),
+            &[],
+        )
+        .await
+        .expect("policy reevaluation should persist");
+        assert!(matches!(
+            cancelled,
+            SystemFinalizeOutcome::RecordedWithoutBuild {
+                reason: SystemNotQueuedReason::StrictPolicyFailure,
+                ..
+            }
+        ));
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT status FROM build_jobs WHERE id = $1")
+                .bind(build_job_id)
+                .fetch_one(&pool)
+                .await
+                .expect("policy-cancelled build should load"),
+            "cancelled"
+        );
+        let scan_state: (String, i32, String, Option<uuid::Uuid>, serde_json::Value) = sqlx::query_as(
+            "SELECT status, attempts, source_trigger, completed_build_job_id, scan_metadata FROM cve_scans WHERE id = $1",
+        )
+        .bind(scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("policy-cancelled scan should load");
+        assert_eq!(scan_state.0, "failed");
+        assert_eq!(scan_state.1, 0);
+        assert_eq!(scan_state.2, "post_build");
+        assert_eq!(scan_state.3, Some(build_job_id));
+        assert_eq!(scan_state.4["build_prerequisite"]["status"], "cancelled");
     }
 
     #[tokio::test]

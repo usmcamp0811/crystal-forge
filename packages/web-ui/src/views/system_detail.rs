@@ -23,13 +23,14 @@ use wasm_bindgen::closure::Closure;
 
 use crate::api::client::{
     ApiClientError, fetch_compliance_system_evidence, fetch_flake_timeline_for_tray,
-    fetch_system_assignments, fetch_system_compliance_bundles, fetch_system_cve_inventory,
+    fetch_system_assignments, fetch_system_compliance_bundles,
+    fetch_system_cve_inventory_candidates, fetch_system_cve_inventory_for_target,
     fetch_system_cve_scan_eligibility, fetch_system_evaluated_options,
     fetch_system_evaluation_module_sources, fetch_system_evaluation_summary,
-    fetch_system_hardening, fetch_system_hardening_justifications,
+    fetch_system_hardening_inventory_for_target, fetch_system_hardening_justifications,
     fetch_system_hardening_scan_eligibility, get_system_deployment_progress,
     queue_system_config_inspection, request_system_generation_rollback, request_system_rollback,
-    request_system_sync, save_system_hardening_justification,
+    request_system_sync, save_system_hardening_justification, trigger_system_hardening_scan,
     verify_generation_closure as verify_generation_closure_request,
 };
 use crate::api::models::{
@@ -43,10 +44,10 @@ use crate::api::models::{
     OptionChangeKind, OptionDefinitionProvenance, OptionInventoryState, SafeOptionValue,
     SaveHardeningJustificationRequest, SelectedEvaluationSummary, SevenDayDriftStatus,
     SnapshotLifecycle, SnapshotRevisionMode, SystemAgentEvent, SystemCommitHistory,
-    SystemComplianceBundle, SystemCveInventoryAuthority, SystemCveInventoryPageResponse,
-    SystemDeploymentProgress, SystemDetail, SystemGeneration, SystemHistoryEntry,
-    SystemRollbackGenerationRequest, SystemRollbackRequest, SystemVulnerability,
-    TrackedFlakeIdentity, TypedOptionDiff, VerifyGenerationClosureRequest,
+    SystemComplianceBundle, SystemCveInventoryCandidate, SystemCveInventoryPageResponse,
+    SystemCveInventorySelection, SystemDeploymentProgress, SystemDetail, SystemGeneration,
+    SystemHardeningInventorySourceResponse, SystemHistoryEntry, SystemRollbackGenerationRequest,
+    SystemRollbackRequest, TrackedFlakeIdentity, TypedOptionDiff, VerifyGenerationClosureRequest,
 };
 use crate::components::compliance::EvidenceDrawer;
 use crate::components::cve::{CveInventoryPaginationState, CvesTab};
@@ -141,9 +142,275 @@ const POLICY_JSON_SAMPLE: &str = r#"[
 /// renders as a real empty/error state (TASK-353 review).
 #[derive(Debug, Clone, PartialEq)]
 struct VulnerabilitiesLoad {
+    selection: SystemCveInventorySelection,
     inventory: Option<SystemCveInventoryPageResponse>,
     error: Option<String>,
     redirect_to_login: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RevisionScopeMode {
+    Generations,
+    Commits,
+}
+
+#[derive(Clone)]
+struct RevisionScopeChoice {
+    key: String,
+    label: String,
+    meta: String,
+    selection: Option<SystemCveInventorySelection>,
+    current: bool,
+}
+
+fn selection_key(selection: SystemCveInventorySelection) -> String {
+    match selection {
+        SystemCveInventorySelection::Current => "current".to_string(),
+        SystemCveInventorySelection::RetainedGeneration {
+            generation_snapshot_id,
+        } => format!("generation:{generation_snapshot_id}"),
+        SystemCveInventorySelection::ExactDerivation { derivation_id } => {
+            format!("derivation:{derivation_id}")
+        }
+    }
+}
+
+fn candidate_for_generation(
+    generation: &SystemGeneration,
+    candidates: &[SystemCveInventoryCandidate],
+) -> Option<SystemCveInventorySelection> {
+    candidates
+        .iter()
+        .find(|candidate| generation.is_current && candidate.is_current)
+        .or_else(|| {
+            candidates.iter().find(|candidate| {
+                candidate.generation == Some(generation.generation)
+                    && matches!(
+                        candidate.selection,
+                        SystemCveInventorySelection::RetainedGeneration { .. }
+                    )
+            })
+        })
+        .map(|candidate| candidate.selection)
+}
+
+fn candidate_for_commit(
+    commit: &CommitInfo,
+    current_commit: Option<&str>,
+    candidates: &[SystemCveInventoryCandidate],
+) -> Option<SystemCveInventorySelection> {
+    candidates
+        .iter()
+        .find(|candidate| current_commit == Some(commit.sha.as_str()) && candidate.is_current)
+        .or_else(|| {
+            candidates.iter().find(|candidate| {
+                candidate.commit_hash.as_deref() == Some(commit.sha.as_str())
+                    && matches!(
+                        candidate.selection,
+                        SystemCveInventorySelection::ExactDerivation { .. }
+                    )
+            })
+        })
+        .map(|candidate| candidate.selection)
+}
+
+fn revision_scope_choices(
+    mode: RevisionScopeMode,
+    candidates: &[SystemCveInventoryCandidate],
+    generations: &[SystemGeneration],
+    commits: &[CommitInfo],
+    current_commit: Option<&str>,
+) -> Vec<RevisionScopeChoice> {
+    match mode {
+        RevisionScopeMode::Generations => generations
+            .iter()
+            .map(|generation| {
+                let selection = candidate_for_generation(generation, candidates);
+                RevisionScopeChoice {
+                    key: selection.map(selection_key).unwrap_or_else(|| {
+                        format!("unavailable-generation:{}", generation.generation)
+                    }),
+                    label: format!(
+                        "gen #{}{} · {}",
+                        generation.generation,
+                        if generation.is_current {
+                            " (current)"
+                        } else {
+                            ""
+                        },
+                        generation.commit_hash.as_deref().unwrap_or("no commit")
+                    ),
+                    meta: generation.timestamp.to_rfc3339(),
+                    selection,
+                    current: generation.is_current,
+                }
+            })
+            .collect(),
+        RevisionScopeMode::Commits => commits
+            .iter()
+            .map(|commit| {
+                let selection = candidate_for_commit(commit, current_commit, candidates);
+                let current = current_commit == Some(commit.sha.as_str());
+                RevisionScopeChoice {
+                    key: selection
+                        .map(selection_key)
+                        .unwrap_or_else(|| format!("unavailable-commit:{}", commit.sha)),
+                    label: format!(
+                        "{}{} · {}",
+                        commit.short_sha,
+                        if current { " (deployed)" } else { "" },
+                        commit.timestamp
+                    ),
+                    meta: format!("{} · {}", commit.message, commit.author),
+                    selection,
+                    current,
+                }
+            })
+            .collect(),
+    }
+}
+
+fn selection_after_scope_mode_change(
+    choices: &[RevisionScopeChoice],
+    candidates: &[SystemCveInventoryCandidate],
+    selected: SystemCveInventorySelection,
+) -> Option<SystemCveInventorySelection> {
+    if let Some(selection) = choices
+        .iter()
+        .find(|choice| choice.selection == Some(selected))
+        .and_then(|choice| choice.selection)
+    {
+        return Some(selection);
+    }
+
+    let selected_candidate = candidates
+        .iter()
+        .find(|candidate| candidate.selection == selected)?;
+    let linked = choices.iter().find_map(|choice| {
+        let selection = choice.selection?;
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.selection == selection)?;
+        let same_derivation = selected_candidate.derivation_id.is_some()
+            && selected_candidate.derivation_id == candidate.derivation_id;
+        let same_generation_and_commit = selected_candidate.generation.is_some()
+            && selected_candidate.generation == candidate.generation
+            && selected_candidate.commit_hash.is_some()
+            && selected_candidate.commit_hash == candidate.commit_hash;
+        (same_derivation || same_generation_and_commit).then_some(selection)
+    });
+    if linked.is_some() || selected_candidate.read_only {
+        return linked;
+    }
+
+    choices
+        .iter()
+        .find(|choice| choice.current)
+        .and_then(|choice| choice.selection)
+}
+
+/// Renders the shared CVE and Hardening revision selector from server-owned targets.
+#[component]
+fn RevisionScopeBar(
+    label: &'static str,
+    candidates: Vec<SystemCveInventoryCandidate>,
+    generations: Vec<SystemGeneration>,
+    commits: Vec<CommitInfo>,
+    current_commit: Option<String>,
+    selected: SystemCveInventorySelection,
+    mut mode: Signal<RevisionScopeMode>,
+    on_select: EventHandler<SystemCveInventorySelection>,
+) -> Element {
+    let choices = revision_scope_choices(
+        mode(),
+        &candidates,
+        &generations,
+        &commits,
+        current_commit.as_deref(),
+    );
+    let selected_key = selection_key(selected);
+    let selected_choice = choices
+        .iter()
+        .find(|choice| choice.key == selected_key)
+        .cloned();
+    let historical = selected_choice
+        .as_ref()
+        .is_some_and(|choice| !choice.current);
+
+    rsx! {
+        div { class: if historical { "rev-bar rev-bar-hist" } else { "rev-bar" },
+            span { class: "rev-bar-label", "{label}" }
+            div { class: "seg xs", aria_label: "Revision scope type",
+                for (value, text) in [
+                    (RevisionScopeMode::Generations, "Generations"),
+                    (RevisionScopeMode::Commits, "Commits"),
+                ] {
+                    button {
+                        class: if mode() == value { "active" } else { "" },
+                        aria_pressed: mode() == value,
+                        onclick: {
+                            let candidates = candidates.clone();
+                            let generations = generations.clone();
+                            let commits = commits.clone();
+                            let current_commit = current_commit.clone();
+                            move |_| {
+                                let choices = revision_scope_choices(
+                                    value,
+                                    &candidates,
+                                    &generations,
+                                    &commits,
+                                    current_commit.as_deref(),
+                                );
+                                if let Some(selection) = selection_after_scope_mode_change(
+                                    &choices,
+                                    &candidates,
+                                    selected,
+                                )
+                                {
+                                    mode.set(value);
+                                    on_select.call(selection);
+                                }
+                            }
+                        },
+                        "{text}"
+                    }
+                }
+            }
+            select {
+                class: "cfgx-select focus-ring",
+                aria_label: "{label}",
+                value: "{selected_key}",
+                onchange: {
+                    let choices = choices.clone();
+                    move |event| {
+                        if let Some(selection) = choices
+                            .iter()
+                            .find(|choice| choice.key == event.value())
+                            .and_then(|choice| choice.selection)
+                        {
+                            on_select.call(selection);
+                        }
+                    }
+                },
+                for choice in choices.iter() {
+                    option {
+                        key: "{choice.key}",
+                        value: "{choice.key}",
+                        disabled: choice.selection.is_none(),
+                        "{choice.label}"
+                        if choice.selection.is_none() { " · unavailable" }
+                    }
+                }
+            }
+            span { class: "rev-bar-meta", title: selected_choice.as_ref().map(|choice| choice.meta.clone()).unwrap_or_default(),
+                if let Some(choice) = selected_choice.as_ref() { span { class: "rev-bar-msg", "{choice.meta}" } }
+            }
+            span { class: "rev-bar-state",
+                if historical { span { class: "chip chip-warning", "historical · read-only" } }
+                else { span { class: "chip chip-healthy", Icon { name: IconName::Check, size: 9 } " running now" } }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -557,6 +824,11 @@ pub fn SystemDetailView(
     // Reload nonce for system detail — incremented after edit-save to re-fetch the system.
     let mut detail_reload = use_signal(|| 0_u64);
     let mut cve_pagination = use_signal(CveInventoryPaginationState::default);
+    let mut cve_selection = use_signal(SystemCveInventorySelection::default);
+    let cve_scope_mode = use_signal(|| RevisionScopeMode::Generations);
+    let mut hardening_selection = use_signal(SystemCveInventorySelection::default);
+    let hardening_scope_mode = use_signal(|| RevisionScopeMode::Generations);
+    let mut hardening_refresh = use_signal(|| 0_u64);
 
     // Live clock tick for relative timers/heartbeat countdowns while page is open.
     let mut now_tick = use_signal(Utc::now);
@@ -591,23 +863,37 @@ pub fn SystemDetailView(
         }
     });
 
+    let id_for_candidates = id.clone();
+    let inventory_candidates_resource = use_resource(move || {
+        let id = id_for_candidates.clone();
+        async move {
+            let system_id = Uuid::parse_str(&id).map_err(|_| {
+                ApiClientError::Deserialize("Invalid system identifier".to_string())
+            })?;
+            fetch_system_cve_inventory_candidates(&system_id).await
+        }
+    });
+
     let id_for_vulns = id.clone();
     let mut vulnerabilities_resource = use_resource(move || {
         let id = id_for_vulns.clone();
+        let selection = cve_selection();
         async move {
             // Security data must never fall back to mock CVEs in production paths.
             // Surface a real error/empty state instead so an API outage cannot
             // render fake vulnerabilities (TASK-353 review).
             let Ok(system_id) = Uuid::parse_str(&id) else {
                 return VulnerabilitiesLoad {
+                    selection,
                     inventory: None,
                     error: Some("Invalid system identifier.".to_string()),
                     redirect_to_login: false,
                 };
             };
 
-            match fetch_system_cve_inventory(&system_id, None).await {
+            match fetch_system_cve_inventory_for_target(&system_id, None, selection).await {
                 Ok(inventory) => VulnerabilitiesLoad {
+                    selection,
                     inventory: Some(inventory),
                     error: None,
                     redirect_to_login: false,
@@ -615,11 +901,13 @@ pub fn SystemDetailView(
                 Err(ApiClientError::Status {
                     code: 401 | 403, ..
                 }) => VulnerabilitiesLoad {
+                    selection,
                     inventory: None,
                     error: None,
                     redirect_to_login: true,
                 },
                 Err(err) => VulnerabilitiesLoad {
+                    selection,
                     inventory: None,
                     error: Some(format!("Unable to load vulnerabilities: {err}")),
                     redirect_to_login: false,
@@ -627,11 +915,18 @@ pub fn SystemDetailView(
             }
         }
     });
+    use_effect(move || {
+        let _ = cve_selection();
+        cve_pagination.write().reset(None);
+    });
     let vulnerabilities_resource_for_state = vulnerabilities_resource.clone();
     use_effect(move || {
         let Some(load) = vulnerabilities_resource_for_state.read().as_ref().cloned() else {
             return;
         };
+        if load.selection != cve_selection() {
+            return;
+        }
         cve_pagination.write().reset(load.inventory);
     });
 
@@ -775,14 +1070,23 @@ pub fn SystemDetailView(
     });
 
     let id_for_hardening = id.clone();
-    let mut hardening_results_resource = use_resource(move || {
+    let mut hardening_inventory_resource = use_resource(move || {
+        let _ = hardening_refresh();
         let id = id_for_hardening.clone();
+        let selection = hardening_selection();
         async move {
             let Ok(system_id) = Uuid::parse_str(&id) else {
-                return Vec::<HardeningServiceResultResponse>::new();
+                return (
+                    selection,
+                    Err(ApiClientError::Deserialize(
+                        "Invalid system identifier".to_string(),
+                    )),
+                );
             };
-
-            fetch_system_hardening(&system_id).await.unwrap_or_default()
+            (
+                selection,
+                fetch_system_hardening_inventory_for_target(&system_id, selection).await,
+            )
         }
     });
 
@@ -944,6 +1248,7 @@ pub fn SystemDetailView(
         .read_unchecked()
         .clone()
         .unwrap_or_else(|| VulnerabilitiesLoad {
+            selection: cve_selection(),
             inventory: None,
             error: None,
             redirect_to_login: false,
@@ -957,28 +1262,17 @@ pub fn SystemDetailView(
             }
         };
     }
-    let vulnerabilities_loading = vulnerabilities_resource.read_unchecked().is_none();
+    let vulnerabilities_loading = vulnerabilities_resource.read_unchecked().is_none()
+        || vulnerabilities_load.selection != cve_selection();
     let cve_inventory = cve_pagination.read().inventory.clone();
-    let cve_tab_key = cve_inventory
-        .as_ref()
-        .map(|inventory| {
-            format!(
-                "{:?}:{}:{}",
-                inventory.authority,
-                inventory
-                    .source
-                    .as_ref()
-                    .map(|source| source.scan_id.to_string())
-                    .unwrap_or_else(|| "no-scan".to_string()),
-                inventory.inventory_revision,
-            )
-        })
-        .unwrap_or_else(|| "no-cve-inventory".to_string());
+    let cve_target_key = selection_key(cve_selection());
     let vulnerabilities = cve_inventory
         .as_ref()
         .map(|inventory| inventory.vulnerabilities.clone())
         .unwrap_or_default();
-    let vulnerabilities_error = vulnerabilities_load.error.clone();
+    let vulnerabilities_error = (vulnerabilities_load.selection == cve_selection())
+        .then(|| vulnerabilities_load.error.clone())
+        .flatten();
     let deployment_logs = map_agent_events_to_logs(
         agent_events_resource
             .read_unchecked()
@@ -989,18 +1283,60 @@ pub fn SystemDetailView(
         .read_unchecked())
     .clone()
     .flatten();
-    let hardening_results = hardening_results_resource
-        .read_unchecked()
-        .clone()
+    let hardening_inventory_result = hardening_inventory_resource.read_unchecked().clone();
+    let hardening_inventory = hardening_inventory_result
+        .as_ref()
+        .filter(|(selection, _)| *selection == hardening_selection())
+        .and_then(|(_, result)| result.as_ref().ok())
+        .cloned();
+    let hardening_loading = hardening_inventory_result.is_none()
+        || hardening_inventory_result
+            .as_ref()
+            .is_some_and(|(selection, _)| *selection != hardening_selection());
+    let hardening_error = hardening_inventory_result
+        .as_ref()
+        .filter(|(selection, _)| *selection == hardening_selection())
+        .and_then(|(_, result)| result.as_ref().err())
+        .map(ToString::to_string);
+    let hardening_results = hardening_inventory
+        .as_ref()
+        .map(|inventory| inventory.services.clone())
         .unwrap_or_default();
-    let hardening_justifications = hardening_justifications_resource
-        .read_unchecked()
-        .clone()
-        .unwrap_or_default();
+    let hardening_read_only = hardening_inventory
+        .as_ref()
+        .is_some_and(|inventory| inventory.read_only);
+    let hardening_justifications = if hardening_read_only {
+        Vec::new()
+    } else {
+        hardening_justifications_resource
+            .read_unchecked()
+            .clone()
+            .unwrap_or_default()
+    };
     let hardening_scan_eligibility: Option<HardeningScanEligibilityResponse> =
         (*hardening_scan_eligibility_resource.read_unchecked())
             .clone()
             .flatten();
+    let inventory_candidates = inventory_candidates_resource
+        .read_unchecked()
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .map(|response| response.items.clone())
+        .unwrap_or_default();
+    let inventory_candidates_error = inventory_candidates_resource
+        .read_unchecked()
+        .as_ref()
+        .and_then(|result| result.as_ref().err())
+        .map(ToString::to_string);
+    let selected_cve_candidate = inventory_candidates
+        .iter()
+        .find(|candidate| candidate.selection == cve_selection());
+    let cve_read_only = selected_cve_candidate
+        .map(|candidate| candidate.read_only)
+        .unwrap_or(!matches!(
+            cve_selection(),
+            SystemCveInventorySelection::Current
+        ));
 
     let auth_context = app_state.read().auth.clone();
     let can_mutate = auth::can_mutate_systems(&auth_context);
@@ -1519,10 +1855,28 @@ pub fn SystemDetailView(
                         }
                     },
                     Tab::Cves => rsx! {
+                        RevisionScopeBar {
+                            label: "Scan target",
+                            candidates: inventory_candidates.clone(),
+                            generations: generations_result.generations.clone(),
+                            commits: commits_response.as_ref().map(|response| response.commits.clone()).unwrap_or_default(),
+                            current_commit: observational_current_commit.clone(),
+                            selected: cve_selection(),
+                            mode: cve_scope_mode,
+                            on_select: move |selection| {
+                                cve_pagination.write().reset(None);
+                                cve_selection.set(selection);
+                            },
+                        }
+                        if let Some(error) = inventory_candidates_error.as_deref() {
+                            div { class: "sd-callout sd-callout-warning", role: "alert",
+                                "Revision targets could not be loaded: {error}"
+                            }
+                        }
                         CvesTab {
-                            key: "{cve_tab_key}",
                             system_id: system.id,
                             hostname: system.hostname.clone(),
+                            inventory_target_key: cve_target_key.clone(),
                             vulnerabilities: vulnerabilities.clone(),
                             inventory_metadata: cve_inventory
                                 .as_ref()
@@ -1537,7 +1891,8 @@ pub fn SystemDetailView(
                             exact_authority_failure: cve_inventory
                                 .as_ref()
                                 .and_then(|inventory| inventory.exact_authority_failure),
-                            allow_mutations: can_mutate,
+                            read_only: cve_read_only,
+                            allow_mutations: can_mutate && !cve_read_only,
                             loading: vulnerabilities_loading,
                             error: vulnerabilities_error.clone(),
                             has_more: cve_inventory
@@ -1550,8 +1905,9 @@ pub fn SystemDetailView(
                                     return;
                                 };
                                 let cursor = request.cursor.clone();
+                                let selection = cve_selection();
                                 spawn(async move {
-                                    match fetch_system_cve_inventory(&system.id, Some(&cursor)).await {
+                                    match fetch_system_cve_inventory_for_target(&system.id, Some(&cursor), selection).await {
                                         Ok(page) => {
                                             let source_matches = cve_pagination
                                                 .write()
@@ -1584,13 +1940,51 @@ pub fn SystemDetailView(
                         }
                     },
                     Tab::Hardening => rsx! {
+                        RevisionScopeBar {
+                            label: "Audited config",
+                            candidates: inventory_candidates.clone(),
+                            generations: generations_result.generations.clone(),
+                            commits: commits_response.as_ref().map(|response| response.commits.clone()).unwrap_or_default(),
+                            current_commit: observational_current_commit.clone(),
+                            selected: hardening_selection(),
+                            mode: hardening_scope_mode,
+                            on_select: move |selection| hardening_selection.set(selection),
+                        }
+                        if let Some(error) = inventory_candidates_error.as_deref() {
+                            div { class: "sd-callout sd-callout-warning", role: "alert",
+                                "Revision targets could not be loaded: {error}"
+                            }
+                        }
                         HardeningTab {
                             system_id: system.id,
+                            inventory_target_key: selection_key(hardening_selection()),
                             results: hardening_results.clone(),
                             justifications: hardening_justifications.clone(),
-                            allow_mutations: can_mutate,
+                            source: hardening_inventory.as_ref().and_then(|inventory| inventory.source.clone()),
+                            read_only: hardening_read_only,
+                            loading: hardening_loading,
+                            error: hardening_error.clone(),
+                            allow_mutations: can_mutate && hardening_inventory.is_some() && !hardening_read_only,
+                            can_check_now: can_mutate && matches!(hardening_selection(), SystemCveInventorySelection::Current) && hardening_scan_eligible,
+                            check_now_disabled_reason: hardening_scan_blocked_reason.clone(),
+                            checking: hardening_scan_in_progress(),
+                            on_check_now: move |_| {
+                                if hardening_scan_in_progress() || !hardening_scan_eligible {
+                                    return;
+                                }
+                                hardening_scan_in_progress.set(true);
+                                hardening_scan_status_text.set(Some("Requesting a hardening scan for the current configuration…".to_string()));
+                                spawn(async move {
+                                    match trigger_system_hardening_scan(&system.id).await {
+                                        Ok(response) => hardening_scan_status_text.set(Some(response.message)),
+                                        Err(error) => hardening_scan_status_text.set(Some(format!("Hardening scan request failed: {error}"))),
+                                    }
+                                    hardening_scan_in_progress.set(false);
+                                    hardening_refresh.set(hardening_refresh().wrapping_add(1));
+                                });
+                            },
                             on_saved: move |_| {
-                                hardening_results_resource.restart();
+                                hardening_refresh.set(hardening_refresh().wrapping_add(1));
                                 hardening_justifications_resource.restart();
                             }
                         }
@@ -8317,9 +8711,18 @@ fn CommitTimelineNode(
 #[component]
 fn HardeningTab(
     system_id: Uuid,
+    inventory_target_key: String,
     results: Vec<HardeningServiceResultResponse>,
     justifications: Vec<HardeningJustificationResponse>,
+    source: Option<SystemHardeningInventorySourceResponse>,
+    read_only: bool,
+    loading: bool,
+    error: Option<String>,
     allow_mutations: bool,
+    can_check_now: bool,
+    check_now_disabled_reason: String,
+    checking: bool,
+    on_check_now: EventHandler<()>,
     on_saved: EventHandler<()>,
 ) -> Element {
     let mut selected_service: Signal<Option<HardeningServiceResultResponse>> = use_signal(|| None);
@@ -8331,17 +8734,43 @@ fn HardeningTab(
     let mut modal_tab = use_signal(|| "overview".to_string());
     let mut search_query = use_signal(String::new);
     let mut severity_filter = use_signal(|| "all".to_string());
+    use_effect(use_reactive(&inventory_target_key, move |_| {
+        selected_service.set(None);
+        reason.set(String::new());
+        justification_error.set(None);
+        justification_notice.set(None);
+        active_waiver_directive.set(None);
+        modal_tab.set("overview".to_string());
+        search_query.set(String::new());
+        severity_filter.set("all".to_string());
+    }));
 
-    let total_services = results.len();
-    let avg_score = if total_services > 0 {
-        results
-            .iter()
-            .map(|service| service.hardening_score as f64)
-            .sum::<f64>()
-            / total_services as f64
-    } else {
-        0.0
-    };
+    if loading {
+        return rsx! { div { class: "q-empty", role: "status", "Loading hardening evidence for the selected revision…" } };
+    }
+    if let Some(error) = error {
+        return rsx! { div { class: "q-empty", role: "alert", h3 { "Hardening evidence could not be loaded" } p { "{error}" } } };
+    }
+
+    let total_services = source
+        .as_ref()
+        .map(|source| source.total_services.max(0) as usize)
+        .unwrap_or(results.len());
+    let avg_score = source
+        .as_ref()
+        .and_then(|source| source.overall_score)
+        .map(f64::from)
+        .unwrap_or_else(|| {
+            if results.is_empty() {
+                0.0
+            } else {
+                results
+                    .iter()
+                    .map(|service| service.hardening_score as f64)
+                    .sum::<f64>()
+                    / results.len() as f64
+            }
+        });
     let vuln_count = results
         .iter()
         .filter(|service| matches!(service.risk_level.as_str(), "vulnerable"))
@@ -8415,6 +8844,28 @@ fn HardeningTab(
     };
 
     rsx! {
+        div { class: "hardening-target-state",
+            if read_only {
+                div { class: "sd-callout sd-callout-warning", role: "status",
+                    strong { "Historical hardening evidence is read-only. " }
+                    "Justifications and Check now apply only to the current configuration."
+                    if let Some(source) = source.as_ref() {
+                        div { class: "text-xs", "Scan {source.scan_id} completed {source.completed_at}." }
+                    }
+                }
+            } else {
+                div { class: "hardening-current-actions",
+                    button {
+                        class: "btn btn-ghost focus-ring",
+                        disabled: !can_check_now || checking,
+                        title: if can_check_now { "Run a hardening audit for the current configuration" } else { "{check_now_disabled_reason}" },
+                        onclick: move |_| on_check_now.call(()),
+                        Icon { name: IconName::Sync, size: 13 }
+                        if checking { " Checking…" } else { " Check now" }
+                    }
+                }
+            }
+        }
         // Main content
         div { class: "space-y-4",
             div { class: "hd-stat-row",
@@ -8533,12 +8984,8 @@ fn HardeningTab(
                             d: "M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"
                         }
                     }
-                    h3 { class: "text-lg font-semibold {theme::text::PRIMARY}", "No scan results yet" }
-                    p { class: "{theme::text::SECONDARY}",
-                        "Run a hardening scan using the ",
-                        span { class: "font-semibold {theme::text::PRIMARY}", "\"Run Hardening Scan\"" },
-                        " button above to analyze systemd service security configurations."
-                    }
+                    h3 { class: "text-lg font-semibold {theme::text::PRIMARY}", if read_only { "No hardening scan for this revision" } else { "No scan results yet" } }
+                    p { class: "{theme::text::SECONDARY}", if read_only { "No completed hardening scan exists for the selected historical target. Current results are not substituted." } else { "Use Check now above to analyze the current systemd service security configuration." } }
                 }
             } else {
                 div { class: "card", style: "overflow: hidden;",
@@ -8643,7 +9090,7 @@ fn HardeningTab(
                                             }
                                             td { style: "text-align:right;",
                                                 div { class: "row-actions",
-                                                    button {
+                                                    if allow_mutations { button {
                                                         class: "btn-icon focus-ring",
                                                         aria_label: "Open justification notes",
                                                         title: "Open justification notes",
@@ -8667,7 +9114,7 @@ fn HardeningTab(
                                                                 d: "M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
                                                             }
                                                         }
-                                                    }
+                                                    } }
                                                     button {
                                                         class: "btn-icon focus-ring",
                                                         aria_label: "View details",
@@ -8832,9 +9279,13 @@ fn HardeningTab(
                                         }
                                     }
                                     div { style: "font-size:13px;line-height:1.5;color:var(--cf-text-secondary);",
-                                        "Directives that aren’t enforced can be "
-                                        strong { style: "color:var(--cf-text-primary);font-weight:800;", "justified with a waiver" }
-                                        " (e.g. compensating control, not applicable). Waivers flow into the compliance evidence export."
+                                        if read_only {
+                                            "This historical audit is immutable. Current-system waiver records are not applied to historical evidence."
+                                        } else {
+                                            "Directives that aren’t enforced can be "
+                                            strong { style: "color:var(--cf-text-primary);font-weight:800;", "justified with a waiver" }
+                                            " (e.g. compensating control, not applicable). Waivers flow into the compliance evidence export."
+                                        }
                                     }
                                 }
 
@@ -10579,13 +11030,14 @@ mod tests {
         map_history_entries_to_commit_history, natural_config_side_height,
         newest_config_inspectable_commit, observational_current_timeline_commit,
         overview_commit_identity, package_identities, query_value, query_with_parameter,
-        render_safe_option_value, selected_config_revision, snapshot_lifecycle_label,
-        snapshot_lifecycle_message, tab_from_query, tab_from_route, unavailable_generation_commit,
-        visible_config_response,
+        render_safe_option_value, revision_scope_choices, selected_config_revision,
+        selection_after_scope_mode_change, snapshot_lifecycle_label, snapshot_lifecycle_message,
+        tab_from_query, tab_from_route, unavailable_generation_commit, visible_config_response,
     };
     use crate::api::models::{
         AuthContext, AuthMode, AuthUser, CommitInfo, Role, SafeEvaluationError, SafePackageValue,
-        SystemAgentEvent, SystemCommitHistory, SystemGeneration, SystemHistoryEntry,
+        SystemAgentEvent, SystemCommitHistory, SystemCveInventoryCandidate,
+        SystemCveInventorySelection, SystemGeneration, SystemHistoryEntry,
     };
     use chrono::{Duration, Utc};
 
@@ -10670,6 +11122,195 @@ mod tests {
             true,
             true,
         ));
+    }
+
+    #[test]
+    fn revision_scope_uses_server_owned_candidate_identity_and_disables_gaps() {
+        let generation_snapshot_id = uuid::Uuid::from_u128(73);
+        let generations = [
+            SystemGeneration {
+                generation: 73,
+                store_path: None,
+                commit_hash: Some("b".repeat(40)),
+                timestamp: Utc::now(),
+                is_current: false,
+                generation_snapshot_id: Some(generation_snapshot_id),
+                rollback_eligible: false,
+            },
+            SystemGeneration {
+                generation: 72,
+                store_path: None,
+                commit_hash: Some("a".repeat(40)),
+                timestamp: Utc::now(),
+                is_current: false,
+                generation_snapshot_id: None,
+                rollback_eligible: false,
+            },
+        ];
+        let candidates = [SystemCveInventoryCandidate {
+            selection: SystemCveInventorySelection::RetainedGeneration {
+                generation_snapshot_id,
+            },
+            generation: Some(73),
+            commit_hash: Some("b".repeat(40)),
+            derivation_id: Some(41),
+            is_current: false,
+            is_latest_per_flake: false,
+            source: None,
+            evidence_representation: None,
+            scan_available: false,
+            read_only: true,
+        }];
+
+        let choices = revision_scope_choices(
+            super::RevisionScopeMode::Generations,
+            &candidates,
+            &generations,
+            &[],
+            None,
+        );
+        assert_eq!(choices.len(), 2);
+        assert_eq!(
+            choices[0].selection,
+            Some(SystemCveInventorySelection::RetainedGeneration {
+                generation_snapshot_id
+            })
+        );
+        assert!(choices[1].selection.is_none());
+    }
+
+    #[test]
+    fn revision_scope_mode_change_links_production_shaped_historical_candidates() {
+        let snapshot_id = uuid::Uuid::from_u128(73);
+        let retained = SystemCveInventorySelection::RetainedGeneration {
+            generation_snapshot_id: snapshot_id,
+        };
+        let exact = SystemCveInventorySelection::ExactDerivation { derivation_id: 41 };
+        let historical_commit = "b".repeat(40);
+        let current_commit = "c".repeat(40);
+        let candidates = [
+            SystemCveInventoryCandidate {
+                selection: SystemCveInventorySelection::Current,
+                generation: Some(74),
+                commit_hash: Some(current_commit.clone()),
+                derivation_id: Some(42),
+                is_current: true,
+                is_latest_per_flake: true,
+                source: None,
+                evidence_representation: None,
+                scan_available: true,
+                read_only: false,
+            },
+            SystemCveInventoryCandidate {
+                selection: retained,
+                generation: Some(73),
+                commit_hash: Some(historical_commit.clone()),
+                derivation_id: Some(41),
+                is_current: false,
+                is_latest_per_flake: false,
+                source: None,
+                evidence_representation: None,
+                scan_available: true,
+                read_only: true,
+            },
+            SystemCveInventoryCandidate {
+                selection: exact,
+                generation: None,
+                commit_hash: Some(historical_commit.clone()),
+                derivation_id: Some(41),
+                is_current: false,
+                is_latest_per_flake: false,
+                source: None,
+                evidence_representation: None,
+                scan_available: true,
+                read_only: true,
+            },
+        ];
+        let generations = [
+            SystemGeneration {
+                generation: 74,
+                store_path: None,
+                commit_hash: Some(current_commit.clone()),
+                timestamp: Utc::now(),
+                is_current: true,
+                generation_snapshot_id: None,
+                rollback_eligible: false,
+            },
+            SystemGeneration {
+                generation: 73,
+                store_path: None,
+                commit_hash: Some(historical_commit.clone()),
+                timestamp: Utc::now(),
+                is_current: false,
+                generation_snapshot_id: Some(snapshot_id),
+                rollback_eligible: false,
+            },
+        ];
+        let commits = [
+            CommitInfo {
+                sha: current_commit.clone(),
+                short_sha: "cccccccc".to_string(),
+                message: "Current revision".to_string(),
+                author: "Operator".to_string(),
+                timestamp: Utc::now().to_rfc3339(),
+                config_inspectable: true,
+            },
+            CommitInfo {
+                sha: historical_commit.clone(),
+                short_sha: "bbbbbbbb".to_string(),
+                message: "Historical revision".to_string(),
+                author: "Operator".to_string(),
+                timestamp: Utc::now().to_rfc3339(),
+                config_inspectable: true,
+            },
+        ];
+        let generation_choices = revision_scope_choices(
+            super::RevisionScopeMode::Generations,
+            &candidates,
+            &generations,
+            &commits,
+            Some(&current_commit),
+        );
+        let commit_choices = revision_scope_choices(
+            super::RevisionScopeMode::Commits,
+            &candidates,
+            &generations,
+            &commits,
+            Some(&current_commit),
+        );
+
+        assert_eq!(
+            selection_after_scope_mode_change(&commit_choices, &candidates, retained),
+            Some(exact)
+        );
+        assert_eq!(
+            selection_after_scope_mode_change(&generation_choices, &candidates, exact),
+            Some(retained)
+        );
+
+        let unlinked = SystemCveInventoryCandidate {
+            selection: SystemCveInventorySelection::ExactDerivation { derivation_id: 99 },
+            generation: None,
+            commit_hash: Some("d".repeat(40)),
+            derivation_id: Some(99),
+            is_current: false,
+            is_latest_per_flake: false,
+            source: None,
+            evidence_representation: None,
+            scan_available: true,
+            read_only: true,
+        };
+        let mut candidates_with_unlinked = candidates.to_vec();
+        candidates_with_unlinked.push(unlinked.clone());
+        assert_eq!(
+            selection_after_scope_mode_change(
+                &generation_choices,
+                &candidates_with_unlinked,
+                unlinked.selection,
+            ),
+            None,
+            "an unlinked historical selection must not fall back to mutable current",
+        );
     }
 
     #[test]

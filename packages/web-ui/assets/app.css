@@ -1902,6 +1902,34 @@ select.input {
   margin-top: 2px;
 }
 
+.rev-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  margin-bottom: 14px;
+  padding: 9px 12px;
+  border: 1px solid var(--cf-card-border);
+  border-radius: 10px;
+  background: var(--cf-card-bg);
+}
+.rev-bar-hist { border-color: color-mix(in oklab, #fbbf24 38%, var(--cf-card-border)); background: color-mix(in oklab, #fbbf24 4%, var(--cf-card-bg)); }
+.rev-bar-label { flex: 0 0 auto; color: var(--cf-text-muted); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.rev-bar .cfgx-select { min-width: 230px; max-width: 360px; }
+.rev-bar-meta { min-width: 0; flex: 1; overflow: hidden; color: var(--cf-text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.rev-bar-msg { overflow: hidden; text-overflow: ellipsis; }
+.rev-bar-state { flex: 0 0 auto; }
+.rev-bar-state .chip { font-size: 10px; }
+.hardening-target-state { display: flex; justify-content: flex-end; margin-bottom: 10px; }
+.hardening-target-state .sd-callout { width: 100%; }
+.hardening-current-actions { display: flex; justify-content: flex-end; }
+@media (max-width: 900px) {
+  .rev-bar { align-items: stretch; flex-wrap: wrap; }
+  .rev-bar .cfgx-select { order: 3; width: 100%; min-width: 0; max-width: none; }
+  .rev-bar-meta { order: 4; flex-basis: 100%; }
+  .rev-bar-state { margin-left: auto; }
+}
+
 .sd-tab {
   background: transparent;
   border: 0;
@@ -7310,6 +7338,7 @@ tr.attention-flash {
 .scan-toolbar .btn { white-space: nowrap; }
 .scanning-include-archived { display: inline-flex; align-items: center; gap: 6px; color: var(--cf-text-secondary); font-size: 11px; white-space: nowrap; }
 .scanning-include-archived input { accent-color: var(--cf-brand-purple); }
+.scanning-archived-filter.active-filter { color: var(--cf-brand-purple); border-color: color-mix(in oklab, var(--cf-brand-purple) 42%, var(--cf-card-border)); background: color-mix(in oklab, var(--cf-brand-purple) 10%, transparent); }
 .scanning-history-actions { display: flex; align-items: center; gap: 8px; min-height: 42px; padding: 7px 16px; border-bottom: 1px solid var(--cf-divider); color: var(--cf-text-muted); font-size: 11px; flex-wrap: wrap; }
 .scanning-hidden-count { margin-left: auto; color: #fbbf24; font-size: 11px; }
 .scanning-table-wrap { width: 100%; overflow-x: auto; }
@@ -7326,7 +7355,7 @@ tr.attention-flash {
 .scanning-full-revision { max-width: 360px; color: var(--cf-text-secondary); font-size: 10px; overflow-wrap: anywhere; word-break: break-all; }
 .scanning-wait, .scanning-row-failure { max-width: 280px; margin-top: 4px; color: var(--cf-text-muted); font-size: 10px; line-height: 1.35; overflow-wrap: anywhere; }
 .scanning-row-failure { color: #f87171; }
-.scanning-archived-label { margin-top: 3px; color: var(--cf-text-muted); font-size: 9px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.scanning-archived-label { display: flex; align-items: center; gap: 3px; margin-top: 3px; color: var(--cf-text-muted); font-size: 9px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
 .scanning-config-revision { margin-top: 2px; font-size: 11px; color: var(--cf-text-muted); display: flex; align-items: center; gap: 3px; }
 .scanning-config-revision .latest-star, .scanning-history-commit .latest-star { display: inline-flex; color: #fbbf24; }
 .scanning-running { display: flex; align-items: center; gap: 5px; margin-top: 3px; font-size: 10px; color: var(--cf-text-muted); }
