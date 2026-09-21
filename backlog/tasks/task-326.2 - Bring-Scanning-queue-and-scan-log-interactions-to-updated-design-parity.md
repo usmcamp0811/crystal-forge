@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-21 19:56'
+updated_date: '2026-09-21 20:22'
 labels:
   - scanning
   - web-ui
@@ -142,6 +142,8 @@ Add focused isolated-PostgreSQL regressions for current-only, scheduled-only, cu
 Verify touched Rust with targeted rustfmt, run SQLX_OFFLINE cf-server check/tests, and run database regressions only through a verified task-owned isolated PostgreSQL runner. Do not modify Web UI files, existing unrelated dirty files, or migration 0271.
 
 Step 6 Web UI slice: mirror the additive current/scheduled-deployment-target/historical inventory fields with presence-aware compatibility normalization; classify drawer rows by inventory section independently from exact/legacy authority; update fleet summary, grouped/flat counts, sorting copy, triage labels, and read-only inventory-only presentation; restrict draft/action eligibility to current exact environment-assigned subjects; update the 16-cves fixture/static assertions for overlap deduplication, scheduled-only and historical-only sections, Viewer/Admin RBAC, and mutation exclusion. Verify with targeted rustfmt, focused and full Web UI Rust tests where feasible, wasm32 check where feasible, JavaScript syntax/static contracts, and git diff --check. Do not run the authoritative Web UI VM and do not modify backend, migrations, or unrelated dirty files.
+
+Frontend review fixes: make additive inventory normalization presence-aware and derive old-server Current/Historical from exact/legacy authority counts at list, group, stats, detail, and environment boundaries; classify legacy-authority rows without relation fields as Historical; add mixed exact/legacy Rust tests. Add Inventory only triage filtering and focused state/query coverage. Correct the 16-cves grouped fixture aggregate counts, add CSV request/header/overlap-dedup assertions, and add Operator inventory/triage plus admin-only rescan RBAC assertions. Modify only Web UI/frontend integration files and run targeted rustfmt, focused/full Web UI tests, Node syntax/static contracts, and git diff --check; do not run the authoritative VM, commit, push, or touch migrations.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
