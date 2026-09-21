@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-21 14:34'
+updated_date: '2026-09-21 14:41'
 labels:
   - scanning
   - web-ui
@@ -224,6 +224,8 @@ Final functional pass implemented at design head 05bcac36. The builder now accep
 Committed and pushed the runtime stabilization follow-up as `562632f9dade9460702ac59ae6b5f1f393e42119` (`TASK-326.2: Stabilize revision-scoped security views`) to MR !329. Local and remote branch SHAs match and the task worktree is clean. The task-owned preview remains reachable at `http://127.0.0.1:8081`; API status at `http://127.0.0.1:3447/status` reports running with a healthy database and 36 systems. The authoritative workflow 28 gate remains blocked before execution by the unrelated TASK-440 design-target prerequisite failure recorded above, so the task remains In Progress.
 
 Resumed runtime-defect review at exact clean head `3659bee22714dcd85a5b19de6915851306594dbc`; local and upstream match. Read-only audits completed for revision design parity, remote scanner/diagnostic protocol, Builds exact lookup, and fleet CVE semantics. No source edits were made. Runtime evidence is blocked because the deployed test environment URL/authentication and builder-host access are not present in the repository or MR metadata; GitLab environment API returned 403. The reachable task-local preview at 8081/3447 is owned by this worktree but its backend predates the current head and contains fixture data only (36 systems, zero derivations), so it cannot establish the required latest real scan failure or real Vulnix reproduction. Awaiting deployed runtime access instructions and clarification on whether that deployed instance is the required live preview, because the user explicitly prohibited work on devenv.
+
+User clarified that deployed-runtime access is required only for final production verification. Local implementation must proceed now. `devenv` tooling may be used, but its configuration and unrelated integration-worktree changes must not be modified. Scanner verification will use the branch's production-packaged evaluator Nix and Vulnix against a real locally realized NixOS closure. Production scan ID/details, final deployed remote scan, and production latency may remain explicitly pending after all local work is complete.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
