@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-21 17:53'
+updated_date: '2026-09-21 18:35'
 labels:
   - scanning
   - web-ui
@@ -234,6 +234,8 @@ Committed and pushed the runtime stabilization follow-up as `562632f9dade9460702
 Resumed runtime-defect review at exact clean head `3659bee22714dcd85a5b19de6915851306594dbc`; local and upstream match. Read-only audits completed for revision design parity, remote scanner/diagnostic protocol, Builds exact lookup, and fleet CVE semantics. No source edits were made. Runtime evidence is blocked because the deployed test environment URL/authentication and builder-host access are not present in the repository or MR metadata; GitLab environment API returned 403. The reachable task-local preview at 8081/3447 is owned by this worktree but its backend predates the current head and contains fixture data only (36 systems, zero derivations), so it cannot establish the required latest real scan failure or real Vulnix reproduction. Awaiting deployed runtime access instructions and clarification on whether that deployed instance is the required live preview, because the user explicitly prohibited work on devenv.
 
 User clarified that deployed-runtime access is required only for final production verification. Local implementation must proceed now. `devenv` tooling may be used, but its configuration and unrelated integration-worktree changes must not be modified. Scanner verification will use the branch's production-packaged evaluator Nix and Vulnix against a real locally realized NixOS closure. Production scan ID/details, final deployed remote scan, and production latency may remain explicitly pending after all local work is complete.
+
+2026-09-21 step 6 backend/API slice final review: added migration 0272 read-only active scheduled-target CVE authority; split fleet reads into exact current, exact active scheduled deployment target, and retained historical sections; compatibility affected totals are the distinct current/scheduled union; added explicit serde-compatible counts/section identity across list, groups, stats, environments, drawer, and CSV; corrected package-specific drawer metadata; retained current-exact-only disposition and mutation authority. Final review also corrected `unassigned_affected_system_count` so historical-only unassigned systems remain listed and counted as historical but do not inflate compatibility affected totals. Verification passed: targeted rustfmt; `git diff --check`; `SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml --tests`; isolated PostgreSQL focused inventory regression after the final correction (1/1); earlier full isolated `poam_workflows` suite (72/72); and CSV column-count unit test (1/1). Existing unrelated warnings remain. No Web UI files, migration 0271, commit, or push were part of this slice.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
