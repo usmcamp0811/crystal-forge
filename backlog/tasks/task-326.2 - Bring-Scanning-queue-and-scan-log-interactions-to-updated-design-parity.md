@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-21 01:44'
+updated_date: '2026-09-21 01:45'
 labels:
   - scanning
   - web-ui
@@ -123,17 +123,12 @@ Replace separate Justify + Create POA&M with one CveTriageModal (extracted from 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-Final functional pass at exact design-only head `05bcac367faa05c2b89e069c08256d7225345eb6`:
-1. Fix cf-builder `nix derivation show` parsing with a pure, bounded normalizer for flat and top-level `derivations` shapes. Preserve exact requested derivation matching and canonical store-path/output validation. Add focused fixtures and safe missing-entry diagnostics.
-2. Add transaction-local terminalization for exact post-build scan intents when their bound build fails without replacement or reaches cancelled. Preserve automatic retry rebinding, attempts=0, exact build identity, and add focused race/requeue regressions plus truthful Scanning detail actions.
-3. Implement a shared production revision scope bar. Wire System Detail CVEs to the existing server-owned candidates and target-aware pagination with stale-response fencing and read-only historical behavior.
-4. Add a compatibility-safe target-aware Hardening read contract. Resolve current and historical derivations through server-owned identities, prevent current fallback to superseded scans, and disable historical justification mutations. Reuse the shared revision scope bar.
-5. Replace the Completed archived checkbox with the design ghost filter and exact count, isolate contextual By-system archive state, bound inline failure previews, and update focused browser/static contracts with real archived fixtures.
-6. Run only focused cf-builder/cf-server/Web UI checks, WASM/static/JavaScript checks, and diff hygiene. Do not run the authoritative Web UI VM or full flake check. Commit, push, verify local/remote SHAs, report, and stop.
-
-P0 cf-builder scanner stabilization: extract a pure bounded normalizer for only the flat `nix derivation show` map and a direct top-level `derivations` map. Require exact requested absolute `.drv` keys in either map; retain canonical output-path validation, non-empty outputs, command output limits, and chunking. Add focused unit coverage for flat, wrapped, absent, malformed/invalid shape, unresolved output, and invalid output path. Run targeted rustfmt and cf-builder tests only; do not commit or push.
-
-Remaining Web UI/browser contract pass in the existing task worktree: add a shared server-owned revision scope selector for System Detail CVEs and Hardening; key and stale-fence target reads and pagination; mirror the target-aware hardening inventory response and enforce historical read-only behavior; replace Completed archive checkbox UI with an `Archived [N]` ghost filter and improve prerequisite terminal-failure actions/copy; update only focused integration/static contracts; verify focused Web UI tests, WASM if affordable, JavaScript syntax/static contracts, targeted rustfmt, and diff hygiene. Preserve and do not edit the dirty cf-server lifecycle changes.
+Focused backend-only hardening inventory slice at design head `05bcac36`:
+1. Add documented cf-server DTOs for a target-aware hardening inventory response that reuses `SystemCveInventorySelection`, reports an exact resolved derivation, latest completed hardening scan provenance, exact service rows, and historical `read_only` state.
+2. Add a dynamic-SQL hardening query that resolves `current` only from the latest system-state store path plus the system flake and effective configuration name, resolves retained generation and exact derivation with the same ownership predicates as CVE inventory, and selects only the latest completed scan for that exact derivation.
+3. Add `/api/v1/systems/:id/hardening-inventory`; preserve `/hardening` response compatibility while routing it through exact-current selection. Authorize the system before parsing or resolving target details, and map unavailable historical targets to non-disclosing 404.
+4. Add focused selector/parser tests and query-level coverage where practical without touching SQLx offline metadata.
+5. Run targeted rustfmt, SQLX_OFFLINE cf-server check/tests as affordable, and `git diff --check`. Do not modify `packages/web-ui`, `queries/builders.rs`, or `queries/cve_scan_leases.rs`; do not commit or push.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
