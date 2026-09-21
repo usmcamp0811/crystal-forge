@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-09-21 16:18'
-updated_date: '2026-09-21 16:20'
+updated_date: '2026-09-21 16:35'
 labels:
   - web-ui
   - server
@@ -21,13 +21,21 @@ documentation:
   - docs/design/CrystalForge/components/EvalDrawer.jsx
   - docs/design/CrystalForge/styles.css
 modified_files:
-  - packages/web-ui/src/views/evaluations.rs
-  - packages/web-ui/assets/app.css
+  - >-
+    packages/default/crates/cf-server/migrations/0269_evaluation_policy_provenance_snapshots.sql
+  - packages/default/crates/cf-server/src/compliance/resolver.rs
+  - packages/default/crates/cf-server/src/models/deployment_policies.rs
+  - packages/default/crates/cf-server/src/models/evaluate_with_policies.rs
+  - packages/default/crates/cf-server/src/queries/commits.rs
+  - packages/default/crates/cf-server/src/server/mod.rs
   - packages/default/crates/cf-server/src/api/models.rs
   - packages/default/crates/cf-server/src/handlers/api/commits.rs
-  - packages/default/crates/cf-server/src/queries/commits.rs
-  - packages/default/crates/cf-server/src/models/deployment_policies.rs
-  - packages/default/crates/cf-server/src/compliance/resolver.rs
+  - packages/web-ui/src/api/models.rs
+  - packages/web-ui/src/views/evaluations.rs
+  - packages/web-ui/assets/app.css
+  - checks/web-ui/tests/integration-test.js
+  - checks/web-ui/coverage-manifest.json
+  - checks/web-ui/default.nix
 priority: high
 type: feature
 ordinal: 484000
@@ -58,6 +66,19 @@ The production Evaluation drawer renders one column per policy and becomes unusa
 - [ ] #15 Production is compared against the full EvalDrawer design and matching CSS with no unresolved P0 P1 or P2 differences in the requested policy-matrix sections.
 - [ ] #16 Focused formatting server SQL or migration SQLx-offline frontend unit WASM browser and git diff checks pass as applicable and any schema migration is additive and supports legacy rows.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Add an immutable attempt-scoped provenance snapshot. Extend resolver provenance with exact assignment-version and scope identity. Keep Nix evaluation inputs deduplicated by configuration, but carry a separate per-system capture so systems that share one configuration retain distinct bundle applicability. Persist a marker per evaluated system/configuration plus normalized policy-contribution rows in the successful attempt transaction. Use additive migration 0269 with immutable foreign-keyed rows; never reconstruct legacy evaluations from current assignments.
+2. Extend the matrix read path with two bounded set-based reads: existing derivation outcomes and the latest matching completed-attempt provenance snapshot joined to immutable policy/bundle version metadata. Return compatibility labels/results/details plus typed policy columns, deterministic bundle groups, stable system identities, per-system policy-to-bundle applicability, and an explicit legacy-unavailable provenance state. Duplicate a shared configuration outcome for each snapshotted system only at response projection time; never duplicate evaluator execution.
+3. Extract pure Web UI matrix domain helpers for status classification, dense defaults (>14), row filters/sort, bundle aggregation, many-to-many/shared counts, bundle focus, visible control projection, and Failing-only trimming over visible rows. Unit-test pass/warn/fail/error/unknown/N/A behavior and a production-shaped 60-system, 120-control fixture before wiring RSX.
+4. Rework EvalDrawerPolicyTab to consume typed metadata. Preserve Top issues, host health, existing detailed findings and policy navigation. Add bundle/control segmented mode, bundle headers/distribution bars, compact host rollups, drilldown/focus clearing, hidden-column restoration, explicit platform/unbundled grouping, mode-specific legends, semantic button interactions, and narrow-layout behavior. Add exact compliance-evidence navigation only when bundle version, policy, system, and evaluation revision are all available and supported.
+5. Port the matching EvalDrawer policy-matrix CSS hierarchy from the design rather than inventing a parallel visual system. Keep small matrices simple and avoid constructing systems × controls cells in default dense bundle mode.
+6. Add server resolver/persistence/query/handler tests for ordinary, >100-control, overlap, direct policy, per-system applicability, status preservation, ordering, no duplicate evaluation, historical immutability, legacy rows, and viewer authorization. Update SQLx offline metadata if checked queries require it.
+7. Add focused authoritative browser step 26e with intercepted production-shaped data (60 systems, 120-150 controls, two overlapping real bundles, platform checks), semantic cell-count/performance assertions, bundle drilldown, Failing-only restoration, overlap, filters, expansion, navigation, mode coherence, and named desktop light/dark plus narrow-dark screenshots. Update the coverage manifest and critical workflow list.
+8. Keep the isolated devenv preview current, restarting only this task's backend after backend changes. Run targeted formatting/tests first, then SQL/migration and SQLX_OFFLINE checks, Web UI unit/WASM checks, focused browser workflow and screenshot inspection, git diff --check, and separate completeness/correctness/performance/parity/state/workflow/regression review passes. Record exact evidence, commit, push, open a new MR to dev, and leave it unmerged.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
