@@ -1458,30 +1458,99 @@ in {
   );
 }
 
+/* ---------- Revision scope (shared by CVEs + Hardening) ---------- */
+// Both tabs report on a specific build of the system, not the host in general: a CVE
+// scan and a hardening audit belong to the generation/commit that was activated.
+function useRevScope(sys) {
+  const gens = React.useMemo(() => buildGenerations(sys), [sys.id]);
+  const commits = React.useMemo(() => buildSystemCommits(sys), [sys.id]);
+  const [mode, setMode] = React.useState("generation");
+  const [genId, setGenId] = React.useState(null);
+  const [sha, setSha] = React.useState(null);
+  React.useEffect(() => { setMode("generation"); setGenId(null); setSha(null); }, [sys.id]);
+  const onCommits = mode === "commit";
+  const gen = (genId !== null && gens.find(g => g.id === genId)) || gens[0];
+  const commit = (sha && commits.find(c => c.sha === sha)) || commits.find(c => c.current) || commits[0];
+  const ageRank = onCommits ? commits.indexOf(commit) : gens.indexOf(gen);
+  return { gens, commits, mode, setMode, setGenId, setSha, onCommits, gen, commit, ageRank,
+           isCurrent: ageRank <= 0, key: onCommits ? commit.sha : `gen${gen.id}` };
+}
+
+function RevScopeBar({ sys, scope, label }) {
+  const { gens, commits, onCommits, setMode, setGenId, setSha, gen, commit, isCurrent } = scope;
+  const sha = onCommits ? commit.sha : gen.sha;
+  const msg = onCommits ? commit.message : gen.msg;
+  const when = onCommits ? commit.when : gen.at;
+  const by = onCommits ? commit.author : gen.by;
+  return (
+    <div className={`rev-bar${isCurrent ? "" : " rev-bar-hist"}`}>
+      <span className="rev-bar-label">{label}</span>
+      <div className="seg xs">
+        <button className={!onCommits ? "active" : ""} onClick={() => setMode("generation")}>Generations</button>
+        <button className={onCommits ? "active" : ""} onClick={() => setMode("commit")}>Commits</button>
+      </div>
+      {onCommits ? (
+        <select className="cfgx-select focus-ring" value={commit.sha} onChange={e => setSha(e.target.value)}>
+          {commits.map(c => <option key={c.sha} value={c.sha}>{c.sha}{c.sha === sys.commit ? " (deployed)" : ""} · {c.when}</option>)}
+        </select>
+      ) : (
+        <select className="cfgx-select focus-ring" value={gen.id} onChange={e => setGenId(Number(e.target.value))}>
+          {gens.map(g => <option key={g.id} value={g.id} disabled={!g.sha}>gen #{g.id}{g.current ? " (current)" : ""}{g.sha ? ` · ${g.sha}` : " · no commit"}</option>)}
+        </select>
+      )}
+      <span className="rev-bar-meta" title={[sha, msg, when, by].filter(Boolean).join(" · ")}>
+        {msg && <span className="rev-bar-msg">{msg}</span>}
+        <span className="rev-bar-dot">·</span><span>{when}</span>
+        {by && <><span className="rev-bar-dot">·</span><span className="mono">{by}</span></>}
+      </span>
+      <span className="rev-bar-state">
+        {isCurrent
+          ? <span className="chip chip-healthy" style={{ fontSize:10 }}><Icon name="check" size={9}/> running now</span>
+          : <span className="chip chip-warning" style={{ fontSize:10 }} title="Not the config running on this host right now">historical</span>}
+      </span>
+    </div>
+  );
+}
+
 /* ---------- CVEs ---------- */
 function CvesTab({ sys }) {
+  // CVE exposure belongs to a specific build, so the tab scopes to one rev.
+  const scope = useRevScope(sys);
+  const { ageRank, isCurrent, key: revKey } = scope;
+
+  // Older generations/commits ran different package versions and hadn't picked up
+  // later patches yet, so exposure grows the further back you look.
+  const cveCounts = React.useMemo(() => {
+    if (isCurrent) return sys.cves;
+    const rnd = _hrng(_hseed(sys.id + "|counts|" + revKey));
+    const bump = (base) => Math.max(0, base + Math.round(ageRank * (0.5 + rnd()*1.3)));
+    const critical = bump(sys.cves.critical), high = bump(sys.cves.high), medium = bump(sys.cves.medium), low = bump(sys.cves.low);
+    return { critical, high, medium, low, total: critical+high+medium+low };
+  }, [sys.id, revKey, ageRank]);
+
   const cves = React.useMemo(() => {
-    const n = Math.min(18, sys.cves.critical + sys.cves.high + Math.min(6, sys.cves.medium));
+    const rnd = _hrng(_hseed(sys.id + "|list|" + revKey));
+    const n = Math.min(18, cveCounts.critical + cveCounts.high + Math.min(6, cveCounts.medium));
     const levels = [
-      ...Array(sys.cves.critical).fill("critical"),
-      ...Array(sys.cves.high).fill("high"),
-      ...Array(Math.min(6, sys.cves.medium)).fill("medium"),
+      ...Array(cveCounts.critical).fill("critical"),
+      ...Array(cveCounts.high).fill("high"),
+      ...Array(Math.min(6, cveCounts.medium)).fill("medium"),
     ].slice(0, n);
     const pkgs = ["openssl", "linux-kernel", "curl", "glibc", "systemd", "nginx", "postgresql", "git", "python311"];
     const pkgVersion = {};
     return levels.map((lvl, i) => {
       const pkg = pkgs[i % pkgs.length];
-      if (!pkgVersion[pkg]) pkgVersion[pkg] = `${Math.floor(Math.random()*10)}.${Math.floor(Math.random()*20)}.${Math.floor(Math.random()*30)}`;
+      if (!pkgVersion[pkg]) pkgVersion[pkg] = `${Math.floor(rnd()*10)}.${Math.floor(rnd()*20)}.${Math.floor(rnd()*30)}`;
       return {
-        id: `CVE-2025-${String(10000 + Math.floor(Math.random() * 9999)).padStart(5,"0")}`,
+        id: `CVE-2025-${String(10000 + Math.floor(rnd() * 9999)).padStart(5,"0")}`,
         level: lvl,
         pkg,
         version: pkgVersion[pkg],
-        score: (lvl === "critical" ? 9 + Math.random() : lvl === "high" ? 7 + Math.random()*2 : 4 + Math.random()*3).toFixed(1),
-        fix: Math.random() > 0.3 ? "available" : "pending",
+        score: (lvl === "critical" ? 9 + rnd() : lvl === "high" ? 7 + rnd()*2 : 4 + rnd()*3).toFixed(1),
+        fix: rnd() > 0.3 ? "available" : "pending",
       };
     });
-  }, [sys.id]);
+  }, [sys.id, revKey, cveCounts]);
 
   const chipFor = (l) =>
     l === "critical" ? <span className="chip chip-critical">critical</span> :
@@ -1527,10 +1596,12 @@ function CvesTab({ sys }) {
   };
 
   return (
+    <>
+    <RevScopeBar sys={sys} scope={scope} label="Scan target"/>
     <section className="card" style={{ overflow: "hidden" }}>
       <div className="sd-card-head" style={{ padding: "14px 18px" }}>
         <h2>Vulnerabilities</h2>
-        <span className="sd-card-meta">{cves.length} of {sys.cves.total} shown · {groups.length} package{groups.length === 1 ? "" : "s"}</span>
+        <span className="sd-card-meta">{cves.length} of {cveCounts.total} shown · {groups.length} package{groups.length === 1 ? "" : "s"}</span>
       </div>
       {cves.length === 0 ? (
         <div className="empty">
@@ -1629,6 +1700,7 @@ function CvesTab({ sys }) {
           }}/>
       )}
     </section>
+    </>
   );
 }
 
@@ -1717,4 +1789,4 @@ function ComplianceTab({ sys, onNavigate }) {
   );
 }
 
-Object.assign(window, { SystemDetail, buildGenerations, buildSystemCommits, CfgInputBadge, ModuleSourceTray, resolveInputFlake });
+Object.assign(window, { SystemDetail, buildGenerations, buildSystemCommits, useRevScope, RevScopeBar, CfgInputBadge, ModuleSourceTray, resolveInputFlake });
