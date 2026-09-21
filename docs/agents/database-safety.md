@@ -2,6 +2,28 @@
 
 SQLx offline metadata must remain synchronized with the schema and compile-time checked queries.
 
+## Isolated local development database: two current mechanisms
+
+This repository currently has two ways to get an isolated local
+development PostgreSQL instance:
+
+- The process-compose-based `db-only`/`run-ui-dev` workflow this document
+  otherwise describes: a fixed port (`3042`) shared by every worktree,
+  with `packages/devScripts/db-usability-check.sh` verifying at startup
+  that the process actually answering that port belongs to the current
+  worktree before reuse.
+- The devenv-based workflow added in TASK-462.1
+  (`docs/agents/devenv-workflow.md`): a dynamically allocated,
+  genuinely per-worktree PostgreSQL instance and port, with its own
+  per-worktree on-disk data directory. Two worktrees running this
+  workflow at the same time cannot collide on a port or data directory in
+  the first place, so no equivalent ownership check is needed there.
+
+The rest of this document describes the process-compose-based workflow.
+It remains fully supported; TASK-462.1 does not remove or weaken it. See
+`docs/agents/devenv-workflow.md` for the devenv-based alternative,
+including how to find its resolved database port for a given worktree.
+
 ## When preparation is required
 
 Run SQLx preparation when a change affects any of:

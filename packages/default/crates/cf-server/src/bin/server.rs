@@ -1204,15 +1204,35 @@ async fn main() -> anyhow::Result<()> {
 
     // Add CORS layer for development (allows frontend dev server to talk to backend)
     // In production, the UI is served from the same origin, so this is permissive for dev
+    let mut allowed_dev_origins = vec![
+        HeaderValue::from_static("http://localhost:8080"),
+        HeaderValue::from_static("http://127.0.0.1:8080"),
+        HeaderValue::from_static("http://localhost:8081"),
+        HeaderValue::from_static("http://127.0.0.1:8081"),
+        HeaderValue::from_static("http://localhost:8000"),
+        HeaderValue::from_static("http://127.0.0.1:8000"),
+    ];
+    // The dynamic-port devenv dev workflow (see devenv.nix) allocates the
+    // web UI dev server's port at runtime, which is not guaranteed to be
+    // one of the fixed ports above (verified empirically while
+    // implementing TASK-462.1: a browser fetch to this server from an
+    // allocated port outside that fixed set fails with no
+    // `Access-Control-Allow-Origin` header, since CORS is an allowlist).
+    // That workflow sets this variable to its own resolved UI origin;
+    // every other workflow (run-ui-dev included) never sets it, so the
+    // fixed allowlist above is unchanged there.
+    if let Ok(dev_origin) = std::env::var("CRYSTAL_FORGE_CORS_DEV_ORIGIN") {
+        if let Ok(value) = HeaderValue::from_str(&dev_origin) {
+            allowed_dev_origins.push(value);
+        } else {
+            warn!(
+                "CRYSTAL_FORGE_CORS_DEV_ORIGIN is not a valid header value; ignoring: {}",
+                dev_origin
+            );
+        }
+    }
     let cors = CorsLayer::new()
-        .allow_origin([
-            HeaderValue::from_static("http://localhost:8080"),
-            HeaderValue::from_static("http://127.0.0.1:8080"),
-            HeaderValue::from_static("http://localhost:8081"),
-            HeaderValue::from_static("http://127.0.0.1:8081"),
-            HeaderValue::from_static("http://localhost:8000"),
-            HeaderValue::from_static("http://127.0.0.1:8000"),
-        ])
+        .allow_origin(allowed_dev_origins)
         .allow_methods([
             Method::GET,
             Method::POST,

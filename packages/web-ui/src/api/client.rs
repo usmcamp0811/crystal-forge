@@ -8,7 +8,19 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 fn backend_origin_for_dev(window: &web_sys::Window, origin: &str) -> Option<String> {
-    if !(origin.contains(":8080") || origin.contains(":8000") || origin.contains(":8081")) {
+    // The devenv dev workflow (see devenv.nix) allocates the API server's
+    // port dynamically, so it is not known until build time and is not
+    // guaranteed to be one of the fixed Dioxus dev-server ports checked
+    // below. That workflow bakes its resolved port into this build via
+    // this compile-time environment variable. `run-ui-dev` and every other
+    // build never set it, so `devenv_port` is `None` there and the
+    // existing origin-port gate and hardcoded fallback port below are
+    // unchanged.
+    let devenv_port = option_env!("CF_UI_DEV_API_PORT");
+
+    if devenv_port.is_none()
+        && !(origin.contains(":8080") || origin.contains(":8000") || origin.contains(":8081"))
+    {
         return None;
     }
 
@@ -25,7 +37,8 @@ fn backend_origin_for_dev(window: &web_sys::Window, origin: &str) -> Option<Stri
         .location()
         .hostname()
         .unwrap_or_else(|_| "localhost".to_string());
-    Some(format!("http://{host}:3445"))
+    let port = devenv_port.unwrap_or("3445");
+    Some(format!("http://{host}:{port}"))
 }
 
 /// Base URL for the API. In production this is the same origin;
