@@ -1,9 +1,11 @@
 ---
 id: TASK-466
 title: Bring Evaluation policy matrix bundle grouping to design parity
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - openai-agent
 created_date: '2026-09-21 16:18'
+updated_date: '2026-09-21 16:20'
 labels:
   - web-ui
   - server
@@ -56,3 +58,11 @@ The production Evaluation drawer renders one column per policy and becomes unusa
 - [ ] #15 Production is compared against the full EvalDrawer design and matching CSS with no unresolved P0 P1 or P2 differences in the requested policy-matrix sections.
 - [ ] #16 Focused formatting server SQL or migration SQLx-offline frontend unit WASM browser and git diff checks pass as applicable and any schema migration is additive and supports legacy rows.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: openai-agent on localhost in /home/mcamp/code/crystal-forge/TASK-466-eval-policy-matrix-bundles
+
+Preflight: dedicated branch TASK-466-eval-policy-matrix-bundles was created at exact fetched origin/dev SHA 4fb7d960909bb7dc75d5f859af43e38f7a3c657e. The worktree is clean. TASK-326.2 has uncommitted scanning/CVE work in its own worktree, including api/models.rs and app.css; this task will not modify that worktree or MR !329. Separate worktree isolation prevents loss, though later integration may require normal conflict resolution.
+<!-- SECTION:NOTES:END -->
