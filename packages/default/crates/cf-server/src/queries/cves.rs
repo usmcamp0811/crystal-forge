@@ -671,9 +671,12 @@ pub async fn fetch_authorized_system_cve_inventory_candidates(
              LEFT JOIN flake_branch_commit_snapshot head ON head.flake_id=flake.id
                AND head.position=0
              UNION ALL
-             SELECT 'exact_derivation',NULL::uuid,NULL::int,derivation.id,
-                    commit.git_commit_hash,
-                    state.store_path IS NOT NULL AND derivation.store_path=state.store_path,
+              SELECT 'exact_derivation',NULL::uuid,NULL::int,derivation.id,
+                     commit.git_commit_hash,
+                     COALESCE(
+                       state.store_path IS NOT NULL
+                         AND derivation.store_path=state.store_path,
+                       FALSE),
                     COALESCE(flake.snapshot_ready_at IS NOT NULL
                       AND head.commit_id=commit.id,FALSE)
              FROM selected_system system CROSS JOIN latest_state state
@@ -3226,6 +3229,63 @@ mod tests {
             Some(exact_clean_scan_id)
         );
         assert!(unverified.rows.is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "runs in the PostgreSQL server-regressions check"]
+    async fn inventory_candidates_treat_unbuilt_derivation_as_not_current(pool: PgPool) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (system, commit_id) = inventory_test_system(&pool, &suffix).await;
+        let derivation_id: i32 = sqlx::query_scalar(
+            r#"INSERT INTO derivations(
+                 derivation_name,derivation_path,derivation_type,commit_id,status_id)
+               VALUES($1,$2,'nixos',$3,
+                 (SELECT id FROM derivation_statuses WHERE name='dry-run-pending' LIMIT 1))
+               RETURNING id"#,
+        )
+        .bind(&system.hostname)
+        .bind(format!("/nix/store/{suffix}-unbuilt.drv"))
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("unbuilt derivation should persist");
+        sqlx::query(
+            r#"INSERT INTO system_states(
+                 hostname,change_reason,store_path,generation,
+                 generation_matches_current_store_path,timestamp)
+               VALUES($1,'startup',$2,7,true,now())"#,
+        )
+        .bind(&system.hostname)
+        .bind(format!("/nix/store/{suffix}-current"))
+        .execute(&pool)
+        .await
+        .expect("current system state should persist");
+        let admin_id = inventory_test_user(&pool, "admin", true).await;
+
+        let candidates =
+            fetch_authorized_system_cve_inventory_candidates(&pool, system.id, admin_id)
+                .await
+                .expect("candidate query should not decode a nullable boolean")
+                .expect("admin should see the system");
+        let exact = candidates
+            .iter()
+            .find(|candidate| {
+                candidate.selection
+                    == SystemCveInventorySelection::ExactDerivation { derivation_id }
+            })
+            .expect("unbuilt exact derivation candidate");
+
+        assert_eq!(exact.derivation_id, Some(derivation_id));
+        assert!(!exact.is_current);
+        assert!(exact.read_only);
+        assert!(!exact.scan_available);
+        assert!(exact.source.is_none());
+        assert!(exact.evidence_representation.is_none());
+        assert!(candidates.iter().any(|candidate| {
+            candidate.selection == SystemCveInventorySelection::Current
+                && candidate.is_current
+                && !candidate.read_only
+        }));
     }
 
     #[sqlx::test]

@@ -45,6 +45,9 @@ in
       evaluator_bin=${evaluatorNix}/bin
       unrelated_nix_bin=${pkgs.nix}/bin
 
+      test -x "$evaluator_bin/nix"
+      test -x "$evaluator_bin/nix-store"
+
       grep -Fq "$evaluator_bin" "$component_wrapper"
       grep -Fq "$evaluator_bin" "$public_wrapper"
       grep -Fq '${componentBuilder}/bin/builder' "$public_wrapper"
@@ -71,5 +74,52 @@ in
         | jq -er '.extraValue.nixVersion')"
 
       test "$packaged_version" = "nix (Nix) $authoritative_version"
+
+      # The sandbox has no daemon store. Use an explicit disposable chroot store
+      # so this contract does not depend on the host's sandbox or daemon setup.
+      probe_store="$TMPDIR/nix-root"
+      input_addressed_drv="$($evaluator_bin/nix-instantiate --store "$probe_store" --expr \
+        'builtins.derivation { name = "crystal-forge-derivation-json-probe"; system = "${system}"; builder = "/bin/sh"; args = []; }')"
+      input_addressed_json="$($evaluator_bin/nix --store "$probe_store" --extra-experimental-features nix-command derivation show "$input_addressed_drv")"
+      input_addressed_key="$(basename "$input_addressed_drv")"
+      printf '%s' "$input_addressed_json" | jq -e \
+        --arg key "$input_addressed_key" \
+        '.version == 4
+         and (.derivations | keys == [$key])
+         and .derivations[$key].version == 4
+         and (.derivations[$key].outputs.out.path | type == "string")
+         and (.derivations[$key].outputs.out.path | startswith("/nix/store/") | not)' \
+        >/dev/null
+
+      second_input_addressed_drv="$($evaluator_bin/nix-instantiate --store "$probe_store" --expr \
+        'builtins.derivation { name = "crystal-forge-derivation-json-probe-two"; system = "${system}"; builder = "/bin/sh"; args = []; }')"
+      multi_derivation_json="$($evaluator_bin/nix --store "$probe_store" --extra-experimental-features nix-command derivation show \
+        "$input_addressed_drv" "$second_input_addressed_drv")"
+      second_input_addressed_key="$(basename "$second_input_addressed_drv")"
+      printf '%s' "$multi_derivation_json" | jq -e \
+        --arg first "$input_addressed_key" \
+        --arg second "$second_input_addressed_key" \
+        '.version == 4
+         and (.derivations | length == 2)
+         and (.derivations | has($first))
+         and (.derivations | has($second))' \
+        >/dev/null
+
+      fixed_output_drv="$($evaluator_bin/nix-instantiate --store "$probe_store" --expr \
+        'builtins.derivation { name = "crystal-forge-fixed-output-json-probe"; system = "${system}"; builder = "/bin/sh"; args = []; outputHashMode = "flat"; outputHashAlgo = "sha256"; outputHash = builtins.hashString "sha256" "probe"; }')"
+      fixed_output_json="$($evaluator_bin/nix --store "$probe_store" --extra-experimental-features nix-command derivation show "$fixed_output_drv")"
+      fixed_output_key="$(basename "$fixed_output_drv")"
+      printf '%s' "$fixed_output_json" | jq -e \
+        --arg key "$fixed_output_key" \
+        '.version == 4
+         and .derivations[$key].version == 4
+         and (.derivations[$key].outputs.out | has("path") | not)' \
+        >/dev/null
+      fixed_output_path="$($evaluator_bin/nix-store --store "$probe_store" --query --binding out "$fixed_output_drv")"
+      case "$fixed_output_path" in
+        /nix/store/*) ;;
+        *) exit 1 ;;
+      esac
+
       printf '%s\n' "$packaged_version" > "$out"
     ''

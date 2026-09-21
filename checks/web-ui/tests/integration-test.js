@@ -17306,18 +17306,30 @@ security.audit.enable = true;</fixtext>
       await routeSystemsWarningData(page);
 
       const historicalGenerationId = "00000000-0000-4000-8000-000000000073";
+      let candidateRequests = 0;
       await page.route(
         "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-inventory-sources",
-        async (route) => route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            items: [
-              { selection: { kind: "current" }, generation: 74, commit_hash: "1111111111111111111111111111111111111111", derivation_id: 42, is_current: true, is_latest_per_flake: true, source: null, evidence_representation: null, scan_available: true, read_only: false },
-              { selection: { kind: "retained_generation", generation_snapshot_id: historicalGenerationId }, generation: 73, commit_hash: "2222222222222222222222222222222222222222", derivation_id: 41, is_current: false, is_latest_per_flake: false, source: null, evidence_representation: null, scan_available: false, read_only: true },
-            ],
-          }),
-        }),
+        async (route) => {
+          candidateRequests += 1;
+          if (candidateRequests === 1) {
+            await route.fulfill({
+              status: 503,
+              contentType: "application/json",
+              body: JSON.stringify({ error: "candidate fixture unavailable" }),
+            });
+            return;
+          }
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              items: [
+                { selection: { kind: "current" }, generation: 74, commit_hash: "1111111111111111111111111111111111111111", derivation_id: 42, is_current: true, is_latest_per_flake: true, source: null, evidence_representation: null, scan_available: true, read_only: false },
+                { selection: { kind: "retained_generation", generation_snapshot_id: historicalGenerationId }, generation: 73, commit_hash: "2222222222222222222222222222222222222222", derivation_id: 41, is_current: false, is_latest_per_flake: false, source: null, evidence_representation: null, scan_available: false, read_only: true },
+              ],
+            }),
+          });
+        },
       );
       await page.route(
         "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/generations",
@@ -17470,6 +17482,18 @@ security.audit.enable = true;</fixtext>
         page.getByText("nginx.service").first(),
         "Expected hardening service rows to render in hardening table",
       );
+      await assertVisible(
+        page.getByText(/Revision targets could not be loaded/i).first(),
+        "Candidate failure must not replace loaded hardening evidence",
+      );
+      await page.getByRole("button", { name: "Retry revision targets" }).click();
+      await assertVisible(
+        page.getByRole("combobox", { name: "Audited config" }),
+        "Retry should restore the server-owned revision targets without reloading evidence",
+      );
+      if (candidateRequests !== 2) {
+        throw new Error(`Expected one candidate retry request, observed ${candidateRequests} total requests`);
+      }
       await assertVisible(page.getByText("nginx.service").first(), "Expected mocked service row to render");
       await assertVisible(
         page.getByRole("button", { name: /^View details$/i }).first(),
@@ -21515,6 +21539,8 @@ function runStaticHarnessContracts() {
   for (const contract of [
     'hardening-inventory*',
     'name: "Audited config"',
+    'name: "Retry revision targets"',
+    'Candidate failure must not replace loaded hardening evidence',
     '"Historical hardening evidence is read-only."',
     '"No hardening scan for this revision"',
     'Historical no-scan target must not retain current services',

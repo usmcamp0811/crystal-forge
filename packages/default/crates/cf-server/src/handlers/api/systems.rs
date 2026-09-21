@@ -4740,11 +4740,15 @@ mod tests {
     use crate::queries::flakes::insert_flake;
     use crate::queries::systems::insert_system;
     use crate::queries::users::insert_user;
+    use axum::Router;
+    use axum::body::Body;
     use axum::extract::State;
-    use axum::http::header;
+    use axum::http::{Request, header};
+    use axum::routing::get;
     use chrono::Utc;
     use ed25519_dalek::SigningKey;
     use sqlx::postgres::PgPoolOptions;
+    use tower::ServiceExt;
 
     async fn response_json<T: serde::de::DeserializeOwned>(
         response: axum::response::Response,
@@ -5088,6 +5092,130 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[sqlx::test]
+    #[ignore = "runs in the PostgreSQL server-regressions check"]
+    async fn cve_inventory_sources_route_hides_systems_and_serializes_unbuilt_targets(
+        pool: PgPool,
+    ) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let repo_url = format!("https://example.test/cve-source-route-{suffix}.git");
+        let flake = insert_flake(
+            &pool,
+            &format!("cve-source-route-{suffix}"),
+            &repo_url,
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("route test flake should persist");
+        let commit_hash = format!("{:0>40}", &suffix[..suffix.len().min(32)]);
+        insert_commit_with_metadata(
+            &pool,
+            &commit_hash,
+            &repo_url,
+            Utc::now(),
+            Some("Route Test"),
+            Some("route test commit"),
+        )
+        .await
+        .expect("route test commit should persist");
+        let commit = get_commit_by_hash(&pool, &commit_hash)
+            .await
+            .expect("route test commit should load");
+        let signing_key = SigningKey::from_bytes(&[47; 32]);
+        let system = insert_system(
+            &pool,
+            &System {
+                id: Uuid::new_v4(),
+                hostname: format!("cve-source-route-{suffix}"),
+                environment_id: None,
+                is_active: true,
+                public_key: PublicKey::from_verifying_key(signing_key.verifying_key()),
+                flake_id: Some(flake.id),
+                derivation: String::new(),
+                system_configuration_name: Some(format!("cve-source-route-{suffix}")),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                desired_target: None,
+                deployment_policy: "manual".into(),
+            },
+        )
+        .await
+        .expect("route test system should persist");
+        let derivation_id: i32 = sqlx::query_scalar(
+            r#"INSERT INTO derivations(
+                 derivation_name,derivation_path,derivation_type,commit_id,status_id)
+               VALUES($1,$2,'nixos',$3,
+                 (SELECT id FROM derivation_statuses WHERE name='dry-run-pending' LIMIT 1))
+               RETURNING id"#,
+        )
+        .bind(&system.hostname)
+        .bind(format!("/nix/store/{suffix}-unbuilt-route.drv"))
+        .bind(commit.id)
+        .fetch_one(&pool)
+        .await
+        .expect("unbuilt route derivation should persist");
+        sqlx::query(
+            r#"INSERT INTO system_states(
+                 hostname,change_reason,store_path,generation,
+                 generation_matches_current_store_path,timestamp)
+               VALUES($1,'startup',$2,7,true,now())"#,
+        )
+        .bind(&system.hostname)
+        .bind(format!("/nix/store/{suffix}-current-route"))
+        .execute(&pool)
+        .await
+        .expect("route test current state should persist");
+
+        let admin_headers =
+            mutation_headers(&pool, AuthRole::Admin, &format!("admin-{suffix}")).await;
+        let viewer_headers =
+            mutation_headers(&pool, AuthRole::Viewer, &format!("viewer-{suffix}")).await;
+        let app = Router::new()
+            .route(
+                "/api/v1/systems/:id/cve-inventory-sources",
+                get(get_system_cve_inventory_candidates),
+            )
+            .with_state(pool);
+        let request = |headers: HeaderMap| {
+            let mut request = Request::builder()
+                .uri(format!(
+                    "/api/v1/systems/{}/cve-inventory-sources",
+                    system.id
+                ))
+                .body(Body::empty())
+                .expect("candidate request should construct");
+            request.headers_mut().extend(headers);
+            request
+        };
+
+        let hidden = app
+            .clone()
+            .oneshot(request(viewer_headers))
+            .await
+            .expect("candidate route should respond for hidden systems");
+        assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+
+        let visible = app
+            .oneshot(request(admin_headers))
+            .await
+            .expect("candidate route should respond for visible systems");
+        assert_eq!(visible.status(), StatusCode::OK);
+        let payload: serde_json::Value = response_json(visible).await;
+        let items = payload["items"]
+            .as_array()
+            .expect("candidate route should return an items array");
+        let exact = items
+            .iter()
+            .find(|candidate| candidate["derivation_id"] == derivation_id)
+            .expect("candidate route should include the unbuilt derivation");
+        assert_eq!(exact["selection"]["kind"], "exact_derivation");
+        assert_eq!(exact["is_current"], false);
+        assert_eq!(exact["read_only"], true);
+        assert_eq!(exact["scan_available"], false);
+        assert!(exact["source"].is_null());
     }
 
     #[sqlx::test]

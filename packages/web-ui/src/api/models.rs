@@ -4721,8 +4721,8 @@ pub struct SystemHardeningInventorySourceResponse {
 pub struct SystemHardeningInventoryResponse {
     /// Echoes the server-validated target selection.
     pub selection: SystemCveInventorySelection,
-    /// Identifies the exact derivation resolved by the server.
-    pub derivation_id: i32,
+    /// Identifies the exact derivation, or is `None` when Current is unresolved.
+    pub derivation_id: Option<i32>,
     /// Gives selected scan provenance, or `None` when this target has no scan.
     pub source: Option<SystemHardeningInventorySourceResponse>,
     /// Contains only service rows from the selected scan.
@@ -6304,7 +6304,7 @@ mod tests {
         ConfigObservationRequestResponse, ConfigObservationResponse, CreatePolicyDraftRequest,
         CreatePolicyDraftResponse, EvaluatedOption, EvaluationModuleSummary,
         ExactCveAuthorityFailureReason, SystemCommitsResponse, SystemCveInventoryAuthority,
-        SystemCveInventoryPageResponse, XccdfPreviewResponse,
+        SystemCveInventoryPageResponse, SystemHardeningInventoryResponse, XccdfPreviewResponse,
     };
 
     #[test]
@@ -6322,6 +6322,24 @@ mod tests {
         .expect("deserialize legacy commit response");
 
         assert!(!response.commits[0].config_inspectable);
+    }
+
+    #[test]
+    fn hardening_inventory_accepts_unresolved_current_derivation() {
+        let response: SystemHardeningInventoryResponse =
+            serde_json::from_value(serde_json::json!({
+                "selection": {"kind": "current"},
+                "derivation_id": null,
+                "source": null,
+                "services": [],
+                "read_only": false
+            }))
+            .expect("deserialize unresolved current hardening inventory");
+
+        assert_eq!(response.derivation_id, None);
+        assert!(response.source.is_none());
+        assert!(response.services.is_empty());
+        assert!(!response.read_only);
     }
 
     #[test]

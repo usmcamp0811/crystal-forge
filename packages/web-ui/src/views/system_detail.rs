@@ -160,7 +160,6 @@ struct RevisionScopeChoice {
     label: String,
     meta: String,
     selection: Option<SystemCveInventorySelection>,
-    current: bool,
 }
 
 fn selection_key(selection: SystemCveInventorySelection) -> String {
@@ -242,7 +241,6 @@ fn revision_scope_choices(
                     ),
                     meta: generation.timestamp.to_rfc3339(),
                     selection,
-                    current: generation.is_current,
                 }
             })
             .collect(),
@@ -263,7 +261,6 @@ fn revision_scope_choices(
                     ),
                     meta: format!("{} · {}", commit.message, commit.author),
                     selection,
-                    current,
                 }
             })
             .collect(),
@@ -299,14 +296,7 @@ fn selection_after_scope_mode_change(
             && selected_candidate.commit_hash == candidate.commit_hash;
         (same_derivation || same_generation_and_commit).then_some(selection)
     });
-    if linked.is_some() || selected_candidate.read_only {
-        return linked;
-    }
-
-    choices
-        .iter()
-        .find(|choice| choice.current)
-        .and_then(|choice| choice.selection)
+    linked
 }
 
 /// Renders the shared CVE and Hardening revision selector from server-owned targets.
@@ -319,8 +309,38 @@ fn RevisionScopeBar(
     current_commit: Option<String>,
     selected: SystemCveInventorySelection,
     mut mode: Signal<RevisionScopeMode>,
+    loading: bool,
+    loaded: bool,
+    error: Option<String>,
     on_select: EventHandler<SystemCveInventorySelection>,
+    on_retry: EventHandler<()>,
 ) -> Element {
+    if !loaded && loading {
+        return rsx! {
+            div { class: "rev-bar", role: "status", aria_live: "polite", aria_busy: "true",
+                span { class: "rev-bar-label", "{label}" }
+                span { class: "rev-bar-msg", "Loading revision targets…" }
+            }
+        };
+    }
+    if !loaded {
+        return rsx! {
+            div { class: "rev-bar", role: "alert",
+                span { class: "rev-bar-label", "{label}" }
+                span { class: "rev-bar-msg",
+                    "Revision targets could not be loaded"
+                    if let Some(error) = error.as_deref() { ": {error}" }
+                }
+                button {
+                    class: "btn btn-sm",
+                    r#type: "button",
+                    onclick: move |_| on_retry.call(()),
+                    "Retry revision targets"
+                }
+            }
+        };
+    }
+
     let choices = revision_scope_choices(
         mode(),
         &candidates,
@@ -333,9 +353,8 @@ fn RevisionScopeBar(
         .iter()
         .find(|choice| choice.key == selected_key)
         .cloned();
-    let historical = selected_choice
-        .as_ref()
-        .is_some_and(|choice| !choice.current);
+    let historical = !matches!(selected, SystemCveInventorySelection::Current);
+    let selected_is_missing = selected_choice.is_none();
 
     rsx! {
         div { class: if historical { "rev-bar rev-bar-hist" } else { "rev-bar" },
@@ -392,6 +411,13 @@ fn RevisionScopeBar(
                         }
                     }
                 },
+                if selected_is_missing {
+                    option {
+                        value: "{selected_key}",
+                        disabled: true,
+                        "Selected historical target · unavailable"
+                    }
+                }
                 for choice in choices.iter() {
                     option {
                         key: "{choice.key}",
@@ -408,6 +434,23 @@ fn RevisionScopeBar(
             span { class: "rev-bar-state",
                 if historical { span { class: "chip chip-warning", "historical · read-only" } }
                 else { span { class: "chip chip-healthy", Icon { name: IconName::Check, size: 9 } " running now" } }
+            }
+            if loading {
+                span { class: "rev-bar-msg", role: "status", aria_live: "polite", "Refreshing revision targets…" }
+            } else if let Some(error) = error.as_deref() {
+                span { class: "rev-bar-msg", role: "alert",
+                    "Revision targets could not be refreshed. Showing the last loaded targets. {error}"
+                }
+                button {
+                    class: "btn btn-sm",
+                    r#type: "button",
+                    onclick: move |_| on_retry.call(()),
+                    "Retry revision targets"
+                }
+            } else if selected_is_missing {
+                span { class: "rev-bar-msg", role: "alert",
+                    "The selected historical target is no longer listed. Loaded evidence remains selected."
+                }
             }
         }
     }
@@ -863,14 +906,36 @@ pub fn SystemDetailView(
         }
     });
 
+    let mut inventory_candidates_cache = use_signal(Vec::<SystemCveInventoryCandidate>::new);
+    let mut inventory_candidates_loaded = use_signal(|| false);
+    let mut inventory_candidates_error_signal = use_signal(|| None::<String>);
     let id_for_candidates = id.clone();
-    let inventory_candidates_resource = use_resource(move || {
+    let mut inventory_candidates_resource = use_resource(move || {
         let id = id_for_candidates.clone();
         async move {
             let system_id = Uuid::parse_str(&id).map_err(|_| {
                 ApiClientError::Deserialize("Invalid system identifier".to_string())
             })?;
             fetch_system_cve_inventory_candidates(&system_id).await
+        }
+    });
+    let inventory_candidates_resource_for_state = inventory_candidates_resource.clone();
+    use_effect(move || {
+        let update = inventory_candidates_resource_for_state
+            .read()
+            .as_ref()
+            .map(|result| match result {
+                Ok(response) => Ok(response.items.clone()),
+                Err(error) => Err(error.to_string()),
+            });
+        match update {
+            Some(Ok(items)) => {
+                inventory_candidates_cache.set(items);
+                inventory_candidates_loaded.set(true);
+                inventory_candidates_error_signal.set(None);
+            }
+            Some(Err(error)) => inventory_candidates_error_signal.set(Some(error)),
+            None => {}
         }
     });
 
@@ -1317,17 +1382,14 @@ pub fn SystemDetailView(
         (*hardening_scan_eligibility_resource.read_unchecked())
             .clone()
             .flatten();
-    let inventory_candidates = inventory_candidates_resource
-        .read_unchecked()
-        .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .map(|response| response.items.clone())
-        .unwrap_or_default();
-    let inventory_candidates_error = inventory_candidates_resource
-        .read_unchecked()
-        .as_ref()
-        .and_then(|result| result.as_ref().err())
-        .map(ToString::to_string);
+    let inventory_candidates = inventory_candidates_cache();
+    let inventory_candidates_loading = inventory_candidates_resource.read_unchecked().is_none();
+    let inventory_candidates_have_loaded = inventory_candidates_loaded();
+    let inventory_candidates_error = inventory_candidates_error_signal();
+    let mut cve_candidates_retry_resource = inventory_candidates_resource.clone();
+    let mut hardening_candidates_retry_resource = inventory_candidates_resource.clone();
+    let mut cve_candidates_error_signal = inventory_candidates_error_signal;
+    let mut hardening_candidates_error_signal = inventory_candidates_error_signal;
     let selected_cve_candidate = inventory_candidates
         .iter()
         .find(|candidate| candidate.selection == cve_selection());
@@ -1863,15 +1925,17 @@ pub fn SystemDetailView(
                             current_commit: observational_current_commit.clone(),
                             selected: cve_selection(),
                             mode: cve_scope_mode,
+                            loading: inventory_candidates_loading,
+                            loaded: inventory_candidates_have_loaded,
+                            error: inventory_candidates_error.clone(),
                             on_select: move |selection| {
                                 cve_pagination.write().reset(None);
                                 cve_selection.set(selection);
                             },
-                        }
-                        if let Some(error) = inventory_candidates_error.as_deref() {
-                            div { class: "sd-callout sd-callout-warning", role: "alert",
-                                "Revision targets could not be loaded: {error}"
-                            }
+                            on_retry: move |_| {
+                                cve_candidates_error_signal.set(None);
+                                cve_candidates_retry_resource.restart();
+                            },
                         }
                         CvesTab {
                             system_id: system.id,
@@ -1948,12 +2012,14 @@ pub fn SystemDetailView(
                             current_commit: observational_current_commit.clone(),
                             selected: hardening_selection(),
                             mode: hardening_scope_mode,
+                            loading: inventory_candidates_loading,
+                            loaded: inventory_candidates_have_loaded,
+                            error: inventory_candidates_error.clone(),
                             on_select: move |selection| hardening_selection.set(selection),
-                        }
-                        if let Some(error) = inventory_candidates_error.as_deref() {
-                            div { class: "sd-callout sd-callout-warning", role: "alert",
-                                "Revision targets could not be loaded: {error}"
-                            }
+                            on_retry: move |_| {
+                                hardening_candidates_error_signal.set(None);
+                                hardening_candidates_retry_resource.restart();
+                            },
                         }
                         HardeningTab {
                             system_id: system.id,
@@ -11310,6 +11376,20 @@ mod tests {
             ),
             None,
             "an unlinked historical selection must not fall back to mutable current",
+        );
+
+        let mut malformed_historical = unlinked;
+        malformed_historical.read_only = false;
+        let mut malformed_candidates = candidates.to_vec();
+        malformed_candidates.push(malformed_historical.clone());
+        assert_eq!(
+            selection_after_scope_mode_change(
+                &generation_choices,
+                &malformed_candidates,
+                malformed_historical.selection,
+            ),
+            None,
+            "historical identity must not fall back to Current when metadata is malformed",
         );
     }
 

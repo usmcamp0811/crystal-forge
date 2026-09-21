@@ -482,6 +482,14 @@ SQL
       tasks::attention_reconciliation::tests::poam_overdue_reconciliation_deduplicates_resolves_and_opens_new_episode \
       -- --ignored --test-threads=1
 
+    echo "=== System CVE inventory candidate query and route regressions ==="
+    cargo test --offline --package cf-server --lib \
+      inventory_candidates_treat_unbuilt_derivation_as_not_current \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      cve_inventory_sources_route_hides_systems_and_serializes_unbuilt_targets \
+      -- --ignored --test-threads=1
+
     echo "=== Composite AC3 pure validation and interchange matrix ==="
     cargo test --offline --package cf-server --lib \
       ac3_validation_matrix_accepts_and_rejects_each_exposed_kind_discriminately \
