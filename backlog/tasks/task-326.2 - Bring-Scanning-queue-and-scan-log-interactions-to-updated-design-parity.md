@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-21 01:35'
+updated_date: '2026-09-21 01:44'
 labels:
   - scanning
   - web-ui
@@ -132,6 +132,8 @@ Final functional pass at exact design-only head `05bcac367faa05c2b89e069c08256d7
 6. Run only focused cf-builder/cf-server/Web UI checks, WASM/static/JavaScript checks, and diff hygiene. Do not run the authoritative Web UI VM or full flake check. Commit, push, verify local/remote SHAs, report, and stop.
 
 P0 cf-builder scanner stabilization: extract a pure bounded normalizer for only the flat `nix derivation show` map and a direct top-level `derivations` map. Require exact requested absolute `.drv` keys in either map; retain canonical output-path validation, non-empty outputs, command output limits, and chunking. Add focused unit coverage for flat, wrapped, absent, malformed/invalid shape, unresolved output, and invalid output path. Run targeted rustfmt and cf-builder tests only; do not commit or push.
+
+Remaining Web UI/browser contract pass in the existing task worktree: add a shared server-owned revision scope selector for System Detail CVEs and Hardening; key and stale-fence target reads and pagination; mirror the target-aware hardening inventory response and enforce historical read-only behavior; replace Completed archive checkbox UI with an `Archived [N]` ghost filter and improve prerequisite terminal-failure actions/copy; update only focused integration/static contracts; verify focused Web UI tests, WASM if affordable, JavaScript syntax/static contracts, targeted rustfmt, and diff hygiene. Preserve and do not edit the dirty cf-server lifecycle changes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
