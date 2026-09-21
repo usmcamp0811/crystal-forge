@@ -69,6 +69,50 @@
           pkgs = channels.nixpkgs;
           inherit inputs;
         };
+
+        # nix develop .#devenv (TASK-462.1): additive, alongside the
+        # existing `devShells.default` (shells/default/default.nix), which
+        # this output does not modify, replace, or remove. This shell only
+        # puts the real `devenv` CLI on `PATH`; it does not itself define
+        # or evaluate any devenv processes. Run `devenv up` from this
+        # worktree's root once inside it to start the isolated
+        # PostgreSQL/API/web UI stack defined in this repository's
+        # `devenv.yaml`/`devenv.nix`. See docs/agents/devenv-workflow.md.
+        #
+        # Deliberately `channels.nixpkgs.devenv` (this repository's own
+        # already-pinned, already-cached nixpkgs), not a separate `devenv`
+        # flake input. An earlier revision added `inputs.devenv`, but
+        # Snowfall's `mkLib` unconditionally probes every entry in the
+        # flake's own `inputs` for a `.lib` attribute (to merge into its
+        # extended `lib`), which forces every *unrelated* flake
+        # output/check to fetch and partially evaluate that input too, even
+        # though nothing here or in devenv.nix/devenv.yaml (devenv's
+        # separately locked native project format; see devenv.nix's own
+        # top comment) ever reads it. That fetch is not yet cached anywhere
+        # CI trusts, and broke three CI jobs with no relationship to devenv
+        # (`run-ui-dev-db-check`, `oidc-auth`, `integration`) purely because
+        # they evaluate the root flake at all. The pinned nixpkgs' `devenv`
+        # package (verified: still performs genuine dynamic port
+        # allocation under real port contention, and still exposes the
+        # `process.proxy`/`processes.<name>.proxy` Portless options
+        # devenv.nix uses) avoids this class of problem entirely: it is
+        # already part of the same nixpkgs revision every other package in
+        # this flake already depends on and CI already fetches reliably.
+        devShells.devenv = channels.nixpkgs.mkShell {
+          packages = [ channels.nixpkgs.devenv ];
+          shellHook = ''
+            echo "🧪 Crystal Forge devenv workflow (TASK-462.1, additive, parallel-worktree-safe)"
+            echo ""
+            echo "  devenv up      → start PostgreSQL + API server + web UI dev server"
+            echo "                   with per-worktree dynamic ports (devenv.nix)"
+            echo "  devenv up -d   → same, detached"
+            echo "  devenv processes list  → show this worktree's resolved ports"
+            echo "  devenv down    → stop only this worktree's stack"
+            echo ""
+            echo "  Does not replace: nix develop / run-ui-dev / process-compose."
+            echo "  Docs: docs/agents/devenv-workflow.md"
+          '';
+        };
       };
     };
 }
