@@ -123,14 +123,13 @@ Replace separate Justify + Create POA&M with one CveTriageModal (extracted from 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-Focused backend-only hardening inventory slice at design head `05bcac36`:
-1. Add documented cf-server DTOs for a target-aware hardening inventory response that reuses `SystemCveInventorySelection`, reports an exact resolved derivation, latest completed hardening scan provenance, exact service rows, and historical `read_only` state.
-2. Add a dynamic-SQL hardening query that resolves `current` only from the latest system-state store path plus the system flake and effective configuration name, resolves retained generation and exact derivation with the same ownership predicates as CVE inventory, and selects only the latest completed scan for that exact derivation.
-3. Add `/api/v1/systems/:id/hardening-inventory`; preserve `/hardening` response compatibility while routing it through exact-current selection. Authorize the system before parsing or resolving target details, and map unavailable historical targets to non-disclosing 404.
-4. Add focused selector/parser tests and query-level coverage where practical without touching SQLx offline metadata.
-5. Run targeted rustfmt, SQLX_OFFLINE cf-server check/tests as affordable, and `git diff --check`. Do not modify `packages/web-ui`, `queries/builders.rs`, or `queries/cve_scan_leases.rs`; do not commit or push.
-
-Web UI follow-up at the existing task worktree: use the server-owned CVE inventory candidates as the shared revision selector identity for System Detail CVEs and Hardening; fence current/historical responses by exact selection; keep historical evidence read-only with explicit no-scan behavior; align Scanning archived filtering and terminal post-build failure actions; update focused 16c/28 browser contracts; verify with Web UI tests, WASM check, JavaScript/static contracts, targeted formatting, and diff checks. Do not modify concurrent cf-builder/cf-server work or fixed-port preview processes.
+Final stabilization at design head `05bcac36`:
+1. Normalize remote `nix derivation show` output only from exact flat or direct `derivations` maps. Reject missing, extra, malformed, unresolved, empty, or noncanonical paths with bounded diagnostics.
+2. Terminalize only the exact attempts=0 `post_build` scan in `awaiting_build` when its bound build reaches an unreplaced terminal failure or actual cancellation, including policy cancellation and obsolete queued jobs. Preserve retry replacement and stale-event guards.
+3. Add a target-aware Hardening inventory endpoint that reuses server-owned current, retained-generation, and exact-derivation identities. Resolve exact current state without superseded fallback and make historical evidence read-only.
+4. Add one shared System Detail revision scope bar for CVE and Hardening. Bind first-page and continuation reads to the selected server identity, fence stale responses, reset target-local state, and disable historical mutations.
+5. Make Completed archive filtering use an authoritative `Archived [N]` ghost control independent from contextual per-system archive state. Render concise prerequisite build failures with exact build links and no scan retry.
+6. Update focused Rust and browser/static regressions. Run scanner/lifecycle tests, SQLX_OFFLINE server compilation, Web UI tests and WASM compilation, JavaScript/static contracts, targeted formatting, and diff hygiene. Do not run the authoritative Web UI VM or full flake check in this pass. Commit, push to MR !329, verify local/remote SHA, and stop.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
