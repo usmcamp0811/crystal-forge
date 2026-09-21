@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-21 02:17'
+updated_date: '2026-09-21 02:32'
 labels:
   - scanning
   - web-ui
@@ -213,6 +213,8 @@ Implemented the compatibility-safe target-aware System Detail hardening read con
 Implemented the uncommitted Web UI follow-up in the existing task worktree. CVEs and Hardening now share a server-owned generation/commit selector; target reads and local dialog/cache state are revision-fenced; historical evidence is read-only; hardening no-scan does not substitute current rows. Scanning now uses an `Archived [N]` ghost filter, visually labels archives, bounds failure previews, and treats attempts=0 post-build terminal failures as build failures with primary `View build` and no retry. Focused browser fixtures/static contracts were updated for 16c and 28. Verification passed: Web UI tests 449 passed/1 ignored; wasm32 cargo check; targeted revision-scope test; `node --check`; static contracts; targeted rustfmt; `git diff --check`. Existing repository warnings remain. No browser VM was run and no preview process was touched under the existing waiver. Concurrent dirty cf-builder/cf-server files were not modified by this UI work.
 
 Final scoped review corrected three Web UI authority/state issues before handoff: Generations/Commits mode changes now preserve the same server-issued target when available and otherwise prefer current; CVE dialog/hydration state resets are keyed directly by the opaque selected target instead of the asynchronously loaded inventory; historical Hardening evidence no longer displays current-system waiver records. Added a selector-transition regression. Final current-worktree verification passed: Web UI tests 450 passed/1 ignored; wasm32 cargo check; `nix build .#web-ui --no-link`; JavaScript syntax; static browser contracts; targeted rustfmt; and `git diff --check`. The Nix build emitted only the existing unauthorized optional CUDA Cachix warning and completed successfully. No browser VM, preview process, commit, push, or concurrent backend modification was performed.
+
+Addressed all concrete frontend review findings without modifying cf-server. Revision mode changes now resolve the selected candidate through authoritative derivation identity or matching generation+commit metadata; retained-generation and exact-derivation views preserve the same logical historical revision, while an unlinked read-only candidate blocks the mode change instead of falling back to current. Replaced the synthetic selector test with production-shaped current/retained/exact candidates. Completed now keeps parallel server responses and derives `Archived [N]` only from the excluded response's authoritative `hidden_archived`, never bounded included rows. By-system archive visibility is a per-system map, independent from Completed and other systems. The 16c fixture now reports `hidden_archived=0` when archives are included, applies the requested limit, waits for both count/list refreshes, and asserts Completed/per-system/cross-system independence; static contracts cover these fixture guarantees. Verification passed: focused selector tests 2/2; focused archive tests 2/2; full Web UI tests 451 passed/1 ignored; wasm32 cargo check; JavaScript syntax; static contracts; targeted rustfmt check; and `git diff --check`. Existing warnings remain. No VM, commit, push, preview change, or cf-server edit was performed.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
