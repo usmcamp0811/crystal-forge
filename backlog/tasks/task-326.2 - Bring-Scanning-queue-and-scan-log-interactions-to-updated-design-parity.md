@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-21 01:32'
+updated_date: '2026-09-21 01:35'
 labels:
   - scanning
   - web-ui
@@ -206,6 +206,8 @@ Final pre-commit review found and corrected two in-scope backend defects after t
 Committed and pushed the complete Scanning workflow parity candidate as `c0b35860e46e3c5663567573ba1955aabe093481` (`TASK-326.2: Restore scanning workflow parity`). Local and remote branch SHAs match and the task worktree is clean. Per user direction, the exact pushed commit was then verified once with `CF_UI_TEST_STEPS="16c-scanning-view" nix build --impure "path:.#checks.x86_64-linux.web-ui" --no-link -L`: 1/1 workflow passed with 16 dark/light captures. All exact-head captures were manually inspected and remain satisfactory. Result: `/nix/store/9xavx94w9s5qclcb0bijfwdyvzyhdfdw-vm-test-run-crystal-forge-web-ui-mega-integration`; full output: `/home/mcamp/.local/share/opencode/tool-output/tool_0c0e7472f001L018Ng4ohWZ3Jn`. MR !329 targets `dev`, has exact head `c0b35860`, no conflicts, and pipeline 2928 is running. Task moved to Review; it must not move to Done until the MR is merged.
 
 Fast stabilization follow-up authorized by the user. Confirmed the task worktree is clean and both local and remote task heads equal `c0b35860e46e3c5663567573ba1955aabe093481`. The repository has no checked-out `main` integration worktree; `dev` contains only the previously documented unrelated untracked `session-ses_f927.md`, which will not be touched. The existing user-approved host-preview waiver remains recorded because TASK-440 owns the fixed preview ports. No authoritative browser VM or full Web UI suite will run before push.
+
+P0 cf-builder scanner fix implemented without commit or push. `cve_scanner.rs` now normalizes only the canonical flat `nix derivation show` object or a direct top-level `derivations` object, using exact requested absolute `.drv` keys in both forms. No basename, recursive, or arbitrary nested lookup was added because local Nix 2.34.5 tool documentation proves only absolute flat keys and no alternate wrapped key format was found. Existing command byte limit, chunk bound, canonical output store-path validation, sorted outputs, and non-empty output requirement remain in force. Missing-entry diagnostics expose only `shape`, entry count, and requested count. Focused tests cover flat, wrapped, exact-key absence, malformed JSON, unsupported nesting/shape, unresolved output, empty outputs, and invalid store paths. Verification passed: focused scanner tests 13/13; complete cf-builder tests 62 library + 32 binary, doc-tests 0; targeted rustfmt check; `git diff --check`. Existing unrelated warnings remain. Only `packages/default/crates/cf-builder/src/builder/cve_scanner.rs` was modified by this work. Concurrent changes appeared in `cf-server/src/queries/builders.rs` and `cve_scan_leases.rs` during final verification and were not touched.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
