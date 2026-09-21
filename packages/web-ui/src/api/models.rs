@@ -433,11 +433,33 @@ pub struct CveListItem {
     /// Counts affected systems visible only through legacy scan inventory.
     #[serde(default)]
     pub legacy_affected_count: i64,
+    /// Counts systems affected in their exact current deployment when supplied.
+    #[serde(default)]
+    pub current_affected_count: Option<i64>,
+    /// Counts exact active scheduled deployment targets when supplied.
+    #[serde(default)]
+    pub scheduled_deployment_target_count: Option<i64>,
+    /// Counts systems represented by retained historical inventory when supplied.
+    #[serde(default)]
+    pub historical_inventory_count: Option<i64>,
     pub affected_environments: Option<Vec<String>>,
     pub first_seen: Option<DateTime<Utc>>,
     pub last_seen: Option<DateTime<Utc>>,
     pub age_days: i32,
     pub triage_status: String,
+}
+
+impl CveListItem {
+    /// Returns presence-aware current, scheduled-target, and historical counts.
+    pub(crate) fn inventory_counts(&self) -> (i64, i64, i64) {
+        normalize_inventory_relation_counts(
+            self.exact_affected_count,
+            self.legacy_affected_count,
+            self.current_affected_count,
+            self.scheduled_deployment_target_count,
+            self.historical_inventory_count,
+        )
+    }
 }
 
 /// CVE package group with aggregated statistics.
@@ -451,6 +473,15 @@ pub struct CvePackageGroup {
     pub low_count: i64,
     pub environments_count: i64,
     pub total_affected_systems: i64,
+    /// Counts systems affected in their exact current deployment when supplied.
+    #[serde(default)]
+    pub current_affected_systems: Option<i64>,
+    /// Counts exact active scheduled deployment targets when supplied.
+    #[serde(default)]
+    pub scheduled_deployment_target_systems: Option<i64>,
+    /// Counts systems represented by retained historical inventory when supplied.
+    #[serde(default)]
+    pub historical_inventory_systems: Option<i64>,
     pub fixable_count: i64,
     pub outstanding_count: i64,
     pub exploited_count: i64,
@@ -458,6 +489,19 @@ pub struct CvePackageGroup {
     pub severity_score: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cves: Option<Vec<CveListItem>>,
+}
+
+impl CvePackageGroup {
+    /// Returns presence-aware current, scheduled-target, and historical counts.
+    pub(crate) fn inventory_counts(&self) -> (i64, i64, i64) {
+        normalize_inventory_relation_counts(
+            0,
+            0,
+            self.current_affected_systems,
+            self.scheduled_deployment_target_systems,
+            self.historical_inventory_systems,
+        )
+    }
 }
 
 /// Detailed CVE information for the drawer view.
@@ -506,6 +550,22 @@ pub struct CveAffectedSystemDetail {
     /// Identifies whether the displayed finding is exact or display-only.
     #[serde(default)]
     pub inventory_authority: SystemCveInventoryAuthority,
+    /// Identifies why the system appears in fleet inventory.
+    #[serde(default)]
+    pub inventory_section: FleetCveInventorySection,
+}
+
+/// Identifies one read-only fleet CVE inventory section.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetCveInventorySection {
+    /// The finding affects the system's exact current deployment.
+    #[default]
+    Current,
+    /// The finding affects an exact active scheduled deployment target.
+    ScheduledDeploymentTarget,
+    /// The finding is retained historical inventory and is display-only.
+    Historical,
 }
 
 /// CVE justification (triage) record.
@@ -547,12 +607,56 @@ pub struct CveFleetStats {
     /// Counts distinct affected systems with at least one legacy-only finding.
     #[serde(default)]
     pub legacy_systems_affected: i64,
+    /// Counts distinct systems with an exact current finding when supplied.
+    #[serde(default)]
+    pub current_systems_affected: Option<i64>,
+    /// Counts distinct systems with an exact active scheduled-target finding.
+    #[serde(default)]
+    pub scheduled_deployment_target_systems: Option<i64>,
+    /// Counts distinct systems represented by retained historical inventory.
+    #[serde(default)]
+    pub historical_inventory_systems: Option<i64>,
     /// Counts visible active systems without a usable completed scan.
     #[serde(default)]
     pub no_scan_systems: i64,
     pub outstanding: i64,
     pub accepted: i64,
     pub scheduled: i64,
+}
+
+impl CveFleetStats {
+    /// Returns presence-aware current, scheduled-target, and historical counts.
+    pub(crate) fn inventory_counts(&self) -> (i64, i64, i64) {
+        normalize_inventory_relation_counts(
+            self.exact_systems_affected,
+            self.legacy_systems_affected,
+            self.current_systems_affected,
+            self.scheduled_deployment_target_systems,
+            self.historical_inventory_systems,
+        )
+    }
+}
+
+// COMPATIBILITY: A response with no relation fields predates inventory sections.
+// Its exact and legacy authority counts are the only safe relation sources. The
+// compatibility affected count can combine authorities and must not become
+// current exposure. Any explicit relation field selects the additive contract.
+fn normalize_inventory_relation_counts(
+    exact: i64,
+    legacy: i64,
+    current: Option<i64>,
+    scheduled: Option<i64>,
+    historical: Option<i64>,
+) -> (i64, i64, i64) {
+    if current.is_none() && scheduled.is_none() && historical.is_none() {
+        (exact, 0, legacy)
+    } else {
+        (
+            current.unwrap_or_default(),
+            scheduled.unwrap_or_default(),
+            historical.unwrap_or_default(),
+        )
+    }
 }
 
 /// Response from fleet rescan trigger.
@@ -4140,6 +4244,25 @@ pub struct BuildQueueItem {
     pub cached_derivs: i64,
 }
 
+/// Identifies the Builds collection that owns an exact attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildAttemptCollection {
+    /// The attempt is queued, building, or stopping.
+    Active,
+    /// The attempt completed, failed, or was cancelled.
+    Completed,
+}
+
+/// Contains one authorization-scoped build attempt and its owning collection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BuildAttemptLookupResponse {
+    /// Collection that the Builds view must select.
+    pub collection: BuildAttemptCollection,
+    /// Exact visible build attempt.
+    pub attempt: BuildQueueItem,
+}
+
 /// Result of idempotently requeueing a terminal build attempt.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RequeueBuildJobResponse {
@@ -4472,6 +4595,9 @@ pub struct CommitInfo {
     /// Indicates that exact targeted Config observations can start.
     #[serde(default)]
     pub config_inspectable: bool,
+    /// Indicates that the server has observed this commit deployed on the system.
+    #[serde(default)]
+    pub deployed_here: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -6305,7 +6431,29 @@ mod tests {
         CreatePolicyDraftResponse, EvaluatedOption, EvaluationModuleSummary,
         ExactCveAuthorityFailureReason, SystemCommitsResponse, SystemCveInventoryAuthority,
         SystemCveInventoryPageResponse, SystemHardeningInventoryResponse, XccdfPreviewResponse,
+        normalize_inventory_relation_counts,
     };
+
+    #[test]
+    fn inventory_relation_normalization_preserves_presence() {
+        assert_eq!(
+            normalize_inventory_relation_counts(3, 1, None, None, None),
+            (3, 0, 1)
+        );
+        assert_eq!(
+            normalize_inventory_relation_counts(9, 8, None, Some(2), Some(1)),
+            (0, 2, 1)
+        );
+        assert_eq!(
+            normalize_inventory_relation_counts(9, 8, Some(0), Some(0), Some(3)),
+            (0, 0, 3)
+        );
+        assert_eq!(
+            normalize_inventory_relation_counts(0, 0, None, None, None),
+            (0, 0, 0),
+            "a grouped compatibility total must not become current exposure"
+        );
+    }
 
     #[test]
     fn commit_inspectability_defaults_false_for_older_servers() {
@@ -6322,6 +6470,7 @@ mod tests {
         .expect("deserialize legacy commit response");
 
         assert!(!response.commits[0].config_inspectable);
+        assert!(!response.commits[0].deployed_here);
     }
 
     #[test]

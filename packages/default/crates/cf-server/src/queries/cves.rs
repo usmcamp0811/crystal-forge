@@ -12,9 +12,9 @@ use uuid::Uuid;
 use crate::api::models::{
     CveAffectedSystemDetail, CveDetail, CveFilters, CveFleetStats, CveJustification,
     CveJustificationInput, CveListItem, CvePackageGroup, ExactCveAuthorityFailureReason,
-    SystemCveEvidenceRepresentation, SystemCveInventoryAuthority, SystemCveInventoryCandidate,
-    SystemCveInventoryMetadata, SystemCveInventoryParams, SystemCveInventorySelection,
-    SystemCveInventorySeverityCounts, SystemCveInventorySource,
+    FleetCveInventorySection, SystemCveEvidenceRepresentation, SystemCveInventoryAuthority,
+    SystemCveInventoryCandidate, SystemCveInventoryMetadata, SystemCveInventoryParams,
+    SystemCveInventorySelection, SystemCveInventorySeverityCounts, SystemCveInventorySource,
 };
 use crate::auth::extractors::AuthenticatedUser;
 
@@ -143,8 +143,8 @@ pub fn is_system_cve_inventory_overflow(error: &anyhow::Error) -> bool {
     error.downcast_ref::<SystemCveInventoryOverflow>().is_some()
 }
 
-fn reject_inventory_overflow<T>(rows: Vec<T>) -> Result<Vec<T>> {
-    if rows.len() > MAX_FLEET_CVE_AFFECTED_SYSTEMS {
+fn reject_inventory_overflow<T>(rows: Vec<T>, distinct_system_count: i64) -> Result<Vec<T>> {
+    if distinct_system_count > MAX_FLEET_CVE_AFFECTED_SYSTEMS as i64 {
         return Err(CveInventoryOverflow.into());
     }
     Ok(rows)
@@ -1489,6 +1489,9 @@ fn default_cve_fleet_stats() -> CveFleetStats {
         systems_affected: 0,
         exact_systems_affected: 0,
         legacy_systems_affected: 0,
+        current_systems_affected: 0,
+        scheduled_deployment_target_systems: 0,
+        historical_inventory_systems: 0,
         no_scan_systems: 0,
         outstanding: 0,
         accepted: 0,
@@ -1496,10 +1499,8 @@ fn default_cve_fleet_stats() -> CveFleetStats {
     }
 }
 
-// SECURITY: This read model annotates a bounded legacy-view row as exact only
-// when the latest deployed state resolves to the immutable scan that supplied
-// the same system and canonical CVE/package identity. Mutation code does not
-// use this CTE.
+// SECURITY: Scope current, scheduled-target, and historical authorities before
+// aggregation. Mutation and disposition code does not use this read CTE.
 const FLEET_INVENTORY_LIST_CTE: &str = r#"
 WITH exact_authority_systems AS (
   SELECT system.id AS system_id,scan.scan_id
@@ -1536,7 +1537,8 @@ WITH exact_authority_systems AS (
   SELECT DISTINCT ON (occurrence.system_id,occurrence.cve_id,occurrence.package_name)
          occurrence.system_id,occurrence.environment_id,occurrence.environment_name,
          occurrence.cve_id,occurrence.package_name,occurrence.installed_version,
-         package_metadata.fixed_version,occurrence.completed_at,'exact'::text AS authority
+         package_metadata.fixed_version,occurrence.completed_at,
+         'current'::text AS inventory_section
    FROM view_current_exact_cve_occurrences occurrence
    JOIN exact_authority_systems exact ON exact.system_id=occurrence.system_id
      AND exact.scan_id=occurrence.scan_id
@@ -1552,14 +1554,37 @@ WITH exact_authority_systems AS (
   WHERE $1::uuid[] IS NULL OR occurrence.environment_id=ANY($1)
   ORDER BY occurrence.system_id,occurrence.cve_id,occurrence.package_name,
            occurrence.observed_derivation_path
-), legacy_subjects AS (
+), scheduled_authority_systems AS (
+  SELECT target.system_id,target.scan_id
+  FROM view_active_scheduled_cve_scan_targets target
+  WHERE $1::uuid[] IS NULL OR target.environment_id=ANY($1)
+), scheduled_subjects AS (
+  SELECT DISTINCT ON (occurrence.system_id,occurrence.cve_id,occurrence.package_name)
+         occurrence.system_id,occurrence.environment_id,occurrence.environment_name,
+         occurrence.cve_id,occurrence.package_name,occurrence.installed_version,
+         package_metadata.fixed_version,occurrence.completed_at,
+         'scheduled_deployment_target'::text AS inventory_section
+  FROM view_active_scheduled_exact_cve_occurrences occurrence
+  LEFT JOIN LATERAL (
+    SELECT vulnerability.fixed_version
+    FROM derivations package_derivation
+    JOIN package_vulnerabilities vulnerability
+      ON vulnerability.derivation_id=package_derivation.id
+     AND vulnerability.cve_id=occurrence.cve_id
+    WHERE package_derivation.derivation_path=occurrence.observed_derivation_path
+    ORDER BY package_derivation.id DESC LIMIT 1
+  ) package_metadata ON true
+  WHERE $1::uuid[] IS NULL OR occurrence.environment_id=ANY($1)
+  ORDER BY occurrence.system_id,occurrence.cve_id,occurrence.package_name,
+           occurrence.observed_derivation_path
+), historical_subjects AS (
   SELECT DISTINCT ON (
            system.id,view.cve_id,COALESCE(view.package_pname,view.package_name))
          system.id AS system_id,system.environment_id,environment.name AS environment_name,
          view.cve_id,COALESCE(view.package_pname,view.package_name) AS package_name,
          COALESCE(view.package_version,'') AS installed_version,view.fixed_version,
          view.completed_at,
-         'legacy'::text AS authority
+          'historical'::text AS inventory_section
   FROM view_system_vulnerabilities view
   JOIN systems system ON system.hostname=view.hostname AND system.is_active
   LEFT JOIN environments environment ON environment.id=system.environment_id
@@ -1567,33 +1592,57 @@ WITH exact_authority_systems AS (
     AND NOT EXISTS(
       SELECT 1 FROM exact_authority_systems exact
       WHERE exact.system_id=system.id)
+    AND NOT EXISTS(
+      SELECT 1 FROM scheduled_authority_systems scheduled
+      WHERE scheduled.system_id=system.id)
   ORDER BY system.id,view.cve_id,COALESCE(view.package_pname,view.package_name),
            view.derivation_path
 ), inventory_subjects AS (
   SELECT * FROM exact_subjects
   UNION ALL
-  SELECT * FROM legacy_subjects
+  SELECT * FROM scheduled_subjects
+  UNION ALL
+  SELECT * FROM historical_subjects
 ), inventory_list AS (
   SELECT subject.cve_id,cve.cvss_v3_score,
          severity_from_cvss(cve.cvss_v3_score) AS severity,
          COALESCE(NULLIF(btrim(cve.description),''),cve.id) AS title,
          cve.vector AS cvss_vector,cve.published_date,cve.exploited,
-         subject.package_name,max(subject.installed_version) AS installed_version,
+          subject.package_name,COALESCE(
+            max(subject.installed_version) FILTER (WHERE subject.inventory_section='current'),
+            max(subject.installed_version) FILTER (
+              WHERE subject.inventory_section='scheduled_deployment_target'),
+            max(subject.installed_version)
+          ) AS installed_version,
          max(subject.fixed_version) AS fixed_version,
          CASE WHEN max(subject.fixed_version) IS NULL THEN 'open'
               ELSE 'fix_available' END AS fix_status,
-         count(DISTINCT subject.system_id)::bigint AS affected_count,
-         count(DISTINCT subject.system_id) FILTER (WHERE subject.authority='exact')::bigint
-           AS exact_affected_count,
-         count(DISTINCT subject.system_id) FILTER (WHERE subject.authority='legacy')::bigint
-           AS legacy_affected_count,
-         array_agg(DISTINCT subject.environment_name ORDER BY subject.environment_name)
-           FILTER (WHERE subject.environment_name IS NOT NULL) AS affected_environments,
+          count(DISTINCT subject.system_id) FILTER (
+            WHERE subject.inventory_section IN ('current','scheduled_deployment_target'))::bigint
+            AS affected_count,
+          count(DISTINCT subject.system_id) FILTER (
+            WHERE subject.inventory_section IN ('current','scheduled_deployment_target'))::bigint
+            AS exact_affected_count,
+          count(DISTINCT subject.system_id) FILTER (
+            WHERE subject.inventory_section='historical')::bigint
+            AS legacy_affected_count,
+          count(DISTINCT subject.system_id) FILTER (
+            WHERE subject.inventory_section='current')::bigint AS current_affected_count,
+          count(DISTINCT subject.system_id) FILTER (
+            WHERE subject.inventory_section='scheduled_deployment_target')::bigint
+            AS scheduled_deployment_target_count,
+          count(DISTINCT subject.system_id) FILTER (
+            WHERE subject.inventory_section='historical')::bigint
+            AS historical_inventory_count,
+          array_agg(DISTINCT subject.environment_name ORDER BY subject.environment_name)
+            FILTER (WHERE subject.environment_name IS NOT NULL
+              AND subject.inventory_section IN ('current','scheduled_deployment_target'))
+            AS affected_environments,
          min(subject.completed_at) AS first_seen,max(subject.completed_at) AS last_seen,
          COALESCE(EXTRACT(EPOCH FROM (now()-cve.published_date))/86400,0)::integer
            AS age_days,
-         CASE WHEN bool_or(subject.authority='legacy') THEN 'inventory_only'
-              ELSE COALESCE(max(exact_list.triage_status),'outstanding') END AS triage_status
+          CASE WHEN NOT bool_or(subject.inventory_section='current') THEN 'inventory_only'
+               ELSE COALESCE(max(exact_list.triage_status),'outstanding') END AS triage_status
   FROM inventory_subjects subject
   JOIN cves cve ON cve.id=subject.cve_id
   LEFT JOIN cve_list_for_environment_scope($1) exact_list
@@ -1614,6 +1663,9 @@ struct CvePackageStatsRow {
     low_count: i64,
     environments_count: i64,
     total_affected_systems: i64,
+    current_affected_systems: i64,
+    scheduled_deployment_target_systems: i64,
+    historical_inventory_systems: i64,
     fixable_count: i64,
     outstanding_count: i64,
     exploited_count: i64,
@@ -1695,6 +1747,9 @@ async fn fetch_cve_rows(
             COALESCE(affected_count, 0)::bigint AS affected_count,
             exact_affected_count,
             legacy_affected_count,
+            current_affected_count,
+            scheduled_deployment_target_count,
+            historical_inventory_count,
             affected_environments,
             first_seen,
             last_seen,
@@ -1733,7 +1788,8 @@ async fn fetch_cve_rows(
             CASE WHEN $7 = 'cvss' THEN cvss_v3_score END DESC NULLS LAST,
             CASE WHEN $7 = 'age' THEN age_days END ASC NULLS LAST,
             CASE WHEN $7 = 'affected' THEN affected_count END DESC NULLS LAST,
-            cve_id ASC
+            cve_id COLLATE "C" ASC,
+            package_name COLLATE "C" ASC
         LIMIT $8
         "#
     );
@@ -1779,6 +1835,9 @@ pub async fn fetch_cve_packages_grouped(
                 package_name,
                 UPPER(COALESCE(severity, 'UNKNOWN')) AS severity,
                 COALESCE(affected_count, 0)::bigint AS affected_count,
+                current_affected_count,
+                scheduled_deployment_target_count,
+                historical_inventory_count,
                 COALESCE(fix_status, 'open') AS fix_status,
                 LOWER(COALESCE(triage_status, 'outstanding')) AS triage_status,
                 COALESCE(exploited, FALSE) AS exploited,
@@ -1830,8 +1889,21 @@ pub async fn fetch_cve_packages_grouped(
         package_occurrence_counts AS (
             SELECT
                 f.package_name,
-                COUNT(DISTINCT subject.environment_id)::bigint as environments_count,
-                COUNT(DISTINCT subject.system_id)::bigint as total_affected_systems
+                COUNT(DISTINCT subject.environment_id) FILTER (
+                  WHERE subject.inventory_section IN ('current','scheduled_deployment_target'))::bigint
+                  as environments_count,
+                COUNT(DISTINCT subject.system_id) FILTER (
+                  WHERE subject.inventory_section IN ('current','scheduled_deployment_target'))::bigint
+                  as total_affected_systems,
+                COUNT(DISTINCT subject.system_id) FILTER (
+                  WHERE subject.inventory_section='current')::bigint
+                  as current_affected_systems,
+                COUNT(DISTINCT subject.system_id) FILTER (
+                  WHERE subject.inventory_section='scheduled_deployment_target')::bigint
+                  as scheduled_deployment_target_systems,
+                COUNT(DISTINCT subject.system_id) FILTER (
+                  WHERE subject.inventory_section='historical')::bigint
+                  as historical_inventory_systems
             FROM filtered f
             JOIN inventory_subjects subject
               ON subject.cve_id=f.cve_id
@@ -1847,6 +1919,11 @@ pub async fn fetch_cve_packages_grouped(
             pc.low_count,
             COALESCE(po.environments_count, 0)::bigint as environments_count,
             COALESCE(po.total_affected_systems, 0)::bigint as total_affected_systems,
+            COALESCE(po.current_affected_systems, 0)::bigint as current_affected_systems,
+            COALESCE(po.scheduled_deployment_target_systems, 0)::bigint
+              as scheduled_deployment_target_systems,
+            COALESCE(po.historical_inventory_systems, 0)::bigint
+              as historical_inventory_systems,
             pc.fixable_count,
             pc.outstanding_count,
             pc.exploited_count,
@@ -1892,6 +1969,9 @@ pub async fn fetch_cve_packages_grouped(
                 COALESCE(affected_count, 0)::bigint AS affected_count,
                 exact_affected_count,
                 legacy_affected_count,
+                current_affected_count,
+                scheduled_deployment_target_count,
+                historical_inventory_count,
                 affected_environments,
                 first_seen,
                 last_seen,
@@ -1930,7 +2010,8 @@ pub async fn fetch_cve_packages_grouped(
                             ELSE 5
                         END,
                         cvss_v3_score DESC NULLS LAST,
-                        cve_id ASC
+                        cve_id COLLATE "C" ASC,
+                        package_name COLLATE "C" ASC
                 ) AS rn
             FROM filtered
         )
@@ -1938,6 +2019,8 @@ pub async fn fetch_cve_packages_grouped(
             cve_id,cvss_v3_score,severity,title,cvss_vector,published_date,
             exploited,package_name,installed_version,fixed_version,fix_status,
             affected_count,exact_affected_count,legacy_affected_count,
+            current_affected_count,scheduled_deployment_target_count,
+            historical_inventory_count,
             affected_environments,first_seen,last_seen,age_days,
             triage_status
         FROM ranked
@@ -1977,6 +2060,9 @@ pub async fn fetch_cve_packages_grouped(
             low_count: row.low_count,
             environments_count: row.environments_count,
             total_affected_systems: row.total_affected_systems,
+            current_affected_systems: row.current_affected_systems,
+            scheduled_deployment_target_systems: row.scheduled_deployment_target_systems,
+            historical_inventory_systems: row.historical_inventory_systems,
             fixable_count: row.fixable_count,
             outstanding_count: row.outstanding_count,
             exploited_count: row.exploited_count,
@@ -2031,6 +2117,47 @@ pub async fn fetch_cve_detail(
     Ok(detail)
 }
 
+/// Fetches detailed metadata for one visible CVE and package identity.
+///
+/// Unlike the compatibility CVE-only route, this query cannot select metadata
+/// from a different package that shares the same CVE.
+///
+/// # Errors
+///
+/// Returns `sqlx::Error::RowNotFound` when the package occurrence is not visible,
+/// or a database error when the scoped read fails.
+pub async fn fetch_cve_package_detail(
+    pool: &PgPool,
+    scope: &CveReadScope,
+    cve_id: &str,
+    package_name: &str,
+) -> Result<CveDetail> {
+    let sql = format!(
+        "{FLEET_INVENTORY_LIST_CTE}{}",
+        r#"
+        SELECT
+            v.cve_id,v.cvss_v3_score::real AS cvss_v3_score,
+            COALESCE(v.severity, 'UNKNOWN') AS severity,
+            COALESCE(v.title, '') AS title,v.cvss_vector,c.cwe_id,
+            v.published_date,c.modified_date,
+            COALESCE(v.exploited, FALSE) AS exploited,v.package_name,
+            v.installed_version,v.fixed_version,
+            NULL::text AS detection_method,
+            COALESCE(v.fix_status, 'open') AS fix_status
+        FROM inventory_list v
+        LEFT JOIN cves c ON c.id = v.cve_id
+        WHERE v.cve_id = $2 AND v.package_name = $3
+        LIMIT 1
+        "#
+    );
+    Ok(sqlx::query_as::<_, CveDetail>(&sql)
+        .bind(scope.environment_ids())
+        .bind(cve_id)
+        .bind(package_name)
+        .fetch_one(pool)
+        .await?)
+}
+
 #[derive(sqlx::FromRow)]
 struct FleetAffectedSystemRow {
     system_id: Uuid,
@@ -2044,6 +2171,8 @@ struct FleetAffectedSystemRow {
     deployment_policy: String,
     current_package_version: Option<String>,
     inventory_authority: String,
+    inventory_section: String,
+    bounded_system_count: i64,
 }
 
 /// Fetches detailed CVE metadata in the caller's transaction.
@@ -2098,8 +2227,9 @@ pub async fn fetch_cve_affected_systems(
 
 /// Fetches visible fleet inventory systems for one CVE and optional package.
 ///
-/// Exact rows are annotated from immutable current occurrences. All other rows
-/// come from the bounded legacy inventory view and are display-only.
+/// Current and scheduled-target rows use exact immutable observations.
+/// Historical rows come from the bounded compatibility inventory and are
+/// display-only. This function does not provide mutation subjects.
 ///
 /// # Errors
 ///
@@ -2113,13 +2243,23 @@ pub async fn fetch_cve_inventory_systems(
     let sql = format!(
         "{FLEET_INVENTORY_LIST_CTE}{}",
         r#"
-        -- Deduplicate package occurrences before the overflow probe so the
-        -- bound measures affected systems rather than inventory rows.
-        , selected_subjects AS (
-          SELECT DISTINCT ON (subject.system_id) subject.*
+        -- Bound distinct systems before section expansion. A system can appear
+        -- in both current and scheduled sections, and every accepted section
+        -- row must remain in the complete response.
+        , selected_systems AS (
+          SELECT subject.system_id
           FROM inventory_subjects subject
           WHERE subject.cve_id=$2 AND ($3::text IS NULL OR subject.package_name=$3)
-          ORDER BY subject.system_id,subject.package_name COLLATE "C",
+          GROUP BY subject.system_id
+          ORDER BY subject.system_id
+          LIMIT $4
+        ), selected_subjects AS (
+          SELECT DISTINCT ON (subject.system_id,subject.inventory_section) subject.*
+          FROM inventory_subjects subject
+          JOIN selected_systems selected ON selected.system_id=subject.system_id
+          WHERE subject.cve_id=$2 AND ($3::text IS NULL OR subject.package_name=$3)
+          ORDER BY subject.system_id,subject.inventory_section,
+                   subject.package_name COLLATE "C",
                    subject.installed_version COLLATE "C"
         )
         SELECT
@@ -2128,7 +2268,10 @@ pub async fn fetch_cve_inventory_systems(
             flake.name AS flake_name,flake.id AS flake_id,NULL::text AS commit_hash,
             system.deployment_policy,
             subject.installed_version AS current_package_version,
-            subject.authority AS inventory_authority
+             CASE WHEN subject.inventory_section='historical'
+                  THEN 'legacy' ELSE 'exact' END AS inventory_authority,
+             subject.inventory_section,
+             (SELECT count(*) FROM selected_systems)::bigint AS bounded_system_count
         FROM selected_subjects subject
         JOIN systems system ON system.id=subject.system_id
         LEFT JOIN environments environment ON environment.id=system.environment_id
@@ -2138,8 +2281,8 @@ pub async fn fetch_cve_inventory_systems(
           WHERE candidate.hostname=system.hostname
           ORDER BY candidate.timestamp DESC,candidate.id DESC LIMIT 1
         ) state ON true
-        ORDER BY environment.name NULLS LAST,system.hostname
-        LIMIT $4
+        ORDER BY environment.name NULLS LAST,system.hostname,system.id,
+                 subject.inventory_section
         "#
     );
     let systems = sqlx::query_as::<_, FleetAffectedSystemRow>(&sql)
@@ -2150,7 +2293,11 @@ pub async fn fetch_cve_inventory_systems(
         .fetch_all(pool)
         .await?;
 
-    let systems = reject_inventory_overflow(systems)?;
+    let distinct_system_count = systems
+        .first()
+        .map(|row| row.bounded_system_count)
+        .unwrap_or_default();
+    let systems = reject_inventory_overflow(systems, distinct_system_count)?;
 
     systems
         .into_iter()
@@ -2159,6 +2306,14 @@ pub async fn fetch_cve_inventory_systems(
                 "exact" => SystemCveInventoryAuthority::Exact,
                 "legacy" => SystemCveInventoryAuthority::Legacy,
                 value => anyhow::bail!("unknown fleet CVE inventory authority {value}"),
+            };
+            let inventory_section = match row.inventory_section.as_str() {
+                "current" => FleetCveInventorySection::Current,
+                "scheduled_deployment_target" => {
+                    FleetCveInventorySection::ScheduledDeploymentTarget
+                }
+                "historical" => FleetCveInventorySection::Historical,
+                value => anyhow::bail!("unknown fleet CVE inventory section {value}"),
             };
             Ok(CveAffectedSystemDetail {
                 system_id: row.system_id,
@@ -2172,6 +2327,7 @@ pub async fn fetch_cve_inventory_systems(
                 deployment_policy: row.deployment_policy,
                 current_package_version: row.current_package_version,
                 inventory_authority,
+                inventory_section,
             })
         })
         .collect()
@@ -2339,8 +2495,10 @@ pub async fn revoke_fleet_cve_justification(pool: &PgPool, cve_id: &str) -> Resu
 
 /// Fetches CVE inventory statistics in the caller's scope.
 ///
-/// CVE totals count exact and bounded legacy CVE/package rows. System and
-/// environment totals count distinct identities and never sum per-CVE rows.
+/// CVE totals count current, scheduled-target, and historical package rows.
+/// Compatibility affected totals count the distinct union of current and
+/// scheduled systems. Historical totals are explicit and never contribute to
+/// compatibility affected totals.
 ///
 /// # Errors
 ///
@@ -2350,15 +2508,21 @@ pub async fn fetch_cve_fleet_stats(pool: &PgPool, scope: &CveReadScope) -> Resul
         "{FLEET_INVENTORY_LIST_CTE}{}",
         r#", scoped_systems AS (
           SELECT system.id,system.environment_id,
-                 EXISTS(SELECT 1 FROM inventory_subjects subject
-                        WHERE subject.system_id=system.id AND subject.authority='exact')
-                   AS has_exact,
-                 EXISTS(SELECT 1 FROM inventory_subjects subject
-                        WHERE subject.system_id=system.id AND subject.authority='legacy')
-                   AS has_legacy,
-                  EXISTS(SELECT 1 FROM exact_authority_systems exact
-                         WHERE exact.system_id=system.id)
-                  OR EXISTS(
+                  EXISTS(SELECT 1 FROM inventory_subjects subject
+                         WHERE subject.system_id=system.id
+                           AND subject.inventory_section='current') AS has_current,
+                  EXISTS(SELECT 1 FROM inventory_subjects subject
+                         WHERE subject.system_id=system.id
+                           AND subject.inventory_section='scheduled_deployment_target')
+                   AS has_scheduled_target,
+                  EXISTS(SELECT 1 FROM inventory_subjects subject
+                         WHERE subject.system_id=system.id
+                           AND subject.inventory_section='historical') AS has_historical,
+                   EXISTS(SELECT 1 FROM exact_authority_systems exact
+                          WHERE exact.system_id=system.id)
+                   OR EXISTS(SELECT 1 FROM scheduled_authority_systems scheduled
+                             WHERE scheduled.system_id=system.id)
+                   OR EXISTS(
                     SELECT 1 FROM derivations derivation
                    JOIN derivation_statuses status ON status.id=derivation.status_id
                      AND status.name=ANY(ARRAY['build-complete','complete'])
@@ -2377,14 +2541,20 @@ pub async fn fetch_cve_fleet_stats(pool: &PgPool, scope: &CveReadScope) -> Resul
           COUNT(*) FILTER (WHERE exploited)::bigint AS exploited,
           COUNT(*) FILTER (WHERE fix_status='fix_available')::bigint AS fixable,
           (SELECT COUNT(DISTINCT environment_id) FROM scoped_systems
-           WHERE has_exact OR has_legacy)::bigint
+           WHERE has_current OR has_scheduled_target)::bigint
             AS environments_affected,
-          (SELECT COUNT(*) FROM scoped_systems WHERE has_exact OR has_legacy)::bigint
+          (SELECT COUNT(*) FROM scoped_systems WHERE has_current OR has_scheduled_target)::bigint
             AS systems_affected,
-          (SELECT COUNT(*) FROM scoped_systems WHERE has_exact)::bigint
+          (SELECT COUNT(*) FROM scoped_systems WHERE has_current OR has_scheduled_target)::bigint
             AS exact_systems_affected,
-          (SELECT COUNT(*) FROM scoped_systems WHERE has_legacy)::bigint
+          (SELECT COUNT(*) FROM scoped_systems WHERE has_historical)::bigint
             AS legacy_systems_affected,
+          (SELECT COUNT(*) FROM scoped_systems WHERE has_current)::bigint
+            AS current_systems_affected,
+          (SELECT COUNT(*) FROM scoped_systems WHERE has_scheduled_target)::bigint
+            AS scheduled_deployment_target_systems,
+          (SELECT COUNT(*) FROM scoped_systems WHERE has_historical)::bigint
+            AS historical_inventory_systems,
           (SELECT COUNT(*) FROM scoped_systems WHERE NOT has_scan)::bigint
             AS no_scan_systems,
           COUNT(*) FILTER (WHERE triage_status='outstanding')::bigint AS outstanding,
@@ -2439,6 +2609,21 @@ mod tests {
     use crate::queries::systems::insert_system;
 
     use super::*;
+
+    #[test]
+    fn fleet_inventory_bound_counts_distinct_systems_not_section_rows() {
+        let section_rows = vec![(); MAX_FLEET_CVE_AFFECTED_SYSTEMS * 2];
+        assert_eq!(
+            reject_inventory_overflow(section_rows, MAX_FLEET_CVE_AFFECTED_SYSTEMS as i64)
+                .expect("overlapping section rows remain within the system bound")
+                .len(),
+            MAX_FLEET_CVE_AFFECTED_SYSTEMS * 2
+        );
+        assert!(is_cve_inventory_overflow(
+            &reject_inventory_overflow(Vec::<()>::new(), MAX_FLEET_CVE_AFFECTED_SYSTEMS as i64 + 1)
+                .expect_err("the distinct-system overflow probe must remain hard bounded")
+        ));
+    }
 
     async fn inventory_test_system(pool: &PgPool, suffix: &str) -> (System, i32) {
         let repo_url = format!("https://example.test/cve-inventory-{suffix}.git");
@@ -2892,9 +3077,12 @@ mod tests {
         .await
         .expect("legacy fleet inventory should load");
         assert_eq!(legacy_list.len(), 1);
-        assert_eq!(legacy_list[0].affected_count, 1);
+        assert_eq!(legacy_list[0].affected_count, 0);
         assert_eq!(legacy_list[0].exact_affected_count, 0);
         assert_eq!(legacy_list[0].legacy_affected_count, 1);
+        assert_eq!(legacy_list[0].current_affected_count, 0);
+        assert_eq!(legacy_list[0].scheduled_deployment_target_count, 0);
+        assert_eq!(legacy_list[0].historical_inventory_count, 1);
         assert_eq!(legacy_list[0].triage_status, "inventory_only");
         let legacy_systems = fetch_cve_inventory_systems(
             &pool,
@@ -2912,9 +3100,10 @@ mod tests {
         let legacy_stats = fetch_cve_fleet_stats(&pool, &CveReadScope::All)
             .await
             .expect("legacy fleet stats should load");
-        assert_eq!(legacy_stats.systems_affected, 1);
+        assert_eq!(legacy_stats.systems_affected, 0);
         assert_eq!(legacy_stats.exact_systems_affected, 0);
         assert_eq!(legacy_stats.legacy_systems_affected, 1);
+        assert_eq!(legacy_stats.historical_inventory_systems, 1);
         assert_eq!(legacy_stats.no_scan_systems, 1);
 
         let commit = sqlx::query_as::<_, crate::models::commits::Commit>(

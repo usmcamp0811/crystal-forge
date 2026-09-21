@@ -158,7 +158,23 @@ enum RevisionScopeMode {
 struct RevisionScopeChoice {
     key: String,
     label: String,
-    meta: String,
+    message: Option<String>,
+    timestamp: String,
+    author: Option<String>,
+    state: RevisionTargetState,
+    selection: Option<SystemCveInventorySelection>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RevisionTargetState {
+    Running,
+    NeverDeployed,
+    Historical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RevisionScopeTransition {
+    mode: RevisionScopeMode,
     selection: Option<SystemCveInventorySelection>,
 }
 
@@ -239,7 +255,16 @@ fn revision_scope_choices(
                         },
                         generation.commit_hash.as_deref().unwrap_or("no commit")
                     ),
-                    meta: generation.timestamp.to_rfc3339(),
+                    message: generation.commit_hash.as_ref().map(|hash| {
+                        format!("commit {}", hash.chars().take(12).collect::<String>())
+                    }),
+                    timestamp: generation.timestamp.to_rfc3339(),
+                    author: None,
+                    state: if generation.is_current {
+                        RevisionTargetState::Running
+                    } else {
+                        RevisionTargetState::Historical
+                    },
                     selection,
                 }
             })
@@ -259,7 +284,16 @@ fn revision_scope_choices(
                         if current { " (deployed)" } else { "" },
                         commit.timestamp
                     ),
-                    meta: format!("{} · {}", commit.message, commit.author),
+                    message: (!commit.message.is_empty()).then(|| commit.message.clone()),
+                    timestamp: commit.timestamp.clone(),
+                    author: (!commit.author.is_empty()).then(|| commit.author.clone()),
+                    state: if current {
+                        RevisionTargetState::Running
+                    } else if commit.deployed_here {
+                        RevisionTargetState::Historical
+                    } else {
+                        RevisionTargetState::NeverDeployed
+                    },
                     selection,
                 }
             })
@@ -297,6 +331,18 @@ fn selection_after_scope_mode_change(
         (same_derivation || same_generation_and_commit).then_some(selection)
     });
     linked
+}
+
+fn revision_scope_transition(
+    mode: RevisionScopeMode,
+    choices: &[RevisionScopeChoice],
+    candidates: &[SystemCveInventoryCandidate],
+    selected: SystemCveInventorySelection,
+) -> RevisionScopeTransition {
+    RevisionScopeTransition {
+        mode,
+        selection: selection_after_scope_mode_change(choices, candidates, selected),
+    }
 }
 
 /// Renders the shared CVE and Hardening revision selector from server-owned targets.
@@ -353,11 +399,12 @@ fn RevisionScopeBar(
         .iter()
         .find(|choice| choice.key == selected_key)
         .cloned();
-    let historical = !matches!(selected, SystemCveInventorySelection::Current);
     let selected_is_missing = selected_choice.is_none();
+    let selected_state = selected_choice.as_ref().map(|choice| choice.state);
+    let read_only = selected_state != Some(RevisionTargetState::Running);
 
     rsx! {
-        div { class: if historical { "rev-bar rev-bar-hist" } else { "rev-bar" },
+        div { class: if read_only { "rev-bar rev-bar-hist" } else { "rev-bar" },
             span { class: "rev-bar-label", "{label}" }
             div { class: "seg xs", aria_label: "Revision scope type",
                 for (value, text) in [
@@ -380,13 +427,14 @@ fn RevisionScopeBar(
                                     &commits,
                                     current_commit.as_deref(),
                                 );
-                                if let Some(selection) = selection_after_scope_mode_change(
+                                let transition = revision_scope_transition(
+                                    value,
                                     &choices,
                                     &candidates,
                                     selected,
-                                )
-                                {
-                                    mode.set(value);
+                                );
+                                mode.set(transition.mode);
+                                if let Some(selection) = transition.selection {
                                     on_select.call(selection);
                                 }
                             }
@@ -428,12 +476,45 @@ fn RevisionScopeBar(
                     }
                 }
             }
-            span { class: "rev-bar-meta", title: selected_choice.as_ref().map(|choice| choice.meta.clone()).unwrap_or_default(),
-                if let Some(choice) = selected_choice.as_ref() { span { class: "rev-bar-msg", "{choice.meta}" } }
+            span {
+                class: "rev-bar-meta",
+                title: selected_choice.as_ref().map(|choice| {
+                    [
+                        choice.message.as_deref(),
+                        Some(choice.timestamp.as_str()),
+                        choice.author.as_deref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+                }).unwrap_or_default(),
+                if let Some(choice) = selected_choice.as_ref() {
+                    if let Some(message) = choice.message.as_deref() {
+                        span { class: "rev-bar-msg", "{message}" }
+                    }
+                    span { class: "rev-bar-dot", "·" }
+                    span { "{choice.timestamp}" }
+                    if let Some(author) = choice.author.as_deref() {
+                        span { class: "rev-bar-dot", "·" }
+                        span { class: "mono", "{author}" }
+                    }
+                }
             }
             span { class: "rev-bar-state",
-                if historical { span { class: "chip chip-warning", "historical · read-only" } }
-                else { span { class: "chip chip-healthy", Icon { name: IconName::Check, size: 9 } " running now" } }
+                if selected_state == Some(RevisionTargetState::Running) {
+                    span { class: "chip chip-healthy", Icon { name: IconName::Check, size: 9 } " running now" }
+                } else if selected_state == Some(RevisionTargetState::NeverDeployed) {
+                    span {
+                        class: "chip chip-info",
+                        title: "The server has no deployment observation for this revision on this system",
+                        "never deployed here"
+                    }
+                } else if selected_state == Some(RevisionTargetState::Historical) {
+                    span { class: "chip chip-warning", title: "Not the revision running on this system", "historical · read-only" }
+                } else {
+                    span { class: "chip chip-unknown", "target unavailable" }
+                }
             }
             if loading {
                 span { class: "rev-bar-msg", role: "status", aria_live: "polite", "Refreshing revision targets…" }
@@ -11096,9 +11177,10 @@ mod tests {
         map_history_entries_to_commit_history, natural_config_side_height,
         newest_config_inspectable_commit, observational_current_timeline_commit,
         overview_commit_identity, package_identities, query_value, query_with_parameter,
-        render_safe_option_value, revision_scope_choices, selected_config_revision,
-        selection_after_scope_mode_change, snapshot_lifecycle_label, snapshot_lifecycle_message,
-        tab_from_query, tab_from_route, unavailable_generation_commit, visible_config_response,
+        render_safe_option_value, revision_scope_choices, revision_scope_transition,
+        selected_config_revision, selection_after_scope_mode_change, snapshot_lifecycle_label,
+        snapshot_lifecycle_message, tab_from_query, tab_from_route, unavailable_generation_commit,
+        visible_config_response,
     };
     use crate::api::models::{
         AuthContext, AuthMode, AuthUser, CommitInfo, Role, SafeEvaluationError, SafePackageValue,
@@ -11145,6 +11227,7 @@ mod tests {
             author: "test".into(),
             timestamp: Utc::now().to_rfc3339(),
             config_inspectable: true,
+            deployed_here: false,
         }];
         assert!(
             !map_commit_infos_to_commit_history(&commits, Some("aaaaaaa".into()))[0].is_current
@@ -11314,12 +11397,22 @@ mod tests {
         ];
         let commits = [
             CommitInfo {
+                sha: "d".repeat(40),
+                short_sha: "dddddddd".to_string(),
+                message: "Undeployed revision".to_string(),
+                author: "Operator".to_string(),
+                timestamp: Utc::now().to_rfc3339(),
+                config_inspectable: true,
+                deployed_here: false,
+            },
+            CommitInfo {
                 sha: current_commit.clone(),
                 short_sha: "cccccccc".to_string(),
                 message: "Current revision".to_string(),
                 author: "Operator".to_string(),
                 timestamp: Utc::now().to_rfc3339(),
                 config_inspectable: true,
+                deployed_here: true,
             },
             CommitInfo {
                 sha: historical_commit.clone(),
@@ -11328,6 +11421,7 @@ mod tests {
                 author: "Operator".to_string(),
                 timestamp: Utc::now().to_rfc3339(),
                 config_inspectable: true,
+                deployed_here: true,
             },
         ];
         let generation_choices = revision_scope_choices(
@@ -11344,6 +11438,16 @@ mod tests {
             &commits,
             Some(&current_commit),
         );
+        assert_eq!(
+            commit_choices[0].state,
+            super::RevisionTargetState::NeverDeployed,
+            "newest-first position must not imply deployment state",
+        );
+        assert_eq!(commit_choices[1].state, super::RevisionTargetState::Running);
+        assert_eq!(
+            commit_choices[2].state,
+            super::RevisionTargetState::Historical
+        );
 
         assert_eq!(
             selection_after_scope_mode_change(&commit_choices, &candidates, retained),
@@ -11352,6 +11456,42 @@ mod tests {
         assert_eq!(
             selection_after_scope_mode_change(&generation_choices, &candidates, exact),
             Some(retained)
+        );
+        assert_eq!(
+            revision_scope_transition(
+                super::RevisionScopeMode::Commits,
+                &commit_choices,
+                &candidates,
+                SystemCveInventorySelection::Current,
+            ),
+            super::RevisionScopeTransition {
+                mode: super::RevisionScopeMode::Commits,
+                selection: Some(SystemCveInventorySelection::Current),
+            },
+        );
+        assert_eq!(
+            revision_scope_transition(
+                super::RevisionScopeMode::Generations,
+                &generation_choices,
+                &candidates,
+                retained,
+            ),
+            super::RevisionScopeTransition {
+                mode: super::RevisionScopeMode::Generations,
+                selection: Some(retained),
+            },
+        );
+        assert_eq!(
+            revision_scope_transition(
+                super::RevisionScopeMode::Commits,
+                &commit_choices,
+                &candidates,
+                exact,
+            ),
+            super::RevisionScopeTransition {
+                mode: super::RevisionScopeMode::Commits,
+                selection: Some(exact),
+            },
         );
 
         let unlinked = SystemCveInventoryCandidate {
@@ -11376,6 +11516,48 @@ mod tests {
             ),
             None,
             "an unlinked historical selection must not fall back to mutable current",
+        );
+        assert_eq!(
+            revision_scope_transition(
+                super::RevisionScopeMode::Generations,
+                &generation_choices,
+                &candidates_with_unlinked,
+                unlinked.selection,
+            ),
+            super::RevisionScopeTransition {
+                mode: super::RevisionScopeMode::Generations,
+                selection: None,
+            },
+            "the presentation mode must change while the unrepresented target stays selected",
+        );
+
+        let unlinked_snapshot_id = uuid::Uuid::from_u128(99);
+        let unlinked_retained = SystemCveInventoryCandidate {
+            selection: SystemCveInventorySelection::RetainedGeneration {
+                generation_snapshot_id: unlinked_snapshot_id,
+            },
+            generation: Some(99),
+            commit_hash: None,
+            derivation_id: None,
+            is_current: false,
+            is_latest_per_flake: false,
+            source: None,
+            evidence_representation: None,
+            scan_available: true,
+            read_only: true,
+        };
+        candidates_with_unlinked.push(unlinked_retained.clone());
+        assert_eq!(
+            revision_scope_transition(
+                super::RevisionScopeMode::Commits,
+                &commit_choices,
+                &candidates_with_unlinked,
+                unlinked_retained.selection,
+            ),
+            super::RevisionScopeTransition {
+                mode: super::RevisionScopeMode::Commits,
+                selection: None,
+            },
         );
 
         let mut malformed_historical = unlinked;

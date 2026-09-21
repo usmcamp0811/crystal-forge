@@ -15,10 +15,10 @@ use uuid::Uuid;
 use crate::api::models::{
     CveAffectedEnvironment, CveAffectedSystemDetail, CveDispositionActor,
     CveEnvironmentDisposition, CveEnvironmentTriageAction, CveTriageConflictSubject,
-    FleetCveDetail, FleetCvePoamRequest, FleetCveTriageRequest, FleetCveTriageResponse,
-    FleetCveTriageRollup, ScheduledPoamMetadata, SystemCveEffectiveDispositionSource,
-    SystemCveInventoryAuthority, SystemCveTriageAction, SystemCveTriageDetail,
-    SystemCveTriageRequest, SystemCveTriageResponse, SystemCveTriageScope,
+    FleetCveDetail, FleetCveInventorySection, FleetCvePoamRequest, FleetCveTriageRequest,
+    FleetCveTriageResponse, FleetCveTriageRollup, ScheduledPoamMetadata,
+    SystemCveEffectiveDispositionSource, SystemCveInventoryAuthority, SystemCveTriageAction,
+    SystemCveTriageDetail, SystemCveTriageRequest, SystemCveTriageResponse, SystemCveTriageScope,
     SystemCveTriageScopeChoice, SystemCveTriageScopeKind,
 };
 use crate::compliance::canonical::semantic_digest;
@@ -3817,6 +3817,7 @@ async fn fleet_cve_detail_tx(
                 deployment_policy: subject.deployment_policy.clone(),
                 current_package_version: Some(subject.observed_package_version.clone()),
                 inventory_authority: SystemCveInventoryAuthority::Exact,
+                inventory_section: FleetCveInventorySection::Current,
             })
             .collect::<Vec<_>>();
         environments.push(CveAffectedEnvironment {
@@ -3825,6 +3826,9 @@ async fn fleet_cve_detail_tx(
             affected_system_count: systems.len() as i64,
             exact_affected_system_count: systems.len() as i64,
             legacy_affected_system_count: 0,
+            current_affected_system_count: systems.len() as i64,
+            scheduled_deployment_target_count: 0,
+            historical_inventory_system_count: 0,
             systems,
             disposition: dispositions.remove(&environment_id),
         });
@@ -3837,6 +3841,9 @@ async fn fleet_cve_detail_tx(
         exact_affected_system_count: subjects.len() as i64,
         exact_mutation_target_count: subjects.len() as i64,
         legacy_affected_system_count: 0,
+        current_affected_system_count: subjects.len() as i64,
+        scheduled_deployment_target_count: 0,
+        historical_inventory_system_count: 0,
         no_scan_system_count: 0,
         unassigned_affected_system_count: 0,
         unassigned_systems: Vec::new(),
@@ -3882,10 +3889,11 @@ pub async fn fleet_cve_detail(
 
 /// Returns display inventory for one visible fleet CVE/package identity.
 ///
-/// The function adds bounded legacy findings to the exact drawer read and
-/// labels every system with its read authority. Dispositions remain attached
-/// only to exact environments. This read does not supply subjects to any
-/// mutation; fleet mutations independently call `fleet_cve_subjects_tx`.
+/// The function separates exact current findings, exact active scheduled
+/// deployment targets, and retained historical findings. Dispositions remain
+/// attached only to exact current environments. This read does not supply
+/// subjects to any mutation; fleet mutations independently call
+/// `fleet_cve_subjects_tx`.
 ///
 /// # Errors
 ///
@@ -3971,46 +3979,84 @@ pub async fn fleet_cve_inventory_detail(
     }
     let mut environments = Vec::with_capacity(grouped.len());
     for (environment_id, (environment_name, systems)) in grouped {
-        let exact_count = systems
+        let current_system_ids = systems
             .iter()
-            .filter(|system| system.inventory_authority == SystemCveInventoryAuthority::Exact)
-            .count() as i64;
-        let legacy_count = systems.len() as i64 - exact_count;
+            .filter(|system| system.inventory_section == FleetCveInventorySection::Current)
+            .map(|system| system.system_id)
+            .collect::<BTreeSet<_>>();
+        let scheduled_system_ids = systems
+            .iter()
+            .filter(|system| {
+                system.inventory_section == FleetCveInventorySection::ScheduledDeploymentTarget
+            })
+            .map(|system| system.system_id)
+            .collect::<BTreeSet<_>>();
+        let historical_system_ids = systems
+            .iter()
+            .filter(|system| system.inventory_section == FleetCveInventorySection::Historical)
+            .map(|system| system.system_id)
+            .collect::<BTreeSet<_>>();
+        let affected_count = current_system_ids.union(&scheduled_system_ids).count() as i64;
         environments.push(CveAffectedEnvironment {
             environment_id,
             environment_name,
-            affected_system_count: systems.len() as i64,
-            exact_affected_system_count: exact_count,
-            legacy_affected_system_count: legacy_count,
+            affected_system_count: affected_count,
+            exact_affected_system_count: affected_count,
+            legacy_affected_system_count: historical_system_ids.len() as i64,
+            current_affected_system_count: current_system_ids.len() as i64,
+            scheduled_deployment_target_count: scheduled_system_ids.len() as i64,
+            historical_inventory_system_count: historical_system_ids.len() as i64,
             systems,
             disposition: dispositions.get(&environment_id).cloned().flatten(),
         });
     }
-    let exact_count = environments
+    let current_count = environments
         .iter()
-        .map(|environment| environment.exact_affected_system_count)
+        .map(|environment| environment.current_affected_system_count)
         .sum::<i64>()
         + unassigned_systems
             .iter()
-            .filter(|system| system.inventory_authority == SystemCveInventoryAuthority::Exact)
+            .filter(|system| system.inventory_section == FleetCveInventorySection::Current)
+            .count() as i64;
+    let scheduled_count = environments
+        .iter()
+        .map(|environment| environment.scheduled_deployment_target_count)
+        .sum::<i64>()
+        + unassigned_systems
+            .iter()
+            .filter(|system| {
+                system.inventory_section == FleetCveInventorySection::ScheduledDeploymentTarget
+            })
             .count() as i64;
     let exact_mutation_target_count = environments
         .iter()
-        .map(|environment| environment.exact_affected_system_count)
+        .map(|environment| environment.current_affected_system_count)
         .sum();
-    let legacy_count = environments
+    let historical_count = environments
         .iter()
-        .map(|environment| environment.legacy_affected_system_count)
+        .map(|environment| environment.historical_inventory_system_count)
         .sum::<i64>()
         + unassigned_systems
             .iter()
-            .filter(|system| system.inventory_authority == SystemCveInventoryAuthority::Legacy)
+            .filter(|system| system.inventory_section == FleetCveInventorySection::Historical)
             .count() as i64;
-    let mut cve = crate::queries::cves::fetch_cve_detail(pool, &read_scope, &cve_id).await?;
-    cve.package_name = Some(package_name.to_owned());
+    let cve =
+        crate::queries::cves::fetch_cve_package_detail(pool, &read_scope, &cve_id, package_name)
+            .await?;
     let no_scan_system_count = crate::queries::cves::fetch_cve_fleet_stats(pool, &read_scope)
         .await?
         .no_scan_systems;
+    let unassigned_affected_system_ids = unassigned_systems
+        .iter()
+        .filter(|system| {
+            matches!(
+                system.inventory_section,
+                FleetCveInventorySection::Current
+                    | FleetCveInventorySection::ScheduledDeploymentTarget
+            )
+        })
+        .map(|system| system.system_id)
+        .collect::<BTreeSet<_>>();
     Ok(FleetCveDetail {
         cve,
         canonical_package_name: package_name.to_owned(),
@@ -4018,12 +4064,23 @@ pub async fn fleet_cve_inventory_detail(
             .as_ref()
             .map(|detail| detail.rollup)
             .unwrap_or(FleetCveTriageRollup::Outstanding),
-        affected_system_count: exact_count + legacy_count,
-        exact_affected_system_count: exact_count,
+        affected_system_count: environments
+            .iter()
+            .map(|environment| environment.affected_system_count)
+            .sum::<i64>()
+            + unassigned_affected_system_ids.len() as i64,
+        exact_affected_system_count: environments
+            .iter()
+            .map(|environment| environment.exact_affected_system_count)
+            .sum::<i64>()
+            + unassigned_affected_system_ids.len() as i64,
         exact_mutation_target_count,
-        legacy_affected_system_count: legacy_count,
+        legacy_affected_system_count: historical_count,
+        current_affected_system_count: current_count,
+        scheduled_deployment_target_count: scheduled_count,
+        historical_inventory_system_count: historical_count,
         no_scan_system_count,
-        unassigned_affected_system_count: unassigned_systems.len() as i64,
+        unassigned_affected_system_count: unassigned_affected_system_ids.len() as i64,
         unassigned_systems,
         environments,
     })
@@ -4318,6 +4375,7 @@ fn system_cve_triage_detail_from_subjects(
             deployment_policy: subject.deployment_policy.clone(),
             current_package_version: Some(subject.observed_package_version.clone()),
             inventory_authority: SystemCveInventoryAuthority::Exact,
+            inventory_section: FleetCveInventorySection::Current,
         })
         .collect::<Vec<_>>();
     let (effective_disposition, effective_source) = if let Some(disposition) = &host_disposition {

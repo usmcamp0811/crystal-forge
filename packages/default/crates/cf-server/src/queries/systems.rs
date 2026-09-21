@@ -90,6 +90,8 @@ pub struct SystemCommitRow {
     pub timestamp: DateTime<Utc>,
     /// Indicates whether the exact commit has the carrier required by Config observations.
     pub config_inspectable: bool,
+    /// Indicates whether system history contains a deployment produced by this commit.
+    pub deployed_here: bool,
 }
 
 /// Resolves the full tracked commit for the latest observed system revision.
@@ -1572,7 +1574,21 @@ pub async fn list_recent_commits_for_system(
                           COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
                       AND derivation.completed_at IS NOT NULL
                       AND NULLIF(BTRIM(derivation.derivation_path), '') IS NOT NULL
-                ) AS config_inspectable
+                ) AS config_inspectable,
+                EXISTS (
+                    SELECT 1
+                    FROM system_states state
+                    JOIN derivations deployed_derivation
+                      ON state.store_path = COALESCE(
+                          deployed_derivation.store_path,
+                          deployed_derivation.expected_store_path
+                      )
+                    WHERE state.hostname = s.hostname
+                      AND deployed_derivation.commit_id = c.id
+                      AND deployed_derivation.derivation_type = 'nixos'
+                      AND deployed_derivation.derivation_name =
+                          COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
+                ) AS deployed_here
          FROM systems s
          JOIN commits c ON c.flake_id = s.flake_id
          WHERE s.id = $1 AND c.source_archived = false
@@ -2796,12 +2812,13 @@ mod tests {
         )
         .await
         .expect("insert inspectable flake");
+        let observed_store = format!("/nix/store/{suffix}-observed");
         let system = current_revision_system(
             &pool,
             &format!("inspectable-{suffix}"),
             flake.id,
             "inspectable-config",
-            &format!("/nix/store/{suffix}-observed"),
+            &observed_store,
             None,
         )
         .await;
@@ -2811,7 +2828,7 @@ mod tests {
             flake.id,
             &inspectable_sha,
             "inspectable-config",
-            &format!("/nix/store/{suffix}-inspectable"),
+            &observed_store,
             "complete",
         )
         .await;
@@ -2854,6 +2871,7 @@ mod tests {
             .expect("list recent system commits");
         assert_eq!(commits[0].sha, pending_sha);
         assert!(!commits[0].config_inspectable);
+        assert!(!commits[0].deployed_here);
         assert!(
             commits
                 .iter()
@@ -2862,11 +2880,25 @@ mod tests {
                 .config_inspectable
         );
         assert!(
+            commits
+                .iter()
+                .find(|commit| commit.sha == inspectable_sha)
+                .expect("deployed commit should remain listed")
+                .deployed_here
+        );
+        assert!(
             !commits
                 .iter()
                 .find(|commit| commit.sha == whitespace_sha)
                 .expect("whitespace-name commit should remain listed")
                 .config_inspectable
+        );
+        assert!(
+            !commits
+                .iter()
+                .find(|commit| commit.sha == whitespace_sha)
+                .expect("undeployed commit should remain listed")
+                .deployed_here
         );
     }
 

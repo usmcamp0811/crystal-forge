@@ -43,13 +43,17 @@ in
       component_wrapper=${componentBuilder}/bin/builder
       public_wrapper=${publicBuilder}/bin/builder
       evaluator_bin=${evaluatorNix}/bin
+      scanner_bin=${pkgs.vulnix}/bin
       unrelated_nix_bin=${pkgs.nix}/bin
 
       test -x "$evaluator_bin/nix"
       test -x "$evaluator_bin/nix-store"
+      test -x "$scanner_bin/vulnix"
 
       grep -Fq "$evaluator_bin" "$component_wrapper"
+      grep -Fq "$scanner_bin" "$component_wrapper"
       grep -Fq "$evaluator_bin" "$public_wrapper"
+      grep -Fq "$scanner_bin" "$public_wrapper"
       grep -Fq '${componentBuilder}/bin/builder' "$public_wrapper"
 
       if [ "$unrelated_nix_bin" != "$evaluator_bin" ]; then
@@ -64,6 +68,7 @@ in
       fi
 
       packaged_version="$($evaluator_bin/nix --version)"
+      packaged_scanner_version="$($scanner_bin/vulnix --version)"
       authoritative_version="$(${pkgs.nix-eval-jobs}/bin/nix-eval-jobs \
         --expr '{ probe = builtins.derivation { name = "crystal-forge-builder-evaluator-probe"; system = builtins.currentSystem; builder = "/bin/sh"; }; }' \
         --workers 1 \
@@ -74,6 +79,7 @@ in
         | jq -er '.extraValue.nixVersion')"
 
       test "$packaged_version" = "nix (Nix) $authoritative_version"
+      test -n "$packaged_scanner_version"
 
       # The sandbox has no daemon store. Use an explicit disposable chroot store
       # so this contract does not depend on the host's sandbox or daemon setup.
@@ -121,5 +127,5 @@ in
         *) exit 1 ;;
       esac
 
-      printf '%s\n' "$packaged_version" > "$out"
+      printf '%s\n%s\n' "$packaged_version" "$packaged_scanner_version" > "$out"
     ''

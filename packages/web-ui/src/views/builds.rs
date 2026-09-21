@@ -10,10 +10,12 @@ use crate::alerts::{
 use crate::api::{
     self,
     client::{
-        fetch_build_queue_paginated, fetch_recent_build_jobs, move_build_job_down,
-        move_build_job_up,
+        fetch_build_attempt, fetch_build_queue_paginated, fetch_recent_build_jobs,
+        move_build_job_down, move_build_job_up,
     },
-    models::{BuildQueueParams, BuildStatus as ApiBuildStatus, BuilderStatus},
+    models::{
+        BuildAttemptCollection, BuildQueueParams, BuildStatus as ApiBuildStatus, BuilderStatus,
+    },
 };
 use crate::components::builds::{
     BuildAction, BuildDetailPane, BuildItem, BuildQueuePane, BuildStatus, ConfirmActionModal,
@@ -204,6 +206,27 @@ fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> Buil
     }
 }
 
+fn map_completed_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> BuildItem {
+    let finished_for = item
+        .elapsed_secs
+        .map(|seconds| format!("completed in {seconds}s"))
+        .unwrap_or_else(|| "completed".to_string());
+    let completed_at = match (item.started_at, item.elapsed_secs) {
+        (Some(started_at), Some(elapsed_secs)) => {
+            Some(started_at + Duration::seconds(elapsed_secs.max(0)))
+        }
+        _ => Some(item.queued_at),
+    };
+    let mut mapped = map_queue_item(item, idx);
+    mapped.id = -((idx as i32) + 1);
+    mapped.queued_for = finished_for;
+    mapped.completed_at = completed_at;
+    mapped.cached_derivs = 0;
+    mapped.built_derivs = 0;
+    mapped.total_derivs = 0;
+    mapped
+}
+
 fn build_matches_search(build: &BuildItem, search: &str) -> bool {
     search.is_empty()
         || [
@@ -213,63 +236,17 @@ fn build_matches_search(build: &BuildItem, search: &str) -> bool {
             (build.worker_id != "unassigned").then(|| build.worker_id.to_lowercase()),
             Some(build.arch.to_lowercase()),
             Some(build.status.label().to_lowercase()),
-            build.job_id.map(|job_id| job_id.to_string()),
         ]
         .into_iter()
         .flatten()
         .any(|value| value.contains(search))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ExactBuildReveal {
-    tab: BuildsTab,
-    selected_build: uuid::Uuid,
-}
-
-fn exact_build_reveal(
-    attempt_id: uuid::Uuid,
-    active_rows: &[BuildItem],
-    completed_rows: &[BuildItem],
-) -> Option<ExactBuildReveal> {
-    if active_rows
-        .iter()
-        .any(|build| build.job_id == Some(attempt_id))
-    {
-        Some(ExactBuildReveal {
-            tab: BuildsTab::ActiveQueue,
-            selected_build: attempt_id,
-        })
-    } else if completed_rows
-        .iter()
-        .any(|build| build.job_id == Some(attempt_id))
-    {
-        Some(ExactBuildReveal {
-            tab: BuildsTab::Completed,
-            selected_build: attempt_id,
-        })
-    } else {
-        None
+fn builds_tab_for_collection(collection: BuildAttemptCollection) -> BuildsTab {
+    match collection {
+        BuildAttemptCollection::Active => BuildsTab::ActiveQueue,
+        BuildAttemptCollection::Completed => BuildsTab::Completed,
     }
-}
-
-fn apply_exact_build_reveal(
-    pending_attempt: &mut Option<uuid::Uuid>,
-    selected_build: &mut Option<uuid::Uuid>,
-    active_tab: &mut BuildsTab,
-    active_rows: &[BuildItem],
-    completed_rows: &[BuildItem],
-) -> bool {
-    let Some(attempt_id) = *pending_attempt else {
-        return false;
-    };
-    let Some(reveal) = exact_build_reveal(attempt_id, active_rows, completed_rows) else {
-        return false;
-    };
-
-    *active_tab = reveal.tab;
-    *selected_build = Some(reveal.selected_build);
-    *pending_attempt = None;
-    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -424,7 +401,17 @@ pub fn BuildsView(query: String) -> Element {
     let mut selected_build = use_signal(|| None::<uuid::Uuid>);
     let requested_build_job = requested_build_job_from_query(&query);
     let mut pending_reveal_attempt = use_signal(|| requested_build_job);
+    let mut exact_build = use_signal(|| None::<BuildItem>);
+    let mut exact_lookup_error = use_signal(|| None::<String>);
     let mut log_open = use_signal(|| false);
+
+    let exact_build_resource = use_resource(move || async move {
+        let attempt_id = pending_reveal_attempt();
+        match attempt_id {
+            Some(attempt_id) => Some(fetch_build_attempt(&attempt_id).await),
+            None => None,
+        }
+    });
 
     // Auto-refresh: bump the relevant refresh signal every 5 s depending on
     // which tab is active.  When viewing the Active queue we only poll queue
@@ -457,21 +444,14 @@ pub fn BuildsView(query: String) -> Element {
     let mut filter_config = use_signal(String::new);
     // Simple time range: "today", "last7d", "" (all)
     let mut filter_time_range = use_signal(String::new);
-    let mut search_query = use_signal(move || {
-        requested_build_job
-            .map(|job_id| job_id.to_string())
-            .unwrap_or_default()
-    });
+    let mut search_query = use_signal(String::new);
     let mut completed_status_filter = use_signal(|| CompletedStatusFilter::All);
 
     // Reset to page 1 limit whenever filters change so accumulated rows are cleared.
     // NB: `refresh_trigger` is deliberately excluded — polling ticks every 5 s
     // and must not erase previously loaded rows (review finding #8).
-    // Navigation and retry reveal also change filters, but must not override
-    // FETCH_LIMIT_MAX. Use peek() to read their markers without subscribing: when
-    // a handler clears its marker after finding a match, this effect must not rerun
-    // and overwrite FETCH_LIMIT_MAX with PAGE_SIZE. read_unchecked() still
-    // subscribes the current reactive scope in Dioxus 0.7; only peek() avoids that.
+    // Navigation focus can grow the ordinary prefix while finding a non-exact
+    // target. Exact attempt lookup is independent from list pagination.
     use_effect(move || {
         let _ = (
             filter_status(),
@@ -482,7 +462,7 @@ pub fn BuildsView(query: String) -> Element {
             search_query(),
             latest_filter().enabled(),
         );
-        if navigation_focus.peek().is_some() || pending_reveal_attempt.peek().is_some() {
+        if navigation_focus.peek().is_some() {
             return;
         }
         fetch_limit.set(PAGE_SIZE);
@@ -573,14 +553,6 @@ pub fn BuildsView(query: String) -> Element {
     });
 
     use_effect(move || {
-        if pending_reveal_attempt().is_some() {
-            fetch_limit.set(FETCH_LIMIT_MAX);
-            build_history_fetch_limit.set(FETCH_LIMIT_MAX);
-            latest_filter.with_mut(LatestFilterState::clear);
-        }
-    });
-
-    use_effect(move || {
         let _ = (
             completed_status_filter(),
             filter_commit(),
@@ -589,7 +561,7 @@ pub fn BuildsView(query: String) -> Element {
             search_query(),
             latest_filter().enabled(),
         );
-        if navigation_focus.peek().is_none() && pending_reveal_attempt.peek().is_none() {
+        if navigation_focus.peek().is_none() {
             build_history_fetch_limit.set(100);
         }
     });
@@ -652,72 +624,46 @@ pub fn BuildsView(query: String) -> Element {
                 .items
                 .iter()
                 .enumerate()
-                .map(|(idx, item)| {
-                    let finished_for = item
-                        .elapsed_secs
-                        .map(|secs| format!("completed in {}s", secs))
-                        .unwrap_or_else(|| "completed".to_string());
-                    let completed_at = match (item.started_at, item.elapsed_secs) {
-                        (Some(started_at), Some(elapsed_secs)) => {
-                            Some(started_at + Duration::seconds(elapsed_secs.max(0)))
-                        }
-                        _ => Some(item.queued_at),
-                    };
-
-                    BuildItem {
-                        id: -((idx as i32) + 1),
-                        job_id: item.job_id,
-                        commit_id: item.commit_id,
-                        server_failure_code: item.server_failure_code.clone(),
-                        system_id: item.system_id,
-                        hostname: item.hostname.clone(),
-                        environment: item.environment.clone(),
-                        flake: item.flake_name.clone(),
-                        commit: item.commit_hash.clone(),
-                        is_latest_per_flake: item.is_latest_per_flake,
-                        branch: "main".to_string(),
-                        arch: "x86_64-linux".to_string(),
-                        worker_id: item
-                            .builder_name
-                            .clone()
-                            .unwrap_or_else(|| "unassigned".to_string()),
-                        queued_at: item.queued_at,
-                        queued_for: finished_for,
-                        runtime: item.elapsed_secs.map(format_human_duration),
-                        duration_secs: item.elapsed_secs,
-                        completed_at,
-                        started_by: "scheduler".to_string(),
-                        logs: item.logs.clone(),
-                        status: match item.status {
-                            ApiBuildStatus::Failed => BuildStatus::Failed,
-                            ApiBuildStatus::Complete => BuildStatus::Complete,
-                            ApiBuildStatus::Cancelled => BuildStatus::Cancelled,
-                            ApiBuildStatus::Building => BuildStatus::Building,
-                            ApiBuildStatus::Cancelling => BuildStatus::Stopping,
-                            ApiBuildStatus::Queued => BuildStatus::Queued,
-                            ApiBuildStatus::Idle => BuildStatus::Queued,
-                        },
-                        summary: item.commit_message.clone().unwrap_or_else(|| {
-                            format!(
-                                "job {}",
-                                item.job_id
-                                    .map(|id| id.to_string())
-                                    .unwrap_or_else(|| "unknown".to_string())
-                            )
-                        }),
-                        cached_derivs: 0,
-                        built_derivs: 0,
-                        total_derivs: 0,
-                        current_pkg: None,
-                        failed_pkg: None,
-                        attempts: item.attempt_number.max(1) as usize,
-                    }
-                })
+                .map(|(idx, item)| map_completed_item(item, idx))
                 .collect::<Vec<_>>();
             let mapped = replace_unique_by(mapped, |item| item.job_id);
             build_history.set(mapped);
             build_history_total.set(page_resp.total);
             build_history_domain_total.set(page_resp.domain_total);
+        }
+    });
+
+    use_effect(move || {
+        let Some(Some(result)) = &*exact_build_resource.read() else {
+            return;
+        };
+        match result {
+            Ok(response) => {
+                let attempt_id = response.attempt.job_id;
+                let mapped = match response.collection {
+                    BuildAttemptCollection::Active => map_queue_item(&response.attempt, 0),
+                    BuildAttemptCollection::Completed => map_completed_item(&response.attempt, 0),
+                };
+                exact_build.set(Some(mapped));
+                exact_lookup_error.set(None);
+                active_view.set(builds_tab_for_collection(response.collection));
+                selected_build.set(attempt_id);
+                pending_reveal_attempt.set(None);
+            }
+            Err(api::client::ApiClientError::Status { code: 404, .. }) => {
+                exact_build.set(None);
+                selected_build.set(None);
+                exact_lookup_error.set(Some(
+                    "Build attempt was not found or is not available to this account.".to_string(),
+                ));
+                pending_reveal_attempt.set(None);
+            }
+            Err(error) => {
+                exact_build.set(None);
+                selected_build.set(None);
+                exact_lookup_error.set(Some(format!("Failed to load build attempt: {error}")));
+                pending_reveal_attempt.set(None);
+            }
         }
     });
 
@@ -912,33 +858,13 @@ pub fn BuildsView(query: String) -> Element {
         }
     });
 
-    let selected = selected_build_data(selected_build.read().to_owned(), &visible_rows);
-
-    use_effect(move || {
-        let mut pending_attempt = pending_reveal_attempt();
-        let mut selected_attempt = selected_build();
-        let mut selected_tab = active_view();
-        let revealed = {
-            // The row reads must stay inside this effect. Dioxus then reruns the
-            // reveal when either asynchronous collection receives the target.
-            let active_rows = builds.read();
-            let completed_rows = build_history.read();
-            apply_exact_build_reveal(
-                &mut pending_attempt,
-                &mut selected_attempt,
-                &mut selected_tab,
-                &active_rows,
-                &completed_rows,
-            )
-        };
-        if !revealed {
-            return;
-        }
-
-        active_view.set(selected_tab);
-        selected_build.set(selected_attempt);
-        pending_reveal_attempt.set(pending_attempt);
-    });
+    let selected_id = selected_build.read().to_owned();
+    let selected = exact_build
+        .read()
+        .as_ref()
+        .filter(|item| item.job_id == selected_id)
+        .cloned()
+        .or_else(|| selected_build_data(selected_id, &visible_rows));
 
     // The server applies search/latest before pagination. Marker matching below
     // prevents stale rows from flashing while a changed request is in flight.
@@ -991,6 +917,13 @@ pub fn BuildsView(query: String) -> Element {
         let Some(selected) = selected_build() else {
             return;
         };
+        if exact_build
+            .read()
+            .as_ref()
+            .is_some_and(|item| item.job_id == Some(selected))
+        {
+            return;
+        }
         let search = search_query().trim().to_lowercase();
         let latest_only = latest_filter().enabled();
         let selected_is_visible = if active_view() == BuildsTab::ActiveQueue {
@@ -1333,6 +1266,13 @@ pub fn BuildsView(query: String) -> Element {
                         "{note}"
                     }
                 }
+                if let Some(error) = exact_lookup_error.read().as_ref() {
+                    div {
+                        role: "alert",
+                        class: "mx-4 mt-3 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200",
+                        "{error}"
+                    }
+                }
                 if let Some(error) = action_error.read().as_ref() {
                     div {
                         role: "alert",
@@ -1472,12 +1412,10 @@ pub fn BuildsView(query: String) -> Element {
                                 let mut history_refresh_trigger = history_refresh_trigger;
                                 let mut active_view = active_view;
                                 let mut filter_status = filter_status;
-                                let mut latest_filter = latest_filter;
-                                let mut search_query = search_query;
-                                let mut pending_reveal_attempt = pending_reveal_attempt;
-                                let mut fetch_limit = fetch_limit;
-                                let mut build_history_fetch_limit = build_history_fetch_limit;
-                                let mut requeue_pending = requeue_pending;
+                                 let mut latest_filter = latest_filter;
+                                 let mut search_query = search_query;
+                                 let mut pending_reveal_attempt = pending_reveal_attempt;
+                                 let mut requeue_pending = requeue_pending;
                                 let filtered = filtered_list.clone();
                                 spawn(async move {
                                     let mut summary = BulkRetrySummary::default();
@@ -1536,12 +1474,10 @@ pub fn BuildsView(query: String) -> Element {
                                                 .any(|build| build_matches_search(build, &search))
                                         {
                                             search_query.set(String::new());
-                                        }
-                                        active_view.set(BuildsTab::ActiveQueue);
-                                        filter_status.set("queued,building,cancelling".to_string());
-                                        fetch_limit.set(FETCH_LIMIT_MAX);
-                                        build_history_fetch_limit.set(FETCH_LIMIT_MAX);
-                                        pending_reveal_attempt.set(first_attempt);
+                                         }
+                                         active_view.set(BuildsTab::ActiveQueue);
+                                         filter_status.set("queued,building,cancelling".to_string());
+                                         pending_reveal_attempt.set(first_attempt);
                                     }
                                     active_refresh_trigger.set(active_refresh_trigger() + 1);
                                     history_refresh_trigger.set(history_refresh_trigger() + 1);
@@ -1813,23 +1749,23 @@ pub fn BuildsView(query: String) -> Element {
                                 PendingAction::Build { job_id, action } => {
                                     let queue_snapshot = builds.read().clone();
                                     let history_snapshot = build_history.read().clone();
+                                    let exact_snapshot = exact_build.read().clone();
                                     let mut action_error = action_error;
                                     let mut last_action_note = last_action_note;
                                     let mut active_refresh_trigger = active_refresh_trigger;
                                     let mut history_refresh_trigger = history_refresh_trigger;
                                     let mut active_view = active_view;
                                     let mut filter_status = filter_status;
-                                    let mut latest_filter = latest_filter;
-                                    let mut search_query = search_query;
-                                    let mut pending_reveal_attempt = pending_reveal_attempt;
-                                    let mut fetch_limit = fetch_limit;
-                                    let mut build_history_fetch_limit = build_history_fetch_limit;
-                                    let mut requeue_pending = requeue_pending;
+                                     let mut latest_filter = latest_filter;
+                                     let mut search_query = search_query;
+                                     let mut pending_reveal_attempt = pending_reveal_attempt;
+                                     let mut requeue_pending = requeue_pending;
                                     let mut pending_action = pending_action;
                                     spawn(async move {
                                         // Check both active queue and completed history
                                         let selected = queue_snapshot.iter().find(|b| b.job_id == Some(job_id))
-                                            .or_else(|| history_snapshot.iter().find(|b| b.job_id == Some(job_id)));
+                                            .or_else(|| history_snapshot.iter().find(|b| b.job_id == Some(job_id)))
+                                            .or_else(|| exact_snapshot.as_ref().filter(|b| b.job_id == Some(job_id)));
                                         let Some(selected) = selected else {
                                             action_error.set(Some(format!("Build job {} not found", job_id)));
                                             requeue_pending.set(false);
@@ -1872,12 +1808,10 @@ pub fn BuildsView(query: String) -> Element {
                                                                     let search = search_query.read().trim().to_lowercase();
                                                                     if !search.is_empty() && !build_matches_search(selected, &search) {
                                                                         search_query.set(String::new());
-                                                                    }
-                                                                    active_view.set(BuildsTab::ActiveQueue);
-                                                                     filter_status.set("queued,building,cancelling".to_string());
-                                                                     fetch_limit.set(FETCH_LIMIT_MAX);
-                                                                     build_history_fetch_limit.set(FETCH_LIMIT_MAX);
-                                                                 }
+                                                                     }
+                                                                     active_view.set(BuildsTab::ActiveQueue);
+                                                                      filter_status.set("queued,building,cancelling".to_string());
+                                                                  }
                                                                  RetryBuildOutcome::Reused { attempt_id, attempt_number } => {
                                                                      last_action_note.set(Some(format!("Using active build attempt #{attempt_number} ({attempt_id})")));
                                                                      pending_reveal_attempt.set(Some(attempt_id));
@@ -1887,12 +1821,10 @@ pub fn BuildsView(query: String) -> Element {
                                                                     let search = search_query.read().trim().to_lowercase();
                                                                     if !search.is_empty() && !build_matches_search(selected, &search) {
                                                                         search_query.set(String::new());
-                                                                    }
-                                                                    active_view.set(BuildsTab::ActiveQueue);
-                                                                     filter_status.set("queued,building,cancelling".to_string());
-                                                                     fetch_limit.set(FETCH_LIMIT_MAX);
-                                                                     build_history_fetch_limit.set(FETCH_LIMIT_MAX);
-                                                                 }
+                                                                     }
+                                                                     active_view.set(BuildsTab::ActiveQueue);
+                                                                      filter_status.set("queued,building,cancelling".to_string());
+                                                                  }
                                                                 RetryBuildOutcome::ReevaluationQueued { commit_id } => last_action_note.set(Some(format!("Queued authoritative re-evaluation for commit {commit_id}. A replacement build attempt is queued automatically after evaluation succeeds."))),
                                                                 RetryBuildOutcome::ReevaluationReused { commit_id } => last_action_note.set(Some(format!("Authoritative re-evaluation is already active for commit {commit_id}. A replacement build attempt is queued automatically after evaluation succeeds."))),
                                                             }
@@ -2178,12 +2110,6 @@ fn BuildQueueFullTable(
 mod tests {
     use super::*;
 
-    fn build_with_attempt(attempt_id: uuid::Uuid) -> BuildItem {
-        let mut build = crate::components::builds::mock_builds().remove(0);
-        build.job_id = Some(attempt_id);
-        build
-    }
-
     #[test]
     fn requested_build_job_parses_router_query_independent_of_parameter_order() {
         let job_id = uuid::Uuid::from_u128(0x30000000000040008000000000000203);
@@ -2212,65 +2138,19 @@ mod tests {
     }
 
     #[test]
-    fn pending_reveal_waits_for_completed_history_before_selecting_exact_attempt() {
-        let attempt_id = uuid::Uuid::from_u128(0x30000000000040008000000000000203);
-        let mut pending_attempt = Some(attempt_id);
-        let mut selected_build = None;
-        let mut active_tab = BuildsTab::ActiveQueue;
-
-        assert!(!apply_exact_build_reveal(
-            &mut pending_attempt,
-            &mut selected_build,
-            &mut active_tab,
-            &[],
-            &[],
-        ));
-        assert_eq!(pending_attempt, Some(attempt_id));
-        assert_eq!(selected_build, None);
-        assert_eq!(active_tab, BuildsTab::ActiveQueue);
-
-        let completed_rows = vec![build_with_attempt(attempt_id)];
-        assert!(apply_exact_build_reveal(
-            &mut pending_attempt,
-            &mut selected_build,
-            &mut active_tab,
-            &[],
-            &completed_rows,
-        ));
-        assert_eq!(pending_attempt, None);
-        assert_eq!(selected_build, Some(attempt_id));
-        assert_eq!(active_tab, BuildsTab::Completed);
+    fn exact_active_attempt_selects_active_queue() {
+        assert_eq!(
+            builds_tab_for_collection(BuildAttemptCollection::Active),
+            BuildsTab::ActiveQueue
+        );
     }
 
     #[test]
-    fn pending_reveal_waits_for_active_queue_before_selecting_exact_attempt() {
-        let attempt_id = uuid::Uuid::from_u128(0x30000000000040008000000000000204);
-        let mut pending_attempt = Some(attempt_id);
-        let mut selected_build = None;
-        let mut active_tab = BuildsTab::Completed;
-
-        assert!(!apply_exact_build_reveal(
-            &mut pending_attempt,
-            &mut selected_build,
-            &mut active_tab,
-            &[],
-            &[],
-        ));
-        assert_eq!(pending_attempt, Some(attempt_id));
-        assert_eq!(selected_build, None);
-        assert_eq!(active_tab, BuildsTab::Completed);
-
-        let active_rows = vec![build_with_attempt(attempt_id)];
-        assert!(apply_exact_build_reveal(
-            &mut pending_attempt,
-            &mut selected_build,
-            &mut active_tab,
-            &active_rows,
-            &[],
-        ));
-        assert_eq!(pending_attempt, None);
-        assert_eq!(selected_build, Some(attempt_id));
-        assert_eq!(active_tab, BuildsTab::ActiveQueue);
+    fn exact_completed_attempt_selects_completed_history() {
+        assert_eq!(
+            builds_tab_for_collection(BuildAttemptCollection::Completed),
+            BuildsTab::Completed
+        );
     }
 
     #[test]

@@ -651,6 +651,11 @@ SQL
         -- --ignored --test-threads=1
     done
 
+    echo "=== Exact build-attempt authorization and production-scale query plan ==="
+    cargo test --offline --package cf-server --lib \
+      exact_build_lookup_plan_stays_primary_key_bounded_at_production_scale \
+      -- --ignored --test-threads=1
+
     runHook postCheck
   '';
 

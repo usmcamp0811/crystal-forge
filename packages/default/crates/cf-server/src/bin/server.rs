@@ -950,6 +950,7 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/build-jobs/recent",
             get(builders::list_recent_build_jobs),
         )
+        .route("/api/v1/build-jobs/:id", get(builders::get_build_attempt))
         .route(
             "/api/v1/build-jobs/:id/prioritize",
             post(builders::prioritize_build_job),
@@ -985,7 +986,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .route(
             "/api/v1/builders/:id/cve-scans/heartbeat",
-            post(builders::heartbeat_cve_scan),
+            post(builders::heartbeat_cve_scan).layer(DefaultBodyLimit::max(
+                cf_protocol::builder::CVE_SCAN_HEARTBEAT_MAX_BODY_BYTES as usize,
+            )),
         )
         .route(
             "/api/v1/builders/:id/cve-scans/complete",

@@ -274,20 +274,51 @@ async fn execute_claim_inner<A: CveLeaseApi>(
     }
     let entries = Arc::new(AtomicUsize::new(0));
     let observations = Arc::new(AtomicUsize::new(0));
-    let mut diagnostics = vec![scan_diagnostic(
+    let attempt_started = scan_diagnostic(
         "info",
         "builder",
         "attempt_started",
         "Remote CVE scan attempt started.",
         false,
-    )];
+    );
+    let mut diagnostics = vec![attempt_started.clone()];
+    persist_phase_diagnostic(
+        api,
+        claim,
+        &entries,
+        &observations,
+        attempt_started,
+        &diagnostics,
+    )
+    .await?;
 
+    let mut materialized_output = false;
     for output in &claim.derivation.outputs {
         validate_store_path(&output.store_path, false)?;
         if !tokio::fs::try_exists(&output.store_path)
             .await
             .unwrap_or(false)
         {
+            if !materialized_output {
+                let diagnostic = scan_diagnostic(
+                    "info",
+                    "nix",
+                    "materialization_started",
+                    "Materializing authorized scan outputs.",
+                    false,
+                );
+                diagnostics.push(diagnostic.clone());
+                persist_phase_diagnostic(
+                    api,
+                    claim,
+                    &entries,
+                    &observations,
+                    diagnostic,
+                    &diagnostics,
+                )
+                .await?;
+                materialized_output = true;
+            }
             let args = vec!["--realise".to_string(), output.store_path.clone()];
             let result = run_leased_command(
                 api,
@@ -324,6 +355,25 @@ async fn execute_claim_inner<A: CveLeaseApi>(
             }
         }
     }
+    if materialized_output {
+        let diagnostic = scan_diagnostic(
+            "info",
+            "nix",
+            "materialization_completed",
+            "Authorized scan outputs are available.",
+            false,
+        );
+        diagnostics.push(diagnostic.clone());
+        persist_phase_diagnostic(
+            api,
+            claim,
+            &entries,
+            &observations,
+            diagnostic,
+            &diagnostics,
+        )
+        .await?;
+    }
 
     let mut scanner_args = claim.policy.scanner_args.clone();
     scanner_args.extend(
@@ -334,6 +384,23 @@ async fn execute_claim_inner<A: CveLeaseApi>(
             .map(|output| output.store_path.clone()),
     );
     let timeout = Duration::from_secs(claim.policy.timeout_seconds.max(1));
+    let diagnostic = scan_diagnostic(
+        "info",
+        "vulnix",
+        "scanner_started",
+        "Vulnix scan started for the authorized outputs.",
+        false,
+    );
+    diagnostics.push(diagnostic.clone());
+    persist_phase_diagnostic(
+        api,
+        claim,
+        &entries,
+        &observations,
+        diagnostic,
+        &diagnostics,
+    )
+    .await?;
     let scan = run_leased_command(
         api,
         claim,
@@ -369,13 +436,75 @@ async fn execute_claim_inner<A: CveLeaseApi>(
     }
 
     entries.store(parsed.len(), Ordering::Relaxed);
-    let result = canonical_result(api, claim, parsed, entries, observations)
-        .await
-        .map_err(|error| error.with_diagnostics(diagnostics.clone()))?;
+    let diagnostic = scan_diagnostic(
+        "info",
+        "vulnix",
+        "scanner_completed",
+        &format!("Vulnix reported {} package entries.", parsed.len()),
+        false,
+    );
+    diagnostics.push(diagnostic.clone());
+    persist_phase_diagnostic(
+        api,
+        claim,
+        &entries,
+        &observations,
+        diagnostic,
+        &diagnostics,
+    )
+    .await?;
+    let diagnostic = scan_diagnostic(
+        "info",
+        "nix",
+        "evidence_resolution_started",
+        "Resolving exact package derivation and output evidence.",
+        false,
+    );
+    diagnostics.push(diagnostic.clone());
+    persist_phase_diagnostic(
+        api,
+        claim,
+        &entries,
+        &observations,
+        diagnostic,
+        &diagnostics,
+    )
+    .await?;
+    let result = canonical_result(
+        api,
+        claim,
+        parsed,
+        Arc::clone(&entries),
+        Arc::clone(&observations),
+    )
+    .await
+    .map_err(|error| error.with_diagnostics(diagnostics.clone()))?;
+    let diagnostic = scan_diagnostic(
+        "info",
+        "nix",
+        "evidence_resolution_completed",
+        &format!(
+            "Resolved {} package entries and {} CVE observations.",
+            result.entries.len(),
+            result.observations.len()
+        ),
+        false,
+    );
+    diagnostics.push(diagnostic.clone());
+    persist_phase_diagnostic(
+        api,
+        claim,
+        &entries,
+        &observations,
+        diagnostic,
+        &diagnostics,
+    )
+    .await?;
     let heartbeat = CveScanHeartbeatRequest {
         lease: claim.lease,
         entries_collected: result.entries.len(),
         observations_collected: result.observations.len(),
+        diagnostics: Vec::new(),
     };
     match api.heartbeat(&heartbeat).await {
         Ok(true) => Ok((result, diagnostics)),
@@ -389,6 +518,35 @@ async fn execute_claim_inner<A: CveLeaseApi>(
             "CVE scan heartbeat failed",
         )
         .with_diagnostics(diagnostics)),
+    }
+}
+
+async fn persist_phase_diagnostic<A: CveLeaseApi>(
+    api: &A,
+    claim: &CveScanClaim,
+    entries: &Arc<AtomicUsize>,
+    observations: &Arc<AtomicUsize>,
+    diagnostic: CveScanDiagnostic,
+    accumulated: &[CveScanDiagnostic],
+) -> Result<(), CveScanExecutionError> {
+    let request = CveScanHeartbeatRequest {
+        lease: claim.lease,
+        entries_collected: entries.load(Ordering::Relaxed),
+        observations_collected: observations.load(Ordering::Relaxed),
+        diagnostics: vec![diagnostic],
+    };
+    match api.heartbeat(&request).await {
+        Ok(true) => Ok(()),
+        Ok(false) | Err(CveApiError::Revoked) => Err(CveScanExecutionError::new(
+            CveScanFailureClass::Cancelled,
+            "CVE scan lease was revoked",
+        )
+        .with_diagnostics(accumulated.to_vec())),
+        Err(error) => Err(CveScanExecutionError::new(
+            error.failure_class(),
+            "CVE scan heartbeat failed while persisting phase diagnostics",
+        )
+        .with_diagnostics(accumulated.to_vec())),
     }
 }
 
@@ -1123,6 +1281,7 @@ async fn run_leased_command<A: CveLeaseApi>(
             lease: claim.lease,
             entries_collected: entries.load(Ordering::Relaxed),
             observations_collected: observations.load(Ordering::Relaxed),
+            diagnostics: Vec::new(),
         };
         async move {
             match api.heartbeat(&heartbeat).await {
@@ -1862,6 +2021,62 @@ mod tests {
         async fn fail(&self, _request: &CveScanFailRequest) -> Result<(), CveApiError> {
             Ok(())
         }
+    }
+
+    #[derive(Default)]
+    struct CapturingApi {
+        heartbeats: Mutex<Vec<CveScanHeartbeatRequest>>,
+    }
+
+    #[async_trait]
+    impl CveLeaseApi for CapturingApi {
+        async fn heartbeat(&self, request: &CveScanHeartbeatRequest) -> Result<bool, CveApiError> {
+            self.heartbeats
+                .lock()
+                .expect("heartbeat capture lock should remain available")
+                .push(request.clone());
+            Ok(true)
+        }
+
+        async fn complete(&self, _request: &CveScanCompleteRequest) -> Result<(), CveApiError> {
+            Ok(())
+        }
+
+        async fn fail(&self, _request: &CveScanFailRequest) -> Result<(), CveApiError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn phase_diagnostics_are_sent_before_terminal_reporting() {
+        let api = CapturingApi::default();
+        let claim = claim();
+        let diagnostic = scan_diagnostic(
+            "info",
+            "vulnix",
+            "scanner_started",
+            "Vulnix scan started for the authorized outputs.",
+            false,
+        );
+        persist_phase_diagnostic(
+            &api,
+            &claim,
+            &Arc::new(AtomicUsize::new(3)),
+            &Arc::new(AtomicUsize::new(5)),
+            diagnostic.clone(),
+            std::slice::from_ref(&diagnostic),
+        )
+        .await
+        .expect("phase heartbeat should be accepted");
+
+        let heartbeats = api
+            .heartbeats
+            .lock()
+            .expect("heartbeat capture lock should remain available");
+        assert_eq!(heartbeats.len(), 1);
+        assert_eq!(heartbeats[0].entries_collected, 3);
+        assert_eq!(heartbeats[0].observations_collected, 5);
+        assert_eq!(heartbeats[0].diagnostics, vec![diagnostic]);
     }
 
     struct RevokingApi;

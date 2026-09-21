@@ -9,7 +9,9 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::api::client::{ApiClientError, base_url, encode_uri_component, send_request_with_csrf};
-use crate::api::models::{CveAffectedSystemDetail, CveDetail};
+use crate::api::models::{
+    CveAffectedSystemDetail, CveDetail, FleetCveInventorySection, SystemCveInventoryAuthority,
+};
 pub use crate::api::models::{FindingObservationReference, FindingObservationSource};
 
 const PAGE_SIZE: i64 = 100;
@@ -238,6 +240,15 @@ pub struct CveAffectedEnvironment {
     /// Counts systems visible only through legacy inventory.
     #[serde(default)]
     pub legacy_affected_system_count: i64,
+    /// Counts exact current deployment findings when supplied by the server.
+    #[serde(default)]
+    pub current_affected_system_count: Option<i64>,
+    /// Counts exact active scheduled deployment targets when supplied.
+    #[serde(default)]
+    pub scheduled_deployment_target_count: Option<i64>,
+    /// Counts retained historical inventory systems when supplied.
+    #[serde(default)]
+    pub historical_inventory_system_count: Option<i64>,
     /// Lists the bounded server-resolved host details.
     #[serde(default)]
     pub systems: Vec<CveAffectedSystemDetail>,
@@ -266,6 +277,15 @@ pub struct FleetCveDetail {
     /// Counts visible systems backed only by legacy inventory.
     #[serde(default)]
     pub legacy_affected_system_count: i64,
+    /// Counts exact current deployment findings when supplied by the server.
+    #[serde(default)]
+    pub current_affected_system_count: Option<i64>,
+    /// Counts exact active scheduled deployment targets when supplied.
+    #[serde(default)]
+    pub scheduled_deployment_target_count: Option<i64>,
+    /// Counts retained historical inventory systems when supplied.
+    #[serde(default)]
+    pub historical_inventory_system_count: Option<i64>,
     /// Counts visible active systems without a usable completed scan.
     #[serde(default)]
     pub no_scan_system_count: i64,
@@ -283,28 +303,84 @@ pub struct FleetCveDetail {
 impl FleetCveDetail {
     // COMPATIBILITY: Servers from before inventory-authority rollout emitted
     // exact-only rows without the additive authority counters.
-    fn normalize_inventory_counts(&mut self) {
-        if self.exact_affected_system_count == 0
-            && self.legacy_affected_system_count == 0
-            && self.affected_system_count > 0
-        {
-            self.exact_affected_system_count = self.affected_system_count;
+    pub(crate) fn normalize_inventory_counts(&mut self) {
+        let has_relation_counts = self.current_affected_system_count.is_some()
+            || self.scheduled_deployment_target_count.is_some()
+            || self.historical_inventory_system_count.is_some();
+        if has_relation_counts {
+            self.current_affected_system_count.get_or_insert_default();
+            self.scheduled_deployment_target_count
+                .get_or_insert_default();
+            self.historical_inventory_system_count
+                .get_or_insert_default();
+        } else {
+            self.current_affected_system_count = Some(self.exact_affected_system_count);
+            self.scheduled_deployment_target_count = Some(0);
+            self.historical_inventory_system_count = Some(self.legacy_affected_system_count);
+            normalize_legacy_inventory_sections(&mut self.unassigned_systems);
         }
         for environment in &mut self.environments {
-            if environment.exact_affected_system_count == 0
-                && environment.legacy_affected_system_count == 0
-                && environment.affected_system_count > 0
-            {
-                environment.exact_affected_system_count = environment.affected_system_count;
+            let has_environment_relation_counts =
+                environment.current_affected_system_count.is_some()
+                    || environment.scheduled_deployment_target_count.is_some()
+                    || environment.historical_inventory_system_count.is_some();
+            if has_environment_relation_counts {
+                environment
+                    .current_affected_system_count
+                    .get_or_insert_default();
+                environment
+                    .scheduled_deployment_target_count
+                    .get_or_insert_default();
+                environment
+                    .historical_inventory_system_count
+                    .get_or_insert_default();
+            } else {
+                environment.current_affected_system_count =
+                    Some(environment.exact_affected_system_count);
+                environment.scheduled_deployment_target_count = Some(0);
+                environment.historical_inventory_system_count =
+                    Some(environment.legacy_affected_system_count);
+                normalize_legacy_inventory_sections(&mut environment.systems);
             }
         }
-        if self.exact_mutation_target_count == 0 {
+        if self.exact_mutation_target_count == 0 && !has_relation_counts {
             self.exact_mutation_target_count = self
                 .environments
                 .iter()
                 .map(|environment| environment.exact_affected_system_count)
                 .sum();
         }
+    }
+
+    /// Returns normalized current, scheduled-target, and historical counts.
+    pub(crate) fn inventory_counts(&self) -> (i64, i64, i64) {
+        (
+            self.current_affected_system_count.unwrap_or_default(),
+            self.scheduled_deployment_target_count.unwrap_or_default(),
+            self.historical_inventory_system_count.unwrap_or_default(),
+        )
+    }
+}
+
+fn normalize_legacy_inventory_sections(systems: &mut [CveAffectedSystemDetail]) {
+    for system in systems {
+        system.inventory_section = match system.inventory_authority {
+            SystemCveInventoryAuthority::Legacy => FleetCveInventorySection::Historical,
+            SystemCveInventoryAuthority::Exact | SystemCveInventoryAuthority::NoScan => {
+                FleetCveInventorySection::Current
+            }
+        };
+    }
+}
+
+impl CveAffectedEnvironment {
+    /// Returns normalized current, scheduled-target, and historical counts.
+    pub(crate) fn inventory_counts(&self) -> (i64, i64, i64) {
+        (
+            self.current_affected_system_count.unwrap_or_default(),
+            self.scheduled_deployment_target_count.unwrap_or_default(),
+            self.historical_inventory_system_count.unwrap_or_default(),
+        )
     }
 }
 
@@ -2426,11 +2502,38 @@ mod tests {
             },
             "canonical_package_name": "openssl",
             "rollup": "outstanding",
-            "affected_system_count": 1,
+            "affected_system_count": 3,
+            "exact_affected_system_count": 2,
+            "legacy_affected_system_count": 1,
             "environments": [{
                 "environment_id": Uuid::from_u128(1),
                 "environment_name": "Production",
-                "affected_system_count": 1,
+                "affected_system_count": 3,
+                "exact_affected_system_count": 2,
+                "legacy_affected_system_count": 1,
+                "systems": [{
+                    "system_id": Uuid::from_u128(2),
+                    "hostname": "exact-host",
+                    "environment": "Production",
+                    "primary_ip_address": null,
+                    "flake_name": "platform",
+                    "flake_id": 1,
+                    "commit_hash": null,
+                    "deployment_policy": "manual",
+                    "current_package_version": "3.4.1",
+                    "inventory_authority": "exact"
+                }, {
+                    "system_id": Uuid::from_u128(3),
+                    "hostname": "legacy-host",
+                    "environment": "Production",
+                    "primary_ip_address": null,
+                    "flake_name": "platform",
+                    "flake_id": 1,
+                    "commit_hash": null,
+                    "deployment_policy": "manual",
+                    "current_package_version": "3.4.0",
+                    "inventory_authority": "legacy"
+                }],
                 "future_server_field": { "ignored": true }
             }],
             "future_top_level_field": "ignored"
@@ -2438,17 +2541,72 @@ mod tests {
         .unwrap();
 
         assert_eq!(detail.environments[0].disposition, None);
-        assert!(detail.environments[0].systems.is_empty());
+        assert_eq!(detail.environments[0].systems.len(), 2);
         detail.normalize_inventory_counts();
-        assert_eq!(detail.exact_affected_system_count, 1);
-        assert_eq!(detail.legacy_affected_system_count, 0);
-        assert_eq!(detail.exact_mutation_target_count, 1);
-        assert_eq!(detail.environments[0].exact_affected_system_count, 1);
+        assert_eq!(detail.inventory_counts(), (2, 0, 1));
+        assert_eq!(detail.exact_mutation_target_count, 2);
+        assert_eq!(detail.environments[0].inventory_counts(), (2, 0, 1));
+        assert_eq!(
+            detail.environments[0].systems[0].inventory_section,
+            FleetCveInventorySection::Current
+        );
+        assert_eq!(
+            detail.environments[0].systems[1].inventory_section,
+            FleetCveInventorySection::Historical
+        );
 
         detail.environments.clear();
         detail.exact_mutation_target_count = 0;
         detail.normalize_inventory_counts();
-        assert_eq!(detail.exact_affected_system_count, 1);
+        assert_eq!(detail.exact_affected_system_count, 2);
+        assert_eq!(detail.exact_mutation_target_count, 0);
+    }
+
+    #[test]
+    fn fleet_detail_does_not_promote_explicit_inventory_only_relations() {
+        let mut detail: FleetCveDetail = serde_json::from_value(serde_json::json!({
+            "cve": {
+                "cve_id": "CVE-2026-1002",
+                "cvss_v3_score": null,
+                "severity": "medium",
+                "title": "Inventory-only vulnerability",
+                "cvss_vector": null,
+                "cwe_id": null,
+                "published_date": null,
+                "modified_date": null,
+                "exploited": false,
+                "package_name": "openssl",
+                "installed_version": "3.4.1",
+                "fixed_version": null,
+                "detection_method": "vulnix",
+                "fix_status": "pending"
+            },
+            "canonical_package_name": "openssl",
+            "rollup": "outstanding",
+            "affected_system_count": 1,
+            "exact_affected_system_count": 1,
+            "exact_mutation_target_count": 0,
+            "legacy_affected_system_count": 0,
+            "current_affected_system_count": 0,
+            "scheduled_deployment_target_count": 1,
+            "historical_inventory_system_count": 1,
+            "environments": [{
+                "environment_id": Uuid::from_u128(2),
+                "environment_name": "Production",
+                "affected_system_count": 1,
+                "exact_affected_system_count": 1,
+                "legacy_affected_system_count": 0,
+                "current_affected_system_count": 0,
+                "scheduled_deployment_target_count": 1,
+                "historical_inventory_system_count": 1
+            }]
+        }))
+        .unwrap();
+
+        detail.normalize_inventory_counts();
+
+        assert_eq!(detail.inventory_counts(), (0, 1, 1));
+        assert_eq!(detail.environments[0].inventory_counts(), (0, 1, 1));
         assert_eq!(detail.exact_mutation_target_count, 0);
     }
 

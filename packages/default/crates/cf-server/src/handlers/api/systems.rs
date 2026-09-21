@@ -4134,6 +4134,7 @@ pub async fn get_system_commits(
                     author: row.author.unwrap_or_else(|| "unknown".to_string()),
                     timestamp: row.timestamp.to_rfc3339(),
                     config_inspectable: row.config_inspectable,
+                    deployed_here: row.deployed_here,
                 }
             })
             .collect::<Vec<_>>(),

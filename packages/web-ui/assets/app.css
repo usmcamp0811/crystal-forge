@@ -1902,6 +1902,34 @@ select.input {
   margin-top: 2px;
 }
 
+/* Native select popups use the active application palette. */
+:root[data-theme="dark"],
+html[data-theme="dark"] select,
+html[data-theme="dark"] option {
+  color-scheme: dark;
+}
+
+:root[data-theme="light"],
+html[data-theme="light"] select,
+html[data-theme="light"] option {
+  color-scheme: light;
+}
+
+select option {
+  background: var(--cf-card-bg);
+  color: var(--cf-text-primary);
+}
+
+select option:disabled {
+  color: var(--cf-text-disabled);
+}
+
+select option:checked {
+  background: var(--cf-input-bg);
+  color: var(--cf-text-primary);
+  font-weight: 600;
+}
+
 .rev-bar {
   display: flex;
   align-items: center;
@@ -1916,8 +1944,10 @@ select.input {
 .rev-bar-hist { border-color: color-mix(in oklab, #fbbf24 38%, var(--cf-card-border)); background: color-mix(in oklab, #fbbf24 4%, var(--cf-card-bg)); }
 .rev-bar-label { flex: 0 0 auto; color: var(--cf-text-muted); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
 .rev-bar .cfgx-select { min-width: 230px; max-width: 360px; }
-.rev-bar-meta { min-width: 0; flex: 1; overflow: hidden; color: var(--cf-text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.rev-bar-msg { overflow: hidden; text-overflow: ellipsis; }
+.rev-bar-meta { display: flex; align-items: center; gap: 7px; min-width: 0; flex: 1 1 340px; overflow: hidden; color: var(--cf-text-muted); font-size: 11.5px; white-space: nowrap; }
+.rev-bar-meta > * { flex-shrink: 0; }
+.rev-bar-msg { min-width: 0; flex: 0 1 auto; overflow: hidden; color: var(--cf-text-secondary); text-overflow: ellipsis; }
+.rev-bar-dot { color: var(--cf-text-disabled); }
 .rev-bar-state { flex: 0 0 auto; }
 .rev-bar-state .chip { font-size: 10px; }
 .hardening-target-state { display: flex; justify-content: flex-end; margin-bottom: 10px; }
@@ -7877,7 +7907,7 @@ html[data-theme="light"] .scanning-detail-callout-danger strong { color:#b91c1c;
 .cve-section-head h3 { margin: 0; color: var(--cf-text-muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
 .cve-section-head span { color: var(--cf-text-muted); font-size: 11px; }
 .cve-vector code { align-self: flex-start; max-width: 100%; padding: 6px 10px; overflow-wrap: anywhere; border-radius: 6px; background: var(--cf-subtle-bg); color: var(--cf-text-primary); font-size: 12px; }
-.cve-authority-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); overflow: hidden; border: 1px solid var(--cf-divider); border-radius: 8px; background: var(--cf-subtle-bg); }
+.cve-authority-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); overflow: hidden; border: 1px solid var(--cf-divider); border-radius: 8px; background: var(--cf-subtle-bg); }
 .cve-authority-strip > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; padding: 8px 10px; border-right: 1px solid var(--cf-divider); }
 .cve-authority-strip > div:last-child { border-right: 0; }
 .cve-authority-strip span { overflow: hidden; color: var(--cf-text-muted); font-size: 10px; letter-spacing: .04em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
@@ -7904,9 +7934,14 @@ html[data-theme="light"] .scanning-detail-callout-danger strong { color:#b91c1c;
 .cve-inventory-env > header div { display: flex; align-items: center; gap: 8px; }
 .cve-inventory-env > header span, .cve-inventory-env > small { color: var(--cf-text-muted); font-size: 11px; }
 .cve-inventory-env > small { display: block; padding: 8px 11px; }
+.cve-inventory-summary { margin-top: 2px; font-size: 11px; }
+.cve-inventory-section { display: flex; flex-direction: column; gap: 8px; padding: 11px; border: 1px solid var(--cf-divider); border-radius: 10px; background: var(--cf-subtle-bg); }
+.cve-inventory-section[data-section="current"] { border-left: 3px solid #f87171; }
+.cve-inventory-section[data-section="scheduled_deployment_target"] { border-left: 3px solid #22d3ee; }
+.cve-inventory-section[data-section="historical"] { border-left: 3px solid #9ca3af; }
 .cve-inventory-authority { white-space: nowrap; }
 .cve-fleet-hosts { display: flex; flex-direction: column; gap: 1px; }
-.cve-fleet-host { display: grid; grid-template-columns: minmax(140px, 1.1fr) minmax(100px, .9fr) minmax(115px, 1fr) minmax(90px, auto) auto auto; gap: 10px; align-items: center; min-width: 0; padding: 7px 10px; border-bottom: 1px solid var(--cf-divider); font-size: 11px; }
+.cve-fleet-host { display: grid; grid-template-columns: minmax(140px, 1.1fr) minmax(100px, .9fr) minmax(115px, 1fr) minmax(90px, auto) auto auto auto; gap: 10px; align-items: center; min-width: 0; padding: 7px 10px; border-bottom: 1px solid var(--cf-divider); font-size: 11px; }
 .cve-fleet-host:last-child { border-bottom: 0; }
 .cve-host-name { font-weight: 600; }
 .cve-triage-backdrop { z-index: 200; }
@@ -7938,11 +7973,11 @@ html[data-theme="light"] .scanning-detail-callout-danger strong { color:#b91c1c;
   .cve-fleet-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cve-fleet-head { align-items: flex-start; }
   .cve-fleet-actions { flex-wrap: wrap; justify-content: flex-end; }
-  .cve-authority-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .cve-authority-strip > div:nth-child(2) { border-right: 0; }
-  .cve-authority-strip > div:nth-child(-n+2) { border-bottom: 1px solid var(--cf-divider); }
+  .cve-authority-strip { grid-template-columns: 1fr; }
+  .cve-authority-strip > div { border-right: 0; border-bottom: 1px solid var(--cf-divider); }
+  .cve-authority-strip > div:last-child { border-bottom: 0; }
   .cve-scheduled-meta { grid-template-columns: 1fr; }
-  .cve-fleet-host { grid-template-columns: minmax(120px, 1fr) minmax(90px, 1fr) auto auto; }
+  .cve-fleet-host { grid-template-columns: minmax(120px, 1fr) minmax(90px, 1fr) auto auto auto; }
   .cve-fleet-host > :nth-child(3), .cve-fleet-host > :nth-child(4) { display: none; }
   .cve-triage-context-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cve-triage-context-grid > div:nth-child(3n) { border-right: 1px solid var(--cf-divider); }

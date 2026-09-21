@@ -9,10 +9,10 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::api::models::{
-    BuildQueueItem, BuildQueuePageResponse, BuildQueueParams, BuildQueueSummary, BuildStatus,
-    CacheHealthStatus, CacheHealthSummary, CveSummary, DashboardActivity, DashboardActivityKind,
-    DashboardActivityStatus, DeploymentStatus, DeploymentStatusSummary, FleetHealthSummary,
-    RecentDeployment,
+    BuildAttemptCollection, BuildAttemptLookupResponse, BuildQueueItem, BuildQueuePageResponse,
+    BuildQueueParams, BuildQueueSummary, BuildStatus, CacheHealthStatus, CacheHealthSummary,
+    CveSummary, DashboardActivity, DashboardActivityKind, DashboardActivityStatus,
+    DeploymentStatus, DeploymentStatusSummary, FleetHealthSummary, RecentDeployment,
 };
 
 /// Query `view_fleet_health_status` for system counts by health category.
@@ -742,6 +742,187 @@ pub async fn fetch_activity_for_user(
         .collect()
 }
 
+const EXACT_BUILD_ATTEMPT_SQL: &str = r#"
+SELECT
+    bj.id AS job_id,
+    resolved_system.id AS system_id,
+    commit.flake_id,
+    COALESCE(resolved_system.hostname, derivation.derivation_target, derivation.derivation_name) AS hostname,
+    flake.name AS flake_name,
+    commit.git_commit_hash AS commit_hash,
+    NULLIF(split_part(COALESCE(commit.message, ''), E'\n', 1), '') AS commit_message,
+    bj.status,
+    builder.name AS builder_name,
+    bj.created_at AS queued_at,
+    bj.started_at,
+    CASE
+        WHEN bj.started_at IS NULL THEN NULL
+        WHEN bj.status IN ('success', 'failed', 'cancelled') AND bj.completed_at IS NOT NULL
+            THEN EXTRACT(EPOCH FROM (bj.completed_at - bj.started_at))::BIGINT
+        ELSE EXTRACT(EPOCH FROM (NOW() - bj.started_at))::BIGINT
+    END AS elapsed_secs,
+    bj.logs,
+    environment.name AS environment,
+    bj.attempt_number,
+    bj.parent_job_id,
+    bj.root_job_id,
+    derivation.commit_id,
+    bj.server_failure_code,
+    bj.available_at,
+    COALESCE(flake.snapshot_ready_at IS NOT NULL AND latest_snapshot.commit_id = commit.id, FALSE)
+        AS is_latest_per_flake,
+    COALESCE((
+        SELECT COUNT(*)::BIGINT
+        FROM derivations related
+        WHERE related.commit_id = derivation.commit_id
+          AND related.derivation_target = derivation.derivation_target
+          AND related.status_id >= 5
+          AND related.status_id <> 6
+    ), 0)::BIGINT AS total_derivs,
+    COALESCE((
+        SELECT COUNT(*)::BIGINT
+        FROM derivations related
+        WHERE related.commit_id = derivation.commit_id
+          AND related.derivation_target = derivation.derivation_target
+          AND related.status_id IN (10, 11, 12)
+    ), 0)::BIGINT AS built_derivs,
+    COALESCE((
+        SELECT COUNT(*)::BIGINT
+        FROM derivations related
+        WHERE related.commit_id = derivation.commit_id
+          AND related.derivation_target = derivation.derivation_target
+          AND related.status_id = 14
+    ), 0)::BIGINT AS cached_derivs
+FROM build_jobs bj
+JOIN derivations derivation ON derivation.id = bj.derivation_id
+LEFT JOIN commits commit ON commit.id = derivation.commit_id
+LEFT JOIN flakes flake ON flake.id = commit.flake_id
+LEFT JOIN flake_branch_commit_snapshot latest_snapshot
+  ON latest_snapshot.flake_id = commit.flake_id
+ AND latest_snapshot.position = 0
+LEFT JOIN LATERAL (
+    SELECT id, hostname, environment_id
+    FROM systems
+    WHERE (hostname = derivation.derivation_target
+       OR (system_configuration_name IS NOT NULL
+           AND system_configuration_name = derivation.derivation_target))
+      AND systems.flake_id = commit.flake_id
+      AND (bj.environment_id IS NULL OR environment_id = bj.environment_id)
+      AND ($2::uuid IS NULL OR bj.environment_id IS NOT NULL OR EXISTS (
+          SELECT 1
+          FROM user_environment_memberships membership
+          WHERE membership.user_id = $2
+            AND membership.environment_id = systems.environment_id
+      ))
+    ORDER BY
+        CASE WHEN hostname = derivation.derivation_target THEN 0 ELSE 1 END,
+        id
+    LIMIT 1
+) resolved_system ON TRUE
+LEFT JOIN environments environment
+  ON environment.id = COALESCE(bj.environment_id, resolved_system.environment_id)
+LEFT JOIN builders builder ON builder.id = bj.builder_id
+WHERE bj.id = $1
+  AND ($2::uuid IS NULL OR EXISTS (
+      SELECT 1
+      FROM user_environment_memberships membership
+      WHERE membership.user_id = $2
+        AND membership.environment_id = COALESCE(bj.environment_id, resolved_system.environment_id)
+  ))
+"#;
+
+/// Returns one exact build attempt in the caller's environment visibility scope.
+///
+/// The primary-key predicate and authorization predicate execute in one query.
+/// A hidden attempt therefore has the same `None` result as a missing attempt.
+///
+/// # Errors
+///
+/// Returns an error when the database query fails or a persisted status is not
+/// part of the supported build lifecycle.
+pub async fn get_build_attempt_by_id(
+    pool: &PgPool,
+    attempt_id: Uuid,
+    visibility_user_id: Option<Uuid>,
+) -> Result<Option<BuildAttemptLookupResponse>> {
+    #[derive(sqlx::FromRow)]
+    struct ExactBuildRow {
+        job_id: Uuid,
+        system_id: Option<Uuid>,
+        flake_id: Option<i32>,
+        hostname: Option<String>,
+        flake_name: Option<String>,
+        commit_hash: Option<String>,
+        commit_message: Option<String>,
+        status: String,
+        builder_name: Option<String>,
+        queued_at: DateTime<Utc>,
+        started_at: Option<DateTime<Utc>>,
+        elapsed_secs: Option<i64>,
+        logs: Option<String>,
+        environment: Option<String>,
+        attempt_number: i32,
+        parent_job_id: Option<Uuid>,
+        root_job_id: Option<Uuid>,
+        commit_id: Option<i32>,
+        server_failure_code: Option<String>,
+        available_at: DateTime<Utc>,
+        is_latest_per_flake: bool,
+        total_derivs: i64,
+        built_derivs: i64,
+        cached_derivs: i64,
+    }
+
+    let row = sqlx::query_as::<_, ExactBuildRow>(EXACT_BUILD_ATTEMPT_SQL)
+        .bind(attempt_id)
+        .bind(visibility_user_id)
+        .fetch_optional(pool)
+        .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let (collection, status) = match row.status.as_str() {
+        "queued" => (BuildAttemptCollection::Active, BuildStatus::Queued),
+        "building" => (BuildAttemptCollection::Active, BuildStatus::Building),
+        "cancelling" => (BuildAttemptCollection::Active, BuildStatus::Cancelling),
+        "success" => (BuildAttemptCollection::Completed, BuildStatus::Complete),
+        "failed" => (BuildAttemptCollection::Completed, BuildStatus::Failed),
+        "cancelled" => (BuildAttemptCollection::Completed, BuildStatus::Cancelled),
+        status => anyhow::bail!("unsupported persisted build status {status}"),
+    };
+
+    Ok(Some(BuildAttemptLookupResponse {
+        collection,
+        attempt: BuildQueueItem {
+            job_id: Some(row.job_id),
+            system_id: row.system_id,
+            flake_id: row.flake_id,
+            is_latest_per_flake: row.is_latest_per_flake,
+            hostname: row.hostname.unwrap_or_else(|| "unknown".to_string()),
+            flake_name: row.flake_name.unwrap_or_else(|| "unknown".to_string()),
+            commit_hash: row.commit_hash.unwrap_or_else(|| "unknown".to_string()),
+            commit_message: row.commit_message,
+            status,
+            builder_name: row.builder_name,
+            queued_at: row.queued_at,
+            attempt_number: row.attempt_number,
+            parent_job_id: row.parent_job_id,
+            root_job_id: row.root_job_id,
+            commit_id: row.commit_id,
+            server_failure_code: row.server_failure_code,
+            available_at: Some(row.available_at),
+            started_at: row.started_at,
+            elapsed_secs: row.elapsed_secs,
+            logs: row.logs,
+            environment: row.environment,
+            total_derivs: row.total_derivs,
+            built_derivs: row.built_derivs,
+            cached_derivs: row.cached_derivs,
+        },
+    }))
+}
+
 /// Fetches recent completed/failed builds as a growing, visibility-scoped prefix.
 ///
 /// `visibility_user_id` scopes non-admin callers to assigned environments;
@@ -836,7 +1017,6 @@ pub async fn fetch_recent_build_history(
               AND ($6::timestamptz IS NULL OR created_at <= $6)
                AND ($7::text IS NULL OR display_name ILIKE ('%' || $7 || '%') OR flake_name ILIKE ('%' || $7 || '%')
                     OR git_commit_hash ILIKE ('%' || $7 || '%') OR builder_name ILIKE ('%' || $7 || '%')
-                    OR id::text = $7
                     OR status ILIKE ('%' || $7 || '%')
                    OR CASE status WHEN 'success' THEN 'complete' WHEN 'cancelling' THEN 'stopping' ELSE status END ILIKE ('%' || $7 || '%')
                    OR 'x86_64-linux' ILIKE ('%' || $7 || '%'))
@@ -929,8 +1109,7 @@ pub async fn fetch_recent_build_history(
               AND ($6::timestamptz IS NULL OR queued_at <= $6)
               AND ($7::text IS NULL OR hostname ILIKE ('%' || $7 || '%') OR flake_name ILIKE ('%' || $7 || '%')
                    OR commit_hash ILIKE ('%' || $7 || '%') OR COALESCE(builder_name, '') ILIKE ('%' || $7 || '%')
-                   OR job_id::text = $7
-                   OR status ILIKE ('%' || $7 || '%')
+                    OR status ILIKE ('%' || $7 || '%')
                    OR CASE status WHEN 'success' THEN 'complete' WHEN 'cancelling' THEN 'stopping' ELSE status END ILIKE ('%' || $7 || '%')
                    OR 'x86_64-linux' ILIKE ('%' || $7 || '%'))
                AND (NOT $8 OR is_latest_per_flake)
@@ -1136,8 +1315,7 @@ pub async fn list_build_queue_paginated(
               AND ($7::timestamptz IS NULL OR created_at <= $7)
               AND ($8::text IS NULL OR display_name ILIKE ('%' || $8 || '%') OR flake_name ILIKE ('%' || $8 || '%')
                    OR git_commit_hash ILIKE ('%' || $8 || '%') OR builder_name ILIKE ('%' || $8 || '%')
-                   OR id::text = $8
-                   OR status ILIKE ('%' || $8 || '%')
+                    OR status ILIKE ('%' || $8 || '%')
                    OR CASE status WHEN 'success' THEN 'complete' WHEN 'cancelling' THEN 'stopping' ELSE status END ILIKE ('%' || $8 || '%')
                    OR 'x86_64-linux' ILIKE ('%' || $8 || '%'))
                AND (NOT $9 OR is_latest_per_flake)
@@ -1285,7 +1463,6 @@ pub async fn list_build_queue_paginated(
             AND ($7::timestamptz IS NULL OR queued_at <= $7)
             AND ($8::text IS NULL OR hostname ILIKE ('%' || $8 || '%') OR flake_name ILIKE ('%' || $8 || '%')
                  OR commit_hash ILIKE ('%' || $8 || '%') OR COALESCE(builder_name, '') ILIKE ('%' || $8 || '%')
-                 OR job_id::text = $8
                  OR status ILIKE ('%' || $8 || '%')
                  OR CASE status WHEN 'success' THEN 'complete' WHEN 'cancelling' THEN 'stopping' ELSE status END ILIKE ('%' || $8 || '%')
                  OR 'x86_64-linux' ILIKE ('%' || $8 || '%'))
@@ -1673,6 +1850,191 @@ mod tests {
         assert!(history.items.iter().all(|item| item.is_latest_per_flake));
     }
 
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "runs in the PostgreSQL server-regressions check"]
+    async fn exact_build_lookup_plan_stays_primary_key_bounded_at_production_scale(pool: PgPool) {
+        async fn explain_exact(pool: &PgPool, attempt_id: Uuid, user_id: Uuid) -> String {
+            let sql = format!("EXPLAIN (ANALYZE, BUFFERS) {EXACT_BUILD_ATTEMPT_SQL}");
+            sqlx::query_scalar::<_, String>(&sql)
+                .bind(attempt_id)
+                .bind(user_id)
+                .fetch_all(pool)
+                .await
+                .unwrap()
+                .join("\n")
+        }
+
+        let suffix = Uuid::new_v4().simple().to_string();
+        let visible_env = Uuid::new_v4();
+        let hidden_env = Uuid::new_v4();
+        for (environment_id, label) in [(visible_env, "visible"), (hidden_env, "hidden")] {
+            sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+                .bind(environment_id)
+                .bind(format!("exact-plan-{label}-{}", &suffix[..12]))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, username, first_name, last_name, email, user_type) \
+             VALUES ($1, $2, 'Exact', 'Viewer', $3, 'human')",
+        )
+        .bind(user_id)
+        .bind(format!("exact-plan-viewer-{suffix}"))
+        .bind(format!("exact-plan-viewer-{suffix}@example.invalid"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO user_environment_memberships (user_id, environment_id) VALUES ($1, $2)",
+        )
+        .bind(user_id)
+        .bind(visible_env)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let flake_id: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+        )
+        .bind(format!("exact-plan-flake-{suffix}"))
+        .bind(format!("https://example.invalid/exact-plan-{suffix}.git"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) \
+             VALUES ($1, $2, NOW()) RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(format!("exact-plan-commit-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let derivation_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations \
+             (commit_id, derivation_name, derivation_target, derivation_type, status_id) \
+             VALUES ($1, $2, $2, 'nixos', 5) RETURNING id",
+        )
+        .bind(commit_id)
+        .bind(format!("exact-plan-host-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // This retained terminal corpus approximates a production build history
+        // while sharing one derivation to keep the fixture setup bounded.
+        sqlx::query(
+            "INSERT INTO build_jobs (derivation_id, environment_id, status, completed_at) \
+             SELECT $1, $2, 'failed', NOW() FROM generate_series(1, 20000)",
+        )
+        .bind(derivation_id)
+        .bind(visible_env)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let active_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs \
+             (derivation_id, environment_id, status, queue_position) \
+             VALUES ($1, $2, 'queued', 1) RETURNING id",
+        )
+        .bind(derivation_id)
+        .bind(visible_env)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let completed_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM build_jobs \
+             WHERE derivation_id = $1 AND environment_id = $2 AND status = 'failed' LIMIT 1",
+        )
+        .bind(derivation_id)
+        .bind(visible_env)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let hidden_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, environment_id, status, completed_at) \
+             VALUES ($1, $2, 'failed', NOW()) RETURNING id",
+        )
+        .bind(derivation_id)
+        .bind(hidden_env)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE build_jobs")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let missing_id = Uuid::new_v4();
+        for (label, attempt_id) in [
+            ("active", active_id),
+            ("completed", completed_id),
+            ("hidden", hidden_id),
+            ("missing", missing_id),
+        ] {
+            let plan = explain_exact(&pool, attempt_id, user_id).await;
+            assert!(
+                plan.contains("build_jobs_pkey"),
+                "{label} exact lookup did not use the build_jobs primary key:\n{plan}"
+            );
+            assert!(
+                !plan.contains("Seq Scan on build_jobs"),
+                "{label} exact lookup scanned build history:\n{plan}"
+            );
+            assert!(plan.contains("Buffers:"), "{label} plan omitted buffers");
+            assert!(
+                plan.contains("Execution Time:"),
+                "{label} plan did not execute"
+            );
+        }
+
+        let legacy_plan = sqlx::query_scalar::<_, String>(
+            "EXPLAIN (ANALYZE, BUFFERS) \
+             SELECT id FROM build_jobs WHERE id::text = $1",
+        )
+        .bind(completed_id.to_string())
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+        .join("\n");
+        assert!(
+            legacy_plan.contains("Seq Scan on build_jobs"),
+            "UUID text search unexpectedly avoided the retained-history scan:\n{legacy_plan}"
+        );
+
+        assert_eq!(
+            get_build_attempt_by_id(&pool, active_id, Some(user_id))
+                .await
+                .unwrap()
+                .unwrap()
+                .collection,
+            BuildAttemptCollection::Active
+        );
+        assert_eq!(
+            get_build_attempt_by_id(&pool, completed_id, Some(user_id))
+                .await
+                .unwrap()
+                .unwrap()
+                .collection,
+            BuildAttemptCollection::Completed
+        );
+        assert!(
+            get_build_attempt_by_id(&pool, hidden_id, Some(user_id))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            get_build_attempt_by_id(&pool, missing_id, Some(user_id))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
     /// Connect to the migrated, repository-owned test database.
     ///
     /// Mirrors the pattern used by the other database-backed regressions so the
@@ -1787,6 +2149,12 @@ mod tests {
             .find(|item| item.job_id == Some(visible_job_id))
             .unwrap();
         assert_eq!(item.hostname, format!("visible-host-{suffix}"));
+        let active_exact = get_build_attempt_by_id(&pool, visible_job_id, Some(user_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(active_exact.collection, BuildAttemptCollection::Active);
+        assert_eq!(active_exact.attempt.job_id, Some(visible_job_id));
 
         let cache_name = format!("dashboard-cache-{suffix}");
         sqlx::query(
@@ -1861,6 +2229,56 @@ mod tests {
                 .items
                 .iter()
                 .all(|item| item.job_id != Some(hidden_job_id))
+        );
+        let completed_exact = get_build_attempt_by_id(&pool, visible_job_id, Some(user_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            completed_exact.collection,
+            BuildAttemptCollection::Completed
+        );
+        assert_eq!(completed_exact.attempt.job_id, Some(visible_job_id));
+        assert!(
+            get_build_attempt_by_id(&pool, hidden_job_id, Some(user_id))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            get_build_attempt_by_id(&pool, Uuid::new_v4(), Some(user_id))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            get_build_attempt_by_id(&pool, hidden_job_id, None)
+                .await
+                .unwrap()
+                .unwrap()
+                .attempt
+                .job_id,
+            Some(hidden_job_id)
+        );
+
+        let uuid_search = BuildQueueParams {
+            search: Some(visible_job_id.to_string()),
+            limit: 100,
+            ..Default::default()
+        };
+        assert!(
+            list_build_queue_paginated(&pool, &uuid_search, Some(user_id))
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert!(
+            fetch_recent_build_history(&pool, &uuid_search, Some(user_id))
+                .await
+                .unwrap()
+                .items
+                .is_empty()
         );
 
         let timelines = crate::queries::flakes::fetch_dashboard_flake_timelines(

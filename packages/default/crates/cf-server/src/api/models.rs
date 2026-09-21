@@ -972,10 +972,19 @@ pub struct CveListItem {
     pub fixed_version: Option<String>,
     pub fix_status: String,
     pub affected_count: i64,
-    /// Counts affected systems backed by exact immutable observations.
+    /// Counts distinct systems in current or scheduled deployment inventory.
     pub exact_affected_count: i64,
-    /// Counts affected systems visible only through legacy scan inventory.
+    /// Counts systems in retained historical inventory.
     pub legacy_affected_count: i64,
+    /// Counts systems affected in their exact current deployment.
+    #[serde(default)]
+    pub current_affected_count: i64,
+    /// Counts systems affected in an exact active scheduled deployment target.
+    #[serde(default)]
+    pub scheduled_deployment_target_count: i64,
+    /// Counts systems visible only in retained historical inventory.
+    #[serde(default)]
+    pub historical_inventory_count: i64,
     pub affected_environments: Option<Vec<String>>,
     pub first_seen: Option<DateTime<Utc>>,
     pub last_seen: Option<DateTime<Utc>>,
@@ -994,6 +1003,15 @@ pub struct CvePackageGroup {
     pub low_count: i64,
     pub environments_count: i64,
     pub total_affected_systems: i64,
+    /// Counts systems affected in their exact current deployment.
+    #[serde(default)]
+    pub current_affected_systems: i64,
+    /// Counts systems affected in an exact active scheduled deployment target.
+    #[serde(default)]
+    pub scheduled_deployment_target_systems: i64,
+    /// Counts systems visible only in retained historical inventory.
+    #[serde(default)]
+    pub historical_inventory_systems: i64,
     pub fixable_count: i64,
     pub outstanding_count: i64,
     pub exploited_count: i64,
@@ -1115,6 +1133,15 @@ pub struct CveAffectedEnvironment {
     pub exact_affected_system_count: i64,
     /// Counts systems visible only through legacy inventory.
     pub legacy_affected_system_count: i64,
+    /// Counts systems affected in their exact current deployment.
+    #[serde(default)]
+    pub current_affected_system_count: i64,
+    /// Counts exact active scheduled deployment targets.
+    #[serde(default)]
+    pub scheduled_deployment_target_count: i64,
+    /// Counts systems shown only as retained historical inventory.
+    #[serde(default)]
+    pub historical_inventory_system_count: i64,
     /// Lists the bounded affected systems for drawer presentation.
     pub systems: Vec<CveAffectedSystemDetail>,
     /// Gives the current disposition. `None` means OPEN.
@@ -1138,6 +1165,15 @@ pub struct FleetCveDetail {
     pub exact_mutation_target_count: i64,
     /// Counts visible systems backed only by legacy inventory.
     pub legacy_affected_system_count: i64,
+    /// Counts systems affected in their exact current deployment.
+    #[serde(default)]
+    pub current_affected_system_count: i64,
+    /// Counts exact active scheduled deployment targets.
+    #[serde(default)]
+    pub scheduled_deployment_target_count: i64,
+    /// Counts systems shown only as retained historical inventory.
+    #[serde(default)]
+    pub historical_inventory_system_count: i64,
     /// Counts visible active systems without a usable completed scan.
     pub no_scan_system_count: i64,
     /// Counts affected systems that an Admin can see without an environment.
@@ -1396,6 +1432,22 @@ pub struct CveAffectedSystemDetail {
     pub current_package_version: Option<String>,
     /// Identifies whether the displayed finding is exact or display-only.
     pub inventory_authority: SystemCveInventoryAuthority,
+    /// Identifies why the system appears in fleet inventory.
+    #[serde(default)]
+    pub inventory_section: FleetCveInventorySection,
+}
+
+/// Identifies one read-only fleet CVE inventory section.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetCveInventorySection {
+    /// The finding affects the system's exact current deployment.
+    #[default]
+    Current,
+    /// The finding affects an exact active scheduled deployment target.
+    ScheduledDeploymentTarget,
+    /// The finding is retained historical inventory and is display-only.
+    Historical,
 }
 
 /// CVE justification (triage) record.
@@ -1437,6 +1489,15 @@ pub struct CveFleetStats {
     pub exact_systems_affected: i64,
     /// Counts distinct affected systems with at least one legacy-only finding.
     pub legacy_systems_affected: i64,
+    /// Counts distinct systems with an exact current finding.
+    #[serde(default)]
+    pub current_systems_affected: i64,
+    /// Counts distinct systems with an exact active scheduled-target finding.
+    #[serde(default)]
+    pub scheduled_deployment_target_systems: i64,
+    /// Counts distinct systems visible only through historical inventory.
+    #[serde(default)]
+    pub historical_inventory_systems: i64,
     /// Counts visible active systems without a usable completed scan.
     pub no_scan_systems: i64,
     pub outstanding: i64,
@@ -1628,6 +1689,25 @@ pub struct BuildQueueItem {
     /// Derivations that have been pushed to cache (cache-pushed status).
     #[serde(default)]
     pub cached_derivs: i64,
+}
+
+/// Identifies the bounded Builds collection that owns an exact attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildAttemptCollection {
+    /// The attempt is queued, building, or stopping.
+    Active,
+    /// The attempt completed, failed, or was cancelled.
+    Completed,
+}
+
+/// Returns one authorization-scoped build attempt and its owning collection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildAttemptLookupResponse {
+    /// Collection that the Builds view must select for this attempt.
+    pub collection: BuildAttemptCollection,
+    /// Exact visible build attempt.
+    pub attempt: BuildQueueItem,
 }
 
 fn default_attempt_number() -> i32 {
@@ -3339,6 +3419,9 @@ pub struct CommitInfo {
     /// Indicates that exact targeted Config observations can start for this commit.
     #[serde(default)]
     pub config_inspectable: bool,
+    /// Indicates that the server has observed this commit deployed on the system.
+    #[serde(default)]
+    pub deployed_here: bool,
 }
 
 /// Response containing available generations for rollback.
@@ -4303,6 +4386,23 @@ mod tests {
         .expect("stable identity should serialize");
         assert_eq!(identity["canonical_cve_id"], "CVE-2099-0001");
         assert_eq!(identity["canonical_package_name"], "openssl");
+    }
+
+    #[test]
+    fn hardening_inventory_serializes_unresolved_current_derivation_as_null() {
+        let response = SystemHardeningInventoryResponse {
+            selection: SystemCveInventorySelection::Current,
+            derivation_id: None,
+            source: None,
+            services: Vec::new(),
+            read_only: false,
+        };
+
+        let json = serde_json::to_value(response).expect("hardening inventory should serialize");
+        assert!(json["derivation_id"].is_null());
+        assert!(json["source"].is_null());
+        assert_eq!(json["services"], serde_json::json!([]));
+        assert_eq!(json["read_only"], false);
     }
 
     #[test]

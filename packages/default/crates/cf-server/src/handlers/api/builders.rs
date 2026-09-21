@@ -1804,6 +1804,44 @@ pub async fn list_build_queue(
     Ok(Json(result))
 }
 
+/// Returns one exact visible build attempt without scanning paginated lists.
+///
+/// # Errors
+///
+/// Returns `403 Forbidden` when the caller is unauthenticated or lacks Viewer
+/// access. Returns `404 Not Found` for both missing attempts and attempts hidden
+/// by the caller's environment scope. Returns `500 Internal Server Error` when
+/// the database query fails.
+pub async fn get_build_attempt(
+    State(state): State<CFState>,
+    Path(attempt_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<crate::api::models::BuildAttemptLookupResponse>, StatusCode> {
+    let Some((user_id, roles)) = authenticated_user_roles(&state.pool, &headers).await else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+    if !has_viewer_or_above_role(&roles) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let visibility_user_id = (!has_admin_role(&roles)).then_some(user_id);
+
+    let attempt = crate::queries::dashboard::get_build_attempt_by_id(
+        &state.pool,
+        attempt_id,
+        visibility_user_id,
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(%attempt_id, "Failed to load exact build attempt: {error:#}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    // SECURITY: Hidden and missing attempts are both 404 so this endpoint does
+    // not disclose build identity across environment boundaries.
+    .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(Json(attempt))
+}
+
 /// GET /api/v1/build-jobs/recent - Recent completed/failed builds (viewer+)
 pub async fn list_recent_build_jobs(
     State(state): State<CFState>,
@@ -2053,6 +2091,7 @@ pub async fn heartbeat_cve_scan(
         request.lease,
         request.entries_collected,
         request.observations_collected,
+        &request.diagnostics,
     )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?

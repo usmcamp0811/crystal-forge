@@ -773,7 +773,15 @@ terminated descendants because they are not direct Crystal Forge children.
 
 Renew the exact active CVE execution. The server returns `410 Gone` when the
 lease expired or a new builder session superseded it. Entry and observation
-progress above the claim limits also prevents renewal.
+progress above the claim limits also prevents renewal. Upgraded builders may
+include up to 16 new or retried single-line phase diagnostics in a heartbeat;
+older builders omit the field. The 64 KiB heartbeat body limit and per-message
+2,048-character limit bound this live channel. Accepted event types are attempt
+start, materialization start/completion, scanner start/completion, and evidence
+resolution start/completion. The server renews the fenced lease and appends the
+phase events in one transaction. A unique execution-and-event-type identity
+makes an uncertain heartbeat retry idempotent. The server acknowledges the
+heartbeat only after that transaction commits.
 
 #### POST /api/v1/builders/:id/cve-scans/complete
 
@@ -820,6 +828,9 @@ also bounded to 64 KiB of stderr and marks truncated output. Diagnostic rows are
 append-only and are fenced by the same execution, lease, builder, and current
 session checks as the terminal scan transition. A diagnostic failure does not
 change build or cache outcomes and diagnostic content never changes CVE evidence.
+The detail API orders events by attempt and server-assigned row identity. The
+builder-supplied observation time is informational and cannot reorder lifecycle
+events.
 
 Invalid evidence returns `422 Unprocessable Entity` and leaves the lease active.
 An expired or superseded execution returns `410 Gone`. A same-digest retry is

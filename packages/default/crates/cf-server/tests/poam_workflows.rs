@@ -1,8 +1,8 @@
 use axum::{Router, routing::get};
 use chrono::{DateTime, NaiveDate, TimeDelta, TimeZone, Utc};
 use crystal_forge::api::models::{
-    CveEnvironmentDisposition, CveEnvironmentTriageAction, CveFilters, FleetCveMutationDetailScope,
-    FleetCvePoamRequest, FleetCveTriageRequest, FleetCveTriageRollup,
+    CveEnvironmentDisposition, CveEnvironmentTriageAction, CveFilters, FleetCveInventorySection,
+    FleetCveMutationDetailScope, FleetCvePoamRequest, FleetCveTriageRequest, FleetCveTriageRollup,
     SystemCveEffectiveDispositionSource, SystemCveTriageAction, SystemCveTriageRequest,
     SystemCveTriageScopeChoice, SystemCveTriageScopeKind,
 };
@@ -827,6 +827,141 @@ async fn assign_environment(pool: &PgPool, name: &str, fixtures: &[&AssessmentFi
         .await
         .unwrap();
     environment_id
+}
+
+async fn add_scheduled_cve_target(
+    pool: &PgPool,
+    fixture: &AssessmentFixture,
+    occurrence: Option<(&str, &str, &str, bool)>,
+) -> Uuid {
+    let (hostname, flake_id, repository): (String, i32, String) = sqlx::query_as(
+        r#"SELECT system.hostname,flake.id,flake.repo_url
+           FROM systems system JOIN flakes flake ON flake.id=system.flake_id
+           WHERE system.id=$1"#,
+    )
+    .bind(fixture.system_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let commit_hash = Uuid::new_v4().simple().to_string();
+    insert_commit(pool, &commit_hash, &repository, Utc::now())
+        .await
+        .unwrap();
+    let commit_id: i32 =
+        sqlx::query_scalar("SELECT id FROM commits WHERE flake_id=$1 AND git_commit_hash=$2")
+            .bind(flake_id)
+            .bind(&commit_hash)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    let store_path = format!("/nix/store/{}-scheduled-target", Uuid::new_v4().simple());
+    let write = record_successful_eval_result(
+        pool,
+        Some(commit_id),
+        &hostname,
+        "nixos",
+        None,
+        &format!("{store_path}.drv"),
+        Some(&store_path),
+        Some(true),
+        true,
+        &serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let derivation_id = match write {
+        SuccessfulEvalWrite::Inserted { derivation_id }
+        | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
+        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
+        | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => derivation_id,
+    };
+    sqlx::query("UPDATE derivations SET store_path=$1,status_id=10 WHERE id=$2")
+        .bind(&store_path)
+        .bind(derivation_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let snapshot_id = persist_available_snapshot_tx(&mut tx, commit_id, &hostname, Vec::new())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    seal_exact_cve_scan_for_derivation(
+        pool,
+        fixture.system_id,
+        derivation_id,
+        Utc::now(),
+        occurrence,
+    )
+    .await;
+    sqlx::query_scalar(
+        r#"INSERT INTO pending_system_deployments(
+             system_id,target_store_path,status,expires_at,requested_commit_id,
+             requested_derivation_id,evaluation_snapshot_id,
+             evaluation_snapshot_binding_expected)
+           VALUES($1,$2,'pending',now()+interval '1 hour',$3,$4,$5,true)
+           RETURNING id"#,
+    )
+    .bind(fixture.system_id)
+    .bind(&store_path)
+    .bind(commit_id)
+    .bind(derivation_id)
+    .bind(snapshot_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn add_historical_cve_inventory(
+    pool: &PgPool,
+    fixture: &AssessmentFixture,
+    cve_id: &str,
+    package_name: &str,
+) {
+    sqlx::query("INSERT INTO cves(id) VALUES($1) ON CONFLICT(id) DO NOTHING")
+        .bind(cve_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    let scan_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO cve_scans(
+             derivation_id,scanner_name,status,completed_at,evidence_schema_version)
+           VALUES($1,'historical-test','completed',now(),0) RETURNING id"#,
+    )
+    .bind(fixture.derivation_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let package_derivation_id: i32 = sqlx::query_scalar(
+        r#"INSERT INTO derivations(
+             derivation_name,derivation_path,derivation_type,status_id,pname,version)
+           VALUES($1,$2,'package',10,$3,'0.9') RETURNING id"#,
+    )
+    .bind(format!("{package_name}-historical"))
+    .bind(format!(
+        "/nix/store/{}-{package_name}.drv",
+        Uuid::new_v4().simple()
+    ))
+    .bind(package_name)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO scan_packages(scan_id,derivation_id) VALUES($1,$2)")
+        .bind(scan_id)
+        .bind(package_derivation_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"INSERT INTO package_vulnerabilities(
+             derivation_id,cve_id,is_whitelisted,detection_method)
+           VALUES($1,$2,false,'historical-test')"#,
+    )
+    .bind(package_derivation_id)
+    .bind(cve_id)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 fn fleet_poam_request(actor_id: Uuid, clock: &FixedClock) -> FleetCvePoamRequest {
@@ -3444,10 +3579,312 @@ async fn exact_cve_list_group_filters_and_stats_share_package_scoped_authority(p
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn fleet_cve_inventory_separates_current_scheduled_and_historical_scope(pool: PgPool) {
+    let current = assessment_fixture(&pool).await;
+    let scheduled = assessment_fixture(&pool).await;
+    let overlap = assessment_fixture(&pool).await;
+    let historical = assessment_fixture(&pool).await;
+    let expired = assessment_fixture(&pool).await;
+    let terminal = assessment_fixture(&pool).await;
+    let superseded_exact = assessment_fixture(&pool).await;
+    let hidden = assessment_fixture(&pool).await;
+    let unassigned_historical = assessment_fixture(&pool).await;
+    let cve_id = "CVE-2026-44990";
+    let hidden_cve_id = "CVE-2026-44991";
+    let package_name = "fleet-section-package";
+    let visible_environment = assign_environment(
+        &pool,
+        "fleet-section-visible",
+        &[
+            &current,
+            &scheduled,
+            &overlap,
+            &historical,
+            &expired,
+            &terminal,
+            &superseded_exact,
+        ],
+    )
+    .await;
+    let hidden_environment = assign_environment(&pool, "fleet-section-hidden", &[&hidden]).await;
+
+    seal_exact_cve_scan(
+        &pool,
+        &current,
+        Utc::now(),
+        Some((cve_id, package_name, "1.0-current", false)),
+    )
+    .await;
+    seal_exact_cve_scan(
+        &pool,
+        &overlap,
+        Utc::now(),
+        Some((cve_id, package_name, "1.0-overlap", false)),
+    )
+    .await;
+    add_scheduled_cve_target(
+        &pool,
+        &scheduled,
+        Some((cve_id, package_name, "2.0-scheduled", false)),
+    )
+    .await;
+    add_scheduled_cve_target(
+        &pool,
+        &overlap,
+        Some((cve_id, package_name, "2.0-overlap", false)),
+    )
+    .await;
+    add_historical_cve_inventory(&pool, &historical, cve_id, package_name).await;
+    sqlx::query(
+        r#"WITH scan AS (
+             INSERT INTO cve_scans(
+               derivation_id,scanner_name,status,completed_at,evidence_schema_version)
+             VALUES($1,'historical-test','completed',now(),0) RETURNING id
+           )
+           INSERT INTO scan_packages(scan_id,derivation_id)
+           SELECT scan.id,package.id FROM scan
+           JOIN derivations package
+             ON package.derivation_type='package' AND package.pname=$2"#,
+    )
+    .bind(unassigned_historical.derivation_id)
+    .bind(package_name)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let expired_id = add_scheduled_cve_target(
+        &pool,
+        &expired,
+        Some((cve_id, package_name, "3.0-expired", false)),
+    )
+    .await;
+    sqlx::query(
+        "UPDATE pending_system_deployments SET expires_at=now()-interval '1 second' WHERE id=$1",
+    )
+    .bind(expired_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let terminal_id = add_scheduled_cve_target(
+        &pool,
+        &terminal,
+        Some((cve_id, package_name, "3.0-terminal", false)),
+    )
+    .await;
+    sqlx::query("UPDATE pending_system_deployments SET status='failed' WHERE id=$1")
+        .bind(terminal_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    add_scheduled_cve_target(
+        &pool,
+        &superseded_exact,
+        Some((cve_id, package_name, "3.0-older-exact", false)),
+    )
+    .await;
+    let superseded_store = format!("/nix/store/{}-inexact", Uuid::new_v4().simple());
+    sqlx::query(
+        r#"INSERT INTO pending_system_deployments(
+             system_id,target_store_path,status,expires_at,issued_at)
+           VALUES($1,$2,'pending',now()+interval '1 hour',now()+interval '1 minute')"#,
+    )
+    .bind(superseded_exact.system_id)
+    .bind(superseded_store)
+    .execute(&pool)
+    .await
+    .unwrap();
+    add_scheduled_cve_target(
+        &pool,
+        &hidden,
+        Some((hidden_cve_id, "hidden-section-package", "9.0", false)),
+    )
+    .await;
+
+    let scope = CveReadScope::Environments(vec![visible_environment]);
+    let rows = fetch_cve_list(&pool, &scope, &CveFilters::default())
+        .await
+        .unwrap();
+    let row = rows
+        .iter()
+        .find(|row| row.cve_id == cve_id && row.package_name.as_deref() == Some(package_name))
+        .unwrap();
+    assert_eq!(row.current_affected_count, 2);
+    assert_eq!(row.scheduled_deployment_target_count, 2);
+    assert_eq!(row.historical_inventory_count, 1);
+    assert_eq!(
+        row.affected_count, 3,
+        "current/scheduled overlap is distinct"
+    );
+    assert_eq!(row.exact_affected_count, 3);
+    assert_eq!(row.legacy_affected_count, 1);
+    assert!(!rows.iter().any(|row| row.cve_id == hidden_cve_id));
+
+    let systems = crystal_forge::queries::cves::fetch_cve_inventory_systems(
+        &pool,
+        &scope,
+        cve_id,
+        Some(package_name),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        systems
+            .iter()
+            .filter(|system| system.inventory_section == FleetCveInventorySection::Current)
+            .count(),
+        2
+    );
+    assert_eq!(
+        systems
+            .iter()
+            .filter(|system| {
+                system.inventory_section == FleetCveInventorySection::ScheduledDeploymentTarget
+            })
+            .count(),
+        2
+    );
+    assert_eq!(
+        systems
+            .iter()
+            .filter(|system| system.inventory_section == FleetCveInventorySection::Historical)
+            .count(),
+        1
+    );
+    assert_eq!(
+        systems
+            .iter()
+            .map(|system| system.system_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        4,
+        "five section rows represent four distinct systems because overlap is preserved"
+    );
+    assert!(!systems.iter().any(|system| {
+        [
+            expired.system_id,
+            terminal.system_id,
+            superseded_exact.system_id,
+        ]
+        .contains(&system.system_id)
+    }));
+
+    let stats = fetch_cve_fleet_stats(&pool, &scope).await.unwrap();
+    assert_eq!(stats.systems_affected, 3);
+    assert_eq!(stats.current_systems_affected, 2);
+    assert_eq!(stats.scheduled_deployment_target_systems, 2);
+    assert_eq!(stats.historical_inventory_systems, 1);
+    assert_eq!(stats.environments_affected, 1);
+    assert_eq!(
+        stats.no_scan_systems, 0,
+        "scheduled exact scans count as scans"
+    );
+
+    let actor = PoamActor {
+        user_id: current.user_id,
+        identifier: "fleet-section-operator@example.invalid".into(),
+        is_admin: false,
+        can_mutate: true,
+        environment_ids: vec![visible_environment],
+        request_origin: None,
+    };
+    let detail = poam_service::fleet_cve_inventory_detail(&pool, &actor, cve_id, package_name)
+        .await
+        .unwrap();
+    assert_eq!(detail.current_affected_system_count, 2);
+    assert_eq!(detail.scheduled_deployment_target_count, 2);
+    assert_eq!(detail.historical_inventory_system_count, 1);
+    assert_eq!(detail.affected_system_count, 3);
+    assert_eq!(detail.exact_mutation_target_count, 2);
+    assert_eq!(detail.environments.len(), 1);
+
+    let admin_actor = PoamActor {
+        user_id: current.user_id,
+        identifier: "fleet-section-admin@example.invalid".into(),
+        is_admin: true,
+        can_mutate: true,
+        environment_ids: Vec::new(),
+        request_origin: None,
+    };
+    let admin_detail =
+        poam_service::fleet_cve_inventory_detail(&pool, &admin_actor, cve_id, package_name)
+            .await
+            .unwrap();
+    assert_eq!(admin_detail.unassigned_systems.len(), 1);
+    assert_eq!(admin_detail.unassigned_affected_system_count, 0);
+    assert_eq!(admin_detail.historical_inventory_system_count, 2);
+
+    let scheduled_actor = PoamActor {
+        user_id: scheduled.user_id,
+        identifier: "scheduled-only@example.invalid".into(),
+        is_admin: false,
+        can_mutate: true,
+        environment_ids: vec![visible_environment],
+        request_origin: None,
+    };
+    let scheduled_only_cve = "CVE-2026-44992";
+    let scheduled_only_deployment = add_scheduled_cve_target(
+        &pool,
+        &scheduled,
+        Some((scheduled_only_cve, "scheduled-only-package", "1.0", false)),
+    )
+    .await;
+    sqlx::query(
+        "UPDATE pending_system_deployments SET issued_at=now()+interval '2 minutes' WHERE id=$1",
+    )
+    .bind(scheduled_only_deployment)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        poam_service::fleet_cve_detail(
+            &pool,
+            &scheduled_actor,
+            scheduled_only_cve,
+            "scheduled-only-package"
+        )
+        .await,
+        Err(PoamError::NotFound)
+    ));
+    let mutation = poam_service::triage_fleet_cve(
+        &pool,
+        &scheduled_actor,
+        scheduled_only_cve,
+        FleetCveTriageRequest {
+            canonical_package_name: "scheduled-only-package".into(),
+            actions: vec![CveEnvironmentTriageAction::LeaveOpen {
+                environment_id: visible_environment,
+            }],
+            poam: None,
+        },
+        &FixedClock(Utc::now()),
+    )
+    .await;
+    assert!(
+        mutation.is_err(),
+        "scheduled-only inventory cannot mutate triage"
+    );
+    let mutation_writes: i64 = sqlx::query_scalar(
+        r#"SELECT
+             (SELECT count(*) FROM cve_environment_dispositions
+              WHERE canonical_cve_id=$1 AND canonical_package_name=$2)
+             +
+             (SELECT count(*) FROM poam_cve_finding_links
+              WHERE canonical_cve_id=$1 AND canonical_package_name=$2)"#,
+    )
+    .bind(scheduled_only_cve)
+    .bind("scheduled-only-package")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(mutation_writes, 0);
+    assert_ne!(visible_environment, hidden_environment);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn cve_export_ignores_list_pagination_and_preserves_long_exact_identity(pool: PgPool) {
     let fixture = assessment_fixture(&pool).await;
     assign_environment(&pool, "export-complete", &[&fixture]).await;
-    let scan_id = begin_exact_cve_scan(&pool, &fixture, 2).await;
+    let scan_id = begin_exact_cve_scan(&pool, &fixture, 3).await;
     let long_package = "p".repeat(300);
     let long_version = "1.".to_string() + &"9".repeat(180);
     sqlx::query("INSERT INTO cves(id) VALUES('CVE-2097-10001'),('CVE-2097-10002')")
@@ -3459,9 +3896,11 @@ async fn cve_export_ignores_list_pagination_and_preserves_long_exact_identity(po
              scan_id,canonical_cve_id,canonical_package_name,
              observed_package_name,observed_package_version,
              observed_derivation_path,is_whitelisted,detection_method)
-           VALUES($1,'CVE-2097-10001',$2,$2,$3,
-                  '/nix/store/export-long-package.drv',FALSE,'test-scanner'),
-                 ($1,'CVE-2097-10002','short-package','short-package','2.0',
+            VALUES($1,'CVE-2097-10001',$2,$2,$3,
+                   '/nix/store/export-long-package.drv',FALSE,'test-scanner'),
+                  ($1,'CVE-2097-10001','aaa-package','aaa-package','1.0',
+                   '/nix/store/export-aaa-package.drv',FALSE,'test-scanner'),
+                  ($1,'CVE-2097-10002','short-package','short-package','2.0',
                   '/nix/store/export-short-package.drv',FALSE,'test-scanner')"#,
     )
     .bind(scan_id)
@@ -3477,7 +3916,10 @@ async fn cve_export_ignores_list_pagination_and_preserves_long_exact_identity(po
         .unwrap();
     let long_row = list
         .iter()
-        .find(|row| row.cve_id == "CVE-2097-10001")
+        .find(|row| {
+            row.cve_id == "CVE-2097-10001"
+                && row.package_name.as_deref() == Some(long_package.as_str())
+        })
         .unwrap();
     assert_eq!(
         long_row.package_name.as_deref(),
@@ -3490,11 +3932,29 @@ async fn cve_export_ignores_list_pagination_and_preserves_long_exact_identity(po
     let detail = fetch_cve_detail(&pool, &CveReadScope::All, "CVE-2097-10001")
         .await
         .unwrap();
-    assert_eq!(detail.package_name.as_deref(), Some(long_package.as_str()));
-    assert_eq!(
-        detail.installed_version.as_deref(),
-        Some(long_version.as_str())
-    );
+    assert_eq!(detail.package_name.as_deref(), Some("aaa-package"));
+    assert_eq!(detail.installed_version.as_deref(), Some("1.0"));
+
+    for sort in ["severity", "cvss", "age", "affected"] {
+        let tied = fetch_cve_list(
+            &pool,
+            &CveReadScope::All,
+            &CveFilters {
+                search: Some("CVE-2097-10001".into()),
+                sort: Some(sort.into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            tied.iter()
+                .filter_map(|row| row.package_name.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["aaa-package", long_package.as_str()],
+            "{sort} ordering must use canonical package name after CVE ID"
+        );
+    }
 
     let filters = CveFilters {
         limit: Some(1),
@@ -3503,7 +3963,24 @@ async fn cve_export_ignores_list_pagination_and_preserves_long_exact_identity(po
     let exported = fetch_cves_for_export(&pool, &CveReadScope::All, &filters)
         .await
         .unwrap();
-    assert_eq!(exported.len(), 2);
+    assert_eq!(exported.len(), 3);
+    let tied_export = fetch_cves_for_export(
+        &pool,
+        &CveReadScope::All,
+        &CveFilters {
+            search: Some("CVE-2097-10001".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        tied_export
+            .iter()
+            .filter_map(|row| row.package_name.as_deref())
+            .collect::<Vec<_>>(),
+        vec!["aaa-package", long_package.as_str()]
+    );
     let (_, token) = role_session(&pool, AuthRole::Admin).await;
     let base = poam_http_server(pool.clone()).await;
     let response = reqwest::Client::new()
@@ -3514,7 +3991,7 @@ async fn cve_export_ignores_list_pagination_and_preserves_long_exact_identity(po
         .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let csv = response.text().await.unwrap();
-    assert_eq!(csv.lines().count(), 3, "header plus both complete rows");
+    assert_eq!(csv.lines().count(), 4, "header plus all complete rows");
     assert!(csv.contains(&long_package));
     assert!(csv.contains(&long_version));
 }

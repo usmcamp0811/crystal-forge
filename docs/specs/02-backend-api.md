@@ -733,10 +733,17 @@ The build queue manages Nix derivation builds.
 
 | Method | Endpoint | Role | Description |
 |--------|----------|------|-------------|
-| GET | `/build-queue` | Viewer+ | Get pending/in-progress builds |
+| GET | `/build-jobs` | Viewer+ | Get a bounded page of pending/in-progress builds |
+| GET | `/build-jobs/recent` | Viewer+ | Get a bounded page of terminal build attempts |
+| GET | `/build-jobs/:id` | Viewer+ | Get one exact visible attempt and its active or completed collection |
 | POST | `/build-queue` | Operator+ | Queue new derivation |
-| GET | `/build-queue/:id` | Viewer+ | Get build status |
 | DELETE | `/build-queue/:id` | Operator+ | Cancel pending build |
+
+The exact build-attempt endpoint applies the caller's environment visibility in
+the primary-key query. It returns `404 Not Found` for both missing attempts and
+attempts outside the caller's visibility scope. This behavior prevents attempt
+identity disclosure. Exact lookup does not expand either paginated list and does
+not treat a UUID as ordinary text search.
 
 ### Build States
 
@@ -853,11 +860,13 @@ event contains an immutable row `id`, immutable `execution_id`, and one-based
 `attempt_number` identity, `occurred_at`, normalized `level`, `source`,
 `event_type`, redacted `message`, and an event-level `truncated` flag.
 
-The response uses a fixed chronological limit of 500 events. `truncated=true`
-means later persisted events exist. This endpoint does not provide cursor or
-offset pagination. Clients must not infer that a truncated response contains the
-complete attempt history. Unknown scan IDs return `404`. Non-admin callers
-receive the standard admin authorization failure.
+The response uses a fixed limit of 500 events in attempt and server receipt
+order. The builder-supplied `occurred_at` value is informational and cannot
+reorder lifecycle events. `truncated=true` means later persisted events exist.
+This endpoint does not provide cursor or offset pagination. Clients must not
+infer that a truncated response contains the complete attempt history. Unknown
+scan IDs return `404`. Non-admin callers receive the standard admin authorization
+failure.
 
 Diagnostic messages are untrusted operational data. Builders can omit the
 optional diagnostics field for backward compatibility. The server accepts at
@@ -865,8 +874,11 @@ most 256 prepared events per terminal report, persists at most 2,048 Unicode
 scalar values per event, removes control characters, and applies canonical
 secret redaction before the first database write. Upgraded builders also apply
 their shared credential-redaction policy before request serialization.
-Diagnostics are independent
-from canonical CVE evidence and are not included in the schema-1 evidence digest.
+The heartbeat endpoint additionally accepts up to 16 single-line phase events
+in a 64 KiB body. It renews the fenced lease and appends those events atomically,
+and it deduplicates uncertain retries by execution and event type. Diagnostics
+are independent from canonical CVE evidence and are not included in the schema-1
+evidence digest.
 
 ---
 
@@ -1078,8 +1090,8 @@ environments to OPEN or ACCEPTED and submit when POA&M lifecycle rules permit.
 When scheduled rows share one reusable POA&M, the editor initializes the shared
 draft from this metadata so an unchanged scheduled row survives mixed edits.
 
-The POST body contains one action for every currently visible affected
-environment:
+The POST body contains one action for every currently visible environment that
+has at least one Current exact subject:
 
 ```json
 {
@@ -1103,39 +1115,49 @@ environment:
 `poam` is required exactly when at least one action is `schedule_patch`. The
 assignee must be a server-validated user or OIDC group. Clients do not send host
 IDs. After writer locks and a fresh actor-membership check, the server recomputes
-the complete visible affected-environment set. The request environment IDs must
-equal that set. Omitted, extra, forged, hidden, or duplicate IDs return the same
-typed evidence conflict without mutation and without identifying hidden
-environments. The server includes every current exact subject in each
-environment. All scheduled subjects use one POA&M. ACCEPTED records operator
-rationale only; it does not create remediation links or PASS evidence.
+the complete visible Current exact environment set. The request environment IDs
+must equal that set. Scheduled-target-only and Historical environments do not
+enter the action set. Omitted, extra, forged, hidden, or duplicate IDs return
+the same typed evidence conflict without mutation and without identifying
+hidden environments. The server includes every Current exact subject in each
+actionable environment. All subjects selected for SCHEDULED use one POA&M.
+ACCEPTED records operator rationale only; it does not create remediation links
+or PASS evidence.
 
-Authenticated CVE dashboard reads combine retained deployed-generation
-schema-1 occurrences with bounded legacy inventory for systems that lack exact
-authority. An exact clean scan suppresses stale legacy findings. Rows and fleet
-statistics expose separate exact and legacy-affected counts; fleet statistics
-also count visible active no-scan systems. Active dispositions apply only to
-exact canonical CVE, canonical package, and environment identities. A row with
-any legacy subject is `inventory_only` and cannot imply accepted risk or
-scheduled remediation. Legacy `system_cve_justifications` rows do not determine
-list status. Admin reads cover the fleet. Viewer and Operator reads first limit
-subjects to current `user_environment_memberships`. Scoped reads exclude
-unassigned systems and do not disclose hidden environment names, counts,
-statuses, package names, CVE presence, or fleet-wide justification rows. The
-legacy `GET /cves/:cve_id` returns the alphabetically first visible canonical
-package row and returns `404` when the CVE is absent or hidden. Lists return only
-visible rows.
+Authenticated CVE dashboard reads classify inventory as Current exact deployed
+findings, exact active scheduled deployment targets, or retained Historical
+evidence. An exact clean scan suppresses stale compatibility findings. Rows and
+fleet statistics expose separate Current, Scheduled deployment target, and
+Historical counts. Compatibility `affected_count` is the distinct union of
+Current and Scheduled deployment target systems. Historical systems do not
+contribute to that count. Fleet statistics also count visible active no-scan
+systems.
 
-A row is `accepted` only when all affected environments are
-ACCEPTED. A row is `scheduled` only when all affected environments are
-SCHEDULED. Any OPEN or mixed state is `outstanding`. Grouped counts, list
+Active dispositions apply only to Current exact canonical CVE, canonical
+package, and environment identities. Scheduled-target-only and Historical-only
+rows are `inventory_only`. Historical evidence on a row that also has Current
+exact subjects does not remove mutation authority from those Current exact
+subjects. Scheduled deployment intent does not imply the SCHEDULED triage state.
+Legacy `system_cve_justifications` rows do not determine list status. Admin reads
+cover the fleet. Viewer and Operator reads first limit subjects to current
+`user_environment_memberships`. Scoped reads exclude unassigned systems and do
+not disclose hidden environment names, counts, statuses, package names, CVE
+presence, or fleet-wide justification rows. The legacy `GET /cves/:cve_id`
+returns the alphabetically first visible canonical package row and returns `404`
+when the CVE is absent or hidden. Lists return only visible rows.
+
+A row is `accepted` only when all Current exact affected environments are
+ACCEPTED. A row is `scheduled` only when all Current exact affected environments
+are SCHEDULED. Any OPEN or mixed Current exact state is `outstanding`. A row
+without Current exact subjects is `inventory_only`. Grouped counts, list
 filters, export/list responses, and fleet statistics consume this conservative
-summary. Package cards count distinct affected systems per package after active
-filters. Fleet statistics count distinct affected systems across scoped mixed
-inventory; they do not sum per-CVE counts. CVE totals count canonical
-CVE/package inventory rows. The exact mutation rollup keeps its more precise
-`partial`/MIXED state and exact-matches both the canonical CVE and canonical
-package when it loads installed version, fixed version, and fix status.
+summary. Package cards count distinct Current-or-Scheduled systems per package
+after active filters. Fleet statistics count distinct systems across the scoped
+Current-or-Scheduled union; they do not sum per-CVE counts. CVE totals count
+canonical CVE/package inventory rows. The exact mutation rollup keeps its more
+precise `partial`/MIXED state and exact-matches both the canonical CVE and
+canonical package when it loads installed version, fixed version, and fix
+status.
 
 The successful response contains transaction-owned `detail`, `detail_scope`,
 `poam_id`, and `poam_reused`; response construction completes before the

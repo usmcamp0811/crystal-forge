@@ -117,6 +117,9 @@ impl CveTriageDraft {
                 }
             },
             legacy_affected_system_count: 0,
+            current_affected_system_count: Some(detail.scope.exact_affected_system_count),
+            scheduled_deployment_target_count: Some(0),
+            historical_inventory_system_count: Some(0),
             systems: detail.systems.clone(),
             disposition: disposition.clone(),
         };

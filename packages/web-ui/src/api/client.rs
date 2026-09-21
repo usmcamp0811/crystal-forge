@@ -1568,6 +1568,20 @@ pub async fn fetch_build_queue_paginated(
     fetch_json(&url).await
 }
 
+/// Fetches one exact build attempt in the current user's visibility scope.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails, the server rejects the
+/// request, or the response cannot be decoded as
+/// [`crate::api::models::BuildAttemptLookupResponse`].
+pub async fn fetch_build_attempt(
+    attempt_id: &uuid::Uuid,
+) -> Result<crate::api::models::BuildAttemptLookupResponse, ApiClientError> {
+    let url = format!("{}/build-jobs/{}", base_url(), attempt_id);
+    fetch_json(&url).await
+}
+
 /// Move a queued build job to the front of the queue (admin/operator).
 pub async fn prioritize_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError> {
     let url = format!("{}/build-jobs/{}/prioritize", base_url(), job_id);

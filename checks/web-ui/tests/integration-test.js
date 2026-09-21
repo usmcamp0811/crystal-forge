@@ -11758,8 +11758,11 @@ const steps = [
             exploited: 2,
             environments_affected: 3,
             systems_affected: 8,
-            exact_systems_affected: 7,
+            exact_systems_affected: 8,
             legacy_systems_affected: 1,
+            current_systems_affected: 6,
+            scheduled_deployment_target_systems: 3,
+            historical_inventory_systems: 1,
             no_scan_systems: 1,
             outstanding: 30,
             accepted: 8,
@@ -11787,34 +11790,52 @@ const steps = [
         fixed_version: "3.0.2",
         fix_status: "fix_available",
         affected_count: 4,
+        current_affected_count: 3,
+        scheduled_deployment_target_count: 2,
+        historical_inventory_count: 1,
         affected_environments: ["prod", "staging"],
         first_seen: new Date().toISOString(),
         last_seen: new Date().toISOString(),
         age_days: 12,
         triage_status: "outstanding",
       };
+      const inventoryOnlyRowFixture = {
+        ...cveRowFixture,
+        cve_id: "CVE-2024-5678",
+        title: "Scheduled and historical inventory only",
+        affected_count: 1,
+        current_affected_count: 0,
+        scheduled_deployment_target_count: 1,
+        historical_inventory_count: 1,
+        triage_status: "inventory_only",
+      };
       // Grouped (default) view fetches /cves/grouped — mock the package rollup so
       // the default grouped surface renders real-shaped data (not a fallback).
+      const groupedCveRequests = [];
       await page.route(/\/api\/v1\/cves\/grouped(?:\?.*)?$/, async (route) => {
+        groupedCveRequests.push(new URL(route.request().url()));
         await route.fulfill({
           status: 200,
           contentType: "application/json",
           body: JSON.stringify([
             {
               package_name: "openssl",
-              cve_count: 1,
-              critical_count: 1,
+              cve_count: 2,
+              critical_count: 2,
               high_count: 0,
               medium_count: 0,
               low_count: 0,
               environments_count: 2,
               total_affected_systems: 4,
-              fixable_count: 1,
+              current_affected_systems: 3,
+              scheduled_deployment_target_systems: 2,
+              historical_inventory_systems: 1,
+              fixable_count: 2,
               outstanding_count: 1,
-              exploited_count: 1,
+              exploited_count: 2,
               max_cvss: 9.8,
               severity_score: 1000,
-              cves: [cveRowFixture],
+              cves: [cveRowFixture, inventoryOnlyRowFixture],
             },
           ]),
         });
@@ -11839,8 +11860,12 @@ const steps = [
         canonical_package_name: "openssl",
         rollup: "partial",
         affected_system_count: 4,
-        exact_affected_system_count: 3,
+        exact_affected_system_count: 4,
+        exact_mutation_target_count: 3,
         legacy_affected_system_count: 1,
+        current_affected_system_count: 3,
+        scheduled_deployment_target_count: 2,
+        historical_inventory_system_count: 1,
         no_scan_system_count: 1,
         environments: [
           {
@@ -11849,6 +11874,9 @@ const steps = [
             affected_system_count: 1,
             exact_affected_system_count: 1,
             legacy_affected_system_count: 0,
+            current_affected_system_count: 1,
+            scheduled_deployment_target_count: 0,
+            historical_inventory_system_count: 0,
             systems: [{
               system_id: "00000000-0000-0000-0000-0000000000a1",
               environment_id: "00000000-0000-0000-0000-0000000000e1",
@@ -11861,6 +11889,7 @@ const steps = [
               deployment_policy: "automatic",
               current_package_version: "3.0.1",
               inventory_authority: "exact",
+              inventory_section: "current",
             }],
             disposition: {
               state: "accepted",
@@ -11876,6 +11905,9 @@ const steps = [
             affected_system_count: 1,
             exact_affected_system_count: 1,
             legacy_affected_system_count: 0,
+            current_affected_system_count: 1,
+            scheduled_deployment_target_count: 1,
+            historical_inventory_system_count: 0,
             systems: [{
               system_id: "00000000-0000-0000-0000-0000000000a2",
               environment_id: "00000000-0000-0000-0000-0000000000e2",
@@ -11888,6 +11920,20 @@ const steps = [
               deployment_policy: "manual",
               current_package_version: "3.0.1",
               inventory_authority: "exact",
+              inventory_section: "current",
+            }, {
+              system_id: "00000000-0000-0000-0000-0000000000a2",
+              environment_id: "00000000-0000-0000-0000-0000000000e2",
+              hostname: "prod-web-01",
+              environment: "Production",
+              primary_ip_address: "10.0.1.1",
+              flake_name: "platform",
+              flake_id: 1,
+              commit_hash: "cccccccccccccccccccccccccccccccccccccccc",
+              deployment_policy: "manual",
+              current_package_version: "3.0.1",
+              inventory_authority: "exact",
+              inventory_section: "scheduled_deployment_target",
             }],
             disposition: {
               state: "scheduled",
@@ -11916,6 +11962,9 @@ const steps = [
             affected_system_count: 1,
             exact_affected_system_count: 1,
             legacy_affected_system_count: 0,
+            current_affected_system_count: 1,
+            scheduled_deployment_target_count: 0,
+            historical_inventory_system_count: 0,
             systems: [{
               system_id: "00000000-0000-0000-0000-0000000000a4",
               environment_id: "00000000-0000-0000-0000-0000000000e3",
@@ -11928,15 +11977,44 @@ const steps = [
               deployment_policy: "manual",
               current_package_version: "3.0.1",
               inventory_authority: "exact",
+              inventory_section: "current",
+            }],
+            disposition: null,
+          },
+          {
+            environment_id: "00000000-0000-0000-0000-0000000000e6",
+            environment_name: "Rollout target",
+            affected_system_count: 1,
+            exact_affected_system_count: 1,
+            legacy_affected_system_count: 0,
+            current_affected_system_count: 0,
+            scheduled_deployment_target_count: 1,
+            historical_inventory_system_count: 0,
+            systems: [{
+              system_id: "00000000-0000-0000-0000-0000000000a6",
+              environment_id: "00000000-0000-0000-0000-0000000000e6",
+              hostname: "rollout-web-01",
+              environment: "Rollout target",
+              primary_ip_address: "10.0.4.1",
+              flake_name: "platform",
+              flake_id: 1,
+              commit_hash: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              deployment_policy: "automatic",
+              current_package_version: "3.0.1",
+              inventory_authority: "exact",
+              inventory_section: "scheduled_deployment_target",
             }],
             disposition: null,
           },
           {
             environment_id: "00000000-0000-0000-0000-0000000000e4",
             environment_name: "Archive",
-            affected_system_count: 1,
+            affected_system_count: 0,
             exact_affected_system_count: 0,
             legacy_affected_system_count: 1,
+            current_affected_system_count: 0,
+            scheduled_deployment_target_count: 0,
+            historical_inventory_system_count: 1,
             systems: [{
               system_id: "00000000-0000-0000-0000-0000000000a5",
               environment_id: "00000000-0000-0000-0000-0000000000e4",
@@ -11949,6 +12027,7 @@ const steps = [
               deployment_policy: "manual",
               current_package_version: "3.0.1",
               inventory_authority: "legacy",
+              inventory_section: "historical",
             }],
             disposition: null,
           },
@@ -11992,7 +12071,9 @@ const steps = [
         }
         const returnedDetail = JSON.parse(JSON.stringify(fleetDetail));
         returnedDetail.affected_system_count = 5;
-        returnedDetail.exact_affected_system_count = 4;
+        returnedDetail.exact_affected_system_count = 5;
+        returnedDetail.exact_mutation_target_count = 4;
+        returnedDetail.current_affected_system_count = 4;
         returnedDetail.rollup = "partial";
         returnedDetail.environments[1].systems.push({
           system_id: "00000000-0000-0000-0000-0000000000a3",
@@ -12006,9 +12087,11 @@ const steps = [
           deployment_policy: "automatic",
           current_package_version: "3.0.1",
           inventory_authority: "exact",
+          inventory_section: "current",
         });
-        returnedDetail.environments[1].affected_system_count =
-          returnedDetail.environments[1].systems.length;
+        returnedDetail.environments[1].affected_system_count = 2;
+        returnedDetail.environments[1].exact_affected_system_count = 2;
+        returnedDetail.environments[1].current_affected_system_count = 2;
         fleetDetailAfterMutation = JSON.parse(JSON.stringify(returnedDetail));
         fleetDetailAfterMutation.environments[1].systems.at(-1).hostname =
           "server-recomputed-prod-02";
@@ -12026,7 +12109,21 @@ const steps = [
         await route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: JSON.stringify([cveRowFixture]),
+          body: JSON.stringify([cveRowFixture, inventoryOnlyRowFixture]),
+        });
+      });
+      const cveCsv = [
+        "CVE ID,Severity,CVSS Score,Package,Installed Version,Fixed Version,Affected Systems,Currently Affected Systems,Scheduled Deployment Targets,Historical Inventory Systems,Environments,Fix Status,Triage Status,Age (days),First Seen,Last Seen",
+        "CVE-2024-1234,critical,9.8,openssl,3.0.1,3.0.2,4,3,2,1,prod;staging,fix_available,outstanding,12,2024-02-01 00:00,2026-09-21 00:00",
+      ].join("\n");
+      const cveExportRequests = [];
+      await page.route(/\/api\/v1\/cves\/export(?:\?.*)?$/, async (route) => {
+        cveExportRequests.push(new URL(route.request().url()));
+        await route.fulfill({
+          status: 200,
+          contentType: "text/csv",
+          headers: { "Content-Disposition": "attachment; filename=crystal-forge-cves.csv" },
+          body: cveCsv,
         });
       });
       let fleetRescanRequests = 0;
@@ -12262,6 +12359,8 @@ const steps = [
               total_cves: 1, critical: 1, high: 0, medium: 0, low: 0,
               fixable: 1, exploited: 1, environments_affected: 3,
               systems_affected: 3, outstanding: 1, accepted: 1, scheduled: 1,
+              current_systems_affected: 2, scheduled_deployment_target_systems: 2,
+              historical_inventory_systems: 1,
             }),
           });
         });
@@ -12280,6 +12379,8 @@ const steps = [
               package_name: "openssl", cve_count: 1, critical_count: 1,
               high_count: 0, medium_count: 0, low_count: 0,
               environments_count: 3, total_affected_systems: 3,
+              current_affected_systems: 2, scheduled_deployment_target_systems: 2,
+              historical_inventory_systems: 1,
               fixable_count: 1, outstanding_count: 1, exploited_count: 1,
               max_cvss: 9.8, severity_score: 1000, cves: [cveRowFixture],
             }]),
@@ -12367,6 +12468,36 @@ const steps = [
         if (releaseLoadingFleet) releaseLoadingFleet();
         await viewerPage.unrouteAll({ behavior: "ignoreErrors" }).catch(() => {});
         await viewerContext.close().catch(() => {});
+      }
+
+      const operatorContext = await browserInstance.newContext({ viewport: VIEWPORTS.desktop });
+      const operatorPage = await operatorContext.newPage();
+      try {
+        await suppressOnboardingCoach(operatorPage);
+        await routeStandaloneUiBootstrap(operatorPage, "Operator");
+        await operatorPage.route("**/api/v1/cves/stats*", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+          total_cves: 1, critical: 1, high: 0, medium: 0, low: 0, fixable: 1, exploited: 1,
+          environments_affected: 3, systems_affected: 4, exact_systems_affected: 4,
+          legacy_systems_affected: 1, current_systems_affected: 3,
+          scheduled_deployment_target_systems: 2, historical_inventory_systems: 1,
+          no_scan_systems: 0, outstanding: 1, accepted: 1, scheduled: 1,
+        }) }));
+        await operatorPage.route("**/api/v1/cves/packages*", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(["openssl"]) }));
+        await operatorPage.route(/\/api\/v1\/cves\/grouped(?:\?.*)?$/, async (route) => route.fulfill({ status: 200, contentType: "application/json", body: "[]" }));
+        await operatorPage.route(/\/api\/v1\/cves(?:\?.*)?$/, async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([cveRowFixture]) }));
+        await operatorPage.route(/\/api\/v1\/cves\/CVE-2024-1234\/fleet\?package=openssl$/, async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(fleetDetail) }));
+        await operatorPage.route("**/api/v1/poams/assignees", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ people: [], groups: [{ group_name: "platform-operators" }] }) }));
+        await operatorPage.goto(`${baseUrl}/cves?cve=CVE-2024-1234&cve_package=openssl`, { timeout: LOAD_TIMEOUT });
+        const operatorDrawer = operatorPage.getByRole("dialog", { name: "CVE-2024-1234 openssl fleet inventory" });
+        await assertVisible(operatorDrawer, "Operator should have readable fleet inventory");
+        await assertCount(operatorPage.getByRole("button", { name: "Rescan fleet" }), 0, "Operator must not receive the Admin-only fleet rescan action");
+        const operatorTriage = operatorDrawer.getByTestId("cve-triage-open");
+        await assertVisible(operatorTriage, "Operator should receive fleet triage controls");
+        await operatorTriage.click();
+        await assertVisible(operatorPage.getByRole("dialog", { name: "Triage CVE-2024-1234 openssl" }), "Operator should open fleet triage");
+      } finally {
+        await operatorPage.unrouteAll({ behavior: "ignoreErrors" }).catch(() => {});
+        await operatorContext.close().catch(() => {});
       }
 
       const completedPoamId = "00000000-0000-0000-0000-0000000000d3";
@@ -12469,6 +12600,41 @@ const steps = [
       const groupCard = page.locator("main .mono:has-text('openssl')").first();
       await assertVisible(groupCard, "Expected grouped package card to render");
 
+      const inventoryOnlyFilter = page.getByRole("button", { name: "Inventory only", exact: true });
+      const inventoryOnlyRequest = page.waitForRequest((request) => {
+        const url = new URL(request.url());
+        return url.pathname === "/api/v1/cves/grouped" && url.searchParams.get("triage_status") === "inventory_only";
+      });
+      await inventoryOnlyFilter.click();
+      await inventoryOnlyRequest;
+      await assertAttribute(inventoryOnlyFilter, "class", "active", "Inventory-only filter should retain selected state");
+      if (new URL(page.url()).searchParams.get("triage_status") !== "inventory_only") {
+        throw new Error(`Inventory-only filter was not retained in route state: ${page.url()}`);
+      }
+      const csvDownloadPromise = page.waitForEvent("download");
+      await page.getByRole("button", { name: "Export report", exact: true }).click();
+      const csvDownload = await csvDownloadPromise;
+      const csvStream = await csvDownload.createReadStream();
+      let downloadedCsv = "";
+      for await (const chunk of csvStream) downloadedCsv += chunk.toString();
+      if (cveExportRequests.length !== 1
+        || cveExportRequests[0].searchParams.get("triage_status") !== "inventory_only"
+        || cveExportRequests[0].searchParams.get("sort") !== "severity"
+        || cveExportRequests[0].searchParams.has("limit")) {
+        throw new Error(`CVE CSV did not preserve active request filters: ${cveExportRequests.map(String).join(", ")}`);
+      }
+      const [csvHeader, csvRow] = downloadedCsv.trim().split(/\r?\n/);
+      for (const column of ["Affected Systems", "Currently Affected Systems", "Scheduled Deployment Targets", "Historical Inventory Systems"]) {
+        if (!csvHeader.split(",").includes(column)) throw new Error(`CVE CSV is missing '${column}': ${csvHeader}`);
+      }
+      if (csvRow.split(",").slice(6, 10).join(",") !== "4,3,2,1") {
+        throw new Error(`CVE CSV must preserve overlap-deduplicated active/current/scheduled/historical values: ${csvRow}`);
+      }
+      await page.getByRole("button", { name: "Any triage", exact: true }).click();
+      if (!groupedCveRequests.some((url) => url.searchParams.get("triage_status") === "inventory_only")) {
+        throw new Error("Grouped CVE request did not use triage_status=inventory_only");
+      }
+
       // Verify flat view mode renders individual CVE rows in a table, then
       // return to grouped mode so the drawer is opened from the design's default surface.
       const flatViewBtn = page.locator("button:has-text('Flat')");
@@ -12477,6 +12643,7 @@ const steps = [
 
       const cveRow = page.locator("main td:has-text('CVE-2024-1234')");
       await assertVisible(cveRow, "Expected CVE row to render");
+      await assertVisible(page.getByText("inventory only", { exact: true }), "Inventory-only rows must render read-only rather than outstanding");
 
       // Open the CVE detail drawer from the flat-view row and assert it renders.
       const openFleet = page.getByRole("button", {
@@ -12497,6 +12664,10 @@ const steps = [
       await assertVisible(drawer.getByTestId("cve-authority-details"), "Expected exact and legacy authority summary");
       await assertVisible(drawer.getByTestId("cve-remediation").getByText("openssl-3.0.2"), "Expected prominent fixed-version remediation");
       await assertVisible(drawer.getByTestId("cve-affected-systems"), "Expected a distinct affected-systems section");
+      await assertVisible(drawer.getByText("Current exposure · 3", { exact: true }), "Expected current exposure inventory section");
+      await assertVisible(drawer.getByText("Scheduled configuration exposure · 2", { exact: true }), "Expected scheduled configuration inventory section");
+      await assertVisible(drawer.getByText("Historical evidence · 1", { exact: true }), "Expected historical evidence inventory section");
+      await assertVisible(drawer.getByTestId("cve-fleet-scheduled-configuration"), "Expected scheduled configuration to be explained separately from POA&M patch scheduling");
 
       const environmentCards = drawer.getByTestId("cve-fleet-environment");
       const developmentCard = environmentCards.filter({ has: page.getByText("Development", { exact: true }) });
@@ -12504,6 +12675,7 @@ const steps = [
       const labCard = environmentCards.filter({ has: page.getByText("Lab", { exact: true }) });
       const affectedEnvironmentCards = drawer.getByTestId("cve-affected-environment");
       const archiveInventory = affectedEnvironmentCards.filter({ has: page.getByText("Archive", { exact: true }) });
+      const rolloutInventory = affectedEnvironmentCards.filter({ has: page.getByText("Rollout target", { exact: true }) });
       await assertVisible(drawer.getByText("MIXED", { exact: true }), "Expected authoritative mixed fleet rollup");
       await assertVisible(developmentCard.getByText("EXACT ACCEPTED", { exact: true }), "Expected accepted environment state");
       await assertVisible(developmentCard.getByText(/Accepted by Morgan Reyes/), "Expected accepted-risk disposition actor");
@@ -12519,7 +12691,9 @@ const steps = [
       await assertCount(environmentCards.filter({ has: page.getByText("Archive", { exact: true }) }), 0, "Legacy-only environments must not imply a triage disposition");
       await assertVisible(drawer.getByTestId("cve-fleet-legacy"), "Expected display-only legacy fleet warning");
       await assertVisible(drawer.getByTestId("cve-fleet-no-scan"), "Expected no-scan fleet warning");
-      await assertVisible(archiveInventory.getByText("HISTORICAL", { exact: true }), "Expected historical host authority label");
+      await assertVisible(archiveInventory.locator(".cve-inventory-authority").getByText("HISTORICAL", { exact: true }), "Expected historical host authority label");
+      await assertVisible(rolloutInventory.locator(".cve-inventory-authority").getByText("SCHEDULED CONFIGURATION", { exact: true }), "Expected scheduled-only host section label");
+      await assertCount(environmentCards.filter({ has: page.getByText("Rollout target", { exact: true }) }), 0, "Scheduled-target-only environments must not imply a triage disposition");
       for (let index = 0; index < await affectedEnvironmentCards.count(); index += 1) {
         const card = affectedEnvironmentCards.nth(index);
         const declared = Number((await card.locator("header .mono").textContent()).match(/(\d+) host/)?.[1]);
@@ -12615,6 +12789,11 @@ const steps = [
         triageDialog.getByTestId("cve-triage-environment").filter({ hasText: "Archive" }),
         0,
         "Legacy-only environments must not enter the triage draft",
+      );
+      await assertCount(
+        triageDialog.getByTestId("cve-triage-environment").filter({ hasText: "Rollout target" }),
+        0,
+        "Scheduled-target-only environments must not enter the triage draft",
       );
       await developmentDraft.getByTestId("cve-accept-justification").fill("");
       await triageDialog.getByTestId("cve-triage-submit").click();
@@ -12761,6 +12940,9 @@ const steps = [
       legacyOnlyDetail.exact_affected_system_count = 0;
       legacyOnlyDetail.exact_mutation_target_count = 0;
       legacyOnlyDetail.legacy_affected_system_count = 1;
+      legacyOnlyDetail.current_affected_system_count = 0;
+      legacyOnlyDetail.scheduled_deployment_target_count = 0;
+      legacyOnlyDetail.historical_inventory_system_count = 1;
       legacyOnlyDetail.environments = [legacyOnlyDetail.environments.find((environment) => environment.environment_name === "Archive")];
       fleetDetailAfterMutation = legacyOnlyDetail;
       await openFleet.click();
@@ -12781,7 +12963,13 @@ const steps = [
       exactOnlyDetail.exact_affected_system_count = 3;
       exactOnlyDetail.exact_mutation_target_count = 3;
       exactOnlyDetail.legacy_affected_system_count = 0;
-      exactOnlyDetail.environments = exactOnlyDetail.environments.filter((environment) => environment.environment_name !== "Archive");
+      exactOnlyDetail.current_affected_system_count = 3;
+      exactOnlyDetail.scheduled_deployment_target_count = 0;
+      exactOnlyDetail.historical_inventory_system_count = 0;
+      exactOnlyDetail.environments = exactOnlyDetail.environments.filter((environment) =>
+        environment.environment_name !== "Archive" && environment.environment_name !== "Rollout target");
+      exactOnlyDetail.environments[1].systems = exactOnlyDetail.environments[1].systems.filter((system) => system.inventory_section === "current");
+      exactOnlyDetail.environments[1].scheduled_deployment_target_count = 0;
       fleetDetailAfterMutation = exactOnlyDetail;
       await openFleet.click();
       await assertVisible(drawer, "Expected exact-only CVE inventory to remain actionable");
@@ -12829,6 +13017,7 @@ const steps = [
       await page.unroute("**/api/v1/poams/assignees");
       await page.unroute(/\/api\/v1\/cves\/CVE-2024-1234\/triage$/);
       await page.unroute(/\/api\/v1\/cves(?:\?.*)?$/);
+      await page.unroute(/\/api\/v1\/cves\/export(?:\?.*)?$/);
       await page.unroute("**/api/v1/cves/rescan-fleet");
 
       // Regression guard for the route-leak fix above: routeStandaloneUiBootstrap()
@@ -16415,7 +16604,7 @@ security.audit.enable = true;</fixtext>
         await assertVisible(detail.getByText("Not supported by execution ownership"), "Expected non-cancellable ownership detail");
         await assertVisible(detail.getByRole("heading", { name: "Findings" }), "Expected findings-first detail hierarchy");
         await captureWorkflowViewportState(page, "16c-scanning-view", "failed-detail", "desktop");
-        const exactBuildRoute = "**/api/v1/build-jobs/recent?*";
+        const exactBuildRoute = `**/api/v1/build-jobs/${exactBuildId}`;
         await page.route(exactBuildRoute, async (route) => {
           const exactBuild = {
             ...mockRecentBuilds().items[1],
@@ -16428,12 +16617,12 @@ security.audit.enable = true;</fixtext>
           await route.fulfill({
             status: 200,
             contentType: "application/json",
-            body: JSON.stringify({ total: 1, domain_total: 1, page: 1, limit: 10000, items: [exactBuild] }),
+            body: JSON.stringify({ collection: "completed", attempt: exactBuild }),
           });
         });
         await buildLink.click();
         await page.waitForURL(new RegExp(`/builds\\?job=${exactBuildId}$`));
-        await assertValue(page.locator("input.q-search-input").first(), exactBuildId, "Exact build deep link should initialize build search");
+        await assertValue(page.locator("input.q-search-input").first(), "", "Exact build deep link must preserve ordinary search state");
         await assertAttribute(page.getByRole("button", { name: /^Completed/ }), "class", "sd-tab focus-ring active", "Exact terminal build should select Completed");
         await assertVisible(page.locator(".build-log-tray .fl-tray-head").getByText("omega-new-failure", { exact: true }), "Exact build deep link should open the associated build");
         await page.unroute(exactBuildRoute);
@@ -21444,6 +21633,36 @@ function runStaticHarnessContracts() {
       scenario16.includes('Object.hasOwn(firstTriage, "scope")') &&
       scenario16.includes('Object.hasOwn(action, "environment_id")'),
     "16-cves must prove fleet triage retains environment actions without System Detail scope selectors",
+  );
+  for (const contract of [
+    "current_systems_affected: 6",
+    "scheduled_deployment_target_systems: 3",
+    "historical_inventory_systems: 1",
+    'inventory_section: "scheduled_deployment_target"',
+    'inventory_section: "historical"',
+    'getByText("Current exposure · 3"',
+    'getByText("Scheduled configuration exposure · 2"',
+    'getByText("Historical evidence · 1"',
+    "Scheduled-target-only environments must not enter the triage draft",
+    "Inventory-only rows must render read-only rather than outstanding",
+    'name: "Inventory only"',
+    'searchParams.get("triage_status") === "inventory_only"',
+    "Currently Affected Systems",
+    "Scheduled Deployment Targets",
+    "Historical Inventory Systems",
+    "4,3,2,1",
+    "Operator should have readable fleet inventory",
+    "Operator should receive fleet triage controls",
+    "Operator must not receive the Admin-only fleet rescan action",
+    "critical_count: 2",
+    "fixable_count: 2",
+    "exploited_count: 2",
+  ]) {
+    assertContract(scenario16.includes(contract), `16-cves inventory relation coverage is missing ${contract}`);
+  }
+  assertContract(
+    (scenario16.match(/system_id: "00000000-0000-0000-0000-0000000000a2"/g) || []).length >= 2,
+    "16-cves must retain the same system in current and scheduled configuration sections to cover affected-count deduplication",
   );
   const sqlAuthoredHelperName = "createTask433Composite" + "AssessmentFixture";
   assertContract(!source.includes(`${sqlAuthoredHelperName}(`), "Canonical workflows must not use the SQL-authored assessment helper");

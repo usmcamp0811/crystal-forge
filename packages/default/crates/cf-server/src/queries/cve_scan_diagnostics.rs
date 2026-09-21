@@ -15,7 +15,7 @@ use crate::security::snapshot_redaction::redact_text;
 /// Maximum diagnostic events accepted from one terminal remote report.
 pub(crate) const MAX_DIAGNOSTIC_EVENTS: usize = 256;
 /// Maximum persisted Unicode scalar count for one event line.
-pub(crate) const MAX_DIAGNOSTIC_CHARS: usize = 2048;
+pub(crate) const MAX_DIAGNOSTIC_CHARS: usize = cf_protocol::builder::CVE_SCAN_MAX_DIAGNOSTIC_CHARS;
 /// Fixed maximum returned by the scan-detail API.
 pub(crate) const MAX_DETAIL_EVENTS: i64 = 500;
 
@@ -95,6 +95,12 @@ pub(crate) fn prepare_diagnostics(values: &[CveScanDiagnostic]) -> Vec<PreparedS
         };
         let event_type = match value.event_type.as_str() {
             "attempt_started" => "attempt_started",
+            "materialization_started" => "materialization_started",
+            "materialization_completed" => "materialization_completed",
+            "scanner_started" => "scanner_started",
+            "scanner_completed" => "scanner_completed",
+            "evidence_resolution_started" => "evidence_resolution_started",
+            "evidence_resolution_completed" => "evidence_resolution_completed",
             "attempt_completed" => "attempt_completed",
             "attempt_failed" => "attempt_failed",
             "result_persistence_failed" => "result_persistence_failed",
@@ -211,7 +217,19 @@ async fn insert_diagnostics_tx(
                (scan_id, execution_id, attempt_number, occurred_at, level, source, event_type, message, truncated)
                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
                ON CONFLICT (scan_id, execution_id, event_type)
-               WHERE event_type IN ('attempt_started','attempt_completed','attempt_failed','attempt_requeued')
+               WHERE event_type IN (
+                   'attempt_started',
+                   'materialization_started',
+                   'materialization_completed',
+                   'scanner_started',
+                   'scanner_completed',
+                   'evidence_resolution_started',
+                   'evidence_resolution_completed',
+                    'attempt_completed',
+                    'attempt_failed',
+                    'result_persistence_failed',
+                    'attempt_requeued'
+               )
                DO NOTHING"#,
         )
         .bind(scan_id)
@@ -275,10 +293,12 @@ pub(crate) async fn get_scan_diagnostics(
     let Some(metadata) = metadata else {
         return Ok(None);
     };
+    // SECURITY: The database identity records server receipt order. The builder's
+    // wall clock remains informational and cannot reorder lifecycle events.
     let rows = sqlx::query(
         r#"SELECT id, execution_id, attempt_number, occurred_at, level, source, event_type, message, truncated
            FROM cve_scan_diagnostic_events WHERE scan_id=$1
-           ORDER BY occurred_at, id LIMIT $2"#,
+           ORDER BY attempt_number, id LIMIT $2"#,
     )
     .bind(scan_id)
     .bind(MAX_DETAIL_EVENTS + 1)

@@ -504,11 +504,17 @@ pub async fn heartbeat_remote_cve_scan(
     lease: CveScanLease,
     entries: usize,
     observations: usize,
+    diagnostics: &[cf_protocol::builder::CveScanDiagnostic],
 ) -> Result<Option<DateTime<Utc>>> {
     if entries > CVE_SCAN_MAX_ENTRIES || observations > CVE_SCAN_MAX_OBSERVATIONS {
         return Ok(None);
     }
     let expires = Utc::now() + chrono::Duration::seconds(LEASE_SECONDS);
+    let diagnostics = crate::queries::cve_scan_diagnostics::prepare_diagnostics(diagnostics);
+    let mut tx = pool.begin().await?;
+    // CONCURRENCY: The guarded lease update locks the scan row before diagnostics
+    // are appended. The transaction acknowledges a heartbeat only after both the
+    // lease renewal and its fenced phase events commit.
     let updated = sqlx::query_scalar::<_, DateTime<Utc>>(
         r#"
         UPDATE cve_scans scan SET lease_heartbeat_at = NOW(), lease_expires_at = $5
@@ -527,8 +533,17 @@ pub async fn heartbeat_remote_cve_scan(
     .bind(lease.builder_id)
     .bind(lease.builder_session_id)
     .bind(expires)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?;
+    if updated.is_some() && !diagnostics.is_empty() {
+        crate::queries::cve_scan_diagnostics::append_remote_diagnostics_tx(
+            &mut tx,
+            lease,
+            &diagnostics,
+        )
+        .await?;
+    }
+    tx.commit().await?;
     Ok(updated)
 }
 
@@ -1755,11 +1770,34 @@ mod tests {
                 .is_none(),
             "one builder must own at most one active scan"
         );
-        let renewed = heartbeat_remote_cve_scan(&pool, claim.lease, 0, 0)
-            .await
-            .expect("heartbeat should execute")
-            .expect("heartbeat should retain ownership");
+        let live_diagnostic = cf_protocol::builder::CveScanDiagnostic {
+            occurred_at: Utc::now(),
+            level: "info".to_string(),
+            source: "vulnix".to_string(),
+            event_type: "scanner_started".to_string(),
+            message: "Vulnix scan started for the authorized outputs.".to_string(),
+            truncated: false,
+        };
+        let renewed = heartbeat_remote_cve_scan(
+            &pool,
+            claim.lease,
+            0,
+            0,
+            std::slice::from_ref(&live_diagnostic),
+        )
+        .await
+        .expect("heartbeat should execute")
+        .expect("heartbeat should retain ownership");
         assert!(renewed > claim.lease_expires_at);
+        let live_events =
+            crate::queries::cve_scan_diagnostics::get_scan_diagnostics(&pool, claim.lease.scan_id)
+                .await
+                .expect("live diagnostics should load")
+                .expect("claimed scan should exist");
+        assert_eq!(live_events.status, "in_progress");
+        assert_eq!(live_events.events.len(), 1);
+        assert_eq!(live_events.events[0].event_type, "scanner_started");
+        assert!(live_events.completed_at.is_none());
         assert_eq!(
             crate::queries::cve_scans::recover_stale_scans(&pool, std::time::Duration::ZERO,)
                 .await
@@ -1768,10 +1806,30 @@ mod tests {
             "legacy stale recovery must not revoke a typed remote lease"
         );
         assert!(
-            heartbeat_remote_cve_scan(&pool, claim.lease, 0, 0)
+            heartbeat_remote_cve_scan(
+                &pool,
+                claim.lease,
+                0,
+                0,
+                std::slice::from_ref(&live_diagnostic),
+            )
+            .await
+            .expect("typed heartbeat after legacy recovery should execute")
+            .is_some()
+        );
+        let retried_events =
+            crate::queries::cve_scan_diagnostics::get_scan_diagnostics(&pool, claim.lease.scan_id)
                 .await
-                .expect("typed heartbeat after legacy recovery should execute")
-                .is_some()
+                .expect("retried diagnostics should load")
+                .expect("claimed scan should exist");
+        assert_eq!(
+            retried_events
+                .events
+                .iter()
+                .filter(|event| event.event_type == "scanner_started")
+                .count(),
+            1,
+            "a retried heartbeat must not duplicate an acknowledged phase event",
         );
 
         let mut result = CveScanResult {
@@ -1836,7 +1894,7 @@ mod tests {
             "a disabled builder must not claim scan work"
         );
         assert!(
-            heartbeat_remote_cve_scan(&pool, claim.lease, 0, 0)
+            heartbeat_remote_cve_scan(&pool, claim.lease, 0, 0, &[])
                 .await
                 .expect("disabled heartbeat should execute")
                 .is_none(),
@@ -1900,7 +1958,7 @@ mod tests {
         .await
         .expect("replacement session should be installed");
         assert!(
-            heartbeat_remote_cve_scan(&pool, claim.lease, 0, 0)
+            heartbeat_remote_cve_scan(&pool, claim.lease, 0, 0, &[])
                 .await
                 .expect("superseded heartbeat should execute")
                 .is_none(),
@@ -1954,7 +2012,7 @@ mod tests {
             RemoteCompletion::Invalid(_)
         ));
         assert!(
-            heartbeat_remote_cve_scan(&pool, claim.lease, 0, 0)
+            heartbeat_remote_cve_scan(&pool, claim.lease, 0, 0, &[])
                 .await
                 .expect("post-validation heartbeat should execute")
                 .is_some(),

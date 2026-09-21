@@ -436,7 +436,7 @@ pub async fn export_cves(
 
     // Build CSV with proper RFC 4180 field escaping
     let mut csv_output = String::new();
-    csv_output.push_str("CVE ID,Severity,CVSS Score,Package,Installed Version,Fixed Version,Affected Systems,Environments,Fix Status,Triage Status,Age (days),First Seen,Last Seen\n");
+    csv_output.push_str("CVE ID,Severity,CVSS Score,Package,Installed Version,Fixed Version,Affected Systems,Currently Affected Systems,Scheduled Deployment Targets,Historical Inventory Systems,Environments,Fix Status,Triage Status,Age (days),First Seen,Last Seen\n");
 
     for cve in cves {
         let environments = cve.affected_environments.unwrap_or_default().join(";");
@@ -458,6 +458,9 @@ pub async fn export_cves(
             csv_field(&cve.installed_version.unwrap_or_default()),
             csv_field(&cve.fixed_version.unwrap_or_default()),
             cve.affected_count.to_string(),
+            cve.current_affected_count.to_string(),
+            cve.scheduled_deployment_target_count.to_string(),
+            cve.historical_inventory_count.to_string(),
             csv_field(&environments),
             csv_field(&cve.fix_status),
             csv_field(&cve.triage_status),
@@ -565,12 +568,13 @@ mod tests {
 
     #[test]
     fn csv_export_row_format_has_correct_column_count() {
-        // Verify our CSV header has 13 columns matching the row format string
+        // Verify the CSV header matches the row format string.
         let header = "CVE ID,Severity,CVSS Score,Package,Installed Version,Fixed Version,\
-                       Affected Systems,Environments,Fix Status,Triage Status,Age (days),\
-                       First Seen,Last Seen";
+                       Affected Systems,Currently Affected Systems,Scheduled Deployment Targets,\
+                       Historical Inventory Systems,Environments,Fix Status,Triage Status,\
+                       Age (days),First Seen,Last Seen";
         let col_count = header.split(',').count();
-        assert_eq!(col_count, 13, "CSV header must have 13 columns");
+        assert_eq!(col_count, 16, "CSV header must have 16 columns");
     }
 
     #[test]
