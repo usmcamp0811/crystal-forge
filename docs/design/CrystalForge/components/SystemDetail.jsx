@@ -1471,13 +1471,18 @@ function useRevScope(sys) {
   const onCommits = mode === "commit";
   const gen = (genId !== null && gens.find(g => g.id === genId)) || gens[0];
   const commit = (sha && commits.find(c => c.sha === sha)) || commits.find(c => c.current) || commits[0];
-  const ageRank = onCommits ? commits.indexOf(commit) : gens.indexOf(gen);
+  const deployedIdx = Math.max(0, commits.findIndex(c => c.sha === sys.commit));
+  const idx = onCommits ? commits.indexOf(commit) : gens.indexOf(gen);
+  const base = onCommits ? deployedIdx : 0;
+  const ageRank = Math.max(0, idx - base);
+  const isDeployed = idx === base;
+  const isAhead = idx < base;
   return { gens, commits, mode, setMode, setGenId, setSha, onCommits, gen, commit, ageRank,
-           isCurrent: ageRank <= 0, key: onCommits ? commit.sha : `gen${gen.id}` };
+           isDeployed, isAhead, isCurrent: idx <= base, key: onCommits ? commit.sha : `gen${gen.id}` };
 }
 
 function RevScopeBar({ sys, scope, label }) {
-  const { gens, commits, onCommits, setMode, setGenId, setSha, gen, commit, isCurrent } = scope;
+  const { gens, commits, onCommits, setMode, setGenId, setSha, gen, commit, isCurrent, isDeployed, isAhead } = scope;
   const sha = onCommits ? commit.sha : gen.sha;
   const msg = onCommits ? commit.message : gen.msg;
   const when = onCommits ? commit.when : gen.at;
@@ -1504,9 +1509,9 @@ function RevScopeBar({ sys, scope, label }) {
         {by && <><span className="rev-bar-dot">·</span><span className="mono">{by}</span></>}
       </span>
       <span className="rev-bar-state">
-        {isCurrent
-          ? <span className="chip chip-healthy" style={{ fontSize:10 }}><Icon name="check" size={9}/> running now</span>
-          : <span className="chip chip-warning" style={{ fontSize:10 }} title="Not the config running on this host right now">historical</span>}
+        {isDeployed && <span className="chip chip-healthy" style={{ fontSize:10 }}><Icon name="check" size={9}/> running now</span>}
+        {isAhead && <span className="chip chip-info" style={{ fontSize:10 }} title="Newer than the deployed revision — never deployed to this host">never deployed here</span>}
+        {!isCurrent && <span className="chip chip-warning" style={{ fontSize:10 }} title="Not the config running on this host right now">historical</span>}
       </span>
     </div>
   );
