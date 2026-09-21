@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-21 02:42'
+updated_date: '2026-09-21 03:17'
 labels:
   - scanning
   - web-ui
@@ -123,13 +123,14 @@ Replace separate Justify + Create POA&M with one CveTriageModal (extracted from 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-Final stabilization at design head `05bcac36`:
-1. Normalize remote `nix derivation show` output only from exact flat or direct `derivations` maps. Reject missing, extra, malformed, unresolved, empty, or noncanonical paths with bounded diagnostics.
-2. Terminalize only the exact attempts=0 `post_build` scan in `awaiting_build` when its bound build reaches an unreplaced terminal failure or actual cancellation, including policy cancellation and obsolete queued jobs. Preserve retry replacement and stale-event guards.
-3. Add a target-aware Hardening inventory endpoint that reuses server-owned current, retained-generation, and exact-derivation identities. Resolve exact current state without superseded fallback and make historical evidence read-only.
-4. Add one shared System Detail revision scope bar for CVE and Hardening. Bind first-page and continuation reads to the selected server identity, fence stale responses, reset target-local state, and disable historical mutations.
-5. Make Completed archive filtering use an authoritative `Archived [N]` ghost control independent from contextual per-system archive state. Render concise prerequisite build failures with exact build links and no scan retry.
-6. Update focused Rust and browser/static regressions. Run scanner/lifecycle tests, SQLX_OFFLINE server compilation, Web UI tests and WASM compilation, JavaScript/static contracts, targeted formatting, and diff hygiene. Do not run the authoritative Web UI VM or full flake check in this pass. Commit, push to MR !329, verify local/remote SHA, and stop.
+Runtime-defect repair at exact rebased head `af064894e9ab4497fd9f0fc50876527940952eb8` without another rebase:
+1. Reproduce the packaged evaluator Nix version and real single/multi-derivation JSON contract. Implement explicit version-aware normalization with canonical identity reconstruction, fail-closed set matching, and real-output fixtures. Extend the Nix package contract to execute the same evaluator.
+2. Reproduce and fix nullable candidate-query decoding. Add live-database query and HTTP-route regressions for built, unbuilt, retained, scanned, unscanned, visible, and hidden candidates, with deterministic ordering and coherent source facts.
+3. Align the Web UI Hardening inventory model with nullable current derivation identity. Render unresolved current as no exact evidence without substitution or mutation and add real server-payload serde/browser coverage.
+4. Give the shared revision scope bar explicit loading, bounded error, retry, unavailable, current, and historical states. Preserve server-owned selection mapping and read-only authority across Generations/Commits.
+5. Start the isolated task-owned devenv preview before UI edits. Verify focused browser workflows through the real seeded database and HTTP routes, then run proportional builder/server/UI/Nix package checks.
+6. Exercise the strongest local end-to-end scan workflow available. Record exact limits if deployment-only verification remains pending.
+7. Perform a separate maintainer review across requirements, persistence, query safety/performance, UI design parity, state handling, E2E behavior, and regressions. Commit and push normally to MR !329; do not merge.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
