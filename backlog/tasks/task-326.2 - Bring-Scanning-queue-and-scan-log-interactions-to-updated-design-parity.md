@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-21 06:27'
+updated_date: '2026-09-21 06:28'
 labels:
   - scanning
   - web-ui
@@ -219,6 +219,8 @@ Addressed all concrete frontend review findings without modifying cf-server. Rev
 Final functional pass implemented at design head 05bcac36. The builder now accepts only exact flat or direct `derivations` Nix maps, rejects extra/missing derivations, and preserves bounded canonical output validation. Build failure, actual cancellation, policy cancellation, and obsolete queued-build paths transactionally terminalize only the exact attempts=0 `post_build`/`awaiting_build` intent while retry replacement and stale-event guards remain intact. Added target-aware exact Hardening reads with server-owned current/retained/exact derivation validation and no superseded fallback. System Detail CVE and Hardening now share a server-owned Generations/Commits scope bar, fence stale target responses, and make historical evidence read-only. Completed scanning now uses an authoritative `Archived [N]` filter independent from per-system archive visibility, and prerequisite failures show concise build-first actions without scan retry. Focused scanner/lifecycle checks, SQLX_OFFLINE server compilation, Web UI tests/WASM compilation, JavaScript/static contracts, targeted formatting, and diff hygiene passed. DB-backed Hardening regressions compiled but were not executed because no task-owned database was available for that agent. No authoritative VM or full flake check was run in this final pass.
 
 2026-09-21 runtime stabilization follow-up at uncommitted head `af064894e9ab4497fd9f0fc50876527940952eb8`: Web UI verification passed after formatting the task-owned System Detail file: full tests 452 passed/1 ignored; wasm32 cargo check passed; targeted rustfmt passed; JavaScript syntax and static contracts passed; `git diff --check` passed. Repository-wide Web UI `cargo fmt --check` remains blocked by an unrelated pre-existing formatting difference in `packages/web-ui/src/components/onboarding/coach_panel.rs`, which was not modified. The authoritative command `CF_UI_TEST_STEPS='28-system-hardening-tab' nix build --impure 'path:.#checks.x86_64-linux.web-ui' --no-link -L` did not start workflow 28 because the `design-targets` prerequisite failed: four existing TASK-440 config screenshots timed out waiting for exact text `TARGET`; 50/54 targets rendered. Full output: `/home/mcamp/.local/share/opencode/tool-output/tool_0c2a0fddf001AcmuR2DG112ebh`. TASK-326.2 remains In Progress; do not claim workflow 28 browser evidence or review readiness until that prerequisite is repaired or explicitly waived.
+
+Committed and pushed the runtime stabilization follow-up as `562632f9dade9460702ac59ae6b5f1f393e42119` (`TASK-326.2: Stabilize revision-scoped security views`) to MR !329. Local and remote branch SHAs match and the task worktree is clean. The task-owned preview remains reachable at `http://127.0.0.1:8081`; API status at `http://127.0.0.1:3447/status` reports running with a healthy database and 36 systems. The authoritative workflow 28 gate remains blocked before execution by the unrelated TASK-440 design-target prerequisite failure recorded above, so the task remains In Progress.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
