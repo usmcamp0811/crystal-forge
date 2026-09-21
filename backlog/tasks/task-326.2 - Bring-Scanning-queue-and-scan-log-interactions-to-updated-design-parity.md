@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-21 14:41'
+updated_date: '2026-09-21 17:53'
 labels:
   - scanning
   - web-ui
@@ -132,6 +132,14 @@ Runtime-defect repair from exact deployed head `3659bee22714dcd85a5b19de69158513
 6. Split fleet CVE inventory into exact currently affected, exact actively scheduled deployment targets, and retained historical inventory. Define compatibility `affected_count` as the distinct union of current and scheduled systems; expose separate current/scheduled/historical counts and sections; keep triage mutation scope current-exact only. Update stats, environments, sorting, grouping, CSV, drawer, labels, and RBAC consistently.
 7. Add cross-boundary coverage: helper/unit tests, isolated PostgreSQL semantics and query-plan tests, HTTP responses, production-shaped serde, packaged-builder Nix contract, real browser workflows without mocking the sole critical boundary, and one real remote scan through persisted completion.
 8. Keep a verified task-owned preview current before browser-visible edits. Run focused formatting/checks/builds first, then authoritative focused browser workflows. Perform separate maintainer passes for requirements, data integrity, performance, design parity, state handling, E2E behavior, and regression adequacy. Commit and push only after required verification passes; keep the task In Progress if any real-runtime or browser evidence remains unavailable.
+
+Step 6 backend/API slice (2026-09-21): add migration 0272 with a read-only exact actively scheduled deployment occurrence view. It will rank the latest active deployment per system and require pending status, unexpired lease, exact system/flake/configuration/commit/derivation/store-path binding, available integrity-v1 evaluation artifact binding, latest completed schema-1 scan, and non-whitelisted observations.
+
+Refactor the environment-scoped fleet CVE read CTE to classify mutually explicit current, scheduled deployment target, and retained historical subjects before aggregation. Compatibility affected_count will count distinct current union scheduled systems. Add serde-compatible count fields and section identity to list, stats, affected-system, environment, drawer, grouping, and CSV contracts. Keep current exact occurrences as the sole source for disposition rollup, coherence, and mutations.
+
+Add focused isolated-PostgreSQL regressions for current-only, scheduled-only, current/scheduled overlap deduplication, historical-only exclusion from affected_count, expired/terminal/inexact deployment exclusion, environment RBAC, and current-only mutation scope. Correct package-specific drawer metadata if the touched query still selects metadata through the package-ambiguous legacy route.
+
+Verify touched Rust with targeted rustfmt, run SQLX_OFFLINE cf-server check/tests, and run database regressions only through a verified task-owned isolated PostgreSQL runner. Do not modify Web UI files, existing unrelated dirty files, or migration 0271.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
