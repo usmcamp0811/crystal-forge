@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-21 20:34'
+updated_date: '2026-09-21 20:36'
 labels:
   - scanning
   - web-ui
@@ -248,6 +248,8 @@ Step 6 Web UI slice implemented at the existing uncommitted worktree head. Added
 Review analysis found that `fetch_cve_inventory_systems` applies `LIMIT 1001` after section expansion, so current/scheduled overlap can cause false overflow and truncate sections. `fetch_cve_fleet_stats` does not directly include `scheduled_authority_systems` in `has_scan`. The shared list/export order ends at `cve_id`, leaving same-CVE package rows nondeterministic.
 
 Backend review fixes completed without commit or push. `fetch_cve_inventory_systems` now probes at most 1,001 distinct system IDs before section expansion, rejects a 1,001-system scope, and returns every current/scheduled/historical row for accepted systems; overlap no longer consumes the system bound. Fleet `has_scan` now includes `scheduled_authority_systems`. Shared list/export ordering and grouped nested ordering now use C-collated canonical package name after CVE ID. `docs/fleet-cve-triage.md` now defines relation semantics, distinct current-union-scheduled affected counts, overlap, current-exact-only mutation, and the corrected distinct-system bound. Focused coverage asserts the bound helper, five relation rows over four systems, scheduled scan coverage, current-only mutation, all list sorts, and export ordering. Verification passed: bound unit test 1/1; isolated PostgreSQL fleet relation/stats test 1/1; isolated PostgreSQL list/export order test 1/1; `SQLX_OFFLINE=true cargo check --tests`; targeted rustfmt check; `git diff --check`. Existing unrelated compiler warnings remain. The initial host-side PostgreSQL attempt did not run because `initdb` was outside Nix; the Nix-environment rerun used a disposable cluster on port 35436 and cleaned it afterward. No Web UI file was modified by this follow-up.
+
+Frontend review fixes completed without commit or push. Old-server relation normalization now derives Current only from exact authority counts and Historical only from legacy authority counts; it never promotes combined affected totals. Detail/environment normalization also reclassifies omitted-section legacy rows as Historical and exact rows as Current, with mixed exact/legacy regressions. Added the Inventory only filter (`triage_status=inventory_only`). The 16-cves browser fixture now corrects grouped severity/fixable/exploited aggregates, asserts filter route state and request serialization, validates CSV filters plus active/current/scheduled/historical headers and 4/3/2/1 overlap-dedup values, and proves Operator inventory/triage access while fleet rescan remains Admin-only. Verification passed: focused model normalization 1/1, focused old-server detail normalization 1/1, focused CVE tests 13/13, full Web UI tests 457 passed/1 ignored, wasm32 check, targeted rustfmt check, Node syntax, static browser contracts, and git diff --check. No authoritative VM was run per user instruction and the existing preview waiver remains in effect. No cf-server migration or unrelated file was modified by this follow-up.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
