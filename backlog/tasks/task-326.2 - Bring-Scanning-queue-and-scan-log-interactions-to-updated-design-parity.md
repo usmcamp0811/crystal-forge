@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-20 22:46'
+updated_date: '2026-09-21 01:31'
 labels:
   - scanning
   - web-ui
@@ -123,14 +123,13 @@ Replace separate Justify + Create POA&M with one CveTriageModal (extracted from 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-Fast stabilization pass from exact pushed head `c0b35860e46e3c5663567573ba1955aabe093481`:
-1. Diagnose the confirmed server-local scan failure only through the worker, Vulnix runner, scan-result persistence, and diagnostic paths. Fix only an established cause. Independently add bounded redacted persistence-stage error-chain diagnostics with execution-token fencing and a focused regression.
-2. Replace scan-time revision inference with server-authoritative current/latest-per-flake relations. Reuse scheduler lifecycle policy for statistics and By-system freshness, and make coverage buckets mutually exclusive.
-3. Make By-system current evidence use exact-current authority and all severity counts. Restore data-backed By-system and main-table hierarchy, raise the bounded client/server record cap consistently, and disclose truncation.
-4. Apply bounded System Detail corrections: lazy first-package expansion, draft-derived submit validity, and read-only historical target groundwork using server-owned generation/derivation identities. Keep historical schema-1 observations separate from legacy schema-0 evidence and bind pagination to target identity. Do not add the final selector UI.
-5. Update focused browser fixtures/assertions and task cancellation wording. Preserve existing build-to-scan behavior and compatibility values.
-6. Run only targeted formatting, focused unit/query/database tests, Web UI WASM check, JavaScript/static checks, and diff hygiene. Do not run any authoritative browser VM, full Web UI suite, full flake check, or visual baseline update.
-7. Review only accidental unrelated edits, commit once, push immediately, verify local/remote SHAs, and stop.
+Final functional pass at exact design-only head `05bcac367faa05c2b89e069c08256d7225345eb6`:
+1. Fix cf-builder `nix derivation show` parsing with a pure, bounded normalizer for flat and top-level `derivations` shapes. Preserve exact requested derivation matching and canonical store-path/output validation. Add focused fixtures and safe missing-entry diagnostics.
+2. Add transaction-local terminalization for exact post-build scan intents when their bound build fails without replacement or reaches cancelled. Preserve automatic retry rebinding, attempts=0, exact build identity, and add focused race/requeue regressions plus truthful Scanning detail actions.
+3. Implement a shared production revision scope bar. Wire System Detail CVEs to the existing server-owned candidates and target-aware pagination with stale-response fencing and read-only historical behavior.
+4. Add a compatibility-safe target-aware Hardening read contract. Resolve current and historical derivations through server-owned identities, prevent current fallback to superseded scans, and disable historical justification mutations. Reuse the shared revision scope bar.
+5. Replace the Completed archived checkbox with the design ghost filter and exact count, isolate contextual By-system archive state, bound inline failure previews, and update focused browser/static contracts with real archived fixtures.
+6. Run only focused cf-builder/cf-server/Web UI checks, WASM/static/JavaScript checks, and diff hygiene. Do not run the authoritative Web UI VM or full flake check. Commit, push, verify local/remote SHAs, report, and stop.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
