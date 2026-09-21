@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-21 06:28'
+updated_date: '2026-09-21 14:34'
 labels:
   - scanning
   - web-ui
@@ -123,14 +123,15 @@ Replace separate Justify + Create POA&M with one CveTriageModal (extracted from 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-Runtime-defect repair at exact rebased head `af064894e9ab4497fd9f0fc50876527940952eb8` without another rebase:
-1. Reproduce the packaged evaluator Nix version and real single/multi-derivation JSON contract. Implement explicit version-aware normalization with canonical identity reconstruction, fail-closed set matching, and real-output fixtures. Extend the Nix package contract to execute the same evaluator.
-2. Reproduce and fix nullable candidate-query decoding. Add live-database query and HTTP-route regressions for built, unbuilt, retained, scanned, unscanned, visible, and hidden candidates, with deterministic ordering and coherent source facts.
-3. Align the Web UI Hardening inventory model with nullable current derivation identity. Render unresolved current as no exact evidence without substitution or mutation and add real server-payload serde/browser coverage.
-4. Give the shared revision scope bar explicit loading, bounded error, retry, unavailable, current, and historical states. Preserve server-owned selection mapping and read-only authority across Generations/Commits.
-5. Start the isolated task-owned devenv preview before UI edits. Verify focused browser workflows through the real seeded database and HTTP routes, then run proportional builder/server/UI/Nix package checks.
-6. Exercise the strongest local end-to-end scan workflow available. Record exact limits if deployment-only verification remains pending.
-7. Perform a separate maintainer review across requirements, persistence, query safety/performance, UI design parity, state handling, E2E behavior, and regressions. Commit and push normally to MR !329; do not merge.
+Runtime-defect repair from exact deployed head `3659bee22714dcd85a5b19de6915851306594dbc`; do not rebase or merge.
+1. Capture the latest real failed remote scan before scanner changes: persisted failure, scan/execution IDs, builder/session ownership, lifecycle, diagnostics, exact realized NixOS output, and production builder tool versions. Reproduce `vulnix --json <realized-output>` in that exact environment and classify the failing phase.
+2. Port commit 3659bee2 native-select dark/light option styling and revision-bar geometry to production. Separate presentation mode from evidence selection; make Generations/Commits always switch while preserving unlinked targets. Derive running, never-deployed, historical, and unavailable states only from factual candidate/generation/commit identity. Cover both CVE and Hardening.
+3. Repair package-evidence resolution based on the observed failure. Preserve realized-system-output Vulnix targeting, exact package `.drv` identity, canonical outputs, aggregate deadline, output/process bounds, and server closure/deriver verification. Prefer a bounded packaged-Nix-proven fast path with stable binding compatibility fallback and phase-specific diagnostics.
+4. Add fenced live remote diagnostics using the smallest robust lease-owned protocol. Persist idempotent bounded phase deltas during execution and keep terminal diagnostics append-only. Poll and prove drawer visibility before completion without fabricated percentages or secret-bearing output.
+5. Replace Builds UUID text search and 10,000-row reveal with one typed, authorization-preserving exact lookup. Keep normal list limits bounded. Benchmark plain and exact paths on isolated production-scale data with `EXPLAIN (ANALYZE, BUFFERS)` before and after, covering active, completed, hidden, and missing attempts.
+6. Split fleet CVE inventory into exact currently affected, exact actively scheduled deployment targets, and retained historical inventory. Define compatibility `affected_count` as the distinct union of current and scheduled systems; expose separate current/scheduled/historical counts and sections; keep triage mutation scope current-exact only. Update stats, environments, sorting, grouping, CSV, drawer, labels, and RBAC consistently.
+7. Add cross-boundary coverage: helper/unit tests, isolated PostgreSQL semantics and query-plan tests, HTTP responses, production-shaped serde, packaged-builder Nix contract, real browser workflows without mocking the sole critical boundary, and one real remote scan through persisted completion.
+8. Keep a verified task-owned preview current before browser-visible edits. Run focused formatting/checks/builds first, then authoritative focused browser workflows. Perform separate maintainer passes for requirements, data integrity, performance, design parity, state handling, E2E behavior, and regression adequacy. Commit and push only after required verification passes; keep the task In Progress if any real-runtime or browser evidence remains unavailable.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
