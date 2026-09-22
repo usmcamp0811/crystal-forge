@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-21 21:33'
+updated_date: '2026-09-22 01:40'
 labels:
   - scanning
   - web-ui
@@ -118,6 +118,16 @@ Replace separate Justify + Create POA&M with one CveTriageModal (extracted from 
 - [x] #10 Browser assertions: Active/Completed switching, wait state rendering, failure actionability, archive/restore selection, log content, triage disposition, POA&M reuse, responsive/narrow/dark behavior
 - [x] #11 Playwright: Active/Completed filtering, wait/failed transitions, log drawer, triage modal outstanding→accepted→scheduled, POA&M reuse, responsive tests; desktop/narrow/light/dark screenshots
 - [x] #12 Selection guards: Active rows are not bulk-selectable while no server-owned execution-safe cancellation contract exists; Completed rows are selectable for archive/restore; BySystem has no bulk selection; scan cancellation remains deferred.
+- [ ] #13 Post-build CVE prerequisite reconciliation repairs impossible awaiting_build rows in bounded idempotent passes without failing valid replacements or non-post-build scans
+- [ ] #14 Scanning Completed is globally chronological by terminal timestamp and stable scan ID with request-bound keyset pagination and bounded first pages
+- [ ] #15 Completed search status revision latest and sort controls apply server-side to the full collection rather than only loaded rows
+- [ ] #16 Completed infinite scroll appends deduplicated older pages preserves loaded rows on continuation errors and refreshes only the collection head
+- [ ] #17 Archive and restore remain exact-ID operations across paginated history and archived inclusion preserves chronological pagination
+- [ ] #18 Successful exact NixOS build completion idempotently queues hardening work while failed and non-NixOS builds do not
+- [ ] #19 Automatic hardening remains controlled by auto_hardening_scans with its default unchanged and its documentation updated to post-build semantics
+- [ ] #20 Hardening backfill is bounded prioritizes relevant successfully built exact targets and preserves serial worker and heavy-Nix safety
+- [ ] #21 Exact hardening inventory exposes never_scanned queued scanning failed and completed lifecycle without cross-revision evidence substitution or historical mutation
+- [ ] #22 Focused PostgreSQL query-plan Web UI and browser verification covers 700+ terminal scans CVE repair pagination archive restore and exact hardening lifecycle
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -146,6 +156,8 @@ Step 6 Web UI slice: mirror the additive current/scheduled-deployment-target/his
 Frontend review fixes: make additive inventory normalization presence-aware and derive old-server Current/Historical from exact/legacy authority counts at list, group, stats, detail, and environment boundaries; classify legacy-authority rows without relation fields as Historical; add mixed exact/legacy Rust tests. Add Inventory only triage filtering and focused state/query coverage. Correct the 16-cves grouped fixture aggregate counts, add CSV request/header/overlap-dedup assertions, and add Operator inventory/triage plus admin-only rescan RBAC assertions. Modify only Web UI/frontend integration files and run targeted rustfmt, focused/full Web UI tests, Node syntax/static contracts, and git diff --check; do not run the authoritative VM, commit, push, or touch migrations.
 
 Backend review fixes (2026-09-21): bind fleet inventory detail overflow to the distinct selected system set while returning every current/scheduled/historical section row for accepted systems; include exact scheduled authority in fleet `has_scan`; add canonical package-name tie-breakers after CVE ID to the shared list/export and grouped nested ordering; update `docs/fleet-cve-triage.md` with section, overlap, count, mutation, and bound semantics; add focused helper/database assertions and verify with targeted rustfmt, server tests/checks, and `git diff --check`. Do not modify Web UI files.
+
+2026-09-21 lifecycle follow-up from exact deployed head `7c39e778c11fecedfd18dd3a95aa38867bb020b9`, without rebase or merge. 1. Add bounded post-build CVE prerequisite reconciliation under the build-derivation lock. Rebind durable waiting intent to the authoritative latest derivation attempt, retain active/success replacements, terminalize only the exact latest failed/cancelled/orphaned prerequisite with guarded writes, and run reconciliation plus promotion in executor-independent worker maintenance. Preserve manual/fleet/periodic scans. 2. Make `/scanning/scans` authoritative for Completed filters and deterministic ordering. Add request-bound opaque keyset cursors, bounded page size, chronological terminal ordering, server-side search/status/revision/latest/sort semantics, coherent totals/archive counts, and production-shaped indexes. Replace prefix-only client filtering with first-page plus continuation state, infinite scroll, non-destructive retry, ID deduplication, exact-ID archive/restore, and head-only live refresh. 3. Move automatic hardening admission from commit evaluation to successful exact NixOS build completion. Add durable trigger/build provenance and unique event idempotency, keep the default disabled, preserve the separate serial worker and heavy-Nix locks, run bounded worker-owned built-target backfill, and expose exact-target never-scanned/queued/scanning/failed/completed lifecycle alongside completed evidence. Keep historical evidence read-only; do not add historical Check now. 4. Add isolated PostgreSQL fixtures including 700+ terminal scans, concurrency/idempotency regressions, query-plan assertions, focused Web UI/browser workflows, exact-target lifecycle isolation, source documentation, and final multi-pass review. Keep the task-owned preview current and do not touch TASK-440, TASK-466, or unrelated devenv work.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
