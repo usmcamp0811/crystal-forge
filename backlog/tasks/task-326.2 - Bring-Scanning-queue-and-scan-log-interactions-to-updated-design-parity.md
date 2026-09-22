@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-22 02:06'
+updated_date: '2026-09-22 02:16'
 labels:
   - scanning
   - web-ui
@@ -274,6 +274,10 @@ Frontend review fixes completed without commit or push. Old-server relation norm
 Committed the final candidate as `7c39e778c11fecedfd18dd3a95aa38867bb020b9` (`TASK-326.2: Stabilize CVE scan authority`) and pushed it to the existing MR !329 branch. Local and remote branch heads match, and the task worktree is clean. The task remains In Progress rather than Review because the authoritative Web UI VM did not reach `16-cves`; the unrelated TASK-440 Config Explorer prerequisite failed first. The task-owned preview remains ready: UI and API both return HTTP 200, and `api`, `postgres`, and `web` report ready. No merge was performed.
 
 Part 1 prerequisite reconciliation implemented without commit/push. Added bounded zero-attempt `post_build`/`awaiting_build` reconciliation under the build-derivation advisory lock, authoritative latest-attempt rebind/terminalization/orphan handling with guarded safe metadata, policy-independent rebinding of existing intent during future build admission, and executor-independent reconciliation plus promotion at the top of every CVE worker iteration. Event-driven terminalization remains intact. Added PostgreSQL coverage for active/success replacements, delayed old failure, failed/cancelled/orphaned prerequisites, bounded passes, manual/fleet/periodic exclusion, policy gating, double/racing idempotency, and startup maintenance placement; updated `docs/multi-builder-api.md`. Verification on isolated PostgreSQL 17 at port 35436 (stopped afterward): focused `post_build_` tests 12/12 passed; startup maintenance test 1/1 passed. `SQLX_OFFLINE=true cargo check --tests`, targeted rustfmt check, and `git diff --check` passed with existing unrelated warnings. Concurrent Scanning pagination/API/migration and documentation relocation changes in the same worktree were not modified.
+
+Part 2 backend/API/database slice completed in the existing task worktree without commit or push. `/scanning/scans?collection=completed` now validates bounded page size, normalized `q`/`search`, terminal status, revision class, latest-only, sort, direction, archive scope, and opaque continuation cursors. The query applies full-collection filters before archive-aware counts and keyset pagination, binds cursors to a SHA-256 request fingerprint, fixes a terminal `(completed_at, scan_id)` high-water tuple, and returns `has_more` plus `next_cursor`. Migration 0273 adds terminal, per-derivation terminal, and newest-system-state indexes. The production-scale PostgreSQL regression covers 702 initial terminal rows, full stable walks, equal timestamps, newer insert exclusion, every sort/direction second page, search/status/revision/latest filters, archive/restore, malformed/rebound cursors, and EXPLAIN index use.
+
+Verification on the task-owned PostgreSQL 17 cluster at port 35437: the new pagination regression passed; the complete ignored `queries::scanning_tests` module passed 12/13, with only existing `waiting_scan_promotes_through_exact_prerequisites` failing because concurrently modified out-of-scope CVE prerequisite code returned 0 promotions instead of 1. No CVE worker/lease/builder files were changed by this slice. Handler tests passed 11/11. `SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml --tests`, targeted Rust formatting, and `git diff --check` passed with existing repository warnings. An initial full-module invocation incorrectly targeted the empty administrative `postgres` database and was superseded by the correctly migrated `crystal_forge` run. The task-owned PostgreSQL process was stopped after verification.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
