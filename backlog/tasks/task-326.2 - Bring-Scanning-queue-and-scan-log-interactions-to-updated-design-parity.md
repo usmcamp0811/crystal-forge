@@ -118,7 +118,7 @@ Replace separate Justify + Create POA&M with one CveTriageModal (extracted from 
 - [x] #10 Browser assertions: Active/Completed switching, wait state rendering, failure actionability, archive/restore selection, log content, triage disposition, POA&M reuse, responsive/narrow/dark behavior
 - [x] #11 Playwright: Active/Completed filtering, wait/failed transitions, log drawer, triage modal outstanding→accepted→scheduled, POA&M reuse, responsive tests; desktop/narrow/light/dark screenshots
 - [x] #12 Selection guards: Active rows are not bulk-selectable while no server-owned execution-safe cancellation contract exists; Completed rows are selectable for archive/restore; BySystem has no bulk selection; scan cancellation remains deferred.
-- [ ] #13 Post-build CVE prerequisite reconciliation repairs impossible awaiting_build rows in bounded idempotent passes without failing valid replacements or non-post-build scans
+- [x] #13 Post-build CVE prerequisite reconciliation repairs impossible awaiting_build rows in bounded idempotent passes without failing valid replacements or non-post-build scans
 - [ ] #14 Scanning Completed is globally chronological by terminal timestamp and stable scan ID with request-bound keyset pagination and bounded first pages
 - [ ] #15 Completed search status revision latest and sort controls apply server-side to the full collection rather than only loaded rows
 - [ ] #16 Completed infinite scroll appends deduplicated older pages preserves loaded rows on continuation errors and refreshes only the collection head
