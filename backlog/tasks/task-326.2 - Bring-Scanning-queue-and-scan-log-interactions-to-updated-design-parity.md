@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-22 02:16'
+updated_date: '2026-09-22 02:18'
 labels:
   - scanning
   - web-ui
@@ -128,6 +128,10 @@ Replace separate Justify + Create POA&M with one CveTriageModal (extracted from 
 - [ ] #20 Hardening backfill is bounded prioritizes relevant successfully built exact targets and preserves serial worker and heavy-Nix safety
 - [ ] #21 Exact hardening inventory exposes never_scanned queued scanning failed and completed lifecycle without cross-revision evidence substitution or historical mutation
 - [ ] #22 Focused PostgreSQL query-plan Web UI and browser verification covers 700+ terminal scans CVE repair pagination archive restore and exact hardening lifecycle
+- [ ] #23 Current System Detail CVE inventory resolves the newest completed schema-1 scan only for the exact authorized running derivation and never substitutes another revision
+- [ ] #24 Missing or ambiguous Current retention authority produces an explicit current-evidence unavailable state while historical selections remain separately exact and read-only
+- [ ] #25 Generation retention lifecycle and any bounded repair preserve immutable snapshot integrity exact deployment identity and fail closed on store-path ambiguity
+- [ ] #26 A production-shaped lucas current-generation browser regression proves current findings metadata and triage authority use the running exact scan and excludes old findings
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -164,6 +168,8 @@ Part 1 prerequisite reconciliation slice (2026-09-21): add a bounded `post_build
 Run reconciliation and existing wait promotion before the CVE executor enabled/Vulnix availability gates on every worker loop iteration, so maintenance is executor-independent and startup performs an immediate pass. Add real PostgreSQL tests in existing builder/query patterns for active and successful replacement rebinding, delayed old failures, orphan handling, manual/fleet/periodic exclusion, policy-independent future rebinding versus policy-gated new intent, bounded passes, repeated and racing pass idempotency, and startup maintenance placement. Update `docs/multi-builder-api.md`, run targeted rustfmt, focused PostgreSQL tests through an isolated repository test database in the Nix environment, offline server check if needed, and `git diff --check`. Do not touch API/query Scanning files, models, UI, migrations, hardening files, previews, other worktrees, or Git history.
 
 Part 2 backend/API/database slice (2026-09-21): modify only migration 0273 and cf-server scanning API model/handler/query/tests. Preserve Active and history ordering. For Completed, validate and normalize search, terminal status, revision class, latest-only, sort, direction, page size, archive scope, and cursor before SQL. Use a versioned base64url JSON cursor bound to a SHA-256 request fingerprint and a fixed terminal high-water tuple. Apply all filters before counts and keyset pagination; return total, hidden_archived, has_more, and next_cursor. Build ORDER BY and keyset fragments only from validated enums. Add terminal/system lifecycle indexes in migration 0273. Add an isolated PostgreSQL fixture with 700+ interleaved terminal rows and assertions for first/second/full walks, equal timestamps, newer inserts, filters/search/revision/archive/restore, malformed or rebound cursors, and EXPLAIN plan shape. Verify with targeted rustfmt, focused scanning tests against a task-owned isolated database, SQLX_OFFLINE server check/tests, and git diff --check. Do not modify Web UI or CVE lease/worker/builder-owned files.
+
+P1 Current CVE authority addendum: independently trace the exact Current selector and generation-retention lifecycle. Preserve retained snapshot/evaluation integrity and exact system/config/flake/derivation authority. Repair any proven reciprocal retention gap with bounded idempotent reconciliation only when one authoritative deployment binding proves the generation/store/snapshot identity. Independently remove the unsafe Current compatibility behavior that substitutes another derivation's historical scan as primary inventory. Current must resolve the newest completed schema-1 scan for its exact authorized derivation or return an explicit no-scan/current-authority-unavailable state. Keep RetainedGeneration and ExactDerivation exact and read-only. Add current-vs-historical isolation, race-order retention, ambiguity, schema/integrity, and production-shaped browser regressions. Do not alter scanner semantics, Completed pagination, Hardening behavior, or the separate future POA&M continuity scope.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
