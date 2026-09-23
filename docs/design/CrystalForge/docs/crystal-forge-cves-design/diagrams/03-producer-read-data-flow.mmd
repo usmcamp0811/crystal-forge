@@ -1,0 +1,21 @@
+flowchart LR
+    A["Agent state reports"] --> B["system_states"]
+    C["Server evaluation and deployment binding"] --> D["derivations, artifacts, retained generations"]
+    E["Deployment request writer"] --> F["pending_system_deployments"]
+    G["Scanner result and owned publication"] --> H["cve_scans and immutable observations"]
+    G --> I["cves and mutable package projection"]
+    B --> J["Current exact resolver"]
+    D --> J
+    H --> J
+    F --> K["Active scheduled target resolver"]
+    D --> K
+    H --> K
+    I --> L["Latest compatibility inventory"]
+    J --> M["Scoped fleet inventory CTE"]
+    K --> M
+    L --> M
+    N["Environment decisions and host overrides"] --> O["Decision coherence and rollup"]
+    P["POAM links and metadata"] --> O
+    O --> M
+    M --> Q["List, groups, host rows, stats, export"]
+    Q --> R["Fleet CVEs UI"]

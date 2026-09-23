@@ -1,0 +1,77 @@
+{
+  "reviewed_sha": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+  "diagrams": [
+    {
+      "file": "diagrams/01-surface-composition.mmd",
+      "title": "As-built surface composition",
+      "status": "AS-BUILT",
+      "section": "3.1"
+    },
+    {
+      "file": "diagrams/02-persistence-relationships.mmd",
+      "title": "Conceptual persistence relationships",
+      "status": "AS-BUILT",
+      "section": "5"
+    },
+    {
+      "file": "diagrams/03-producer-read-data-flow.mmd",
+      "title": "Producer and fleet read dependencies",
+      "status": "AS-BUILT",
+      "section": "6.1"
+    },
+    {
+      "file": "diagrams/04-inventory-selection.mmd",
+      "title": "Current, scheduled and Historical selection",
+      "status": "AS-BUILT",
+      "section": "7.3"
+    },
+    {
+      "file": "diagrams/05-count-overlap.mmd",
+      "title": "Illustrative host count overlap",
+      "status": "EXPLANATORY",
+      "section": "8.2"
+    },
+    {
+      "file": "diagrams/06-page-request-and-refresh.mmd",
+      "title": "Independent requests and missing parent invalidation",
+      "status": "AS-BUILT",
+      "section": "10.1"
+    },
+    {
+      "file": "diagrams/07-drawer-state-machine.mmd",
+      "title": "Drawer and nested editor states",
+      "status": "AS-BUILT",
+      "section": "11.1"
+    },
+    {
+      "file": "diagrams/08-host-override-precedence.mmd",
+      "title": "Effective host decision versus fleet rollup",
+      "status": "AS-BUILT",
+      "section": "12.2"
+    },
+    {
+      "file": "diagrams/09-triage-transaction.mmd",
+      "title": "Triage transaction and authority revalidation",
+      "status": "AS-BUILT",
+      "section": "13.1"
+    },
+    {
+      "file": "diagrams/10-current-verification-rule.mmd",
+      "title": "Baseline-bound verification predicate",
+      "status": "AS-BUILT",
+      "section": "14.2"
+    },
+    {
+      "file": "diagrams/11-proposed-evidence-continuity.mmd",
+      "title": "Immutable baseline and moving Current evidence",
+      "status": "EXISTING PROPOSAL",
+      "section": "15.2"
+    },
+    {
+      "file": "diagrams/12-proposed-invalidation.mmd",
+      "title": "Shared read-model invalidation contract",
+      "status": "PROPOSED",
+      "section": "21.5"
+    }
+  ]
+}

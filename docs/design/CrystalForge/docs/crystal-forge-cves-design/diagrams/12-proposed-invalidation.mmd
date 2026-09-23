@@ -1,0 +1,14 @@
+flowchart TD
+    A["Committed triage / scan publication / deployment observation"] --> B["Affected source and pair identities"]
+    B --> C["Invalidate fleet detail"]
+    B --> D["Invalidate flat and grouped inventory"]
+    B --> E["Invalidate statistics and coverage"]
+    B --> F["Invalidate affected System Detail triage"]
+    C --> G["Fetch current revision-bound responses"]
+    D --> G
+    E --> G
+    F --> G
+    G --> H{"Selection and scope still match?"}
+    H -->|Yes| I["Replace matching read model"]
+    H -->|No| J["Discard response or restart current selection"]
+    G --> K["Read failure keeps stale data labelled stale"]

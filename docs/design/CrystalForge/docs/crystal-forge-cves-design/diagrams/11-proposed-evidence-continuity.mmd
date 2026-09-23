@@ -1,0 +1,11 @@
+flowchart LR
+    A["Generation A: finding linked"] --> B["Immutable baseline A"]
+    A --> C["Stable finding and active remediation episode"]
+    D["Generation B: still affected"] --> E["Latest Current evidence pointer"]
+    F["Generation C: no longer affected"] --> E
+    C --> E
+    B --> G["Auditable verification attempt"]
+    E --> G
+    G --> H{"Newer authorized evidence with sufficient coverage?"}
+    H -->|Yes, pair absent| I["Proposed PASS across deployment change"]
+    H -->|No or unknown| J["MISSING or failed verification"]
