@@ -179,6 +179,27 @@ struct RevisionScopeTransition {
     selection: Option<SystemCveInventorySelection>,
 }
 
+/// Identifies the server-authorized target that the revision controls select
+/// before an operator chooses a target or presentation mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RevisionScopeDefault {
+    selection: SystemCveInventorySelection,
+    mode: RevisionScopeMode,
+    message: Option<&'static str>,
+    head_unavailable: bool,
+}
+
+/// Tracks whether an operator has overridden the automatic target for one tab.
+///
+/// The automatic target may change when candidate metadata refreshes. An
+/// explicit target or mode choice MUST survive that refresh until navigation
+/// selects a different system.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RevisionScopeSelectionState {
+    system_id: Option<String>,
+    is_explicit: bool,
+}
+
 fn selection_key(selection: SystemCveInventorySelection) -> String {
     match selection {
         SystemCveInventorySelection::Current => "current".to_string(),
@@ -191,13 +212,68 @@ fn selection_key(selection: SystemCveInventorySelection) -> String {
     }
 }
 
+fn candidate_is_tracked_current(candidate: &SystemCveInventoryCandidate) -> bool {
+    matches!(candidate.selection, SystemCveInventorySelection::Current)
+        && candidate.is_current
+        && candidate.derivation_id.is_some()
+}
+
+fn revision_scope_default(candidates: &[SystemCveInventoryCandidate]) -> RevisionScopeDefault {
+    if candidates.iter().any(candidate_is_tracked_current) {
+        return RevisionScopeDefault {
+            selection: SystemCveInventorySelection::Current,
+            mode: RevisionScopeMode::Generations,
+            message: None,
+            head_unavailable: false,
+        };
+    }
+
+    if let Some(candidate) = candidates.iter().find(|candidate| {
+        matches!(
+            candidate.selection,
+            SystemCveInventorySelection::ExactDerivation { .. }
+        ) && candidate.is_latest_per_flake
+    }) {
+        return RevisionScopeDefault {
+            selection: candidate.selection,
+            mode: RevisionScopeMode::Commits,
+            message: Some("Showing flake head because the running configuration is out of band."),
+            head_unavailable: false,
+        };
+    }
+
+    // Do not select a retained scan or another candidate when the server has
+    // no selectable branch head. Current remains a fail-closed request target;
+    // the selector makes the unavailable head state visible to the operator.
+    RevisionScopeDefault {
+        selection: SystemCveInventorySelection::Current,
+        mode: RevisionScopeMode::Commits,
+        message: Some("The flake head is unavailable for this out-of-band running configuration."),
+        head_unavailable: true,
+    }
+}
+
+fn automatic_revision_scope_update(
+    state: &mut RevisionScopeSelectionState,
+    system_id: &str,
+    default: &RevisionScopeDefault,
+) -> Option<RevisionScopeDefault> {
+    if state.system_id.as_deref() != Some(system_id) {
+        *state = RevisionScopeSelectionState {
+            system_id: Some(system_id.to_string()),
+            is_explicit: false,
+        };
+    }
+    (!state.is_explicit).then(|| default.clone())
+}
+
 fn candidate_for_generation(
     generation: &SystemGeneration,
     candidates: &[SystemCveInventoryCandidate],
 ) -> Option<SystemCveInventorySelection> {
     candidates
         .iter()
-        .find(|candidate| generation.is_current && candidate.is_current)
+        .find(|candidate| generation.is_current && candidate_is_tracked_current(candidate))
         .or_else(|| {
             candidates.iter().find(|candidate| {
                 candidate.generation == Some(generation.generation)
@@ -217,7 +293,9 @@ fn candidate_for_commit(
 ) -> Option<SystemCveInventorySelection> {
     candidates
         .iter()
-        .find(|candidate| current_commit == Some(commit.sha.as_str()) && candidate.is_current)
+        .find(|candidate| {
+            current_commit == Some(commit.sha.as_str()) && candidate_is_tracked_current(candidate)
+        })
         .or_else(|| {
             candidates.iter().find(|candidate| {
                 candidate.commit_hash.as_deref() == Some(commit.sha.as_str())
@@ -359,7 +437,9 @@ fn RevisionScopeBar(
     loading: bool,
     loaded: bool,
     error: Option<String>,
+    default_message: Option<&'static str>,
     on_select: EventHandler<SystemCveInventorySelection>,
+    on_mode_change: EventHandler<()>,
     on_retry: EventHandler<()>,
 ) -> Element {
     if !loaded && loading {
@@ -421,6 +501,7 @@ fn RevisionScopeBar(
                             let commits = commits.clone();
                             let current_commit = current_commit.clone();
                             move |_| {
+                                on_mode_change.call(());
                                 let choices = revision_scope_choices(
                                     value,
                                     &candidates,
@@ -531,8 +612,11 @@ fn RevisionScopeBar(
                 }
             } else if selected_is_missing {
                 span { class: "rev-bar-msg", role: "alert",
-                    "The selected historical target is no longer listed. Loaded evidence remains selected."
+                    "The selected target is no longer listed. Loaded evidence remains selected."
                 }
+            }
+            if let Some(message) = default_message {
+                span { class: "rev-bar-msg", role: "status", "{message}" }
             }
         }
     }
@@ -951,8 +1035,10 @@ pub fn SystemDetailView(
     let mut cve_pagination = use_signal(CveInventoryPaginationState::default);
     let mut cve_selection = use_signal(SystemCveInventorySelection::default);
     let cve_scope_mode = use_signal(|| RevisionScopeMode::Generations);
+    let mut cve_selection_state = use_signal(RevisionScopeSelectionState::default);
     let mut hardening_selection = use_signal(SystemCveInventorySelection::default);
     let hardening_scope_mode = use_signal(|| RevisionScopeMode::Generations);
+    let mut hardening_selection_state = use_signal(RevisionScopeSelectionState::default);
     let mut hardening_refresh = use_signal(|| 0_u64);
 
     // Live clock tick for relative timers/heartbeat countdowns while page is open.
@@ -989,37 +1075,89 @@ pub fn SystemDetailView(
     });
 
     let mut inventory_candidates_cache = use_signal(Vec::<SystemCveInventoryCandidate>::new);
+    let mut inventory_candidates_system_id = use_signal(|| None::<String>);
     let mut inventory_candidates_loaded = use_signal(|| false);
     let mut inventory_candidates_error_signal = use_signal(|| None::<String>);
     let id_for_candidates = id.clone();
     let mut inventory_candidates_resource = use_resource(move || {
         let id = id_for_candidates.clone();
         async move {
-            let system_id = Uuid::parse_str(&id).map_err(|_| {
-                ApiClientError::Deserialize("Invalid system identifier".to_string())
-            })?;
-            fetch_system_cve_inventory_candidates(&system_id).await
+            let response = match Uuid::parse_str(&id) {
+                Ok(system_id) => fetch_system_cve_inventory_candidates(&system_id).await,
+                Err(_) => Err(ApiClientError::Deserialize(
+                    "Invalid system identifier".to_string(),
+                )),
+            };
+            (id, response)
         }
     });
     let inventory_candidates_resource_for_state = inventory_candidates_resource.clone();
     use_effect(move || {
-        let update = inventory_candidates_resource_for_state
-            .read()
-            .as_ref()
-            .map(|result| match result {
-                Ok(response) => Ok(response.items.clone()),
-                Err(error) => Err(error.to_string()),
-            });
+        let update = inventory_candidates_resource_for_state.read().as_ref().map(
+            |(response_system_id, result)| match result {
+                Ok(response) => Ok((response_system_id.clone(), response.items.clone())),
+                Err(error) => Err((response_system_id.clone(), error.to_string())),
+            },
+        );
         match update {
-            Some(Ok(items)) => {
+            Some(Ok((response_system_id, items))) => {
                 inventory_candidates_cache.set(items);
+                inventory_candidates_system_id.set(Some(response_system_id));
                 inventory_candidates_loaded.set(true);
                 inventory_candidates_error_signal.set(None);
             }
-            Some(Err(error)) => inventory_candidates_error_signal.set(Some(error)),
+            Some(Err((_, error))) => inventory_candidates_error_signal.set(Some(error)),
             None => {}
         }
     });
+
+    // Candidate metadata, rather than evidence presence or response ordering,
+    // selects the initial target. Each tab owns its explicit-choice state so a
+    // refresh in one tab cannot overwrite the other tab's operator choice.
+    {
+        let id = id.clone();
+        let candidates = inventory_candidates_cache;
+        let loaded = inventory_candidates_loaded;
+        let candidates_system_id = inventory_candidates_system_id;
+        let mut selection = cve_selection;
+        let mut mode = cve_scope_mode;
+        let mut state = cve_selection_state;
+        use_effect(move || {
+            if !loaded() || candidates_system_id().as_deref() != Some(id.as_str()) {
+                return;
+            }
+            let default = revision_scope_default(&candidates());
+            let mut current_state = state.write();
+            if let Some(default) =
+                automatic_revision_scope_update(&mut current_state, &id, &default)
+            {
+                selection.set(default.selection);
+                mode.set(default.mode);
+            }
+        });
+    }
+    {
+        let id = id.clone();
+        let candidates = inventory_candidates_cache;
+        let loaded = inventory_candidates_loaded;
+        let candidates_system_id = inventory_candidates_system_id;
+        let mut selection = hardening_selection;
+        let mut mode = hardening_scope_mode;
+        let mut state = hardening_selection_state;
+        use_effect(move || {
+            if !loaded() || candidates_system_id().as_deref() != Some(id.as_str()) {
+                return;
+            }
+            let default = revision_scope_default(&candidates());
+            let mut current_state = state.write();
+            if let Some(default) =
+                automatic_revision_scope_update(&mut current_state, &id, &default)
+            {
+                selection.set(default.selection);
+                mode.set(default.mode);
+            }
+        });
+    }
 
     let id_for_vulns = id.clone();
     let mut vulnerabilities_resource = use_resource(move || {
@@ -1518,8 +1656,37 @@ pub fn SystemDetailView(
             .flatten();
     let inventory_candidates = inventory_candidates_cache();
     let inventory_candidates_loading = inventory_candidates_resource.read_unchecked().is_none();
-    let inventory_candidates_have_loaded = inventory_candidates_loaded();
+    let inventory_candidates_have_loaded = inventory_candidates_loaded()
+        && inventory_candidates_system_id().as_deref() == Some(id.as_str());
     let inventory_candidates_error = inventory_candidates_error_signal();
+    let automatic_revision_default =
+        inventory_candidates_have_loaded.then(|| revision_scope_default(&inventory_candidates));
+    let cve_default_message = cve_selection_state()
+        .system_id
+        .as_deref()
+        .filter(|system_id| *system_id == id)
+        .filter(|_| !cve_selection_state().is_explicit)
+        .and_then(|_| automatic_revision_default.as_ref())
+        .and_then(|default| default.message);
+    let hardening_default_message = hardening_selection_state()
+        .system_id
+        .as_deref()
+        .filter(|system_id| *system_id == id)
+        .filter(|_| !hardening_selection_state().is_explicit)
+        .and_then(|_| automatic_revision_default.as_ref())
+        .and_then(|default| default.message);
+    let hardening_head_unavailable = hardening_selection_state()
+        .system_id
+        .as_deref()
+        .is_some_and(|system_id| system_id == id)
+        && !hardening_selection_state().is_explicit
+        && automatic_revision_default
+            .as_ref()
+            .is_some_and(|default| default.head_unavailable);
+    let cve_system_id_for_selection = id.clone();
+    let cve_system_id_for_mode = id.clone();
+    let hardening_system_id_for_selection = id.clone();
+    let hardening_system_id_for_mode = id.clone();
     let mut cve_candidates_retry_resource = inventory_candidates_resource.clone();
     let mut hardening_candidates_retry_resource = inventory_candidates_resource.clone();
     let mut cve_candidates_error_signal = inventory_candidates_error_signal;
@@ -2062,9 +2229,20 @@ pub fn SystemDetailView(
                             loading: inventory_candidates_loading,
                             loaded: inventory_candidates_have_loaded,
                             error: inventory_candidates_error.clone(),
+                            default_message: cve_default_message,
                             on_select: move |selection| {
+                                cve_selection_state.set(RevisionScopeSelectionState {
+                                    system_id: Some(cve_system_id_for_selection.clone()),
+                                    is_explicit: true,
+                                });
                                 cve_pagination.write().reset(None);
                                 cve_selection.set(selection);
+                            },
+                            on_mode_change: move |_| {
+                                cve_selection_state.set(RevisionScopeSelectionState {
+                                    system_id: Some(cve_system_id_for_mode.clone()),
+                                    is_explicit: true,
+                                });
                             },
                             on_retry: move |_| {
                                 cve_candidates_error_signal.set(None);
@@ -2152,7 +2330,20 @@ pub fn SystemDetailView(
                             loading: inventory_candidates_loading,
                             loaded: inventory_candidates_have_loaded,
                             error: inventory_candidates_error.clone(),
-                            on_select: move |selection| hardening_selection.set(selection),
+                            default_message: hardening_default_message,
+                            on_select: move |selection| {
+                                hardening_selection_state.set(RevisionScopeSelectionState {
+                                    system_id: Some(hardening_system_id_for_selection.clone()),
+                                    is_explicit: true,
+                                });
+                                hardening_selection.set(selection);
+                            },
+                            on_mode_change: move |_| {
+                                hardening_selection_state.set(RevisionScopeSelectionState {
+                                    system_id: Some(hardening_system_id_for_mode.clone()),
+                                    is_explicit: true,
+                                });
+                            },
                             on_retry: move |_| {
                                 hardening_candidates_error_signal.set(None);
                                 hardening_candidates_retry_resource.restart();
@@ -2169,7 +2360,10 @@ pub fn SystemDetailView(
                             loading: hardening_loading,
                             error: hardening_error.clone(),
                             allow_mutations: can_mutate && hardening_inventory.is_some() && !hardening_read_only,
-                            can_check_now: can_mutate && matches!(hardening_selection(), SystemCveInventorySelection::Current) && hardening_scan_eligible,
+                            can_check_now: can_mutate
+                                && matches!(hardening_selection(), SystemCveInventorySelection::Current)
+                                && !hardening_head_unavailable
+                                && hardening_scan_eligible,
                             check_now_disabled_reason: hardening_scan_blocked_reason.clone(),
                             checking: hardening_scan_in_progress(),
                             on_check_now: move |_| {
@@ -11639,17 +11833,18 @@ fn map_agent_events_to_logs(events: Vec<SystemAgentEvent>) -> Vec<DeploymentLogE
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigRevision, EvaluatedOptionsPage, HistoryEventKind, SafeOptionValue, SnapshotLifecycle,
-        SnapshotRevisionMode, Tab, build_history_events, classify_history_entry,
+        ConfigRevision, EvaluatedOptionsPage, HistoryEventKind, RevisionScopeMode,
+        RevisionScopeSelectionState, SafeOptionValue, SnapshotLifecycle, SnapshotRevisionMode, Tab,
+        automatic_revision_scope_update, build_history_events, classify_history_entry,
         config_observation_request_allowed, config_selection_is_historical,
         fitted_config_page_size, map_agent_events_to_logs, map_commit_infos_to_commit_history,
         map_history_entries_to_commit_history, natural_config_side_height,
         newest_config_inspectable_commit, observational_current_timeline_commit,
         overview_commit_identity, package_identities, query_value, query_with_parameter,
-        render_safe_option_value, revision_scope_choices, revision_scope_transition,
-        selected_config_revision, selection_after_scope_mode_change, snapshot_lifecycle_label,
-        snapshot_lifecycle_message, tab_from_query, tab_from_route, unavailable_generation_commit,
-        visible_config_response,
+        render_safe_option_value, revision_scope_choices, revision_scope_default,
+        revision_scope_transition, selected_config_revision, selection_after_scope_mode_change,
+        snapshot_lifecycle_label, snapshot_lifecycle_message, tab_from_query, tab_from_route,
+        unavailable_generation_commit, visible_config_response,
     };
     use crate::api::models::{
         AuthContext, AuthMode, AuthUser, CommitInfo, Role, SafeEvaluationError, SafePackageValue,
@@ -11673,6 +11868,26 @@ mod tests {
             flake_repo_url: None,
             config_identity: None,
             config_inspectable: inspectable,
+        }
+    }
+
+    fn inventory_candidate(
+        selection: SystemCveInventorySelection,
+        derivation_id: Option<i32>,
+        is_current: bool,
+        is_latest_per_flake: bool,
+    ) -> SystemCveInventoryCandidate {
+        SystemCveInventoryCandidate {
+            selection,
+            generation: None,
+            commit_hash: None,
+            derivation_id,
+            is_current,
+            is_latest_per_flake,
+            source: None,
+            evidence_representation: None,
+            scan_available: false,
+            read_only: false,
         }
     }
 
@@ -11740,6 +11955,102 @@ mod tests {
             true,
             true,
         ));
+    }
+
+    #[test]
+    fn revision_scope_default_uses_tracked_current_without_scan_or_candidate_ordering() {
+        let candidates = [
+            inventory_candidate(
+                SystemCveInventorySelection::ExactDerivation { derivation_id: 9 },
+                Some(9),
+                false,
+                true,
+            ),
+            inventory_candidate(SystemCveInventorySelection::Current, Some(7), true, false),
+        ];
+
+        assert_eq!(
+            revision_scope_default(&candidates),
+            super::RevisionScopeDefault {
+                selection: SystemCveInventorySelection::Current,
+                mode: RevisionScopeMode::Generations,
+                message: None,
+                head_unavailable: false,
+            }
+        );
+    }
+
+    #[test]
+    fn revision_scope_default_uses_authoritative_head_for_out_of_band_runtime() {
+        let candidates = [
+            inventory_candidate(SystemCveInventorySelection::Current, None, true, false),
+            inventory_candidate(
+                SystemCveInventorySelection::ExactDerivation { derivation_id: 12 },
+                Some(12),
+                false,
+                false,
+            ),
+            inventory_candidate(
+                SystemCveInventorySelection::ExactDerivation { derivation_id: 13 },
+                Some(13),
+                false,
+                true,
+            ),
+        ];
+
+        assert_eq!(
+            revision_scope_default(&candidates),
+            super::RevisionScopeDefault {
+                selection: SystemCveInventorySelection::ExactDerivation { derivation_id: 13 },
+                mode: RevisionScopeMode::Commits,
+                message: Some(
+                    "Showing flake head because the running configuration is out of band."
+                ),
+                head_unavailable: false,
+            }
+        );
+    }
+
+    #[test]
+    fn revision_scope_default_never_substitutes_retained_evidence_for_missing_head() {
+        let candidates = [
+            inventory_candidate(SystemCveInventorySelection::Current, None, true, false),
+            inventory_candidate(
+                SystemCveInventorySelection::ExactDerivation { derivation_id: 12 },
+                Some(12),
+                false,
+                false,
+            ),
+        ];
+
+        let default = revision_scope_default(&candidates);
+        assert_eq!(default.selection, SystemCveInventorySelection::Current);
+        assert_eq!(default.mode, RevisionScopeMode::Commits);
+        assert!(default.head_unavailable);
+    }
+
+    #[test]
+    fn explicit_revision_scope_choices_survive_refresh_and_reset_for_navigation() {
+        let default = super::RevisionScopeDefault {
+            selection: SystemCveInventorySelection::Current,
+            mode: RevisionScopeMode::Generations,
+            message: None,
+            head_unavailable: false,
+        };
+        let mut state = RevisionScopeSelectionState::default();
+        assert_eq!(
+            automatic_revision_scope_update(&mut state, "system-a", &default),
+            Some(default.clone())
+        );
+
+        state.is_explicit = true;
+        assert!(automatic_revision_scope_update(&mut state, "system-a", &default).is_none());
+
+        assert_eq!(
+            automatic_revision_scope_update(&mut state, "system-b", &default),
+            Some(default)
+        );
+        assert!(!state.is_explicit);
     }
 
     #[test]

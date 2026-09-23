@@ -18218,6 +18218,7 @@ security.audit.enable = true;</fixtext>
 
       const historicalGenerationId = "00000000-0000-4000-8000-000000000073";
       let candidateRequests = 0;
+      let candidateMode = "tracked";
       await page.route(
         "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-inventory-sources",
         async (route) => {
@@ -18227,6 +18228,19 @@ security.audit.enable = true;</fixtext>
               status: 503,
               contentType: "application/json",
               body: JSON.stringify({ error: "candidate fixture unavailable" }),
+            });
+            return;
+          }
+          if (candidateMode === "out-of-band") {
+            await route.fulfill({
+              status: 200,
+              contentType: "application/json",
+              body: JSON.stringify({
+                items: [
+                  { selection: { kind: "current" }, generation: 74, commit_hash: "1111111111111111111111111111111111111111", derivation_id: null, is_current: true, is_latest_per_flake: false, source: { scan_id: "00000000-0000-0000-0000-000000000c01", scanner_name: "vulnix", scanner_version: "1.10.1", completed_at: "2026-04-10T09:00:00Z" }, evidence_representation: "schema1_observations", scan_available: true, read_only: false },
+                  { selection: { kind: "exact_derivation", derivation_id: 99 }, generation: null, commit_hash: "3333333333333333333333333333333333333333", derivation_id: 99, is_current: false, is_latest_per_flake: true, source: null, evidence_representation: null, scan_available: false, read_only: true },
+                ],
+              }),
             });
             return;
           }
@@ -18557,6 +18571,29 @@ security.audit.enable = true;</fixtext>
       await assertVisible(lifecycle.getByText("Scan complete", { exact: true }), "Expected completed label");
       await assertVisible(page.getByText("nginx.service", { exact: true }), "Completed current target must restore exact-target evidence");
       await assertEnabled(page.getByTestId("hardening-check-now"), "Completed terminal attempt should permit another Check now");
+
+      candidateMode = "out-of-band";
+      await page.goto(`${baseUrl}/systems/00000000-0000-0000-0000-0000000000a1`, { timeout: LOAD_TIMEOUT });
+      await page.getByRole("tab", { name: /^Hardening$/i }).first().click();
+      const outOfBandRevision = page.getByRole("combobox", { name: "Audited config" });
+      await assertVisible(outOfBandRevision, "Out-of-band hardening must load its revision selector");
+      await assertAttribute(
+        outOfBandRevision,
+        "value",
+        "derivation:99",
+        "Out-of-band hardening must select the authoritative flake head rather than retained evidence",
+      );
+      await assertVisible(
+        page.getByText("Showing flake head because the running configuration is out of band.", { exact: true }),
+        "Out-of-band hardening must explain the flake-head fallback",
+      );
+      await assertAttribute(
+        page.getByRole("button", { name: "Commits", exact: true }),
+        "aria-pressed",
+        "true",
+        "Out-of-band hardening must default to commit presentation",
+      );
+      await assertCount(page.getByRole("button", { name: "Check now" }), 0, "Head fallback must not expose Check now");
 
       await page.getByRole("button", { name: /^View details$/i }).first().click({ force: true });
       await assertVisible(
@@ -22660,6 +22697,10 @@ function runStaticHarnessContracts() {
     '"hardening-state-failed"',
     '"hardening-state-completed"',
     'Failed attempt must preserve and identify earlier exact-target evidence',
+    'candidateMode = "out-of-band"',
+    'derivation:99',
+    'Showing flake head because the running configuration is out of band.',
+    'Head fallback must not expose Check now',
   ]) {
     assertContract(hardeningWorkflowSource.includes(contract), `28 System Detail hardening workflow is missing ${contract}`);
   }
