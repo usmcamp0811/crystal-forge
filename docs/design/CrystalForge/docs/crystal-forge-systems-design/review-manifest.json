@@ -1,0 +1,97 @@
+{
+  "document": "systems-view-design-v0.1.md",
+  "version": "0.1",
+  "date": "2026-09-23",
+  "mr": 329,
+  "reviewed_head": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+  "inspection_base": "72c8066323bcc1ef507c853a89852dfd880e469a",
+  "head_delta_files": [
+    "packages/web-ui/src/views/system_detail.rs",
+    "checks/web-ui/tests/integration-test.js"
+  ],
+  "diagrams": 11,
+  "source_references": 30,
+  "regression_scenarios": 31,
+  "application_tests_run": false,
+  "database_queries_run": false,
+  "browser_workflows_run": false,
+  "mermaid_rendered": false,
+  "markdown_structure_validated": true,
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 1302,
+      "sha256": "eed3f429e384bf84b434d0d627a0c2d022ce426a3945cc72df7717563dc8f8a8"
+    },
+    {
+      "path": "detail-evidence.png",
+      "bytes": 107613,
+      "sha256": "98f6ed9470fabeaab7cbc00a6cd0a14008cd969c46803407917271eb6020775a"
+    },
+    {
+      "path": "diagrams/01-screen-navigation.mmd",
+      "bytes": 587,
+      "sha256": "fa35060d4fb66a8edc67d3c3f3e36be40804def5d40813d8e338fbc771fce239"
+    },
+    {
+      "path": "diagrams/02-logical-data-model.mmd",
+      "bytes": 991,
+      "sha256": "f61f416307babf4649fcb7bfc9fac065602e025813f46e7e1800e38cfb81f4ae"
+    },
+    {
+      "path": "diagrams/03-as-built-read-paths.mmd",
+      "bytes": 915,
+      "sha256": "c65b490999ff245c727f51c1f1e3764c680bf2e1f5a6b7712cdab50f0852acba"
+    },
+    {
+      "path": "diagrams/04-current-cve-authority.mmd",
+      "bytes": 812,
+      "sha256": "4fbdd222859cc86901456988ff29b36f30d95e10ccf5a862b07f1ae0493f0dbf"
+    },
+    {
+      "path": "diagrams/05-generation-retention.mmd",
+      "bytes": 880,
+      "sha256": "a3ef2da4ce20842d2eabb6081d64f52948624a530f0921dad418087214d9c3c4"
+    },
+    {
+      "path": "diagrams/06-screenshot-inconsistency.mmd",
+      "bytes": 688,
+      "sha256": "3cdc68a17c6c804b6f9e897faec9823602716af3449b21f551dbd49d4a2c2801"
+    },
+    {
+      "path": "diagrams/07-proposed-default-selection.mmd",
+      "bytes": 756,
+      "sha256": "db83dac9d1660c0fe2f1d00231a6611251883ef5bfa7e46172ac5a48505c0638"
+    },
+    {
+      "path": "diagrams/08-proposed-read-model.mmd",
+      "bytes": 653,
+      "sha256": "0233f780fa293b1dfd1618fdd3366c886c9adddc7ff29ebe9b56af3381175a7a"
+    },
+    {
+      "path": "diagrams/09-attempt-versus-evidence.mmd",
+      "bytes": 459,
+      "sha256": "93ba39f79308d7a7d4e2be6ef9c2bf42645851069a095a2077be70035a7ee5f6"
+    },
+    {
+      "path": "diagrams/10-proposed-page-load.mmd",
+      "bytes": 814,
+      "sha256": "9233d6cf7ec8a30ff11d09950de83d468791981a045a1023edf712bb2b7bb132"
+    },
+    {
+      "path": "diagrams/11-proposed-mutation-validation.mmd",
+      "bytes": 858,
+      "sha256": "7f68d601b6a00a71af84fd04dc4511ba6d093d62e12b55e3f6894d193fbb5f5c"
+    },
+    {
+      "path": "scanning-evidence.png",
+      "bytes": 81942,
+      "sha256": "ab0916f20d62c8df5095c8c49bade22d1cfdb64b1ac163d3bab91a212e156046"
+    },
+    {
+      "path": "systems-view-design-v0.1.md",
+      "bytes": 109825,
+      "sha256": "e642855c44afbb4a7a20866c2dab96c4094e02c6e31ce4a38e02fa08540643b9"
+    }
+  ]
+}

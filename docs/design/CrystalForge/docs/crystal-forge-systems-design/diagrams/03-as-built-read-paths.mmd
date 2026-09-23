@@ -1,0 +1,19 @@
+flowchart LR
+    SS["systems and latest observed state"] --> VD["view_system_detail / list"]
+    VS["Legacy latest-scan vulnerability view"] --> VD
+    VD --> DTO["SystemDetail / SystemSummary"]
+    DTO --> LIST["List and preview"]
+    DTO --> HEAD["Detail header and Overview counts"]
+    SS --> OCR["Observational current-revision resolver"]
+    OCR --> COMMITS["System commits response"]
+    COMMITS --> REV["Revision bar and Config context"]
+    RET["Retained generation + immutable evaluation artifact"] --> CI["Strict Current CVE inventory"]
+    SS --> CI
+    OBS["Schema-1 scan observations"] --> CI
+    CI --> CT["System CVEs tab"]
+    SS --> HI["Hardening current-target resolver"]
+    HR["Hardening scans and service results"] --> HI
+    HI --> HT["System Hardening tab"]
+    RET --> SG["Scanning current summary"]
+    OBS --> SG
+    SC["Stored scan attempt counters"] --> SH["Scanning revision history"]

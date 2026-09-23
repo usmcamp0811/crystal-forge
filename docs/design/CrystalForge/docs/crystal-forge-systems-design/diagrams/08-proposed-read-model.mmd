@@ -1,0 +1,15 @@
+flowchart TB
+    ID["Server running identity resolution"] --> CONTEXT["System observation context"]
+    SEL["Authorized selected target"] --> CONTEXT
+    CONTEXT --> EVID["Selected evidence resolver"]
+    EVID --> SOURCE["Scan or artifact identity"]
+    EVID --> COUNTS["Counts with explicit unit and metadata basis"]
+    EVID --> AVAIL["Evidence availability and freshness"]
+    CONTEXT --> PROOF["Deployment lineage proof"]
+    PROOF --> CAP["Action capability resolver"]
+    SOURCE --> CAP
+    AUTH["Active user and environment permissions"] --> CAP
+    SOURCE --> UI["Shared presentation contract"]
+    COUNTS --> UI
+    AVAIL --> UI
+    CAP --> UI

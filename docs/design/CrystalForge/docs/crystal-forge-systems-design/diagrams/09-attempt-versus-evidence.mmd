@@ -1,0 +1,13 @@
+stateDiagram-v2
+    state "Attempt lifecycle" as Attempt {
+        [*] --> Queued
+        Queued --> Scanning
+        Scanning --> Completed
+        Scanning --> Failed
+    }
+    state "Displayed evidence" as Evidence {
+        [*] --> NoSource
+        NoSource --> CompletedSource: valid scan completes
+        CompletedSource --> CompletedSource: newer valid scan selected
+        CompletedSource --> SourceUnavailable: access or target proof changes
+    }

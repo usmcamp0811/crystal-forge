@@ -1,0 +1,20 @@
+flowchart TB
+    L["Systems list: cards or table"] --> P["System preview panel"]
+    L --> D["System Detail /systems/:id"]
+    P --> D
+    D --> O["Overview"]
+    D --> DEP["Deploy"]
+    D --> H["History"]
+    D --> LOG["Logs"]
+    D --> CFG["Config"]
+    D --> CVE["CVEs"]
+    D --> HARD["Hardening"]
+    D --> COMP["Compliance"]
+    H -->|"Rollback target"| DEP
+    H -->|"Event anchor"| LOG
+    O --> CVE
+    CVE --> POAM["Shared POA&M detail"]
+    COMP --> POAM
+    CFG --> F["Flake commit tray"]
+    O --> F
+    S["Scanning: By system"] -.->|"Related system and scan evidence"| CVE

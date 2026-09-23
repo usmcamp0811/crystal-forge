@@ -1,0 +1,16 @@
+flowchart TD
+    OPEN["Open system or change system ID"] --> EX{"Explicit target supplied?"}
+    EX -->|"Yes"| PIN["Validate and preserve explicit target"]
+    EX -->|"No"| LOAD["Wait for required identity and head data"]
+    LOAD --> ERR{"Request failed?"}
+    ERR -->|"Yes"| RETRY["Show error and retry; no new default"]
+    ERR -->|"No"| MAP{"Running configuration mapped?"}
+    MAP -->|"Yes"| CUR["Automatic running target"]
+    MAP -->|"No"| OOB{"Confirmed out-of-band condition?"}
+    OOB -->|"No"| UNK["Explicit unresolved state"]
+    OOB -->|"Yes"| HEAD["Automatic actual flake head"]
+    CUR --> USER["User changes target or mode"]
+    HEAD --> USER
+    USER --> PIN
+    PIN --> REF["Refresh data without changing user choice"]
+    RETRY --> LOAD

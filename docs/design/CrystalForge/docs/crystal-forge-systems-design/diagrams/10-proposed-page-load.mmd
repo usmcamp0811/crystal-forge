@@ -1,0 +1,18 @@
+sequenceDiagram
+    participant U as User
+    participant V as System Detail
+    participant I as Identity and candidate reads
+    participant E as Selected evidence read
+    U->>V: Open system without explicit security target
+    V->>I: Load running identity and required target metadata
+    V-->>U: Loading identity; no clean or out-of-band conclusion
+    I-->>V: Facts plus read revision
+    V->>V: Resolve default once from complete facts
+    V->>E: Request exact selected target
+    U->>V: Select another target before response
+    V->>V: Mark explicit selection and advance request epoch
+    E-->>V: Response for previous target
+    V->>V: Discard stale response
+    V->>E: Request explicitly selected target
+    E-->>V: Source, counts, capabilities, revision
+    V-->>U: Render matching target and evidence

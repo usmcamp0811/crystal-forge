@@ -1,0 +1,18 @@
+sequenceDiagram
+    participant UI as Browser
+    participant API as Mutation handler
+    participant DB as Domain transaction
+    UI->>API: Explicit action with server-issued target/context
+    API->>API: Validate session, CSRF, and request shape
+    API->>DB: Acquire required domain locks
+    DB->>DB: Re-read active user, roles, and memberships
+    DB->>DB: Resolve current target and required evidence
+    DB->>DB: Validate supplied revision and observation context
+    alt Any prerequisite changed or is unavailable
+        DB-->>API: Reject without unauthorized mutation
+        API-->>UI: Typed conflict or unavailable reason
+    else Required authority still holds
+        DB->>DB: Persist action and audit evidence atomically
+        DB-->>API: Committed revision and outcome
+        API-->>UI: Accepted or completed outcome, as applicable
+    end

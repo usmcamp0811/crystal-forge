@@ -1,0 +1,19 @@
+sequenceDiagram
+    participant E as Evaluation evidence
+    participant D as Deployment coordinator
+    participant DB as Server database
+    participant A as Agent observation
+    participant R as Retention logic
+    E->>DB: Publish immutable artifact
+    D->>DB: Record deployment target and expected evidence binding
+    D->>DB: Bind exact artifact when available
+    A->>DB: Persist observed generation and store
+    DB->>R: Attempt generation retention
+    R->>DB: Lock and select corresponding latest deployment
+    R->>DB: Validate target, time, status, artifact, and scope
+    alt Eligible exact deployment binding exists
+        R->>DB: Insert system-generation retained binding
+    else Prerequisite missing or invalid
+        R-->>DB: Do not manufacture a binding
+    end
+    Note over D,R: Reverse reconciliation also handles observations that arrived before binding
