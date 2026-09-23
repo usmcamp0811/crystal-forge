@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-23 02:06'
+updated_date: '2026-09-23 02:15'
 labels:
   - scanning
   - web-ui
@@ -177,6 +177,8 @@ Run reconciliation and existing wait promotion before the CVE executor enabled/V
 Part 2 backend/API/database slice (2026-09-21): modify only migration 0273 and cf-server scanning API model/handler/query/tests. Preserve Active and history ordering. For Completed, validate and normalize search, terminal status, revision class, latest-only, sort, direction, page size, archive scope, and cursor before SQL. Use a versioned base64url JSON cursor bound to a SHA-256 request fingerprint and a fixed terminal high-water tuple. Apply all filters before counts and keyset pagination; return total, hidden_archived, has_more, and next_cursor. Build ORDER BY and keyset fragments only from validated enums. Add terminal/system lifecycle indexes in migration 0273. Add an isolated PostgreSQL fixture with 700+ interleaved terminal rows and assertions for first/second/full walks, equal timestamps, newer inserts, filters/search/revision/archive/restore, malformed or rebound cursors, and EXPLAIN plan shape. Verify with targeted rustfmt, focused scanning tests against a task-owned isolated database, SQLX_OFFLINE server check/tests, and git diff --check. Do not modify Web UI or CVE lease/worker/builder-owned files.
 
 P1 Current CVE authority addendum: independently trace the exact Current selector and generation-retention lifecycle. Preserve retained snapshot/evaluation integrity and exact system/config/flake/derivation authority. Repair any proven reciprocal retention gap with bounded idempotent reconciliation only when one authoritative deployment binding proves the generation/store/snapshot identity. Independently remove the unsafe Current compatibility behavior that substitutes another derivation's historical scan as primary inventory. Current must resolve the newest completed schema-1 scan for its exact authorized derivation or return an explicit no-scan/current-authority-unavailable state. Keep RetainedGeneration and ExactDerivation exact and read-only. Add current-vs-historical isolation, race-order retention, ambiguity, schema/integrity, and production-shaped browser regressions. Do not alter scanner semantics, Completed pagination, Hardening behavior, or the separate future POA&M continuity scope.
+
+P0 migration-0275 repair: preserve already-applied migration 0274. Add a populated-database upgrade regression that applies through 0273, inserts completed/failed historical hardening scans and a dependent service result, then applies 0274, corrected 0275, and 0276. The fix must remove 0274's restrictive source-trigger constraint before changing historical rows from manual to legacy, then recreate the final constraint. Verify row identity/data preservation and final provenance/constraint invariants. Audit 0272-0276 for equivalent pre-existing-data failures. Run isolated PostgreSQL migration regression, targeted server checks, then commit and push. Keep TASK-326.2 In Progress until the user supplies deployment evidence from reckless.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
