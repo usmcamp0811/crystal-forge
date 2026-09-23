@@ -457,6 +457,18 @@ impl std::fmt::Display for EvaluationFailure {
 
 impl std::error::Error for EvaluationFailure {}
 
+impl EvaluationFailure {
+    /// Returns the complete contextual diagnostic chain for this failure.
+    ///
+    /// Callers that persist or expose this text MUST redact and bound it before
+    /// crossing their trust boundary. [`Display`](std::fmt::Display) retains
+    /// only the outer context, which is insufficient to diagnose source
+    /// materialization failures.
+    pub(crate) fn diagnostic_chain(&self) -> String {
+        format!("{:#}", self.source)
+    }
+}
+
 fn classify_evaluation_failure(message: &str) -> RetryFailureClass {
     let message = message.to_ascii_lowercase();
     if message.contains("cancelled by user") || message.contains("canceled by user") {
@@ -5753,7 +5765,7 @@ mod tests {
     use super::{
         PREFLIGHT_LOG_EXCERPT_MAX_CHARS, authoritative_evaluator_args, classify_evaluation_failure,
         isolate_authoritative_evaluator_credentials, preflight_discovery_failure_log,
-        systems_selected_for_evaluation,
+        structured_evaluation_failure, systems_selected_for_evaluation,
     };
     use crate::models::retry_policy::RetryFailureClass;
 
@@ -5774,6 +5786,24 @@ mod tests {
         );
         assert!(systems_selected_for_evaluation(&known, &Some(Vec::new())).is_empty());
         assert_eq!(systems_selected_for_evaluation(&known, &None), known);
+    }
+
+    #[test]
+    fn evaluation_failure_diagnostic_chain_retains_source_materialization_cause() {
+        let failure = structured_evaluation_failure(
+            anyhow::anyhow!("authorized Git commit lookup failed: missing object")
+                .context("failed to materialize authoritative immutable source"),
+        );
+
+        assert_eq!(
+            failure.to_string(),
+            "failed to materialize authoritative immutable source"
+        );
+        assert!(
+            failure
+                .diagnostic_chain()
+                .contains("authorized Git commit lookup failed: missing object")
+        );
     }
 
     #[tokio::test]

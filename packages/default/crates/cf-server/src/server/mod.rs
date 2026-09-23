@@ -212,9 +212,10 @@ async fn handle_evaluation_attempt_failure(
     error: &str,
     failure_class: crate::models::retry_policy::RetryFailureClass,
 ) -> Result<()> {
-    // SECURITY: This function logs and persists the failure. Redact once at
-    // entry so no branch can expose the raw evaluator diagnostic.
-    let error = crate::security::snapshot_redaction::redact_evaluation_error(error);
+    // SECURITY: This function logs, persists, and broadcasts the failure.
+    // Redact and bound once at entry so no branch can expose untrusted source
+    // diagnostics or turn an oversized Nix trace into durable API data.
+    let error = bounded_redacted_evaluation_error(error);
     error!(
         "❌ Failed to evaluate commit {}: {}",
         commit.git_commit_hash, error
@@ -332,6 +333,27 @@ async fn handle_evaluation_attempt_failure(
 
     crate::handlers::api::commits::cleanup_eval_channel(cf_state, commit.id).await;
     Ok(())
+}
+
+/// Maximum persisted evaluation diagnostic length after redaction.
+///
+/// Source-materialization errors can contain a complete Git or Nix trace. The
+/// bounded chain preserves the actionable cause without making `commits`,
+/// `evaluation_attempts`, or streamed logs unbounded.
+const MAX_PERSISTED_EVALUATION_ERROR_CHARS: usize = 4096;
+
+fn bounded_redacted_evaluation_error(error: &str) -> String {
+    let redacted = crate::security::snapshot_redaction::redact_evaluation_error(error);
+    if redacted.chars().count() > MAX_PERSISTED_EVALUATION_ERROR_CHARS {
+        let mut bounded = redacted
+            .chars()
+            .take(MAX_PERSISTED_EVALUATION_ERROR_CHARS - 1)
+            .collect::<String>();
+        bounded.push('…');
+        bounded
+    } else {
+        redacted
+    }
 }
 
 pub(crate) fn parse_deployment_policy_record(
@@ -2048,14 +2070,12 @@ async fn process_pending_commits(
                 // SECURITY: The support error can contain evaluator-controlled
                 // values and URLs. Redact before failure handling can log,
                 // persist, or broadcast the diagnostic.
-                let error_text =
-                    crate::security::snapshot_redaction::redact_evaluation_error(&e.to_string());
                 return handle_evaluation_attempt_failure(
                     pool,
                     &cf_state,
                     &commit,
                     attempt,
-                    &error_text,
+                    &e.diagnostic_chain(),
                     e.class,
                 )
                 .await;
@@ -2073,9 +2093,10 @@ fn select_next_pending_commit_id_for_cycle(
 #[cfg(test)]
 mod tests {
     use super::{
-        EvaluationPolicyLoadSafetyError, EvaluationPolicyRecord, builder_stale_timeout_secs,
-        classify_policy_loader_failure, evaluation_due_delay, evaluation_policy_digest,
-        is_nix_policy_execution_eligible, new_cve_scan_background_job,
+        EvaluationPolicyLoadSafetyError, EvaluationPolicyRecord,
+        MAX_PERSISTED_EVALUATION_ERROR_CHARS, bounded_redacted_evaluation_error,
+        builder_stale_timeout_secs, classify_policy_loader_failure, evaluation_due_delay,
+        evaluation_policy_digest, is_nix_policy_execution_eligible, new_cve_scan_background_job,
         normalize_custom_policy_expression, parse_deployment_policy_record,
         parse_effective_policy_record, parse_executable_policy_record,
         select_next_pending_commit_id_for_cycle,
@@ -2088,6 +2109,18 @@ mod tests {
     use chrono::Utc;
     use serde_json::json;
     use uuid::Uuid;
+
+    #[test]
+    fn evaluation_failure_diagnostic_is_bounded_after_redaction() {
+        let error = "a".repeat(MAX_PERSISTED_EVALUATION_ERROR_CHARS + 1);
+        let bounded = bounded_redacted_evaluation_error(&error);
+
+        assert_eq!(
+            bounded.chars().count(),
+            MAX_PERSISTED_EVALUATION_ERROR_CHARS
+        );
+        assert!(bounded.ends_with('…'));
+    }
 
     #[tokio::test]
     async fn registered_cve_scan_job_starts_enabled() {

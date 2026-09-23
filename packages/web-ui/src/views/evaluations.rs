@@ -1593,28 +1593,6 @@ fn EvalHistory(
                                                         },
                                                         Icon { name: IconName::Terminal, size: 14 }
                                                     }
-                                                    // Re-evaluate
-                                                    button {
-                                                        class: "btn-icon focus-ring",
-                                                        title: "Re-evaluate",
-                                                        onclick: move |_| {
-                                                            let mut refresh_sig = refresh.clone();
-                                                            let mut toast = toast_msg.clone();
-                                                            spawn(async move {
-                                                                match re_evaluate_commit(commit_id).await {
-                                                                    Ok(_) => {
-                                                                        toast.set(Some("Re-queued evaluation".to_string()));
-                                                                        refresh_sig.set(refresh_sig() + 1);
-                                                                    }
-                                                                    Err(_) => {
-                                                                        toast.set(Some("Re-evaluate failed — see server logs".to_string()));
-                                                                    }
-                                                                }
-                                                            });
-                                                        },
-                                                        Icon { name: IconName::Sync, size: 14 }
-                                                    }
-                                                    // Retry (failed only)
                                                     if is_failed {
                                                         button {
                                                             class: "btn-icon focus-ring",
@@ -1635,6 +1613,27 @@ fn EvalHistory(
                                                                 });
                                                             },
                                                             Icon { name: IconName::Rollback, size: 14 }
+                                                        }
+                                                    } else {
+                                                        button {
+                                                            class: "btn-icon focus-ring",
+                                                            title: "Re-evaluate",
+                                                            onclick: move |_| {
+                                                                let mut refresh_sig = refresh.clone();
+                                                                let mut toast = toast_msg.clone();
+                                                                spawn(async move {
+                                                                    match re_evaluate_commit(commit_id).await {
+                                                                        Ok(_) => {
+                                                                            toast.set(Some("Re-queued evaluation".to_string()));
+                                                                            refresh_sig.set(refresh_sig() + 1);
+                                                                        }
+                                                                        Err(_) => {
+                                                                            toast.set(Some("Re-evaluate failed — see server logs".to_string()));
+                                                                        }
+                                                                    }
+                                                                });
+                                                            },
+                                                            Icon { name: IconName::Sync, size: 14 }
                                                         }
                                                     }
                                                 }
@@ -2195,7 +2194,13 @@ fn EvalDrawerLogTabHistory(ev: EvalHistoryItem, live: bool) -> Element {
                     div { style: "color: var(--cf-text-muted); padding: 12px;", "Loading logs..." }
                 } else if lines.is_empty() {
                     div { style: "color: var(--cf-text-muted); padding: 12px;",
-                        if live { "Waiting for log output..." } else { "No logs available" }
+                        if let Some(error) = ev.evaluation_error_message.as_deref() {
+                            "Evaluation failed before log streaming began: {error}"
+                        } else if live {
+                            "Waiting for log output..."
+                        } else {
+                            "No logs available"
+                        }
                     }
                 } else {
                     for (idx, line) in lines.iter().enumerate() {
