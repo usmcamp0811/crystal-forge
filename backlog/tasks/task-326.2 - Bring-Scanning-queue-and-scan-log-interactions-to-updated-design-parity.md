@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-23 13:36'
+updated_date: '2026-09-23 13:48'
 labels:
   - scanning
   - web-ui
@@ -309,6 +309,8 @@ P0 DEPLOYMENT BLOCKER reopened from Review at deployed/pushed candidate 543b07fd
 P0 migration-0275 repair committed and pushed as `130c472c1a34a6c8c6b95190c8672e49b9427714` to MR !329. The fix drops 0274's restrictive `hardening_scan_source_trigger_check` before reclassifying pre-existing manual/no-build-provenance rows as `legacy`, then recreates the final constraint. New integration regression applies through 0273, inserts historical completed/failed Hardening rows plus a dependent service result, proves the original update is rejected under 0274, then applies corrected 0275/0276 and asserts no loss/duplication, exact pre-existing-column preservation, final trigger/provenance/unique invariants, direct build-job deletion rejection, and deferred derivation cascade. Audit found no equivalent populated-upgrade defect in 0272 (views), 0273 (indexes), 0274 (compatible default/null additions), or 0276 (valid pre-existing FK references). Verification: isolated task-owned PostgreSQL on port 3042; `cargo test --test hardening_admission_migration_upgrade -- --test-threads=1` passed (1/1); `cargo fmt --check` passed; `SQLX_OFFLINE=true cargo check --tests` passed before package build; `nix build .#packages.x86_64-linux.server --no-link -L` passed and package check phase reported 1560 passed, 0 failed, 588 ignored; `git diff --check` passed. SQLx metadata unchanged: no checked query, selected column, bind, or result shape changed. Task remains In Progress pending user-run reckless deployment/runtime evidence; no production access was used.
 
 2026-09-23 System Detail revision-default follow-up: implemented candidate-authoritative Current/Generations defaults for tracked running derivations and ExactDerivation/Commits flake-head fallback for out-of-band runtime. Each CVE and Hardening tab now retains explicit target/mode choices across candidate refreshes and resets automatic state only for a different system. Missing head remains explicit unavailable without selecting retained evidence. Added unit and 28-system-hardening-tab browser coverage. Focused Rust tests, WASM check, formatting, diff check, JavaScript syntax, and static browser contracts passed. Preview is ready at http://127.0.0.1:8080 with API status healthy.
+
+2026-09-23 authoritative browser command was attempted: `CF_UI_TEST_STEPS='12ha-system-detail-cve-inventory-fallbacks,28-system-hardening-tab' nix build --impure 'path:.#checks.x86_64-linux.web-ui' --no-link -L`. It did not reach either requested workflow because shared `crystal-forge-design-targets` failed at TASK-440's unchanged Config Explorer locator `.cfgx`.getByText('TARGET', { exact: true }) in all four dark/light wide/narrow captures (50/54 targets rendered). The same known external blocker remains; do not claim browser workflows passed. Final diff check remains clean.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
