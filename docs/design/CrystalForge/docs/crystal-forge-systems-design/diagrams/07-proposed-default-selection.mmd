@@ -1,16 +1,17 @@
 flowchart TD
-    OPEN["Open system or change system ID"] --> EX{"Explicit target supplied?"}
-    EX -->|"Yes"| PIN["Validate and preserve explicit target"]
-    EX -->|"No"| LOAD["Wait for required identity and head data"]
-    LOAD --> ERR{"Request failed?"}
-    ERR -->|"Yes"| RETRY["Show error and retry; no new default"]
-    ERR -->|"No"| MAP{"Running configuration mapped?"}
-    MAP -->|"Yes"| CUR["Automatic running target"]
-    MAP -->|"No"| OOB{"Confirmed out-of-band condition?"}
-    OOB -->|"No"| UNK["Explicit unresolved state"]
-    OOB -->|"Yes"| HEAD["Automatic actual flake head"]
-    CUR --> USER["User changes target or mode"]
-    HEAD --> USER
-    USER --> PIN
-    PIN --> REF["Refresh data without changing user choice"]
-    RETRY --> LOAD
+    OPEN["Open system or refresh"] --> EX{"Explicit revision supplied?"}
+    EX -->|"Yes"| PIN["Validate exact revision; keep its identity"]
+    EX -->|"No: Current intent"| LOAD["Resolve latest reported running output"]
+    LOAD --> READ{"Read successful?"}
+    READ -->|"No"| ERR["Loading or error; no target substitution"]
+    READ -->|"Yes"| MAP{"Running target mapping"}
+    MAP -->|"Known and unique"| CUR["Current target and its own scan"]
+    MAP -->|"No match"| UNMAP["Unmapped; no Current inventory"]
+    MAP -->|"Ambiguous or no report"| UNK["Typed unavailable state"]
+    CUR --> PROOF{"Normal remediation proof available?"}
+    PROOF -->|"Yes"| NORMAL["Normal Current evidence and existing capabilities"]
+    PROOF -->|"No"| RO["Matching schema-1 scan read-only, if present"]
+    UNMAP -.-> FUT["Deferred optional agent-local Vulnix scan"]
+    PIN --> EXACT["Exact selected-target evidence or explicit unavailable"]
+    NORMAL --> NEXT["Refresh re-resolves Current"]
+    RO --> NEXT

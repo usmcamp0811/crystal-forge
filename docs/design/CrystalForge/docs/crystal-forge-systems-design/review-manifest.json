@@ -1,27 +1,37 @@
 {
   "document": "systems-view-design-v0.1.md",
-  "version": "0.1",
+  "version": "0.2",
   "date": "2026-09-23",
   "mr": 329,
-  "reviewed_head": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
-  "inspection_base": "72c8066323bcc1ef507c853a89852dfd880e469a",
-  "head_delta_files": [
-    "packages/web-ui/src/views/system_detail.rs",
-    "checks/web-ui/tests/integration-test.js"
+  "original_application_audit_head": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+  "decision_update_branch_head": "327d03b6d58055eb688fe657f12e223b8419f446",
+  "original_document_git_blob": "54735e4e64a86152ff819137160b80805e3f7aed",
+  "original_inspection_base": "72c8066323bcc1ef507c853a89852dfd880e469a",
+  "decision_update_reads": [
+    "GitLab branch metadata",
+    "AGENTS.md (full)",
+    "packages/default/crates/cf-server/src/models/poam.rs:80-168",
+    "packages/web-ui/src/views/system_detail.rs:120-290",
+    "packages/default/crates/cf-server/src/queries/cves.rs:590-785,870-1140",
+    "packages/default/crates/cf-server/src/handlers/api/systems.rs:read_only hydration search"
   ],
-  "diagrams": 11,
-  "source_references": 30,
-  "regression_scenarios": 31,
+  "change_scope": "Complete document update, owner decisions, SC1 contract, agent prompt, manual validation, synchronized diagram source",
+  "implementation_performed": false,
+  "repository_writes_made": false,
   "application_tests_run": false,
   "database_queries_run": false,
   "browser_workflows_run": false,
   "mermaid_rendered": false,
   "markdown_structure_validated": true,
+  "diagrams": 12,
+  "source_references": 37,
+  "regression_scenarios": 36,
+  "SC1_acceptance_cases": 14,
   "files": [
     {
       "path": "README.md",
-      "bytes": 1302,
-      "sha256": "eed3f429e384bf84b434d0d627a0c2d022ce426a3945cc72df7717563dc8f8a8"
+      "bytes": 2115,
+      "sha256": "c010b110bd32a509547f5df00468dff34c6636f86a4df683276a475071b7ef07"
     },
     {
       "path": "detail-evidence.png",
@@ -60,8 +70,8 @@
     },
     {
       "path": "diagrams/07-proposed-default-selection.mmd",
-      "bytes": 756,
-      "sha256": "db83dac9d1660c0fe2f1d00231a6611251883ef5bfa7e46172ac5a48505c0638"
+      "bytes": 1009,
+      "sha256": "140b20e8b76e6e0c930d0f272aa4f5c61f3e9db1096039fdb42a4b1d72aa686c"
     },
     {
       "path": "diagrams/08-proposed-read-model.mmd",
@@ -84,14 +94,34 @@
       "sha256": "7f68d601b6a00a71af84fd04dc4511ba6d093d62e12b55e3f6894d193fbb5f5c"
     },
     {
+      "path": "diagrams/12-continuity-and-readiness.mmd",
+      "bytes": 732,
+      "sha256": "7e2a0c3e65230cd392b39eb81f447f794440df45bbf82a9c691dea86e8a7bfa1"
+    },
+    {
       "path": "scanning-evidence.png",
       "bytes": 81942,
       "sha256": "ab0916f20d62c8df5095c8c49bade22d1cfdb64b1ac163d3bab91a212e156046"
     },
     {
+      "path": "system-cves-chunk-1-agent-prompt.md",
+      "bytes": 8476,
+      "sha256": "fc68600095f0b3172f36bf12277e15da740cc65414fdf3f9928b0e62bfbcff37"
+    },
+    {
+      "path": "system-cves-chunk-1-manual-validation.md",
+      "bytes": 5821,
+      "sha256": "78e683eb6d167e251234ad01199e72f94acc05a7310f059687273a6ebab155ec"
+    },
+    {
+      "path": "system-cves-chunk-1.md",
+      "bytes": 17650,
+      "sha256": "357b321317342e5d41fd45b4e6c19c84715107698608b782ffc7b37e3a8ea453"
+    },
+    {
       "path": "systems-view-design-v0.1.md",
-      "bytes": 109825,
-      "sha256": "e642855c44afbb4a7a20866c2dab96c4094e02c6e31ce4a38e02fa08540643b9"
+      "bytes": 126716,
+      "sha256": "bdd32f3ea3dc2a36b7bebeb33e49805c88710279312a218f97159d80d8ed1ea0"
     }
   ]
 }

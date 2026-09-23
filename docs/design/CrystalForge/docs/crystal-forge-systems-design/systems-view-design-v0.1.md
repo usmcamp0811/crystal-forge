@@ -1,14 +1,15 @@
 # Crystal Forge Systems View
 ## Architecture, data provenance, and consistency contract
 
-**Document version:** 0.1, review draft  
-**Current reviewed head:** `58006084aa699b84bcb1d02d6f911d4d4ee94ea3`  
+**Document version:** 0.2, decision update and staged implementation contract  
+**Original application audit head:** `58006084aa699b84bcb1d02d6f911d4d4ee94ea3`  
+**Decision-update branch head:** `327d03b6d58055eb688fe657f12e223b8419f446`  
 **Full inspection base:** `72c8066323bcc1ef507c853a89852dfd880e469a`  
 **Source branch:** `TASK-326.2-scanning-cve-triage-parity`  
 **Merge request:** Crystal Forge !329, target `dev`  
 **Review date:** 2026-09-23  
-**Suggested repository location:** `docs/systems-view-architecture.md`  
-**Repository status:** This document has not been committed. No application code, database, task, or MR state was changed.
+**Repository location:** `docs/design/CrystalForge/docs/crystal-forge-systems-design/systems-view-design-v0.1.md`  
+**Repository status:** Version 0.1 is committed at the decision-update head. This complete replacement is version 0.2. The existing filename is retained for stable links. This handoff does not commit the replacement or change application code, database records, tasks, branches, or MR state.
 
 ---
 
@@ -18,13 +19,26 @@ This document describes the Systems list, its preview panel, and all eight Syste
 
 The document has two purposes. First, it records the implementation at the pinned source revision. Second, it proposes an explicit contract for behavior that is missing, inconsistent, or not yet decided. A statement about existing code does not make that behavior a product requirement.
 
+### 1.0 Decision update and scope
+
+The owner resolved the System Detail CVEs read/default questions on 2026-09-23. Section 22 records those decisions. It also records the requested continuity of remediation work across deployments. The first implementation slice is **SC1: System Detail CVEs target and scan selection**. Its complete contract is in `system-cves-chunk-1.md`.
+
+For the System Detail CVEs work, Section 22 replaces the older proposals about automatic flake-head fallback and freezing an automatic head selection. An unmapped running configuration stays unmapped. A separately evaluated commit does not become the running configuration. A known local activation is not permanently a lower-grade deployment merely because CF did not initiate it.
+
+The original AS-BUILT descriptions remain an audit of the stated source, not a claim that the newly agreed behavior already exists. New reads at `327d03b6` checked the current branch, default resolver, Current inventory resolver, candidate query, POA&M status enum, and repository agent guide. This update is not a new full repository audit. [S32], [S33], [S34], [S35], [S36], [S37]
+
+Other architecture proposals remain proposals. In particular, schema-0 admission to a new Current read fallback, automatic formal POA&M closure, trusted reconciliation of missing deployment proof, and local agent scanning are not implemented by SC1. The separate fleet CVEs and Compliance audit files retain their historical findings. Their open decision entries must not override the owner's newer decisions in Section 22 for this scoped work.
+
 ### 1.1 Evidence labels
 
 | Label | Meaning |
 |---|---|
 | **AS-BUILT** | Verified by reading source at the pinned revision. This is not a claim that the path was executed in this review. |
 | **EXISTING SPEC** | Stated by an existing repository specification. Conflicts with current code are identified. |
-| **USER REQUIREMENT** | Behavior requested in this conversation. |
+| **USER REQUIREMENT** | Behavior requested by the owner. Section 22 is the decision record for this update. |
+| **AGREED / SC1** | An agreed outcome that the first implementation slice must provide. |
+| **AGREED / LATER** | An agreed product outcome assigned to a later slice. It is not an SC1 implementation requirement. |
+| **WORKING LIFECYCLE MAPPING** | A concrete mapping of the owner's completion intent to existing states. It is recorded for the later continuity design, not implemented by SC1. |
 | **PROPOSED** | A recommended contract for review. It is not implemented or approved by this document. |
 | **UNVERIFIED** | Requires live data, a running browser, test execution, or additional inspection. |
 
@@ -84,7 +98,7 @@ Sources: [S02], [S03], [S04], [S05], [S06], [S23], [S24], [S25].
 
 ### 2.2 Specification conflicts that need explicit resolution
 
-**Current CVE fallback.** The older snapshot document describes fallback inventory. The updated API specification and current query instead return `current_authority_unavailable` or `no_current_scan`, with no selected source, when Current prerequisites fail. Tests now explicitly require this behavior. A repair must not silently restore the old fallback under the same Current authority label. [S04], [S05], [S15], [S28]
+**Current CVE fallback.** The older snapshot document describes fallback inventory. The audited API and query return `current_authority_unavailable` or `no_current_scan`, with no selected source, when strict Current prerequisites fail. Tests encode that audited behavior. The owner has now approved a narrower display-only case: a uniquely mapped running derivation can supply its schema-1 scan without granting remediation authority. Update the specific read expectations and API documentation when SC1 implements that case. Keep the independent write rejections and cross-target substitution prohibitions. [S04], [S05], [S15], [S28], [S34]
 
 **Real history versus synthesized history.** The deployment-progress specification requires real recent activity. The current detail view can synthesize history from commit data when history entries are empty. The Logs tab also adds explicitly labelled reconstructed entries. These behaviors must not be described as authoritative recorded deployment events. [S03], [S08]
 
@@ -143,7 +157,7 @@ CVEs and Hardening maintain their own `SystemCveInventorySelection` signals and 
 
 The header describes a system. Config, CVEs, and Hardening can inspect different revisions. Compliance also has bundle/version context. A historical tab selection must not silently rewrite the header's running-generation identity.
 
-**PROPOSED:** Keep the header scoped to running system state. Put selected-target identity and evidence counts inside the relevant tab. Where the selected target differs from running state, show that difference directly. Matching labels must mean matching scope, not merely similar numbers.
+**AGREED / LATER:** Keep the header scoped to running system state. Put selected-target identity and finding counts inside the relevant tab. Where the selected target differs from running state, show that difference directly. Header count-source repair belongs to SC2. SC1 must not replace header identity with an inspected commit. Matching labels must mean matching scope, not merely similar numbers.
 
 ---
 
@@ -412,7 +426,7 @@ The shared prerequisite edge is conceptual. The two server queries are separate 
 
 **G02: Header scope differs from Current inventory.** The header uses the legacy summary path, not the strict Current inventory source. A positive header count and an unavailable Current inventory can coexist. The UI does not explain their different scope. [S08], [S12], [S13], [S14], [S15]
 
-**G03: Current inventory intentionally rejects missing retention.** The source and tests require empty Current inventory when the current generation has no retained binding. This is an existing restriction, not just a selector initialization defect. Altering it requires a specific design decision. [S15], [S28]
+**G03: Current inventory rejects missing retention at the audit baseline.** The source and tests require empty Current inventory when the generation lacks a retained binding. The owner has now approved read-only display from a uniquely mapped running derivation, with the proof failure still visible. This changes the read contract, not the independent mutation predicates. [S15], [S28], [S34]
 
 **G04: Units differ.** The header counts distinct CVE IDs. Stored scan severity counters count affected entries across package derivations. The paged inventory uses canonical CVE/package pairs. Equal source identity would not by itself make these three totals equal. [S13], [S15], [S21], [S22]
 
@@ -436,7 +450,7 @@ The stored `total_vulnerabilities` is the sum of critical, high, medium, and low
 
 The header's SQL aggregates distinct CVE IDs from a mutable legacy projection. The inventory API groups immutable observations into canonical CVE/package identities and uses live metadata for presentation such as severity. Stored scan counters and dynamically enriched inventory counts can therefore differ in both unit and metadata time. [S13], [S14], [S15], [S21], [S22]
 
-### 9.2 PROPOSED vocabulary and formulas
+### 9.2 Agreed counting units and supporting formulas
 
 Let `O` be eligible affected, non-whitelisted observations from one selected scan. For a stated severity metadata version:
 
@@ -449,7 +463,7 @@ package_count    = count distinct canonical_package_name in O
 
 An occurrence identity must be defined by the stored observation contract, including its derivation path and observed package context. It must not be inferred from a row number. [S05], [S15], [S22]
 
-The proposed primary table unit is **findings**, meaning canonical CVE/package pairs. A header labelled **CVEs** should continue to mean distinct CVE IDs, or be explicitly renamed. Scanning can retain occurrence counts, but should label them **scan occurrences**, not present them as directly comparable inventory totals.
+**AGREED:** The primary table unit is **findings**, meaning canonical CVE/package pairs. The running-system header uses **CVEs**, meaning distinct CVE IDs. Scanning can retain occurrence counts, but those are a separately labelled unit. SC2 owns the header and cross-screen count-source repair. SC1 uses the selected inventory's existing full-scope metadata and must not turn unavailable evidence into zero or clean.
 
 ### 9.3 Mandatory consistency conditions
 
@@ -471,75 +485,71 @@ A missing source, failed attempt without prior evidence, unavailable target, or 
 
 ## 10. Revision defaults and explicit selection
 
-### 10.1 USER REQUIREMENT
+### 10.1 Audited implementation and replaced requirement
 
-CVEs and Hardening must default to the configuration currently deployed to the system. For an out-of-band configuration, they must default to the registered flake's head.
+**AS-BUILT at `58006084`, rechecked at `327d03b6`:** Signals start at Current in Generations mode. After a successful candidate response, `revision_scope_default` selects Current if a Current candidate has a derivation ID. Otherwise it selects an `is_latest_per_flake` derivation, or leaves a Current request underneath a head-unavailable message. The helper ignores scan availability. Per-tab explicit-selection state prevents automatic replacement after a target or mode choice. [S08], [S30], [S33]
 
-**AS-BUILT at `58006084`:** The signal initializers still start at `Current` in Generations mode. After a successful candidate response for the matching system, `revision_scope_default` now applies the following rule. [S08], [S30]
+This code implements the earlier request to fall back to head. **The owner's new decision replaces that fallback for the System Detail CVEs workflow.** Unmapped running output must not cause the UI to show head evidence as the system's default CVE inventory.
 
-```text
-If any candidate is Current, is_current, and has a derivation_id:
-    Select Current / Generations.
-Else if an ExactDerivation candidate has is_latest_per_flake:
-    Select the first such candidate / Commits.
-    Explain that running configuration is out of band.
-Else:
-    Keep Current as the underlying request target / Commits.
-    Mark head_unavailable and explain that head is unavailable for an out-of-band configuration.
-```
+A Current candidate's non-null derivation ID does not prove uniqueness or complete registered-flake membership. In the candidate query, the Current derivation and scoped commit use separate left joins. A failed scoped commit join does not itself clear the derivation ID. Do not use that field alone as a new read-authority decision. The server must prove the complete mapping before selecting scan evidence. [S35]
 
-The helper deliberately ignores `scan_available`, which avoids selecting old scanned data merely because Current has no scan. Each tab has separate explicit-choice state. Target and mode handlers set that state. Automatic updates stop for an explicit choice and reset when the stored system ID changes. Successful candidate responses carry their system ID before automatic selection is applied. These are implemented changes, not remaining feature omissions. [S08], [S30]
+### 10.2 Agreed target-selection rules
 
-However, the helper treats every absence of a Current candidate with a derivation as out of band. It does not distinguish no reported state, an empty candidate collection, absent registered head, ambiguous mapping, or a successfully loaded-but-unresolved current identity. It does not wait for a separate typed current-identity result. A non-null derivation ID alone does not prove the full registered current mapping or retained authority. [S08], [S15], [S30]
-
-When head is unavailable, requests still use `Current`; there is no separate unavailable-head request target. Only the additional Check now guard uses `head_unavailable`. The whole evidence/action surface is not represented by a new head-unavailable type. Existing eager inventory requests also start before automatic default resolution. These gaps must not be described as a complete implementation of the proposed rules below. [S08], [S30]
-
-### 10.2 PROPOSED target-selection rules
-
-| Condition after authoritative data loads | Default target | Mode | Required explanation |
+| Condition | Default or selected target | Evidence outcome | Required explanation |
 |---|---|---|---|
-| Running tracked configuration is mapped | Current running target | Generations | Identify generation and commit when available. |
-| Running target is an older commit or rollback | That running target | Generations | Do not prefer newer head. |
-| Running target is mapped, but its scan is absent | Same running target | Generations | “No completed scan for this target.” |
-| Running identity is mapped, but retained remediation proof is missing | Same running identity; display policy decided in Section 22 | Normally Generations | Explain the missing proof. Do not call the system out of band solely for this reason. |
-| Running configuration is confirmed out of band under the agreed definition | Actual registered ref head | Commits | “Showing flake head because the running configuration is out of band.” |
-| Head is known but not evaluated into a selectable derivation | Head identity remains the intended target | Commits | “Flake head has no available target for this configuration.” |
-| No configured flake or no usable head snapshot | No invented fallback | Explicit unavailable state | State the missing prerequisite. |
-| Required request is loading or failed | Do not finalize a new default | Loading/error | Do not classify loading or errors as out of band. |
-| User or exact navigation has selected a target | Preserve explicit target | Preserve explicit mode | Never override it with a late automatic response. |
+| Reported running configuration maps to a known target | Current, normally Generations mode | Read evidence for that exact target only. | Show real observed generation, target identity, and source. |
+| Local activation maps to a known target | Same Current behavior as a CF activation | Use normal authority when its proof exists; otherwise use the agreed read-only tier. | Do not classify a known equivalent end state as permanently untrusted because of its trigger. |
+| Running target is an older commit or rollback | Actual observed running target | Do not prefer the highest generation or newest commit. | Report the actual observation and its time. |
+| Target is uniquely mapped and strict proof is missing | Same Current target | Show its completed schema-1 scan read-only, when present. | Show the failed proof prerequisite and unavailable actions. |
+| Target is mapped but no eligible completed scan exists | Same Current target | No scan. | No completed scan for this target; never substitute an older or head scan. |
+| Reported running output is unmapped | Current intent remains selected; mapping state is unmapped | No Current CVE inventory in SC1. | Running configuration is unmapped; no scan is available for it. |
+| Running mapping is ambiguous | Current unresolved state | No arbitrary source. | Mapping is ambiguous; do not infer no report or local activation. |
+| No usable state was reported | No fabricated running target | No Current inventory. | No usable running state has been reported. |
+| Identity/source request is loading or failed | Preserve user selection; do not finalize an unsupported conclusion | Loading/error, optionally labelled stale data. | Loading and request failure are not out-of-band evidence. |
+| Operator selects a known commit or retained generation | Preserve that exact selector | Read only that target. | Mark running, non-running, or historical from facts, not array order. |
+| Operator selects an evaluated head with no scan | Preserve the selected head derivation | No scan for that target. | Evaluation is not scanning and does not prove activation. |
 
-A head candidate must belong to the system's registered flake and effective configuration. `is_latest_per_flake` is a useful server fact when its candidate is present. The resolver must not select the first candidate with a scan. A failed or missing head evaluation must not cause substitution of an older successfully scanned revision. [S15]
+This table is the agreed destination for selection semantics. SC1 applies it to CVEs. A necessary shared-selector change must receive Hardening regression coverage, but SC1 does not redesign Hardening's evidence rules.
 
-### 10.3 Initialization and selection state
+### 10.3 Initialization and refresh state
 
 ```mermaid
 flowchart TD
-    OPEN["Open system or change system ID"] --> EX{"Explicit target supplied?"}
-    EX -->|"Yes"| PIN["Validate and preserve explicit target"]
-    EX -->|"No"| LOAD["Wait for required identity and head data"]
-    LOAD --> ERR{"Request failed?"}
-    ERR -->|"Yes"| RETRY["Show error and retry; no new default"]
-    ERR -->|"No"| MAP{"Running configuration mapped?"}
-    MAP -->|"Yes"| CUR["Automatic running target"]
-    MAP -->|"No"| OOB{"Confirmed out-of-band condition?"}
-    OOB -->|"No"| UNK["Explicit unresolved state"]
-    OOB -->|"Yes"| HEAD["Automatic actual flake head"]
-    CUR --> USER["User changes target or mode"]
-    HEAD --> USER
-    USER --> PIN
-    PIN --> REF["Refresh data without changing user choice"]
-    RETRY --> LOAD
+    OPEN["Open system or refresh"] --> EX{"Explicit revision supplied?"}
+    EX -->|"Yes"| PIN["Validate exact revision; keep its identity"]
+    EX -->|"No: Current intent"| LOAD["Resolve latest reported running output"]
+    LOAD --> READ{"Read successful?"}
+    READ -->|"No"| ERR["Loading or error; no target substitution"]
+    READ -->|"Yes"| MAP{"Running target mapping"}
+    MAP -->|"Known and unique"| CUR["Current target and its own scan"]
+    MAP -->|"No match"| UNMAP["Unmapped; no Current inventory"]
+    MAP -->|"Ambiguous or no report"| UNK["Typed unavailable state"]
+    CUR --> PROOF{"Normal remediation proof available?"}
+    PROOF -->|"Yes"| NORMAL["Normal Current evidence and existing capabilities"]
+    PROOF -->|"No"| RO["Matching schema-1 scan read-only, if present"]
+    UNMAP -.-> FUT["Deferred optional agent-local Vulnix scan"]
+    PIN --> EXACT["Exact selected-target evidence or explicit unavailable"]
+    NORMAL --> NEXT["Refresh re-resolves Current"]
+    RO --> NEXT
 ```
 
-The new head already has a small shared helper and independent explicit-selection state. Extend that helper with sufficient identity states rather than adding a second default policy. The tabs should keep independent explicit selections. A user changing only Generations/Commits has still expressed a choice. A later effect must not reset that mode merely because there was no equivalent target in the other menu.
+**AGREED:** Current follows the latest reported running configuration on refresh. A newly evaluated commit appears in the available revision choices after refresh. It does not replace Current until it is reported running. No new live-update transport or independent polling system is required by SC1.
 
-**AS-BUILT:** The new helper reapplies an automatic default when candidate metadata changes, unless the tab is explicit. Automatic head selection can therefore move on a candidate refresh. **PROPOSED:** Automatic selection can follow a confirmed running-target change after coherent refresh. Explicit selection stays fixed. A flake-head default should resolve to a specific full commit/derivation at initialization; a later head change should be offered as an update rather than silently replacing evidence under an operator. This head-follow behavior differs from the current automatic-refresh rule and requires a decision. [S30]
+An explicit commit or retained generation remains that exact target during refresh, tab changes, reload, and back/forward navigation. Presentation mode is separate from target identity. Selecting Commits mode while the intent is Current must not turn Current into a frozen commit accidentally. Switching mode without an equivalent representation must not select an unrelated target.
 
-### 10.4 Definition of out of band is still a decision
+A refresh can select a newer completed scan for the same target. A failed or queued attempt must not erase an earlier completed source for that target. An explicitly fixed scan reference, where supported by another workflow, is different from an exact derivation selector and must not be silently replaced.
 
-The code distinguishes local activation that can be reconciled to a tracked commit from local activation that remains unmapped. “Activated outside CF” and “unmapped configuration” are not synonyms. [S08], [S11]
+**AGREED / LATER:** An edit session captures its original server-issued evidence and action scope. Current reads can advance without rewriting that edit's baseline. SC1 must not introduce a refresh that discards a mounted draft. Existing stale-write checks remain in force until the later continuity work implements a safe captured-start contract. This temporary restriction is not the final continuity behavior.
 
-The preferred proposal is to keep a correctly mapped running configuration selected even when its activation originated locally. Use flake head for a genuinely unmapped out-of-band configuration. Section 22 asks for confirmation because the user's wording can also mean every non-CF activation.
+### 10.4 Local activation and future local scans
+
+Out-of-band describes the activation's origin: CF did not initiate or manage the switch. It does not by itself describe the result's quality. A local `nixos-rebuild` can produce a known, reconciled configuration. That configuration should behave like an equivalent normal deployment when the required evidence is verified.
+
+If the reported output cannot be mapped to a known configuration, SC1 shows **Unmapped** with no Current scan. The owner intends a later optional agent feature that runs Vulnix against the actual running configuration and returns observational results. Those results will be useful but separately identified from CF's fully bound evidence. No local execution, upload protocol, scheduler, permission model, or UI toggle is authorized in SC1. Do not invent an exact derivation or mutate an old scan to represent that future source.
+
+### 10.5 No invented ancestry
+
+Continuity belongs to the system and stable finding identity. It is not a claim that NixOS generations depend on one another. A rollback can restore an earlier artifact and reintroduce a CVE. Select the latest observation first, then validate its fields and target mapping. Do not select Current by a maximum generation number, commit timestamp, or Git ancestry test. Keep observation history and remediation history even when artifact identity moves backward.
 
 ---
 
@@ -603,13 +613,19 @@ stateDiagram-v2
 
 This diagram describes the proposed separation, not all CVE worker states. Actual CVE operations also have wait/retry states. The important rule is that a new failed or queued attempt does not erase earlier completed evidence for the same selected target. The UI must identify which attempt failed and which scan still supplies findings. Hardening already implements part of this separation. [S08], [S18]
 
-### 11.4 Displaying evidence without granting remediation authority
+### 11.4 Agreed read-only evidence without complete deployment proof
 
-**PROPOSED, requires decision:** When the server uniquely maps the running artifact to an authorized derivation and a completed schema-1 scan, it may display that scan read-only despite missing retained-generation proof. The response must label this as mapped-running scan evidence with unavailable remediation authority. It must not call it the existing fully authorized `ExactCurrentScan` state.
+**AGREED / SC1:** When the server uniquely maps the latest reported running output to the system's registered flake and effective configuration, its completed schema-1 scan can be shown even if retained-generation proof is missing. The response must keep these facts separate: reported running target, source scan, evidence representation, proof failure, and action capability.
 
-The server must continue to reject unsupported remediation operations. It must not create retained records, relax mutation validation, choose a different derivation, or borrow an older generation's binding to make the display available.
+This is a read-only result, not the existing fully authorized `ExactCurrentScan` state. Do not label it historical merely because it lacks proof. Do not grant remediation context or capability from a matching path, a short SHA, `is_current`, `scan_available`, or a non-null candidate derivation ID.
 
-An alternative is to keep the current strict Current display restriction and make every Current-labelled summary say unavailable. Both alternatives eliminate false clean. Only the first makes independently readable matching scan evidence visible without requiring historical navigation. Section 22 records the choice.
+SC1 reuses immutable schema-1 observations for this new display path. Existing explicit schema-0 browsing remains unchanged. Admission of schema-0 or future agent-local evidence to Current needs a separate representation contract; do not add it as an unrequested fallback.
+
+The mapping must select the latest observation before testing it. Authorize the system and complete target scope before exposing results. Resolve all scoped candidates before proving uniqueness; a bounded candidate menu is not proof that other matches do not exist. A contradictory or ambiguous target binding must produce an explicit failure, not a silent downgrade that hides the contradiction.
+
+A missing generation can be reported separately when a trustworthy current store path independently identifies the running output. Never present a mismatched generation as the selected target's generation. The new read path must describe only the facts it can establish. It must not guess a target from a commit or fall back to an older valid observation.
+
+The strict existing mutation checks remain unchanged in SC1. Do not insert retained-generation rows, claim a CF deployment happened, or weaken triage/POA&M/verification/closure validation. A later trusted reconciliation path may verify a known external activation without inventing history; that is a separate change.
 
 ---
 
@@ -705,9 +721,9 @@ When no source exists, the UI can still show zero services and a zero average sc
 
 **AS-BUILT:** Compliance loads system bundles, assignments, POA&M rollups/items, and exact evidence. POA&M appears before bundle summaries. The tab distinguishes loading, unauthorized, failed, and empty states. It can require a bundle/version choice for exact finding evidence. CVEs and Compliance share the POA&M detail host. [S08]
 
-**EXISTING SPEC:** A triage disposition does not prove remediation. Exact-CVE verification and closure require newer authorized evidence and unchanged required lineage. A typed assignee does not grant environment access. Mutation handlers must revalidate active users, roles, and memberships under their domain locks. [S05], [S06]
+**AS-BUILT / EXISTING SPEC:** A triage disposition does not prove remediation. The audited exact-CVE verifier requires newer evidence and baseline-lineage equality. That lineage freeze conflicts with the owner's now-confirmed cross-deployment continuity requirement. It remains an implementation gap for the later continuity slice, not a requirement to preserve indefinitely. A typed assignee does not grant environment access. Mutation handlers must revalidate active users, roles, and memberships under their domain locks. [S05], [S06], [S38]
 
-**PROPOSED:** A selected security revision must not silently change a POA&M's saved baseline. Keep immutable baseline evidence, present evidence, and proposed remediation target separate. Do not infer complete backend support for a visual host-level override from the mock design alone. This review did not audit every mutation path end to end.
+**AGREED / LATER:** A selected security revision must not silently change a POA&M's saved baseline. Keep immutable baseline evidence, present evidence, and proposed remediation target separate. The same system/CVE/package finding and its open plan continue across revisions. Current scan absence can establish a remediation candidate, not absence of all required proof. Host overrides are implemented in the companion CVEs audit; full workflow verification remains a separate step. Section 22 records the later lifecycle contract. [S38]
 
 ---
 
@@ -852,7 +868,8 @@ An API that accepts only `system_id` must not be used to imply an operation on a
 | System hidden or absent | Not found without existence disclosure. | Detailed hidden-target diagnostics. | Return to visible Systems list. |
 | No reported state | No running state reported. | Generation 0 or head is running. | Check registration/agent reporting. |
 | Running mapping ambiguous | Running revision unresolved, with safe reason. | Select arbitrary matching derivation. | Inspect mapping diagnostics. |
-| Missing retained generation | Current remediation proof unavailable. | No scan exists, or run scan will repair lineage. | Inspect deployment/evaluation binding; optionally view explicitly read-only evidence after decision D1. |
+| Running output unmapped | Unmapped; no Current inventory in SC1. | Flake-head evidence is the running system's scan. | Select a known target explicitly for browsing; optional agent-local scanning is deferred. |
+| Missing retained generation with uniquely mapped running target | Display its schema-1 scan read-only when present; show missing proof. | No scan exists, or running a scan will repair lineage. | Inspect genuine deployment/evaluation evidence; do not create proof in a GET. |
 | Valid target, no completed scan | No completed scan for this target. | Clean or zero audited services. | Target-specific scan if authorized. |
 | Active scan, no earlier evidence | Queued/running with attempt identity. | Current findings are zero. | View progress/diagnostics. |
 | Active or failed newer attempt, older valid evidence | Show attempt state and dated prior evidence separately. | Latest attempt completed successfully. | Retry exact target when eligible. |
@@ -903,10 +920,10 @@ This register distinguishes source defects from product decisions. It is not a c
 |---|---|---|---|
 | G01 | Confirmed presentation defect | Scanning can call missing evidence clean and discards medium/low counts. | Summary DTO use and findings predicate. |
 | G02 | Confirmed contract mismatch | Header counts are not bound to the Current inventory target/source. | Shared scope/provenance contract and labels. |
-| G03 | Existing intentional restriction | Current CVEs require retained proof even to return an inventory. | Decision D1, not an unreviewed fallback. |
+| G03 | Agreed read-contract change | Audited Current CVEs require retained proof even to return an inventory. | SC1 implements D1 read-only mapped evidence; preserve independent write checks. |
 | G04 | Confirmed semantic mismatch | Distinct CVEs, pairs, and occurrence counts share insufficiently specific labels. | Explicit units and cross-screen reconciliation. |
 | G05 | Confirmed recovery-message defect | Generic scan advice covers missing retention and historical no-scan cases. | Failure-specific copy and actions. |
-| G06 | Partial implementation at new head | Candidate-based Current/head defaults and explicit-choice guards now exist, but unresolved states are still classified as out of band. Missing-head requests still use Current. | Typed identity states, honest unavailable-head rendering, and async verification. |
+| G06 | Superseded default behavior | Audited helper falls back to head when Current lacks a candidate derivation. The new decision requires Unmapped instead. | SC1 removes CVE automatic head substitution, distinguishes target states, and preserves explicit selection. |
 | G07 | Confirmed identity presentation defect | Preview branch is guessed; preview and deployment From use latest commit. | Canonical observed identity and registered ref. |
 | G08 | Confirmed metadata-loss risk | Systems adapter discards pagination metadata. | List completeness and server total handling. |
 | G09 | Confirmed refresh separation | Header, candidates, and tab evidence have independent invalidation. | Explicit refresh dependency rules. |
@@ -949,9 +966,9 @@ The out-of-band candidate fixture also attaches a completed CVE source to a Curr
 | SV-01 | Running tracked A, head B | Both security tabs default to A; header remains running-scoped. | Pure resolver + browser |
 | SV-02 | Known rollback to an older generation | Actual observed generation wins over maximum generation and newest commit. | SQL + browser |
 | SV-03 | Running target has no scan, older/head target has a scan | Do not substitute a different target. | SQL + browser |
-| SV-04 | Confirmed unmapped out-of-band target | Actual registered head/configuration selected in Commits mode. | Resolver + browser |
-| SV-05 | Head has no derivation or build | Show intended head unavailable, not latest successful revision. | Resolver + API + browser |
-| SV-06 | Running derivation and completed schema-1 scan, missing retained binding | Assert the chosen D1 display contract and unchanged mutation rejection. | SQL + API + browser |
+| SV-04 | Confirmed unmapped out-of-band output | Current remains unmapped with no inventory. No automatic head fallback or local scan is started. | Resolver + API + browser |
+| SV-05 | Explicit head inspection has no selectable derivation or scan | Show the selected target's unavailable state. Do not substitute an older successful revision. | Resolver + API + browser |
+| SV-06 | Unique running derivation and completed schema-1 scan, missing retained binding | Show the matching scan read-only, retain the proof reason, and assert unchanged mutation rejection. | SQL + API + browser |
 | SV-07 | Two flakes have the same configuration name | No cross-flake counts, candidate, source, or mutation context. | SQL + API |
 | SV-08 | Configuration alias differs from hostname | Resolve effective configuration consistently everywhere. | SQL + API |
 | SV-09 | Same commit has multiple configuration outputs | Select only the registered configuration's derivation. | SQL + API |
@@ -977,6 +994,11 @@ The out-of-band candidate fixture also attaches a completed CVE source to a Curr
 | SV-29 | Archive/restore a scan used by audit context | Operational visibility does not erase retained proof or silently select another source. | SQL + API |
 | SV-30 | Response body identifies a different target from the request | Reject or explicitly error; a request tag must not certify the returned body. | Client unit + browser |
 | SV-31 | Candidate response has no current derivation because no state was reported | Do not claim out-of-band activation without evidence. | Resolver + API + browser |
+| SV-32 | Known local activation matches registered target | Same Current selection as a CF activation; capabilities follow actual verified proof, not trigger origin. | SQL + API + browser |
+| SV-33 | New commit is evaluated but not activated | Refresh exposes the choice; Current and its remediation result do not move to it. | API + browser |
+| SV-34 | Open a draft on A, then observe D | Later continuity work preserves the server-issued A baseline and the stable finding; SC1 does not weaken stale-write validation. | Later domain + browser |
+| SV-35 | Same canonical CVE/package persists A to D | Same finding and plan; current evidence advances without baseline rewrite. | Later domain + browser |
+| SV-36 | New deployed complete scan lacks the pair | Finding becomes candidate remediated; whole-plan readiness requires every required subject. Mere evaluation or missing scan never resolves it. | Later domain + browser |
 
 ### 19.3 How tests must prove consistency
 
@@ -1013,21 +1035,24 @@ The focused browser command can still depend on the shared design-target derivat
 
 ---
 
-## 20. Safe implementation boundaries and rollout
+## 20. Staged implementation and review stops
 
-This document does not authorize implementation. After decisions are accepted, separate changes by behavior and proof boundary.
+The owner requested bounded chunks that can be exercised independently. Do not implement this entire architecture in one task. Each slice needs a source SHA, acceptance checks, real test outcomes, a task-owned live preview, and a manual review stop.
 
-**First boundary: presentation truth.** Correct false clean, unsupported zero conclusions, misleading metadata, and failure-specific text. Preserve current security restrictions. Tests must include unavailable, medium-only, low-only, and unknown-only cases.
+| Slice | Outcome | Explicit boundary |
+|---|---|---|
+| **SC1: Target and scan selection** | Current-first CVE browsing; unique mapped scan read-only when proof is missing; unmapped stays empty; exact target navigation and coherent refresh. | No local scanner, no new write authority, no continuity or closure rewrite. |
+| **SC2: Inventory and count consistency** | Running header distinct CVEs; selected-tab findings and full pagination; provenance and agreed cross-screen count rules. | Do not claim SC1 already repaired the legacy header or Scanning clean badge. |
+| **SC3: Host triage workflow** | Accurate effective state, host-only save/reopen, existing POA&M navigation, and reliable post-save refresh. | Preserve host/environment separation and typed ownership. |
+| **SC4: Environment decisions and overrides** | Show current scope, direct overrides, and environment-owned subjects; preserve peer/host ownership under conflicts. | Do not conceal dynamic membership requirements behind a static UI count. |
+| **SC5: Cross-revision continuity and completion** | Preserve stable finding/plan and opened-against evidence; reconcile current evidence and membership; record candidate remediation and verify/close safely. | Separate accepted product intent from the detailed transaction/reconciliation/auto-close policy. |
+| **Later optional agent scanning** | Observational Vulnix results for unmapped running output, with explicit provenance and capability grade. | No protocol, local command execution, scheduler, or toggle in SC1. |
 
-**Second boundary: identity and defaults.** Complete the shared target-default resolver added in `58006084`. Resolve actual running target and actual ref head independently of scan availability. Add missing identity/unavailable states and exact response checks. Preserve the new explicit-choice protections and existing async guards.
+`system-cves-chunk-1.md` is the small implementation contract for SC1. The agent prompt and manual validation guide in this bundle apply only to that slice. Shared helper changes must receive regression tests for affected consumers. They are not permission to fix unrelated Hardening, fleet, or Compliance features.
 
-**Third boundary: read-model consistency.** Reuse scoped identity resolution and expose source/unit/state metadata. Remove or deprecate legacy count consumers only after all affected screens use a declared contract.
+Use existing repository modules and bounded query patterns. Add DTO fields only when they convey missing target/proof facts. Preserve deployed-client safety; old clients must not interpret the new read-only tier as fully authoritative Current evidence. Add migrations for schema changes. Never edit an applied migration or rewrite immutable scan or baseline evidence.
 
-**Fourth boundary: optional evidence display change.** Implement D1 only after approval. Add an explicit read-only evidence state rather than weakening Current remediation semantics.
-
-**Fifth boundary: broader Systems gaps.** Address preview identity, pagination, deploy gate truth, history reconstruction, and Hardening modal defects in bounded follow-up work. Do not hide these gaps by calling the initial consistency repair complete for all Systems behavior.
-
-Use additive response fields for rolling compatibility where possible. New enum values need an explicit unknown-state client strategy. Schema changes require new migrations, not edits to already-applied migrations. Do not invent historical scan counts or generation bindings during backfill. Preserve exact observation and audit identity. [S05], [S26]
+Do not mark an entire original audit gap closed because one SC1 case passes. For example, an explicit, correctly labelled read-only scan does not establish complete header parity, effective fleet rollups, or working cross-generation closure.
 
 ---
 
@@ -1050,47 +1075,105 @@ This is a diagnostic checklist, not a request to write or repair data. A missing
 
 ---
 
-## 22. Decisions for review
+## 22. Owner decisions and implementation scope
 
-### D1. Readable matching scan, but missing retained-generation proof
+**Decision date:** 2026-09-23. These decisions come from the owner's responses to the four System Detail CVEs questions. They are newer than the open-decision tables in the original audits. They do not approve every broader architecture proposal.
 
-**Current implementation:** Return no Current inventory. Existing tests enforce this.
+### D1. Read a matching scan without complete deployment proof
 
-**Proposed contract:** Display a uniquely mapped, authorized running-derivation scan as explicitly read-only evidence. Show the missing deployment-proof reason. Keep triage, exact POA&M, verification, and closure disabled unless their independent server checks succeed. Do not reuse the existing fully authoritative Current state for this lesser proof.
+**AGREED / SC1:** Show a completed schema-1 scan when the server uniquely maps the latest reported running output to the system's registered flake/configuration and exact derivation. Keep the failed proof prerequisite visible. The result is valid read-only feedback, not full remediation authority.
 
-**Alternative:** Keep strict Current display unavailable and make header/Scanning Current summaries unavailable too. Provide explicit historical/exact-target navigation to the matching scan.
+Do not return the existing fully authoritative state for this result. Do not hydrate mutation context, change write checks, manufacture retained-generation evidence, or select a different target's scan. Missing proof and missing scan are different facts.
 
-This is the main decision behind the supplied inconsistency. It is separate from selecting flake head for an unmapped out-of-band configuration. [S15], [S28]
+### D2. Out-of-band activation and unmapped output
 
-### D2. What counts as out of band for automatic defaults?
+**AGREED / SC1:** Out-of-band means a switch outside CF's control. If its result reconciles to a known configuration, treat its equivalent end state like a normal CF deployment. Capability still depends on the proof actually established. A missing proof record invokes D1 rather than a permanent origin-based penalty.
 
-**Proposed:** Fallback applies to an unmapped running configuration, not merely any local activation. A locally activated configuration that maps correctly to the tracked running derivation remains the current target.
+If the result cannot be mapped, show **Unmapped** and no Current CVE inventory. This replaces the earlier automatic flake-head fallback. The operator can still browse a known commit explicitly; that does not describe the unknown running output.
 
-Confirm whether the intended rule instead treats every non-CF activation as a reason to inspect flake head. Do not infer the distinction from `current_commit=None` alone.
+**AGREED / LATER:** Optional agent-local Vulnix scanning may provide observational feedback for unmapped running output. Record its lower evidence grade separately. Leave it unimplemented in SC1, including its UI toggles.
 
-### D3. Which count is primary?
+Trusted reconciliation of a known external activation must verify real facts. The read-only fix is not authority to insert a fictitious CF deployment or fabricate lineage records.
 
-**Proposed:** Use “findings” for canonical CVE/package pairs in inventory tables. Use “CVEs” only for distinct IDs. Retain scan occurrence totals where useful, but label them. Show source identity and scan time so different screens can be reconciled.
+### D3. CVEs and findings have different units
 
-No requirement should force all totals to the same number by discarding valid differences in unit.
+**AGREED:** A CVE count means distinct canonical CVE IDs. A finding count means distinct canonical CVE/package pairs. A scan occurrence count remains a third named unit.
 
-### D4. Header scope during historical/head inspection
+The running header uses distinct CVEs. The selected tab uses findings and package counts from its selected source. Include Unknown severity in the appropriate total. Unavailable evidence has no clean or zero conclusion. SC2 owns the broader count-source and header repair.
 
-**Proposed:** Header remains running-system scoped. The tab supplies selected-target counts and provenance. A head fallback must not make the header claim that head is deployed.
+### D4. Header stays running-scoped
 
-### D5. Automatic head-follow behavior
+**AGREED:** Inspecting an old generation or undeployed commit does not change the header's reported running identity. Selected-target identity and totals belong in the CVEs tab. Differences must be explainable by scope, unit, source, and time.
 
-**Current implementation:** Candidate refresh can reapply the default while a tab is not explicit. **Proposed:** Initialize to a specific head identity and notify when head advances. Do not move an operator's displayed evidence silently while they inspect or act on it. Explicit selections never follow head automatically. [S30]
+### D5. Refresh follows intent, not a frozen page snapshot
 
-### D6. Host-specific versus environment triage
+**AGREED / SC1:** Refresh updates the actual running state and available evaluated revisions. Current re-resolves to the latest reported running target. A newly evaluated but undeployed commit only adds or updates a browsing choice. It does not change current exposure or resolve a running finding.
 
-The visual reference has a host-override example. The inspected domain document specifies shared environment triage and exact system subjects. This document does not claim complete host-override parity. Confirm the intended public workflow before extending default-selection work into disposition precedence. [S06], [S24]
+Explicit generation and commit selections remain exact through refresh, reload, and browser history. Target identity and Generations/Commits presentation mode are separate. There is no automatic head-fallback mode to freeze or follow in the new default contract.
+
+A source/target change restarts incompatible inventory pagination. Old in-flight requests cannot overwrite the new system/target. Refresh failure remains a failure, not evidence of clean inventory or an unmapped deployment.
+
+### D6. Stable findings and captured-start edits
+
+**AGREED / LATER:** The operator works on one continuing system and its stable findings, not a new remediation project for each generation. The stable finding identity remains:
+
+```text
+system_id + canonical_cve_id + canonical_package_name
+```
+
+Commit, generation, derivation, store path, package version, and scan identify evidence. They are not new finding identities. The same finding and open POA&M continue when the pair persists on a newer deployed state. Baseline evidence is immutable; current evidence advances independently.
+
+An edit started with authoritative Current evidence captures that server-issued observation, the original system and scope, and the baseline context. A refresh does not retarget or erase the draft. Later implementation must support committing that captured intent while independently resolving the new Current state. A generation change alone must not require the operator to create a duplicate plan.
+
+This is not general permission to start mutations from historical, unproven, or read-only inventory. Server authorization and scope are rechecked at submission. An environment move, access revocation, changed canonical identity, conflicting ownership, or invalid captured context must remain an explicit conflict. Do not apply an old environment choice to a new environment without confirmation.
+
+SC1 preserves the current server write checks. It does not implement captured-start persistence or remove stale-evidence protection. Those existing restrictions can still reject a deployment-racing submission until SC5 implements the complete contract. Report that limitation, rather than claiming continuity is complete.
+
+### D7. Disappearance, completion readiness, and formal closure
+
+**AGREED PRODUCT INTENT / LATER:** When a newer deployed configuration has sufficient scan evidence that the pair is absent, the operator should see that the remediation is finished or ready to finish. The plan should not remain visually indistinguishable from an unresolved finding merely because it began on an older generation.
+
+**AS-BUILT:** The server status enum contains `open`, `in_progress`, `blocked`, `awaiting_verification`, and `completed`. The model assigns `completed` to authoritative closure. [S32]
+
+**WORKING LIFECYCLE MAPPING FOR SC5:** Show **Candidate remediated** for a finding whose pair is absent from sufficient, newer, independently authorized Current evidence. When every required plan subject meets the readiness contract, use the existing **Awaiting verification** lifecycle state. Final **Completed** still records a successful authoritative verification/closure outcome. This maps the owner's allowed “at least a finished state” alternative to existing state names without claiming verified closure from a UI refresh.
+
+Automatic candidate/readiness updates are the working direction. Automatic formal closure is a separate policy and orchestration choice, not part of SC1. A later design must decide how readiness interacts with manually recorded blockers, pending drafts, and multi-subject plans before implementing those transitions. No new status enum is required merely to display finding-level candidate remediation.
+
+Absence must come from sufficient scan evidence for the current deployed target. An unevaluated revision, an evaluated but undeployed commit, a missing scan, failed refresh, partial page, whitelist, accepted risk, or future lower-grade observational scan does not itself prove completion. One clean host cannot close a multi-host plan while another required subject is affected or unknown.
+
+If the pair returns before closure, keep the same remediation episode and show affected current evidence. After formal closure, preserve the closed record; recurrence must not silently rewrite closure evidence or reopen the old plan. An actual rollback is a new observation, not a reason to assume that risk only decreases. [S38]
+
+```mermaid
+flowchart LR
+    A["A: affected; operator starts plan"] --> BASE["Immutable baseline A"]
+    A --> PLAN["Same system, finding, and open POAM"]
+    B["B: newer deployed state; pair persists"] --> PLAN
+    D["D: newer deployed state; sufficient scan lacks pair"] --> READY["Candidate remediated"]
+    PLAN --> READY
+    READY --> ALL{"All required subjects ready?"}
+    ALL -->|"Yes: working mapping"| WAIT["Awaiting verification"]
+    ALL -->|"No or unknown"| OPEN["Plan remains unresolved"]
+    WAIT --> VERIFY["Authoritative verification and closure"]
+    VERIFY --> DONE["Completed with retained evidence"]
+    BASE --> VERIFY
+    E["New evaluated commit, not deployed"] -.-> ONLY["Browsing evidence only; no Current resolution"]
+```
+
+### D8. Document precedence and remaining work
+
+For SC1, the controlling documents are this version's agreed decisions and `system-cves-chunk-1.md`. Original AS-BUILT sections remain evidence of behavior to change. Old head-fallback tests must be updated to the new expected result; unrelated failure and authorization tests must remain.
+
+The fleet audit D05 and cross-view ledger CPC03 are resolved only for this precise read-only mapped-running case. Systems D3/D4 record the approved units and header scope. The later continuity direction addresses CPC13 and the fleet continuity proposal at the product level; it does not approve every persistence, reconciliation, or closure detail in those documents.
+
+Before SC5, reconcile the owning continuity specification, fleet triage guide, API contract, and cross-view ledger as complete replacement files. Do not have a UI-only agent resolve conflicting lifecycle rules by changing whichever check blocks its test.
+
+**No product question remains that blocks SC1.** The local-scanner protocol, trusted proof reconciliation, automatic formal closure policy, and complete dynamic environment membership design belong to later work. They must not be presented as completed or silently implemented by the first agent.
 
 ---
 
 ## 23. Acceptance criteria for this architecture contract
 
-The reviewed contract is ready to guide implementation when D1 and D2 are decided, count units are named, and each Current-labelled surface has an explicit source and availability rule. Implementation is ready for review only when the relevant regression matrix is proven and no unsupported clean, current, or remediation conclusion remains.
+SC1 can proceed against the agreed decisions in Section 22 and the acceptance contract in `system-cves-chunk-1.md`. No additional product question blocks that slice. Readiness for a later slice requires its own acceptance contract, including any remaining domain details. Implementation is ready for review only when its declared regression cases are proven. Completion of SC1 does not close all Systems, Scanning, fleet CVEs, or POA&M findings in this audit.
 
 A passing unit suite alone does not establish live UI parity. A green screenshot does not establish correct identity. A completed scan does not establish retained deployment lineage. A retained binding does not establish that a scan found no vulnerabilities. These distinctions are the central invariants of the Systems view.
 
@@ -1112,7 +1195,7 @@ The screenshots are user-provided runtime observations. They do not establish th
 
 ## Appendix B. Source index and inspection coverage
 
-All current repository file references below are pinned to `58006084aa699b84bcb1d02d6f911d4d4ee94ea3`. Unchanged files were inspected at its direct parent, `72c8066323bcc1ef507c853a89852dfd880e469a`; the complete direct-child diff confirms their unchanged contents. MR metadata is a point-in-time read. “Full” describes a file read, not full runtime verification.
+Original audit references S01–S31 are pinned to `58006084aa699b84bcb1d02d6f911d4d4ee94ea3`, except point-in-time MR metadata. Decision-update references S32–S38 use `327d03b6d58055eb688fe657f12e223b8419f446`. For the original audit, unchanged files were inspected at its direct parent, `72c8066323bcc1ef507c853a89852dfd880e469a`; the complete direct-child diff confirms their unchanged contents. MR metadata is a point-in-time read. “Full” describes a file read, not full runtime verification.
 
 | Ref | Source and inspected responsibility | Coverage |
 |---|---|---|
@@ -1146,6 +1229,13 @@ All current repository file references below are pinned to `58006084aa699b84bcb1
 | S29 | Systems route wrapper. | Full file. |
 | S30 | Direct-child head commit `58006084`, default resolver, state guards, and tests. | Commit metadata and complete two-file diff; no truncation or remaining pages. |
 | S31 | Current-head Hardening browser fixture and added fallback assertions. | Fixture ranges 18200–18485 and complete added test diff. |
+| S32 | POA&M persisted lifecycle states and permitted transitions at decision-update head. | Lines 90–130 re-read; no lifecycle transition executed. |
+| S33 | Current shared revision-default helper at decision-update head. | Lines 140–290 re-read. |
+| S34 | Current CVE inventory authority and source resolver at decision-update head. | Lines 870–1140 re-read. |
+| S35 | Current/retained/exact candidate query at decision-update head. | Lines 590–785 re-read; Current left-join behavior identified. |
+| S36 | Source branch head at decision update. | GitLab branch metadata: `327d03b6d58055eb688fe657f12e223b8419f446`. |
+| S37 | Repository workflow, live-preview, and safety requirements. | Full `AGENTS.md` at decision-update head. |
+| S38 | Existing evidence-continuity proposal and companion fleet audit. | Complete source provided in preceding repository reads at the same branch head; proposal status preserved. |
 
 [S01]: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/329 "MR !329; metadata observed on 2026-09-23"
 [S02]: https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/docs/specs/01-frontend-views.md "Frontend view specification"
@@ -1178,3 +1268,11 @@ All current repository file references below are pinned to `58006084aa699b84bcb1
 
 [S30]: https://gitlab.com/crystal-forge/crystal-forge/-/commit/58006084aa699b84bcb1d02d6f911d4d4ee94ea3 "Current-head default-selection change; complete diff inspected"
 [S31]: https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/checks/web-ui/tests/integration-test.js#L18200-18610 "New head-default test and its Hardening fixture"
+
+[S32]: https://gitlab.com/crystal-forge/crystal-forge/-/blob/327d03b6d58055eb688fe657f12e223b8419f446/packages/default/crates/cf-server/src/models/poam.rs#L90-130 "Persisted POAM lifecycle states"
+[S33]: https://gitlab.com/crystal-forge/crystal-forge/-/blob/327d03b6d58055eb688fe657f12e223b8419f446/packages/web-ui/src/views/system_detail.rs#L140-290 "Default selection recheck"
+[S34]: https://gitlab.com/crystal-forge/crystal-forge/-/blob/327d03b6d58055eb688fe657f12e223b8419f446/packages/default/crates/cf-server/src/queries/cves.rs#L870-1140 "Current source selection recheck"
+[S35]: https://gitlab.com/crystal-forge/crystal-forge/-/blob/327d03b6d58055eb688fe657f12e223b8419f446/packages/default/crates/cf-server/src/queries/cves.rs#L590-785 "Candidate scope and identity recheck"
+[S36]: https://gitlab.com/crystal-forge/crystal-forge/-/commit/327d03b6d58055eb688fe657f12e223b8419f446 "Decision-update branch head"
+[S37]: https://gitlab.com/crystal-forge/crystal-forge/-/blob/327d03b6d58055eb688fe657f12e223b8419f446/AGENTS.md "Repository agent workflow"
+[S38]: https://gitlab.com/crystal-forge/crystal-forge/-/blob/327d03b6d58055eb688fe657f12e223b8419f446/docs/design/CrystalForge/cve-poam-evidence-continuity-design-spec.md "Earlier continuity proposal, not a completed implementation"

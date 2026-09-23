@@ -1,27 +1,40 @@
-# Crystal Forge Systems design review, version 0.1
+# Systems design and System Detail CVEs handoff
 
-Start with `systems-view-design-v0.1.md`.
+The complete `systems-view-design-v0.1.md` file now contains document version **0.2**.
+The filename is retained so existing repository links keep working.
 
-The document contains the full design, current implementation analysis, source references,
-11 Mermaid diagrams, a gap register, and 31 proposed regression scenarios.
+Start with the decision record in Section 22, then read `system-cves-chunk-1.md`.
+The latter is the bounded first implementation slice. The agent prompt and manual
+validation guide are in this directory. Do not ask one agent to implement the
+entire Systems, fleet CVEs, or Compliance audit.
 
-Current reviewed MR !329 head:
-`58006084aa699b84bcb1d02d6f911d4d4ee94ea3`
+Original application audit: `58006084aa699b84bcb1d02d6f911d4d4ee94ea3`.
+Decision-update branch head: `327d03b6d58055eb688fe657f12e223b8419f446`.
+The owner's decision update is dated 2026-09-23.
 
-Full inspection base:
-`72c8066323bcc1ef507c853a89852dfd880e469a`
+## Main changes
 
-The current head is the direct child of the inspection base. Its complete two-file
-change was independently inspected and incorporated before delivery.
+Unmapped Current stays unmapped. It does not select flake head automatically.
+A uniquely mapped running derivation can display its schema-1 scan read-only
+when strict deployment proof is missing. Current follows observed deployments
+on refresh. Explicit revisions remain exact. New evaluated revisions only
+change browsing choices until deployed.
 
-`diagrams/` contains the Mermaid blocks as separate `.mmd` files for editing.
-The diagram blocks are also embedded in the Markdown document. Open the Markdown
-in a renderer that supports Mermaid to display them as diagrams.
+The later continuity direction keeps one stable system/CVE/package finding and
+its open POA&M across revisions. It preserves the opened-against baseline.
+Candidate remediation, Awaiting verification, and formal Completed are separate
+concepts. Local agent scanning and automatic formal closure are not SC1 work.
 
-`detail-evidence.png` and `scanning-evidence.png` are crops of the screenshots supplied
-in the conversation. Keep them beside the Markdown file to preserve its image links.
+## Contents and evidence
 
-The repository links are pinned to the reviewed head. Access can require GitLab login.
-No repository changes were made. No application, database, NixOS VM, or browser tests
-were executed for this document. The Markdown structure and references were checked;
-Mermaid diagrams were not executed by an installed Mermaid renderer in this environment.
+The full document retains the original screen audit, gaps, source references,
+and screenshot crops. Its 12 Mermaid blocks match the separate files in
+`diagrams/`. Historical diagram filenames are retained for link stability.
+The full regression matrix has 36 scenarios; the SC1 contract identifies its
+own smaller acceptance set.
+
+This is a document handoff, not a code implementation or merge approval.
+No repository write, database operation, application test, or browser workflow
+was performed for this update. The manifest records artifact checks separately.
+The existing fleet and Compliance audit documents are not overwritten by this
+bundle. Section 22 limits the scope of precedence over their older proposals.
