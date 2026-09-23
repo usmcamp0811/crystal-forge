@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-23 02:34'
+updated_date: '2026-09-23 03:27'
 labels:
   - scanning
   - web-ui
@@ -179,6 +179,8 @@ Part 2 backend/API/database slice (2026-09-21): modify only migration 0273 and c
 P1 Current CVE authority addendum: independently trace the exact Current selector and generation-retention lifecycle. Preserve retained snapshot/evaluation integrity and exact system/config/flake/derivation authority. Repair any proven reciprocal retention gap with bounded idempotent reconciliation only when one authoritative deployment binding proves the generation/store/snapshot identity. Independently remove the unsafe Current compatibility behavior that substitutes another derivation's historical scan as primary inventory. Current must resolve the newest completed schema-1 scan for its exact authorized derivation or return an explicit no-scan/current-authority-unavailable state. Keep RetainedGeneration and ExactDerivation exact and read-only. Add current-vs-historical isolation, race-order retention, ambiguity, schema/integrity, and production-shaped browser regressions. Do not alter scanner semantics, Completed pagination, Hardening behavior, or the separate future POA&M continuity scope.
 
 P0 migration-0275 repair: preserve already-applied migration 0274. Add a populated-database upgrade regression that applies through 0273, inserts completed/failed historical hardening scans and a dependent service result, then applies 0274, corrected 0275, and 0276. The fix must remove 0274's restrictive source-trigger constraint before changing historical rows from manual to legacy, then recreate the final constraint. Verify row identity/data preservation and final provenance/constraint invariants. Audit 0272-0276 for equivalent pre-existing-data failures. Run isolated PostgreSQL migration regression, targeted server checks, then commit and push. Keep TASK-326.2 In Progress until the user supplies deployment evidence from reckless.
+
+Deployed runtime review addendum: preserve the current candidate and first obtain user-run ata-nix-config commit/attempt/journal evidence before asserting a production root cause. Trace all pre-evaluator failure transitions (flake lookup, config load, per-configuration policy load, composite evidence initialization) and add only proven regressions/fixes. Start a task-owned dynamically isolated preview before modifying Evaluation UI. Surface a sanitized persisted terminal pre-evaluator failure when no streamed lines exist; remove duplicate terminal-row re-evaluation actions; add exact action-count regressions. Verify config-health latest-commit semantics and Completed scan API ordering/accounting against real runtime data before changing pagination. Restrict styling work to visible Evaluation drawer defects; do not implement the separate policy-matrix bundle grouping scope. Keep the task In Progress and do not merge.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
