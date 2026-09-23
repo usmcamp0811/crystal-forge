@@ -1,40 +1,45 @@
 # Systems design and System Detail CVEs handoff
 
-The complete `systems-view-design-v0.1.md` file now contains document version **0.2**.
-The filename is retained so existing repository links keep working.
+The complete `systems-view-design-v0.1.md` file contains document version **0.3**.
+The filename remains unchanged for stable repository links. The SC1 contract,
+prompt, and manual guide are handoff revision 2.
 
-Start with the decision record in Section 22, then read `system-cves-chunk-1.md`.
-The latter is the bounded first implementation slice. The agent prompt and manual
-validation guide are in this directory. Do not ask one agent to implement the
-entire Systems, fleet CVEs, or Compliance audit.
+## Authority
+
+The owner's Claude design implementation is the UI source of truth. The Systems
+architecture defines data and behavior, not replacement UI. Start with the UI
+authority rule in Section 1.0, then Section 22 and `system-cves-chunk-1.md`.
+
+Before browser-visible edits, map the affected states to existing Claude design
+components/states. Do not invent banners, badges, panels, fields, controls or
+workflows. A missing design state returns to the owner's Claude design workflow
+and blocks its UI acceptance. It does not block independent backend work.
+
+## Scope
+
+SC1 corrects target and scan selection only. Unmapped Current stays unmapped.
+A uniquely mapped running derivation can supply its schema-1 scan read-only when
+strict deployment proof is missing. Current follows observed deployment changes
+on refresh. Explicit target selections remain exact. A new evaluation adds a
+browsing choice; it does not change the running configuration.
+
+Header/count consolidation remains SC2. Host/environment triage and continuity
+remain later slices. The working completion mapping is not approval for a new UI
+badge, status widget or automatic formal closure.
+
+## Evidence and contents
 
 Original application audit: `58006084aa699b84bcb1d02d6f911d4d4ee94ea3`.
-Decision-update branch head: `327d03b6d58055eb688fe657f12e223b8419f446`.
-The owner's decision update is dated 2026-09-23.
+Recorded decision-update inspection: `327d03b6d58055eb688fe657f12e223b8419f446`.
+This correction does not recheck the current repository head or design state.
+It changes the supplied documents, not application code or repository state.
 
-## Main changes
+The bundle contains complete files: the Systems document, SC1 contract, prompt,
+manual guide, 12 matching Mermaid sources, prior screenshot crops, and a review
+manifest. The screenshots are historical evidence, not UI approval. The diagrams
+model data and state; they are not mockups. The 36-case broad regression matrix
+is retained. SC1 has 15 cases including the design-authority gate.
 
-Unmapped Current stays unmapped. It does not select flake head automatically.
-A uniquely mapped running derivation can display its schema-1 scan read-only
-when strict deployment proof is missing. Current follows observed deployments
-on refresh. Explicit revisions remain exact. New evaluated revisions only
-change browsing choices until deployed.
-
-The later continuity direction keeps one stable system/CVE/package finding and
-its open POA&M across revisions. It preserves the opened-against baseline.
-Candidate remediation, Awaiting verification, and formal Completed are separate
-concepts. Local agent scanning and automatic formal closure are not SC1 work.
-
-## Contents and evidence
-
-The full document retains the original screen audit, gaps, source references,
-and screenshot crops. Its 12 Mermaid blocks match the separate files in
-`diagrams/`. Historical diagram filenames are retained for link stability.
-The full regression matrix has 36 scenarios; the SC1 contract identifies its
-own smaller acceptance set.
-
-This is a document handoff, not a code implementation or merge approval.
-No repository write, database operation, application test, or browser workflow
-was performed for this update. The manifest records artifact checks separately.
-The existing fleet and Compliance audit documents are not overwritten by this
-bundle. Section 22 limits the scope of precedence over their older proposals.
+No application tests, database operations, browser workflows or new visual audit
+were performed for this correction. Artifact checks are recorded separately.
+Fleet CVEs, Compliance and the continuity proposal are not overwritten here.

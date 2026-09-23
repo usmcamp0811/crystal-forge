@@ -1,6 +1,6 @@
 {
   "document": "systems-view-design-v0.1.md",
-  "version": "0.2",
+  "version": "0.3",
   "date": "2026-09-23",
   "mr": 329,
   "original_application_audit_head": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
@@ -15,7 +15,7 @@
     "packages/default/crates/cf-server/src/queries/cves.rs:590-785,870-1140",
     "packages/default/crates/cf-server/src/handlers/api/systems.rs:read_only hydration search"
   ],
-  "change_scope": "Complete document update, owner decisions, SC1 contract, agent prompt, manual validation, synchronized diagram source",
+  "change_scope": "Complete supplied-document correction: Claude UI authority, design-state gate, and aligned SC1 prompt/validation. No new UI design or product behavior.",
   "implementation_performed": false,
   "repository_writes_made": false,
   "application_tests_run": false,
@@ -26,12 +26,12 @@
   "diagrams": 12,
   "source_references": 37,
   "regression_scenarios": 36,
-  "SC1_acceptance_cases": 14,
+  "SC1_acceptance_cases": 15,
   "files": [
     {
       "path": "README.md",
-      "bytes": 2115,
-      "sha256": "c010b110bd32a509547f5df00468dff34c6636f86a4df683276a475071b7ef07"
+      "bytes": 2383,
+      "sha256": "34cde989702b0c29555b59ce8e74b6887e1c9bcf6358dbf6e974871e08793d45"
     },
     {
       "path": "detail-evidence.png",
@@ -105,23 +105,32 @@
     },
     {
       "path": "system-cves-chunk-1-agent-prompt.md",
-      "bytes": 8476,
-      "sha256": "fc68600095f0b3172f36bf12277e15da740cc65414fdf3f9928b0e62bfbcff37"
+      "bytes": 10622,
+      "sha256": "e2d965a7b62648ec92fabfd9fd76b647be93f6d20b6a6c1a7327f0459232a5e7"
     },
     {
       "path": "system-cves-chunk-1-manual-validation.md",
-      "bytes": 5821,
-      "sha256": "78e683eb6d167e251234ad01199e72f94acc05a7310f059687273a6ebab155ec"
+      "bytes": 7578,
+      "sha256": "7f23b1022f736cd97547af4c302d3e00033d6cebffe9eed174630b9f18f0dbc7"
     },
     {
       "path": "system-cves-chunk-1.md",
-      "bytes": 17650,
-      "sha256": "357b321317342e5d41fd45b4e6c19c84715107698608b782ffc7b37e3a8ea453"
+      "bytes": 21588,
+      "sha256": "41354ca21c0a686c62d4fb554f403f4080738e64f206e4500c615d357edfe7c5"
     },
     {
       "path": "systems-view-design-v0.1.md",
-      "bytes": 126716,
-      "sha256": "bdd32f3ea3dc2a36b7bebeb33e49805c88710279312a218f97159d80d8ed1ea0"
+      "bytes": 131155,
+      "sha256": "be6c6d788d7883f06bc7d129947afc9a41d8e2182c8653c82607f8c54c76d922"
     }
-  ]
+  ],
+  "ui_authority_correction": {
+    "date": "2026-09-23",
+    "basis": "Owner instruction: use the existing Claude design setup; do not invent UI elements.",
+    "source_files": "Previous complete SC1 bundle and its four matching mounted Markdown files.",
+    "new_repository_reads": false,
+    "new_application_audit": false,
+    "design_state_coverage_verified": false,
+    "required_next_step": "Implementation agent maps affected states to the existing Claude design before UI edits; missing states return to that design workflow."
+  }
 }

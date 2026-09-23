@@ -1,7 +1,7 @@
 # Crystal Forge Systems View
 ## Architecture, data provenance, and consistency contract
 
-**Document version:** 0.2, decision update and staged implementation contract  
+**Document version:** 0.3, Claude UI design authority and staged implementation contract  
 **Original application audit head:** `58006084aa699b84bcb1d02d6f911d4d4ee94ea3`  
 **Decision-update branch head:** `327d03b6d58055eb688fe657f12e223b8419f446`  
 **Full inspection base:** `72c8066323bcc1ef507c853a89852dfd880e469a`  
@@ -9,7 +9,7 @@
 **Merge request:** Crystal Forge !329, target `dev`  
 **Review date:** 2026-09-23  
 **Repository location:** `docs/design/CrystalForge/docs/crystal-forge-systems-design/systems-view-design-v0.1.md`  
-**Repository status:** Version 0.1 is committed at the decision-update head. This complete replacement is version 0.2. The existing filename is retained for stable links. This handoff does not commit the replacement or change application code, database records, tasks, branches, or MR state.
+**Repository status:** The recorded source inspection used the decision-update head above. This complete replacement is version 0.3 and supersedes the version 0.2 handoff. The existing filename is retained for stable links. This correction updates the supplied documents only. It does not recheck current branch state or change the repository, application, database, task, or MR.
 
 ---
 
@@ -28,6 +28,22 @@ For the System Detail CVEs work, Section 22 replaces the older proposals about a
 The original AS-BUILT descriptions remain an audit of the stated source, not a claim that the newly agreed behavior already exists. New reads at `327d03b6` checked the current branch, default resolver, Current inventory resolver, candidate query, POA&M status enum, and repository agent guide. This update is not a new full repository audit. [S32], [S33], [S34], [S35], [S36], [S37]
 
 Other architecture proposals remain proposals. In particular, schema-0 admission to a new Current read fallback, automatic formal POA&M closure, trusted reconciliation of missing deployment proof, and local agent scanning are not implemented by SC1. The separate fleet CVEs and Compliance audit files retain their historical findings. Their open decision entries must not override the owner's newer decisions in Section 22 for this scoped work.
+
+#### UI design authority
+
+**USER REQUIREMENT:** The owner's Claude design implementation is the UI source of truth. It is not merely a visual reference. Use the screen components, shared components, styles, content hierarchy, and interaction states in `docs/design/CrystalForge/`. For System Detail CVEs, start with `components/SystemDetail.jsx`, then follow its shared triage components and styles.
+
+This document defines data meaning, provenance, authority, persistence, and refresh behavior. It does not authorize an alternative UI. A required backend state is not permission to add a banner, badge, panel, card, column, button, dialog, tooltip, tab, or workflow. A new DTO field is not automatically a new visible field.
+
+Implement required facts through the corresponding existing design state. Preserve the designed section order, dimensions, spacing, typography, colors, icons, controls, interactions, and static copy. Bind real values into existing data slots. An existing production-only element is not approved merely because an earlier agent added it. A generic component elsewhere is not permission to place it in a new location or compose a new state.
+
+If the design cannot represent a required condition, report the exact design gap to the owner for the Claude design workflow. Identify the relevant file/component, condition, missing fact or interaction, and affected acceptance case. Do not invent a temporary UI, edit the reference to match the implementation, hide a required fact, or present unknown data as a successful result. Continue independent backend work and already-designed cases. Mark the dependent UI case **Blocked: design gap** until the design is supplied.
+
+Presentation suggestions elsewhere in this document, including quoted labels, notices, proposed metadata layouts, and recovery actions, specify meaning only unless the Claude design already provides them. They do not approve new static copy or new controls. The later phrase **Candidate remediated** is a proposed result meaning, not approval for a new badge or lifecycle widget. Mermaid diagrams describe data and state relationships; they are not UI mockups.
+
+Before browser-visible edits, record a compact mapping from each affected state to its authoritative design component/state. Verify the implementation against that design, not against a screenshot of the agent's own additions. Do not expand SC1 into a full design-system rewrite or change unrelated production deviations.
+
+This UI-authority correction adds no product behavior and changes none of the owner's read-only, unmapped, refresh, continuity, or count decisions. It introduces a design gate for presentation that was previously left open to implementation choice.
 
 ### 1.1 Evidence labels
 
@@ -108,7 +124,7 @@ Sources: [S02], [S03], [S04], [S05], [S06], [S23], [S24], [S25].
 
 ### 2.3 Proposed document ownership
 
-Use this document as the Systems-specific architecture description after review. Keep domain rules in their existing domain specifications. Replace stale summaries with links rather than copying contradictory rules into several documents. Keep visual references authoritative for structure, but document departures required by real loading, permissions, and evidence states. [S26]
+Use this document as the Systems-specific architecture description after review. Keep domain rules in their existing domain specifications. Replace stale summaries with links rather than copying contradictory rules into several documents. The owner's Claude implementation owns UI design. Missing loading, permission, or evidence-state designs must return to that workflow; an architecture note cannot authorize a departure. See the UI design authority rule in Section 1.0. [S26]
 
 ---
 
@@ -509,7 +525,7 @@ A Current candidate's non-null derivation ID does not prove uniqueness or comple
 | Operator selects a known commit or retained generation | Preserve that exact selector | Read only that target. | Mark running, non-running, or historical from facts, not array order. |
 | Operator selects an evaluated head with no scan | Preserve the selected head derivation | No scan for that target. | Evaluation is not scanning and does not prove activation. |
 
-This table is the agreed destination for selection semantics. SC1 applies it to CVEs. A necessary shared-selector change must receive Hardening regression coverage, but SC1 does not redesign Hardening's evidence rules.
+This table is the agreed destination for selection semantics, not a new UI layout or copy specification. Express each condition through the existing Claude design state. A missing state is a design gap, not permission for an additional notice or control. SC1 applies these semantics to CVEs. A necessary shared-selector change must receive Hardening regression coverage, but SC1 does not redesign Hardening's evidence rules.
 
 ### 10.3 Initialization and refresh state
 
@@ -729,20 +745,20 @@ When no source exists, the UI can still show zero services and a zero average sc
 
 ## 13. Structural comparison with the design examples
 
-This section compares inspected component structure and behavior. It does **not** claim pixel-level parity. No live light/dark, desktop/mobile, keyboard, or screenshot-diff run was performed. [S07], [S08], [S23], [S24], [S25]
+This section records inspected structural differences. It does not approve production-only additions or authorize new UI. The Claude design remains authoritative under Section 1.0. This section does **not** claim pixel-level parity. No live light/dark, desktop/mobile, keyboard, or screenshot-diff run was performed. [S07], [S08], [S23], [S24], [S25]
 
 | Surface | Missing sections | Reordered sections | Collapsed or merged concepts | Missing or incorrect metadata | Changed interaction behavior | Visual hierarchy differences |
 |---|---|---|---|---|---|---|
 | Systems preview | Reference tag strip and deployed commit message are absent from the inspected preview structure. | Generation appears before commit; reference places message and generation after commit. | Deployment progress can replace the last-heartbeat value. | Branch is guessed from environment; latest commit is presented as deployed; unknown generation becomes zero. | View logs opens generic detail; tags do not have the reference's complete interaction here. | Pending deployment adds a leading section. Exact spacing and responsive width are unverified. |
 | Full detail shell | All eight current tabs exist. This does not certify every tab's sections. | Current order is Overview, Deploy, History, Logs, Config, CVEs, Hardening, Compliance. The older four-tab spec is obsolete. | Header CVE summary is not visibly separated from selected-tab evidence scope. | No header count source or unit distinction; “activated” uses last-seen context. | Exact CVE/Hardening selection restoration is not demonstrated in the URL. | Header and tab scope bars exist. Rendered parity beyond supplied CVE screenshot is unverified. |
-| CVE revision bar | Basic label, toggle, menu, metadata, and relation badge exist. | No structural order omission found in the inspected bar. | Missing target falls into historical-unavailable language regardless of default-state reason. | Generation metadata substitutes commit text and lacks author; source scope can differ from the inventory below. | Unlinked mode changes preserve evidence rather than copying mock index fallback. This is a protective difference. | Production adds loading/error/refresh states. These should remain, not be removed to imitate mock data. |
+| CVE revision bar | Basic label, toggle, menu, metadata, and relation badge exist. | No structural order omission found in the inspected bar. | Missing target falls into historical-unavailable language regardless of default-state reason. | Generation metadata substitutes commit text and lacks author; source scope can differ from the inventory below. | Unlinked mode changes preserve evidence rather than copying mock index fallback. This is a protective difference. | Production adds loading/error/refresh states. Their required meanings must remain truthful, but their presentation must map to the Claude design or be recorded as a design gap. |
 | CVE inventory and triage | No finding list appears in the supplied unavailable state because the server returns no source. Host-override parity is not established by this review. | No claimed package/triage ordering pass. | Evidence format, deployment authority, and read-only status share overloaded labels. | Source/authority explanations and exact action capability need clearer separation. | Production mutations use server validation rather than mock local disposition state. | The unavailable banner and empty card are prominent. Full populated/drawer parity remains unverified. |
-| Hardening page | Revision bar, stats, filters, table, and modal exist. | Production inserts lifecycle/current-action sections before summary metrics. | Missing evidence becomes zero audit metrics; service type is presented as user. | Directive positive state is broken by string mismatch. | Check now is a real request; mock reference has no equivalent lifecycle contract. | Added lifecycle information changes hierarchy intentionally; no pixel pass is claimed. |
+| Hardening page | Revision bar, stats, filters, table, and modal exist. | Production inserts lifecycle/current-action sections before summary metrics. | Missing evidence becomes zero audit metrics; service type is presented as user. | Directive positive state is broken by string mismatch. | Check now is a real request; mock reference has no equivalent lifecycle contract. | Added lifecycle information changes the hierarchy. This audit does not approve that design departure; no pixel pass is claimed. |
 | Hardening modal | `justification` action has no body; All checks lacks the reference's waived display. | Directives, NixOS config, All checks tab order matches. | Raw directive state and accepted waiver state are not consistently distinct in All checks. | Actor is hard-coded; per-service Nix guidance is generic. | Remove is disabled instead of reference's mock removal. Export is unwired in both, not a new parity regression. | Actual tiles use larger padding, heavier/larger type, larger gaps, and minimum height than the reference source. Rendered impact is unverified. |
 | Deploy | Controls and plan exist, but real dry-run and real selected-target gate evidence are absent. | No full visual-order verification. | Current header security and hypothetical selected-target gating are combined. | From commit, cache status, diff, and drift pass can be misleading. | Real deployment and policy conversion differ from mock operations; confirmation coverage needs workflow testing. | The heuristic gate panel has authority-like prominence. It must not imply a verified gate result. |
 | History, Logs, Config, Compliance | Structures were inspected, but no full section-by-section visual pass was executed. | POA&M precedes Compliance bundles; History can promote a generation-changing event above restart noise. | Recorded and reconstructed history/log information can coexist. | Durable provenance and unavailable states must remain explicit. | Config has real token/inspection constraints absent from simple mocks. | These differences require focused runtime comparison before a parity claim. |
 
-The proposed repair must preserve the reference's information hierarchy while correcting false conclusions. Do not resolve a false clean badge by hiding security metadata. Do not remove lifecycle or unavailable states merely because the fixture always has data.
+The repair must implement the Claude design while correcting false data conclusions. Do not resolve false clean by hiding required facts. Do not invent a new presentation for a missing lifecycle or unavailable state. Report that state for the Claude design workflow and block its UI acceptance until resolved.
 
 ---
 
@@ -861,7 +877,9 @@ An API that accepts only `system_id` must not be used to imply an operation on a
 
 ### 16.1 Proposed presentation matrix
 
-| Actual condition | Required UI | Prohibited conclusion | Useful next action |
+This matrix specifies state meaning and recovery needs. It does not authorize a new UI element, new static copy, or new recovery control. Use the corresponding Claude design state and existing interaction. When no such state exists, record a design gap under Section 1.0. Do not remove a required fact merely to avoid that gate.
+
+| Actual condition | Required meaning | Prohibited conclusion | Recovery need, subject to the design |
 |---|---|---|---|
 | Identity request pending | Loading identity. | Out of band, clean, never scanned. | Wait; retain explicit user selection. |
 | Identity request failed | Error with retry; optional labelled stale data. | No system exists merely because a request failed. | Retry the failed read. |
@@ -1037,7 +1055,7 @@ The focused browser command can still depend on the shared design-target derivat
 
 ## 20. Staged implementation and review stops
 
-The owner requested bounded chunks that can be exercised independently. Do not implement this entire architecture in one task. Each slice needs a source SHA, acceptance checks, real test outcomes, a task-owned live preview, and a manual review stop.
+The owner requested bounded chunks that can be exercised independently. Do not implement this entire architecture in one task. Each slice needs a source SHA, acceptance checks, real test outcomes, a task-owned live preview, and a manual review stop. Every browser-visible case must map to the existing Claude design. A missing design state is a blocker for that case, not authority to design it during implementation.
 
 | Slice | Outcome | Explicit boundary |
 |---|---|---|
@@ -1161,19 +1179,19 @@ flowchart LR
 
 ### D8. Document precedence and remaining work
 
-For SC1, the controlling documents are this version's agreed decisions and `system-cves-chunk-1.md`. Original AS-BUILT sections remain evidence of behavior to change. Old head-fallback tests must be updated to the new expected result; unrelated failure and authorization tests must remain.
+For SC1, this version's agreed decisions and `system-cves-chunk-1.md` control domain behavior. The owner's Claude design controls UI composition and interaction. Neither is permission to silently violate the other. Resolve a missing or conflicting presentation in the Claude design workflow. Original AS-BUILT sections remain evidence of behavior to change. Old head-fallback tests must be updated to the new expected result; unrelated failure and authorization tests must remain.
 
 The fleet audit D05 and cross-view ledger CPC03 are resolved only for this precise read-only mapped-running case. Systems D3/D4 record the approved units and header scope. The later continuity direction addresses CPC13 and the fleet continuity proposal at the product level; it does not approve every persistence, reconciliation, or closure detail in those documents.
 
 Before SC5, reconcile the owning continuity specification, fleet triage guide, API contract, and cross-view ledger as complete replacement files. Do not have a UI-only agent resolve conflicting lifecycle rules by changing whichever check blocks its test.
 
-**No product question remains that blocks SC1.** The local-scanner protocol, trusted proof reconciliation, automatic formal closure policy, and complete dynamic environment membership design belong to later work. They must not be presented as completed or silently implemented by the first agent.
+**No unresolved read/default product decision blocks SC1.** The implementation agent must first map the affected states to the Claude design. Missing presentation states remain design blockers; they are not assumed to exist or approved for invention. The local-scanner protocol, trusted proof reconciliation, automatic formal closure policy, and complete dynamic environment membership design belong to later work. They must not be presented as completed or silently implemented by the first agent.
 
 ---
 
 ## 23. Acceptance criteria for this architecture contract
 
-SC1 can proceed against the agreed decisions in Section 22 and the acceptance contract in `system-cves-chunk-1.md`. No additional product question blocks that slice. Readiness for a later slice requires its own acceptance contract, including any remaining domain details. Implementation is ready for review only when its declared regression cases are proven. Completion of SC1 does not close all Systems, Scanning, fleet CVEs, or POA&M findings in this audit.
+SC1 backend and state work can proceed against Section 22 and `system-cves-chunk-1.md`. Browser-visible work also requires a corresponding Claude design state under Section 1.0. Do not mark a design-blocked case passed or call SC1 complete while it remains blocked. Readiness for a later slice requires its own acceptance contract, including remaining domain and design details. Implementation is ready for review only when its declared regression cases are proven. Completion of SC1 does not close all Systems, Scanning, fleet CVEs, or POA&M findings in this audit.
 
 A passing unit suite alone does not establish live UI parity. A green screenshot does not establish correct identity. A completed scan does not establish retained deployment lineage. A retained binding does not establish that a scan found no vulnerabilities. These distinctions are the central invariants of the Systems view.
 

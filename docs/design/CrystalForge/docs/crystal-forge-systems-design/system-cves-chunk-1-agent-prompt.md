@@ -1,4 +1,5 @@
 Implement SC1 only: System Detail → CVEs target and scan selection.
+Handoff revision 2. Implement the owner's Claude UI. Do not design new UI.
 
 BASE
 Repository: crystal-forge/crystal-forge
@@ -15,11 +16,32 @@ named MR branch, with its own lock. Do not reset or seize TASK-326.2 or another
 agent's worktree. Do not push directly to the base branch, merge, or force-push.
 
 Read system-cves-chunk-1.md in full. Read the parent Systems document's Sections
-10, 11.4, and 22. The parent file retains the name systems-view-design-v0.1.md,
-but its internal version must be 0.2 or newer with these decisions. If missing,
+1.0, 10, 11.4, and 22. The parent file retains the name systems-view-design-v0.1.md,
+but its internal version must be 0.3 or newer with these decisions. If missing,
 report the missing handoff before edits; do not implement the old head fallback.
-Read the relevant SystemDetail.jsx revision/CVE design, then use rg and targeted
-source ranges. No subagents, whole-repository review, or broad refactor.
+Read docs/design/CrystalForge/components/SystemDetail.jsx and follow its shared
+triage components, including CvesView.jsx, and applicable styles. Use rg and
+bounded source ranges. No subagents, whole-repository review, or broad refactor.
+
+UI AUTHORITY: REQUIRED BEFORE UI EDITS
+The owner's Claude design controls composition, hierarchy, static copy, spacing,
+typography, colors, icons, controls and interactions. It is not inspiration.
+These architecture documents define data/behavior, not an alternative interface.
+Map each affected visible state to its exact design file/component/state before
+editing. Bind real data into existing slots. Do not treat existing production
+additions or a generic component elsewhere as permission for a new UI here.
+
+Do not invent banners, badges, cards, panels, fields, columns, buttons, tooltips,
+modals, tabs, refresh indicators or confirmation workflows to expose backend
+states. Do not add a visible field merely because a DTO needs it. Preserve the
+owner's read-only/unmapped/error semantics without creating a new presentation.
+
+If a required state has no corresponding design, report the exact component,
+condition, missing fact/interaction and acceptance case to the owner for the
+Claude design workflow. Mark its UI acceptance BLOCKED: DESIGN GAP. Continue
+independent backend work and already-designed cases. Do not invent a temporary
+UI, hide the requirement, edit the design to match your code, or mark the slice
+complete. Quoted labels in architecture notes convey meaning, not approved copy.
 
 REQUIRED BEHAVIOR
 1. Default the CVE tab to the actual reported running configuration. A local
@@ -27,7 +49,8 @@ REQUIRED BEHAVIOR
    because CF did not initiate it. Full proof retains normal Current behavior.
 2. A unique server-proved mapping to the running derivation can display that
    derivation's completed schema-1 scan even when retained proof is missing.
-   Mark it read-only and show the specific proof reason. Do not emit the existing
+   Return read-only state and the proof reason. Bind them to the corresponding
+   designed presentation, or report the design gap. Do not emit the existing
    fully authoritative Current semantics or hydrate mutation context for it.
    Existing direct triage/POA&M/verification/closure calls must still reject it.
 3. UNMAPPED MEANS UNMAPPED. No automatic flake-head fallback, no scan substitution,
@@ -35,7 +58,8 @@ REQUIRED BEHAVIOR
    operator can inspect head or another known target explicitly, read-only.
 4. Mapped without scan, no report, ambiguous mapping, loading, request failure,
    unsupported source, and genuinely empty completed evidence are different
-   states. Their banner and empty panel must agree. A scan cannot repair lineage.
+   states. Their representations must agree wherever the design exposes them.
+   This does not authorize a new banner or panel. A scan cannot repair lineage.
 5. Resolve latest report before validity checks. Scope mapping to the registered
    flake/effective configuration and prove uniqueness independently of menu caps.
    Use only the chosen derivation's latest completed schema-1 scan, ordered by
@@ -49,9 +73,11 @@ REQUIRED BEHAVIOR
    Preserve explicit selection, loaded pages on continuation failure, and late-
    response guards. A failed newer attempt does not erase same-target evidence.
 8. Do not silently discard or retarget a mounted draft during in-app refresh.
-   Preserve its start context; defer action-bound replacement or require explicit
-   refresh confirmation. Keep existing stale-write rejection. Captured-start
-   cross-generation save and continuity are later work, not a client-side bypass.
+   Preserve its start context and defer action-bound replacement as required.
+   Use the existing designed conflict behavior; do not add a confirmation dialog.
+   Use only existing design/browser refresh interactions, not a new Refresh button
+   or new-head notice. Keep stale-write rejection. Captured-start cross-generation
+   save and continuity are later work, not a client-side bypass.
 
 STARTING POINTS
 - packages/web-ui/src/views/system_detail.rs:
@@ -79,7 +105,7 @@ client compatibility; old clients must fail conservatively, not gain authority.
 Keep read-only APIs free of scan enqueueing, Nix execution and persistence writes.
 
 SCOPE LIMITS
-Preserve the package-first visual design and existing columns/dialog. No new
+Implement the Claude package-first design and its columns/dialog. No new
 fleet filter bar. No new scanner/protocol/toggles, proof repair, continuity,
 automatic closure, broad header/count consolidation, Scanning rewrite, new event
 bus, or unrelated UI/CI fixes. Shared helper edits require affected Hardening
@@ -92,10 +118,13 @@ its URL as soon as usable. Keep backend and UI builds current. Use an isolated
 fixture database; never seed/migrate/reset the persistent user database or stop
 another worktree's processes. An old preview/check waiver does not apply here.
 
-Implement and prove SC1-01 through SC1-14 in system-cves-chunk-1.md. In particular,
+Implement and prove SC1-01 through SC1-15 in system-cves-chunk-1.md. In particular,
 use real database/API fixtures for missing-proof read-only and unmapped cases,
 assert exact IDs, and directly test that mutations remain rejected. Use stubs
 only where needed to control races/errors. Preserve explicit historical checks.
+Compare rendered UI with the Claude design at matching viewport, theme and data.
+Check exact IDs in API/test evidence when the design has no visible ID field;
+do not add debugging or provenance panels solely to satisfy an assertion.
 
 Starting verification commands, through Nix:
   nix develop --command cargo test --manifest-path packages/web-ui/Cargo.toml revision_scope
@@ -116,13 +145,15 @@ baselines to conceal differences. Do not fix unrelated Config Explorer work.
 
 Update changed source docs, the relevant live API contract, and this slice's
 implementation/evidence notes. Keep historical AS-BUILT claims labelled with their
-original SHA. Do not mark unrelated audit gaps complete. Supply complete contents
+original SHA. Do not modify the Claude UI design/reference assets in this task.
+Do not mark unrelated audit gaps complete. Supply complete contents
 for every design/spec file returned to the owner, not patches or partial sections.
 
 HANDOFF AND STOP
 Provide one scoped review commit, preview URL/data mode and freshness, task/branch/
 worktree, changed files, SC1 acceptance results with exact commands and exit/test
 counts, wide/narrow and light/dark evidence, concrete manual test paths, and known
-remaining defects. List structural differences from the design in all six review
-categories. Do not claim merge readiness with required checks blocked. Stop for
+remaining defects. Include the design-state mapping and every design gap. List
+structural differences in all six review categories, including added UI. Do not
+claim completion or merge readiness with design/verification cases blocked. Stop for
 owner validation before SC2. No merge, force-push or direct base-branch push.
