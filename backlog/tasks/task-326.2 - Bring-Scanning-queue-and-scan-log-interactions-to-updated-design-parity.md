@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-23 13:48'
+updated_date: '2026-09-23 13:53'
 labels:
   - scanning
   - web-ui
@@ -311,6 +311,8 @@ P0 migration-0275 repair committed and pushed as `130c472c1a34a6c8c6b95190c8672e
 2026-09-23 System Detail revision-default follow-up: implemented candidate-authoritative Current/Generations defaults for tracked running derivations and ExactDerivation/Commits flake-head fallback for out-of-band runtime. Each CVE and Hardening tab now retains explicit target/mode choices across candidate refreshes and resets automatic state only for a different system. Missing head remains explicit unavailable without selecting retained evidence. Added unit and 28-system-hardening-tab browser coverage. Focused Rust tests, WASM check, formatting, diff check, JavaScript syntax, and static browser contracts passed. Preview is ready at http://127.0.0.1:8080 with API status healthy.
 
 2026-09-23 authoritative browser command was attempted: `CF_UI_TEST_STEPS='12ha-system-detail-cve-inventory-fallbacks,28-system-hardening-tab' nix build --impure 'path:.#checks.x86_64-linux.web-ui' --no-link -L`. It did not reach either requested workflow because shared `crystal-forge-design-targets` failed at TASK-440's unchanged Config Explorer locator `.cfgx`.getByText('TARGET', { exact: true }) in all four dark/light wide/narrow captures (50/54 targets rendered). The same known external blocker remains; do not claim browser workflows passed. Final diff check remains clean.
+
+2026-09-23 committed and pushed System Detail revision-default work as `58006084` (`TASK-326.2: Default revision scope from candidates`) to MR !329. The worktree is clean and local/remote branch heads match. Required VM browser workflows remain blocked by the documented TASK-440 shared design-target failure; task remains In Progress.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
