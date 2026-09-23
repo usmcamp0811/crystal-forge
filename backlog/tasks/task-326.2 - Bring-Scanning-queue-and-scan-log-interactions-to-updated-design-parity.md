@@ -1,11 +1,11 @@
 ---
 id: TASK-326.2
 title: Bring Scanning and per-system CVE triage to updated design parity
-status: Review
+status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-23 01:42'
+updated_date: '2026-09-23 02:06'
 labels:
   - scanning
   - web-ui
@@ -299,6 +299,8 @@ Verification that PASSED for this commit: `cargo test --manifest-path packages/w
 BLOCKED / UNVERIFIED (not passed, not failed): authoritative NixOS web-ui browser verification for this candidate's Scanning/CVE/Hardening workflows. Exact command attempted: `CF_UI_TEST_STEPS='16c-scanning-view,12ha-system-detail-cve-inventory-fallbacks,28-system-hardening-tab' nix build --impure 'path:.#checks.x86_64-linux.web-ui' --no-link -L`. The shared `crystal-forge-design-targets` derivation is a blocking dependency of the whole `web-ui` check regardless of CF_UI_TEST_STEPS filtering (checks/web-ui/default.nix:789 documents this explicitly), and it failed on the unrelated TASK-440 Config Explorer defect before any requested workflow started: `FAIL design target: task440-config-wide-expanded--dark - locator.waitFor: Timeout 30000ms exceeded. waiting for locator('.cfgx').getByText('TARGET', { exact: true }) to be visible` (and the matching --light, task440-config-narrow--dark, task440-config-narrow--light variants); `Design targets: 50/54 rendered; TASK-440: 12/16`. Confirmed by grep of the full build log that none of `16c-scanning-view`, `12ha-system-detail-cve-inventory-fallbacks`, or `28-system-hardening-tab` appear anywhere in the output — the requested TASK-326.2 workflows did not execute. TASK-440 already owns this Config Explorer/design-target defect; no duplicate task was created and TASK-440's worktree/branch was not touched.
 
 All executable focused checks pass. The authoritative Web UI VM/browser workflows remain unverified because the shared TASK-440 design-target derivation fails before those workflows start. This is not 'all verification passed,' not 'fully verified,' and not 'ready to merge' — it is an explicit bounded waiver for the commit/push/Review transition only, authorized by the user. Rerun of the authoritative browser workflows is REQUIRED after TASK-440's Config Explorer design-target defect is repaired, or during the Review deployment pass, before this MR can be considered merge-ready. MR !329 description was updated with the same PENDING record. MR !329 head pipeline (543b07fd) was running at push time; MR is NOT merged and this task is moving to Review only as an implementation candidate ready for deployment/review, not as merge-ready.
+
+P0 DEPLOYMENT BLOCKER reopened from Review at deployed/pushed candidate 543b07fd78e73923eb3474c498648c789171f7c7 (MR !329). The deployed server is in a systemd restart loop: migration 275 fails against the real pre-existing database with 'new row for relation "hardening_scans" violates check constraint...'. Root cause under investigation: migration 0275's UPDATE...SET source_trigger='legacy' runs before the CHECK constraint is relaxed to permit 'legacy', so any database with pre-existing hardening_scans rows fails the UPDATE against the still-restrictive 0274 constraint. A clean/empty test database masks this because the UPDATE affects zero rows. Do not merge, rebase, or touch TASK-440. Do not modify 0274 unless proven production never applied it. Task remains In Progress until a corrected 0275, a production-shaped upgrade regression proving historical hardening_scans data survives 0274->0275->0276 losslessly, full focused verification, commit, push, and a real successful deployment are confirmed.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
