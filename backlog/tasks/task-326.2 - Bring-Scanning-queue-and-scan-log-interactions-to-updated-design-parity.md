@@ -1,7 +1,7 @@
 ---
 id: TASK-326.2
 title: Bring Scanning and per-system CVE triage to updated design parity
-status: In Progress
+status: Review
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
@@ -21,6 +21,13 @@ references:
   - docs/design/CrystalForge/components/CvesView.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/329'
+  - >-
+    TASK-440: the authoritative NixOS web-ui browser rerun for TASK-326.2
+    (16c-scanning-view, 12ha-system-detail-cve-inventory-fallbacks,
+    28-system-hardening-tab) depends on TASK-440's Config Explorer design-target
+    repair (task440-config-* locator timeouts), because
+    crystal-forge-design-targets is a shared blocking dependency of the whole
+    web-ui check.
 documentation:
   - docs/design/CrystalForge/components/ScanningView.jsx
   - docs/design/CrystalForge/components/CvesView.jsx
@@ -297,24 +304,27 @@ All executable focused checks pass. The authoritative Web UI VM/browser workflow
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-## Summary
-- Adds durable post-build Scanning intent creation across authoritative build admission, retry, and recovery paths while preserving manual/fleet provenance and exact build/cache prerequisite authority.
-- Keeps wait states non-claimable and promotes them only through `promote_waiting_cve_scans`; successful legacy builds receive a bounded policy/type-gated missing-intent repair without changing terminal history.
-- Rebuilds the Scanning workflow around Active, Completed, and By system views with exact lifecycle details, real retry/build actions, bounded redacted diagnostics, findings-first details, focus management, and responsive light/dark presentation.
-- Fixes exact build deep-link routing and asynchronous active/completed attempt reveal.
-- Extends the focused `16c-scanning-view` browser workflow for wait, failure, running, completed, history, responsive, focus, and exact-build behavior.
+Implementation candidate for TASK-326.2 is complete enough for deployment/review, but it is NOT merge-ready.
 
-## Verification
-- Focused PostgreSQL `queries::build_jobs::tests::post_build`: 5/5 passed against a task-owned temporary PostgreSQL 17 instance.
-- Web UI tests: 440 passed with 1 ignored before final backend-only review corrections.
-- Web UI WASM check and SQLX_OFFLINE cf-server tests check passed.
-- JavaScript syntax/static contracts, targeted rustfmt, and `git diff --check` passed.
-- Exact pushed commit `c0b35860e46e3c5663567573ba1955aabe093481`: focused `16c-scanning-view` NixOS VM gate passed 1/1 and produced 16 dark/light captures. All captures were manually inspected and found satisfactory.
-- Authoritative exact-head browser result: `/nix/store/9xavx94w9s5qclcb0bijfwdyvzyhdfdw-vm-test-run-crystal-forge-web-ui-mega-integration`.
+## What this candidate adds
+- Scanning Completed collection: request-bound opaque keyset pagination (terminal timestamp + scan ID tie-break), server-side search/status/revision/latest-only/sort, coherent total/hidden_archived/has_more/next_cursor. Migration 0273 terminal-history indexes. Web UI: bounded first page, deduplicated infinite scroll, mutually-exclusive continuation/head-refresh, head refresh that restarts on out-of-cursor rows or archive-visibility change, and an AbortController-backed 10s timeout so a stalled live refresh cannot accumulate.
+- Hardening: automatic admission moved from evaluation time to successful exact NixOS build completion, with durable provenance and one-event-per-build idempotency (migrations 0274-0276; 0276 defers the provenance FK so derivation-delete cascades work in either sibling order while direct build-job deletion still fails). Bounded worker-owned backfill that waits for active Hardening work to drain. Exact-target lifecycle without cross-revision substitution.
+- Current CVE authority: resolves only the newest completed schema-1 scan for the exact authorized running derivation; explicit current-authority-unavailable state on ambiguity; distinct empty-state copy for the read-only historical no-scan case. Retained-generation/exact-derivation selections stay exact and read-only.
+- docs/specs/02-backend-api.md and docs/multi-builder-api.md updated to match.
 
-## Review state
-- Commit `c0b35860e46e3c5663567573ba1955aabe093481` is pushed to MR !329.
-- Local and remote branch SHAs match; the task worktree is clean.
-- Exact-head GitLab pipeline 2928 is running.
-- Host preview remains waived because TASK-440 owns the fixed ports. The isolated NixOS browser gate supplies authoritative UI evidence.
+## All executable focused checks PASS
+- cargo test --manifest-path packages/web-ui/Cargo.toml: 488 passed, 1 ignored, 0 failed.
+- views::scanning::tests: 31 passed. components::cve::tests: 12 passed.
+- nix build .#packages.x86_64-linux.web-ui --no-link -L: passed.
+- SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml --tests: passed.
+- node --check and CF_UI_STATIC_CONTRACTS=1 node checks/web-ui/tests/integration-test.js: passed.
+- git diff --check: passed.
+- Focused isolated-PostgreSQL Hardening admission/provenance/cascade regressions: passed.
+
+## PENDING (explicit, unresolved)
+Authoritative NixOS browser verification for the affected TASK-326.2 workflows is BLOCKED by the unrelated TASK-440 crystal-forge-design-targets dependency. Exact command:
+`CF_UI_TEST_STEPS='16c-scanning-view,12ha-system-detail-cve-inventory-fallbacks,28-system-hardening-tab' nix build --impure 'path:.#checks.x86_64-linux.web-ui' --no-link -L`
+This fails in the shared crystal-forge-design-targets derivation (checks/web-ui/default.nix:789, a blocking dependency regardless of CF_UI_TEST_STEPS) on TASK-440's task440-config-wide-expanded/narrow (dark/light) `locator('.cfgx').getByText('TARGET', { exact: true })` timeouts (50/54 design targets rendered), before any of the three requested TASK-326.2 workflows execute. This status is BLOCKED / UNVERIFIED, not failed TASK-326.2 behavior and not passed. Rerun is required after TASK-440's Config Explorer design-target defect is repaired, or during the Review deployment pass, before this MR is merge-ready.
+
+MR !329: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/329 (description updated with the same PENDING record). Commit 543b07fd pushed; local and remote branch heads match; worktree clean. Not merged. Do not merge until the authoritative browser workflows above are verified.
 <!-- SECTION:FINAL_SUMMARY:END -->
