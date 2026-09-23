@@ -1,0 +1,425 @@
+[
+  {
+    "id": "CPG01",
+    "priority": "P1",
+    "evidence_status": "Source-confirmed scope mismatch",
+    "gap": "Compliance catalog and systems projections do not apply the environment scope used by evidence and POA&M reads.",
+    "required_response": "Use one explicit read-scope contract before host/count aggregation. Prove hidden-environment behavior through real routes.",
+    "source_ids": [
+      "P06",
+      "P07",
+      "P13"
+    ],
+    "section": "17.1",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG02",
+    "priority": "P1",
+    "evidence_status": "Source-confirmed selector mismatch",
+    "gap": "The matrix, evidence detail, and verification paths do not use identical complete/enforced policy-context matching rules.",
+    "required_response": "Define compatible assessment-set selection once. Preserve intentional display-only differences with an explicit authority label.",
+    "source_ids": [
+      "P07",
+      "P11"
+    ],
+    "section": "8.2",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG03",
+    "priority": "P1",
+    "evidence_status": "Source-confirmed display-authority gap",
+    "gap": "Evaluation-attempt fallback can select latest results per rule without an exact deployed-target binding or one common attempt.",
+    "required_response": "Expose candidate evidence separately. Require one identified complete observation set for a current-result claim.",
+    "source_ids": [
+      "P07"
+    ],
+    "section": "8.3",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG04",
+    "priority": "P1 review priority",
+    "evidence_status": "Source-confirmed predicate difference; impact unexecuted",
+    "gap": "Some current-state reads validate the newest report; policy verification first filters to nonempty store paths.",
+    "required_response": "Test a newer invalid report after an older valid report. Decide whether last-known state is an explicit secondary mode.",
+    "source_ids": [
+      "P07",
+      "P10",
+      "P11"
+    ],
+    "section": "8.4",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG05",
+    "priority": "P1",
+    "evidence_status": "Source-confirmed export-scope defect",
+    "gap": "Multi-bundle selection changes the reported selection or filename, but the export body is built from the original single bundle.",
+    "required_response": "Fetch and serialize exactly the chosen bundle set. Reject an empty selection and never include a deselected bundle.",
+    "source_ids": [
+      "P01",
+      "P14"
+    ],
+    "section": "15.1",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG06",
+    "priority": "P1",
+    "evidence_status": "Source-confirmed revision loss",
+    "gap": "Evidence export does not pass the selected immutable bundle revision to each evidence request.",
+    "required_response": "Bind each export item to a validated bundle/version pair and preserve that pair through every request and file.",
+    "source_ids": [
+      "P01",
+      "P14"
+    ],
+    "section": "15.1",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG07",
+    "priority": "P1",
+    "evidence_status": "Source-confirmed reporting mismatch",
+    "gap": "Filtered export rows can retain unfiltered totals. The native JSON projection omits important evidence and version identities.",
+    "required_response": "Define report scope and count units. Carry a provenance envelope or label the result as a non-replayable summary.",
+    "source_ids": [
+      "P01",
+      "P14"
+    ],
+    "section": "15.2–15.4",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG08",
+    "priority": "P1",
+    "evidence_status": "Source-confirmed unsupported report metadata",
+    "gap": "The OSCAL generator assigns classification, sensitivity, observation times, and evaluation metadata without corresponding authoritative inputs.",
+    "required_response": "Require sourced values or represent them as unspecified. Separate export time from observation time. Validate emitted formats independently.",
+    "source_ids": [
+      "P14"
+    ],
+    "section": "15.3",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG09",
+    "priority": "P2",
+    "evidence_status": "Source-confirmed clean-filter defect",
+    "gap": "Clean filtering checks only Fail and Warn, so incomplete or error-only hosts can enter a clean selection.",
+    "required_response": "Define clean from completeness, errors, conflicts, and applicable evaluated results. Use the same predicate in export.",
+    "source_ids": [
+      "P01",
+      "P02",
+      "P07",
+      "P14"
+    ],
+    "section": "9.2",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG10",
+    "priority": "P2",
+    "evidence_status": "Source-confirmed terminology mismatch",
+    "gap": "Waiver-only evaluated hosts can satisfy the fully-compliant predicate while receiving a zero Pass-based score.",
+    "required_response": "Name technical pass rate, accepted risk, evaluation coverage, and compliance policy separately. Approve any formula change explicitly.",
+    "source_ids": [
+      "P07"
+    ],
+    "section": "9.1",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG11",
+    "priority": "P2",
+    "evidence_status": "Source-confirmed identity substitution",
+    "gap": "An unknown bundle/version deep link can fall back to another selection; the heading can retain current-pointer metadata for a selected revision.",
+    "required_response": "Fail explicitly for an unavailable exact selection. Render heading metadata from the selected version.",
+    "source_ids": [
+      "P01",
+      "P02"
+    ],
+    "section": "7.1,10.1",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG12",
+    "priority": "P2",
+    "evidence_status": "Source-confirmed panic path",
+    "gap": "POA&M-to-evidence navigation eagerly evaluates candidates[0] inside then_some when no valid bundle candidate exists.",
+    "required_response": "Handle zero, one, and multiple candidates without indexing before the cardinality check. Preserve direct-policy navigation.",
+    "source_ids": [
+      "P01"
+    ],
+    "section": "10.3",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG13",
+    "priority": "P2",
+    "evidence_status": "Source-confirmed caller-capability gap",
+    "gap": "The Compliance POA&M host omits the exact-CVE Evidence callback, while the common tray still exposes policy-oriented finding controls.",
+    "required_response": "Make finding-family capabilities explicit and provide a valid exact-CVE return path from every caller.",
+    "source_ids": [
+      "P01",
+      "P03"
+    ],
+    "section": "12.1–12.2",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG14",
+    "priority": "P2",
+    "evidence_status": "Source-confirmed count-family defect",
+    "gap": "The compact POA&M table uses policy finding_count for a CVE-only plan even though the API supplies cve_finding_count.",
+    "required_response": "Render the active finding family and its count, not a zero policy count described as all findings.",
+    "source_ids": [
+      "P03",
+      "P20",
+      "P21",
+      "P22"
+    ],
+    "section": "12.2",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG15",
+    "priority": "P2",
+    "evidence_status": "Source-confirmed action-state mismatch",
+    "gap": "Verify now is offered outside awaiting_verification, but the service rejects verification in those states.",
+    "required_response": "Render server-supported lifecycle capabilities and retain server enforcement.",
+    "source_ids": [
+      "P03",
+      "P12"
+    ],
+    "section": "13.1",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG16",
+    "priority": "P2",
+    "evidence_status": "Source-confirmed draft/refresh mismatch",
+    "gap": "Successful Verify reloads with draft reset and does not call the parent change callback.",
+    "required_response": "Preserve unrelated unsaved edits and publish a verification/revision invalidation event. Distinguish saved and draft values.",
+    "source_ids": [
+      "P03",
+      "P12"
+    ],
+    "section": "12.4,13.1",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG17",
+    "priority": "P2",
+    "evidence_status": "Source-confirmed incomplete invalidation graph",
+    "gap": "Plan, assignment, policy, and release mutations refresh different local projections without a common dependency contract.",
+    "required_response": "Define mutation receipts and affected-resource invalidation across Systems, CVEs, Compliance, and exports.",
+    "source_ids": [
+      "P01",
+      "P02",
+      "P03"
+    ],
+    "section": "10.5",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG18",
+    "priority": "P2",
+    "evidence_status": "Source-confirmed missing request fences; races unexecuted",
+    "gap": "POA&M list and assignment scope changes do not consistently invalidate outstanding requests for the previous bundle context.",
+    "required_response": "Bind every asynchronous response to selection, visibility, and request generation. Clear obsolete scope on navigation.",
+    "source_ids": [
+      "P01"
+    ],
+    "section": "10.2,16.4",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG19",
+    "priority": "P2",
+    "evidence_status": "Source-confirmed edit-state risk; persistence effect unverified",
+    "gap": "Bundle requirement editing can begin with an empty selection while hydration is pending or failed.",
+    "required_response": "Block destructive replacement until the authoritative initial selection loads. Test persistence through the real update path.",
+    "source_ids": [
+      "P01"
+    ],
+    "section": "16.2",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG20",
+    "priority": "P2",
+    "evidence_status": "Source-confirmed assignment presentation/refresh gap",
+    "gap": "Assignment edit/deactivate presentation is not consistently role-gated; local drafts and parent caches can retain prior assignment state.",
+    "required_response": "Use explicit capabilities, immutable assignment-version preconditions, and committed readback. Keep Admin/CSRF enforcement.",
+    "source_ids": [
+      "P01",
+      "P06"
+    ],
+    "section": "16.4,17.2",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG21",
+    "priority": "P2",
+    "evidence_status": "Audited entry-point omission",
+    "gap": "The audited control UI refers to a separate waiver workflow but provides no inspected request/decision entry point.",
+    "required_response": "Provide or identify the complete policy-waiver workflow. Do not replace it with CVE acceptance or POA&M scheduling.",
+    "source_ids": [
+      "P01",
+      "P02",
+      "P03",
+      "P09"
+    ],
+    "section": "14.1",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG22",
+    "priority": "P2",
+    "evidence_status": "Source-confirmed picker gaps",
+    "gap": "First-page candidate limits lack continuation, and the tray policy linker excludes observation-only legacy contexts that other entry points support.",
+    "required_response": "Use the shared typed finding contract and bounded continuation. Distinguish no matches from a partial catalog.",
+    "source_ids": [
+      "P03"
+    ],
+    "section": "11.4,12.3",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG23",
+    "priority": "P2",
+    "evidence_status": "Source-confirmed recoverability gaps",
+    "gap": "Initial evidence loading lacks the normal close path, and a failed coverage request can retain its last-request marker and prevent a simple retry.",
+    "required_response": "Keep dismissal and retry available in loading and failed states. Test stalled requests and repeated same-selection retries.",
+    "source_ids": [
+      "P01",
+      "P02"
+    ],
+    "section": "17.3",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG24",
+    "priority": "P2",
+    "evidence_status": "Source-level visual/metadata omission",
+    "gap": "Systems filters, remediation indicators, assignment context, and artifact source/type/time hierarchy differ from the design reference.",
+    "required_response": "Resolve the detailed Section 18 matrix, then inspect exact-head rendered pairs. Do not invent missing metadata.",
+    "source_ids": [
+      "P01",
+      "P02",
+      "P04",
+      "P05"
+    ],
+    "section": "18",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG25",
+    "priority": "P2",
+    "evidence_status": "Source-confirmed ambiguous-success boundary",
+    "gap": "Generic policy POA&M creation commits before loading response detail; a later read failure can be reported after the write succeeds.",
+    "required_response": "Define a committed-result receipt or construct authoritative response data before commit. Test retry and lost-response reconciliation.",
+    "source_ids": [
+      "P08"
+    ],
+    "section": "11.2",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG26",
+    "priority": "P2",
+    "evidence_status": "Source-confirmed milestone/date mismatch",
+    "gap": "Policy default milestones use fixed offsets through day 56 even when the user chooses an earlier target completion date.",
+    "required_response": "Approve target-relative milestone generation or an explicit schedule conflict. Do not change an existing plan silently.",
+    "source_ids": [
+      "P08"
+    ],
+    "section": "11.3",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG27",
+    "priority": "P1 review priority",
+    "evidence_status": "Source-confirmed lifecycle constraint; design decision open",
+    "gap": "Exact-CVE verification returns MISSING after a deployment identity differs from the immutable link baseline, even with a newer clean exact scan on the new deployment.",
+    "required_response": "Review baseline preservation versus current-evidence continuity jointly. Never repair this by overwriting the original baseline.",
+    "source_ids": [
+      "P10",
+      "P24",
+      "P25"
+    ],
+    "section": "13.3",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG28",
+    "priority": "Verification priority",
+    "evidence_status": "Incomplete route-level security verification",
+    "gap": "Some inspected basic bundle handlers lack an explicit local CSRF check; assignment and POA&M mutations do have checks.",
+    "required_response": "Inventory all write routes and execute missing/mismatched-token tests. Do not infer exploitability from an absent local check alone.",
+    "source_ids": [
+      "P06",
+      "P12",
+      "P16"
+    ],
+    "section": "17.2",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG29",
+    "priority": "Verification priority",
+    "evidence_status": "Source-confirmed materialization; coverage of producers unverified",
+    "gap": "Evidence GET can materialize stable finding identities. Rollups count materialized finding records, but complete producer coverage was not established.",
+    "required_response": "Prove that visiting an evidence drawer or exporting cannot change the apparent open-finding population. Document read-side writes.",
+    "source_ids": [
+      "P07",
+      "P13"
+    ],
+    "section": "6.2,9.3",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG30",
+    "priority": "P2 review priority",
+    "evidence_status": "Source-confirmed browser-state scope; impact unexecuted",
+    "gap": "Import draft persistence uses a shared local-storage key rather than an explicit account/environment identity.",
+    "required_response": "Define draft ownership, logout handling, source matching, expiry, and recovery. Never treat restored state as import approval.",
+    "source_ids": [
+      "P01"
+    ],
+    "section": "16.1",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG31",
+    "priority": "P2",
+    "evidence_status": "Source-level history presentation gap",
+    "gap": "The shared tray explicitly presents retired exact-CVE links but does not provide equivalent policy-link history presentation in the inspected path.",
+    "required_response": "Verify active, retired, and closure-set navigation for both families. Do not label every retired link completed remediation.",
+    "source_ids": [
+      "P03",
+      "P12"
+    ],
+    "section": "12.5",
+    "resolution": "Open"
+  },
+  {
+    "id": "CPG32",
+    "priority": "Measurement priority",
+    "evidence_status": "Source-confirmed scaling and snapshot boundaries; performance unmeasured",
+    "gap": "Per-host exports can repeat bundle-wide work, and several multi-query projections lack a common evidence revision.",
+    "required_response": "Measure representative query plans, bounded expansion, and lock behavior; define coherent response and export snapshot boundaries.",
+    "source_ids": [
+      "P01",
+      "P07",
+      "P10",
+      "P11",
+      "P13",
+      "P15"
+    ],
+    "section": "19",
+    "resolution": "Open"
+  }
+]

@@ -1,0 +1,13 @@
+flowchart LR
+  PF["Current failed policy finding"] --> Plan["POAM remediation plan"]
+  PF --> Request["Policy waiver request"]
+  Request --> Pending["Pending waiver"]
+  Pending --> Admin["Administrator decision"]
+  Admin --> Bound["Accepted unexpired waiver bound to observation"]
+  Bound --> PV["May satisfy policy closure result"]
+  CF["Exact CVE and package"] --> Triage["Host or environment triage"]
+  Triage --> Accept["Accepted-risk disposition"]
+  Triage --> Schedule["Scheduled remediation POAM"]
+  Accept -.->|"not an exact absence result"| CV["CVE closure requires PASS"]
+  Schedule -.->|"not an exact absence result"| CV
+  Plan -.->|"does not change evaluation"| PF

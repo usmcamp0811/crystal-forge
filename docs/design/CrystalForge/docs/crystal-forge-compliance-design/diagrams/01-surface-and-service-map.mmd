@@ -1,0 +1,19 @@
+flowchart TB
+  Page["Compliance route"] --> Catalog["Bundle catalog"]
+  Page --> Drawer["Bundle revision drawer"]
+  Drawer --> Coverage["Requirement mapping coverage"]
+  Drawer --> Matrix["Systems and control results"]
+  Matrix --> Evidence["Host evidence drawer"]
+  Evidence --> Finding["Finding create or link action"]
+  Drawer --> Plans["Bundle POAM list"]
+  Drawer --> Assign["Assignment maintenance and references"]
+  Plans --> Host["Shared POAM detail host"]
+  Finding --> Host
+  Assign --> Host
+  Page --> Export["Client evidence export"]
+  Page --> Import["Import and bundle maintenance"]
+  Coverage --> ReqAPI["Requirement coverage queries"]
+  Matrix --> ComplianceAPI["Compliance queries"]
+  Evidence --> ComplianceAPI
+  Host --> POAMAPI["POAM service and verification"]
+  Export --> ComplianceAPI

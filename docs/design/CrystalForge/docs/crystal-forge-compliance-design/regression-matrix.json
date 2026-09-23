@@ -1,0 +1,922 @@
+[
+  {
+    "id": "CPT01",
+    "area": "Identity and navigation",
+    "scenario": "Open a valid exact bundle/version deep link.",
+    "expected": "Heading, baseline, coverage, systems requests, and export selection retain the same validated pair.",
+    "proof_level": "Browser + HTTP",
+    "gap_ids": [
+      "CPG06",
+      "CPG11"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT02",
+    "area": "Identity and navigation",
+    "scenario": "Open an absent bundle or a version belonging to another bundle.",
+    "expected": "Return an explicit unavailable/invalid selection; do not substitute the first bundle or current version.",
+    "proof_level": "HTTP + browser",
+    "gap_ids": [
+      "CPG11"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT03",
+    "area": "Identity and navigation",
+    "scenario": "Switch between a published version and a draft with different metadata.",
+    "expected": "Header and body refer to the selected version; lineage-level metadata is labeled separately.",
+    "proof_level": "Browser",
+    "gap_ids": [
+      "CPG11"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT04",
+    "area": "Identity and navigation",
+    "scenario": "Open a direct-policy finding from a POA&M with no bundle candidates.",
+    "expected": "No panic occurs; the user reaches direct-policy evidence or an explicit supported alternative.",
+    "proof_level": "Unit + browser",
+    "gap_ids": [
+      "CPG12"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT05",
+    "area": "Identity and navigation",
+    "scenario": "Open a policy finding with more than one bundle context.",
+    "expected": "Use a validated retained pair or a context picker; do not combine unrelated bundle and version arrays.",
+    "proof_level": "Unit + browser",
+    "gap_ids": [
+      "CPG11",
+      "CPG12"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT06",
+    "area": "Identity and navigation",
+    "scenario": "Move between evidence controls with keyboard navigation, then use Back.",
+    "expected": "Visible control, URL, selected observation, and restored focus remain coherent.",
+    "proof_level": "Browser",
+    "gap_ids": [
+      "CPG11",
+      "CPG24"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT07",
+    "area": "Identity and navigation",
+    "scenario": "Open the same exact-CVE plan from Systems, fleet CVEs, and a direct Compliance URL.",
+    "expected": "Each caller shows the same plan revision and family; Evidence navigation is available and correctly bound.",
+    "proof_level": "Cross-view browser + HTTP",
+    "gap_ids": [
+      "CPG13",
+      "CPG14"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT08",
+    "area": "Identity and navigation",
+    "scenario": "Open current, link-baseline, and closure evidence from a completed plan.",
+    "expected": "Each mode preserves its own source identity and time; historical links never silently open current evidence.",
+    "proof_level": "Browser + database",
+    "gap_ids": [
+      "CPG11",
+      "CPG13",
+      "CPG31"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT09",
+    "area": "Evidence authority",
+    "scenario": "Provide an assessment with the complete digest only, then with the enforced digest only.",
+    "expected": "Matrix, detail, verifier, and export implement the approved compatibility rule and identify any display-only difference.",
+    "proof_level": "Database + HTTP",
+    "gap_ids": [
+      "CPG02"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT10",
+    "area": "Evidence authority",
+    "scenario": "Provide matching policy versions but different per-host effective overrides.",
+    "expected": "Each host is evaluated against its own effective configuration; cached metadata cannot substitute another host configuration.",
+    "proof_level": "Database",
+    "gap_ids": [
+      "CPG02"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT11",
+    "area": "Evidence authority",
+    "scenario": "Provide a newer evaluation attempt for an undeployed target.",
+    "expected": "It cannot become an authoritative current result or authorize remediation/closure for the running target.",
+    "proof_level": "Database + HTTP",
+    "gap_ids": [
+      "CPG03"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT12",
+    "area": "Evidence authority",
+    "scenario": "Split successful rule rows across separate evaluation attempts.",
+    "expected": "No complete passing observation is synthesized from incompatible attempts.",
+    "proof_level": "Database",
+    "gap_ids": [
+      "CPG03"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT13",
+    "area": "Evidence authority",
+    "scenario": "Omit a required rule while all present rules pass.",
+    "expected": "Completeness is partial/unavailable, not Pass; mutation capabilities follow the authoritative result.",
+    "proof_level": "Database + browser",
+    "gap_ids": [
+      "CPG02",
+      "CPG03"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT14",
+    "area": "Evidence authority",
+    "scenario": "Record a valid current report followed by a newer empty or invalid report.",
+    "expected": "All current resolvers follow the approved newest-report rule; any last-known display is explicitly secondary.",
+    "proof_level": "Database",
+    "gap_ids": [
+      "CPG04"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT15",
+    "area": "Evidence authority",
+    "scenario": "Provide an exact legacy Nix result for one policy version and a different result for its lineage head.",
+    "expected": "The selected version is not replaced by the lineage head; the typed observation identity remains intact.",
+    "proof_level": "Database + HTTP",
+    "gap_ids": [
+      "CPG02",
+      "CPG22"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT16",
+    "area": "Evidence authority",
+    "scenario": "Provide completed CVE threshold counters without schema-1 exact occurrence evidence.",
+    "expected": "Policy threshold status and exact-CVE finding authority remain distinct; no exact occurrence is fabricated.",
+    "proof_level": "Database + cross-view browser",
+    "gap_ids": [
+      "CPG02",
+      "CPG13"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT17",
+    "area": "Evidence authority",
+    "scenario": "Complete a clean exact scan after an older vulnerable scan.",
+    "expected": "The current resolver honors the complete clean scan and does not fall back to old findings.",
+    "proof_level": "Database + HTTP",
+    "gap_ids": [
+      "CPG03",
+      "CPG27"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT18",
+    "area": "Evidence authority",
+    "scenario": "Read evidence and rollups before and after first-time finding-identity materialization.",
+    "expected": "The apparent technical finding population is stable, or a documented reconciliation state explains the difference.",
+    "proof_level": "Database + HTTP",
+    "gap_ids": [
+      "CPG29"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT19",
+    "area": "Counts and scope",
+    "scenario": "Use a baseline with full, partial, unmapped, and recovery-required requirements.",
+    "expected": "The denominator includes every selected requirement; the four coverage counts sum to that denominator.",
+    "proof_level": "Database + browser",
+    "gap_ids": [
+      "CPG10"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT20",
+    "area": "Counts and scope",
+    "scenario": "Map several policies to one requirement and one policy to several requirements.",
+    "expected": "Requirement coverage, policy control counts, and plan counts remain separate units.",
+    "proof_level": "Database + browser",
+    "gap_ids": [
+      "CPG10",
+      "CPG14"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT21",
+    "area": "Counts and scope",
+    "scenario": "Create an error-only host and a never-evaluated host.",
+    "expected": "Neither enters an unqualified clean collection or clean export.",
+    "proof_level": "Unit + HTTP + browser",
+    "gap_ids": [
+      "CPG09"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT22",
+    "area": "Counts and scope",
+    "scenario": "Use only waived controls on an evaluated host.",
+    "expected": "Technical score, waiver count, and accepted-compliance label follow the explicitly approved formula.",
+    "proof_level": "Database + browser",
+    "gap_ids": [
+      "CPG10"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT23",
+    "area": "Counts and scope",
+    "scenario": "Link multiple findings to one plan and show one finding under multiple bundle contexts.",
+    "expected": "Plans, findings, and distinct systems are not summed interchangeably or double-counted.",
+    "proof_level": "Database + browser",
+    "gap_ids": [
+      "CPG14"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT24",
+    "area": "Counts and scope",
+    "scenario": "Load a plan containing only exact-CVE findings.",
+    "expected": "Its compact row uses the exact-CVE count and family label, not zero policy findings.",
+    "proof_level": "Unit + browser",
+    "gap_ids": [
+      "CPG14"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT25",
+    "area": "Counts and scope",
+    "scenario": "Give a non-Admin access to one of two environments and query every summary/detail route.",
+    "expected": "Unauthorized host identities and counts are excluded before aggregation; hidden details stay non-enumerable.",
+    "proof_level": "Real HTTP + database",
+    "gap_ids": [
+      "CPG01"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT26",
+    "area": "Counts and scope",
+    "scenario": "Filter by environment, result, bundle revision, and finding-family scope.",
+    "expected": "Rows and aggregates declare and use the same scope; empty access is not interpreted as fleet access.",
+    "proof_level": "HTTP + browser",
+    "gap_ids": [
+      "CPG01",
+      "CPG07",
+      "CPG09"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT27",
+    "area": "Creation and linking",
+    "scenario": "Create from the same current failed policy finding through Systems and Compliance.",
+    "expected": "Stable finding identity and server-owned authority checks are identical; the finding remains Fail after creation.",
+    "proof_level": "Cross-view browser + database",
+    "gap_ids": [
+      "CPG17",
+      "CPG29"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT28",
+    "area": "Creation and linking",
+    "scenario": "Attempt creation from Pass, stale, partial, or an unrelated observation.",
+    "expected": "The server rejects the action without creating a plan, reference, or active link.",
+    "proof_level": "Real HTTP + database",
+    "gap_ids": [
+      "CPG02",
+      "CPG03"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT29",
+    "area": "Creation and linking",
+    "scenario": "Create and link with a supported legacy observation-only policy context.",
+    "expected": "All supported entry points preserve the typed observation instead of requiring a fabricated assessment ID.",
+    "proof_level": "HTTP + browser",
+    "gap_ids": [
+      "CPG22"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT30",
+    "area": "Creation and linking",
+    "scenario": "Browse more than 50 compatible plans/findings.",
+    "expected": "Continuation reaches every allowed candidate; a first-page limit is not presented as the complete set.",
+    "proof_level": "HTTP + browser",
+    "gap_ids": [
+      "CPG22"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT31",
+    "area": "Creation and linking",
+    "scenario": "Choose a 14-day target with default policy milestones enabled.",
+    "expected": "Milestone dates obey the approved target-date rule or the UI reports an explicit schedule conflict.",
+    "proof_level": "Database + browser",
+    "gap_ids": [
+      "CPG26"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT32",
+    "area": "Creation and linking",
+    "scenario": "Commit generic creation, then fail response-detail loading or lose the response.",
+    "expected": "The client can reconcile the committed plan and revision; retries do not claim a rollback or silently duplicate ownership.",
+    "proof_level": "Database fault injection + HTTP",
+    "gap_ids": [
+      "CPG25"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT33",
+    "area": "Shared POA&M tray",
+    "scenario": "Open policy-only, CVE-only, and direct-policy plans at the Compliance route.",
+    "expected": "The tray works without unrelated catalog selection and shows only the correct family capabilities.",
+    "proof_level": "Browser + HTTP",
+    "gap_ids": [
+      "CPG13"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT34",
+    "area": "Shared POA&M tray",
+    "scenario": "Open the exact-CVE Evidence action from the Compliance-hosted tray.",
+    "expected": "A real callback leads to the canonical pair and intended target/observation.",
+    "proof_level": "Browser",
+    "gap_ids": [
+      "CPG13"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT35",
+    "area": "Shared POA&M tray",
+    "scenario": "Verify each non-completed lifecycle state.",
+    "expected": "Verify is offered only when supported; the server still rejects invalid state transitions.",
+    "proof_level": "Browser + real HTTP",
+    "gap_ids": [
+      "CPG15"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT36",
+    "area": "Shared POA&M tray",
+    "scenario": "Edit plan text locally, then run Verify.",
+    "expected": "Successful verification updates saved attempt/revision without discarding unrelated unsaved text.",
+    "proof_level": "Browser",
+    "gap_ids": [
+      "CPG16"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT37",
+    "area": "Shared POA&M tray",
+    "scenario": "Trigger stale-revision, unauthorized, and deleted/hidden-record errors during edit.",
+    "expected": "The UI preserves recoverable drafts, distinguishes unavailable state, and never claims an unsaved change persisted.",
+    "proof_level": "Browser + HTTP",
+    "gap_ids": [
+      "CPG16",
+      "CPG20"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT38",
+    "area": "Shared POA&M tray",
+    "scenario": "Retire policy and exact-CVE links, then close and reopen related plans.",
+    "expected": "Both families expose accurate active, retired, and closure-set history without treating all retirement as closure.",
+    "proof_level": "Database + browser",
+    "gap_ids": [
+      "CPG31"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT39",
+    "area": "Shared POA&M tray",
+    "scenario": "Change or remove an assignee identity after the plan was created.",
+    "expected": "Historical identity remains readable; unavailable identity is not a valid new assignment and does not confer access.",
+    "proof_level": "Database + browser",
+    "gap_ids": [
+      "CPG20"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT40",
+    "area": "Shared POA&M tray",
+    "scenario": "Mutate a plan while a history continuation is in flight.",
+    "expected": "Pages do not combine incompatible record revisions; restart behavior is explicit and does not duplicate rows.",
+    "proof_level": "HTTP + browser",
+    "gap_ids": [
+      "CPG16",
+      "CPG31"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT41",
+    "area": "Verification and closure",
+    "scenario": "Verify while a linked finding still fails.",
+    "expected": "Persist a rejected sealed attempt and new revision; retain awaiting-verification status and active links.",
+    "proof_level": "Database + real HTTP",
+    "gap_ids": [
+      "CPG15",
+      "CPG16"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT42",
+    "area": "Verification and closure",
+    "scenario": "Close while current evidence fails.",
+    "expected": "Return the documented 412 with the committed attempt/revision; the client adopts that revision.",
+    "proof_level": "Database + browser",
+    "gap_ids": [
+      "CPG16",
+      "CPG25"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT43",
+    "area": "Verification and closure",
+    "scenario": "Show a passing verification, then publish newer failed evidence before Close.",
+    "expected": "Close re-resolves current authority under locks and rejects stale readiness.",
+    "proof_level": "Concurrent database + HTTP",
+    "gap_ids": [
+      "CPG02",
+      "CPG04"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT44",
+    "area": "Verification and closure",
+    "scenario": "Complete all milestones while one current finding still fails.",
+    "expected": "Milestone completion does not authorize closure.",
+    "proof_level": "Database + browser",
+    "gap_ids": [
+      "CPG15",
+      "CPG26"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT45",
+    "area": "Verification and closure",
+    "scenario": "Approve a policy waiver for the exact current failed observation.",
+    "expected": "Only an applicable unexpired waiver under the approved policy rule can satisfy closure; original Fail remains visible.",
+    "proof_level": "Database + HTTP",
+    "gap_ids": [
+      "CPG21"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT46",
+    "area": "Verification and closure",
+    "scenario": "Expire or change the observation underlying an accepted policy waiver.",
+    "expected": "The old waiver cannot satisfy the new closure attempt.",
+    "proof_level": "Database",
+    "gap_ids": [
+      "CPG21"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT47",
+    "area": "Verification and closure",
+    "scenario": "Create an exact-CVE link on A, deploy fixed B, and scan B clean.",
+    "expected": "Record the present MISSING behavior as a regression baseline; implement a different expectation only after the continuity decision.",
+    "proof_level": "Database + cross-view browser",
+    "gap_ids": [
+      "CPG27"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT48",
+    "area": "Verification and closure",
+    "scenario": "Keep deployment A and provide a strictly newer complete schema-1 scan with pair absence.",
+    "expected": "Exact-CVE verification can return Pass without changing the immutable link baseline.",
+    "proof_level": "Database",
+    "gap_ids": [
+      "CPG27"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT49",
+    "area": "Verification and closure",
+    "scenario": "Keep the pair present but whitelist it, justify it, or accept its risk.",
+    "expected": "None of those states becomes exact absence or silently satisfies the current exact-CVE Pass requirement.",
+    "proof_level": "Database + cross-view browser",
+    "gap_ids": [
+      "CPG21",
+      "CPG27"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT50",
+    "area": "Verification and closure",
+    "scenario": "Race closure/reopen against ownership changes, environment moves, and link replacement.",
+    "expected": "Re-resolve access and exact subjects; preserve one active owner and immutable closure history, or return a typed conflict.",
+    "proof_level": "Concurrent database + HTTP",
+    "gap_ids": [
+      "CPG01",
+      "CPG25",
+      "CPG27",
+      "CPG31"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT51",
+    "area": "Waivers and assignments",
+    "scenario": "Request and decide a policy waiver through its user-visible entry point.",
+    "expected": "The complete role-separated workflow exists; accepted-risk triage is not used as a substitute.",
+    "proof_level": "Browser + real HTTP",
+    "gap_ids": [
+      "CPG21"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT52",
+    "area": "Waivers and assignments",
+    "scenario": "Attach an immutable assignment-version reference, then update that assignment.",
+    "expected": "The reference stays on its original version; current assignment state and its effect are separate.",
+    "proof_level": "Database + browser",
+    "gap_ids": [
+      "CPG20"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT53",
+    "area": "Waivers and assignments",
+    "scenario": "Update assignment reason with omitted, null, and nonempty values.",
+    "expected": "Omitted preserves, null clears, and a value replaces under the expected-version precondition.",
+    "proof_level": "Database + real HTTP",
+    "gap_ids": [
+      "CPG20"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT54",
+    "area": "Waivers and assignments",
+    "scenario": "Use Viewer or Operator credentials on Admin-only assignment maintenance.",
+    "expected": "UI capabilities match the restriction; forged requests are rejected without mutation.",
+    "proof_level": "Browser + real HTTP",
+    "gap_ids": [
+      "CPG20"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT55",
+    "area": "Waivers and assignments",
+    "scenario": "Use missing or mismatched CSRF tokens on every basic bundle and assignment write route.",
+    "expected": "Each state-changing route rejects the request according to the common CSRF contract.",
+    "proof_level": "Real HTTP",
+    "gap_ids": [
+      "CPG28"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT56",
+    "area": "Waivers and assignments",
+    "scenario": "Save bundle edits while requirement hydration is delayed or fails.",
+    "expected": "The UI cannot replace an unknown prior requirement selection with an empty one; real persisted membership is preserved.",
+    "proof_level": "Browser + database",
+    "gap_ids": [
+      "CPG19"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT57",
+    "area": "Export integrity",
+    "scenario": "Select two bundles with disjoint host and control data.",
+    "expected": "Downloaded bytes contain the complete selected set, not just the bundle active before the modal opened.",
+    "proof_level": "Browser download + parse",
+    "gap_ids": [
+      "CPG05"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT58",
+    "area": "Export integrity",
+    "scenario": "Deselect the original bundle and retain another bundle.",
+    "expected": "No original-bundle data appears; the retained selection controls both filename and contents.",
+    "proof_level": "Browser download + parse",
+    "gap_ids": [
+      "CPG05"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT59",
+    "area": "Export integrity",
+    "scenario": "Export two revisions with different selected policies and metadata.",
+    "expected": "Each request and record retains the chosen immutable version; no current-pointer substitution occurs.",
+    "proof_level": "HTTP + browser download",
+    "gap_ids": [
+      "CPG06"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT60",
+    "area": "Export integrity",
+    "scenario": "Restrict export to one authorized environment.",
+    "expected": "All host/control rows and totals use that scope; hidden environments cannot appear in metadata or totals.",
+    "proof_level": "Real HTTP + download parse",
+    "gap_ids": [
+      "CPG01",
+      "CPG07"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT61",
+    "area": "Export integrity",
+    "scenario": "Export the clean host scope with error, unscanned, waiver-only, and passing fixtures.",
+    "expected": "Membership follows the approved clean/completeness rule and does not hide unknown states.",
+    "proof_level": "Download semantic validation",
+    "gap_ids": [
+      "CPG09",
+      "CPG10"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT62",
+    "area": "Export integrity",
+    "scenario": "Toggle inclusion of waivers and source evidence.",
+    "expected": "Each format implements the declared toggle semantics, with explicit source omissions and coherent totals.",
+    "proof_level": "Download semantic validation",
+    "gap_ids": [
+      "CPG07"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT63",
+    "area": "Export integrity",
+    "scenario": "Export native JSON for an exact selected observation.",
+    "expected": "Version, observation, authority, target, completeness, and relevant time identities survive, or the format is explicitly a summary.",
+    "proof_level": "Download semantic validation",
+    "gap_ids": [
+      "CPG07"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT64",
+    "area": "Export integrity",
+    "scenario": "Export multiple control rows for one host to CSV.",
+    "expected": "Repeated rollup cells are not represented as additive distinct-host counts; quoting and row structure are validated.",
+    "proof_level": "Download parse + semantic validation",
+    "gap_ids": [
+      "CPG07"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT65",
+    "area": "Export integrity",
+    "scenario": "Export with no authoritative classification or sensitivity metadata.",
+    "expected": "Do not assert UNCLASSIFIED or low sensitivity by default; retain unspecified or validated user input.",
+    "proof_level": "Download semantic validation",
+    "gap_ids": [
+      "CPG08"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT66",
+    "area": "Export integrity",
+    "scenario": "Export old observations now, including absent and partial evidence.",
+    "expected": "Export time is distinct from collection/evaluation time; no not-checked row is reported as an executed automated assessment.",
+    "proof_level": "Download semantic validation",
+    "gap_ids": [
+      "CPG08"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT67",
+    "area": "Export integrity",
+    "scenario": "Validate SARIF and OSCAL against pinned schemas and application semantics.",
+    "expected": "Check every status, including not-checked, referenced resources, identifiers, and real waiver provenance; schema success alone is insufficient.",
+    "proof_level": "Pinned schema + semantic validation",
+    "gap_ids": [
+      "CPG07",
+      "CPG08"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT68",
+    "area": "Export integrity",
+    "scenario": "Fail a middle evidence request or change evidence midway through a large export.",
+    "expected": "No apparently complete partial report is emitted; changed-snapshot, cancellation, and overflow behavior are explicit.",
+    "proof_level": "Fault injection + browser download",
+    "gap_ids": [
+      "CPG07",
+      "CPG32"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT69",
+    "area": "Async and recoverability",
+    "scenario": "Delay a POA&M list for bundle A, then switch to bundle B.",
+    "expected": "The late A response cannot replace B rows or counts; obsolete assignment scope is cleared.",
+    "proof_level": "Browser request control",
+    "gap_ids": [
+      "CPG18"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT70",
+    "area": "Async and recoverability",
+    "scenario": "Delay two assignment previews or policy-detail reads in opposite order.",
+    "expected": "Each response applies only to its original immutable scope and newest request generation.",
+    "proof_level": "Browser request control",
+    "gap_ids": [
+      "CPG18",
+      "CPG20"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT71",
+    "area": "Async and recoverability",
+    "scenario": "Fail requirement coverage, then retry the same selection.",
+    "expected": "Retry issues a new request and can succeed without changing bundle selection.",
+    "proof_level": "Browser request control",
+    "gap_ids": [
+      "CPG23"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT72",
+    "area": "Async and recoverability",
+    "scenario": "Keep initial evidence loading indefinitely, then dismiss it.",
+    "expected": "Close and Escape remain usable; no background response reopens the dismissed drawer.",
+    "proof_level": "Browser request control",
+    "gap_ids": [
+      "CPG23"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT73",
+    "area": "Async and recoverability",
+    "scenario": "Create, link, update, verify, and close while adjacent views remain mounted.",
+    "expected": "Every affected relationship/list/rollup is refreshed or marked stale; unrelated drafts and inactive views are not needlessly reset.",
+    "proof_level": "Cross-view browser + real HTTP",
+    "gap_ids": [
+      "CPG16",
+      "CPG17"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT74",
+    "area": "Async and recoverability",
+    "scenario": "Restore an import draft after logout/account change or with a different source file.",
+    "expected": "Draft ownership and source validation are explicit; restored browser state cannot approve or import unreviewed content.",
+    "proof_level": "Browser storage + HTTP",
+    "gap_ids": [
+      "CPG30"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT75",
+    "area": "Visual and interaction parity",
+    "scenario": "Compare populated page and bundle drawer with the reference.",
+    "expected": "Explicitly account for section order, requirement coverage, remediation strip, systems filters, and missing columns.",
+    "proof_level": "Rendered paired captures + assertions",
+    "gap_ids": [
+      "CPG24"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT76",
+    "area": "Visual and interaction parity",
+    "scenario": "Compare complete, partial, missing, and failed evidence drawers.",
+    "expected": "Result, completeness, source type, identity, observation time, and action authority remain distinguishable.",
+    "proof_level": "Rendered paired captures + assertions",
+    "gap_ids": [
+      "CPG03",
+      "CPG23",
+      "CPG24"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT77",
+    "area": "Visual and interaction parity",
+    "scenario": "Compare policy and exact-CVE create/link/detail surfaces.",
+    "expected": "Family-specific context, assignee, due date, plan, findings, verification, history, and unavailable actions retain clear hierarchy.",
+    "proof_level": "Rendered paired captures + assertions",
+    "gap_ids": [
+      "CPG13",
+      "CPG14",
+      "CPG24",
+      "CPG31"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT78",
+    "area": "Visual and interaction parity",
+    "scenario": "Use nested dialogs by keyboard in both themes.",
+    "expected": "Initial focus, wrapping, Escape precedence, and return focus work without closing or reopening the wrong layer.",
+    "proof_level": "Browser keyboard + paired captures",
+    "gap_ids": [
+      "CPG23",
+      "CPG24"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT79",
+    "area": "Visual and interaction parity",
+    "scenario": "Use narrow desktop and mobile with long package, policy, requirement, and assignee text.",
+    "expected": "Important metadata/actions remain reachable; no hidden overflow or collapsed concept is accepted without a recorded decision.",
+    "proof_level": "Responsive browser + paired captures",
+    "gap_ids": [
+      "CPG24"
+    ],
+    "execution_status": "Not executed in this audit"
+  },
+  {
+    "id": "CPT80",
+    "area": "Visual and interaction parity",
+    "scenario": "Inspect export/import/assignment pending, error, empty, and read-only states.",
+    "expected": "Controls match capabilities; incomplete hydration, export scope, and retry guidance remain visible and truthful.",
+    "proof_level": "Rendered paired captures + assertions",
+    "gap_ids": [
+      "CPG19",
+      "CPG20",
+      "CPG23",
+      "CPG24"
+    ],
+    "execution_status": "Not executed in this audit"
+  }
+]

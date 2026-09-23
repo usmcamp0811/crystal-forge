@@ -1,0 +1,365 @@
+[
+  {
+    "id": "CPC01",
+    "contract": "Finding identity",
+    "treatment": "Must agree within a family",
+    "systems_review_input": "Systems must preserve the stable policy lineage or canonical CVE/package identity described in its draft.",
+    "fleet_cves_review_input": "Fleet rows aggregate canonical CVE/package pairs; mutation subjects add exact authorized systems.",
+    "compliance_finding": "Policy findings use system plus policy lineage. Exact-CVE plans retain their distinct family.",
+    "joint_review_question": "Approve the identity dictionary and prohibit conversions based only on matching display names.",
+    "source_ids": [
+      "P08",
+      "P10",
+      "P23",
+      "P24"
+    ],
+    "status": "Open"
+  },
+  {
+    "id": "CPC02",
+    "contract": "Target and revision selection",
+    "treatment": "Must agree",
+    "systems_review_input": "System Current, exact configuration, and retained-generation selections need separate meanings.",
+    "fleet_cves_review_input": "Current exposure, scheduled deployment target, and Historical inventory are separate relations.",
+    "compliance_finding": "Bundle version selects membership; it is not a deployment or observation identity.",
+    "joint_review_question": "Define a typed selection envelope and explicit unavailable state for each target kind.",
+    "source_ids": [
+      "P01",
+      "P07",
+      "P23",
+      "P24"
+    ],
+    "status": "Open"
+  },
+  {
+    "id": "CPC03",
+    "contract": "Read fallback versus write authority",
+    "treatment": "Decision required",
+    "systems_review_input": "The Systems draft leaves the read-only scan-fallback question open.",
+    "fleet_cves_review_input": "Inventory can contain read-only scheduled/historical rows that cannot authorize fleet triage.",
+    "compliance_finding": "Evaluation-attempt fallback can display output without current deployed-target binding.",
+    "joint_review_question": "Approve display-only fallback separately from mutation and closure prerequisites.",
+    "source_ids": [
+      "P07",
+      "P10",
+      "P23",
+      "P24"
+    ],
+    "status": "Open"
+  },
+  {
+    "id": "CPC04",
+    "contract": "Complete versus enforced policy context",
+    "treatment": "Must agree for the same observation",
+    "systems_review_input": "System policy evidence must be checked against the approved effective-policy compatibility contract.",
+    "fleet_cves_review_input": "Exact occurrence evidence is not itself a composite policy assessment.",
+    "compliance_finding": "Matrix, detail, and verifier currently select against differing digest rules.",
+    "joint_review_question": "Choose one compatible assessment-set resolver, with explicit family-specific inputs.",
+    "source_ids": [
+      "P07",
+      "P11",
+      "P23",
+      "P24"
+    ],
+    "status": "Open"
+  },
+  {
+    "id": "CPC05",
+    "contract": "Newest report versus last valid report",
+    "treatment": "Must agree for Current",
+    "systems_review_input": "Current system state must not silently mean an older valid report unless labeled last-known.",
+    "fleet_cves_review_input": "Exact Current authority must not substitute an unrelated older target.",
+    "compliance_finding": "Policy verification and other selectors do not all apply validation after selecting the newest report.",
+    "joint_review_question": "Test a newer invalid report and decide a consistent Current/last-known distinction.",
+    "source_ids": [
+      "P07",
+      "P10",
+      "P11",
+      "P23",
+      "P24"
+    ],
+    "status": "Open"
+  },
+  {
+    "id": "CPC06",
+    "contract": "Threshold policy versus exact CVE",
+    "treatment": "Intentional family distinction",
+    "systems_review_input": "A system can have a CVE threshold policy failure and separate exact vulnerability findings.",
+    "fleet_cves_review_input": "Exact CVE/package presence supplies vulnerability subjects, not policy lineage.",
+    "compliance_finding": "Policy evaluation can use completed scan counters without producing exact-CVE finding identity.",
+    "joint_review_question": "Keep both families typed. Define explicit relationships rather than treating them as duplicates.",
+    "source_ids": [
+      "P07",
+      "P10",
+      "P11",
+      "P23",
+      "P24"
+    ],
+    "status": "Open"
+  },
+  {
+    "id": "CPC07",
+    "contract": "Authorization before aggregation",
+    "treatment": "Must agree",
+    "systems_review_input": "System detail, summary, and navigation must respect current environment visibility.",
+    "fleet_cves_review_input": "The CVEs draft describes environment scoping before occurrence counts and rollups.",
+    "compliance_finding": "Some Compliance catalog/systems handlers do not carry the scope used by evidence and POA&M routes.",
+    "joint_review_question": "Use one scope contract and prove every endpoint, export, and autocomplete path.",
+    "source_ids": [
+      "P06",
+      "P07",
+      "P13",
+      "P23",
+      "P24"
+    ],
+    "status": "Open"
+  },
+  {
+    "id": "CPC08",
+    "contract": "Unassigned or unavailable systems",
+    "treatment": "Decision required",
+    "systems_review_input": "Distinguish an unassigned system from missing scan data or an inaccessible system.",
+    "fleet_cves_review_input": "Admin-visible unassigned inventory does not automatically create environment-scoped mutation subjects.",
+    "compliance_finding": "Catalog/matrix visibility and plan access need the same explicit unassigned rule.",
+    "joint_review_question": "Specify read visibility, action availability, and non-enumerating errors without treating missing fields as zero.",
+    "source_ids": [
+      "P06",
+      "P13",
+      "P23",
+      "P24"
+    ],
+    "status": "Open"
+  },
+  {
+    "id": "CPC09",
+    "contract": "Count units",
+    "treatment": "Must agree for equal scopes",
+    "systems_review_input": "System counts, control results, and related plan counts are separate quantities.",
+    "fleet_cves_review_input": "Pairs, current/scheduled/historical systems, and actionable subjects have different units.",
+    "compliance_finding": "Requirement versions, controls, policy/CVE findings, and plans coexist; compact plan counts omit the CVE family.",
+    "joint_review_question": "Document units on each field and label. Reconcile by set identity, not by comparing unrelated totals.",
+    "source_ids": [
+      "P03",
+      "P07",
+      "P15",
+      "P20",
+      "P21",
+      "P23",
+      "P24"
+    ],
+    "status": "Open"
+  },
+  {
+    "id": "CPC10",
+    "contract": "Coverage, result, and remediation",
+    "treatment": "Intentional dimensional distinction",
+    "systems_review_input": "A system status must not imply every requirement has a mapped and executed policy.",
+    "fleet_cves_review_input": "Accepted or scheduled vulnerability disposition does not mean remediation is verified.",
+    "compliance_finding": "Full requirement mapping can coexist with failed, missing, or erroneous policy evidence and open plans.",
+    "joint_review_question": "Keep mapping coverage, observed result, disposition, and remediation lifecycle separate in every view.",
+    "source_ids": [
+      "P07",
+      "P12",
+      "P15",
+      "P23",
+      "P24"
+    ],
+    "status": "Open"
+  },
+  {
+    "id": "CPC11",
+    "contract": "Risk acceptance and waiver",
+    "treatment": "Intentional family distinction; UX decision",
+    "systems_review_input": "System triage and policy control waivers need distinct identity and effects.",
+    "fleet_cves_review_input": "CVE acceptance records risk; it is not exact scan absence or a policy waiver.",
+    "compliance_finding": "Policy waiver verification binds to an observation/version and can satisfy its policy-family closure rule.",
+    "joint_review_question": "Approve terminology and complete entry points. Do not unify these merely because both say accepted.",
+    "source_ids": [
+      "P09",
+      "P10",
+      "P11",
+      "P23",
+      "P24"
+    ],
+    "status": "Open"
+  },
+  {
+    "id": "CPC12",
+    "contract": "Host override and environment default",
+    "treatment": "Must agree in CVE family",
+    "systems_review_input": "System host decisions override the environment default; clearing an override is not necessarily opening the finding.",
+    "fleet_cves_review_input": "Fleet rollups and environment ownership must account for host overrides explicitly.",
+    "compliance_finding": "A CVE-originated plan shown in Compliance must retain that subject ownership and not assume a bundle scope.",
+    "joint_review_question": "Define effective disposition, default scope, and owned subjects as separate fields.",
+    "source_ids": [
+      "P03",
+      "P10",
+      "P23",
+      "P24"
+    ],
+    "status": "Open"
+  },
+  {
+    "id": "CPC13",
+    "contract": "Baseline and cross-deployment continuity",
+    "treatment": "Decision required",
+    "systems_review_input": "System deployment changes must retain old evidence while independently resolving new current evidence.",
+    "fleet_cves_review_input": "The continuity proposal differs from the present immutable-baseline verifier.",
+    "compliance_finding": "The shared exact-CVE verifier still returns MISSING when the deployed identity changes from the link baseline.",
+    "joint_review_question": "Review A-to-B remediation, recurrence, rollback, and closure evidence without overwriting baseline history.",
+    "source_ids": [
+      "P10",
+      "P23",
+      "P24",
+      "P25"
+    ],
+    "status": "Open"
+  },
+  {
+    "id": "CPC14",
+    "contract": "Bundle and assignment association",
+    "treatment": "Decision required",
+    "systems_review_input": "System plans can be direct-policy, bundle-related, or exact-CVE plans.",
+    "fleet_cves_review_input": "A canonical CVE/package pair is not automatically a bundle requirement.",
+    "compliance_finding": "Bundle rollups use lineage/current memberships plus closure context and assignment references, not only the selected version.",
+    "joint_review_question": "Decide when association means current responsibility, selected-version context, or historical reference.",
+    "source_ids": [
+      "P08",
+      "P13",
+      "P23",
+      "P24"
+    ],
+    "status": "Open"
+  },
+  {
+    "id": "CPC15",
+    "contract": "Typed assignee and required metadata",
+    "treatment": "Must agree where shared; defaults may differ",
+    "systems_review_input": "Typed identity and availability must survive opening the same plan from a system.",
+    "fleet_cves_review_input": "Scheduling requires valid typed ownership and remediation metadata; reuse preserves existing metadata.",
+    "compliance_finding": "Generic policy creation permits weaker minimum fields and fixed default milestone dates.",
+    "joint_review_question": "Approve minimum fields and family-specific defaults. Never infer authorization from assignee identity.",
+    "source_ids": [
+      "P03",
+      "P08",
+      "P23",
+      "P24"
+    ],
+    "status": "Open"
+  },
+  {
+    "id": "CPC16",
+    "contract": "Common plan capabilities",
+    "treatment": "Must agree for the same record",
+    "systems_review_input": "A plan opened from System Detail should expose the same valid record actions.",
+    "fleet_cves_review_input": "Fleet triage may create or reuse a plan; opening it should not lose exact-CVE navigation.",
+    "compliance_finding": "Compliance hosts the common tray but omits the CVE Evidence callback and shows policy-oriented controls.",
+    "joint_review_question": "Use family-aware capabilities and complete caller adapters, not optional no-op behavior.",
+    "source_ids": [
+      "P01",
+      "P03",
+      "P23",
+      "P24"
+    ],
+    "status": "Open"
+  },
+  {
+    "id": "CPC17",
+    "contract": "Verification and closure",
+    "treatment": "Shared transaction meaning; different family proofs",
+    "systems_review_input": "Reported remediation completion, a new scan, verification, and closure are not the same operation.",
+    "fleet_cves_review_input": "Exact-CVE closure needs the approved exact-absence proof, not accepted/scheduled status.",
+    "compliance_finding": "Policy closure can use current Pass or an applicable accepted waiver; Close re-verifies and records attempts.",
+    "joint_review_question": "Make lifecycle labels consistent while preserving each family evidence rule.",
+    "source_ids": [
+      "P10",
+      "P11",
+      "P12",
+      "P23",
+      "P24"
+    ],
+    "status": "Open"
+  },
+  {
+    "id": "CPC18",
+    "contract": "Committed errors and retries",
+    "treatment": "Must agree",
+    "systems_review_input": "System-origin actions need the same committed-result and conflict semantics as other callers.",
+    "fleet_cves_review_input": "Fleet triage builds its mutation detail before commit, as recorded in the CVEs draft.",
+    "compliance_finding": "Generic creation commits before detail loading; failed Close commits attempt/revision before 412.",
+    "joint_review_question": "Define receipt, unknown-outcome reconciliation, and retry rules per action.",
+    "source_ids": [
+      "P08",
+      "P12",
+      "P23",
+      "P24"
+    ],
+    "status": "Open"
+  },
+  {
+    "id": "CPC19",
+    "contract": "Invalidation and unsaved drafts",
+    "treatment": "Must agree for shared data",
+    "systems_review_input": "System relationships, lists, and badges need invalidation after common plan mutations.",
+    "fleet_cves_review_input": "The CVEs draft identifies stale parent lists/statistics after triage.",
+    "compliance_finding": "Compliance uses local callbacks; Verify can reset drafts without notifying the parent.",
+    "joint_review_question": "Specify affected-resource invalidation and draft-preserving saved-state updates.",
+    "source_ids": [
+      "P01",
+      "P02",
+      "P03",
+      "P23",
+      "P24"
+    ],
+    "status": "Open"
+  },
+  {
+    "id": "CPC20",
+    "contract": "History and return navigation",
+    "treatment": "Must agree",
+    "systems_review_input": "Retained evidence and current evidence need distinct return targets.",
+    "fleet_cves_review_input": "Scheduled/historical inventory navigation must retain the selected target rather than default to Current.",
+    "compliance_finding": "Policy zero-candidate navigation can panic; exact-CVE callback and policy retired-history presentation are incomplete.",
+    "joint_review_question": "Support current, link-baseline, and closure evidence with explicit return context and revision-bound paging.",
+    "source_ids": [
+      "P01",
+      "P03",
+      "P12",
+      "P23",
+      "P24"
+    ],
+    "status": "Open"
+  },
+  {
+    "id": "CPC21",
+    "contract": "Export source, scope, and time",
+    "treatment": "Must agree with displayed selection",
+    "systems_review_input": "A system export must identify exact evidence rather than rely on the page heading.",
+    "fleet_cves_review_input": "Fleet exports must preserve canonical pair identity and defined inventory/count scope.",
+    "compliance_finding": "Client Compliance exports can drop revision/scope and manufacture authoritative-looking metadata.",
+    "joint_review_question": "Use one validated export manifest; distinguish observation, export, verification, and closure timestamps.",
+    "source_ids": [
+      "P01",
+      "P14",
+      "P23",
+      "P24"
+    ],
+    "status": "Open"
+  },
+  {
+    "id": "CPC22",
+    "contract": "Finding materialization and count completeness",
+    "treatment": "Verification required",
+    "systems_review_input": "Opening one system should not make previously existing fleet failures appear for the first time without explanation.",
+    "fleet_cves_review_input": "Occurrence-based fleet counts and persistent plan-finding records are not necessarily the same population.",
+    "compliance_finding": "Evidence GET materializes policy finding identities; complete background population was not established.",
+    "joint_review_question": "Prove stable counts before any drawer or export is opened; define reconciliation ownership and lag.",
+    "source_ids": [
+      "P07",
+      "P13",
+      "P23",
+      "P24"
+    ],
+    "status": "Open"
+  }
+]

@@ -1,0 +1,10 @@
+flowchart LR
+  Scope["Same visible host"] --> Matrix["Matrix: complete effective-set digest"]
+  Scope --> Detail["Detail: enforced digest or complete digest"]
+  Detail --> Attempt["Fallback: latest rules across eligible attempts"]
+  Scope --> Policy["Policy verification: compatible current policy set"]
+  Scope --> CVE["CVE verification: retained running target"]
+  CVE --> Baseline["Must still match original link deployment"]
+  Policy --> PAccept["PASS or applicable evidence-bound waiver"]
+  Baseline --> CAccept["Newer schema-1 scan; exact pair absent"]
+  Attempt -.-> Warning["Readable does not imply actionable"]

@@ -1,0 +1,13 @@
+flowchart TB
+  UI["Modal selects many bundles and environments"] --> Name["Filename reflects chosen selections"]
+  Original["Original selected bundle and cached systems"] --> Rows["Filter original host rows"]
+  Rows --> Fetch["Fetch evidence sequentially with version None"]
+  Fetch --> Payload["One bundle payload"]
+  Totals["Unfiltered original totals"] --> Payload
+  Payload --> JSON["Native JSON projection"]
+  Payload --> CSV["CSV"]
+  Payload --> SARIF["SARIF"]
+  Payload --> OSCAL["OSCAL with generated metadata"]
+  Payload --> HTML["Print-ready HTML"]
+  UI -.->|"selection set not used to fetch all bundles"| Payload
+  Revision["Selected immutable revision"] -.->|"not carried into evidence requests"| Fetch
