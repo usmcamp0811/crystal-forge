@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-23 03:27'
+updated_date: '2026-09-23 13:36'
 labels:
   - scanning
   - web-ui
@@ -307,6 +307,8 @@ All executable focused checks pass. The authoritative Web UI VM/browser workflow
 P0 DEPLOYMENT BLOCKER reopened from Review at deployed/pushed candidate 543b07fd78e73923eb3474c498648c789171f7c7 (MR !329). The deployed server is in a systemd restart loop: migration 275 fails against the real pre-existing database with 'new row for relation "hardening_scans" violates check constraint...'. Root cause under investigation: migration 0275's UPDATE...SET source_trigger='legacy' runs before the CHECK constraint is relaxed to permit 'legacy', so any database with pre-existing hardening_scans rows fails the UPDATE against the still-restrictive 0274 constraint. A clean/empty test database masks this because the UPDATE affects zero rows. Do not merge, rebase, or touch TASK-440. Do not modify 0274 unless proven production never applied it. Task remains In Progress until a corrected 0275, a production-shaped upgrade regression proving historical hardening_scans data survives 0274->0275->0276 losslessly, full focused verification, commit, push, and a real successful deployment are confirmed.
 
 P0 migration-0275 repair committed and pushed as `130c472c1a34a6c8c6b95190c8672e49b9427714` to MR !329. The fix drops 0274's restrictive `hardening_scan_source_trigger_check` before reclassifying pre-existing manual/no-build-provenance rows as `legacy`, then recreates the final constraint. New integration regression applies through 0273, inserts historical completed/failed Hardening rows plus a dependent service result, proves the original update is rejected under 0274, then applies corrected 0275/0276 and asserts no loss/duplication, exact pre-existing-column preservation, final trigger/provenance/unique invariants, direct build-job deletion rejection, and deferred derivation cascade. Audit found no equivalent populated-upgrade defect in 0272 (views), 0273 (indexes), 0274 (compatible default/null additions), or 0276 (valid pre-existing FK references). Verification: isolated task-owned PostgreSQL on port 3042; `cargo test --test hardening_admission_migration_upgrade -- --test-threads=1` passed (1/1); `cargo fmt --check` passed; `SQLX_OFFLINE=true cargo check --tests` passed before package build; `nix build .#packages.x86_64-linux.server --no-link -L` passed and package check phase reported 1560 passed, 0 failed, 588 ignored; `git diff --check` passed. SQLx metadata unchanged: no checked query, selected column, bind, or result shape changed. Task remains In Progress pending user-run reckless deployment/runtime evidence; no production access was used.
+
+2026-09-23 System Detail revision-default follow-up: implemented candidate-authoritative Current/Generations defaults for tracked running derivations and ExactDerivation/Commits flake-head fallback for out-of-band runtime. Each CVE and Hardening tab now retains explicit target/mode choices across candidate refreshes and resets automatic state only for a different system. Missing head remains explicit unavailable without selecting retained evidence. Added unit and 28-system-hardening-tab browser coverage. Focused Rust tests, WASM check, formatting, diff check, JavaScript syntax, and static browser contracts passed. Preview is ready at http://127.0.0.1:8080 with API status healthy.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
