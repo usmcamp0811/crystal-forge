@@ -5145,6 +5145,198 @@ async function phase6Api(page, requestPath, options = {}) {
   return result;
 }
 
+function createTask326CurrentCveAuthorityFixture() {
+  const suffix = crypto.randomUUID();
+  const systemId = crypto.randomUUID();
+  const currentScanId = crypto.randomUUID();
+  const historicalScanId = crypto.randomUUID();
+  const snapshotId = crypto.randomUUID();
+  const hostname = `lucas-current-authority-${suffix.slice(0, 8)}`;
+  const configurationName = hostname;
+  const currentStorePath = `/nix/store/11111111111111111111111111111111-${hostname}`;
+  const historicalStorePath = `/nix/store/22222222222222222222222222222222-${hostname}`;
+  const historicalRevision = createHash("sha1").update(`task326-history-${suffix}`).digest("hex");
+  const cveSeed = createHash("sha256").update(`task326-cves-${suffix}`).digest("hex");
+  const currentCveNumber = 10_000_000n + (BigInt(`0x${cveSeed.slice(0, 12)}`) % 89_999_999n);
+  let historicalCveNumber = 10_000_000n + (BigInt(`0x${cveSeed.slice(12, 24)}`) % 89_999_999n);
+  if (historicalCveNumber === currentCveNumber) historicalCveNumber += 1n;
+  const currentCveId = `CVE-2099-${currentCveNumber}`;
+  const historicalCveId = `CVE-2099-${historicalCveNumber}`;
+  const currentCompletedAt = "2026-09-21T10:00:00Z";
+  const historicalCompletedAt = "2026-09-22T10:00:00Z";
+  const fixture = {
+    systemId,
+    hostname,
+    configurationName,
+    historicalRevision,
+    currentDerivationId: null,
+    historicalDerivationId: null,
+    historicalCommitId: null,
+    currentScanId,
+    historicalScanId,
+    currentCveId,
+    historicalCveId,
+    currentCompletedAt,
+    historicalCompletedAt,
+    snapshotId,
+  };
+  try {
+    const target = runFixtureSql(`
+    WITH selected_environment AS (
+      SELECT id FROM environments ORDER BY created_at NULLS LAST, id LIMIT 1
+    ), selected_commit AS (
+      SELECT id, flake_id FROM commits ORDER BY id LIMIT 1
+    ), historical_commit AS (
+      INSERT INTO commits (
+        flake_id, git_commit_hash, commit_timestamp, message, author,
+        evaluation_status, evaluation_completed_at
+      )
+      SELECT flake_id, '${historicalRevision}', now(),
+             'TASK-326 historical authority exclusion fixture', 'Web UI test',
+             'complete', now()
+      FROM selected_commit
+      RETURNING id
+    ), current_derivation AS (
+      INSERT INTO derivations (
+        commit_id, derivation_type, derivation_name, derivation_path, store_path,
+        expected_store_path, status_id, attempt_count, completed_at, policy_results
+      )
+      SELECT id, 'nixos', $name$${configurationName}$name$,
+             $path$${currentStorePath}.drv$path$, $path$${currentStorePath}$path$,
+             $path$${currentStorePath}$path$, 10, 1, now(), '{}'::jsonb
+      FROM selected_commit
+      RETURNING id, commit_id
+    ), historical_derivation AS (
+      INSERT INTO derivations (
+        commit_id, derivation_type, derivation_name, derivation_path, store_path,
+        expected_store_path, status_id, attempt_count, completed_at, policy_results
+       )
+      SELECT id, 'nixos', $name$${configurationName}$name$,
+              $path$${historicalStorePath}.drv$path$, $path$${historicalStorePath}$path$,
+              $path$${historicalStorePath}$path$, 10, 1, now(), '{}'::jsonb
+      FROM historical_commit
+      RETURNING id
+    ), inserted_system AS (
+      INSERT INTO systems (
+        id, hostname, environment_id, flake_id, is_active, public_key,
+        derivation, system_configuration_name
+      )
+      SELECT '${systemId}'::uuid, $hostname$${hostname}$hostname$,
+             environment.id, commit.flake_id, true,
+             $key$ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITASK326${suffix}$key$,
+             $path$${currentStorePath}$path$, $name$${configurationName}$name$
+      FROM selected_environment environment CROSS JOIN selected_commit commit
+      RETURNING id
+    )
+    SELECT current_derivation.id, historical_derivation.id,
+           current_derivation.commit_id, historical_commit.id
+    FROM current_derivation CROSS JOIN historical_derivation
+    CROSS JOIN inserted_system CROSS JOIN historical_commit;
+    `).split("|");
+    if (target.length !== 4) {
+      throw new Error(`Could not create TASK-326 Current CVE authority fixture: ${JSON.stringify(target)}`);
+    }
+    const currentDerivationId = Number(target[0]);
+    const historicalDerivationId = Number(target[1]);
+    const commitId = Number(target[2]);
+    const historicalCommitId = Number(target[3]);
+    Object.assign(fixture, { currentDerivationId, historicalDerivationId, historicalCommitId });
+    runFixtureSql(`
+      INSERT INTO evaluation_snapshots (
+        id, commit_id, configuration_name, schema_version, lifecycle, integrity_version,
+        option_count, module_count, content_bytes, completed_at
+      ) VALUES (
+        '${snapshotId}'::uuid, ${commitId}, $name$${configurationName}$name$, 1,
+        'available', 0, 0, 0, 0, now()
+      );
+    `);
+    const certified = Number(runFixtureSql(`
+    WITH updated AS (
+      UPDATE evaluation_snapshots SET integrity_version=1
+      WHERE id='${snapshotId}'::uuid RETURNING id
+    ) SELECT COUNT(*) FROM updated;
+    `));
+    if (certified !== 1) throw new Error(`Could not certify TASK-326 snapshot ${snapshotId}`);
+    runFixtureSql(`
+    BEGIN;
+    INSERT INTO evaluation_generation_snapshots (
+      system_id, generation, snapshot_id, derivation_id, commit_id,
+      source_store_path, configuration_name, lineage_verified
+    ) VALUES (
+      '${systemId}'::uuid, 74, '${snapshotId}'::uuid, ${currentDerivationId}, ${commitId},
+      $path$${currentStorePath}$path$, $name$${configurationName}$name$, true
+    );
+    INSERT INTO system_states (
+      hostname, change_reason, store_path, generation,
+      generation_matches_current_store_path, timestamp
+    ) VALUES (
+      $hostname$${hostname}$hostname$, 'startup', $path$${currentStorePath}$path$,
+      74, true, now()
+    );
+    COMMIT;
+
+    INSERT INTO cves (id, description, cvss_v3_score, published_date)
+    VALUES
+      ('${currentCveId}', 'Current generation authority marker', 8.4, '2026-09-01'),
+      ('${historicalCveId}', 'Historical generation exclusion marker', 9.9, '2026-08-01');
+
+    INSERT INTO cve_scans (
+      id, derivation_id, scanner_name, scanner_version, status,
+      evidence_schema_version, total_packages, total_vulnerabilities,
+      high_count, attempts, completed_at
+    ) VALUES (
+      '${currentScanId}'::uuid, ${currentDerivationId}, 'current-authority-scanner',
+      '2.6.0', 'in_progress', 0, 0, 0, 0, 1, NULL
+    ), (
+      '${historicalScanId}'::uuid, ${historicalDerivationId}, 'historical-authority-scanner',
+      '1.0.0', 'in_progress', 0, 0, 0, 0, 1, NULL
+    );
+
+    INSERT INTO cve_scan_vulnerability_observations (
+      scan_id, canonical_cve_id, canonical_package_name,
+      observed_package_name, observed_package_version,
+      observed_derivation_path, is_whitelisted, detection_method
+    ) VALUES (
+      '${currentScanId}'::uuid, '${currentCveId}', 'current-authority-package',
+      'current-authority-package', '3.2.1-current',
+      '/nix/store/current-authority-package.drv', false, 'current-authority-scanner'
+    ), (
+      '${historicalScanId}'::uuid, '${historicalCveId}', 'historical-only-package',
+      'historical-only-package', '0.9-historical',
+      '/nix/store/historical-only-package.drv', false, 'historical-authority-scanner'
+    );
+
+    UPDATE cve_scans
+    SET status='completed', evidence_schema_version=1,
+        total_packages=1, total_vulnerabilities=1,
+        high_count=CASE WHEN id='${currentScanId}'::uuid THEN 1 ELSE 0 END,
+        completed_at=CASE
+          WHEN id='${currentScanId}'::uuid THEN '${currentCompletedAt}'::timestamptz
+          ELSE '${historicalCompletedAt}'::timestamptz
+        END
+    WHERE id IN ('${currentScanId}'::uuid, '${historicalScanId}'::uuid);
+    `);
+    return fixture;
+  } catch (error) {
+    removeTask326CurrentCveAuthorityFixture(fixture);
+    throw error;
+  }
+}
+
+function removeTask326CurrentCveAuthorityFixture(fixture) {
+  runFixtureSql(`
+    BEGIN;
+    DELETE FROM system_states WHERE hostname=$hostname$${fixture.hostname}$hostname$;
+    DELETE FROM evaluation_generation_snapshots WHERE system_id='${fixture.systemId}'::uuid;
+    DELETE FROM systems WHERE id='${fixture.systemId}'::uuid;
+    DELETE FROM evaluation_snapshots WHERE id='${fixture.snapshotId}'::uuid;
+    DELETE FROM derivations WHERE derivation_name=$name$${fixture.configurationName}$name$;
+    DELETE FROM commits WHERE git_commit_hash='${fixture.historicalRevision}';
+    DELETE FROM cves WHERE id IN ('${fixture.currentCveId}', '${fixture.historicalCveId}');
+    COMMIT;
+  `);
+}
+
 async function loadTask433RequirementContext(page) {
   const frameworks = (await phase6Api(page, "/api/v1/compliance/frameworks")).body;
   const framework = frameworks.find((item) => item.canonical_source_key === "web-ui-mapping-roundtrip");
@@ -10196,6 +10388,40 @@ const steps = [
         "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-inventory*",
         async (route) => {
           const requestUrl = new URL(route.request().url());
+          if (requestUrl.pathname.endsWith("/cve-inventory-sources")) {
+            const exactCandidate = inventoryState === "exact-large" || inventoryState === "exact-clean";
+            const noScanCandidate = inventoryState === "no-scan";
+            await route.fulfill({
+              status: 200,
+              contentType: "application/json",
+              body: JSON.stringify({
+                items: [{
+                  selection: { kind: "current" },
+                  generation: 74,
+                  commit_hash: "1111111111111111111111111111111111111111",
+                  derivation_id: 42,
+                  is_current: true,
+                  is_latest_per_flake: true,
+                  source: noScanCandidate ? null : {
+                    scan_id: exactCandidate
+                      ? "00000000-0000-0000-0000-000000000c45"
+                      : "00000000-0000-0000-0000-000000000c44",
+                    scanner_name: "vulnix",
+                    scanner_version: exactCandidate ? "1.10.1" : "0.8.0",
+                    completed_at: exactCandidate
+                      ? "2026-04-10T09:00:00Z"
+                      : "2026-04-09T08:00:00Z",
+                  },
+                  evidence_representation: noScanCandidate
+                    ? null
+                    : exactCandidate ? "schema1_observations" : "schema0_projection",
+                  scan_available: !noScanCandidate,
+                  read_only: !exactCandidate,
+                }],
+              }),
+            });
+            return;
+          }
           inventoryRequests.push(requestUrl);
           if (!requestUrl.pathname.endsWith("/cve-inventory-page")) {
             throw new Error(`Expected the versioned paged inventory route, got ${requestUrl.pathname}`);
@@ -10233,6 +10459,10 @@ const steps = [
               body: JSON.stringify({
                 authority: "exact",
                 exact_authority_failure: null,
+                current_state: "exact_current_scan",
+                selection: { kind: "current" },
+                evidence_representation: "schema1_observations",
+                read_only: false,
                 source: {
                   scan_id: "00000000-0000-0000-0000-000000000c45",
                   scanner_name: "vulnix",
@@ -10273,6 +10503,9 @@ const steps = [
             : [];
           const noScan = inventoryState === "no-scan";
           const exact = inventoryState === "exact-clean";
+          // COMPATIBILITY: Legacy responses exercise rolling upgrades from a
+          // server that predates the no-fallback Current authority contract.
+          // The SQL-backed fixture below verifies the current production shape.
           await route.fulfill({
             status: 200,
             contentType: "application/json",
@@ -10282,14 +10515,26 @@ const steps = [
                 ? null
                 : noScan
                 ? "missing_current_generation"
-                : "no_schema1_current_scan",
+                 : "no_schema1_current_scan",
+              current_state: exact
+                ? "exact_current_scan"
+                : noScan ? "current_authority_unavailable" : null,
+              selection: { kind: "current" },
+              evidence_representation: noScan
+                ? null
+                : exact ? "schema1_observations" : "schema0_projection",
+              read_only: !exact,
               source: noScan
                 ? null
                 : {
-                    scan_id: "00000000-0000-0000-0000-000000000c44",
+                    scan_id: exact
+                      ? "00000000-0000-0000-0000-000000000c45"
+                      : "00000000-0000-0000-0000-000000000c44",
                     scanner_name: "vulnix",
-                    scanner_version: "0.8.0",
-                    completed_at: "2026-04-09T08:00:00Z",
+                    scanner_version: exact ? "1.10.1" : "0.8.0",
+                    completed_at: exact
+                      ? "2026-04-10T09:00:00Z"
+                      : "2026-04-09T08:00:00Z",
                   },
               vulnerabilities,
               metadata: metadata(vulnerabilities.length),
@@ -10448,9 +10693,12 @@ const steps = [
           page.getByText("legacy-openssl", { exact: true }),
           "Expected pre-upgrade finding to remain visible",
         );
-        await page.getByRole("button", { name: /legacy-openssl/ }).click();
+        const historicalTriageState = page.getByTestId("system-cve-triage-state").filter({ hasText: "Historical inventory" });
+        if (await historicalTriageState.count() === 0) {
+          await page.getByRole("button", { name: /legacy-openssl/ }).click();
+        }
         await assertVisible(
-          page.getByTestId("system-cve-triage-state").filter({ hasText: "Historical inventory" }),
+          historicalTriageState,
           "Expected historical row to retain truthful authority labeling",
         );
         await assertCount(
@@ -10491,7 +10739,7 @@ const steps = [
           "Expected no-scan state not to claim a clean result",
         );
         await assertVisible(
-          page.getByText("The current evaluated deployment and a CVE scan are required before inventory or exact remediation is available."),
+          page.getByText("The server could not resolve one authoritative current deployment target. Historical inventories remain separate and read-only."),
           "Expected no-scan authority boundary to remain explicit",
         );
         await assertCount(
@@ -10505,6 +10753,103 @@ const steps = [
         );
         await page.unroute(inventoryTriageRoute);
         await unrouteSystemsWarningData(page);
+      }
+
+      const authorityFixture = createTask326CurrentCveAuthorityFixture();
+      try {
+        const historical = (await phase6Api(
+          page,
+          `/api/v1/systems/${authorityFixture.systemId}/cve-inventory-page?limit=100&target=exact_derivation&target_id=${authorityFixture.historicalDerivationId}`,
+        )).body;
+        if (
+          historical.authority !== "legacy"
+          || historical.read_only !== true
+          || historical.selection?.kind !== "exact_derivation"
+          || Number(historical.selection?.derivation_id) !== authorityFixture.historicalDerivationId
+          || historical.source?.scan_id !== authorityFixture.historicalScanId
+          || historical.source?.scanner_name !== "historical-authority-scanner"
+          || historical.vulnerabilities?.length !== 1
+          || historical.vulnerabilities[0].cve_id !== authorityFixture.historicalCveId
+          || historical.vulnerabilities[0].canonical_package_name !== "historical-only-package"
+          || historical.vulnerabilities[0].installed_version !== "0.9-historical"
+        ) {
+          throw new Error(`Historical CVE authority fixture was not independently readable: ${JSON.stringify(historical)}`);
+        }
+
+        const currentResponsePromise = page.waitForResponse((response) => {
+          const url = new URL(response.url());
+          return response.request().method() === "GET"
+            && url.pathname === `/api/v1/systems/${authorityFixture.systemId}/cve-inventory-page`
+            && url.searchParams.get("limit") === "100"
+            && !url.searchParams.has("target")
+            && !url.searchParams.has("target_id")
+            && !url.searchParams.has("after");
+        });
+        await page.goto(`${baseUrl}/systems/${authorityFixture.systemId}`, { timeout: LOAD_TIMEOUT });
+        await assertVisible(
+          page.getByRole("heading", { name: new RegExp(authorityFixture.hostname, "i") }).first(),
+          "Expected production-shaped current-authority system",
+        );
+        await page.getByRole("tab", { name: "CVEs" }).first().click();
+        const currentResponse = await currentResponsePromise;
+        if (currentResponse.status() !== 200) {
+          throw new Error(`Current CVE inventory returned HTTP ${currentResponse.status()}`);
+        }
+        const current = await currentResponse.json();
+        const expectedMetadata = {
+          total_findings: 1,
+          total_cves: 1,
+          total_packages: 1,
+          severity: { critical: 0, high: 1, medium: 0, low: 0, unknown: 0 },
+        };
+        if (
+          current.authority !== "exact"
+          || current.current_state !== "exact_current_scan"
+          || current.exact_authority_failure !== null
+          || current.selection?.kind !== "current"
+          || current.evidence_representation !== "schema1_observations"
+          || current.read_only !== false
+          || current.source?.scan_id !== authorityFixture.currentScanId
+          || current.source?.scanner_name !== "current-authority-scanner"
+          || current.source?.scanner_version !== "2.6.0"
+          || Date.parse(current.source?.completed_at) !== Date.parse(authorityFixture.currentCompletedAt)
+          || current.has_more !== false
+          || current.next_cursor !== null
+          || !isDeepStrictEqual(current.metadata, expectedMetadata)
+          || current.vulnerabilities?.length !== 1
+          || current.vulnerabilities[0].cve_id !== authorityFixture.currentCveId
+          || current.vulnerabilities[0].canonical_package_name !== "current-authority-package"
+          || current.vulnerabilities[0].installed_version !== "3.2.1-current"
+        ) {
+          throw new Error(`Current CVE inventory did not use the running exact scan: ${JSON.stringify(current)}`);
+        }
+        if (current.vulnerabilities.some((row) =>
+          row.cve_id === authorityFixture.historicalCveId
+          || row.canonical_package_name === "historical-only-package"
+          || row.installed_version === "0.9-historical"
+        )) {
+          throw new Error(`Current CVE inventory leaked historical findings: ${JSON.stringify(current.vulnerabilities)}`);
+        }
+
+        const exactBanner = page.getByTestId("system-cves-exact");
+        await assertVisible(exactBanner, "Expected exact Current CVE authority", 12000);
+        await assertVisible(exactBanner.getByText("Exact scan findings.", { exact: false }), "Expected exact Current finding state");
+        await assertVisible(
+          exactBanner.getByText("This inventory is bound to the current evaluated deployment and supports exact remediation.", { exact: false }),
+          "Expected current-deployment authority disclosure",
+        );
+        await assertVisible(exactBanner.getByText(/by current-authority-scanner\./), "Expected exact Current scanner provenance");
+        await assertVisible(page.getByText("1 of 1 shown · 1 of 1 package loaded", { exact: true }), "Expected exact Current totals");
+        await assertVisible(page.getByRole("button", { name: /current-authority-package/ }), "Expected current exact package group");
+        await assertVisible(page.getByText(authorityFixture.currentCveId, { exact: true }), "Expected current exact CVE");
+        await assertVisible(page.getByText("3.2.1-current", { exact: true }), "Expected current exact installed version");
+        await assertCount(page.getByText(authorityFixture.historicalCveId, { exact: true }), 0, "Current must exclude the historical CVE");
+        await assertCount(page.getByText("historical-only-package", { exact: true }), 0, "Current must exclude the historical package");
+        await assertCount(page.getByText("0.9-historical", { exact: true }), 0, "Current must exclude historical package metadata");
+        await assertCount(page.getByTestId("system-cves-legacy"), 0, "Current must never report historical authority");
+        await assertCount(page.getByTestId("system-cves-no-scan"), 0, "Valid exact Current evidence must not report no scan");
+      } finally {
+        removeTask326CurrentCveAuthorityFixture(authorityFixture);
       }
     },
   },
@@ -16416,9 +16761,17 @@ security.audit.enable = true;</fixtext>
         failed: "20000000-0000-4000-8000-000000000003",
         oldFailure: "20000000-0000-4000-8000-000000000004",
         retained: "20000000-0000-4000-8000-000000000005",
+        gray: "20000000-0000-4000-8000-000000000006",
+        liveArrival: "20000000-0000-4000-8000-000000000007",
       };
       const timestamp = (hour) => `2026-09-20T${String(hour).padStart(2, "0")}:00:00Z`;
-      const record = (scanId, derivationId, hostname, flakeName, revision, status, hour, extra = {}) => ({
+      // Terminal fixtures are ordered by minutes before a fixed newest moment.
+      // Named rows keep the newest positions so existing first-page coverage
+      // stays valid, and the bulk rows extend the collection past the former
+      // 500-row client cap with interleaved failed and completed timestamps.
+      const terminalOrigin = Date.parse("2026-09-20T18:00:00Z");
+      const terminalAt = (minutesBeforeNewest) => new Date(terminalOrigin - minutesBeforeNewest * 60_000).toISOString();
+      const record = (scanId, derivationId, hostname, flakeName, revision, status, at, extra = {}) => ({
         scan_id: scanId,
         derivation_id: derivationId,
         hostname,
@@ -16426,17 +16779,17 @@ security.audit.enable = true;</fixtext>
         commit_hash: revision,
         status,
         source_trigger: "manual",
-        created_at: timestamp(hour),
-        scheduled_at: timestamp(hour),
-        started_at: status === "in_progress" ? new Date(Date.now() - 305_000).toISOString() : timestamp(hour),
-        completed_at: ["completed", "failed"].includes(status) ? timestamp(hour) : null,
+        created_at: at,
+        scheduled_at: at,
+        started_at: status === "in_progress" ? new Date(Date.now() - 305_000).toISOString() : at,
+        completed_at: ["completed", "failed"].includes(status) ? at : null,
         scanner_name: "vulnix",
         scanner_version: "1.12.4",
         executor: "builder-a",
         failure: status === "failed" ? `failure for ${revision}` : null,
         wait_reason: null,
         build_job_id: `30000000-0000-4000-8000-${String(derivationId).padStart(12, "0")}`,
-        build_status: status === "failed" ? "failed" : status === "awaiting_build" ? "queued" : status === "awaiting_closure" ? "success" : "success",
+        build_status: status === "failed" ? "failed" : status === "awaiting_build" ? "queued" : "success",
         total_packages: status === "completed" ? 120 : 0,
         total_vulnerabilities: status === "completed" ? 4 : 0,
         critical_count: status === "completed" ? 1 : 0,
@@ -16447,23 +16800,45 @@ security.audit.enable = true;</fixtext>
         attempts: 1,
         archived_at: null,
         cancellable: false,
+        is_current: false,
+        is_latest_per_flake: false,
         ...extra,
       });
       const activeRows = [
-        record(ids.running, 101, "zeta-running", "edge-fleet", "ffff-running", "in_progress", 9),
-        record(ids.build, 102, "alpha-build-wait", "core-fleet", "aaaa-build", "awaiting_build", 8, { wait_reason: "Build output is not available." }),
-        record(ids.closure, 103, "beta-closure-wait", "core-fleet", "bbbb-closure", "awaiting_closure", 7, { wait_reason: "A completed cache closure is not available." }),
-        record(ids.pending, 104, "gamma-queued", "lab-fleet", "cccc-queued", "pending", 6),
+        record(ids.running, 101, "zeta-running", "edge-fleet", "ffff-running", "in_progress", timestamp(9), { is_latest_per_flake: true }),
+        record(ids.build, 102, "alpha-build-wait", "core-fleet", "aaaa-build", "awaiting_build", timestamp(8), { wait_reason: "Build output is not available." }),
+        record(ids.closure, 103, "beta-closure-wait", "core-fleet", "bbbb-closure", "awaiting_closure", timestamp(7), { wait_reason: "A completed cache closure is not available." }),
+        record(ids.pending, 104, "gamma-queued", "lab-fleet", "cccc-queued", "pending", timestamp(6)),
       ];
-      const completedRows = [
-        record(ids.newest, 201, "alpha-current", "core-fleet", "zzzz-current", "completed", 15),
-        record(ids.superseded, 202, "alpha-old", "core-fleet", "aaaa-old", "completed", 12),
-        record(ids.failed, 203, "omega-new-failure", "failure-fleet", "ffff-failed", "failed", 14),
-        record(ids.oldFailure, 204, "omega-old-failure", "failure-fleet", "eeee-failed", "failed", 10, { failure: `bounded failure ${"detail ".repeat(30)}` }),
-        record(ids.retained, 205, "retained-archive", "archive-fleet", "dddd-archive", "completed", 5, { archived_at: timestamp(16) }),
-        record(ids.failedBuild, 105, "delta-build-failed", "failed-build-fleet", "dddd-build-failed", "failed", 5, { source_trigger: "post_build", attempts: 0, build_status: "failed", failure: "The associated build failed before vulnix started." }),
-        record(ids.cancelledBuild, 106, "epsilon-build-cancelled", "cancelled-build-fleet", "eeee-build-cancelled", "failed", 4, { source_trigger: "post_build", attempts: 0, build_status: "cancelled", failure: "The associated build was cancelled before vulnix started." }),
+      const namedTerminalRows = [
+        record(ids.failed, 203, "omega-new-failure", "failure-fleet", "ffff-failed", "failed", terminalAt(1)),
+        record(ids.gray, 206, "gray", "core-fleet", "gray-recent-revision", "completed", terminalAt(2), { is_latest_per_flake: true }),
+        record(ids.newest, 201, "alpha-current", "core-fleet", "zzzz-current", "completed", terminalAt(3), { is_current: true }),
+        record(ids.retained, 205, "retained-archive", "archive-fleet", "dddd-archive", "completed", terminalAt(4)),
+        record(ids.superseded, 202, "alpha-old", "core-fleet", "aaaa-old", "completed", terminalAt(5)),
+        record(ids.oldFailure, 204, "omega-old-failure", "failure-fleet", "eeee-failed", "failed", terminalAt(6), { failure: `bounded failure ${"detail ".repeat(30)}` }),
+        record(ids.failedBuild, 105, "delta-build-failed", "failed-build-fleet", "dddd-build-failed", "failed", terminalAt(7), { source_trigger: "post_build", attempts: 0, build_status: "failed", failure: "The associated build failed before vulnix started." }),
+        record(ids.cancelledBuild, 106, "epsilon-build-cancelled", "cancelled-build-fleet", "eeee-build-cancelled", "failed", terminalAt(8), { source_trigger: "post_build", attempts: 0, build_status: "cancelled", failure: "The associated build was cancelled before vulnix started." }),
       ];
+      const BULK_TERMINAL_ROWS = 700;
+      // Index 400 names the configuration searched for while it sits far
+      // beyond the first page, which proves search reaches the whole
+      // collection instead of the loaded rows.
+      const DEEP_SEARCH_INDEX = 400;
+      const bulkTerminalRows = Array.from({ length: BULK_TERMINAL_ROWS }, (_, index) => {
+        const failed = index % 10 < 7;
+        const suffix = String(index).padStart(3, "0");
+        return record(
+          `40000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+          1_000 + index,
+          index === DEEP_SEARCH_INDEX ? "needle-deep-config" : `bulk-${failed ? "failed" : "completed"}-${suffix}`,
+          index % 2 === 0 ? "core-fleet" : "lab-fleet",
+          `bulk-revision-${suffix}`,
+          failed ? "failed" : "completed",
+          terminalAt(30 + index),
+        );
+      });
+      const terminalRows = [...namedTerminalRows, ...bulkTerminalRows];
       const archivedIds = new Set([ids.retained]);
       const collectionRequests = [];
       const retryRequests = [];
@@ -16472,6 +16847,65 @@ security.audit.enable = true;</fixtext>
       const scansRoute = /\/api\/v1\/scanning\/scans(?:\?.*)?$/;
       const scanDetailRoute = /\/api\/v1\/scanning\/scans\/([0-9a-f-]+)$/;
       const exactRetryRoute = /\/api\/v1\/cves\/rescan\/(\d+)$/;
+      const withArchiveState = (row) => ({ ...row, archived_at: archivedIds.has(row.scan_id) ? timestamp(16) : null });
+      const historyRows = (requestedSystemId) => (requestedSystemId === systemId
+        ? terminalRows.filter((row) => [201, 202].includes(row.derivation_id))
+        : []);
+      const revisionClass = (row) => (row.is_current ? "deployed" : row.is_latest_per_flake ? "recent" : "superseded");
+      const matchesScanFilters = (row, filters) => {
+        const haystack = [row.hostname, row.flake_name || "", row.commit_hash || "", row.scan_id, String(row.derivation_id)].join(" ").toLowerCase();
+        return (filters.search === "" || haystack.includes(filters.search))
+          && (filters.status === "all" || row.status === filters.status)
+          && (filters.revision === "all" || revisionClass(row) === filters.revision)
+          && (!filters.latestOnly || row.is_latest_per_flake === true);
+      };
+      // Mirrors the server's deterministic tiebreak: terminal_at DESC, scan_id DESC.
+      const compareTerminalRecency = (left, right) => (Date.parse(right.completed_at) - Date.parse(left.completed_at))
+        || (left.scan_id < right.scan_id ? 1 : left.scan_id > right.scan_id ? -1 : 0);
+      const terminalStatusRank = (row) => (row.status === "completed" ? 0 : row.status === "failed" ? 1 : 2);
+      const primaryComparators = {
+        timestamp: (left, right) => (Date.parse(left.completed_at) - Date.parse(right.completed_at))
+          || (left.scan_id < right.scan_id ? -1 : left.scan_id > right.scan_id ? 1 : 0),
+        configuration: (left, right) => left.hostname.toLowerCase().localeCompare(right.hostname.toLowerCase()),
+        revision: (left, right) => (left.commit_hash || "").localeCompare(right.commit_hash || ""),
+        status: (left, right) => terminalStatusRank(left) - terminalStatusRank(right),
+        severity: (left, right) => ["critical_count", "high_count", "medium_count", "low_count"]
+          .reduce((order, key) => order || (left[key] - right[key]), 0),
+      };
+      const compareOrderedTerminalRows = (left, right, sort, direction) => {
+        const sign = direction === "asc" ? 1 : -1;
+        return (sign * primaryComparators[sort](left, right)) || compareTerminalRecency(left, right);
+      };
+      const orderTerminalRows = (rows, sort, direction) => {
+        return [...rows].sort((left, right) => compareOrderedTerminalRows(left, right, sort, direction));
+      };
+      const visibleTerminalRows = (options = {}) => {
+        const filters = { search: "", status: "all", revision: "all", latestOnly: false, ...options };
+        const matching = terminalRows.filter((row) => matchesScanFilters(row, filters));
+        return orderTerminalRows(
+          matching.filter((row) => options.includeArchived === true || !archivedIds.has(row.scan_id)),
+          options.sort || "timestamp",
+          options.direction || "desc",
+        );
+      };
+      const encodeMockScanCursor = (payload) => Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+      const decodeMockScanCursor = (value) => JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+      // The server binds a cursor to the exact request that issued it. The
+      // fingerprint mirrors that contract so a changed filter, page size, or
+      // ordering must restart from the first page without a cursor.
+      const scanRequestFingerprint = (params) => [
+        params.get("collection") || "",
+        params.get("include_archived") || "",
+        params.get("system_id") || "",
+        params.get("limit") || "",
+        (params.get("q") || "").trim().toLowerCase(),
+        params.get("status") || "",
+        params.get("revision") || "",
+        params.get("latest_only") || "",
+        params.get("sort") || "",
+        params.get("direction") || "",
+      ].join("\u0000");
+      const invalidCursorBody = JSON.stringify({ error: "Invalid or request-incompatible pagination cursor." });
 
       await page.route("**/api/v1/scanning/stats", async (route) => route.fulfill({
         status: 200,
@@ -16488,25 +16922,147 @@ security.audit.enable = true;</fixtext>
           return;
         }
         const url = new URL(request.url());
-        const collection = url.searchParams.get("collection");
-        const includeArchived = url.searchParams.get("include_archived") === "true";
-        const requestedLimit = Number.parseInt(url.searchParams.get("limit") || "0", 10);
-        collectionRequests.push({ collection, includeArchived, systemId: url.searchParams.get("system_id"), limit: url.searchParams.get("limit") });
-        if (!["active", "completed", "history"].includes(collection) || !Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 500) {
+        const params = url.searchParams;
+        const collection = params.get("collection");
+        const includeArchived = params.get("include_archived") === "true";
+        const requestedLimit = Number.parseInt(params.get("limit") || "0", 10);
+        const search = (params.get("q") || "").trim().toLowerCase();
+        const status = params.get("status") || "";
+        const revision = params.get("revision") || "";
+        const latestOnly = params.get("latest_only") === "true";
+        const sort = params.get("sort") || "";
+        const direction = params.get("direction") || "";
+        const after = params.get("after");
+        collectionRequests.push({
+          collection,
+          includeArchived,
+          systemId: params.get("system_id"),
+          limit: params.get("limit"),
+          search,
+          status,
+          revision,
+          latestOnly,
+          sort,
+          direction,
+          after,
+          query: url.search,
+        });
+        if (!["active", "completed", "history"].includes(collection)
+          || !Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 500
+          || !["true", "false"].includes(params.get("include_archived"))
+          || !["true", "false"].includes(params.get("latest_only"))
+          || !["all", "completed", "failed"].includes(status)
+          || !["all", "deployed", "recent", "superseded"].includes(revision)
+          || !["configuration", "revision", "status", "severity", "timestamp"].includes(sort)
+          || !["asc", "desc"].includes(direction)
+          || search.length > 200) {
           throw new Error(`Unexpected scanning collection contract: ${url.search}`);
         }
-        let rows = collection === "active" ? activeRows : completedRows;
-        if (collection === "history") rows = completedRows.filter((row) => [201, 202].includes(row.derivation_id));
-        const hiddenArchived = includeArchived ? 0 : rows.filter((row) => archivedIds.has(row.scan_id)).length;
-        const items = rows
-          .filter((row) => includeArchived || !archivedIds.has(row.scan_id))
-          .slice(0, requestedLimit)
-          .map((row) => ({ ...row, archived_at: archivedIds.has(row.scan_id) ? timestamp(16) : null }));
-        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items, total: rows.length, hidden_archived: hiddenArchived }) });
+        if (collection === "active" || collection === "history") {
+          // The server rejects continuation cursors for collections without a
+          // keyset order, so the browser must never send one here.
+          if (after !== null) {
+            await route.fulfill({ status: 400, contentType: "application/json", body: invalidCursorBody });
+            return;
+          }
+          const rows = collection === "history" ? historyRows(params.get("system_id")) : activeRows;
+          const hiddenArchived = includeArchived ? 0 : rows.filter((row) => archivedIds.has(row.scan_id)).length;
+          const items = rows
+            .filter((row) => includeArchived || !archivedIds.has(row.scan_id))
+            .slice(0, requestedLimit)
+            .map(withArchiveState);
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({ items, total: rows.length, hidden_archived: hiddenArchived, has_more: false, next_cursor: null }),
+          });
+          return;
+        }
+        const matching = terminalRows.filter((row) => matchesScanFilters(row, { search, status, revision, latestOnly }));
+        let cursor = null;
+        if (after !== null) {
+          try {
+            cursor = decodeMockScanCursor(after);
+          } catch {
+            cursor = null;
+          }
+          if (!cursor || cursor.fingerprint !== scanRequestFingerprint(params)) {
+            await route.fulfill({ status: 400, contentType: "application/json", body: invalidCursorBody });
+            return;
+          }
+        }
+        const newestMatching = orderTerminalRows(matching, "timestamp", "desc")[0];
+        const highWater = cursor
+          ? { completedAt: cursor.highWaterCompletedAt, scanId: cursor.highWaterScanId }
+          : newestMatching
+            ? { completedAt: newestMatching.completed_at, scanId: newestMatching.scan_id }
+            : null;
+        // Continuations remain bound to the first page's newest terminal row.
+        // A later terminal insert must not shift or enter that cursor sequence.
+        const snapshotMatching = highWater === null
+          ? []
+          : matching.filter((row) => Date.parse(row.completed_at) < Date.parse(highWater.completedAt)
+            || (row.completed_at === highWater.completedAt && row.scan_id <= highWater.scanId));
+        const hiddenArchived = includeArchived ? 0 : snapshotMatching.filter((row) => archivedIds.has(row.scan_id)).length;
+        const visible = orderTerminalRows(
+          snapshotMatching.filter((row) => includeArchived || !archivedIds.has(row.scan_id)),
+          sort,
+          direction,
+        );
+        let startIndex = 0;
+        if (cursor !== null) {
+          const position = visible.findIndex((row) => row.scan_id === cursor.afterScanId);
+          if (position >= 0) {
+            startIndex = position + 1;
+          } else {
+            const cursorRow = {
+              hostname: cursor.configuration,
+              commit_hash: cursor.revision,
+              status: ["completed", "failed", "unknown"][cursor.statusRank],
+              critical_count: cursor.criticalCount,
+              high_count: cursor.highCount,
+              medium_count: cursor.mediumCount,
+              low_count: cursor.lowCount,
+              completed_at: cursor.terminalAt,
+              scan_id: cursor.afterScanId,
+            };
+            const firstAfterCursor = visible.findIndex((row) => compareOrderedTerminalRows(row, cursorRow, sort, direction) > 0);
+            startIndex = firstAfterCursor >= 0 ? firstAfterCursor : visible.length;
+          }
+        }
+        const pageRows = visible.slice(startIndex, startIndex + requestedLimit);
+        const hasMore = startIndex + pageRows.length < visible.length;
+        const nextCursor = hasMore && pageRows.length > 0
+          ? encodeMockScanCursor({
+            fingerprint: scanRequestFingerprint(params),
+            highWaterCompletedAt: highWater.completedAt,
+            highWaterScanId: highWater.scanId,
+            afterScanId: pageRows[pageRows.length - 1].scan_id,
+            configuration: pageRows[pageRows.length - 1].hostname.toLowerCase(),
+            revision: pageRows[pageRows.length - 1].commit_hash || "",
+            statusRank: terminalStatusRank(pageRows[pageRows.length - 1]),
+            criticalCount: pageRows[pageRows.length - 1].critical_count,
+            highCount: pageRows[pageRows.length - 1].high_count,
+            mediumCount: pageRows[pageRows.length - 1].medium_count,
+            lowCount: pageRows[pageRows.length - 1].low_count,
+            terminalAt: pageRows[pageRows.length - 1].completed_at,
+          })
+          : null;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            items: pageRows.map(withArchiveState),
+            total: snapshotMatching.length,
+            hidden_archived: hiddenArchived,
+            has_more: hasMore,
+            next_cursor: nextCursor,
+          }),
+        });
       });
       await page.route(scanDetailRoute, async (route) => {
         const scanId = route.request().url().match(scanDetailRoute)?.[1];
-        const row = [...activeRows, ...completedRows].find((candidate) => candidate.scan_id === scanId);
+        const row = [...activeRows, ...terminalRows].find((candidate) => candidate.scan_id === scanId);
         if (!row) throw new Error(`Unexpected scan detail identity ${scanId}`);
         await route.fulfill({
           status: 200,
@@ -16715,26 +17271,192 @@ security.audit.enable = true;</fixtext>
         if (retryRequests.at(-1) !== 203) throw new Error(`Exact retry used derivation ${retryRequests.at(-1)} instead of 203`);
         await assertVisible(page.getByText("1 archived scans hidden by retention view"), "Expected retention hidden count");
 
+        // ── Completed server pagination ──────────────────────────────────────
+        // The collection is larger than any single response, so ordering,
+        // counts, filters, and search must come from the server and pages must
+        // accumulate without duplicates, skips, or full refetches.
+        const completedRowNames = () => page.locator("#scan-completed-panel tbody .scanning-config-name");
+        const completedNames = () => completedRowNames().allTextContents();
+        const waitForCompletedRows = async (minimum) => page.waitForFunction(
+          (expected) => document.querySelectorAll("#scan-completed-panel tbody .scanning-config-name").length >= expected,
+          minimum,
+          { timeout: 25000 },
+        );
+        const expectedCompletedOrder = (count, options = {}) => visibleTerminalRows(options).slice(0, count).map((row) => row.hostname);
+        const assertCompletedPrefix = async (label, options = {}) => {
+          const names = await completedNames();
+          if (new Set(names).size !== names.length) throw new Error(`${label} duplicated loaded scan rows`);
+          const expected = expectedCompletedOrder(names.length, options);
+          if (names.join(",") !== expected.join(",")) {
+            throw new Error(`${label} skipped or reordered rows: got ${names.slice(0, 4).join(",")} expected ${expected.slice(0, 4).join(",")}`);
+          }
+        };
+        const completedFilterCount = () => page.locator("#scan-completed-panel .filter-count").textContent();
+        // Returning to the top keeps the scroll sentinel out of view so a
+        // deliberate assertion about one page is not raced by scroll paging.
+        const scrollCompletedToTop = async () => page.evaluate(() => {
+          const container = document.querySelector(".content");
+          if (container) container.scrollTop = 0;
+        });
+
+        await scrollCompletedToTop();
+        await waitForCompletedRows(50);
+        await assertCount(completedRowNames(), 50, "Completed must request one explicitly bounded page instead of a silent 500-row cap");
+        await assertCompletedPrefix("The newest-first first page");
+        await assertVisible(page.locator("#scan-completed-panel").getByText("gray", { exact: true }), "Expected the newest gray configuration scan on page one");
+        const visibleTerminalTotal = visibleTerminalRows().length;
+        const firstPageCountText = await completedFilterCount();
+        if (!firstPageCountText.includes(`50 loaded · ${visibleTerminalTotal} matching`)) {
+          throw new Error(`Completed counts must describe the whole collection: ${firstPageCountText}`);
+        }
+
+        const loadMore = page.getByTestId("scanning-completed-load-more");
+        await assertVisible(loadMore, "Expected an accessible Load more fallback for Completed");
+        const secondPageResponse = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("after="));
+        await loadMore.click();
+        await secondPageResponse;
+        await waitForCompletedRows(100);
+        await assertCompletedPrefix("The second Completed page");
+        const cursorPageRequests = collectionRequests.filter((entry) => entry.after);
+        if (cursorPageRequests.length === 0 || cursorPageRequests.some((entry) => entry.collection !== "completed" || entry.limit !== "50")) {
+          throw new Error(`Continuation must request bounded Completed pages by cursor: ${JSON.stringify(cursorPageRequests)}`);
+        }
+
+        for (let iteration = 0; iteration < 2; iteration += 1) {
+          const scrolledPage = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("after="));
+          await page.evaluate(() => {
+            const container = document.querySelector(".content");
+            if (container) container.scrollTop = container.scrollHeight;
+          });
+          await scrolledPage;
+        }
+        await waitForCompletedRows(150);
+        await assertCompletedPrefix("Infinite scroll");
+
+        // Live refresh replaces the head page only. Accumulated pages keep
+        // their cursor bound, so no loaded row is refetched or duplicated.
+        const cursorRequestsBeforeLive = collectionRequests.filter((entry) => entry.after).length;
+        const rowsBeforeLive = await completedNames();
+        const scrollBeforeLive = await page.evaluate(() => document.querySelector(".content")?.scrollTop ?? 0);
+        terminalRows.unshift(record(ids.liveArrival, 907, "live-arrival-completed", "core-fleet", "live-arrival-revision", "completed", terminalAt(0)));
+        await page.waitForFunction(
+          () => document.querySelector("#scan-completed-panel tbody .scanning-config-name")?.textContent === "live-arrival-completed",
+          undefined,
+          { timeout: 30000 },
+        );
+        const rowsAfterLive = await completedNames();
+        if (new Set(rowsAfterLive).size !== rowsAfterLive.length) throw new Error("Live refresh duplicated accumulated Completed rows");
+        if (!rowsAfterLive.slice(1).join(",").startsWith(rowsBeforeLive.join(","))) {
+          throw new Error("Live refresh reordered accumulated Completed rows");
+        }
+        if (collectionRequests.filter((entry) => entry.after).length !== cursorRequestsBeforeLive) {
+          throw new Error("Live refresh refetched accumulated Completed pages");
+        }
+        const scrollAfterLive = await page.evaluate(() => document.querySelector(".content")?.scrollTop ?? 0);
+        if (scrollBeforeLive > 0 && scrollAfterLive === 0) throw new Error("Live refresh reset the Completed scroll position");
+
+        // The original cursor excludes the new head row. Its continuation
+        // therefore adds the next 50 original rows without a gap or duplicate.
+        await scrollCompletedToTop();
+        const postRefreshContinuation = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("after="));
+        await loadMore.click();
+        await postRefreshContinuation;
+        await waitForCompletedRows(201);
+        await assertCompletedPrefix("Continuation after a live insert");
+        const postRefreshRows = await completedNames();
+        if (new Set(postRefreshRows).size !== postRefreshRows.length) {
+          throw new Error("Continuation after a live insert duplicated a Completed row");
+        }
+
+        // A changed filter restarts pagination without a cursor and stays
+        // scoped to the whole collection, not the loaded rows.
+        const completedStatusFilter = page.getByRole("combobox", { name: "Filter by scan status" });
+        await scrollCompletedToTop();
+        await completedStatusFilter.selectOption("failed");
+        await page.waitForFunction(
+          () => document.querySelectorAll("#scan-completed-panel tbody .scanning-config-name").length === 50,
+          undefined,
+          { timeout: 25000 },
+        );
+        const failedPageRequests = collectionRequests.filter((entry) => entry.collection === "completed" && entry.status === "failed" && entry.limit === "50");
+        if (failedPageRequests.length === 0 || failedPageRequests.some((entry) => entry.after !== null)) {
+          throw new Error(`The Failed filter must restart a server-scoped request without a cursor: ${JSON.stringify(failedPageRequests)}`);
+        }
+        const failedTotal = visibleTerminalRows({ status: "failed" }).length;
+        const failedCountText = await completedFilterCount();
+        if (!failedCountText.includes(`· ${failedTotal} matching`)) {
+          throw new Error(`The Failed filter must count the whole collection: ${failedCountText}`);
+        }
+        await assertCount(page.locator("#scan-completed-panel tbody tr").filter({ hasText: "gray" }), 0, "The Failed filter must exclude successful scans server-side");
+        await scrollCompletedToTop();
+        await completedStatusFilter.selectOption("all");
+        await waitForCompletedRows(50);
+
+        // Search reaches a scan that is intentionally far beyond page one, and
+        // typing is debounced into a small number of server requests.
+        const searchRequestsBefore = collectionRequests.filter((entry) => entry.collection === "completed" && entry.search !== "").length;
+        const deepScan = terminalRows.find((row) => row.hostname === "needle-deep-config");
+        const deepScanPosition = visibleTerminalRows().findIndex((row) => row.scan_id === deepScan.scan_id);
+        if (deepScanPosition < 50) throw new Error(`The searched scan must start beyond page one, not at ${deepScanPosition}`);
+        await scrollCompletedToTop();
+        await search.pressSequentially("needle-deep", { delay: 40 });
+        await page.waitForFunction(
+          () => document.querySelectorAll("#scan-completed-panel tbody .scanning-config-name").length === 1,
+          undefined,
+          { timeout: 25000 },
+        );
+        await assertVisible(page.getByText("needle-deep-config", { exact: true }), "Server search must reach scans beyond page one");
+        const searchRequests = collectionRequests
+          .filter((entry) => entry.collection === "completed" && entry.search !== "")
+          .slice(searchRequestsBefore);
+        if (searchRequests.length === 0 || searchRequests.length > 4) {
+          throw new Error(`Debounced search must not request one page per keystroke: ${searchRequests.length}`);
+        }
+        if (searchRequests.some((entry) => entry.after !== null)) throw new Error("A changed search must restart without a cursor");
+        await page.getByRole("button", { name: "Clear scan search" }).click();
+        await waitForCompletedRows(50);
+        await scrollCompletedToTop();
+
         for (const scanId of [ids.newest, ids.superseded, ids.failed, ids.oldFailure, ids.failedBuild, ids.cancelledBuild]) {
           await page.getByRole("checkbox", { name: `Select scan ${scanId}` }).check();
         }
         const completedReload = page.waitForResponse((response) => response.url().includes("collection=completed&include_archived=false") && response.request().method() === "GET");
         await page.getByRole("button", { name: "Archive selected" }).click();
         await completedReload;
+        await waitForCompletedRows(50);
+        for (const hostname of ["alpha-current", "alpha-old", "omega-new-failure", "omega-old-failure", "delta-build-failed", "epsilon-build-cancelled"]) {
+          await assertHidden(page.locator("#scan-completed-panel tbody tr").filter({ hasText: hostname }), `Archiving must remove ${hostname} from the default Completed view`);
+        }
+        await assertCompletedPrefix("The reloaded Completed page after archiving");
+        await assertVisible(page.getByRole("button", { name: "Archived [7]" }), "The archived count must stay truthful after archiving");
+        await search.fill("retained-archive");
         await assertVisible(page.getByRole("heading", { name: "Completed scans are hidden" }), "Expected retention empty state");
-        await assertVisible(page.getByText("7 archived scan(s)"), "Expected retention empty count");
-        const includeArchived = page.getByRole("button", { name: "Archived [7]" });
-        await includeArchived.click();
+        await assertVisible(page.getByText("The current retention view hides 1 archived scan(s). Include archived scans to review or restore them."), "Expected retention empty count");
+        await page.getByRole("button", { name: "Clear scan search" }).click();
+        await waitForCompletedRows(50);
+        const archivedToggle = page.getByRole("button", { name: /^Archived \[/ });
+        await archivedToggle.click();
         await assertAttribute(page.getByRole("button", { name: "Archived [7]" }), "aria-pressed", "true", "Archived filter should expose its active state");
         await assertVisible(page.getByText("retained-archive", { exact: true }), "Expected archived history to be reviewable");
+        await waitForCompletedRows(50);
+        await assertCompletedPrefix("The archived Completed view", { includeArchived: true });
+        await assertCount(page.locator("#scan-completed-panel tbody tr.archived .scanning-archived-label"), 7, "Archived rows must remain visually marked");
         await page.getByRole("checkbox", { name: `Select scan ${ids.retained}` }).check();
         const restoreReload = page.waitForResponse((response) => response.url().includes("collection=completed&include_archived=true") && response.request().method() === "GET");
         const restoreCountReload = page.waitForResponse((response) => response.url().includes("collection=completed&include_archived=false") && response.request().method() === "GET");
         await page.getByRole("button", { name: "Restore selected" }).click();
         await Promise.all([restoreReload, restoreCountReload]);
+        await assertVisible(page.getByRole("button", { name: "Archived [6]" }), "Restoring must reduce the archived count");
+        await waitForCompletedRows(50);
+        await assertCount(page.locator("#scan-completed-panel tbody tr").filter({ hasText: "retained-archive" }).locator(".scanning-archived-label"), 0, "A restored scan must stop reporting archived state");
         if (!archiveRequests.some((request) => request.archived === true && request.scan_ids.length === 6) || !archiveRequests.some((request) => request.archived === false && request.scan_ids.includes(ids.retained))) {
           throw new Error(`Archive/restore selection requests were incomplete: ${JSON.stringify(archiveRequests)}`);
         }
+        const continuationAfterArchive = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("after="));
+        await page.getByTestId("scanning-completed-load-more").click();
+        await continuationAfterArchive;
+        await waitForCompletedRows(100);
+        await assertCompletedPrefix("Continuation after archive and restore", { includeArchived: true });
 
         await page.getByRole("tab", { name: /^By system/ }).click();
         const buildRequiredRow = page.locator("#scan-systems-panel tbody tr").filter({ hasText: "build-required-01" });
@@ -17513,7 +18235,23 @@ security.audit.enable = true;</fixtext>
             contentType: "application/json",
             body: JSON.stringify({
               items: [
-                { selection: { kind: "current" }, generation: 74, commit_hash: "1111111111111111111111111111111111111111", derivation_id: 42, is_current: true, is_latest_per_flake: true, source: null, evidence_representation: null, scan_available: true, read_only: false },
+                {
+                  selection: { kind: "current" },
+                  generation: 74,
+                  commit_hash: "1111111111111111111111111111111111111111",
+                  derivation_id: 42,
+                  is_current: true,
+                  is_latest_per_flake: true,
+                  source: {
+                    scan_id: "00000000-0000-0000-0000-000000000c01",
+                    scanner_name: "vulnix",
+                    scanner_version: "1.10.1",
+                    completed_at: "2026-04-10T09:00:00Z",
+                  },
+                  evidence_representation: "schema1_observations",
+                  scan_available: true,
+                  read_only: false,
+                },
                 { selection: { kind: "retained_generation", generation_snapshot_id: historicalGenerationId }, generation: 73, commit_hash: "2222222222222222222222222222222222222222", derivation_id: 41, is_current: false, is_latest_per_flake: false, source: null, evidence_representation: null, scan_available: false, read_only: true },
               ],
             }),
@@ -17542,6 +18280,7 @@ security.audit.enable = true;</fixtext>
         },
       );
 
+      let hardeningLifecycleState = "completed";
       await page.route(
         "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening-inventory*",
         async (route) => {
@@ -17600,11 +18339,26 @@ security.audit.enable = true;</fixtext>
                 derivation_id: 41,
                 source: null,
                 services: [],
+                attempt: null,
                 read_only: true,
               }),
             });
             return;
           }
+          const completedSource = {
+            scan_id: "00000000-0000-0000-0000-00000000b001",
+            scheduled_at: "2026-04-07T08:10:00Z",
+            started_at: "2026-04-07T08:10:05Z",
+            completed_at: "2026-04-07T08:10:20Z",
+            attempts: 1,
+            total_services: 2,
+            well_hardened_count: 0,
+            moderately_hardened_count: 1,
+            poorly_hardened_count: 0,
+            vulnerable_count: 1,
+            overall_score: 56,
+            scan_duration_ms: 15000,
+          };
           const services = [
             {
               id: "00000000-0000-0000-0000-00000000c001",
@@ -17633,14 +18387,59 @@ security.audit.enable = true;</fixtext>
               created_at: new Date().toISOString(),
             },
           ];
+          const attempts = {
+            never_scanned: null,
+            queued: {
+              scan_id: "00000000-0000-0000-0000-00000000d001",
+              state: "queued",
+              source_trigger: "post_build",
+              scheduled_at: "2026-04-07T08:12:00Z",
+              started_at: null,
+              completed_at: null,
+              attempts: 0,
+              error: null,
+            },
+            scanning: {
+              scan_id: "00000000-0000-0000-0000-00000000d001",
+              state: "scanning",
+              source_trigger: "post_build",
+              scheduled_at: "2026-04-07T08:12:00Z",
+              started_at: "2026-04-07T08:12:05Z",
+              completed_at: null,
+              attempts: 1,
+              error: null,
+            },
+            failed: {
+              scan_id: "00000000-0000-0000-0000-00000000d001",
+              state: "failed",
+              source_trigger: "post_build",
+              scheduled_at: "2026-04-07T08:12:00Z",
+              started_at: "2026-04-07T08:12:05Z",
+              completed_at: "2026-04-07T08:12:20Z",
+              attempts: 1,
+              error: "nix eval timed out",
+            },
+            completed: {
+              scan_id: completedSource.scan_id,
+              state: "completed",
+              source_trigger: "post_build",
+              scheduled_at: completedSource.scheduled_at,
+              started_at: completedSource.started_at,
+              completed_at: completedSource.completed_at,
+              attempts: 1,
+              error: null,
+            },
+          };
+          const hasCompletedEvidence = hardeningLifecycleState !== "never_scanned";
           await route.fulfill({
             status: 200,
             contentType: "application/json",
             body: JSON.stringify({
               selection: { kind: "current" },
               derivation_id: 42,
-              source: { scan_id: "00000000-0000-0000-0000-00000000b001", completed_at: new Date().toISOString(), overall_score: 56, total_services: 2 },
-              services,
+              source: hasCompletedEvidence ? completedSource : null,
+              services: hasCompletedEvidence ? services : [],
+              attempt: attempts[hardeningLifecycleState],
               read_only: false,
             }),
           });
@@ -17696,6 +18495,68 @@ security.audit.enable = true;</fixtext>
       await assertCount(page.getByText("nginx.service", { exact: true }), 0, "Historical no-scan target must not retain current services");
       await hardeningRevision.selectOption({ label: "gen #74 (current) · 1111111111111111111111111111111111111111" });
       await assertVisible(page.getByText("nginx.service").first(), "Returning to current should restore current hardening evidence");
+
+      const historicalHardeningLabel = "gen #73 · 2222222222222222222222222222222222222222";
+      const currentHardeningLabel = "gen #74 (current) · 1111111111111111111111111111111111111111";
+      const selectCurrentHardeningLifecycle = async (state, testId) => {
+        await hardeningRevision.selectOption({ label: historicalHardeningLabel });
+        await assertVisible(
+          page.getByRole("heading", { name: "No hardening scan for this revision" }),
+          `Expected historical boundary before loading ${state}`,
+        );
+        hardeningLifecycleState = state;
+        await hardeningRevision.selectOption({ label: currentHardeningLabel });
+        const banner = page.getByTestId(testId);
+        await assertVisible(banner, `Expected ${state} hardening lifecycle`);
+        return banner;
+      };
+
+      await assertVisible(page.getByTestId("hardening-state-completed"), "Expected completed hardening lifecycle");
+      let lifecycle = await selectCurrentHardeningLifecycle("never_scanned", "hardening-state-never-scanned");
+      await assertVisible(lifecycle.getByText("Never scanned", { exact: true }), "Expected never-scanned label");
+      await assertVisible(
+        lifecycle.getByText("No hardening scan has run for the current configuration yet.", { exact: true }),
+        "Expected current never-scanned explanation",
+      );
+      await assertVisible(page.getByRole("heading", { name: "No scan results yet", exact: true }), "Expected current no-results state");
+      await assertCount(page.getByText("nginx.service", { exact: true }), 0, "Never-scanned current target must not substitute another revision's evidence");
+      await assertEnabled(page.getByTestId("hardening-check-now"), "Never-scanned current target should permit Check now");
+
+      lifecycle = await selectCurrentHardeningLifecycle("queued", "hardening-state-queued");
+      await assertVisible(lifecycle.getByText("Queued", { exact: true }), "Expected queued label");
+      await assertVisible(page.getByText("nginx.service", { exact: true }), "Queued attempt must preserve earlier exact-target evidence");
+      await assertDisabled(page.getByTestId("hardening-check-now"), "Queued attempt must disable Check now");
+      await assertAttribute(
+        page.getByTestId("hardening-check-now"),
+        "title",
+        "A hardening scan is already queued for this configuration.",
+        "Queued attempt must explain why Check now is disabled",
+      );
+
+      lifecycle = await selectCurrentHardeningLifecycle("scanning", "hardening-state-scanning");
+      await assertVisible(lifecycle.getByText("Scanning", { exact: true }), "Expected scanning label");
+      await assertVisible(page.getByText("nginx.service", { exact: true }), "Scanning attempt must preserve earlier exact-target evidence");
+      await assertDisabled(page.getByTestId("hardening-check-now"), "Scanning attempt must disable Check now");
+      await assertAttribute(
+        page.getByTestId("hardening-check-now"),
+        "title",
+        "A hardening scan is already running for this configuration.",
+        "Scanning attempt must explain why Check now is disabled",
+      );
+
+      lifecycle = await selectCurrentHardeningLifecycle("failed", "hardening-state-failed");
+      await assertVisible(lifecycle.getByText("Last scan failed", { exact: true }), "Expected failed label");
+      await assertVisible(
+        lifecycle.getByText("The most recent hardening scan failed: nix eval timed out The evidence below is from the last scan that completed.", { exact: true }),
+        "Failed attempt must preserve and identify earlier exact-target evidence",
+      );
+      await assertVisible(page.getByText("nginx.service", { exact: true }), "Failed attempt must keep earlier exact-target evidence visible");
+      await assertEnabled(page.getByTestId("hardening-check-now"), "Failed terminal attempt should permit another Check now");
+
+      lifecycle = await selectCurrentHardeningLifecycle("completed", "hardening-state-completed");
+      await assertVisible(lifecycle.getByText("Scan complete", { exact: true }), "Expected completed label");
+      await assertVisible(page.getByText("nginx.service", { exact: true }), "Completed current target must restore exact-target evidence");
+      await assertEnabled(page.getByTestId("hardening-check-now"), "Completed terminal attempt should permit another Check now");
 
       await page.getByRole("button", { name: /^View details$/i }).first().click({ force: true });
       await assertVisible(
@@ -21536,6 +22397,16 @@ function runStaticHarnessContracts() {
       !scenario12h.includes("/poams/cves"),
     "System-detail workflow must use only the unified exact-CVE triage endpoint",
   );
+  for (const contract of [
+    "createTask326CurrentCveAuthorityFixture()",
+    'current.current_state !== "exact_current_scan"',
+    'current.source?.scan_id !== authorityFixture.currentScanId',
+    'current.vulnerabilities[0].canonical_package_name !== "current-authority-package"',
+    "Current CVE inventory leaked historical findings",
+    "Current must exclude the historical CVE",
+  ]) {
+    assertContract(scenario12h.includes(contract), `12ha Current CVE authority workflow is missing ${contract}`);
+  }
   for (const identifier of ["fleetDetail", "triageBodies"]) {
     const declaration = scenario16.search(new RegExp(`(?:const|let) ${identifier}\\b`));
     assertContract(declaration >= 0 && scenario16.indexOf(identifier, declaration + identifier.length) > declaration, `16-cves must declare ${identifier} before runtime use`);
@@ -21751,9 +22622,29 @@ function runStaticHarnessContracts() {
     'Completed archived state leaked into By-system history',
     "One system's archived state leaked into another system",
     'name: "Archived [6]"',
+    // Request-bound keyset pagination for the Completed collection.
+    'next_cursor: nextCursor',
+    'has_more: hasMore',
+    'cursor.fingerprint !== scanRequestFingerprint(params)',
+    'getByTestId("scanning-completed-load-more")',
+    'Expected the newest gray configuration scan on page one',
+    'The second Completed page',
+    'Infinite scroll',
+    'Live refresh refetched accumulated Completed pages',
+    'The Failed filter must count the whole collection',
+    'Server search must reach scans beyond page one',
+    'Debounced search must not request one page per keystroke',
+    'must restart a server-scoped request without a cursor',
+    'Archiving must remove ${hostname} from the default Completed view',
+    'Continuation after archive and restore',
   ]) {
     assertContract(scanningWorkflowSource.includes(contract), `16c Scanning workflow is missing ${contract}`);
   }
+  assertContract(
+    /BULK_TERMINAL_ROWS = (\d+)/.test(scanningWorkflowSource)
+      && Number(scanningWorkflowSource.match(/BULK_TERMINAL_ROWS = (\d+)/)[1]) > 500,
+    "16c must exercise a terminal scan collection larger than one response",
+  );
   const hardeningWorkflowSource = isolateWorkflow("28-system-hardening-tab");
   for (const contract of [
     'hardening-inventory*',
@@ -21763,6 +22654,12 @@ function runStaticHarnessContracts() {
     '"Historical hardening evidence is read-only."',
     '"No hardening scan for this revision"',
     'Historical no-scan target must not retain current services',
+    '"hardening-state-never-scanned"',
+    '"hardening-state-queued"',
+    '"hardening-state-scanning"',
+    '"hardening-state-failed"',
+    '"hardening-state-completed"',
+    'Failed attempt must preserve and identify earlier exact-target evidence',
   ]) {
     assertContract(hardeningWorkflowSource.includes(contract), `28 System Detail hardening workflow is missing ${contract}`);
   }

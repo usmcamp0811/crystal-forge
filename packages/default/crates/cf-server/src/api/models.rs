@@ -336,6 +336,10 @@ pub struct ScanningScanRecordsResponse {
     pub total: i64,
     /// Counts archived matching rows omitted from this response.
     pub hidden_archived: i64,
+    /// Is true when another request-bound keyset page exists.
+    pub has_more: bool,
+    /// Continues after the last returned stable scan identity.
+    pub next_cursor: Option<String>,
 }
 
 /// Describes one exact persisted scan lifecycle.
@@ -677,13 +681,19 @@ pub struct SystemCveInventoryVulnerability {
 }
 
 /// Identifies the evidence authority used for a system CVE inventory read.
+///
+/// # Invariants
+///
+/// A `current` selection produces only `Exact` or `NoScan`. `Legacy` is
+/// reachable only from a historical selection, is always read-only, and never
+/// describes the running deployment.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemCveInventoryAuthority {
-    /// Uses immutable schema-1 observations for the exact deployed generation.
+    /// Uses immutable schema-1 observations for the exact selected derivation.
     #[default]
     Exact,
-    /// Uses the latest completed legacy scan selected by the bounded legacy view.
+    /// Uses a completed historical scan for an explicitly selected past target.
     Legacy,
     /// Reports that no completed scan is usable for inventory display.
     NoScan,
@@ -711,6 +721,42 @@ pub enum ExactCveAuthorityFailureReason {
     ExactDerivationUnavailable,
     /// The exact derivation has no completed schema-1 CVE scan.
     NoSchema1CurrentScan,
+}
+
+/// Reports the explicit `current` selection state of one inventory read.
+///
+/// This state is present only when the request selected
+/// [`SystemCveInventorySelection::Current`]. It is absent for every historical
+/// selection because a historical selection never claims current authority.
+///
+/// # States
+///
+/// - [`Self::ExactCurrentScan`]: The server proved the exact authorized current
+///   derivation and returned its newest completed schema-1 scan. The response is
+///   mutable and can authorize triage.
+/// - [`Self::NoCurrentScan`]: The server proved the exact authorized current
+///   derivation, but that derivation has no completed schema-1 scan. The
+///   response has no source, no rows, and is read-only.
+/// - [`Self::CurrentAuthorityUnavailable`]: The server could not prove current
+///   identity or current authority. The response has no source, no rows, and is
+///   read-only. `exact_authority_failure` reports the first failed
+///   prerequisite.
+///
+/// # Invariants
+///
+/// A `current` response never contains findings from another derivation's scan.
+/// [`Self::NoCurrentScan`] and [`Self::CurrentAuthorityUnavailable`] are never
+/// mutable and never carry [`SystemCveInventorySource`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemCveCurrentAuthorityState {
+    /// Returns the newest completed schema-1 scan for the exact current
+    /// derivation.
+    ExactCurrentScan,
+    /// Reports that the exact current derivation has no completed schema-1 scan.
+    NoCurrentScan,
+    /// Reports that current identity or current authority could not be proven.
+    CurrentAuthorityUnavailable,
 }
 
 /// Gives provenance for the scan selected by a system inventory read.
@@ -875,13 +921,21 @@ pub struct SystemCveInventoryParams {
 
 /// Returns one complete non-unioned CVE inventory source for a system.
 ///
-/// `Exact` takes precedence even when `vulnerabilities` is empty. `Legacy`
-/// rows never contain server-issued exact remediation context. Inventory
+/// This compatibility endpoint always reads the `current` selection.
+/// `Exact` takes precedence even when `vulnerabilities` is empty. Inventory
 /// authority does not redefine the ordinary system justification API. `NoScan`
 /// has no source and no rows. The legacy endpoint returns at most 1,000 rows and
 /// returns HTTP 400 when the complete inventory exceeds that bound. For client
 /// compatibility, the legacy handler maps unknown source severities to `low`
 /// before it constructs this DTO.
+///
+/// # Invariants
+///
+/// A `current` read never returns `Legacy` authority. Another derivation's scan
+/// is never substituted for the current deployment. When the exact current
+/// derivation has no completed schema-1 scan, or when current authority cannot
+/// be proven, `authority` is `NoScan`, `source` is `None`, `vulnerabilities` is
+/// empty, and `current_state` reports which of the two explicit states applies.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemCveInventoryResponse {
     /// Identifies the authority selected for this response.
@@ -890,16 +944,28 @@ pub struct SystemCveInventoryResponse {
     pub exact_authority_failure: Option<ExactCveAuthorityFailureReason>,
     /// Gives the selected scan provenance, including for a clean scan.
     pub source: Option<SystemCveInventorySource>,
+    /// Reports the explicit `current` state. Older clients may ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_state: Option<SystemCveCurrentAuthorityState>,
     /// Contains all findings from only the selected source.
     pub vulnerabilities: Vec<SystemVulnerability>,
 }
 
 /// Returns one bounded page from a non-unioned system CVE inventory source.
 ///
-/// Exact authority takes precedence over legacy evidence, including for a
-/// clean exact scan. The response metadata covers the complete filtered scope.
-/// Clients must restart from the first page after an `inventory_changed`
-/// conflict.
+/// The response metadata covers the complete filtered scope. Clients must
+/// restart from the first page after an `inventory_changed` conflict.
+///
+/// # Selection contract
+///
+/// A `current` selection resolves the newest completed schema-1 scan for the
+/// exact authorized current derivation only. It never substitutes another
+/// derivation's scan, and it never returns `Legacy` authority. `current_state`
+/// reports which explicit current state applies.
+///
+/// A `retained_generation` or `exact_derivation` selection resolves the newest
+/// completed scan for exactly that target. Every historical selection is
+/// read-only, carries no `current_state`, and never authorizes remediation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemCveInventoryPageResponse {
     /// Identifies the authority selected for this response.
@@ -908,6 +974,9 @@ pub struct SystemCveInventoryPageResponse {
     pub exact_authority_failure: Option<ExactCveAuthorityFailureReason>,
     /// Gives the selected scan provenance, including for a clean scan.
     pub source: Option<SystemCveInventorySource>,
+    /// Reports the explicit `current` state. Historical selections omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_state: Option<SystemCveCurrentAuthorityState>,
     /// Gives the normalized server-validated target identity.
     pub selection: SystemCveInventorySelection,
     /// Gives the selected scan representation when a scan exists.
@@ -3686,6 +3755,34 @@ pub struct HardeningScanProvenanceResponse {
     pub scan_duration_ms: Option<i32>,
 }
 
+/// Reports the newest hardening attempt for one exact derivation.
+///
+/// This is lifecycle information and is not evidence. The field is independent
+/// of [`SystemHardeningInventoryResponse::source`]: a `queued`, `scanning`, or
+/// `failed` attempt never replaces or invalidates earlier completed evidence.
+/// A derivation that was never scanned reports no attempt at all.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HardeningScanAttemptResponse {
+    /// Identifies the newest attempt.
+    pub scan_id: Uuid,
+    /// Gives the lifecycle state as `queued`, `scanning`, `failed`, or
+    /// `completed`.
+    pub state: String,
+    /// Gives the immutable admission reason as `manual`, `legacy`,
+    /// `post_build`, or `backfill`.
+    pub source_trigger: String,
+    /// Gives the admission time.
+    pub scheduled_at: Option<DateTime<Utc>>,
+    /// Gives the execution start time, when execution started.
+    pub started_at: Option<DateTime<Utc>>,
+    /// Gives the terminal time, when the attempt finished.
+    pub completed_at: Option<DateTime<Utc>>,
+    /// Counts execution attempts recorded for the attempt row.
+    pub attempts: i32,
+    /// Gives redacted, bounded failure text for a `failed` attempt only.
+    pub error: Option<String>,
+}
+
 /// Returns hardening service rows for one exact system-owned derivation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemHardeningInventoryResponse {
@@ -3697,6 +3794,11 @@ pub struct SystemHardeningInventoryResponse {
     pub source: Option<HardeningScanProvenanceResponse>,
     /// Contains rows from exactly `source`, or no rows when no scan exists.
     pub services: Vec<HardeningServiceResultResponse>,
+    /// Gives the newest attempt for the resolved derivation.
+    ///
+    /// `None` means the derivation was never scanned, or that the target did
+    /// not resolve. It never means the attempt is unknown.
+    pub attempt: Option<HardeningScanAttemptResponse>,
     /// Is true for retained-generation and exact-derivation targets.
     pub read_only: bool,
 }
@@ -4363,6 +4465,7 @@ mod tests {
             authority: SystemCveInventoryAuthority::NoScan,
             exact_authority_failure: Some(ExactCveAuthorityFailureReason::MissingCurrentGeneration),
             source: None,
+            current_state: Some(SystemCveCurrentAuthorityState::CurrentAuthorityUnavailable),
             selection: SystemCveInventorySelection::Current,
             evidence_representation: None,
             read_only: false,
@@ -4374,6 +4477,7 @@ mod tests {
         };
         let json = serde_json::to_value(response).expect("inventory response should serialize");
         assert_eq!(json["authority"], "no_scan");
+        assert_eq!(json["current_state"], "current_authority_unavailable");
         assert!(json["vulnerabilities"].is_array());
         assert_eq!(json["metadata"]["total_findings"], 0);
         assert_eq!(json["has_more"], false);
@@ -4394,6 +4498,7 @@ mod tests {
             selection: SystemCveInventorySelection::Current,
             derivation_id: None,
             source: None,
+            attempt: None,
             services: Vec::new(),
             read_only: false,
         };

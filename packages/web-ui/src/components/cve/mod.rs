@@ -8,9 +8,9 @@ use dioxus::prelude::*;
 use uuid::Uuid;
 
 use crate::api::models::{
-    CveSeverity, ExactCveAuthorityFailureReason, SystemCveInventoryAuthority,
-    SystemCveInventoryMetadata, SystemCveInventoryPageResponse, SystemCveInventoryRowIdentity,
-    SystemCveInventorySource, SystemCveInventoryVulnerability,
+    CveSeverity, ExactCveAuthorityFailureReason, SystemCveCurrentAuthorityState,
+    SystemCveInventoryAuthority, SystemCveInventoryMetadata, SystemCveInventoryPageResponse,
+    SystemCveInventoryRowIdentity, SystemCveInventorySource, SystemCveInventoryVulnerability,
 };
 #[cfg(test)]
 use crate::api::models::{SystemCveEvidenceRepresentation, SystemCveInventorySelection};
@@ -188,6 +188,9 @@ pub fn CvesTab(
     inventory_metadata: SystemCveInventoryMetadata,
     /// Identifies the single inventory source selected by the server.
     inventory_authority: Option<SystemCveInventoryAuthority>,
+    /// Distinguishes an absent exact scan from unavailable Current authority.
+    #[props(default = None)]
+    current_state: Option<SystemCveCurrentAuthorityState>,
     /// Gives real provenance for the selected completed scan.
     inventory_source: Option<SystemCveInventorySource>,
     /// Reports why exact remediation authority was unavailable.
@@ -337,8 +340,16 @@ pub fn CvesTab(
                 },
                 Some(SystemCveInventoryAuthority::NoScan) => rsx! {
                     div { class: "sd-callout sd-callout-warning", "data-testid": "system-cves-no-scan",
-                        strong { "No completed CVE scan. " }
-                        "The current evaluated deployment and a CVE scan are required before inventory or exact remediation is available."
+                        if current_state == Some(SystemCveCurrentAuthorityState::CurrentAuthorityUnavailable) {
+                            strong { "Current CVE evidence unavailable. " }
+                            "The server could not resolve one authoritative current deployment target. Historical inventories remain separate and read-only."
+                        } else if read_only {
+                            strong { "No completed CVE scan for this historical target. " }
+                            "Evidence from another revision is not substituted."
+                        } else {
+                            strong { "No completed current CVE scan. " }
+                            "The current evaluated deployment and a CVE scan are required before inventory or exact remediation is available."
+                        }
                         if let Some(reason) = exact_authority_failure {
                             div { class: "text-xs", "Exact authority unavailable: {exact_authority_reason_label(reason)}." }
                         }
@@ -1385,6 +1396,7 @@ mod tests {
         SystemCveInventoryPageResponse {
             authority: SystemCveInventoryAuthority::Exact,
             exact_authority_failure: None,
+            current_state: Some(SystemCveCurrentAuthorityState::ExactCurrentScan),
             source: Some(SystemCveInventorySource {
                 scan_id,
                 scanner_name: "vulnix".into(),

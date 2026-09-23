@@ -727,15 +727,201 @@ pub struct ScanningStatsResponse {
     pub coverage_percent: i64,
 }
 
-/// Returns one bounded archive-aware collection of exact scan lifecycles.
+/// Returns one bounded archive-aware page of exact scan lifecycles.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScanningScanRecordsResponse {
     /// Contains rows in the server's deterministic collection order.
     pub items: Vec<ScanningScanRecordResponse>,
     /// Counts matching rows before response limiting and archive filtering.
+    ///
+    /// The count covers the whole server-filtered collection, not the returned
+    /// page, so it stays truthful while pages accumulate in the browser.
     pub total: i64,
     /// Counts archived rows omitted when archived records are not requested.
     pub hidden_archived: i64,
+    /// Is true when another request-bound keyset page exists.
+    ///
+    /// COMPATIBILITY: A server that predates request-bound scan-record
+    /// pagination omits this field. The default reports a complete collection,
+    /// which keeps the view from offering a continuation it cannot request.
+    #[serde(default)]
+    pub has_more: bool,
+    /// Continues after the last returned stable scan identity.
+    ///
+    /// The value is opaque. It is only valid for the exact request parameters
+    /// that produced it; the server rejects it for any other request identity.
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+}
+
+/// Selects the server lifecycle collection for one scan-record request.
+///
+/// Only [`ScanRecordCollectionParam::Completed`] accepts a continuation
+/// cursor. The server rejects a cursor for every other collection because
+/// nonterminal and mixed history rows have no stable keyset order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanRecordCollectionParam {
+    /// Selects waiting, queued, and running rows.
+    Active,
+    /// Selects completed and failed rows.
+    Completed,
+    /// Selects every persisted lifecycle row.
+    History,
+}
+
+impl ScanRecordCollectionParam {
+    /// Returns the exact `collection` query value accepted by the server.
+    pub fn as_param(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Completed => "completed",
+            Self::History => "history",
+        }
+    }
+
+    /// Is true when the server applies keyset pagination to this collection.
+    pub fn supports_cursor(self) -> bool {
+        matches!(self, Self::Completed)
+    }
+}
+
+/// Selects the fixed terminal status filter applied by the server.
+///
+/// The variants are fixed by the server contract. They are never derived from
+/// loaded rows, so the filter keeps the same meaning on every page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanRecordStatusParam {
+    /// Selects every terminal status.
+    All,
+    /// Selects successful terminal scans.
+    Completed,
+    /// Selects failed terminal scans.
+    Failed,
+}
+
+impl ScanRecordStatusParam {
+    /// Returns the exact `status` query value accepted by the server.
+    pub fn as_param(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Selects the revision class filter applied by the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanRecordRevisionParam {
+    /// Selects every revision class.
+    All,
+    /// Selects exact currently deployed revisions.
+    Deployed,
+    /// Selects the latest ready flake revision that is not deployed.
+    Recent,
+    /// Selects older flake revisions.
+    Superseded,
+}
+
+impl ScanRecordRevisionParam {
+    /// Returns the exact `revision` query value accepted by the server.
+    pub fn as_param(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Deployed => "deployed",
+            Self::Recent => "recent",
+            Self::Superseded => "superseded",
+        }
+    }
+}
+
+/// Selects the primary ordering key applied by the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanRecordSortParam {
+    /// Orders by configuration name.
+    Configuration,
+    /// Orders by commit revision.
+    Revision,
+    /// Orders by terminal lifecycle status.
+    Status,
+    /// Orders lexicographically by critical, high, medium, and low counts.
+    Severity,
+    /// Orders by the authoritative terminal timestamp.
+    Timestamp,
+}
+
+impl ScanRecordSortParam {
+    /// Returns the exact `sort` query value accepted by the server.
+    pub fn as_param(self) -> &'static str {
+        match self {
+            Self::Configuration => "configuration",
+            Self::Revision => "revision",
+            Self::Status => "status",
+            Self::Severity => "severity",
+            Self::Timestamp => "timestamp",
+        }
+    }
+}
+
+/// Selects the primary ordering direction applied by the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanRecordDirectionParam {
+    /// Orders the primary key from low to high.
+    Asc,
+    /// Orders the primary key from high to low.
+    Desc,
+}
+
+impl ScanRecordDirectionParam {
+    /// Returns the exact `direction` query value accepted by the server.
+    pub fn as_param(self) -> &'static str {
+        match self {
+            Self::Asc => "asc",
+            Self::Desc => "desc",
+        }
+    }
+}
+
+/// Requests one bounded, server-filtered page of exact scan lifecycles.
+///
+/// Every field maps to one validated query parameter of
+/// `GET /api/v1/scanning/scans`. The server owns search, status, revision,
+/// latest-revision, ordering, archive visibility, and page bounds, so the
+/// browser never filters or sorts a partially loaded collection and calls it
+/// authoritative.
+///
+/// INVARIANT: `limit` must be 1 through 500. The server answers any other
+/// value with a validation error instead of silently clamping the page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanningScanRecordQuery {
+    /// Selects the lifecycle collection.
+    pub collection: ScanRecordCollectionParam,
+    /// Includes archive-marked terminal rows when true.
+    pub include_archived: bool,
+    /// Restricts rows to one active system's exact flake and configuration.
+    pub system_id: Option<Uuid>,
+    /// Bounds the returned page to 1 through 500 rows.
+    pub limit: u16,
+    /// Searches configuration, flake, commit, scan UUID, and derivation ID.
+    ///
+    /// The server normalizes whitespace and case and rejects a value longer
+    /// than 200 characters after normalization.
+    pub search: Option<String>,
+    /// Selects the terminal status filter.
+    pub status: ScanRecordStatusParam,
+    /// Selects the revision class filter.
+    pub revision: ScanRecordRevisionParam,
+    /// Requires the latest ready flake revision when true.
+    pub latest_only: bool,
+    /// Selects the primary ordering key.
+    pub sort: ScanRecordSortParam,
+    /// Selects the primary ordering direction.
+    pub direction: ScanRecordDirectionParam,
+    /// Continues from the opaque cursor returned by the previous page.
+    ///
+    /// The cursor is only accepted for [`ScanRecordCollectionParam::Completed`]
+    /// and only with the parameters that produced it.
+    pub after: Option<String>,
 }
 
 /// Describes one exact persisted scan lifecycle.
@@ -4842,6 +5028,31 @@ pub struct SystemHardeningInventorySourceResponse {
     pub total_services: i32,
 }
 
+/// Reports the newest hardening attempt for one exact revision target.
+///
+/// This is lifecycle information, not evidence. A `queued`, `scanning`, or
+/// `failed` attempt never replaces the completed evidence carried by
+/// [`SystemHardeningInventoryResponse::source`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemHardeningInventoryAttemptResponse {
+    /// Identifies the newest attempt.
+    pub scan_id: Uuid,
+    /// Gives `queued`, `scanning`, `failed`, or `completed`.
+    pub state: String,
+    /// Gives `manual`, `legacy`, `post_build`, or `backfill`.
+    pub source_trigger: String,
+    /// Gives the admission time.
+    pub scheduled_at: Option<DateTime<Utc>>,
+    /// Gives the execution start time, when execution started.
+    pub started_at: Option<DateTime<Utc>>,
+    /// Gives the terminal time, when the attempt finished.
+    pub completed_at: Option<DateTime<Utc>>,
+    /// Counts execution attempts recorded for the attempt.
+    pub attempts: i32,
+    /// Gives server-redacted, bounded failure text for a `failed` attempt.
+    pub error: Option<String>,
+}
+
 /// Returns hardening evidence for one server-authorized system revision target.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemHardeningInventoryResponse {
@@ -4853,6 +5064,13 @@ pub struct SystemHardeningInventoryResponse {
     pub source: Option<SystemHardeningInventorySourceResponse>,
     /// Contains only service rows from the selected scan.
     pub services: Vec<HardeningServiceResultResponse>,
+    /// Gives the newest attempt, or `None` when this target was never scanned.
+    ///
+    /// The default keeps responses from a server that predates the lifecycle
+    /// contract readable. When completed `source` evidence exists, the UI
+    /// derives the completed state instead of claiming the target was unscanned.
+    #[serde(default)]
+    pub attempt: Option<SystemHardeningInventoryAttemptResponse>,
     /// Is true when mutations cannot apply to the selected historical target.
     pub read_only: bool,
 }
@@ -5154,6 +5372,21 @@ pub enum ExactCveAuthorityFailureReason {
     NoSchema1CurrentScan,
 }
 
+/// Reports the explicit authority state of a Current system CVE inventory read.
+///
+/// Historical selections omit this state because they never claim authority for
+/// the running deployment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemCveCurrentAuthorityState {
+    /// Uses the newest completed schema-1 scan for the exact running derivation.
+    ExactCurrentScan,
+    /// Reports that the exact running derivation has no completed schema-1 scan.
+    NoCurrentScan,
+    /// Reports that the server could not prove the current deployment identity.
+    CurrentAuthorityUnavailable,
+}
+
 /// Gives provenance for the selected completed CVE scan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemCveInventorySource {
@@ -5248,6 +5481,9 @@ pub struct SystemCveInventoryPageResponse {
     pub authority: SystemCveInventoryAuthority,
     /// Reports why exact authority was unavailable for a fallback response.
     pub exact_authority_failure: Option<ExactCveAuthorityFailureReason>,
+    /// Reports the explicit state when [`Self::selection`] is Current.
+    #[serde(default)]
+    pub current_state: Option<SystemCveCurrentAuthorityState>,
     /// Gives scan provenance, including when the scan is clean.
     pub source: Option<SystemCveInventorySource>,
     #[serde(default)]
@@ -6429,8 +6665,9 @@ mod tests {
         ComplianceControlEvidence, ConfigObservationLifecycle, ConfigObservationPayload,
         ConfigObservationRequestResponse, ConfigObservationResponse, CreatePolicyDraftRequest,
         CreatePolicyDraftResponse, EvaluatedOption, EvaluationModuleSummary,
-        ExactCveAuthorityFailureReason, SystemCommitsResponse, SystemCveInventoryAuthority,
-        SystemCveInventoryPageResponse, SystemHardeningInventoryResponse, XccdfPreviewResponse,
+        ExactCveAuthorityFailureReason, SystemCommitsResponse, SystemCveCurrentAuthorityState,
+        SystemCveInventoryAuthority, SystemCveInventoryPageResponse,
+        SystemHardeningInventoryResponse, XccdfPreviewResponse,
         normalize_inventory_relation_counts,
     };
 
@@ -6489,6 +6726,48 @@ mod tests {
         assert!(response.source.is_none());
         assert!(response.services.is_empty());
         assert!(!response.read_only);
+        // A response without the lifecycle field means "never scanned", not
+        // "unknown". Older servers must stay readable.
+        assert!(response.attempt.is_none());
+    }
+
+    #[test]
+    fn hardening_inventory_keeps_completed_evidence_when_a_later_attempt_failed() {
+        let response: SystemHardeningInventoryResponse =
+            serde_json::from_value(serde_json::json!({
+                "selection": {"kind": "current"},
+                "derivation_id": 42,
+                "source": {
+                    "scan_id": "00000000-0000-0000-0000-000000000001",
+                    "completed_at": "2026-09-01T00:00:00Z",
+                    "overall_score": 71,
+                    "total_services": 9
+                },
+                "services": [],
+                "attempt": {
+                    "scan_id": "00000000-0000-0000-0000-000000000002",
+                    "state": "failed",
+                    "source_trigger": "post_build",
+                    "scheduled_at": "2026-09-02T00:00:00Z",
+                    "started_at": "2026-09-02T00:01:00Z",
+                    "completed_at": "2026-09-02T00:02:00Z",
+                    "attempts": 3,
+                    "error": "nix eval exited with status 1"
+                },
+                "read_only": false
+            }))
+            .expect("deserialize hardening inventory with a failed newer attempt");
+
+        let source = response.source.expect("completed evidence must survive");
+        assert_eq!(source.overall_score, Some(71));
+        let attempt = response.attempt.expect("lifecycle attempt must be present");
+        assert_eq!(attempt.state, "failed");
+        assert_eq!(attempt.source_trigger, "post_build");
+        assert_eq!(attempt.attempts, 3);
+        assert_eq!(
+            attempt.error.as_deref(),
+            Some("nix eval exited with status 1")
+        );
     }
 
     #[test]
@@ -6519,6 +6798,7 @@ mod tests {
         let exact: SystemCveInventoryPageResponse = serde_json::from_value(serde_json::json!({
             "authority": "exact",
             "exact_authority_failure": null,
+            "current_state": "exact_current_scan",
             "source": {
                 "scan_id": "00000000-0000-0000-0000-000000000441",
                 "scanner_name": "vulnix",
@@ -6558,6 +6838,10 @@ mod tests {
         .expect("exact-clean inventory should deserialize");
         assert_eq!(exact.authority, SystemCveInventoryAuthority::Exact);
         assert!(exact.exact_authority_failure.is_none());
+        assert_eq!(
+            exact.current_state,
+            Some(SystemCveCurrentAuthorityState::ExactCurrentScan)
+        );
         assert!(exact.source.is_some());
         assert_eq!(exact.vulnerabilities.len(), 1);
         assert_eq!(exact.metadata.total_findings, 1315);
@@ -6600,6 +6884,7 @@ mod tests {
         let no_scan: SystemCveInventoryPageResponse = serde_json::from_value(serde_json::json!({
             "authority": "no_scan",
             "exact_authority_failure": "missing_current_generation",
+            "current_state": "current_authority_unavailable",
             "source": null,
             "vulnerabilities": [],
             "metadata": {
@@ -6614,6 +6899,10 @@ mod tests {
         }))
         .expect("no-scan inventory should deserialize");
         assert_eq!(no_scan.authority, SystemCveInventoryAuthority::NoScan);
+        assert_eq!(
+            no_scan.current_state,
+            Some(SystemCveCurrentAuthorityState::CurrentAuthorityUnavailable)
+        );
         assert!(no_scan.source.is_none());
     }
 

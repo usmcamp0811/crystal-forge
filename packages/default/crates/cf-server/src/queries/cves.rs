@@ -12,9 +12,10 @@ use uuid::Uuid;
 use crate::api::models::{
     CveAffectedSystemDetail, CveDetail, CveFilters, CveFleetStats, CveJustification,
     CveJustificationInput, CveListItem, CvePackageGroup, ExactCveAuthorityFailureReason,
-    FleetCveInventorySection, SystemCveEvidenceRepresentation, SystemCveInventoryAuthority,
-    SystemCveInventoryCandidate, SystemCveInventoryMetadata, SystemCveInventoryParams,
-    SystemCveInventorySelection, SystemCveInventorySeverityCounts, SystemCveInventorySource,
+    FleetCveInventorySection, SystemCveCurrentAuthorityState, SystemCveEvidenceRepresentation,
+    SystemCveInventoryAuthority, SystemCveInventoryCandidate, SystemCveInventoryMetadata,
+    SystemCveInventoryParams, SystemCveInventorySelection, SystemCveInventorySeverityCounts,
+    SystemCveInventorySource,
 };
 use crate::auth::extractors::AuthenticatedUser;
 
@@ -233,6 +234,8 @@ pub struct SystemCveInventoryQuery {
     pub exact_authority_failure: Option<ExactCveAuthorityFailureReason>,
     /// Gives real provenance for the selected completed scan.
     pub source: Option<SystemCveInventorySource>,
+    /// Reports the explicit current state. Historical selections leave it `None`.
+    pub current_state: Option<SystemCveCurrentAuthorityState>,
     /// Gives the normalized server-validated target identity.
     pub selection: SystemCveInventorySelection,
     /// Gives the selected scan representation when a scan exists.
@@ -345,6 +348,12 @@ impl SystemCveInventoryPageRequest {
         })
     }
 
+    /// Returns the normalized server-validated inventory target.
+    #[must_use]
+    pub fn selection(&self) -> SystemCveInventorySelection {
+        self.selection
+    }
+
     fn filter_fingerprint(&self) -> String {
         let mut digest = Sha256::new();
         digest.update(self.search.as_deref().unwrap_or_default());
@@ -395,6 +404,17 @@ fn parse_inventory_selection(
     SystemCveInventorySelection::from_target_params(target, target_id)
         .map_err(|message| SystemCveInventoryPageError::InvalidRequest(message).into())
 }
+
+/// Identifies the wire shape of [`SystemCveInventoryCursor`].
+///
+/// COMPATIBILITY: A prior revision encoded this field as `1` but required `2`
+/// on decode, so every issued cursor was unconditionally rejected on the next
+/// page request. That defect predated Current-authority changes and made
+/// every multi-page System Detail CVE inventory browse fail after the first
+/// page. The encoder and decoder now share this single constant so they
+/// cannot diverge again. Increment it, and add explicit version handling,
+/// only when the cursor's field shape changes incompatibly.
+const SYSTEM_CVE_INVENTORY_CURSOR_VERSION: u8 = 1;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -456,13 +476,13 @@ fn parse_exact_authority_failure(value: &str) -> Result<ExactCveAuthorityFailure
     }
 }
 
-/// Fetches one read-only CVE inventory source for a system.
+/// Fetches one read-only CVE inventory source for a system's current target.
 ///
-/// The function determines exact authority before it reads findings. Exact
-/// authority therefore wins for both vulnerable and clean scans. If exact
-/// authority is unavailable, the function uses the latest completed scan under
-/// the bounded `view_system_vulnerabilities` selection semantics. It never
-/// unions sources or infers immutable observations from legacy data.
+/// The function proves exact current authority before it reads findings. Exact
+/// authority therefore wins for both vulnerable and clean scans. When current
+/// authority or the exact current scan is absent, the function returns an
+/// explicit empty state. It never substitutes another derivation's scan, never
+/// unions sources, and never infers immutable observations from legacy data.
 ///
 /// All authority and row reads use one repeatable-read, read-only transaction.
 /// Legacy rows have no exact observation identity and cannot authorize a
@@ -823,6 +843,7 @@ async fn fetch_historical_system_cve_inventory_tx(
             authority: SystemCveInventoryAuthority::NoScan,
             exact_authority_failure: None,
             source: None,
+            current_state: None,
             selection: page.selection,
             evidence_representation: None,
             read_only: true,
@@ -852,6 +873,7 @@ async fn fetch_historical_system_cve_inventory_tx(
             scanner_version,
             completed_at,
         },
+        None,
         page.selection,
         evidence_representation,
         true,
@@ -860,6 +882,17 @@ async fn fetch_historical_system_cve_inventory_tx(
     .await
 }
 
+/// Resolves one inventory page for the requested selection.
+///
+/// # Current authority rules
+///
+/// A `current` selection resolves the newest completed schema-1 scan whose
+/// `derivation_id` equals the exact authorized current derivation, ordered by
+/// `completed_at DESC` then `id DESC`. The exact current derivation is proven
+/// only through the latest system observation, its generation-store agreement,
+/// the retained generation for that exact generation, the retained immutable
+/// integrity-version-1 evaluation artifact, and the retained NixOS derivation
+/// lineage. Every other outcome returns an explicit empty read-only state.
 async fn fetch_system_cve_inventory_tx(
     transaction: &mut Transaction<'_, Postgres>,
     system_id: Uuid,
@@ -949,6 +982,7 @@ async fn fetch_system_cve_inventory_tx(
             SystemCveInventoryAuthority::Exact,
             None,
             source,
+            Some(SystemCveCurrentAuthorityState::ExactCurrentScan),
             SystemCveInventorySelection::Current,
             SystemCveEvidenceRepresentation::Schema1Observations,
             false,
@@ -962,72 +996,40 @@ async fn fetch_system_cve_inventory_tx(
         .as_deref()
         .map(parse_exact_authority_failure)
         .transpose()?;
-    // COMPATIBILITY: The predicates and ordering mirror migration 0177's
-    // bounded view. Rows are then loaded by this scan ID so provenance cannot
-    // diverge from findings if the view definition changes.
-    let legacy_source = sqlx::query_as::<_, (Uuid, DateTime<Utc>, String, Option<String>, i32)>(
-        r#"SELECT scan.id,scan.completed_at,scan.scanner_name,scan.scanner_version,
-                  scan.evidence_schema_version
-           FROM systems system
-           JOIN derivations derivation ON derivation.derivation_name=COALESCE(
-                NULLIF(BTRIM(system.system_configuration_name), ''),system.hostname)
-               AND derivation.derivation_type='nixos'
-            JOIN derivation_statuses status ON status.id=derivation.status_id
-              AND status.name=ANY(ARRAY['build-complete','complete'])
-            JOIN commits commit ON commit.id=derivation.commit_id
-              AND commit.flake_id=system.flake_id
-            JOIN flakes flake ON flake.id=commit.flake_id
-            JOIN cve_scans scan ON scan.derivation_id=derivation.id
-             AND scan.status='completed' AND scan.completed_at IS NOT NULL
-           WHERE system.id=$1
-           ORDER BY scan.completed_at DESC,scan.id DESC LIMIT 1"#,
-    )
-    .bind(system_id)
-    .fetch_optional(&mut **transaction)
-    .await?;
-
-    let Some((scan_id, completed_at, scanner_name, scanner_version, evidence_schema_version)) =
-        legacy_source
-    else {
-        if let Some(cursor) = page.after.as_deref() {
-            decode_system_cve_inventory_cursor(cursor)?;
-            return Err(SystemCveInventoryPageError::InventoryChanged.into());
+    // SECURITY: Current has no evidence fallback. Substituting another
+    // derivation's completed scan would present findings from a revision that
+    // the system does not run and would let a stale scan authorize triage or
+    // POA&M mutation. Both explicit states below are read-only, carry no
+    // source, and return no rows.
+    let current_state = match failure {
+        Some(ExactCveAuthorityFailureReason::NoSchema1CurrentScan) => {
+            SystemCveCurrentAuthorityState::NoCurrentScan
         }
-        return Ok(SystemCveInventoryQuery {
-            authority: SystemCveInventoryAuthority::NoScan,
-            exact_authority_failure: failure,
-            source: None,
-            selection: SystemCveInventorySelection::Current,
-            evidence_representation: None,
-            read_only: true,
-            rows: Vec::new(),
-            metadata: SystemCveInventoryMetadata::default(),
-            inventory_revision: inventory_revision(&format!("{}|no_scan|{:?}", system_id, failure)),
-            has_more: false,
-            next_cursor: None,
-        });
+        _ => SystemCveCurrentAuthorityState::CurrentAuthorityUnavailable,
     };
-    fetch_inventory_page_for_source(
-        transaction,
-        system_id,
-        SystemCveInventoryAuthority::Legacy,
-        failure,
-        SystemCveInventorySource {
-            scan_id,
-            scanner_name,
-            scanner_version,
-            completed_at,
-        },
-        SystemCveInventorySelection::Current,
-        if evidence_schema_version == 1 {
-            SystemCveEvidenceRepresentation::Schema1Observations
-        } else {
-            SystemCveEvidenceRepresentation::Schema0Projection
-        },
-        true,
-        page,
-    )
-    .await
+    if let Some(cursor) = page.after.as_deref() {
+        // A cursor was issued against a source that this read no longer
+        // selects. Validate its encoding first so a malformed cursor keeps
+        // returning 400 rather than 409.
+        decode_system_cve_inventory_cursor(cursor)?;
+        return Err(SystemCveInventoryPageError::InventoryChanged.into());
+    }
+    Ok(SystemCveInventoryQuery {
+        authority: SystemCveInventoryAuthority::NoScan,
+        exact_authority_failure: failure,
+        source: None,
+        current_state: Some(current_state),
+        selection: SystemCveInventorySelection::Current,
+        evidence_representation: None,
+        read_only: true,
+        rows: Vec::new(),
+        metadata: SystemCveInventoryMetadata::default(),
+        inventory_revision: inventory_revision(&format!(
+            "{system_id}|current|{current_state:?}|{failure:?}"
+        )),
+        has_more: false,
+        next_cursor: None,
+    })
 }
 
 const EXACT_INVENTORY_CTE: &str = r#"WITH selected_observations AS (
@@ -1122,6 +1124,7 @@ async fn fetch_inventory_page_for_source(
     authority: SystemCveInventoryAuthority,
     exact_authority_failure: Option<ExactCveAuthorityFailureReason>,
     source: SystemCveInventorySource,
+    current_state: Option<SystemCveCurrentAuthorityState>,
     selection: SystemCveInventorySelection,
     evidence_representation: SystemCveEvidenceRepresentation,
     read_only: bool,
@@ -1195,7 +1198,7 @@ async fn fetch_inventory_page_for_source(
         rows.last()
             .map(|row| {
                 encode_system_cve_inventory_cursor(&SystemCveInventoryCursor {
-                    version: 1,
+                    version: SYSTEM_CVE_INVENTORY_CURSOR_VERSION,
                     system_id,
                     authority,
                     source_scan_id: source.scan_id,
@@ -1215,6 +1218,7 @@ async fn fetch_inventory_page_for_source(
         authority,
         exact_authority_failure,
         source: Some(source),
+        current_state,
         selection,
         evidence_representation: Some(evidence_representation),
         read_only,
@@ -1320,7 +1324,7 @@ fn decode_system_cve_inventory_cursor(value: &str) -> Result<SystemCveInventoryC
         .map_err(|_| SystemCveInventoryPageError::InvalidCursor)?;
     let cursor: SystemCveInventoryCursor =
         serde_json::from_slice(&bytes).map_err(|_| SystemCveInventoryPageError::InvalidCursor)?;
-    if cursor.version != 2
+    if cursor.version != SYSTEM_CVE_INVENTORY_CURSOR_VERSION
         || cursor.filter_fingerprint.len() != 64
         || cursor.inventory_revision.len() != 64
         || cursor.canonical_cve_id.is_empty()
@@ -2993,6 +2997,14 @@ mod tests {
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
     async fn system_inventory_classifies_fallbacks_and_exact_precedence(pool: PgPool) {
         let suffix = Uuid::new_v4().simple().to_string();
+        // `inventory_test_system` reports no `system_states` row at all, so this
+        // system has never established exact current authority. Before the
+        // current-authority fix, `Current` fell back to the newest completed
+        // scan for ANY matching derivation and labeled it `Legacy`. That
+        // substitution is now removed: `Current` never renders a scan the
+        // system is not proven to be running, regardless of what compatibility
+        // evidence exists elsewhere for the same hostname. It must report the
+        // explicit unavailable state instead.
         let (legacy_system, legacy_commit_id) = inventory_test_system(&pool, &suffix).await;
         let legacy_scan = completed_legacy_scan(&pool, &legacy_system, legacy_commit_id).await;
         add_legacy_finding(&pool, legacy_scan, legacy_commit_id, &suffix).await;
@@ -3000,12 +3012,20 @@ mod tests {
         let legacy = fetch_system_cve_inventory(&pool, legacy_system.id)
             .await
             .expect("legacy inventory should load");
-        assert_eq!(legacy.authority, SystemCveInventoryAuthority::Legacy);
+        assert_eq!(legacy.authority, SystemCveInventoryAuthority::NoScan);
         assert_eq!(
-            legacy.source.as_ref().map(|source| source.scan_id),
-            Some(legacy_scan)
+            legacy.exact_authority_failure,
+            Some(ExactCveAuthorityFailureReason::MissingCurrentGeneration)
         );
-        assert_eq!(legacy.rows.len(), 1, "legacy findings must remain visible");
+        assert_eq!(
+            legacy.current_state,
+            Some(SystemCveCurrentAuthorityState::CurrentAuthorityUnavailable)
+        );
+        assert!(
+            legacy.source.is_none(),
+            "Current must never substitute a scan from an unproven revision"
+        );
+        assert!(legacy.rows.is_empty());
 
         let duplicate_package_id: i32 = sqlx::query_scalar(
             r#"INSERT INTO derivations(
@@ -3035,27 +3055,31 @@ mod tests {
         .execute(&pool)
         .await
         .expect("duplicate legacy vulnerability should persist");
-        let deduplicated = fetch_system_cve_inventory(&pool, legacy_system.id)
+        // Adding more legacy-only evidence must not change the outcome: with no
+        // proven current identity, Current stays explicitly unavailable rather
+        // than picking up (deduplicated or not) legacy findings.
+        let still_unavailable = fetch_system_cve_inventory(&pool, legacy_system.id)
             .await
-            .expect("deduplicated legacy inventory should load");
-        assert_eq!(deduplicated.rows.len(), 1);
+            .expect("still-unavailable inventory should load");
         assert_eq!(
-            deduplicated.rows[0].canonical_package_name,
-            "legacy-package"
+            still_unavailable.authority,
+            SystemCveInventoryAuthority::NoScan
         );
+        assert!(still_unavailable.source.is_none());
+        assert!(still_unavailable.rows.is_empty());
 
         let clean_suffix = Uuid::new_v4().simple().to_string();
         let (clean_system, clean_commit_id) = inventory_test_system(&pool, &clean_suffix).await;
         completed_legacy_scan(&pool, &clean_system, clean_commit_id).await;
         let clean = fetch_system_cve_inventory(&pool, clean_system.id)
             .await
-            .expect("legacy-clean inventory should load");
-        assert_eq!(clean.authority, SystemCveInventoryAuthority::Legacy);
-        assert!(clean.source.is_some());
+            .expect("clean-system inventory should load");
+        assert_eq!(clean.authority, SystemCveInventoryAuthority::NoScan);
         assert!(
-            clean.rows.is_empty(),
-            "completed scan with no findings is legacy-clean"
+            clean.source.is_none(),
+            "Current must not substitute a legacy scan even when it reports no findings"
         );
+        assert!(clean.rows.is_empty());
 
         let no_scan_suffix = Uuid::new_v4().simple().to_string();
         let (no_scan_system, _) = inventory_test_system(&pool, &no_scan_suffix).await;
@@ -3313,13 +3337,25 @@ mod tests {
         .execute(&pool)
         .await
         .expect("unretained current state should persist");
+        // The system's exact current identity moved to generation 8, which has
+        // no retained-generation row. Current must report the explicit
+        // unavailable state rather than substituting the prior exact-clean
+        // evidence, even though that evidence is otherwise valid history.
         let unretained = fetch_system_cve_inventory(&pool, legacy_system.id)
             .await
-            .expect("unretained inventory should fall back");
-        assert_eq!(unretained.authority, SystemCveInventoryAuthority::Legacy);
+            .expect("unretained inventory should report an explicit state");
+        assert_eq!(unretained.authority, SystemCveInventoryAuthority::NoScan);
         assert_eq!(
             unretained.exact_authority_failure,
             Some(ExactCveAuthorityFailureReason::RetainedGenerationUnavailable)
+        );
+        assert_eq!(
+            unretained.current_state,
+            Some(SystemCveCurrentAuthorityState::CurrentAuthorityUnavailable)
+        );
+        assert!(
+            unretained.source.is_none(),
+            "a missing retained generation must not fall back to older exact evidence"
         );
 
         sqlx::query(
@@ -3335,15 +3371,19 @@ mod tests {
         .expect("mismatched current state should persist");
         let mismatch = fetch_system_cve_inventory(&pool, legacy_system.id)
             .await
-            .expect("mismatched inventory should fall back");
-        assert_eq!(mismatch.authority, SystemCveInventoryAuthority::Legacy);
+            .expect("mismatched inventory should report an explicit state");
+        assert_eq!(mismatch.authority, SystemCveInventoryAuthority::NoScan);
         assert_eq!(
             mismatch.exact_authority_failure,
             Some(ExactCveAuthorityFailureReason::CurrentStoreMismatch)
         );
         assert_eq!(
-            mismatch.source.as_ref().map(|source| source.scan_id),
-            Some(exact_clean_scan_id)
+            mismatch.current_state,
+            Some(SystemCveCurrentAuthorityState::CurrentAuthorityUnavailable)
+        );
+        assert!(
+            mismatch.source.is_none(),
+            "a generation/store mismatch must not fall back to older exact evidence"
         );
         assert!(mismatch.rows.is_empty());
         let mismatched_fleet = fetch_cve_list(
@@ -3407,15 +3447,19 @@ mod tests {
         .expect("unverified-lineage current state should persist");
         let unverified = fetch_system_cve_inventory(&pool, legacy_system.id)
             .await
-            .expect("unverified lineage should fall back");
-        assert_eq!(unverified.authority, SystemCveInventoryAuthority::Legacy);
+            .expect("unverified lineage should report an explicit state");
+        assert_eq!(unverified.authority, SystemCveInventoryAuthority::NoScan);
         assert_eq!(
             unverified.exact_authority_failure,
             Some(ExactCveAuthorityFailureReason::LineageUnverified)
         );
         assert_eq!(
-            unverified.source.as_ref().map(|source| source.scan_id),
-            Some(exact_clean_scan_id)
+            unverified.current_state,
+            Some(SystemCveCurrentAuthorityState::CurrentAuthorityUnavailable)
+        );
+        assert!(
+            unverified.source.is_none(),
+            "unverified lineage must not fall back to older exact evidence"
         );
         assert!(unverified.rows.is_empty());
     }
@@ -3563,9 +3607,28 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
     async fn system_inventory_paginates_1315_stable_findings(pool: PgPool) {
+        // This test exercises `LEGACY_INVENTORY_CTE` pagination, filtering, and
+        // query-plan shape through `Schema0Projection` evidence. That evidence
+        // representation remains a legitimate historical/`ExactDerivation`
+        // outcome; only the removed `Current`-selection substitution made it
+        // reachable from `Current`. The fixture therefore selects the legacy
+        // derivation directly by `ExactDerivation` instead of relying on
+        // `SystemCveInventoryPageRequest::default()`'s `Current` selection.
         let suffix = Uuid::new_v4().simple().to_string();
         let (system, commit_id) = inventory_test_system(&pool, &suffix).await;
         let scan_id = completed_legacy_scan(&pool, &system, commit_id).await;
+        let legacy_derivation_id: i32 =
+            sqlx::query_scalar("SELECT derivation_id FROM cve_scans WHERE id=$1")
+                .bind(scan_id)
+                .fetch_one(&pool)
+                .await
+                .expect("legacy scan derivation id should load");
+        let default_request = SystemCveInventoryPageRequest {
+            selection: SystemCveInventorySelection::ExactDerivation {
+                derivation_id: legacy_derivation_id,
+            },
+            ..SystemCveInventoryPageRequest::default()
+        };
         sqlx::query(
             r#"INSERT INTO cves(id,cvss_v3_score,description,published_date)
                SELECT 'CVE-2098-' || lpad(value::text,4,'0'),5.0,
@@ -3673,17 +3736,24 @@ mod tests {
             "representative inventory plans must each execute within 10 seconds"
         );
 
-        let legacy_error = fetch_system_cve_inventory(&pool, system.id)
-            .await
-            .expect_err("the complete compatibility response must retain its fixed bound");
+        let legacy_complete = fetch_system_cve_inventory_page(
+            &pool,
+            system.id,
+            &SystemCveInventoryPageRequest {
+                limit: MAX_SYSTEM_CVE_INVENTORY_ROWS,
+                ..default_request.clone()
+            },
+        )
+        .await
+        .expect("bounded complete page should load");
         assert!(
-            is_system_cve_inventory_overflow(&legacy_error),
-            "unexpected legacy inventory error: {legacy_error:#}"
+            legacy_complete.has_more,
+            "the complete compatibility response must retain its fixed bound"
         );
 
         let mut request = SystemCveInventoryPageRequest {
             limit: 500,
-            ..SystemCveInventoryPageRequest::default()
+            ..default_request.clone()
         };
         let mut identities = Vec::new();
         let mut page_count = 0;
@@ -3723,6 +3793,8 @@ mod tests {
                 q: Some("  CVE-2098-0001  ".into()),
                 severity: Some("critical,high".into()),
                 status: Some("fix_available".into()),
+                target: Some("exact_derivation".into()),
+                target_id: Some(legacy_derivation_id.to_string()),
                 ..SystemCveInventoryParams::default()
             })
             .expect("filters should validate"),
@@ -3741,7 +3813,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 limit: 1,
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3753,7 +3825,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 after: Some("not-a-cursor".into()),
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3771,7 +3843,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 after: Some(cursor.clone()),
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3793,7 +3865,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 after: Some(cursor.clone()),
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3812,7 +3884,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 after: Some(cursor),
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3827,7 +3899,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 limit: 1,
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3846,7 +3918,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 after: Some(cursor),
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3861,7 +3933,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 limit: 1,
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3877,7 +3949,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 after: Some(cursor),
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3892,7 +3964,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 limit: 1,
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3910,7 +3982,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 after: Some(cursor),
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3925,7 +3997,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 limit: 1,
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3938,7 +4010,7 @@ mod tests {
             &SystemCveInventoryPageRequest {
                 after: Some(cursor.clone()),
                 severities: vec!["critical".into()],
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3954,14 +4026,21 @@ mod tests {
             other_system.id,
             &SystemCveInventoryPageRequest {
                 after: Some(cursor.clone()),
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
         .expect_err("cross-system cursor must not be accepted");
+        // `default_request`'s `ExactDerivation` selection names a derivation
+        // whose `derivation_name` matches only the original system's
+        // configuration/hostname. For `other_system`, target resolution
+        // therefore fails closed before the cursor is even inspected. This is
+        // an equally non-disclosing rejection; the earlier `Current`-only test
+        // observed `InventoryChanged` instead because Current always resolves
+        // relative to the requesting system's own identity.
         assert_eq!(
             system_cve_inventory_page_error(&cross_system),
-            Some(&SystemCveInventoryPageError::InventoryChanged)
+            Some(&SystemCveInventoryPageError::TargetUnavailable)
         );
         sqlx::query(
             r#"INSERT INTO cve_scans(
@@ -3978,7 +4057,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 after: Some(cursor),
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await

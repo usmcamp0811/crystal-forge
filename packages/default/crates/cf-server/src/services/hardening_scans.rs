@@ -10,12 +10,21 @@ use crate::derivations::utils::build_flake_reference;
 use crate::hardening::scanner::HardeningScanner;
 use crate::models::evaluate_with_policies::HEAVY_NIX_ADVISORY_LOCK;
 use crate::queries::hardening_scans::{
-    ClaimedHardeningScan, claim_next_hardening_scan, create_hardening_scan,
-    get_active_scan_for_derivation, hardening_queue_depth, list_commit_hardening_targets,
-    mark_scan_failed, persist_completed_hardening_scan, recover_stale_hardening_scans,
+    ClaimedHardeningScan, HARDENING_BACKFILL_BATCH_SIZE, claim_next_hardening_scan,
+    create_hardening_scan, enqueue_hardening_backfill_batch, get_active_scan_for_derivation,
+    hardening_active_work_count, hardening_queue_depth, mark_scan_failed,
+    persist_completed_hardening_scan, recover_stale_hardening_scans,
 };
 
 const HARDENING_QUEUE_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Separates two bounded backfill cycles.
+///
+/// Backfill discovery inspects build history across every NixOS derivation, so
+/// it is deliberately far slower than the claim poll. Five minutes keeps
+/// recovery progressing while leaving the claim loop responsive to new manual
+/// and post-build work.
+const HARDENING_BACKFILL_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Domain errors for hardening scan operations.
 #[derive(Debug)]
@@ -178,8 +187,9 @@ async fn run_hardening_scan(pool: &PgPool, claimed: ClaimedHardeningScan) -> Res
 ///    worker process cannot claim the same row.  Migration 0188 also creates a
 ///    partial unique index that prevents more than one globally `in_progress`
 ///    row at any time.
-/// 2. **Process**: The single `tokio::spawn` in `server/mod.rs` starts exactly
-///    one instance of this loop.  Do not spawn additional instances.
+/// 2. **Process**: The single `tokio::spawn` in the `hardening-worker` binary
+///    starts exactly one instance of this loop.  Do not spawn additional
+///    instances.
 ///
 /// IMPORTANT: This function must never call `tokio::spawn` for individual scan
 /// items.  The previous design spawned one task per scan and caused a
@@ -189,8 +199,23 @@ async fn run_hardening_scan(pool: &PgPool, claimed: ClaimedHardeningScan) -> Res
 /// Correctness depends entirely on PostgreSQL state.  Polling (rather than
 /// in-memory notifications) means queued work survives process restarts without
 /// a fan-out event storm.
-pub async fn run_hardening_scan_queue(pool: PgPool) {
-    info!("Starting serial hardening scan queue worker");
+///
+/// This loop also owns the bounded backfill described by
+/// [`run_hardening_backfill_cycle`]. Backfill runs on its own slower cadence,
+/// admits at most [`HARDENING_BACKFILL_BATCH_SIZE`] rows per cycle, and shares
+/// the serial execution path; it therefore adds queue depth, never concurrency.
+///
+/// # Parameters
+///
+/// `auto_hardening_scans` mirrors `server.auto_hardening_scans` and is read by
+/// the worker binary from configuration. When it is `false` no backfill cycle
+/// admits work. Manual scans already in the queue are still executed, because
+/// the flag governs automatic admission only.
+pub async fn run_hardening_scan_queue(pool: PgPool, auto_hardening_scans: bool) {
+    info!(
+        auto_hardening_scans,
+        "Starting serial hardening scan queue worker"
+    );
 
     match recover_stale_hardening_scans(&pool).await {
         Ok(recovered) if recovered > 0 => {
@@ -202,9 +227,33 @@ pub async fn run_hardening_scan_queue(pool: PgPool) {
 
     let mut ticker = tokio::time::interval(HARDENING_QUEUE_POLL_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // The first cycle runs on the first tick so a restarted worker resumes
+    // recovery immediately instead of after a full backfill interval.
+    let mut last_backfill: Option<tokio::time::Instant> = None;
 
     loop {
         ticker.tick().await;
+
+        // CONCURRENCY: The backfill cycle is awaited on this same task, so a
+        // backfill pass can never overlap a claimed scan or another backfill.
+        let backfill_due =
+            last_backfill.is_none_or(|previous| previous.elapsed() >= HARDENING_BACKFILL_INTERVAL);
+        if auto_hardening_scans && backfill_due {
+            match hardening_active_work_count(&pool).await {
+                Ok(0) => {
+                    run_hardening_backfill_cycle(&pool, auto_hardening_scans).await;
+                    last_backfill = Some(tokio::time::Instant::now());
+                }
+                Ok(_) => {
+                    // CONCURRENCY: Historical recovery is admitted only while
+                    // the serial queue is idle. This prevents periodic batches
+                    // from sustaining a backlog ahead of manual or post-build
+                    // work. Keep the cycle due so it runs as soon as the queue
+                    // drains.
+                }
+                Err(error) => warn!(%error, "hardening_backfill_idle_check_failed"),
+            }
+        }
 
         if let Ok(queue_depth) = hardening_queue_depth(&pool).await {
             debug!(
@@ -236,6 +285,32 @@ pub async fn run_hardening_scan_queue(pool: PgPool) {
     }
 }
 
+/// Runs one bounded backfill cycle for already built targets without evidence.
+///
+/// The cycle is a single guarded SQL statement that admits at most
+/// [`HARDENING_BACKFILL_BATCH_SIZE`] scans. It runs on the worker's own slower
+/// cadence and only while the serial queue is idle, so historical recovery
+/// cannot sustain a backlog ahead of manual or post-build work. It never starts
+/// a scan; the serial claim loop still owns every `nix eval`.
+///
+/// A failed cycle is logged and the worker continues. Backfill is recovery work,
+/// so one failed pass must not stop the queue from draining.
+async fn run_hardening_backfill_cycle(pool: &PgPool, auto_hardening_scans: bool) {
+    match enqueue_hardening_backfill_batch(
+        pool,
+        HARDENING_BACKFILL_BATCH_SIZE,
+        auto_hardening_scans,
+    )
+    .await
+    {
+        Ok(admitted) if admitted > 0 => {
+            info!(admitted, "hardening_backfill_admitted");
+        }
+        Ok(_) => {}
+        Err(error) => warn!(%error, "hardening_backfill_failed"),
+    }
+}
+
 /// Trigger a hardening scan for a system by system ID.
 pub async fn trigger_system_hardening_scan(
     pool: PgPool,
@@ -259,40 +334,4 @@ pub async fn trigger_system_hardening_scan(
 
     trigger_immediate_hardening_scan(pool, target.derivation_id, &flake_ref, &target.config_name)
         .await
-}
-
-/// Queue hardening scans for all NixOS derivations in a commit.
-pub async fn trigger_commit_hardening_scans(
-    pool: PgPool,
-    commit_id: i32,
-    repo_url: &str,
-    commit_hash: &str,
-) -> Result<usize, HardeningScanError> {
-    let flake_ref = build_flake_reference(repo_url, commit_hash);
-    let targets = list_commit_hardening_targets(&pool, commit_id)
-        .await
-        .map_err(HardeningScanError::Internal)?;
-
-    let mut queued = 0usize;
-    for target in targets {
-        match trigger_immediate_hardening_scan(
-            pool.clone(),
-            target.derivation_id,
-            &flake_ref,
-            &target.config_name,
-        )
-        .await
-        {
-            Ok(_) => queued += 1,
-            Err(HardeningScanError::ScanAlreadyActive(_)) => {}
-            Err(err) => {
-                error!(
-                    "Failed to queue hardening scan for derivation {} ({}): {}",
-                    target.derivation_id, target.config_name, err
-                );
-            }
-        }
-    }
-
-    Ok(queued)
 }

@@ -24,7 +24,9 @@ type InsertFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 /// Persists one reported system state and its retention side effects atomically.
 ///
 /// The transaction records state-transition events, inserts the observation,
-/// and retains an exact deployment-bound evaluation artifact when eligible.
+/// and retains an exact deployment-bound evaluation artifact when eligible. If
+/// ordinary retention finds no eligible binding, it runs the bounded
+/// reconciliation repair for the same observation.
 /// It acquires the snapshot-writer advisory lock before POA&M keys and the
 /// system observation row to preserve the repository-wide lock order. A
 /// retention miss is a successful no-op and does not roll back the observation.
@@ -65,9 +67,10 @@ pub(crate) async fn persist_reported_system_state(
     // transitions can still emit event-backed history transactionally.
     record_report_events_tx(&mut tx, previous_observed.as_ref(), payload, None, None).await?;
     insert_system_state(&mut *tx, payload, version_compatible, None, None).await?;
-    crate::queries::evaluation_snapshots::retain_generation_snapshot_tx(
+    crate::queries::evaluation_snapshots::retain_observed_generation_snapshot_tx(
         &mut tx,
         &payload.hostname,
+        system_id,
         payload.generation,
         payload.store_path.as_deref(),
         payload.timestamp.unwrap_or_else(chrono::Utc::now),

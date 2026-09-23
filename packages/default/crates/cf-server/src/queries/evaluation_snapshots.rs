@@ -1486,6 +1486,232 @@ pub(crate) async fn retain_bound_deployment_observations_tx(
     Ok(inserted.rows_affected())
 }
 
+/// Inserts the retained generation that ingestion should already have created.
+///
+/// Both ordinary retention paths are single events. [`retain_generation_snapshot_tx`]
+/// runs only while one observation is ingested, and it inspects only the newest
+/// deployment that targets the observed store path. [`retain_bound_deployment_observations_tx`]
+/// runs only while one deployment gains its exact binding. Neither path runs
+/// again after the missing fact arrives, so an authoritative deployment binding
+/// can exist while its retained generation is absent.
+///
+/// This function repairs exactly that gap for the system's latest observation.
+///
+/// # Authority
+///
+/// The repair requires exactly one distinct eligible deployment binding that
+/// proves system, generation, store path, requested NixOS derivation, requested
+/// commit, evaluation artifact, and configuration identity together. Bindings
+/// that agree on every one of those identities collapse to one candidate.
+/// Two or more distinct identities, including one store path reached from more
+/// than one commit, insert nothing. A store path is never used alone to choose
+/// a commit.
+///
+/// Eligible deployments are `pending`, `succeeded`, or `expired` within
+/// [`DEPLOYMENT_ARTIFACT_INGESTION_WINDOW_HOURS`] of completion, exactly as
+/// ordinary retention defines eligibility. `failed` and `superseded`
+/// deployments never grant authority.
+///
+/// # Concurrency
+///
+/// Callers MUST hold the snapshot-writer lock through
+/// [`lock_snapshot_writer_tx`] before calling this function, which keeps
+/// artifact reclamation from removing an artifact between resolution and
+/// insertion.
+///
+/// The insert is idempotent. `ON CONFLICT DO NOTHING` preserves an existing
+/// retained row, and the row is immutable, so a repeated or racing pass never
+/// changes retained history.
+///
+/// # Returns
+///
+/// `true` only when this call inserted the repaired retained generation.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot evaluate or insert the repair.
+pub(crate) async fn reconcile_current_generation_retention_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_id: Uuid,
+) -> Result<bool> {
+    let inserted = sqlx::query(
+        r#"
+        WITH observed AS (
+            SELECT system.id AS system_id,
+                   COALESCE(
+                       NULLIF(btrim(system.system_configuration_name), ''), system.hostname
+                   ) AS configuration_name,
+                   state.generation, state.store_path, state.timestamp
+            FROM systems system
+            JOIN LATERAL (
+                SELECT candidate.generation, candidate.store_path, candidate.timestamp,
+                       candidate.generation_matches_current_store_path
+                FROM system_states candidate
+                WHERE candidate.hostname = system.hostname
+                ORDER BY candidate.timestamp DESC, candidate.id DESC
+                LIMIT 1
+            ) state ON true
+            WHERE system.id = $1
+              AND state.generation IS NOT NULL
+              AND state.store_path IS NOT NULL
+              AND btrim(state.store_path) <> ''
+              AND state.timestamp IS NOT NULL
+              AND state.generation_matches_current_store_path
+              AND NOT EXISTS (
+                  SELECT 1 FROM evaluation_generation_snapshots retained
+                  WHERE retained.system_id = system.id
+                    AND retained.generation = state.generation
+              )
+        ), authoritative AS (
+            SELECT DISTINCT
+                   observed.system_id, observed.generation, observed.store_path,
+                   artifact.id AS snapshot_id, derivation.id AS derivation_id,
+                   derivation.commit_id, derivation.derivation_name
+            FROM observed
+            JOIN pending_system_deployments pending
+              ON pending.system_id = observed.system_id
+             AND pending.target_store_path = observed.store_path
+             AND pending.evaluation_snapshot_binding_expected
+             AND pending.requested_commit_id IS NOT NULL
+             AND pending.requested_derivation_id IS NOT NULL
+             AND pending.evaluation_snapshot_id IS NOT NULL
+             AND pending.issued_at <= observed.timestamp
+             AND (
+                 pending.status IN ('pending', 'succeeded')
+                 OR (pending.status = 'expired'
+                     AND pending.completed_at > NOW() - INTERVAL '24 hours')
+             )
+            JOIN derivations derivation
+              ON derivation.id = pending.requested_derivation_id
+             AND derivation.commit_id = pending.requested_commit_id
+             AND derivation.derivation_type = 'nixos'
+             AND derivation.derivation_name = observed.configuration_name
+             AND COALESCE(derivation.store_path, derivation.expected_store_path)
+                 = observed.store_path
+            JOIN evaluation_snapshots artifact
+              ON artifact.id = pending.evaluation_snapshot_id
+             AND artifact.commit_id = derivation.commit_id
+             AND artifact.configuration_name = derivation.derivation_name
+             AND artifact.lifecycle = 'available'
+             AND artifact.integrity_version = 1
+        )
+        INSERT INTO evaluation_generation_snapshots (
+            system_id, generation, snapshot_id, derivation_id, commit_id,
+            source_store_path, configuration_name
+        )
+        SELECT system_id, generation, snapshot_id, derivation_id, commit_id,
+               store_path, derivation_name
+        FROM authoritative
+        WHERE (SELECT COUNT(*) FROM authoritative) = 1
+        ON CONFLICT (system_id, generation) DO NOTHING
+        "#,
+    )
+    .bind(system_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(inserted.rows_affected() == 1)
+}
+
+/// Retains one observed generation and repairs a missed earlier retention.
+///
+/// Ingestion calls this function instead of [`retain_generation_snapshot_tx`]
+/// when the observed system identity is known. The ordinary retention path runs
+/// first and keeps its exact semantics. When it retains nothing, the bounded
+/// repair in [`reconcile_current_generation_retention_tx`] runs against the
+/// same transaction, which recovers an observation whose authoritative
+/// deployment binding was not the newest deployment for the observed store
+/// path.
+///
+/// The repair reads the latest persisted observation. Callers MUST insert the
+/// observation before calling this function.
+///
+/// # Returns
+///
+/// `true` when either path inserted a retained generation.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot retain or repair the generation.
+pub async fn retain_observed_generation_snapshot_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    hostname: &str,
+    system_id: Option<Uuid>,
+    generation: Option<i32>,
+    store_path: Option<&str>,
+    observed_at: DateTime<Utc>,
+) -> Result<bool> {
+    if retain_generation_snapshot_tx(tx, hostname, generation, store_path, observed_at).await? {
+        return Ok(true);
+    }
+    let Some(system_id) = system_id else {
+        return Ok(false);
+    };
+    // CONCURRENCY: retain_generation_snapshot_tx returns early without the
+    // writer lock when the payload carries no usable generation or store path.
+    // The advisory lock is re-entrant, so taking it here preserves the
+    // repository lock order in both cases.
+    lock_snapshot_writer_tx(tx).await?;
+    reconcile_current_generation_retention_tx(tx, system_id).await
+}
+
+/// Repairs the latest observed generation retention in its own transaction.
+///
+/// The function first performs one bounded unlocked probe. It acquires the
+/// snapshot-writer lock and writes only when the latest observation has no
+/// retained generation, which keeps an ordinary read path from serializing on
+/// the shared writer lock.
+///
+/// # Returns
+///
+/// `true` only when this call inserted the repaired retained generation.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot probe, lock, insert, or commit.
+pub async fn reconcile_current_generation_retention(
+    pool: &PgPool,
+    system_id: Uuid,
+) -> Result<bool> {
+    let repair_possible = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM systems system
+            JOIN LATERAL (
+                SELECT candidate.generation, candidate.generation_matches_current_store_path
+                FROM system_states candidate
+                WHERE candidate.hostname = system.hostname
+                ORDER BY candidate.timestamp DESC, candidate.id DESC
+                LIMIT 1
+            ) state ON true
+            WHERE system.id = $1
+              AND state.generation IS NOT NULL
+              AND state.generation_matches_current_store_path
+              AND NOT EXISTS (
+                  SELECT 1 FROM evaluation_generation_snapshots retained
+                  WHERE retained.system_id = system.id
+                    AND retained.generation = state.generation
+              )
+        )
+        "#,
+    )
+    .bind(system_id)
+    .fetch_one(pool)
+    .await?;
+    if !repair_possible {
+        return Ok(false);
+    }
+
+    let mut tx = pool.begin().await?;
+    // CONCURRENCY: Acquire the shared snapshot-writer lock before the insert so
+    // artifact reclamation cannot remove the selected artifact between
+    // resolution and the restrictive retention reference.
+    lock_snapshot_writer_tx(&mut tx).await?;
+    let inserted = reconcile_current_generation_retention_tx(&mut tx, system_id).await?;
+    tx.commit().await?;
+    Ok(inserted)
+}
+
 /// Selects a commit-mode snapshot and its first-parent baseline.
 ///
 /// # Errors

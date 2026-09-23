@@ -852,7 +852,25 @@ GET /api/v1/admin/audit?start_date=2024-01-01&end_date=2024-01-31&actor=john
 
 | Method | Endpoint | Role | Description |
 |--------|----------|------|-------------|
+| GET | `/scanning/scans` | Admin | Return one bounded Active, Completed, or History scan-record page |
 | GET | `/scanning/scans/:scan_id` | Admin | Return bounded diagnostics for one exact CVE scan |
+
+The collection route accepts `collection=active|completed|history` and a `limit`
+from 1 through 500. `history` requires `system_id` and returns that system's
+bounded revision history without a continuation cursor. Completed requests
+also accept normalized `q` (with `search` retained as an alias), terminal
+`status`, revision class, latest-per-flake, archive visibility, sort, direction,
+and an opaque `after` cursor. The server applies those values to the complete
+collection before counting or paging. Completed rows use deterministic keyset
+order with terminal timestamp and scan ID tie-breakers. Responses include
+`total`, `hidden_archived`, `has_more`, and `next_cursor`.
+
+The versioned cursor binds every normalized request value and the first page's
+terminal high-water tuple. A request with changed filters or ordering must start
+without a cursor. Malformed cursors return 400. A cursor rebound to another
+request returns 400. Newer terminal rows cannot enter continuation pages from an
+existing walk. Archive and restore operations continue to use exact scan IDs;
+including archived rows does not change chronological keyset semantics.
 
 The endpoint returns `scan_id`, current `status`, `scanner_name`, optional
 `scanner_version`, `source_trigger`, an `events` array, and `truncated`. Each
@@ -896,26 +914,32 @@ part of the stable finding identity.
 | GET | `/systems/:id/cve-inventory` | Viewer+ | Return the complete compatibility inventory up to 1,000 rows |
 | GET | `/systems/:id/cve-inventory-page` | Viewer+ | Return a bounded typed exact, legacy, or no-scan inventory page |
 
-The paged inventory response contains `authority`,
-`exact_authority_failure`, `source`, `vulnerabilities`, `metadata`, `has_more`,
-`inventory_revision`, and `next_cursor`. `authority` is `exact`, `legacy`, or `no_scan`. `source`
-contains the real scan ID, scanner name and optional version, and completion
-time. The server selects exact authority independently of finding count in one
-read-only repeatable-read transaction. An exact clean scan therefore cannot
-fall back to stale legacy findings.
+The paged inventory response contains `authority`, `exact_authority_failure`,
+`current_state`, `selection`, `evidence_representation`, `read_only`, `source`,
+`vulnerabilities`, `metadata`, `has_more`, `inventory_revision`, and
+`next_cursor`. `authority` is `exact`, `legacy`, or `no_scan`. `source` contains
+the real scan ID, scanner name and optional version, and completion time.
 
-When exact authority is unavailable, the server selects the latest completed
-legacy scan under the bounded `view_system_vulnerabilities` semantics. A
-completed legacy scan with no findings returns `legacy` with an empty array. No
-usable completed scan returns `no_scan`. Sources are never unioned. Legacy
-findings can include ordinary system justification state, but never
-server-issued exact remediation context. The pre-existing ordinary system
-justification API continues to accept a qualifying legacy finding. That write
-does not create exact remediation authority. POA&M creation, patch scheduling,
-finding attach/link/reopen, verification, and closure continue to resolve
-retained generation, store path, verified lineage, certified snapshot,
-schema-1 scan, and immutable observation authority independently and fail
-closed for legacy or no-scan input.
+For `selection=current`, the server resolves only the newest completed schema-1
+scan for the exact authorized running derivation. It never substitutes another
+derivation or a schema-0 projection. `current_state` is `exact_current_scan`,
+`no_current_scan`, or `current_authority_unavailable`; the latter two return
+`no_scan` with no source. A clean exact scan remains exact with an empty finding
+array.
+
+Historical `retained_generation` and `exact_derivation` selections remain
+exactly bound and read-only. Their evidence can be schema-1 observations or a
+schema-0 historical projection, but is never promoted to Current authority.
+Clients select them with `target=retained_generation&target_id=<snapshot UUID>`
+or `target=exact_derivation&target_id=<derivation integer>`. Current is the
+default and can be requested explicitly with `target=current`; it has no
+`target_id`.
+Sources are never unioned. Historical findings can include ordinary system
+justification state, but never server-issued exact remediation context. POA&M
+creation, patch scheduling, finding attach/link/reopen, verification, and
+closure continue to resolve retained generation, store path, verified lineage,
+certified snapshot, schema-1 scan, and immutable observation authority
+independently and fail closed for historical or no-scan input.
 
 The paged route accepts `limit` from 1 through 500 with a default of 100, an opaque
 `after` cursor, `q` up to 200 normalized characters, comma-separated `severity`

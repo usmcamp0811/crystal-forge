@@ -46,8 +46,9 @@ use crate::api::models::{
     SnapshotLifecycle, SnapshotRevisionMode, SystemAgentEvent, SystemCommitHistory,
     SystemComplianceBundle, SystemCveInventoryCandidate, SystemCveInventoryPageResponse,
     SystemCveInventorySelection, SystemDeploymentProgress, SystemDetail, SystemGeneration,
-    SystemHardeningInventorySourceResponse, SystemHistoryEntry, SystemRollbackGenerationRequest,
-    SystemRollbackRequest, TrackedFlakeIdentity, TypedOptionDiff, VerifyGenerationClosureRequest,
+    SystemHardeningInventoryAttemptResponse, SystemHardeningInventorySourceResponse,
+    SystemHistoryEntry, SystemRollbackGenerationRequest, SystemRollbackRequest,
+    TrackedFlakeIdentity, TypedOptionDiff, VerifyGenerationClosureRequest,
 };
 use crate::components::compliance::EvidenceDrawer;
 use crate::components::cve::{CveInventoryPaginationState, CvesTab};
@@ -1236,6 +1237,48 @@ pub fn SystemDetailView(
         }
     });
 
+    // Bounded lifecycle poll. It refreshes the hardening inventory only while the
+    // selected revision has a queued or running attempt, and only for a limited
+    // number of consecutive polls, so an attempt that never leaves the queue
+    // cannot turn this page into an endless request source.
+    {
+        let inventory_resource = hardening_inventory_resource;
+        let mut refresh = hardening_refresh;
+        use_future(move || async move {
+            let mut polls_remaining = HARDENING_ACTIVE_POLL_LIMIT;
+            loop {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    gloo_timers::future::TimeoutFuture::new(HARDENING_ACTIVE_POLL_INTERVAL_MS)
+                        .await;
+                    let active = {
+                        let snapshot = inventory_resource.read_unchecked();
+                        snapshot.as_ref().is_some_and(|(_, result)| {
+                            result.as_ref().is_ok_and(|inventory| {
+                                hardening_lifecycle_state(
+                                    inventory.attempt.as_ref(),
+                                    inventory.source.is_some(),
+                                )
+                                .is_active()
+                            })
+                        })
+                    };
+                    if !active {
+                        polls_remaining = HARDENING_ACTIVE_POLL_LIMIT;
+                    } else if polls_remaining > 0 {
+                        polls_remaining -= 1;
+                        refresh.set(refresh().wrapping_add(1));
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let _ = (&inventory_resource, &refresh, &mut polls_remaining);
+                    break;
+                }
+            }
+        });
+    }
+
     let id_for_hardening_justifications = id.clone();
     let mut hardening_justifications_resource = use_resource(move || {
         let id = id_for_hardening_justifications.clone();
@@ -1451,6 +1494,16 @@ pub fn SystemDetailView(
     let hardening_read_only = hardening_inventory
         .as_ref()
         .is_some_and(|inventory| inventory.read_only);
+    let hardening_attempt = hardening_inventory
+        .as_ref()
+        .and_then(|inventory| inventory.attempt.clone());
+    let hardening_attempt_active = hardening_lifecycle_state(
+        hardening_attempt.as_ref(),
+        hardening_inventory
+            .as_ref()
+            .is_some_and(|inventory| inventory.source.is_some()),
+    )
+    .is_active();
     let hardening_justifications = if hardening_read_only {
         Vec::new()
     } else {
@@ -2030,6 +2083,9 @@ pub fn SystemDetailView(
                             inventory_authority: cve_inventory
                                 .as_ref()
                                 .map(|inventory| inventory.authority),
+                            current_state: cve_inventory
+                                .as_ref()
+                                .and_then(|inventory| inventory.current_state),
                             inventory_source: cve_inventory
                                 .as_ref()
                                 .and_then(|inventory| inventory.source.clone()),
@@ -2108,6 +2164,7 @@ pub fn SystemDetailView(
                             results: hardening_results.clone(),
                             justifications: hardening_justifications.clone(),
                             source: hardening_inventory.as_ref().and_then(|inventory| inventory.source.clone()),
+                            attempt: hardening_attempt.clone(),
                             read_only: hardening_read_only,
                             loading: hardening_loading,
                             error: hardening_error.clone(),
@@ -2116,7 +2173,14 @@ pub fn SystemDetailView(
                             check_now_disabled_reason: hardening_scan_blocked_reason.clone(),
                             checking: hardening_scan_in_progress(),
                             on_check_now: move |_| {
-                                if hardening_scan_in_progress() || !hardening_scan_eligible {
+                                // A queued or running attempt already covers this
+                                // revision. Sending a second request would be
+                                // absorbed by the server and would report work
+                                // this click did not create.
+                                if hardening_scan_in_progress()
+                                    || !hardening_scan_eligible
+                                    || hardening_attempt_active
+                                {
                                     return;
                                 }
                                 hardening_scan_in_progress.set(true);
@@ -8855,6 +8919,357 @@ fn CommitTimelineNode(
     }
 }
 
+/// Separates two hardening lifecycle polls while an attempt is active.
+///
+/// Hardening scans take tens of seconds at best, so a faster poll only adds
+/// request volume without showing the user anything new.
+const HARDENING_ACTIVE_POLL_INTERVAL_MS: u32 = 5_000;
+
+/// Bounds how many consecutive polls one active attempt may trigger.
+///
+/// At the interval above this is about ten minutes, which exceeds a normal scan
+/// and the worker's stale-claim recovery window. The budget stops a page left
+/// open on a stuck queue from polling for the lifetime of the browser tab. It is
+/// restored as soon as the attempt is no longer active.
+const HARDENING_ACTIVE_POLL_LIMIT: u32 = 120;
+
+/// Presents the newest hardening attempt for the selected revision.
+///
+/// The variants map one-to-one onto the server lifecycle contract, plus two
+/// client-side cases the server cannot express: no attempt at all, and a state
+/// string this build does not recognize. An unrecognized state is never shown as
+/// a known state, because that would let a newer server make the page report a
+/// scan outcome that did not happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HardeningLifecycleState {
+    /// The selected revision has no hardening attempt.
+    NeverScanned,
+    /// An attempt is admitted and waits for the serial worker.
+    Queued,
+    /// The worker is evaluating the configuration now.
+    Scanning,
+    /// The newest attempt failed. Earlier completed evidence, when present, is
+    /// still displayed.
+    Failed,
+    /// The newest attempt produced the displayed evidence.
+    Completed,
+    /// The server reported a state this build does not know.
+    Unrecognized,
+}
+
+impl HardeningLifecycleState {
+    /// Returns true while the attempt can still change without a new request.
+    ///
+    /// An unrecognized state is deliberately not active. Treating it as active
+    /// would disable `Check now` forever against a server this build cannot
+    /// interpret.
+    fn is_active(self) -> bool {
+        matches!(self, Self::Queued | Self::Scanning)
+    }
+
+    /// Returns the short status label shown in the Hardening tab header.
+    fn label(self) -> &'static str {
+        match self {
+            Self::NeverScanned => "Never scanned",
+            Self::Queued => "Queued",
+            Self::Scanning => "Scanning",
+            Self::Failed => "Last scan failed",
+            Self::Completed => "Scan complete",
+            Self::Unrecognized => "Scan state unavailable",
+        }
+    }
+
+    /// Returns the callout class used to render the status banner.
+    fn callout_class(self) -> &'static str {
+        match self {
+            Self::Failed => "sd-callout sd-callout-danger",
+            Self::Queued | Self::Scanning => "sd-callout sd-callout-info",
+            _ => "sd-callout",
+        }
+    }
+
+    /// Returns the stable test and automation identity for the banner.
+    fn test_id(self) -> &'static str {
+        match self {
+            Self::NeverScanned => "hardening-state-never-scanned",
+            Self::Queued => "hardening-state-queued",
+            Self::Scanning => "hardening-state-scanning",
+            Self::Failed => "hardening-state-failed",
+            Self::Completed => "hardening-state-completed",
+            Self::Unrecognized => "hardening-state-unrecognized",
+        }
+    }
+}
+
+/// Maps a server attempt onto the Hardening tab lifecycle presentation.
+///
+/// `None` means the selected revision was never scanned. It never means the
+/// state is unknown; an unknown server value maps to
+/// [`HardeningLifecycleState::Unrecognized`] instead.
+fn hardening_lifecycle_state(
+    attempt: Option<&SystemHardeningInventoryAttemptResponse>,
+    has_completed_evidence: bool,
+) -> HardeningLifecycleState {
+    match attempt {
+        None if has_completed_evidence => HardeningLifecycleState::Completed,
+        None => HardeningLifecycleState::NeverScanned,
+        Some(attempt) => match attempt.state.as_str() {
+            "queued" => HardeningLifecycleState::Queued,
+            "scanning" => HardeningLifecycleState::Scanning,
+            "failed" => HardeningLifecycleState::Failed,
+            "completed" => HardeningLifecycleState::Completed,
+            _ => HardeningLifecycleState::Unrecognized,
+        },
+    }
+}
+
+/// Builds the explanatory sentence shown under the lifecycle label.
+///
+/// The sentence states only facts the server supplied. Failure text is already
+/// redacted and bounded by the server and is reproduced without reinterpretation.
+fn hardening_lifecycle_detail(
+    state: HardeningLifecycleState,
+    attempt: Option<&SystemHardeningInventoryAttemptResponse>,
+    has_completed_evidence: bool,
+    read_only: bool,
+) -> String {
+    match state {
+        HardeningLifecycleState::NeverScanned if read_only => {
+            "No hardening scan ran for this revision. Evidence from another revision is not \
+             substituted."
+                .to_string()
+        }
+        HardeningLifecycleState::NeverScanned => {
+            "No hardening scan has run for the current configuration yet.".to_string()
+        }
+        HardeningLifecycleState::Queued => {
+            "A hardening scan is queued and will start when the scan worker is free.".to_string()
+        }
+        HardeningLifecycleState::Scanning => {
+            "A hardening scan is running for this revision now.".to_string()
+        }
+        HardeningLifecycleState::Failed => {
+            let reason = attempt
+                .and_then(|attempt| attempt.error.as_deref())
+                .filter(|error| !error.trim().is_empty())
+                .unwrap_or("The scan worker did not record a reason.");
+            if has_completed_evidence {
+                format!(
+                    "The most recent hardening scan failed: {reason} The evidence below is from the last scan that completed."
+                )
+            } else {
+                format!("The most recent hardening scan failed: {reason}")
+            }
+        }
+        HardeningLifecycleState::Completed => {
+            "The evidence below is from the most recent completed hardening scan.".to_string()
+        }
+        HardeningLifecycleState::Unrecognized => {
+            "This page cannot interpret the reported scan state. Reload after the interface is \
+             updated."
+                .to_string()
+        }
+    }
+}
+
+/// Decides whether `Check now` must be disabled and explains why.
+///
+/// Returns `None` when the control is usable. An active attempt always wins over
+/// eligibility, because a second request would be absorbed by the server and the
+/// button would report work it did not create.
+fn hardening_check_now_block_reason(
+    state: HardeningLifecycleState,
+    can_check_now: bool,
+    checking: bool,
+    eligibility_reason: &str,
+) -> Option<String> {
+    if state.is_active() {
+        return Some(match state {
+            HardeningLifecycleState::Scanning => {
+                "A hardening scan is already running for this configuration.".to_string()
+            }
+            _ => "A hardening scan is already queued for this configuration.".to_string(),
+        });
+    }
+    if checking {
+        return Some("The scan request is still being submitted.".to_string());
+    }
+    if !can_check_now {
+        return Some(eligibility_reason.to_string());
+    }
+    None
+}
+
+#[cfg(test)]
+mod hardening_lifecycle_tests {
+    use super::{
+        HardeningLifecycleState, hardening_check_now_block_reason, hardening_lifecycle_detail,
+        hardening_lifecycle_state,
+    };
+    use crate::api::models::SystemHardeningInventoryAttemptResponse;
+    use uuid::Uuid;
+
+    fn attempt(state: &str, error: Option<&str>) -> SystemHardeningInventoryAttemptResponse {
+        SystemHardeningInventoryAttemptResponse {
+            scan_id: Uuid::new_v4(),
+            state: state.to_string(),
+            source_trigger: "post_build".to_string(),
+            scheduled_at: None,
+            started_at: None,
+            completed_at: None,
+            attempts: 1,
+            error: error.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn absent_attempt_is_never_scanned() {
+        assert_eq!(
+            hardening_lifecycle_state(None, false),
+            HardeningLifecycleState::NeverScanned
+        );
+    }
+
+    #[test]
+    fn pre_lifecycle_response_with_completed_source_is_completed() {
+        assert_eq!(
+            hardening_lifecycle_state(None, true),
+            HardeningLifecycleState::Completed
+        );
+    }
+
+    #[test]
+    fn known_server_states_map_to_distinct_lifecycle_states() {
+        for (wire, expected) in [
+            ("queued", HardeningLifecycleState::Queued),
+            ("scanning", HardeningLifecycleState::Scanning),
+            ("failed", HardeningLifecycleState::Failed),
+            ("completed", HardeningLifecycleState::Completed),
+        ] {
+            let attempt = attempt(wire, None);
+            assert_eq!(hardening_lifecycle_state(Some(&attempt), false), expected);
+        }
+    }
+
+    #[test]
+    fn unknown_server_state_is_unrecognized_not_a_guess() {
+        let attempt = attempt("some-future-state", None);
+        assert_eq!(
+            hardening_lifecycle_state(Some(&attempt), false),
+            HardeningLifecycleState::Unrecognized
+        );
+    }
+
+    #[test]
+    fn never_scanned_detail_distinguishes_historical_from_current() {
+        assert!(
+            hardening_lifecycle_detail(HardeningLifecycleState::NeverScanned, None, false, true)
+                .contains("not substituted"),
+            "a read-only (historical) never-scanned target must say evidence is not substituted"
+        );
+        assert!(
+            !hardening_lifecycle_detail(HardeningLifecycleState::NeverScanned, None, false, false)
+                .contains("not substituted"),
+            "the mutable current target's never-scanned copy must not reference substitution"
+        );
+    }
+
+    #[test]
+    fn failed_detail_preserves_earlier_completed_evidence_distinctly() {
+        let failed = attempt("failed", Some("nix eval timed out"));
+        let with_evidence =
+            hardening_lifecycle_detail(HardeningLifecycleState::Failed, Some(&failed), true, false);
+        assert!(with_evidence.contains("nix eval timed out"));
+        assert!(
+            with_evidence.contains("last scan that completed"),
+            "a failed attempt with earlier evidence must say that evidence is still shown: {with_evidence}"
+        );
+        let without_evidence = hardening_lifecycle_detail(
+            HardeningLifecycleState::Failed,
+            Some(&failed),
+            false,
+            false,
+        );
+        assert!(
+            !without_evidence.contains("last scan that completed"),
+            "a failed attempt with no completed evidence must not claim evidence is shown: {without_evidence}"
+        );
+    }
+
+    #[test]
+    fn failed_detail_without_a_server_reason_uses_a_safe_default() {
+        let failed = attempt("failed", None);
+        let detail = hardening_lifecycle_detail(
+            HardeningLifecycleState::Failed,
+            Some(&failed),
+            false,
+            false,
+        );
+        assert!(detail.contains("did not record a reason"));
+    }
+
+    #[test]
+    fn active_states_block_check_now_regardless_of_eligibility() {
+        for state in [
+            HardeningLifecycleState::Queued,
+            HardeningLifecycleState::Scanning,
+        ] {
+            let reason = hardening_check_now_block_reason(state, true, false, "unused");
+            assert!(
+                reason.is_some(),
+                "an active attempt must always disable Check now"
+            );
+        }
+    }
+
+    #[test]
+    fn submitting_request_blocks_check_now_even_when_otherwise_eligible() {
+        let reason = hardening_check_now_block_reason(
+            HardeningLifecycleState::NeverScanned,
+            true,
+            true,
+            "unused",
+        );
+        assert!(reason.is_some());
+    }
+
+    #[test]
+    fn ineligible_target_surfaces_the_exact_server_reason() {
+        let reason = hardening_check_now_block_reason(
+            HardeningLifecycleState::NeverScanned,
+            false,
+            false,
+            "This revision is historical and read-only.",
+        );
+        assert_eq!(
+            reason.as_deref(),
+            Some("This revision is historical and read-only.")
+        );
+    }
+
+    #[test]
+    fn eligible_idle_target_leaves_check_now_enabled() {
+        let reason = hardening_check_now_block_reason(
+            HardeningLifecycleState::NeverScanned,
+            true,
+            false,
+            "unused",
+        );
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn completed_state_never_reports_as_active() {
+        assert!(!HardeningLifecycleState::Completed.is_active());
+        assert!(!HardeningLifecycleState::NeverScanned.is_active());
+        assert!(!HardeningLifecycleState::Failed.is_active());
+        assert!(
+            !HardeningLifecycleState::Unrecognized.is_active(),
+            "an unrecognized future state must not permanently disable Check now"
+        );
+    }
+}
+
 #[component]
 fn HardeningTab(
     system_id: Uuid,
@@ -8862,6 +9277,7 @@ fn HardeningTab(
     results: Vec<HardeningServiceResultResponse>,
     justifications: Vec<HardeningJustificationResponse>,
     source: Option<SystemHardeningInventorySourceResponse>,
+    attempt: Option<SystemHardeningInventoryAttemptResponse>,
     read_only: bool,
     loading: bool,
     error: Option<String>,
@@ -8990,8 +9406,40 @@ fn HardeningTab(
         theme::health::HEALTHY_TEXT
     };
 
+    // Lifecycle state and completed evidence are independent. A failed or queued
+    // attempt must not hide evidence produced by an earlier completed scan.
+    let lifecycle_state = hardening_lifecycle_state(attempt.as_ref(), source.is_some());
+    let lifecycle_detail = hardening_lifecycle_detail(
+        lifecycle_state,
+        attempt.as_ref(),
+        source.is_some(),
+        read_only,
+    );
+    let check_now_block_reason = hardening_check_now_block_reason(
+        lifecycle_state,
+        can_check_now,
+        checking,
+        &check_now_disabled_reason,
+    );
+    let check_now_disabled = check_now_block_reason.is_some();
+    let check_now_title = check_now_block_reason
+        .clone()
+        .unwrap_or_else(|| "Run a hardening audit for the current configuration".to_string());
+
     rsx! {
         div { class: "hardening-target-state",
+            div {
+                class: "{lifecycle_state.callout_class()}",
+                role: if matches!(lifecycle_state, HardeningLifecycleState::Failed) { "alert" } else { "status" },
+                "data-testid": "{lifecycle_state.test_id()}",
+                strong { "{lifecycle_state.label()}" }
+                p { class: "text-xs", "{lifecycle_detail}" }
+                if let Some(attempt) = attempt.as_ref() {
+                    p { class: "text-[11px] {theme::text::MUTED}",
+                        "Attempt {attempt.scan_id} · trigger {attempt.source_trigger} · {attempt.attempts} execution attempts"
+                    }
+                }
+            }
             if read_only {
                 div { class: "sd-callout sd-callout-warning", role: "status",
                     strong { "Historical hardening evidence is read-only. " }
@@ -9004,11 +9452,17 @@ fn HardeningTab(
                 div { class: "hardening-current-actions",
                     button {
                         class: "btn btn-ghost focus-ring",
-                        disabled: !can_check_now || checking,
-                        title: if can_check_now { "Run a hardening audit for the current configuration" } else { "{check_now_disabled_reason}" },
+                        disabled: check_now_disabled,
+                        title: "{check_now_title}",
+                        "data-testid": "hardening-check-now",
                         onclick: move |_| on_check_now.call(()),
                         Icon { name: IconName::Sync, size: 13 }
-                        if checking { " Checking…" } else { " Check now" }
+                        match lifecycle_state {
+                            HardeningLifecycleState::Scanning => " Scanning…",
+                            HardeningLifecycleState::Queued => " Queued…",
+                            _ if checking => " Checking…",
+                            _ => " Check now",
+                        }
                     }
                 }
             }
@@ -9131,8 +9585,23 @@ fn HardeningTab(
                             d: "M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"
                         }
                     }
-                    h3 { class: "text-lg font-semibold {theme::text::PRIMARY}", if read_only { "No hardening scan for this revision" } else { "No scan results yet" } }
-                    p { class: "{theme::text::SECONDARY}", if read_only { "No completed hardening scan exists for the selected historical target. Current results are not substituted." } else { "Use Check now above to analyze the current systemd service security configuration." } }
+                    h3 { class: "text-lg font-semibold {theme::text::PRIMARY}",
+                        match (read_only, lifecycle_state) {
+                            (_, HardeningLifecycleState::Queued) => "Hardening scan queued",
+                            (_, HardeningLifecycleState::Scanning) => "Hardening scan running",
+                            (_, HardeningLifecycleState::Failed) => "Hardening scan failed",
+                            (true, _) => "No hardening scan for this revision",
+                            (false, _) => "No scan results yet",
+                        }
+                    }
+                    p { class: "{theme::text::SECONDARY}",
+                        match (read_only, lifecycle_state) {
+                            (_, HardeningLifecycleState::Queued | HardeningLifecycleState::Scanning) => lifecycle_detail.clone(),
+                            (_, HardeningLifecycleState::Failed) => lifecycle_detail.clone(),
+                            (true, _) => "No completed hardening scan exists for the selected historical target. Current results are not substituted.".to_string(),
+                            (false, _) => "Use Check now above to analyze the current systemd service security configuration.".to_string(),
+                        }
+                    }
                 }
             } else {
                 div { class: "card", style: "overflow: hidden;",

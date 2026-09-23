@@ -9,9 +9,10 @@ use uuid::Uuid;
 
 use crate::api::models::{
     ApiError, HardeningFleetSummaryResponse, HardeningJustificationResponse,
-    HardeningScanEligibilityResponse, HardeningScanProvenanceResponse, HardeningScanStatusResponse,
-    HardeningScanTriggerResponse, HardeningServiceResultResponse, HardeningSystemPostureResponse,
-    HardeningTopServiceResponse, SaveHardeningJustificationRequest, SystemHardeningInventoryParams,
+    HardeningScanAttemptResponse, HardeningScanEligibilityResponse,
+    HardeningScanProvenanceResponse, HardeningScanStatusResponse, HardeningScanTriggerResponse,
+    HardeningServiceResultResponse, HardeningSystemPostureResponse, HardeningTopServiceResponse,
+    SaveHardeningJustificationRequest, SystemHardeningInventoryParams,
     SystemHardeningInventoryResponse, SystemMutationResponse,
 };
 use crate::auth::models::Role;
@@ -161,6 +162,12 @@ pub async fn get_system_hardening(
 ///
 /// System RBAC runs before target parsing and resolution. An absent, hidden, or
 /// foreign historical identity therefore does not disclose its existence.
+///
+/// The response carries two independent facts. `source` and `services` are
+/// completed evidence for exactly the resolved derivation and never substitute
+/// another revision. `attempt` is the newest lifecycle state for that same
+/// derivation and may be absent, queued, scanning, failed, or completed. A
+/// failed newer attempt therefore does not remove older completed evidence.
 pub async fn get_system_hardening_inventory(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -218,6 +225,18 @@ pub async fn get_system_hardening_inventory(
                 }
                 None => None,
             };
+            let attempt = inventory
+                .attempt
+                .map(|attempt| HardeningScanAttemptResponse {
+                    scan_id: attempt.scan_id,
+                    state: attempt.state.as_str().to_string(),
+                    source_trigger: attempt.source_trigger,
+                    scheduled_at: attempt.scheduled_at,
+                    started_at: attempt.started_at,
+                    completed_at: attempt.completed_at,
+                    attempts: attempt.attempts,
+                    error: attempt.error,
+                });
             (
                 StatusCode::OK,
                 Json(SystemHardeningInventoryResponse {
@@ -225,6 +244,7 @@ pub async fn get_system_hardening_inventory(
                     derivation_id: inventory.derivation_id,
                     source,
                     services: map_service_results(inventory.services),
+                    attempt,
                     read_only: inventory.read_only,
                 }),
             )

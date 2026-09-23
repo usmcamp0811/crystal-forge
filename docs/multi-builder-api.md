@@ -737,6 +737,17 @@ Mark job as successfully completed.
   does not replace its trigger provenance. Scan failure does not change build or
   cache status.
 
+The server also runs bounded post-build prerequisite maintenance at startup and
+on every CVE worker interval. This maintenance runs even when the local scan
+executor is disabled or Vulnix is unavailable. Under the build-derivation lock,
+the server binds an existing zero-attempt `awaiting_build` intent to the latest
+same-derivation build attempt. Active and successful replacements keep the
+intent alive. Only the exact latest failed or cancelled attempt makes the intent
+failed. If no authoritative attempt exists, the prerequisite fails as
+unavailable. The maintenance does not change manual, fleet, or periodic scans.
+It does not consult the current `on_build` policy when it repairs existing
+intent; the policy still controls creation of new post-build intent.
+
 #### POST /api/v1/builders/:id/cve-scans/claim
 
 Claim one schema-1 CVE scan through the authenticated builder session. Builders

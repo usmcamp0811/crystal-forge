@@ -103,8 +103,9 @@ pub async fn record_session_cve_capabilities(
 /// IDEMPOTENCY: The active-scan partial index retains the identity and immutable
 /// trigger of existing work. Manual and fleet work is unchanged. A replacement
 /// build updates only an `awaiting_build` post-build intent's exact prerequisite
-/// job identity. Only derivation IDs returned by a successful build insert may
-/// be supplied.
+/// job identity even when current `on_build` policy is disabled; policy controls
+/// new intent only. Only derivation IDs returned by a successful build insert
+/// may be supplied.
 ///
 /// # Errors
 ///
@@ -117,38 +118,246 @@ pub(crate) async fn create_post_build_scan_intents_tx(
         return Ok(0);
     }
 
-    let inserted = sqlx::query(
+    let changed: i64 = sqlx::query_scalar(
         r#"
-        INSERT INTO cve_scans AS scan (
-            id, derivation_id, scanner_name, status, attempts, source_trigger,
-            completed_build_job_id
-        )
-        SELECT gen_random_uuid(), derivation.id, 'vulnix', 'awaiting_build', 0,
-               'post_build', admitted_job.id
-        FROM derivations derivation
-        JOIN scan_schedule_policy policy ON policy.id = 1 AND policy.on_build
-        JOIN LATERAL (
+        WITH admitted AS (
             SELECT job.id
+                 , job.derivation_id
             FROM build_jobs job
-            WHERE job.derivation_id = derivation.id
+            WHERE job.derivation_id = ANY($1)
               AND job.status IN ('queued', 'building', 'cancelling')
-            ORDER BY job.created_at DESC, job.id DESC
-            LIMIT 1
-        ) admitted_job ON TRUE
-        WHERE derivation.id = ANY($1)
-          AND derivation.derivation_type = 'nixos'
-        ON CONFLICT (derivation_id) WHERE status IN (
-            'awaiting_build', 'awaiting_closure', 'pending', 'in_progress'
-        ) DO UPDATE
-          SET completed_build_job_id = EXCLUDED.completed_build_job_id
-        WHERE scan.source_trigger = 'post_build'
-          AND scan.status = 'awaiting_build'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM build_jobs newer
+                  WHERE newer.derivation_id = job.derivation_id
+                    AND (newer.created_at, newer.id) > (job.created_at, job.id)
+              )
+        ), rebound AS (
+            UPDATE cve_scans scan
+            SET completed_build_job_id = admitted.id
+            FROM admitted
+            WHERE scan.derivation_id = admitted.derivation_id
+              AND scan.source_trigger = 'post_build'
+              AND scan.status = 'awaiting_build'
+              AND scan.attempts = 0
+              AND scan.completed_build_job_id IS DISTINCT FROM admitted.id
+            RETURNING scan.id
+        ), inserted AS (
+            INSERT INTO cve_scans (
+                id, derivation_id, scanner_name, status, attempts,
+                source_trigger, completed_build_job_id
+            )
+            SELECT gen_random_uuid(), derivation.id, 'vulnix',
+                   'awaiting_build', 0, 'post_build', admitted.id
+            FROM admitted
+            JOIN derivations derivation ON derivation.id = admitted.derivation_id
+            JOIN scan_schedule_policy policy ON policy.id = 1 AND policy.on_build
+            WHERE derivation.derivation_type = 'nixos'
+            ON CONFLICT (derivation_id) WHERE status IN (
+                'awaiting_build', 'awaiting_closure', 'pending', 'in_progress'
+            ) DO NOTHING
+            RETURNING id
+        )
+        SELECT COUNT(*)
+        FROM (
+            SELECT id FROM rebound
+            UNION ALL
+            SELECT id FROM inserted
+        ) changed
         "#,
     )
     .bind(derivation_ids)
-    .execute(&mut **tx)
+    .fetch_one(&mut **tx)
     .await?;
-    Ok(inserted.rows_affected())
+    Ok(changed as u64)
+}
+
+/// Reconciles durable post-build intents with authoritative build attempts.
+///
+/// The pass is bounded by `limit` and handles only zero-attempt
+/// `post_build` scans in `awaiting_build`. Each candidate acquires the build
+/// derivation lock before reading build history or locking the scan row. The
+/// latest same-derivation attempt is authoritative. Active and successful
+/// replacements rebind the intent. A latest failed or cancelled attempt
+/// terminalizes the intent. An intent with no remaining build attempt fails as
+/// unavailable. Current `on_build` policy does not affect an existing intent.
+///
+/// Guarded writes make repeated and concurrent passes idempotent. They also
+/// prevent an old build event from changing an intent after replacement
+/// rebinding.
+///
+/// # Errors
+///
+/// Returns an error when candidate discovery, locking, or persistence fails.
+pub(crate) async fn reconcile_post_build_scan_prerequisites(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<i64> {
+    if limit <= 0 {
+        return Ok(0);
+    }
+
+    let candidates: Vec<(Uuid, i32)> = sqlx::query_as(
+        r#"
+        SELECT id, derivation_id
+        FROM cve_scans
+        WHERE source_trigger = 'post_build'
+          AND status = 'awaiting_build'
+          AND attempts = 0
+        ORDER BY created_at, id
+        LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    let mut reconciled = 0;
+    for (scan_id, derivation_id) in candidates {
+        let mut tx = pool.begin().await?;
+        crate::queries::build_jobs::lock_build_derivation(&mut tx, derivation_id).await?;
+
+        let latest: Option<(Uuid, String)> = sqlx::query_as(
+            r#"
+            SELECT id, status
+            FROM build_jobs
+            WHERE derivation_id = $1
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(derivation_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let changed = match latest {
+            Some((job_id, status))
+                if matches!(
+                    status.as_str(),
+                    "queued" | "building" | "cancelling" | "success"
+                ) =>
+            {
+                sqlx::query(
+                    r#"
+                    UPDATE cve_scans
+                    SET completed_build_job_id = $3
+                    WHERE id = $1
+                      AND derivation_id = $2
+                      AND source_trigger = 'post_build'
+                      AND status = 'awaiting_build'
+                      AND attempts = 0
+                      AND completed_build_job_id IS DISTINCT FROM $3
+                      AND EXISTS (
+                          SELECT 1
+                          FROM build_jobs authoritative
+                          WHERE authoritative.id = $3
+                            AND authoritative.derivation_id = $2
+                            AND authoritative.status IN (
+                                'queued', 'building', 'cancelling', 'success'
+                            )
+                            AND NOT EXISTS (
+                                SELECT 1
+                                FROM build_jobs newer
+                                WHERE newer.derivation_id = authoritative.derivation_id
+                                  AND (newer.created_at, newer.id) >
+                                      (authoritative.created_at, authoritative.id)
+                            )
+                      )
+                    "#,
+                )
+                .bind(scan_id)
+                .bind(derivation_id)
+                .bind(job_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+            }
+            Some((job_id, status)) if matches!(status.as_str(), "failed" | "cancelled") => {
+                let error = if status == "cancelled" {
+                    "Prerequisite build was cancelled"
+                } else {
+                    "Prerequisite build failed"
+                };
+                sqlx::query(
+                    r#"
+                    UPDATE cve_scans
+                    SET status = 'failed',
+                        completed_at = NOW(),
+                        completed_build_job_id = $3,
+                        scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
+                            || jsonb_build_object(
+                                'error', $5::text,
+                                'build_prerequisite', jsonb_build_object(
+                                    'job_id', $3::uuid,
+                                    'status', $4::text
+                                )
+                            )
+                    WHERE id = $1
+                      AND derivation_id = $2
+                      AND source_trigger = 'post_build'
+                      AND status = 'awaiting_build'
+                      AND attempts = 0
+                      AND EXISTS (
+                          SELECT 1
+                          FROM build_jobs authoritative
+                          WHERE authoritative.id = $3
+                            AND authoritative.derivation_id = $2
+                            AND authoritative.status = $4
+                            AND NOT EXISTS (
+                                SELECT 1
+                                FROM build_jobs newer
+                                WHERE newer.derivation_id = authoritative.derivation_id
+                                  AND (newer.created_at, newer.id) >
+                                      (authoritative.created_at, authoritative.id)
+                            )
+                      )
+                    "#,
+                )
+                .bind(scan_id)
+                .bind(derivation_id)
+                .bind(job_id)
+                .bind(&status)
+                .bind(error)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+            }
+            None => sqlx::query(
+                r#"
+                UPDATE cve_scans
+                SET status = 'failed',
+                    completed_at = NOW(),
+                    completed_build_job_id = NULL,
+                    scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'error', 'Build prerequisite is unavailable',
+                            'build_prerequisite', jsonb_build_object(
+                                'status', 'unavailable'
+                            )
+                        )
+                WHERE id = $1
+                  AND derivation_id = $2
+                  AND source_trigger = 'post_build'
+                  AND status = 'awaiting_build'
+                  AND attempts = 0
+                  AND NOT EXISTS (
+                      SELECT 1 FROM build_jobs WHERE derivation_id = $2
+                  )
+                "#,
+            )
+            .bind(scan_id)
+            .bind(derivation_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected(),
+            Some(_) => 0,
+        };
+
+        tx.commit().await?;
+        reconciled += changed as i64;
+    }
+
+    Ok(reconciled)
 }
 
 /// Confirms successful build provenance for active post-build scan intent.

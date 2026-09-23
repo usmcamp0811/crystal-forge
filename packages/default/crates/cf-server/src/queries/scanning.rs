@@ -1,7 +1,9 @@
 use anyhow::Result;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Row};
+use sha2::{Digest, Sha256};
+use sqlx::{PgPool, Postgres, Row};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,6 +187,151 @@ pub struct ScanRecordResult {
     pub total: i64,
     /// Counts matching archived records hidden from this response.
     pub hidden_archived: i64,
+    /// Is true when another request-bound keyset page exists.
+    pub has_more: bool,
+    /// Continues after the last returned stable scan identity.
+    pub next_cursor: Option<String>,
+}
+
+/// Selects a validated Completed status filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanRecordStatus {
+    /// Includes every terminal status.
+    All,
+    /// Includes successful terminal scans.
+    Completed,
+    /// Includes failed terminal scans.
+    Failed,
+}
+
+/// Selects a validated derivation revision class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanRecordRevision {
+    /// Includes every revision class.
+    All,
+    /// Includes exact currently deployed revisions.
+    Deployed,
+    /// Includes the latest ready flake revision that is not deployed.
+    Recent,
+    /// Includes older flake revisions.
+    Superseded,
+}
+
+/// Selects a validated Completed ordering key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanRecordSort {
+    /// Orders by configuration name.
+    Configuration,
+    /// Orders by commit revision.
+    Revision,
+    /// Orders by terminal lifecycle status.
+    Status,
+    /// Orders lexicographically by critical, high, medium, and low counts.
+    Severity,
+    /// Orders by the authoritative terminal timestamp.
+    Timestamp,
+}
+
+/// Selects a validated primary sort direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanRecordDirection {
+    /// Orders the primary key from low to high.
+    Asc,
+    /// Orders the primary key from high to low.
+    Desc,
+}
+
+/// Contains validated inputs for one scan-record page.
+#[derive(Debug, Clone)]
+pub struct ScanRecordRequest {
+    /// Selects the lifecycle collection.
+    pub collection: ScanRecordCollection,
+    /// Includes archived terminal records when true.
+    pub include_archived: bool,
+    /// Restricts history to one active system.
+    pub system_id: Option<Uuid>,
+    /// Bounds returned rows to 1 through 500.
+    pub limit: u16,
+    /// Contains the normalized case-insensitive search value.
+    pub search: Option<String>,
+    /// Selects a terminal status.
+    pub status: ScanRecordStatus,
+    /// Selects a revision class.
+    pub revision: ScanRecordRevision,
+    /// Requires the latest ready flake revision when true.
+    pub latest_only: bool,
+    /// Selects the primary ordering key.
+    pub sort: ScanRecordSort,
+    /// Selects the primary ordering direction.
+    pub direction: ScanRecordDirection,
+    /// Continues from an opaque cursor returned by the previous page.
+    pub after: Option<String>,
+}
+
+impl ScanRecordRequest {
+    fn fingerprint(&self) -> String {
+        let mut digest = Sha256::new();
+        for component in [
+            self.collection.as_str().to_string(),
+            self.include_archived.to_string(),
+            self.system_id.map(|id| id.to_string()).unwrap_or_default(),
+            self.limit.to_string(),
+            self.search.clone().unwrap_or_default(),
+            scan_record_status_value(self.status).to_string(),
+            scan_record_revision_value(self.revision).to_string(),
+            self.latest_only.to_string(),
+            scan_record_sort_value(self.sort).to_string(),
+            scan_record_direction_value(self.direction).to_string(),
+        ] {
+            digest.update(component);
+            digest.update([0]);
+        }
+        hex::encode(digest.finalize())
+    }
+
+    fn search_pattern(&self) -> Option<String> {
+        self.search.as_ref().map(|value| {
+            let escaped = value
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            format!("%{escaped}%")
+        })
+    }
+}
+
+/// Identifies malformed or request-incompatible scan-record cursors.
+#[derive(Debug)]
+pub struct InvalidScanRecordCursor;
+
+impl std::fmt::Display for InvalidScanRecordCursor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("invalid scan record cursor")
+    }
+}
+
+impl std::error::Error for InvalidScanRecordCursor {}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScanRecordCursor {
+    version: u8,
+    fingerprint: String,
+    high_water_at: DateTime<Utc>,
+    high_water_id: Uuid,
+    configuration: String,
+    revision: String,
+    status_rank: i16,
+    critical_count: i32,
+    high_count: i32,
+    medium_count: i32,
+    low_count: i32,
+    terminal_at: DateTime<Utc>,
+    scan_id: Uuid,
 }
 
 pub async fn get_scan_schedule_policy(pool: &PgPool) -> Result<ScanSchedulePolicyRow> {
@@ -317,14 +464,22 @@ pub async fn get_scan_stats(pool: &PgPool) -> Result<ScanStatsRow> {
 ///
 /// # Errors
 ///
-/// Returns an error when PostgreSQL cannot load the records or counts.
+/// Returns an error when a continuation cursor is malformed or belongs to a
+/// different request, or when PostgreSQL cannot load the records or counts.
 pub async fn get_scan_records(
     pool: &PgPool,
-    collection: ScanRecordCollection,
-    include_archived: bool,
-    system_id: Option<Uuid>,
-    limit: i64,
+    request: &ScanRecordRequest,
 ) -> Result<ScanRecordResult> {
+    if request.collection == ScanRecordCollection::Completed {
+        return get_completed_scan_records(pool, request).await;
+    }
+    if request.after.is_some() {
+        return Err(InvalidScanRecordCursor.into());
+    }
+    let collection = request.collection;
+    let include_archived = request.include_archived;
+    let system_id = request.system_id;
+    let limit = i64::from(request.limit);
     let base = r#"
         FROM cve_scans scan
         JOIN derivations derivation ON derivation.id = scan.derivation_id
@@ -470,7 +625,402 @@ pub async fn get_scan_records(
         rows,
         total,
         hidden_archived: if include_archived { 0 } else { archived },
+        has_more: false,
+        next_cursor: None,
     })
+}
+
+const COMPLETED_RECORDS_CTE: &str = r#"
+    WITH records AS (
+        SELECT
+            scan.id AS scan_id, scan.derivation_id,
+            derivation.derivation_name AS hostname,
+            derivation.derivation_path,
+            flake.name AS flake_name, commit.git_commit_hash AS commit_hash,
+            EXISTS (
+              SELECT 1 FROM systems system
+              WHERE system.is_active
+                AND system.flake_id=commit.flake_id
+                AND COALESCE(NULLIF(BTRIM(system.system_configuration_name), ''), system.hostname)=derivation.derivation_name
+                AND derivation.store_path IS NOT NULL AND BTRIM(derivation.store_path)<>''
+                AND derivation.store_path=(
+                  SELECT state.store_path FROM system_states state
+                  WHERE state.hostname=system.hostname
+                  ORDER BY state.timestamp DESC NULLS LAST,state.id DESC LIMIT 1)
+            ) AS is_current,
+            COALESCE(flake.snapshot_ready_at IS NOT NULL
+              AND latest_snapshot.commit_id=commit.id,FALSE) AS is_latest_per_flake,
+            scan.status,
+            CASE scan.status WHEN 'completed' THEN 0 WHEN 'failed' THEN 1 ELSE 2 END::smallint
+              AS status_rank,
+            scan.source_trigger, scan.created_at, scan.scheduled_at,
+            COALESCE(
+                scan.lease_started_at,
+                (scan.scan_metadata ->> 'execution_started_at')::timestamptz
+            ) AS started_at,
+            scan.completed_at, scan.completed_at AS terminal_at,
+            scan.scanner_name, scan.scanner_version,
+            COALESCE(builder.name,
+                CASE WHEN scan.scan_metadata ? 'execution_id' THEN 'server-local' END
+            ) AS executor,
+            scan.scan_metadata ->> 'error' AS failure,
+            NULL::text AS wait_reason,
+            scan.total_packages, scan.total_vulnerabilities,
+            scan.critical_count, scan.high_count, scan.medium_count, scan.low_count,
+            scan.scan_duration_ms, scan.attempts, archive.archived_at
+        FROM cve_scans scan
+        JOIN derivations derivation ON derivation.id = scan.derivation_id
+        LEFT JOIN commits commit ON commit.id = derivation.commit_id
+        LEFT JOIN flakes flake ON flake.id = commit.flake_id
+        LEFT JOIN flake_branch_commit_snapshot latest_snapshot
+          ON latest_snapshot.flake_id=commit.flake_id AND latest_snapshot.position=0
+        LEFT JOIN builders builder ON builder.id = scan.lease_builder_id
+        LEFT JOIN cve_scan_archives archive ON archive.scan_id = scan.id
+        WHERE derivation.derivation_type = 'nixos'
+          AND scan.status IN ('completed', 'failed')
+          AND scan.completed_at IS NOT NULL
+          AND ($1::uuid IS NULL OR EXISTS (
+              SELECT 1
+              FROM systems system
+              WHERE system.id = $1
+                AND system.is_active = TRUE
+                AND system.flake_id = commit.flake_id
+                AND COALESCE(
+                    NULLIF(BTRIM(system.system_configuration_name), ''),
+                    system.hostname
+                ) = derivation.derivation_name
+          ))
+    ), classified AS (
+        SELECT records.*,
+               lower(hostname) AS configuration_key,
+               COALESCE(commit_hash, '') AS revision_key,
+               CASE
+                 WHEN is_current THEN 'deployed'
+                 WHEN is_latest_per_flake THEN 'recent'
+                 ELSE 'superseded'
+               END AS revision_class
+        FROM records
+    ), filtered AS (
+        SELECT * FROM classified
+        WHERE ($2::text IS NULL
+               OR hostname ILIKE $2 ESCAPE '\'
+               OR COALESCE(flake_name, '') ILIKE $2 ESCAPE '\'
+               OR COALESCE(commit_hash, '') ILIKE $2 ESCAPE '\'
+               OR scan_id::text ILIKE $2 ESCAPE '\'
+               OR derivation_id::text ILIKE $2 ESCAPE '\'
+               OR COALESCE(derivation_path, '') ILIKE $2 ESCAPE '\')
+          AND ($3 = 'all' OR status = $3)
+          AND ($4 = 'all' OR revision_class = $4)
+          AND (NOT $5 OR is_latest_per_flake)
+          AND ($6::timestamptz IS NULL OR
+               (terminal_at, scan_id) <= ($6, $7::uuid))
+    )
+"#;
+
+/// Returns a filtered, request-bound keyset page of terminal scan records.
+///
+/// A repeatable-read transaction keeps page metadata and rows coherent. The
+/// cursor's high-water tuple excludes newer terminal inserts from every
+/// continuation page. Archive state remains mutable and separate from scan
+/// evidence.
+///
+/// # Errors
+///
+/// Returns an error when the cursor is malformed, belongs to a different
+/// request, or PostgreSQL cannot load a coherent page.
+async fn get_completed_scan_records(
+    pool: &PgPool,
+    request: &ScanRecordRequest,
+) -> Result<ScanRecordResult> {
+    let fingerprint = request.fingerprint();
+    let cursor = request
+        .after
+        .as_deref()
+        .map(decode_scan_record_cursor)
+        .transpose()?;
+    if cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.fingerprint != fingerprint)
+    {
+        return Err(InvalidScanRecordCursor.into());
+    }
+
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *transaction)
+        .await?;
+    let search_pattern = request.search_pattern();
+    let status = scan_record_status_value(request.status);
+    let revision = scan_record_revision_value(request.revision);
+    let cursor_high_water_at = cursor.as_ref().map(|cursor| cursor.high_water_at);
+    let cursor_high_water_id = cursor.as_ref().map(|cursor| cursor.high_water_id);
+    let metadata_sql = format!(
+        r#"{COMPLETED_RECORDS_CTE}
+           SELECT COUNT(*)::bigint AS total,
+                  COUNT(*) FILTER (WHERE archived_at IS NOT NULL)::bigint AS archived,
+                  (SELECT terminal_at FROM filtered
+                   ORDER BY terminal_at DESC,scan_id DESC LIMIT 1) AS high_water_at,
+                  (SELECT scan_id FROM filtered
+                   ORDER BY terminal_at DESC,scan_id DESC LIMIT 1) AS high_water_id
+           FROM filtered"#
+    );
+    let metadata = bind_completed_base(
+        sqlx::query(&metadata_sql),
+        request,
+        search_pattern.as_deref(),
+        status,
+        revision,
+        cursor_high_water_at,
+        cursor_high_water_id,
+    )
+    .fetch_one(&mut *transaction)
+    .await?;
+    let total: i64 = metadata.get("total");
+    let archived: i64 = metadata.get("archived");
+    let high_water_at: Option<DateTime<Utc>> =
+        cursor_high_water_at.or_else(|| metadata.get::<Option<DateTime<Utc>>, _>("high_water_at"));
+    let high_water_id: Option<Uuid> =
+        cursor_high_water_id.or_else(|| metadata.get::<Option<Uuid>, _>("high_water_id"));
+
+    let (keyset, order_by) = completed_order_sql(request.sort, request.direction);
+    let rows_sql = format!(
+        r#"{COMPLETED_RECORDS_CTE}
+           SELECT * FROM filtered
+           WHERE ($8 OR archived_at IS NULL)
+             AND ({keyset})
+           ORDER BY {order_by}
+           LIMIT $18"#
+    );
+    let query = bind_completed_base(
+        sqlx::query(&rows_sql),
+        request,
+        search_pattern.as_deref(),
+        status,
+        revision,
+        high_water_at,
+        high_water_id,
+    )
+    .bind(request.include_archived)
+    .bind(cursor.as_ref().map(|cursor| cursor.configuration.as_str()))
+    .bind(cursor.as_ref().map(|cursor| cursor.revision.as_str()))
+    .bind(cursor.as_ref().map(|cursor| cursor.status_rank))
+    .bind(cursor.as_ref().map(|cursor| cursor.critical_count))
+    .bind(cursor.as_ref().map(|cursor| cursor.high_count))
+    .bind(cursor.as_ref().map(|cursor| cursor.medium_count))
+    .bind(cursor.as_ref().map(|cursor| cursor.low_count))
+    .bind(cursor.as_ref().map(|cursor| cursor.terminal_at))
+    .bind(cursor.as_ref().map(|cursor| cursor.scan_id))
+    .bind(i64::from(request.limit) + 1);
+    let mut raw_rows = query.fetch_all(&mut *transaction).await?;
+    let has_more = raw_rows.len() > usize::from(request.limit);
+    if has_more {
+        raw_rows.pop();
+    }
+    let next_cursor = if has_more {
+        raw_rows
+            .last()
+            .map(|row| {
+                encode_scan_record_cursor(&ScanRecordCursor {
+                    version: 1,
+                    fingerprint: fingerprint.clone(),
+                    high_water_at: high_water_at.ok_or(InvalidScanRecordCursor)?,
+                    high_water_id: high_water_id.ok_or(InvalidScanRecordCursor)?,
+                    configuration: row.get("configuration_key"),
+                    revision: row.get("revision_key"),
+                    status_rank: row.get("status_rank"),
+                    critical_count: row.get("critical_count"),
+                    high_count: row.get("high_count"),
+                    medium_count: row.get("medium_count"),
+                    low_count: row.get("low_count"),
+                    terminal_at: row.get("terminal_at"),
+                    scan_id: row.get("scan_id"),
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let rows = raw_rows.into_iter().map(scan_record_from_row).collect();
+    transaction.commit().await?;
+    Ok(ScanRecordResult {
+        rows,
+        total,
+        hidden_archived: if request.include_archived {
+            0
+        } else {
+            archived
+        },
+        has_more,
+        next_cursor,
+    })
+}
+
+fn bind_completed_base<'q>(
+    query: sqlx::query::Query<'q, Postgres, sqlx::postgres::PgArguments>,
+    request: &'q ScanRecordRequest,
+    search_pattern: Option<&'q str>,
+    status: &'static str,
+    revision: &'static str,
+    high_water_at: Option<DateTime<Utc>>,
+    high_water_id: Option<Uuid>,
+) -> sqlx::query::Query<'q, Postgres, sqlx::postgres::PgArguments> {
+    query
+        .bind(request.system_id)
+        .bind(search_pattern)
+        .bind(status)
+        .bind(revision)
+        .bind(request.latest_only)
+        .bind(high_water_at)
+        .bind(high_water_id)
+}
+
+fn scan_record_status_value(status: ScanRecordStatus) -> &'static str {
+    match status {
+        ScanRecordStatus::All => "all",
+        ScanRecordStatus::Completed => "completed",
+        ScanRecordStatus::Failed => "failed",
+    }
+}
+
+fn scan_record_revision_value(revision: ScanRecordRevision) -> &'static str {
+    match revision {
+        ScanRecordRevision::All => "all",
+        ScanRecordRevision::Deployed => "deployed",
+        ScanRecordRevision::Recent => "recent",
+        ScanRecordRevision::Superseded => "superseded",
+    }
+}
+
+fn scan_record_sort_value(sort: ScanRecordSort) -> &'static str {
+    match sort {
+        ScanRecordSort::Configuration => "configuration",
+        ScanRecordSort::Revision => "revision",
+        ScanRecordSort::Status => "status",
+        ScanRecordSort::Severity => "severity",
+        ScanRecordSort::Timestamp => "timestamp",
+    }
+}
+
+fn scan_record_direction_value(direction: ScanRecordDirection) -> &'static str {
+    match direction {
+        ScanRecordDirection::Asc => "asc",
+        ScanRecordDirection::Desc => "desc",
+    }
+}
+
+fn completed_order_sql(
+    sort: ScanRecordSort,
+    direction: ScanRecordDirection,
+) -> (&'static str, &'static str) {
+    match (sort, direction) {
+        (ScanRecordSort::Timestamp, ScanRecordDirection::Desc) => (
+            "$16::timestamptz IS NULL OR (terminal_at,scan_id)<($16,$17::uuid)",
+            "terminal_at DESC,scan_id DESC",
+        ),
+        (ScanRecordSort::Timestamp, ScanRecordDirection::Asc) => (
+            "$16::timestamptz IS NULL OR (terminal_at,scan_id)>($16,$17::uuid)",
+            "terminal_at ASC,scan_id ASC",
+        ),
+        (ScanRecordSort::Configuration, ScanRecordDirection::Asc) => (
+            "$9::text IS NULL OR configuration_key COLLATE \"C\">$9 COLLATE \"C\" OR (configuration_key=$9 AND (terminal_at,scan_id)<($16,$17::uuid))",
+            "configuration_key COLLATE \"C\" ASC,terminal_at DESC,scan_id DESC",
+        ),
+        (ScanRecordSort::Configuration, ScanRecordDirection::Desc) => (
+            "$9::text IS NULL OR configuration_key COLLATE \"C\"<$9 COLLATE \"C\" OR (configuration_key=$9 AND (terminal_at,scan_id)<($16,$17::uuid))",
+            "configuration_key COLLATE \"C\" DESC,terminal_at DESC,scan_id DESC",
+        ),
+        (ScanRecordSort::Revision, ScanRecordDirection::Asc) => (
+            "$10::text IS NULL OR revision_key COLLATE \"C\">$10 COLLATE \"C\" OR (revision_key=$10 AND (terminal_at,scan_id)<($16,$17::uuid))",
+            "revision_key COLLATE \"C\" ASC,terminal_at DESC,scan_id DESC",
+        ),
+        (ScanRecordSort::Revision, ScanRecordDirection::Desc) => (
+            "$10::text IS NULL OR revision_key COLLATE \"C\"<$10 COLLATE \"C\" OR (revision_key=$10 AND (terminal_at,scan_id)<($16,$17::uuid))",
+            "revision_key COLLATE \"C\" DESC,terminal_at DESC,scan_id DESC",
+        ),
+        (ScanRecordSort::Status, ScanRecordDirection::Asc) => (
+            "$11::smallint IS NULL OR status_rank>$11 OR (status_rank=$11 AND (terminal_at,scan_id)<($16,$17::uuid))",
+            "status_rank ASC,terminal_at DESC,scan_id DESC",
+        ),
+        (ScanRecordSort::Status, ScanRecordDirection::Desc) => (
+            "$11::smallint IS NULL OR status_rank<$11 OR (status_rank=$11 AND (terminal_at,scan_id)<($16,$17::uuid))",
+            "status_rank DESC,terminal_at DESC,scan_id DESC",
+        ),
+        (ScanRecordSort::Severity, ScanRecordDirection::Asc) => (
+            "$12::integer IS NULL OR (critical_count,high_count,medium_count,low_count)>($12,$13,$14,$15) OR ((critical_count,high_count,medium_count,low_count)=($12,$13,$14,$15) AND (terminal_at,scan_id)<($16,$17::uuid))",
+            "critical_count ASC,high_count ASC,medium_count ASC,low_count ASC,terminal_at DESC,scan_id DESC",
+        ),
+        (ScanRecordSort::Severity, ScanRecordDirection::Desc) => (
+            "$12::integer IS NULL OR (critical_count,high_count,medium_count,low_count)<($12,$13,$14,$15) OR ((critical_count,high_count,medium_count,low_count)=($12,$13,$14,$15) AND (terminal_at,scan_id)<($16,$17::uuid))",
+            "critical_count DESC,high_count DESC,medium_count DESC,low_count DESC,terminal_at DESC,scan_id DESC",
+        ),
+    }
+}
+
+fn decode_scan_record_cursor(value: &str) -> Result<ScanRecordCursor> {
+    if value.is_empty() || value.len() > 8_192 {
+        return Err(InvalidScanRecordCursor.into());
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| InvalidScanRecordCursor)?;
+    let cursor: ScanRecordCursor =
+        serde_json::from_slice(&bytes).map_err(|_| InvalidScanRecordCursor)?;
+    if cursor.version != 1
+        || cursor.fingerprint.len() != 64
+        || cursor.configuration.len() > 4_096
+        || cursor.revision.len() > 4_096
+        || !(0..=2).contains(&cursor.status_rank)
+    {
+        return Err(InvalidScanRecordCursor.into());
+    }
+    Ok(cursor)
+}
+
+fn encode_scan_record_cursor(cursor: &ScanRecordCursor) -> Result<String> {
+    let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(cursor)?);
+    if encoded.len() > 8_192 {
+        return Err(InvalidScanRecordCursor.into());
+    }
+    Ok(encoded)
+}
+
+fn scan_record_from_row(row: sqlx::postgres::PgRow) -> ScanRecordRow {
+    let failure = row
+        .get::<Option<String>, _>("failure")
+        .map(|value| crate::security::snapshot_redaction::redact_text(&value))
+        .map(|value| value.chars().take(2048).collect());
+    ScanRecordRow {
+        scan_id: row.get("scan_id"),
+        derivation_id: row.get("derivation_id"),
+        hostname: row.get("hostname"),
+        flake_name: row.get("flake_name"),
+        commit_hash: row.get("commit_hash"),
+        is_current: row.get("is_current"),
+        is_latest_per_flake: row.get("is_latest_per_flake"),
+        status: row.get("status"),
+        source_trigger: crate::queries::cve_scans::present_scan_trigger(
+            row.get::<Option<String>, _>("source_trigger").as_deref(),
+        ),
+        created_at: row.get("created_at"),
+        scheduled_at: row.get("scheduled_at"),
+        started_at: row.get("started_at"),
+        completed_at: row.get("completed_at"),
+        scanner_name: row.get("scanner_name"),
+        scanner_version: row.get("scanner_version"),
+        executor: row.get("executor"),
+        failure,
+        wait_reason: row.get("wait_reason"),
+        total_packages: row.get("total_packages"),
+        total_vulnerabilities: row.get("total_vulnerabilities"),
+        critical_count: row.get("critical_count"),
+        high_count: row.get("high_count"),
+        medium_count: row.get("medium_count"),
+        low_count: row.get("low_count"),
+        scan_duration_ms: row.get("scan_duration_ms"),
+        attempts: row.get("attempts"),
+        archived_at: row.get("archived_at"),
+        cancellable: false,
+    }
 }
 
 /// Sets archive presentation state for a bounded set of eligible terminal scans.

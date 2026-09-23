@@ -4,12 +4,15 @@
 //!
 //! 1. **Stale recovery** — examines bounded batches of abandoned executions and
 //!    old revocations so recovery cannot monopolize a worker cycle.
-//! 2. **Operator-queued scans** — runs explicit fleet-rescan requests before
+//! 2. **Prerequisite reconciliation** — repairs durable post-build waits before
+//!    optional executor gates so disabled or unavailable Vulnix cannot strand
+//!    lifecycle state.
+//! 3. **Operator-queued scans** — runs explicit fleet-rescan requests before
 //!    loading scan policy. This phase is independent of `on_build` and still
 //!    runs when policy loading fails.
-//! 3. **Post-build scans** — picks up build-complete derivations that have
+//! 4. **Post-build scans** — picks up build-complete derivations that have
 //!    never been successfully scanned and runs vulnix on them.
-//! 4. **Periodic rescans** — picks up derivations whose last completed scan is
+//! 5. **Periodic rescans** — picks up derivations whose last completed scan is
 //!    older than the configured interval in `scan_schedule_policy`, so newly
 //!    published NVD advisories are picked up automatically (vulnix fetches the
 //!    latest NVD data on every invocation).
@@ -33,6 +36,7 @@ use crate::derivations::utils::{
 use crate::log::{WorkerState, WorkerStatus, get_cve_status};
 use crate::models::cache_destination::CacheDestination;
 use crate::queries::cache_destinations::get_cache_destination;
+use crate::queries::cve_scan_leases::reconcile_post_build_scan_prerequisites;
 #[cfg(test)]
 use crate::queries::cve_scans::create_cve_scan;
 use crate::queries::cve_scans::{
@@ -276,6 +280,8 @@ pub async fn run_cve_scan_loop(
             Err(e) => error!("Failed to recover remote CVE scan leases: {e}"),
         }
 
+        run_cve_prerequisite_maintenance(&pool).await;
+
         // Honour the enabled flag — sleep the full interval and skip work when disabled.
         let enabled = *enabled_rx.read().await;
         if !enabled {
@@ -369,6 +375,24 @@ pub async fn run_cve_scan_loop(
     }
 }
 
+/// Runs bounded prerequisite maintenance independently of scan execution.
+///
+/// Reconciliation runs before promotion because it can bind a durable intent
+/// to a successful replacement that promotion can advance in the same pass.
+async fn run_cve_prerequisite_maintenance(pool: &PgPool) {
+    match reconcile_post_build_scan_prerequisites(pool, 32).await {
+        Ok(count) if count > 0 => info!("Reconciled {count} CVE build prerequisite wait(s)"),
+        Ok(_) => {}
+        Err(error) => error!("Failed to reconcile CVE build prerequisites: {error:#}"),
+    }
+
+    match promote_waiting_cve_scans(pool, 32).await {
+        Ok(count) if count > 0 => info!("Advanced {count} CVE scan prerequisite wait(s)"),
+        Ok(_) => {}
+        Err(error) => error!("Failed to advance waiting CVE scans: {error:#}"),
+    }
+}
+
 /// Maximum derivations scanned per cycle phase.
 ///
 /// Processing is bounded per cycle so that a large historical backlog does not
@@ -426,12 +450,6 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
         Ok(n) if n > 0 => warn!("Recovered {n} stale in_progress CVE scan(s)"),
         Ok(_) => {}
         Err(e) => error!("Failed to recover stale CVE scans: {e}"),
-    }
-
-    match promote_waiting_cve_scans(pool, 32).await {
-        Ok(count) if count > 0 => info!("Advanced {count} CVE scan prerequisite wait(s)"),
-        Ok(_) => {}
-        Err(error) => error!("Failed to advance waiting CVE scans: {error:#}"),
     }
 
     // --- Phase 0: operator-queued scans (bounded) ---
@@ -2190,6 +2208,82 @@ mod tests {
         .execute(pool)
         .await
         .expect("original scan schedule policy should be restored");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn startup_maintenance_rebinds_and_promotes_before_executor_work(pool: PgPool) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let derivation = insert_derivation(
+            &pool,
+            None,
+            &format!("startup-maintenance-{suffix}"),
+            "nixos",
+        )
+        .await
+        .expect("maintenance derivation should be inserted");
+        sqlx::query("UPDATE derivations SET derivation_path = $2, store_path = $3 WHERE id = $1")
+            .bind(derivation.id)
+            .bind(format!("/nix/store/{suffix}-startup.drv"))
+            .bind(format!("/nix/store/{suffix}-startup"))
+            .execute(&pool)
+            .await
+            .expect("maintenance derivation paths should update");
+        let source_job: Uuid = sqlx::query_scalar(
+            r#"
+            INSERT INTO build_jobs (
+                derivation_id, status, attempt_number, created_at, completed_at
+            ) VALUES ($1, 'failed', 1, NOW() - INTERVAL '2 seconds', NOW())
+            RETURNING id
+            "#,
+        )
+        .bind(derivation.id)
+        .fetch_one(&pool)
+        .await
+        .expect("failed source attempt should be inserted");
+        let replacement_job: Uuid = sqlx::query_scalar(
+            r#"
+            INSERT INTO build_jobs (
+                derivation_id, status, attempt_number, parent_job_id,
+                root_job_id, created_at, completed_at
+            ) VALUES ($1, 'success', 2, $2, $2, NOW(), NOW())
+            RETURNING id
+            "#,
+        )
+        .bind(derivation.id)
+        .bind(source_job)
+        .fetch_one(&pool)
+        .await
+        .expect("successful replacement should be inserted");
+        let scan_id: Uuid = sqlx::query_scalar(
+            r#"
+            INSERT INTO cve_scans (
+                derivation_id, scanner_name, status, attempts,
+                source_trigger, completed_build_job_id
+            ) VALUES ($1, 'vulnix', 'awaiting_build', 0, 'post_build', $2)
+            RETURNING id
+            "#,
+        )
+        .bind(derivation.id)
+        .bind(source_job)
+        .fetch_one(&pool)
+        .await
+        .expect("waiting intent should be inserted");
+
+        // This helper is called at the top of the worker loop, before both the
+        // runtime-enabled and Vulnix availability checks.
+        run_cve_prerequisite_maintenance(&pool).await;
+
+        assert_eq!(
+            sqlx::query_as::<_, (String, Option<Uuid>)>(
+                "SELECT status, completed_build_job_id FROM cve_scans WHERE id = $1",
+            )
+            .bind(scan_id)
+            .fetch_one(&pool)
+            .await
+            .expect("maintained scan should load"),
+            ("pending".into(), Some(replacement_job))
+        );
     }
 
     /// Confirms that [`run_cve_scan_loop`] exits cleanly when vulnix is not on

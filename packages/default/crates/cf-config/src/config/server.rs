@@ -53,18 +53,46 @@ pub struct ServerConfig {
     #[serde(default = "default_eval_check_cache")]
     pub eval_check_cache: bool,
 
-    /// Automatically enqueue hardening scans after successful commit evaluation.
+    /// Automatically admit hardening scans after a successful NixOS build.
     ///
-    /// IMPORTANT: Keep this `false` (the default) on memory-constrained deployments.
-    /// Each hardening scan launches a full `nix eval` subprocess that can consume
-    /// several GiB of memory.  When `false`, scans must be triggered manually via
-    /// the API; the durable `crystal-forge-hardening` queue worker still runs and
-    /// will pick up any manually-enqueued scans.
+    /// When `true`, the transaction that records a successful exact NixOS build
+    /// also inserts one `pending` hardening scan for that exact derivation, and
+    /// the hardening worker additionally runs a small bounded backfill for
+    /// already built targets that have no hardening evidence. Admission is a
+    /// single guarded database insert. It never starts a scan.
     ///
-    /// Setting this to `true` caused a production OOM incident on 2026-07-28:
-    /// nine concurrent hardening `nix eval` processes overlapped a bulk
-    /// `nix-eval-jobs` evaluation, driving the server cgroup to 58.5 GiB with
-    /// 1.9 GiB of swap and making the API unresponsive.
+    /// When `false` (the default) nothing is admitted automatically. Scans must
+    /// be requested through the API. The durable `crystal-forge-hardening` queue
+    /// worker still runs and still executes those manual requests.
+    ///
+    /// # History
+    ///
+    /// Admission previously happened after successful commit *evaluation*, which
+    /// admitted one scan for every evaluated derivation of a commit and, in the
+    /// design of that time, detached a `nix eval` subprocess per admitted row.
+    /// That fan-out caused a production incident on 2026-07-28: nine concurrent
+    /// hardening `nix eval` processes overlapped a bulk `nix-eval-jobs`
+    /// evaluation, drove the server cgroup to 58.5 GiB with 1.9 GiB of swap, and
+    /// made the API unresponsive.
+    ///
+    /// # Recommendation
+    ///
+    /// The default remains `false` so an upgrade never changes the workload of a
+    /// running deployment on its own. Enabling it is now recommended for
+    /// deployments that want continuous hardening evidence, because the incident
+    /// conditions no longer apply:
+    ///
+    /// - admission is tied to a build that already succeeded, not to every
+    ///   evaluated configuration, so volume tracks real builds;
+    /// - admission performs no subprocess work;
+    /// - the single serial worker, the global one-in-progress index from
+    ///   migration 0188, and the shared heavy-Nix advisory lock keep hardening to
+    ///   one `nix eval` at a time and keep it from overlapping bulk evaluation;
+    /// - the backfill is bounded to a small fixed batch per cycle.
+    ///
+    /// The remaining cost of `true` is queue depth and scan latency, not
+    /// concurrent memory use. Keep it `false` when a deployment must never run
+    /// unattended `nix eval` work.
     #[serde(default)]
     pub auto_hardening_scans: bool,
 

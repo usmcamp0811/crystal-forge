@@ -9,13 +9,15 @@ use uuid::Uuid;
 use wasm_bindgen::{JsCast, closure::Closure};
 
 use crate::api::client::{
-    fetch_environments, fetch_scanning_scan_detail, fetch_scanning_scan_records,
-    fetch_scanning_schedule, fetch_scanning_stats, fetch_scanning_system_scans,
-    fetch_scanning_systems, trigger_cve_derivation_rescan, update_scanning_archive_state,
-    update_scanning_schedule,
+    ApiClientError, fetch_environments, fetch_scanning_scan_detail, fetch_scanning_scan_records,
+    fetch_scanning_scan_records_with_timeout, fetch_scanning_schedule, fetch_scanning_stats,
+    fetch_scanning_system_scans, fetch_scanning_systems, trigger_cve_derivation_rescan,
+    update_scanning_archive_state, update_scanning_schedule,
 };
 use crate::api::models::{
-    ScanSchedulePolicyResponse, ScanningQueueItemResponse, ScanningScanDetailResponse,
+    ScanRecordCollectionParam, ScanRecordDirectionParam, ScanRecordRevisionParam,
+    ScanRecordSortParam, ScanRecordStatusParam, ScanSchedulePolicyResponse,
+    ScanningQueueItemResponse, ScanningScanDetailResponse, ScanningScanRecordQuery,
     ScanningScanRecordResponse, ScanningScanRecordsResponse, ScanningSystemsItemResponse,
     UpdateScanSchedulePolicyRequest,
 };
@@ -24,10 +26,52 @@ use crate::components::dialog_focus::{
     DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel, DialogInitialFocus,
 };
 use crate::components::icon::{Icon, IconName};
+use crate::hooks::{InfiniteScroll, use_infinite_scroll};
 
-const RECORD_LIMIT: i64 = 10_000;
+/// Bounds one Completed page request.
+///
+/// The server issues a continuation cursor whenever more matching rows exist,
+/// so this value is a page size and not a collection cap.
+const COMPLETED_PAGE_LIMIT: u16 = 50;
+
+/// Bounds the single Active request.
+///
+/// The server rejects continuation cursors for nonterminal collections because
+/// waiting, queued, and running rows have no stable keyset order. Active
+/// therefore loads one explicitly bounded page and discloses when the server
+/// reports more matching rows than are loaded.
+const ACTIVE_PAGE_LIMIT: u16 = 200;
+
+/// Bounds one per-system history request.
+///
+/// The history collection mixes nonterminal and terminal rows and has the same
+/// cursor restriction as [`ACTIVE_PAGE_LIMIT`].
+const SYSTEM_HISTORY_LIMIT: u16 = 200;
+
+/// Bounds the per-system derivation projection request.
+const SYSTEM_DERIVATION_LIMIT: i64 = 500;
+
+/// Bounds the fleet system projection request.
+const SYSTEM_LIMIT: i64 = 500;
+
+/// Bounds one archive or restore request to the server's exact-identity limit.
+const ARCHIVE_BATCH_MAX: usize = 100;
+
 const DETAIL_POLL_MS: u32 = 3_000;
 const LIVE_REFRESH_MS: u32 = 15_000;
+/// Releases a live-refresh slot before the next polling interval.
+const HEAD_REFRESH_TIMEOUT_MS: u32 = 10_000;
+
+/// Delays server search requests until typing pauses.
+const SEARCH_DEBOUNCE_MS: u32 = 250;
+
+// INVARIANT: the server validates every scan-record page size against 1..=500
+// and answers any other value with a validation error. The client sends these
+// constants unchanged instead of clamping, so an out-of-range page size is a
+// build-time failure rather than a silently truncated collection.
+const _: () = assert!(COMPLETED_PAGE_LIMIT >= 1 && COMPLETED_PAGE_LIMIT <= 500);
+const _: () = assert!(ACTIVE_PAGE_LIMIT >= 1 && ACTIVE_PAGE_LIMIT <= 500);
+const _: () = assert!(SYSTEM_HISTORY_LIMIT >= 1 && SYSTEM_HISTORY_LIMIT <= 500);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ScanTab {
@@ -42,6 +86,11 @@ enum ScanDetailTab {
     Details,
 }
 
+/// Orders the single loaded Active page inside the browser.
+///
+/// The server does not order nonterminal collections by request, so this key
+/// only applies to rows that are already loaded. The Active panel offers it
+/// only while the loaded page holds the complete matching collection.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ScanSort {
     Configuration,
@@ -49,6 +98,456 @@ enum ScanSort {
     Status,
     Severity,
     Timestamp,
+}
+
+/// Identifies one in-flight scan-record continuation request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScanRecordContinuation {
+    generation: u64,
+    /// Contains the opaque server-issued cursor for this request.
+    cursor: String,
+}
+
+/// Identifies one in-flight head-page refresh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScanRecordHeadRefresh {
+    generation: u64,
+    sequence: u64,
+}
+
+/// Selects how a head-page refresh treats rows that are not loaded yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeadRefreshMode {
+    /// Inserts unseen head rows before the loaded rows. Only newest-first
+    /// ordering guarantees that a new terminal row belongs at the head.
+    PrependNewRows,
+    /// Updates loaded rows only. Any other ordering could place an unseen row
+    /// between loaded rows, which would reorder rows the operator can see.
+    UpdateLoadedOnly,
+}
+
+/// Accumulates server-issued scan-record pages for one request identity.
+///
+/// The state rejects responses from superseded requests, keeps loaded rows
+/// visible when a continuation fails, and never lets a live refresh
+/// re-request a page that is already loaded.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct ScanRecordPaginationState {
+    /// Contains the accumulated rows and the newest page metadata.
+    page: Option<ScanningScanRecordsResponse>,
+    /// Reports whether one continuation request is active.
+    continuation_loading: bool,
+    /// Contains the latest continuation failure while loaded rows remain.
+    continuation_error: Option<String>,
+    /// Counts loaded server pages, including the head page.
+    pages_loaded: usize,
+    generation: u64,
+    /// Identifies the newest head refresh started in this generation.
+    head_refresh_sequence: u64,
+    /// Is true while one head refresh owns the current sequence.
+    head_refresh_loading: bool,
+}
+
+impl ScanRecordPaginationState {
+    /// Replaces every loaded page and invalidates all earlier requests.
+    ///
+    /// CONCURRENCY: the generation bump makes every in-flight continuation and
+    /// head refresh for a previous request identity a no-op on completion.
+    fn reset(&mut self, page: Option<ScanningScanRecordsResponse>) {
+        self.generation = self.generation.wrapping_add(1);
+        self.pages_loaded = usize::from(page.is_some());
+        self.page = page;
+        self.continuation_loading = false;
+        self.continuation_error = None;
+        self.head_refresh_sequence = self.head_refresh_sequence.wrapping_add(1);
+        self.head_refresh_loading = false;
+    }
+
+    /// Returns the accumulated rows in the server's collection order.
+    fn rows(&self) -> &[ScanningScanRecordResponse] {
+        self.page.as_ref().map_or(&[], |page| page.items.as_slice())
+    }
+
+    /// Is true when the head page has been loaded.
+    fn is_loaded(&self) -> bool {
+        self.page.is_some()
+    }
+
+    /// Returns the current request generation.
+    ///
+    /// The value changes on every reset, so callers can tie scroll paging to
+    /// the loaded pages and start again after a reload.
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Is true when the server offers another requestable page.
+    fn has_more(&self) -> bool {
+        self.page
+            .as_ref()
+            .is_some_and(|page| page.has_more && page.next_cursor.is_some())
+    }
+
+    /// Counts matching rows the server reports before archive filtering.
+    fn total(&self) -> i64 {
+        self.page.as_ref().map_or(0, |page| page.total)
+    }
+
+    /// Counts archived matching rows the current archive filter hides.
+    fn hidden_archived(&self) -> i64 {
+        self.page
+            .as_ref()
+            .map_or(0, |page| page.hidden_archived.max(0))
+    }
+
+    /// Counts matching rows the current archive filter shows.
+    fn visible_total(&self) -> i64 {
+        (self.total() - self.hidden_archived()).max(0)
+    }
+
+    /// Starts one continuation request when no other page request is active.
+    fn begin_continuation(&mut self) -> Option<ScanRecordContinuation> {
+        if self.continuation_loading || self.head_refresh_loading {
+            return None;
+        }
+        let page = self.page.as_ref()?;
+        if !page.has_more {
+            return None;
+        }
+        let cursor = page.next_cursor.clone()?;
+        self.continuation_loading = true;
+        self.continuation_error = None;
+        Some(ScanRecordContinuation {
+            generation: self.generation,
+            cursor,
+        })
+    }
+
+    /// Appends a matching continuation page and ignores stale completions.
+    ///
+    /// Returns `false` when no head page remains, which requires the caller to
+    /// request a new first page.
+    fn complete_continuation(
+        &mut self,
+        request: &ScanRecordContinuation,
+        page: ScanningScanRecordsResponse,
+    ) -> bool {
+        if request.generation != self.generation || !self.continuation_loading {
+            return true;
+        }
+        self.continuation_loading = false;
+        let Some(current) = self.page.as_mut() else {
+            return false;
+        };
+        // INVARIANT: keyset pages never repeat a scan identity, but a
+        // concurrent archive or restore can move a page boundary. Deduplicating
+        // by scan identity keeps every row unique without dropping loaded rows.
+        let mut identities = current
+            .items
+            .iter()
+            .map(|row| row.scan_id)
+            .collect::<HashSet<_>>();
+        current.items.extend(
+            page.items
+                .into_iter()
+                .filter(|row| identities.insert(row.scan_id)),
+        );
+        // The cursor binds this page to the high-water snapshot captured by the
+        // original head request. A later live head refresh can report a newer
+        // total, so continuation metadata must not replace the live total.
+        current.has_more = page.has_more;
+        current.next_cursor = page.next_cursor;
+        self.pages_loaded = self.pages_loaded.saturating_add(1);
+        true
+    }
+
+    /// Records a matching continuation failure and preserves loaded rows.
+    fn fail_continuation(&mut self, request: &ScanRecordContinuation, message: String) {
+        if request.generation == self.generation && self.continuation_loading {
+            self.continuation_loading = false;
+            self.continuation_error = Some(message);
+        }
+    }
+
+    /// Starts one head-page refresh for the loaded request identity.
+    ///
+    /// Returns `None` before the head page exists or while another page request
+    /// is active, because concurrent merges could duplicate or reorder rows.
+    fn begin_head_refresh(&mut self) -> Option<ScanRecordHeadRefresh> {
+        if self.page.is_none() || self.continuation_loading || self.head_refresh_loading {
+            return None;
+        }
+        self.head_refresh_sequence = self.head_refresh_sequence.wrapping_add(1);
+        self.head_refresh_loading = true;
+        Some(ScanRecordHeadRefresh {
+            generation: self.generation,
+            sequence: self.head_refresh_sequence,
+        })
+    }
+
+    /// Applies a matching head refresh without re-requesting later pages.
+    ///
+    /// INVARIANT: a continuation cursor carries the high-water bound captured
+    /// by the first request of this identity. Once a continuation page is
+    /// loaded, the refreshed head page's own cursor must be ignored; adopting
+    /// it would re-request rows that are already visible.
+    ///
+    /// Returns `false` when the response belongs to a superseded request.
+    fn complete_head_refresh(
+        &mut self,
+        request: &ScanRecordHeadRefresh,
+        head: ScanningScanRecordsResponse,
+        mode: HeadRefreshMode,
+    ) -> bool {
+        if request.generation != self.generation || request.sequence != self.head_refresh_sequence {
+            return false;
+        }
+        self.head_refresh_loading = false;
+        let Some(current) = self.page.as_mut() else {
+            return false;
+        };
+        if self.pages_loaded <= 1 {
+            // One loaded page is exactly the head page, so the fresh response
+            // replaces it, cursor included.
+            *current = head;
+            self.pages_loaded = 1;
+            return true;
+        }
+        let total_delta = head.total - current.total;
+        let loaded = current
+            .items
+            .iter()
+            .map(|row| row.scan_id)
+            .collect::<HashSet<_>>();
+        let discovered_new_rows = head
+            .items
+            .iter()
+            .filter(|row| !loaded.contains(&row.scan_id))
+            .count();
+        let refresh_exceeds_old_cursor = total_delta < 0
+            || head.hidden_archived != current.hidden_archived
+            || (total_delta > 0
+                && (mode == HeadRefreshMode::UpdateLoadedOnly
+                    || total_delta as usize > discovered_new_rows));
+        if refresh_exceeds_old_cursor {
+            // The continuation cursor belongs to the old high-water snapshot.
+            // Restart from the refreshed head when rows can fall outside that
+            // cursor; otherwise the UI can report the new total while making
+            // some matching rows permanently unreachable.
+            *current = head;
+            self.pages_loaded = 1;
+            return true;
+        }
+        let refreshed = head
+            .items
+            .iter()
+            .map(|row| (row.scan_id, row))
+            .collect::<HashMap<_, _>>();
+        for row in current.items.iter_mut() {
+            if let Some(updated) = refreshed.get(&row.scan_id) {
+                *row = (*updated).clone();
+            }
+        }
+        if mode == HeadRefreshMode::PrependNewRows {
+            let mut merged = head
+                .items
+                .into_iter()
+                .filter(|row| !loaded.contains(&row.scan_id))
+                .collect::<Vec<_>>();
+            merged.append(&mut current.items);
+            current.items = merged;
+        }
+        current.total = head.total;
+        current.hidden_archived = head.hidden_archived;
+        true
+    }
+
+    /// Releases the matching refresh slot after a request failure.
+    fn fail_head_refresh(&mut self, request: &ScanRecordHeadRefresh) {
+        if request.generation == self.generation && request.sequence == self.head_refresh_sequence {
+            self.head_refresh_loading = false;
+        }
+    }
+}
+
+/// Identifies one exact Completed request sent to the server.
+///
+/// The server's cursor fingerprint covers every value here, so any change must
+/// restart pagination from the first page without a cursor.
+#[derive(Clone, PartialEq, Eq)]
+struct CompletedRequest {
+    include_archived: bool,
+    search: String,
+    status: ScanRecordStatusParam,
+    revision: ScanRecordRevisionParam,
+    latest_only: bool,
+    sort: ScanRecordSortParam,
+    direction: ScanRecordDirectionParam,
+}
+
+impl CompletedRequest {
+    /// Builds the head or continuation query for this request identity.
+    fn to_query(&self, after: Option<String>) -> ScanningScanRecordQuery {
+        ScanningScanRecordQuery {
+            collection: ScanRecordCollectionParam::Completed,
+            include_archived: self.include_archived,
+            system_id: None,
+            limit: COMPLETED_PAGE_LIMIT,
+            search: (!self.search.is_empty()).then(|| self.search.clone()),
+            status: self.status,
+            revision: self.revision,
+            latest_only: self.latest_only,
+            sort: self.sort,
+            direction: self.direction,
+            after,
+        }
+    }
+
+    /// Builds the bounded archive-count probe for the Archived badge.
+    ///
+    /// The probe repeats the current filters with archived rows excluded and a
+    /// one-row page, so `hidden_archived` counts every archived row the
+    /// current view hides without transferring those rows.
+    fn archived_count_query(&self) -> ScanningScanRecordQuery {
+        ScanningScanRecordQuery {
+            include_archived: false,
+            limit: 1,
+            ..self.to_query(None)
+        }
+    }
+
+    /// Returns the infinite-scroll reset key for this request identity.
+    fn reset_key(&self) -> String {
+        format!(
+            "completed|{}|{}|{}|{}|{}|{}|{}",
+            self.include_archived,
+            self.search,
+            self.status.as_param(),
+            self.revision.as_param(),
+            self.latest_only,
+            self.sort.as_param(),
+            self.direction.as_param(),
+        )
+    }
+
+    /// Selects the head-refresh behavior implied by the server ordering.
+    fn head_refresh_mode(&self) -> HeadRefreshMode {
+        if self.sort == ScanRecordSortParam::Timestamp
+            && self.direction == ScanRecordDirectionParam::Desc
+        {
+            HeadRefreshMode::PrependNewRows
+        } else {
+            HeadRefreshMode::UpdateLoadedOnly
+        }
+    }
+
+    /// Is true when the request narrows the collection beyond archive state.
+    fn has_narrowing_filter(&self) -> bool {
+        !self.search.is_empty()
+            || self.status != ScanRecordStatusParam::All
+            || self.revision != ScanRecordRevisionParam::All
+            || self.latest_only
+    }
+}
+
+/// Groups the Completed filter signals owned by [`ScanningView`].
+#[derive(Clone, Copy)]
+struct CompletedFilterSignals {
+    include_archived: Signal<bool>,
+    /// Contains the raw search input before debouncing.
+    query: Signal<String>,
+    status: Signal<ScanRecordStatusParam>,
+    revision: Signal<ScanRecordRevisionParam>,
+    latest_only: Signal<bool>,
+    sort: Signal<ScanRecordSortParam>,
+    direction: Signal<ScanRecordDirectionParam>,
+}
+
+/// Groups the Active filter signals owned by [`ScanningView`].
+///
+/// These filters apply to the single loaded Active page because the server
+/// does not filter or order nonterminal collections by request.
+#[derive(Clone, Copy)]
+struct ActiveFilterSignals {
+    query: Signal<String>,
+    status: Signal<String>,
+    revision: Signal<String>,
+    latest_only: Signal<bool>,
+    sort: Signal<ScanSort>,
+    descending: Signal<bool>,
+}
+
+/// Groups the row-level interaction signals shared by every record panel.
+#[derive(Clone, Copy)]
+struct RecordRowContext {
+    retry_pending: Signal<HashSet<i32>>,
+    feedback: Signal<Option<ScanActionFeedback>>,
+    refresh: Signal<u64>,
+    selected_scan: Signal<Option<ScanDetailSelection>>,
+    detail_state: Signal<ScanDetailState>,
+    detail_generation: Signal<u64>,
+}
+
+/// Builds the bounded Active collection query.
+///
+/// CONTRACT: the server applies only `collection`, `system_id`,
+/// `include_archived`, and `limit` to nonterminal collections. The neutral
+/// filter and ordering values below document that the Active panel asks the
+/// server for the whole nonterminal collection and never implies a
+/// server-applied filter it cannot get.
+fn active_records_query() -> ScanningScanRecordQuery {
+    ScanningScanRecordQuery {
+        collection: ScanRecordCollectionParam::Active,
+        include_archived: false,
+        system_id: None,
+        limit: ACTIVE_PAGE_LIMIT,
+        search: None,
+        status: ScanRecordStatusParam::All,
+        revision: ScanRecordRevisionParam::All,
+        latest_only: false,
+        sort: ScanRecordSortParam::Timestamp,
+        direction: ScanRecordDirectionParam::Desc,
+        after: None,
+    }
+}
+
+/// Builds the bounded per-system history query for one active system.
+fn system_history_query(system_id: Uuid, include_archived: bool) -> ScanningScanRecordQuery {
+    ScanningScanRecordQuery {
+        collection: ScanRecordCollectionParam::History,
+        include_archived,
+        system_id: Some(system_id),
+        limit: SYSTEM_HISTORY_LIMIT,
+        search: None,
+        status: ScanRecordStatusParam::All,
+        revision: ScanRecordRevisionParam::All,
+        latest_only: false,
+        sort: ScanRecordSortParam::Timestamp,
+        direction: ScanRecordDirectionParam::Desc,
+        after: None,
+    }
+}
+
+/// Builds the server query that resolves the newest failed terminal scan.
+///
+/// The failed summary action uses this query instead of searching loaded rows,
+/// so it stays correct when the Completed view holds a different filter or
+/// only part of the collection. Archived rows stay included because archiving
+/// hides retained evidence without deleting it.
+fn newest_failed_query() -> ScanningScanRecordQuery {
+    ScanningScanRecordQuery {
+        collection: ScanRecordCollectionParam::Completed,
+        include_archived: true,
+        system_id: None,
+        limit: 1,
+        search: None,
+        status: ScanRecordStatusParam::Failed,
+        revision: ScanRecordRevisionParam::All,
+        latest_only: false,
+        sort: ScanRecordSortParam::Timestamp,
+        direction: ScanRecordDirectionParam::Desc,
+        after: None,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -96,12 +595,13 @@ enum SystemHistoryEntry {
     NoScan(ScanningQueueItemResponse),
 }
 
+/// Counts the matching rows one collection response shows.
+///
+/// The server's `total` counts matching rows before archive filtering, so the
+/// hidden archived count must be subtracted to describe what the current view
+/// contains.
 fn visible_record_total(response: &ScanningScanRecordsResponse) -> i64 {
     response.total.saturating_sub(response.hidden_archived)
-}
-
-fn archived_record_total(response_without_archived: &ScanningScanRecordsResponse) -> i64 {
-    response_without_archived.hidden_archived.max(0)
 }
 
 fn system_archive_visibility(states: &HashMap<Uuid, bool>, system_id: Uuid) -> bool {
@@ -270,8 +770,14 @@ fn is_prerequisite_build_failure(row: &ScanningScanRecordResponse) -> bool {
         && row.attempts == 0
 }
 
+/// Filters and orders the single loaded Active page inside the browser.
+///
+/// The server does not filter or order nonterminal collections by request, so
+/// this function only describes rows that are already loaded. The Active panel
+/// discloses that bound whenever the server reports more matching rows than the
+/// loaded page contains, and it withholds column sorting in that state.
 #[allow(clippy::too_many_arguments)]
-fn filter_and_sort_records(
+fn filter_and_sort_active_records(
     rows: &[ScanningScanRecordResponse],
     query: &str,
     status: &str,
@@ -325,20 +831,83 @@ fn filter_and_sort_records(
     filtered
 }
 
-fn first_failed(rows: &[ScanningScanRecordResponse]) -> Option<ScanDetailSelection> {
-    let mut failures = rows
-        .iter()
-        .filter(|row| row.status == "failed")
-        .collect::<Vec<_>>();
-    failures.sort_by(|left, right| {
-        record_time(right)
-            .cmp(&record_time(left))
-            .then_with(|| left.scan_id.cmp(&right.scan_id))
+/// Requests the next Completed page and preserves loaded rows on failure.
+///
+/// A rejected cursor means the request identity no longer matches the loaded
+/// pages, so the view discards them and restarts from a fresh first page
+/// instead of mixing incompatible pages.
+fn request_completed_continuation(
+    mut pagination: Signal<ScanRecordPaginationState>,
+    mut head: Resource<Result<ScanningScanRecordsResponse, ApiClientError>>,
+    request: CompletedRequest,
+) {
+    let Some(continuation) = pagination.write().begin_continuation() else {
+        return;
+    };
+    let query = request.to_query(Some(continuation.cursor.clone()));
+    spawn(async move {
+        match fetch_scanning_scan_records(&query).await {
+            Ok(page) => {
+                if !pagination
+                    .write()
+                    .complete_continuation(&continuation, page)
+                {
+                    pagination.write().reset(None);
+                    head.restart();
+                }
+            }
+            Err(ApiClientError::Status { code: 400, .. }) => {
+                pagination.write().reset(None);
+                head.restart();
+            }
+            Err(error) => pagination
+                .write()
+                .fail_continuation(&continuation, error.to_string()),
+        }
     });
-    failures.first().map(|row| ScanDetailSelection {
-        scan_id: row.scan_id,
-        label: format!("{} · {}", row.hostname, commit_label(&row.commit_hash)),
-    })
+}
+
+/// Opens the newest failed terminal scan reported by the server.
+///
+/// The lookup requests a one-row failed page, so the summary action never
+/// depends on which Completed rows happen to be loaded.
+fn open_newest_failed_scan(
+    mut pending: Signal<bool>,
+    mut feedback: Signal<Option<ScanActionFeedback>>,
+    selected: Signal<Option<ScanDetailSelection>>,
+    state: Signal<ScanDetailState>,
+    generation: Signal<u64>,
+) {
+    if pending() {
+        return;
+    }
+    pending.set(true);
+    feedback.set(None);
+    spawn(async move {
+        let result = fetch_scanning_scan_records(&newest_failed_query()).await;
+        pending.set(false);
+        match result {
+            Ok(page) => match page.items.first() {
+                Some(row) => load_scan_detail(
+                    ScanDetailSelection {
+                        scan_id: row.scan_id,
+                        label: format!("{} · {}", row.hostname, commit_label(&row.commit_hash)),
+                    },
+                    selected,
+                    state,
+                    generation,
+                ),
+                None => feedback.set(Some(ScanActionFeedback {
+                    message: "No failed scan is available in the retained history.".to_string(),
+                    success: false,
+                })),
+            },
+            Err(error) => feedback.set(Some(ScanActionFeedback {
+                message: format!("The newest failed scan could not be loaded: {error}"),
+                success: false,
+            })),
+        }
+    });
 }
 
 fn scan_detail_request_is_current(
@@ -426,35 +995,93 @@ fn retry_exact_scan(
 ///
 /// The view does not expose cancellation because the server reports every scan
 /// as non-cancellable. Archive actions only target terminal scan identities.
+///
+/// The Completed collection is server-filtered, server-ordered, and paged with
+/// request-bound keyset cursors. Its search, status, revision, latest-revision,
+/// ordering, and archive controls are request parameters, so their result
+/// counts describe the whole matching collection instead of the loaded rows.
+/// Active and per-system history load one explicitly bounded page each because
+/// the server rejects continuation cursors for those collections.
 #[component]
 pub fn ScanningView() -> Element {
     let mut tab = use_signal(|| ScanTab::Active);
-    let mut refresh = use_signal(|| 0_u64);
+    let refresh = use_signal(|| 0_u64);
     let mut live_refresh = use_signal(|| 0_u64);
-    let mut completed_include_archived = use_signal(|| false);
-    let mut query = use_signal(String::new);
-    let mut status_filter = use_signal(|| "all".to_string());
-    let mut revision_filter = use_signal(|| "all".to_string());
-    let mut latest_only = use_signal(|| false);
-    let mut sort = use_signal(|| ScanSort::Timestamp);
-    let mut descending = use_signal(|| true);
+    // Each collection owns its filters because the server applies them to the
+    // Completed collection only. Sharing them would imply that an Active
+    // filter reaches the server.
+    let active_filters = ActiveFilterSignals {
+        query: use_signal(String::new),
+        status: use_signal(|| "all".to_string()),
+        revision: use_signal(|| "all".to_string()),
+        latest_only: use_signal(|| false),
+        sort: use_signal(|| ScanSort::Timestamp),
+        descending: use_signal(|| true),
+    };
+    let completed_filters = CompletedFilterSignals {
+        include_archived: use_signal(|| false),
+        query: use_signal(String::new),
+        status: use_signal(|| ScanRecordStatusParam::All),
+        revision: use_signal(|| ScanRecordRevisionParam::All),
+        latest_only: use_signal(|| false),
+        sort: use_signal(|| ScanRecordSortParam::Timestamp),
+        direction: use_signal(|| ScanRecordDirectionParam::Desc),
+    };
+    let mut completed_search = use_signal(String::new);
+    let mut search_debounce = use_signal(|| 0_u64);
+    let mut completed_pagination = use_signal(ScanRecordPaginationState::default);
+    let mut archived_count = use_signal(|| 0_i64);
+    let failed_lookup_pending = use_signal(|| false);
     let mut selected_rows = use_signal(HashSet::<Uuid>::new);
-    let mut archive_pending = use_signal(|| false);
-    let mut exact_retry_pending = use_signal(HashSet::<i32>::new);
+    let archive_pending = use_signal(|| false);
+    let exact_retry_pending = use_signal(HashSet::<i32>::new);
     let mut action_feedback = use_signal(|| Option::<ScanActionFeedback>::None);
     let mut schedule_open = use_signal(|| false);
-    let mut schedule_refresh = use_signal(|| 0_u64);
-    let mut selected_scan = use_signal(|| Option::<ScanDetailSelection>::None);
-    let mut detail_state = use_signal(|| ScanDetailState::Loading);
-    let mut detail_generation = use_signal(|| 0_u64);
-    let mut system_query = use_signal(String::new);
-    let mut system_environment = use_signal(|| "all".to_string());
-    let mut expanded_system = use_signal(|| Option::<Uuid>::None);
+    let schedule_refresh = use_signal(|| 0_u64);
+    let selected_scan = use_signal(|| Option::<ScanDetailSelection>::None);
+    let detail_state = use_signal(|| ScanDetailState::Loading);
+    let detail_generation = use_signal(|| 0_u64);
+    let system_query = use_signal(String::new);
+    let system_environment = use_signal(|| "all".to_string());
+    let expanded_system = use_signal(|| Option::<Uuid>::None);
     let mut system_histories = use_signal(HashMap::<(Uuid, bool), SystemHistoryData>::new);
     let mut system_errors = use_signal(HashMap::<(Uuid, bool), String>::new);
-    let mut loading_system = use_signal(|| Option::<(Uuid, bool)>::None);
-    let mut system_archive_states = use_signal(HashMap::<Uuid, bool>::new);
-    let mut open_failed_when_loaded = use_signal(|| false);
+    let loading_system = use_signal(|| Option::<(Uuid, bool)>::None);
+    let system_archive_states = use_signal(HashMap::<Uuid, bool>::new);
+
+    let rows_context = RecordRowContext {
+        retry_pending: exact_retry_pending,
+        feedback: action_feedback,
+        refresh,
+        selected_scan,
+        detail_state,
+        detail_generation,
+    };
+
+    // Reads every Completed request value reactively so resources and the
+    // infinite-scroll reset key follow filter changes.
+    let completed_request = move || CompletedRequest {
+        include_archived: *completed_filters.include_archived.read(),
+        search: completed_search.read().clone(),
+        status: *completed_filters.status.read(),
+        revision: *completed_filters.revision.read(),
+        latest_only: *completed_filters.latest_only.read(),
+        sort: *completed_filters.sort.read(),
+        direction: *completed_filters.direction.read(),
+    };
+    // Reads the same values without subscribing, for effects that must depend
+    // only on their own trigger. The debounced search value is authoritative
+    // here: a head refresh must repeat the request identity that produced the
+    // loaded pages.
+    let completed_request_snapshot = move || CompletedRequest {
+        include_archived: *completed_filters.include_archived.peek(),
+        search: completed_search.peek().clone(),
+        status: *completed_filters.status.peek(),
+        revision: *completed_filters.revision.peek(),
+        latest_only: *completed_filters.latest_only.peek(),
+        sort: *completed_filters.sort.peek(),
+        direction: *completed_filters.direction.peek(),
+    };
 
     let mut policy_on_build = use_signal(|| true);
     let mut policy_deployed_interval = use_signal(|| "24h".to_string());
@@ -463,7 +1090,7 @@ pub fn ScanningView() -> Element {
     let mut policy_archived_enabled = use_signal(|| true);
     let mut policy_rebuild_to_scan = use_signal(|| false);
     let mut schedule_save_error = use_signal(|| Option::<String>::None);
-    let mut schedule_saving = use_signal(|| false);
+    let schedule_saving = use_signal(|| false);
 
     use_future(move || async move {
         loop {
@@ -508,24 +1135,39 @@ pub fn ScanningView() -> Element {
         let _ = live_refresh();
         async { fetch_scanning_stats().await }
     });
-    let mut active = use_resource(move || {
+    // Active is one bounded page. The live tick replaces it because no
+    // accumulated pages exist for a collection without cursors.
+    let active = use_resource(move || {
         let _ = refresh();
         let _ = live_refresh();
-        async { fetch_scanning_scan_records("active", false, None, Some(RECORD_LIMIT)).await }
+        async { fetch_scanning_scan_records(&active_records_query()).await }
     });
-    let mut completed = use_resource(move || {
+    // The head resource owns the Completed first page for the current request
+    // identity. Filter changes, archive actions, and manual retries restart it,
+    // which resets every accumulated page. It deliberately does not depend on
+    // the live tick: a live refresh must not refetch accumulated pages.
+    let completed_head = use_resource(move || {
         let _ = refresh();
-        let _ = live_refresh();
-        async { fetch_scanning_scan_records("completed", false, None, Some(RECORD_LIMIT)).await }
+        let request = completed_request();
+        async move { fetch_scanning_scan_records(&request.to_query(None)).await }
     });
-    let mut completed_with_archived = use_resource(move || {
+    // The archived badge needs a count the current page cannot report while
+    // archived rows are included. The probe repeats the current filters with a
+    // one-row page and archived rows excluded.
+    let archived_probe = use_resource(move || {
         let _ = refresh();
         let _ = live_refresh();
-        async { fetch_scanning_scan_records("completed", true, None, Some(RECORD_LIMIT)).await }
+        let request = completed_request();
+        async move {
+            if !request.include_archived {
+                return None;
+            }
+            Some(fetch_scanning_scan_records(&request.archived_count_query()).await)
+        }
     });
     let mut systems = use_resource(move || {
         let _ = refresh();
-        async { fetch_scanning_systems(Some(RECORD_LIMIT)).await }
+        async { fetch_scanning_systems(Some(SYSTEM_LIMIT)).await }
     });
     let environments = use_resource(|| async { fetch_environments().await });
     let mut schedule = use_resource(move || {
@@ -547,15 +1189,90 @@ pub fn ScanningView() -> Element {
         }
     });
 
+    // Selection is scoped to one collection's rows, so switching tabs clears
+    // it. Filters persist per collection and are not reset here.
     use_effect(move || {
         let _ = tab();
-        query.set(String::new());
-        status_filter.set("all".to_string());
-        revision_filter.set("all".to_string());
-        latest_only.set(false);
-        sort.set(ScanSort::Timestamp);
-        descending.set(true);
         selected_rows.write().clear();
+    });
+
+    // Completed selection belongs to one exact server request identity. Clear
+    // it when any filter or ordering value changes so hidden stale identities
+    // cannot inflate the selected count or reappear under a later filter.
+    use_effect(move || {
+        let _ = completed_request();
+        selected_rows.write().clear();
+    });
+
+    // Debounce the server search so each keystroke does not restart Completed
+    // pagination. The sequence guard drops superseded timers.
+    use_effect(move || {
+        let typed = completed_filters.query.read().trim().to_string();
+        let sequence = *search_debounce.peek() + 1;
+        search_debounce.set(sequence);
+        spawn(async move {
+            gloo_timers::future::TimeoutFuture::new(SEARCH_DEBOUNCE_MS).await;
+            if *search_debounce.peek() == sequence && *completed_search.peek() != typed {
+                completed_search.set(typed);
+            }
+        });
+    });
+
+    // The head response is the authoritative first page for its request
+    // identity. Every transition resets the accumulated pages, so an archive
+    // action, filter change, or retry can never mix pages from two identities.
+    use_effect(move || {
+        let head = completed_head.read().clone();
+        match head {
+            Some(Ok(page)) => completed_pagination.write().reset(Some(page)),
+            Some(Err(_)) | None => completed_pagination.write().reset(None),
+        }
+    });
+
+    // Keep the last server-reported archived count so a reload never claims
+    // zero archived rows while the replacement page is in flight.
+    use_effect(move || {
+        let reported = if *completed_filters.include_archived.read() {
+            match &*archived_probe.read() {
+                Some(Some(Ok(page))) => Some(page.hidden_archived.max(0)),
+                _ => None,
+            }
+        } else {
+            let state = completed_pagination.read();
+            state.is_loaded().then(|| state.hidden_archived())
+        };
+        if let Some(count) = reported {
+            archived_count.set(count);
+        }
+    });
+
+    // CONCURRENCY: the live tick refreshes only the Completed head page. Later
+    // pages keep the cursor bound captured by the first request, so no
+    // accumulated page is refetched and no loaded row is duplicated. A failed
+    // head refresh keeps the loaded rows and waits for the next tick.
+    use_effect(move || {
+        if live_refresh() == 0 {
+            return;
+        }
+        let request = completed_request_snapshot();
+        let Some(token) = completed_pagination.write().begin_head_refresh() else {
+            return;
+        };
+        spawn(async move {
+            let query = request.to_query(None);
+            match fetch_scanning_scan_records_with_timeout(&query, HEAD_REFRESH_TIMEOUT_MS).await {
+                Ok(page) => {
+                    completed_pagination.write().complete_head_refresh(
+                        &token,
+                        page,
+                        request.head_refresh_mode(),
+                    );
+                }
+                Err(_) => {
+                    completed_pagination.write().fail_head_refresh(&token);
+                }
+            }
+        });
     });
 
     use_effect(move || {
@@ -577,24 +1294,48 @@ pub fn ScanningView() -> Element {
     });
 
     let active_value = resource_value(&active);
-    let completed_without_archived_value = resource_value(&completed);
-    let completed_with_archived_value = resource_value(&completed_with_archived);
-    let completed_value = if completed_include_archived() {
-        completed_with_archived_value.clone()
-    } else {
-        completed_without_archived_value.clone()
-    };
-    let completed_loading = if completed_include_archived() {
-        completed_with_archived.read().is_none()
-    } else {
-        completed.read().is_none()
-    };
-    let completed_error = if completed_include_archived() {
-        resource_error(&completed_with_archived)
-    } else {
-        resource_error(&completed)
-    };
-    let archived_count = archived_record_total(&completed_without_archived_value);
+    let completed_value = completed_request();
+    let completed_loading = completed_head.read().is_none();
+    let completed_error = resource_error(&completed_head);
+    // The infinite-scroll hook must run on every render, so it is created here
+    // and passed to the panel. The reset key combines the request identity with
+    // the pagination generation, so a filter change, an archive action, or any
+    // other reload returns scroll paging to the first page. A live head refresh
+    // keeps the generation and therefore keeps the loaded depth.
+    let completed_scroll = use_infinite_scroll(
+        format!(
+            "{}|{}",
+            completed_value.reset_key(),
+            completed_pagination.read().generation()
+        ),
+        usize::from(COMPLETED_PAGE_LIMIT),
+    );
+
+    // The hook grows its requested count by one page whenever the sentinel
+    // enters the scroll container. The strict comparison keeps the first render
+    // from requesting a continuation before any scrolling happens, and keeps
+    // one intersection from requesting more than one page.
+    use_effect(move || {
+        let requested = completed_scroll.count();
+        let (loaded, wants_more) = {
+            let state = completed_pagination.read();
+            (
+                state.rows().len(),
+                state.has_more()
+                    && !state.continuation_loading
+                    && state.continuation_error.is_none(),
+            )
+        };
+        if wants_more && requested > loaded {
+            request_completed_continuation(
+                completed_pagination,
+                completed_head,
+                completed_request_snapshot(),
+            );
+        }
+        completed_scroll.recheck(requested.min(loaded));
+    });
+
     let systems_value = systems
         .read()
         .as_ref()
@@ -622,42 +1363,7 @@ pub fn ScanningView() -> Element {
                 .collect::<HashMap<_, _>>()
         })
         .unwrap_or_default();
-    let failed_rows = completed_with_archived_value.items.clone();
     let schedule_for_button = schedule_value.clone();
-
-    use_effect(move || {
-        if !open_failed_when_loaded() {
-            return;
-        }
-        let outcome = {
-            let resource = completed_with_archived.read();
-            match resource.as_ref() {
-                Some(Ok(response)) => Some(Ok(first_failed(&response.items))),
-                Some(Err(error)) => Some(Err(error.to_string())),
-                None => None,
-            }
-        };
-        let Some(outcome) = outcome else {
-            return;
-        };
-        open_failed_when_loaded.set(false);
-        match outcome {
-            Ok(selection) => {
-                if let Some(selection) = selection {
-                    load_scan_detail(selection, selected_scan, detail_state, detail_generation);
-                } else {
-                    action_feedback.set(Some(ScanActionFeedback {
-                        message: "No failed scan is available in the retained history.".to_string(),
-                        success: false,
-                    }));
-                }
-            }
-            Err(error) => action_feedback.set(Some(ScanActionFeedback {
-                message: format!("The newest failed scan could not be loaded: {error}"),
-                success: false,
-            })),
-        }
-    });
 
     rsx! {
         div { class: "scanning-view",
@@ -713,14 +1419,10 @@ pub fn ScanningView() -> Element {
                         button {
                             class: "stat scanning-stat-button focus-ring",
                             aria_label: "Open the newest failed scan",
+                            aria_busy: failed_lookup_pending(),
                             onclick: move |_| {
                                 tab.set(ScanTab::Completed);
-                                if let Some(selection) = first_failed(&failed_rows) {
-                                    load_scan_detail(selection, selected_scan, detail_state, detail_generation);
-                                } else {
-                                    open_failed_when_loaded.set(true);
-                                    completed_with_archived.restart();
-                                }
+                                open_newest_failed_scan(failed_lookup_pending, action_feedback, selected_scan, detail_state, detail_generation);
                             },
                             span { class: "stat-accent", style: "--stat-color:#f87171;" }
                             div { class: "stat-label", "Failed" }
@@ -753,67 +1455,36 @@ pub fn ScanningView() -> Element {
                         focus_element_by_id(scan_tab_id(next));
                     },
                     { scan_tab_button(tab, ScanTab::Active, "Active", active_value.total, "scan-active-panel") }
-                    { scan_tab_button(tab, ScanTab::Completed, "Completed", visible_record_total(&completed_value), "scan-completed-panel") }
+                    { scan_tab_button(tab, ScanTab::Completed, "Completed", completed_pagination.read().visible_total(), "scan-completed-panel") }
                     { scan_tab_button(tab, ScanTab::Systems, "By system", systems_value.len() as i64, "scan-systems-panel") }
                 }
                 match tab() {
                     ScanTab::Active => rsx! {
                         div { id: "scan-active-panel", role: "tabpanel", aria_labelledby: "scan-active-tab",
-                            { records_panel(
+                            { active_panel(
                                 active_value.clone(),
                                 active.read().is_none(),
                                 resource_error(&active),
-                                false,
-                                completed_include_archived,
-                                0,
-                                query,
-                                status_filter,
-                                revision_filter,
-                                latest_only,
-                                sort,
-                                descending,
-                                selected_rows,
-                                archive_pending,
-                                exact_retry_pending,
-                                action_feedback,
-                                refresh,
-                                selected_scan,
-                                detail_state,
-                                detail_generation,
-                                move || active.restart(),
+                                active_filters,
+                                rows_context,
+                                active,
                             ) }
                         }
                     },
                     ScanTab::Completed => rsx! {
                         div { id: "scan-completed-panel", role: "tabpanel", aria_labelledby: "scan-completed-tab",
-                            { records_panel(
+                            { completed_panel(
+                                completed_pagination,
+                                completed_head,
                                 completed_value.clone(),
                                 completed_loading,
                                 completed_error.clone(),
-                                true,
-                                completed_include_archived,
-                                archived_count,
-                                query,
-                                status_filter,
-                                revision_filter,
-                                latest_only,
-                                sort,
-                                descending,
+                                archived_count(),
+                                completed_filters,
                                 selected_rows,
                                 archive_pending,
-                                exact_retry_pending,
-                                action_feedback,
-                                refresh,
-                                selected_scan,
-                                detail_state,
-                                detail_generation,
-                                move || {
-                                    if completed_include_archived() {
-                                        completed_with_archived.restart();
-                                    } else {
-                                        completed.restart();
-                                    }
-                                },
+                                rows_context,
+                                completed_scroll,
                             ) }
                         }
                     },
@@ -831,12 +1502,7 @@ pub fn ScanningView() -> Element {
                                 system_errors,
                                 loading_system,
                                 system_archive_states,
-                                exact_retry_pending,
-                                action_feedback,
-                                refresh,
-                                selected_scan,
-                                detail_state,
-                                detail_generation,
+                                rows_context,
                                 move || systems.restart(),
                             ) }
                         }
@@ -878,7 +1544,7 @@ pub fn ScanningView() -> Element {
 }
 
 fn resource_value(
-    resource: &Resource<Result<ScanningScanRecordsResponse, crate::api::client::ApiClientError>>,
+    resource: &Resource<Result<ScanningScanRecordsResponse, ApiClientError>>,
 ) -> ScanningScanRecordsResponse {
     resource
         .read()
@@ -889,11 +1555,13 @@ fn resource_value(
             items: Vec::new(),
             total: 0,
             hidden_archived: 0,
+            has_more: false,
+            next_cursor: None,
         })
 }
 
 fn resource_error(
-    resource: &Resource<Result<ScanningScanRecordsResponse, crate::api::client::ApiClientError>>,
+    resource: &Resource<Result<ScanningScanRecordsResponse, ApiClientError>>,
 ) -> Option<String> {
     resource
         .read()
@@ -947,59 +1615,228 @@ fn focus_element_by_id(id: &str) {
     let _ = id;
 }
 
+/// Lists the fixed Active status filter values.
+///
+/// The values come from the server's nonterminal lifecycle states, not from
+/// loaded rows, so the filter offers the same options on every load.
+const ACTIVE_STATUS_OPTIONS: [&str; 4] = [
+    "in_progress",
+    "pending",
+    "awaiting_build",
+    "awaiting_closure",
+];
+
+/// Renders the server-filtered, server-ordered, keyset-paged Completed
+/// collection.
+///
+/// Search, status, revision, latest-revision, ordering, and archive visibility
+/// are request parameters, so every count and the row order describe the whole
+/// matching collection instead of the loaded rows. Continuation pages are
+/// appended in server order. A continuation failure keeps the loaded rows and
+/// offers a retry rather than discarding evidence the operator can see.
 #[allow(clippy::too_many_arguments)]
-fn records_panel(
-    response: ScanningScanRecordsResponse,
+fn completed_panel(
+    pagination: Signal<ScanRecordPaginationState>,
+    head: Resource<Result<ScanningScanRecordsResponse, ApiClientError>>,
+    request: CompletedRequest,
     loading: bool,
     error: Option<String>,
-    completed: bool,
-    mut include_archived: Signal<bool>,
     archived_count: i64,
-    mut query: Signal<String>,
-    mut status_filter: Signal<String>,
-    mut revision_filter: Signal<String>,
-    mut latest_only: Signal<bool>,
-    mut sort: Signal<ScanSort>,
-    mut descending: Signal<bool>,
+    filters: CompletedFilterSignals,
     mut selected_rows: Signal<HashSet<Uuid>>,
     archive_pending: Signal<bool>,
-    exact_retry_pending: Signal<HashSet<i32>>,
-    action_feedback: Signal<Option<ScanActionFeedback>>,
-    refresh: Signal<u64>,
-    selected_scan: Signal<Option<ScanDetailSelection>>,
-    detail_state: Signal<ScanDetailState>,
-    detail_generation: Signal<u64>,
-    retry: impl FnMut() + 'static,
+    rows: RecordRowContext,
+    scroll: InfiniteScroll,
 ) -> Element {
-    let mut retry = retry;
-    let rows = filter_and_sort_records(
-        &response.items,
-        &query(),
-        &status_filter(),
-        &revision_filter(),
-        latest_only(),
-        sort(),
-        descending(),
-    );
-    let statuses = response
-        .items
-        .iter()
-        .map(|row| status_meta(&row.status).key)
-        .collect::<HashSet<_>>();
+    let mut include_archived = filters.include_archived;
+    let mut query = filters.query;
+    let mut status = filters.status;
+    let mut revision = filters.revision;
+    let mut latest_only = filters.latest_only;
+    let mut head = head;
+    let state = pagination.read().clone();
+    let records = state.rows().to_vec();
+    let loaded = records.len();
+    let available = state.visible_total();
+    let hidden_archived = state.hidden_archived();
+    let has_more = state.has_more();
+    let continuation_loading = state.continuation_loading;
+    let continuation_error = state.continuation_error.clone();
+    let narrowed = request.has_narrowing_filter();
     let selected = selected_rows();
-    let archive_ids = response
-        .items
+    let archive_ids = records
         .iter()
         .filter(|row| selected.contains(&row.scan_id) && row.archived_at.is_none())
         .map(|row| row.scan_id)
         .collect::<Vec<_>>();
-    let restore_ids = response
-        .items
+    let restore_ids = records
         .iter()
         .filter(|row| selected.contains(&row.scan_id) && row.archived_at.is_some())
         .map(|row| row.scan_id)
         .collect::<Vec<_>>();
-    let filtered = rows.len();
+    let archive_over_batch = archive_ids.len() > ARCHIVE_BATCH_MAX;
+    let restore_over_batch = restore_ids.len() > ARCHIVE_BATCH_MAX;
+    let request_for_button = request.clone();
+    let request_for_error = request.clone();
+
+    rsx! {
+        div { class: "scan-toolbar",
+            div { class: "q-search scanning-search",
+                Icon { name: IconName::Search, size: 13 }
+                input { class: "q-search-input", aria_label: "Search scans by configuration, flake, revision, scan ID, or derivation ID", placeholder: "Search scans…", value: query(), oninput: move |event| query.set(event.value()) }
+                if !query().is_empty() { button { class: "btn-icon xs focus-ring", aria_label: "Clear scan search", onclick: move |_| query.set(String::new()), Icon { name: IconName::X, size: 13 } } }
+            }
+            select { class: "input filter-select focus-ring", aria_label: "Filter by scan status", value: status().as_param(), oninput: move |event| status.set(completed_status_from_value(&event.value())),
+                option { value: "all", "All statuses" }
+                option { value: "completed", "{status_meta(\"completed\").label}" }
+                option { value: "failed", "{status_meta(\"failed\").label}" }
+            }
+            select { class: "input filter-select focus-ring", aria_label: "Filter by revision freshness", value: revision().as_param(), oninput: move |event| revision.set(completed_revision_from_value(&event.value())),
+                option { value: "all", "All revisions" }
+                option { value: "deployed", "Deployed" }
+                option { value: "recent", "Latest per flake" }
+                option { value: "superseded", "Superseded" }
+            }
+            button { class: if latest_only() { "btn btn-ghost xs focus-ring active-filter" } else { "btn btn-ghost xs focus-ring" }, aria_pressed: latest_only(), onclick: move |_| latest_only.toggle(), Icon { name: IconName::Star, size: 12 } " Latest per flake" }
+            span { class: "filter-count", "{loaded} loaded · {available} matching" if has_more { " · more pages available" } }
+            button {
+                class: if include_archived() { "btn btn-ghost xs focus-ring active-filter scanning-archived-filter" } else { "btn btn-ghost xs focus-ring scanning-archived-filter" },
+                aria_pressed: include_archived(),
+                disabled: archived_count == 0 && !include_archived(),
+                title: if include_archived() { "Hide archived scans" } else if archived_count == 0 { "No archived scans match this view" } else { "Show archived scans hidden by this view" },
+                onclick: move |_| { include_archived.toggle(); selected_rows.write().clear(); },
+                Icon { name: IconName::Archive, size: 12 }
+                " Archived [{archived_count}]"
+            }
+        }
+
+        div { class: "scanning-history-actions",
+            span { "{selected.len()} selected" }
+            button {
+                class: "btn btn-ghost xs focus-ring",
+                disabled: archive_ids.is_empty() || archive_pending() || archive_over_batch,
+                title: if archive_over_batch { "Select 100 or fewer scans; one archive request carries at most 100 exact scan identities" } else { "Archive the selected exact scans" },
+                onclick: move |_| apply_archive(archive_ids.clone(), true, selected_rows, archive_pending, rows.feedback, rows.refresh),
+                "Archive selected"
+            }
+            button {
+                class: "btn btn-ghost xs focus-ring",
+                disabled: restore_ids.is_empty() || archive_pending() || restore_over_batch,
+                title: if restore_over_batch { "Select 100 or fewer scans; one restore request carries at most 100 exact scan identities" } else { "Restore the selected exact scans" },
+                onclick: move |_| apply_archive(restore_ids.clone(), false, selected_rows, archive_pending, rows.feedback, rows.refresh),
+                "Restore selected"
+            }
+            if hidden_archived > 0 { span { class: "scanning-hidden-count", "{hidden_archived} archived scans hidden by retention view" } }
+        }
+
+        if let Some(error) = error {
+            { load_error_state("Scans could not be loaded", &error, move || head.restart()) }
+        } else if loading {
+            div { class: "q-empty", role: "status", "Loading exact scan lifecycles…" }
+        } else if records.is_empty() {
+            div { class: "q-empty",
+                if hidden_archived > 0 && !include_archived() {
+                    h3 { "Completed scans are hidden" }
+                    p { "The current retention view hides {hidden_archived} archived scan(s). Include archived scans to review or restore them." }
+                } else if narrowed {
+                    h3 { "No scans match these filters" }
+                    p { "The server found no terminal scan matching these filters." }
+                    button { class: "btn btn-ghost xs focus-ring", onclick: move |_| reset_completed_filters(query, status, revision, latest_only), "Reset filters" }
+                } else {
+                    h3 { "No completed scan history" }
+                    p { "Terminal scan lifecycles will remain here as history." }
+                }
+            }
+        } else {
+            div { class: "scanning-table-wrap",
+                table { class: "sys-table scanning-table",
+                    thead { tr {
+                        th { span { class: "sr-only", "Select" } }
+                        { completed_sort_header("Configuration", ScanRecordSortParam::Configuration, filters) }
+                        { completed_sort_header("Revision", ScanRecordSortParam::Revision, filters) }
+                        { completed_sort_header("Status", ScanRecordSortParam::Status, filters) }
+                        { completed_sort_header("Findings", ScanRecordSortParam::Severity, filters) }
+                        { completed_sort_header("Last scan", ScanRecordSortParam::Timestamp, filters) }
+                        th { "Trigger" }
+                        th { class: "scanning-actions-heading", span { class: "sr-only", "Actions" } }
+                    } }
+                    tbody { for row in records { { record_row(row, Some(selected_rows), rows) } } }
+                }
+            }
+            if let Some(message) = continuation_error {
+                div { role: "alert", class: "sd-callout sd-callout-danger scanning-inline-alert", "data-testid": "scanning-completed-continuation-error",
+                    div { "More completed scans could not be loaded: {message}" }
+                    button {
+                        class: "btn btn-ghost xs focus-ring",
+                        disabled: continuation_loading,
+                        aria_label: "Retry loading more completed scans",
+                        onclick: move |_| request_completed_continuation(pagination, head, request_for_error.clone()),
+                        "Retry"
+                    }
+                }
+            }
+            div { class: "scanning-pagination",
+                span { "{loaded} of {available} loaded" }
+                if has_more {
+                    button {
+                        class: "btn btn-ghost xs focus-ring",
+                        "data-testid": "scanning-completed-load-more",
+                        disabled: continuation_loading,
+                        aria_busy: continuation_loading,
+                        aria_label: "Load more completed scans",
+                        onclick: move |_| request_completed_continuation(pagination, head, request_for_button.clone()),
+                        if continuation_loading { "Loading more…" } else { "Load more" }
+                    }
+                } else {
+                    span { class: "scanning-end-of-history", role: "status", "End of completed history" }
+                }
+            }
+            if has_more && !continuation_loading {
+                // The sentinel drives scroll-triggered continuation. The Load
+                // more button above carries the accessible affordance, so the
+                // sentinel stays out of the accessibility tree.
+                div {
+                    class: "infinite-sentinel scanning-sentinel",
+                    "data-sentinel": scroll.sentinel_id(),
+                    aria_hidden: "true",
+                    onmounted: move |_| scroll.check_and_register(),
+                }
+            }
+        }
+    }
+}
+
+/// Renders the single bounded Active page.
+///
+/// The server does not filter or order nonterminal collections by request, so
+/// this panel filters the loaded page in the browser. When the server reports
+/// more matching rows than the page holds, the panel discloses the bound and
+/// withholds column sorting instead of ordering an incomplete collection.
+fn active_panel(
+    response: ScanningScanRecordsResponse,
+    loading: bool,
+    error: Option<String>,
+    filters: ActiveFilterSignals,
+    rows: RecordRowContext,
+    source: Resource<Result<ScanningScanRecordsResponse, ApiClientError>>,
+) -> Element {
+    let mut source = source;
+    let mut query = filters.query;
+    let mut status = filters.status;
+    let mut revision = filters.revision;
+    let mut latest_only = filters.latest_only;
+    let sort = filters.sort;
+    let descending = filters.descending;
+    let visible = filter_and_sort_active_records(
+        &response.items,
+        &query(),
+        &status(),
+        &revision(),
+        latest_only(),
+        sort(),
+        descending(),
+    );
+    let filtered = visible.len();
     let loaded = response.items.len();
     let available = visible_record_total(&response);
     let capped = available > loaded as i64;
@@ -1011,83 +1848,95 @@ fn records_panel(
                 input { class: "q-search-input", aria_label: "Search scans by configuration, flake, revision, scan ID, or derivation ID", placeholder: "Search scans…", value: query(), oninput: move |event| query.set(event.value()) }
                 if !query().is_empty() { button { class: "btn-icon xs focus-ring", aria_label: "Clear scan search", onclick: move |_| query.set(String::new()), Icon { name: IconName::X, size: 13 } } }
             }
-            select { class: "input filter-select focus-ring", aria_label: "Filter by scan status", value: status_filter(), oninput: move |event| status_filter.set(event.value()),
+            select { class: "input filter-select focus-ring", aria_label: "Filter by scan status", value: status(), oninput: move |event| status.set(event.value()),
                 option { value: "all", "All statuses" }
-                for key in ["in_progress", "pending", "awaiting_build", "awaiting_closure", "failed", "completed"] {
-                    if statuses.contains(key) { option { value: key, "{status_meta(key).label}" } }
+                for key in ACTIVE_STATUS_OPTIONS {
+                    option { value: key, "{status_meta(key).label}" }
                 }
             }
-            select { class: "input filter-select focus-ring", aria_label: "Filter by revision freshness", value: revision_filter(), oninput: move |event| revision_filter.set(event.value()),
+            select { class: "input filter-select focus-ring", aria_label: "Filter by revision freshness", value: revision(), oninput: move |event| revision.set(event.value()),
                 option { value: "all", "All revisions" }
                 option { value: "deployed", "Deployed" }
                 option { value: "recent", "Latest per flake" }
                 option { value: "superseded", "Superseded" }
             }
             button { class: if latest_only() { "btn btn-ghost xs focus-ring active-filter" } else { "btn btn-ghost xs focus-ring" }, aria_pressed: latest_only(), onclick: move |_| latest_only.toggle(), Icon { name: IconName::Star, size: 12 } " Latest per flake" }
-            span { class: "filter-count", "{filtered} visible · {loaded} loaded" if capped { " · showing the first {loaded} of {available}; search and sorting apply to loaded records" } if response.total != available { " · {response.total} all" } }
-            if completed {
-                button {
-                    class: if include_archived() { "btn btn-ghost xs focus-ring active-filter scanning-archived-filter" } else { "btn btn-ghost xs focus-ring scanning-archived-filter" },
-                    aria_pressed: include_archived(),
-                    disabled: archived_count == 0 && !include_archived(),
-                    title: if include_archived() { "Hide archived scans" } else if archived_count == 0 { "No archived scans are available" } else { "Show archived scans" },
-                    onclick: move |_| { include_archived.toggle(); selected_rows.write().clear(); },
-                    Icon { name: IconName::Archive, size: 12 }
-                    " Archived [{archived_count}]"
-                }
-            }
-        }
-
-        if completed {
-            div { class: "scanning-history-actions",
-                span { "{selected.len()} selected" }
-                button { class: "btn btn-ghost xs focus-ring", disabled: archive_ids.is_empty() || archive_pending(), onclick: move |_| apply_archive(archive_ids.clone(), true, selected_rows, archive_pending, action_feedback, refresh), "Archive selected" }
-                button { class: "btn btn-ghost xs focus-ring", disabled: restore_ids.is_empty() || archive_pending(), onclick: move |_| apply_archive(restore_ids.clone(), false, selected_rows, archive_pending, action_feedback, refresh), "Restore selected" }
-                if response.hidden_archived > 0 { span { class: "scanning-hidden-count", "{response.hidden_archived} archived scans hidden by retention view" } }
-            }
+            span { class: "filter-count", "{filtered} visible · {loaded} loaded" if capped { " · the server reports {available} active scans; this page holds the first {loaded} and sorting is unavailable" } }
         }
 
         if let Some(error) = error {
-            { load_error_state("Scans could not be loaded", &error, move || retry()) }
+            { load_error_state("Scans could not be loaded", &error, move || source.restart()) }
         } else if loading {
             div { class: "q-empty", role: "status", "Loading exact scan lifecycles…" }
-        } else if rows.is_empty() {
+        } else if visible.is_empty() {
             div { class: "q-empty",
                 if response.items.is_empty() {
-                    if completed && response.hidden_archived > 0 {
-                        h3 { "Completed scans are hidden" }
-                        p { "The current retention view hides {response.hidden_archived} archived scan(s). Include archived scans to review or restore them." }
-                    } else {
-                        h3 { if completed { "No completed scan history" } else { "No active scans" } }
-                        p { if completed { "Terminal scan lifecycles will remain here as history." } else { "Queued, scanning, and prerequisite wait states will appear here." } }
-                    }
+                    h3 { "No active scans" }
+                    p { "Queued, scanning, and prerequisite wait states will appear here." }
                 } else {
                     h3 { "No scans match these filters" }
-                    p { if capped { "No loaded scans match these filters. Additional records exist beyond the loaded cap." } else { "The result count reflects the current client-side filters." } }
-                    button { class: "btn btn-ghost xs focus-ring", onclick: move |_| reset_filters(query, status_filter, revision_filter, latest_only), "Reset filters" }
+                    p { if capped { "No loaded active scan matches these filters. The server reports more active scans than this page holds." } else { "The result count reflects the current filters." } }
+                    button { class: "btn btn-ghost xs focus-ring", onclick: move |_| reset_active_filters(query, status, revision, latest_only), "Reset filters" }
                 }
             }
         } else {
             div { class: "scanning-table-wrap",
                 table { class: "sys-table scanning-table",
                     thead { tr {
-                        if completed { th { span { class: "sr-only", "Select" } } }
-                        { sortable_header("Configuration", ScanSort::Configuration, sort, descending) }
-                        { sortable_header("Revision", ScanSort::Revision, sort, descending) }
-                        { sortable_header("Status", ScanSort::Status, sort, descending) }
-                        { sortable_header("Findings", ScanSort::Severity, sort, descending) }
-                        { sortable_header("Last scan", ScanSort::Timestamp, sort, descending) }
+                        { active_sort_header("Configuration", ScanSort::Configuration, filters, capped) }
+                        { active_sort_header("Revision", ScanSort::Revision, filters, capped) }
+                        { active_sort_header("Status", ScanSort::Status, filters, capped) }
+                        { active_sort_header("Findings", ScanSort::Severity, filters, capped) }
+                        { active_sort_header("Last scan", ScanSort::Timestamp, filters, capped) }
                         th { "Trigger" }
                         th { class: "scanning-actions-heading", span { class: "sr-only", "Actions" } }
                     } }
-                    tbody { for row in rows { { record_row(row, completed, selected_rows, exact_retry_pending, action_feedback, refresh, selected_scan, detail_state, detail_generation) } } }
+                    tbody { for row in visible { { record_row(row, None, rows) } } }
                 }
             }
         }
     }
 }
 
-fn reset_filters(
+/// Maps a status select value to the validated server parameter.
+///
+/// An unknown value falls back to [`ScanRecordStatusParam::All`] so a stale
+/// DOM value can never produce a request the server rejects.
+fn completed_status_from_value(value: &str) -> ScanRecordStatusParam {
+    match value {
+        "completed" => ScanRecordStatusParam::Completed,
+        "failed" => ScanRecordStatusParam::Failed,
+        _ => ScanRecordStatusParam::All,
+    }
+}
+
+/// Maps a revision select value to the validated server parameter.
+///
+/// An unknown value falls back to [`ScanRecordRevisionParam::All`] for the same
+/// reason as [`completed_status_from_value`].
+fn completed_revision_from_value(value: &str) -> ScanRecordRevisionParam {
+    match value {
+        "deployed" => ScanRecordRevisionParam::Deployed,
+        "recent" => ScanRecordRevisionParam::Recent,
+        "superseded" => ScanRecordRevisionParam::Superseded,
+        _ => ScanRecordRevisionParam::All,
+    }
+}
+
+/// Returns the direction a newly selected Completed sort key starts with.
+///
+/// Severity and timestamp read newest or worst first; names and revisions read
+/// in ascending order.
+fn default_sort_direction(key: ScanRecordSortParam) -> ScanRecordDirectionParam {
+    match key {
+        ScanRecordSortParam::Severity | ScanRecordSortParam::Timestamp => {
+            ScanRecordDirectionParam::Desc
+        }
+        _ => ScanRecordDirectionParam::Asc,
+    }
+}
+
+fn reset_active_filters(
     mut query: Signal<String>,
     mut status: Signal<String>,
     mut revision: Signal<String>,
@@ -1099,12 +1948,68 @@ fn reset_filters(
     latest.set(false);
 }
 
-fn sortable_header(
+/// Clears the Completed request filters without changing the ordering.
+///
+/// Clearing them restarts pagination because the server's cursor fingerprint
+/// covers every filter value.
+fn reset_completed_filters(
+    mut query: Signal<String>,
+    mut status: Signal<ScanRecordStatusParam>,
+    mut revision: Signal<ScanRecordRevisionParam>,
+    mut latest: Signal<bool>,
+) {
+    query.set(String::new());
+    status.set(ScanRecordStatusParam::All);
+    revision.set(ScanRecordRevisionParam::All);
+    latest.set(false);
+}
+
+/// Renders one Completed column header that reorders the whole collection.
+fn completed_sort_header(
+    label: &'static str,
+    key: ScanRecordSortParam,
+    filters: CompletedFilterSignals,
+) -> Element {
+    let mut sort = filters.sort;
+    let mut direction = filters.direction;
+    let active = sort() == key;
+    let descending = direction() == ScanRecordDirectionParam::Desc;
+    rsx! {
+        th { aria_sort: if !active { "none" } else if descending { "descending" } else { "ascending" },
+            button {
+                class: if active { "th-sort focus-ring on" } else { "th-sort focus-ring" },
+                aria_label: format!("Sort by {label}"),
+                onclick: move |_| {
+                    if sort() == key {
+                        direction.set(if direction() == ScanRecordDirectionParam::Desc { ScanRecordDirectionParam::Asc } else { ScanRecordDirectionParam::Desc });
+                    } else {
+                        sort.set(key);
+                        direction.set(default_sort_direction(key));
+                    }
+                },
+                "{label}" Icon { name: if active && descending { IconName::ChevronDown } else { IconName::ChevronUp }, size: 10 }
+            }
+        }
+    }
+}
+
+/// Renders one Active column header.
+///
+/// The header stays a plain label when the loaded page is incomplete, because
+/// ordering only the loaded rows would misrepresent the collection.
+fn active_sort_header(
     label: &'static str,
     key: ScanSort,
-    mut sort: Signal<ScanSort>,
-    mut descending: Signal<bool>,
+    filters: ActiveFilterSignals,
+    capped: bool,
 ) -> Element {
+    let mut sort = filters.sort;
+    let mut descending = filters.descending;
+    if capped {
+        return rsx! {
+            th { aria_sort: "none", title: "Sorting needs the complete active collection", "{label}" }
+        };
+    }
     let active = sort() == key;
     rsx! {
         th { aria_sort: if !active { "none" } else if descending() { "descending" } else { "ascending" },
@@ -1115,20 +2020,25 @@ fn sortable_header(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Renders one scan lifecycle row.
+///
+/// `selection` is `Some` only for collections that support archive and restore
+/// actions. Active rows have no selection column because nonterminal scans are
+/// neither archivable nor cancellable.
 fn record_row(
     row: ScanningScanRecordResponse,
-    selectable: bool,
-    mut selected_rows: Signal<HashSet<Uuid>>,
-    retry_pending: Signal<HashSet<i32>>,
-    feedback: Signal<Option<ScanActionFeedback>>,
-    refresh: Signal<u64>,
-    selected_scan: Signal<Option<ScanDetailSelection>>,
-    detail_state: Signal<ScanDetailState>,
-    detail_generation: Signal<u64>,
+    selection_state: Option<Signal<HashSet<Uuid>>>,
+    context: RecordRowContext,
 ) -> Element {
+    let retry_pending = context.retry_pending;
+    let feedback = context.feedback;
+    let refresh = context.refresh;
+    let selected_scan = context.selected_scan;
+    let detail_state = context.detail_state;
+    let detail_generation = context.detail_generation;
     let meta = status_meta(&row.status);
-    let selected = selected_rows.read().contains(&row.scan_id);
+    let selected =
+        selection_state.is_some_and(|selected_rows| selected_rows.read().contains(&row.scan_id));
     let selection = ScanDetailSelection {
         scan_id: row.scan_id,
         label: format!("{} · {}", row.hostname, commit_label(&row.commit_hash)),
@@ -1147,7 +2057,7 @@ fn record_row(
     };
     rsx! {
         tr { key: "{row.scan_id}", class: if row.archived_at.is_some() { "scanning-record archived" } else { "scanning-record" },
-            if selectable { td { input { r#type: "checkbox", aria_label: format!("Select scan {}", row.scan_id), checked: selected, onchange: move |event| { if event.checked() { selected_rows.write().insert(row.scan_id); } else { selected_rows.write().remove(&row.scan_id); } } } } }
+            if let Some(mut selected_rows) = selection_state { td { input { r#type: "checkbox", aria_label: format!("Select scan {}", row.scan_id), checked: selected, onchange: move |event| { if event.checked() { selected_rows.write().insert(row.scan_id); } else { selected_rows.write().remove(&row.scan_id); } } } } }
             td { div { class: "scanning-config-name", "{row.hostname}" } div { class: "scanning-history-flake", "{configuration_meta}" } }
             td { span { class: if relation == "deployed" { "chip chip-healthy" } else if relation == "recent" { "chip chip-info" } else { "chip chip-unknown" }, "{relation_label}" } }
             td {
@@ -1167,6 +2077,19 @@ fn record_row(
     }
 }
 
+/// Archives or restores the selected exact scan identities.
+///
+/// The request carries the exact scan IDs the operator selected. It never
+/// derives identities from a filter or a page, so a concurrent reload cannot
+/// widen the action.
+///
+/// On success the shared refresh counter advances. That restarts the Completed
+/// head request and clears cached per-system history, which resets every
+/// accumulated page for the affected scopes and reloads authoritative archive
+/// counts. Archiving hides retained evidence; it never deletes a scan.
+///
+/// The server rejects a request with more than [`ARCHIVE_BATCH_MAX`] scan IDs,
+/// so the calling panel disables the action before that bound is reached.
 fn apply_archive(
     scan_ids: Vec<Uuid>,
     archived: bool,
@@ -1175,7 +2098,7 @@ fn apply_archive(
     mut feedback: Signal<Option<ScanActionFeedback>>,
     mut refresh: Signal<u64>,
 ) {
-    if scan_ids.is_empty() || pending() {
+    if scan_ids.is_empty() || scan_ids.len() > ARCHIVE_BATCH_MAX || pending() {
         return;
     }
     pending.set(true);
@@ -1211,20 +2134,18 @@ fn systems_panel(
     env_colors: HashMap<String, String>,
     mut query: Signal<String>,
     mut environment: Signal<String>,
-    mut expanded: Signal<Option<Uuid>>,
+    expanded: Signal<Option<Uuid>>,
     histories: Signal<HashMap<(Uuid, bool), SystemHistoryData>>,
     errors: Signal<HashMap<(Uuid, bool), String>>,
     loading_system: Signal<Option<(Uuid, bool)>>,
     mut archive_states: Signal<HashMap<Uuid, bool>>,
-    retry_pending: Signal<HashSet<i32>>,
-    feedback: Signal<Option<ScanActionFeedback>>,
-    refresh: Signal<u64>,
-    selected_scan: Signal<Option<ScanDetailSelection>>,
-    detail_state: Signal<ScanDetailState>,
-    detail_generation: Signal<u64>,
+    context: RecordRowContext,
     retry: impl FnMut() + 'static,
 ) -> Element {
     let mut retry = retry;
+    let retry_pending = context.retry_pending;
+    let feedback = context.feedback;
+    let refresh = context.refresh;
     let search = query().trim().to_ascii_lowercase();
     let selected_environment = environment();
     let mut environment_names = rows
@@ -1292,7 +2213,7 @@ fn systems_panel(
                                     else if loading_system() == Some((system_id, archive_state)) { div { class: "q-empty scanning-system-state", role: "status", "Loading exact history…" } }
                                     else if let Some(history) = history {
                                         if history.scans.items.is_empty() && history.derivations.iter().all(|row| row.scan_id.is_some()) { div { class: "q-empty scanning-system-state", if history.scans.hidden_archived > 0 { "{history.scans.hidden_archived} archived scan(s) are hidden by the retention view." } else { "No exact scans or unscanned revisions are recorded for this system." } } }
-                                        else { { system_history_table(&system, history, retry_pending, feedback, refresh, selected_scan, detail_state, detail_generation) } }
+                                        else { { system_history_table(&system, history, context) } }
                                     }
                                 }
                             } } }
@@ -1312,6 +2233,12 @@ fn toggle_system_history(system_id: Uuid, mut expanded: Signal<Option<Uuid>>) {
     }
 }
 
+/// Loads one system's bounded exact revision history.
+///
+/// The server rejects continuation cursors for the history collection, so this
+/// request is one explicitly bounded page. [`system_history_table`] discloses
+/// the bound whenever the server reports more retained scans than the page
+/// holds.
 fn reload_system_history(
     system_id: Uuid,
     mut histories: Signal<HashMap<(Uuid, bool), SystemHistoryData>>,
@@ -1323,14 +2250,10 @@ fn reload_system_history(
     loading.set(Some(key));
     errors.write().remove(&key);
     spawn(async move {
-        let scans = fetch_scanning_scan_records(
-            "history",
-            include_archived,
-            Some(&system_id),
-            Some(RECORD_LIMIT),
-        )
-        .await;
-        let derivations = fetch_scanning_system_scans(&system_id, Some(RECORD_LIMIT)).await;
+        let scans =
+            fetch_scanning_scan_records(&system_history_query(system_id, include_archived)).await;
+        let derivations =
+            fetch_scanning_system_scans(&system_id, Some(SYSTEM_DERIVATION_LIMIT)).await;
         match (scans, derivations) {
             (Ok(scans), Ok(derivations)) => {
                 histories
@@ -1347,18 +2270,21 @@ fn reload_system_history(
     });
 }
 
-#[allow(clippy::too_many_arguments)]
 fn system_history_table(
     system: &ScanningSystemsItemResponse,
     history: SystemHistoryData,
-    retry_pending: Signal<HashSet<i32>>,
-    feedback: Signal<Option<ScanActionFeedback>>,
-    refresh: Signal<u64>,
-    selected_scan: Signal<Option<ScanDetailSelection>>,
-    detail_state: Signal<ScanDetailState>,
-    detail_generation: Signal<u64>,
+    context: RecordRowContext,
 ) -> Element {
+    let retry_pending = context.retry_pending;
+    let feedback = context.feedback;
+    let refresh = context.refresh;
+    let selected_scan = context.selected_scan;
+    let detail_state = context.detail_state;
+    let detail_generation = context.detail_generation;
     let hidden_archived = history.scans.hidden_archived;
+    let loaded_scans = history.scans.items.len();
+    let available_scans = visible_record_total(&history.scans);
+    let bounded = available_scans > loaded_scans as i64;
     let revision_relations = history
         .derivations
         .iter()
@@ -1367,6 +2293,7 @@ fn system_history_table(
     let rows = system_history_entries(history);
     rsx! {
         if hidden_archived > 0 { div { class: "scanning-hidden-count", "{hidden_archived} archived scan(s) hidden" } }
+        if bounded { div { class: "scanning-hidden-count", "Showing the newest {loaded_scans} of {available_scans} retained scans for this system" } }
         div { class: "scan-sys-expand-table-wrap", table { class: "scanning-history-table",
             thead { tr { th { "Revision" } th { "Relation" } th { "Status" } th { "Findings" } th { "Timestamp" } th { span { class: "sr-only", "Actions" } } } }
             tbody { for entry in rows {
@@ -2084,6 +3011,33 @@ mod tests {
         }
     }
 
+    fn page(
+        items: Vec<ScanningScanRecordResponse>,
+        total: i64,
+        hidden_archived: i64,
+        next_cursor: Option<&str>,
+    ) -> ScanningScanRecordsResponse {
+        ScanningScanRecordsResponse {
+            items,
+            total,
+            hidden_archived,
+            has_more: next_cursor.is_some(),
+            next_cursor: next_cursor.map(ToString::to_string),
+        }
+    }
+
+    fn completed_request() -> CompletedRequest {
+        CompletedRequest {
+            include_archived: false,
+            search: String::new(),
+            status: ScanRecordStatusParam::All,
+            revision: ScanRecordRevisionParam::All,
+            latest_only: false,
+            sort: ScanRecordSortParam::Timestamp,
+            direction: ScanRecordDirectionParam::Desc,
+        }
+    }
+
     fn unscanned_derivation(rescan_eligible: bool) -> ScanningQueueItemResponse {
         ScanningQueueItemResponse {
             derivation_id: 42,
@@ -2116,7 +3070,7 @@ mod tests {
     #[test]
     fn filters_and_sorts_with_domain_values_and_stable_identity() {
         let rows = vec![row("zeta", "completed", 3, 0), row("atlas", "failed", 1, 2)];
-        let filtered = filter_and_sort_records(
+        let filtered = filter_and_sort_active_records(
             &rows,
             "atlas",
             "failed",
@@ -2127,8 +3081,15 @@ mod tests {
         );
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].hostname, "atlas");
-        let sorted =
-            filter_and_sort_records(&rows, "", "all", "all", false, ScanSort::Severity, true);
+        let sorted = filter_and_sort_active_records(
+            &rows,
+            "",
+            "all",
+            "all",
+            false,
+            ScanSort::Severity,
+            true,
+        );
         assert_eq!(sorted[0].hostname, "atlas");
     }
 
@@ -2139,7 +3100,7 @@ mod tests {
         let mut newer_commit_scanned_yesterday = row("newer", "completed", 24, 0);
         newer_commit_scanned_yesterday.is_latest_per_flake = true;
 
-        let filtered = filter_and_sort_records(
+        let filtered = filter_and_sort_active_records(
             &[
                 older_commit_rescanned_today,
                 newer_commit_scanned_yesterday.clone(),
@@ -2163,7 +3124,7 @@ mod tests {
         let mut many_high = row("high", "completed", 1, 0);
         many_high.high_count = 1_000;
 
-        let sorted = filter_and_sort_records(
+        let sorted = filter_and_sort_active_records(
             &[many_high, one_critical],
             "",
             "all",
@@ -2177,12 +3138,20 @@ mod tests {
     }
 
     #[test]
-    fn failed_stat_selects_newest_failure_deterministically() {
-        let older = row("older", "failed", 4, 0);
-        let newer = row("newer", "failed", 1, 0);
-        assert_eq!(
-            first_failed(&[older, newer.clone()]).unwrap().scan_id,
-            newer.scan_id
+    fn failed_stat_asks_the_server_for_the_newest_failure() {
+        let query = newest_failed_query();
+        assert_eq!(query.collection.as_param(), "completed");
+        assert_eq!(query.status.as_param(), "failed");
+        assert_eq!(query.sort.as_param(), "timestamp");
+        assert_eq!(query.direction.as_param(), "desc");
+        assert_eq!(query.limit, 1);
+        assert!(
+            query.include_archived,
+            "archived evidence is retained and must remain reachable",
+        );
+        assert!(
+            query.after.is_none() && query.search.is_none(),
+            "the newest-failure lookup must not depend on view state",
         );
     }
 
@@ -2255,23 +3224,19 @@ mod tests {
 
     #[test]
     fn archive_aware_totals_distinguish_visible_and_all_rows() {
-        let without_archived = ScanningScanRecordsResponse {
-            items: vec![row("atlas", "completed", 1, 0)],
-            total: 12,
-            hidden_archived: 5,
-        };
-        let with_archived = ScanningScanRecordsResponse {
-            items: vec![row("atlas", "completed", 1, 0)],
-            total: 12,
-            hidden_archived: 0,
-        };
+        let without_archived = page(vec![row("atlas", "completed", 1, 0)], 12, 5, None);
+        let with_archived = page(vec![row("atlas", "completed", 1, 0)], 12, 0, None);
         assert_eq!(visible_record_total(&without_archived), 7);
         assert_eq!(visible_record_total(&with_archived), 12);
-        assert_eq!(archived_record_total(&without_archived), 5);
+
+        let mut state = ScanRecordPaginationState::default();
+        state.reset(Some(without_archived));
+        assert_eq!(state.hidden_archived(), 5);
+        assert_eq!(state.visible_total(), 7);
         assert_ne!(
-            archived_record_total(&without_archived),
-            with_archived.items.len() as i64,
-            "the archived count must not come from the bounded included rows",
+            state.hidden_archived(),
+            state.rows().len() as i64,
+            "the archived count must come from the server, not the loaded rows",
         );
     }
 
@@ -2294,11 +3259,7 @@ mod tests {
     #[test]
     fn system_history_includes_unscanned_derivations_without_scan_identity() {
         let entry = system_history_entries(SystemHistoryData {
-            scans: ScanningScanRecordsResponse {
-                items: Vec::new(),
-                total: 0,
-                hidden_archived: 0,
-            },
+            scans: page(Vec::new(), 0, 0, None),
             derivations: vec![unscanned_derivation(false)],
         })
         .pop()
@@ -2319,5 +3280,446 @@ mod tests {
         let now = Utc::now();
         running.started_at = Some(now - Duration::seconds(75));
         assert_eq!(detail_elapsed_seconds(&running, now), Some(75));
+    }
+
+    #[test]
+    fn continuation_appends_unique_rows_and_advances_the_cursor() {
+        let first = row("alpha", "completed", 1, 0);
+        let second = row("beta", "completed", 2, 0);
+        let mut state = ScanRecordPaginationState::default();
+        state.reset(Some(page(vec![first.clone()], 2, 0, Some("cursor-1"))));
+
+        let request = state
+            .begin_continuation()
+            .expect("a next cursor must start one continuation");
+        assert_eq!(request.cursor, "cursor-1");
+        assert!(
+            state.begin_continuation().is_none(),
+            "one continuation must be active at a time",
+        );
+        assert!(state.complete_continuation(
+            &request,
+            page(vec![first.clone(), second.clone()], 2, 0, None),
+        ));
+
+        let loaded = state
+            .rows()
+            .iter()
+            .map(|row| row.scan_id)
+            .collect::<Vec<_>>();
+        assert_eq!(loaded, vec![first.scan_id, second.scan_id]);
+        assert!(!state.has_more());
+        assert!(state.begin_continuation().is_none());
+    }
+
+    #[test]
+    fn continuation_responses_from_superseded_requests_are_ignored() {
+        let loaded = row("alpha", "completed", 1, 0);
+        let stale = row("stale", "completed", 9, 0);
+        let mut state = ScanRecordPaginationState::default();
+        state.reset(Some(page(vec![loaded.clone()], 5, 0, Some("cursor-1"))));
+        let request = state.begin_continuation().expect("continuation starts");
+
+        // A filter change resets the state while the request is in flight.
+        state.reset(Some(page(vec![loaded.clone()], 5, 0, Some("cursor-2"))));
+        assert!(state.complete_continuation(&request, page(vec![stale], 5, 0, None)));
+
+        assert_eq!(state.rows().len(), 1);
+        assert_eq!(state.rows()[0].scan_id, loaded.scan_id);
+        assert!(
+            state.has_more(),
+            "the superseded response must not overwrite the current cursor",
+        );
+    }
+
+    #[test]
+    fn continuation_failure_keeps_loaded_rows_and_allows_retry() {
+        let loaded = row("alpha", "completed", 1, 0);
+        let next = row("beta", "completed", 2, 0);
+        let mut state = ScanRecordPaginationState::default();
+        state.reset(Some(page(vec![loaded.clone()], 2, 0, Some("cursor-1"))));
+        let request = state.begin_continuation().expect("continuation starts");
+
+        state.fail_continuation(&request, "HTTP 500: unavailable".into());
+        assert_eq!(
+            state.continuation_error.as_deref(),
+            Some("HTTP 500: unavailable"),
+        );
+        assert_eq!(state.rows().len(), 1);
+
+        let retry = state
+            .begin_continuation()
+            .expect("a failed continuation must stay retryable");
+        assert_eq!(retry.cursor, "cursor-1");
+        assert!(state.continuation_error.is_none());
+        assert!(state.complete_continuation(&retry, page(vec![next.clone()], 2, 0, None)));
+        assert_eq!(state.rows().len(), 2);
+    }
+
+    #[test]
+    fn head_refresh_prepends_new_rows_without_refetching_loaded_pages() {
+        let newest = row("newest", "completed", 0, 0);
+        let first = row("alpha", "completed", 1, 0);
+        let second = row("beta", "completed", 2, 0);
+        let mut state = ScanRecordPaginationState::default();
+        state.reset(Some(page(vec![first.clone()], 2, 0, Some("cursor-1"))));
+        let request = state.begin_continuation().expect("continuation starts");
+        assert!(
+            state.complete_continuation(
+                &request,
+                page(vec![second.clone()], 2, 0, Some("cursor-2")),
+            )
+        );
+
+        let token = state.begin_head_refresh().expect("head refresh starts");
+        assert!(state.complete_head_refresh(
+            &token,
+            page(
+                vec![newest.clone(), first.clone()],
+                3,
+                0,
+                Some("cursor-head"),
+            ),
+            HeadRefreshMode::PrependNewRows,
+        ));
+
+        let loaded = state
+            .rows()
+            .iter()
+            .map(|row| row.scan_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            loaded,
+            vec![newest.scan_id, first.scan_id, second.scan_id],
+            "the refreshed head must not duplicate or reorder accumulated rows",
+        );
+        assert_eq!(state.total(), 3);
+        assert_eq!(
+            state.begin_continuation().map(|request| request.cursor),
+            Some("cursor-2".to_string()),
+            "continuation must resume after the accumulated tail",
+        );
+    }
+
+    #[test]
+    fn continuation_keeps_newer_head_totals() {
+        let newest = row("newest", "completed", 0, 0);
+        let first = row("alpha", "completed", 1, 0);
+        let second = row("beta", "completed", 2, 0);
+        let third = row("gamma", "completed", 3, 0);
+        let mut state = ScanRecordPaginationState::default();
+        state.reset(Some(page(vec![first.clone()], 3, 0, Some("cursor-1"))));
+        let request = state.begin_continuation().expect("continuation starts");
+        assert!(state.complete_continuation(&request, page(vec![second], 3, 0, Some("cursor-2")),));
+
+        let refresh = state.begin_head_refresh().expect("head refresh starts");
+        assert!(state.complete_head_refresh(
+            &refresh,
+            page(vec![newest, first], 4, 0, Some("new-head-cursor")),
+            HeadRefreshMode::PrependNewRows,
+        ));
+        assert_eq!(state.total(), 4);
+
+        let continuation = state
+            .begin_continuation()
+            .expect("old cursor remains valid");
+        assert_eq!(continuation.cursor, "cursor-2");
+        assert!(state.complete_continuation(&continuation, page(vec![third], 3, 0, None),));
+        assert_eq!(
+            state.total(),
+            4,
+            "old snapshot totals must not replace the refreshed head total"
+        );
+    }
+
+    #[test]
+    fn head_refresh_allows_only_one_request_and_retries_after_failure() {
+        let first = row("alpha", "completed", 1, 0);
+        let mut state = ScanRecordPaginationState::default();
+        state.reset(Some(page(vec![first], 1, 0, None)));
+
+        let refresh = state.begin_head_refresh().expect("first refresh starts");
+        assert!(state.begin_head_refresh().is_none());
+        state.fail_head_refresh(&refresh);
+        assert!(state.begin_head_refresh().is_some());
+    }
+
+    #[test]
+    fn continuation_waits_for_an_active_head_refresh() {
+        let mut state = ScanRecordPaginationState::default();
+        state.reset(Some(page(
+            vec![row("alpha", "completed", 1, 0)],
+            2,
+            0,
+            Some("cursor-1"),
+        )));
+        let _refresh = state.begin_head_refresh().expect("head refresh starts");
+
+        assert!(
+            state.begin_continuation().is_none(),
+            "a continuation must not race a head-page replacement",
+        );
+    }
+
+    #[test]
+    fn head_refresh_keeps_order_for_non_newest_first_requests() {
+        let unseen = row("unseen", "completed", 0, 0);
+        let first = row("alpha", "completed", 1, 0);
+        let second = row("beta", "completed", 2, 0);
+        let mut state = ScanRecordPaginationState::default();
+        state.reset(Some(page(vec![first.clone()], 9, 0, Some("cursor-1"))));
+        let request = state.begin_continuation().expect("continuation starts");
+        assert!(state.complete_continuation(&request, page(vec![second.clone()], 9, 0, None)));
+
+        let token = state.begin_head_refresh().expect("head refresh starts");
+        assert!(state.complete_head_refresh(
+            &token,
+            page(vec![unseen, first.clone()], 9, 0, None),
+            HeadRefreshMode::UpdateLoadedOnly,
+        ));
+
+        let loaded = state
+            .rows()
+            .iter()
+            .map(|row| row.scan_id)
+            .collect::<Vec<_>>();
+        assert_eq!(loaded, vec![first.scan_id, second.scan_id]);
+    }
+
+    #[test]
+    fn non_newest_head_refresh_restarts_when_the_collection_grows() {
+        let unseen = row("unseen", "completed", 0, 0);
+        let first = row("alpha", "completed", 1, 0);
+        let second = row("beta", "completed", 2, 0);
+        let mut state = ScanRecordPaginationState::default();
+        state.reset(Some(page(vec![first.clone()], 2, 0, Some("cursor-1"))));
+        let request = state.begin_continuation().expect("continuation starts");
+        assert!(state.complete_continuation(&request, page(vec![second], 2, 0, None)));
+
+        let token = state.begin_head_refresh().expect("head refresh starts");
+        assert!(state.complete_head_refresh(
+            &token,
+            page(
+                vec![unseen.clone(), first.clone()],
+                3,
+                0,
+                Some("fresh-cursor"),
+            ),
+            HeadRefreshMode::UpdateLoadedOnly,
+        ));
+
+        assert_eq!(
+            state
+                .rows()
+                .iter()
+                .map(|row| row.scan_id)
+                .collect::<Vec<_>>(),
+            vec![unseen.scan_id, first.scan_id],
+        );
+        assert_eq!(
+            state.begin_continuation().map(|request| request.cursor),
+            Some("fresh-cursor".to_string()),
+            "an arbitrary-order refresh must discard the old high-water cursor",
+        );
+    }
+
+    #[test]
+    fn newest_head_refresh_restarts_when_new_rows_exceed_the_head_page() {
+        let newest = row("newest", "completed", 0, 0);
+        let first = row("alpha", "completed", 1, 0);
+        let second = row("beta", "completed", 2, 0);
+        let mut state = ScanRecordPaginationState::default();
+        state.reset(Some(page(vec![first], 2, 0, Some("cursor-1"))));
+        let request = state.begin_continuation().expect("continuation starts");
+        assert!(state.complete_continuation(&request, page(vec![second], 2, 0, None)));
+
+        let token = state.begin_head_refresh().expect("head refresh starts");
+        assert!(state.complete_head_refresh(
+            &token,
+            page(vec![newest.clone()], 103, 0, Some("fresh-cursor")),
+            HeadRefreshMode::PrependNewRows,
+        ));
+
+        assert_eq!(state.rows().len(), 1);
+        assert_eq!(state.rows()[0].scan_id, newest.scan_id);
+        assert_eq!(
+            state.begin_continuation().map(|request| request.cursor),
+            Some("fresh-cursor".to_string()),
+            "a truncated refreshed head must replace the old high-water cursor",
+        );
+    }
+
+    #[test]
+    fn head_refresh_restarts_when_archive_visibility_changes() {
+        let first = row("alpha", "completed", 1, 0);
+        let second = row("beta", "completed", 2, 0);
+        let mut state = ScanRecordPaginationState::default();
+        state.reset(Some(page(vec![first], 2, 0, Some("cursor-1"))));
+        let request = state.begin_continuation().expect("continuation starts");
+        assert!(state.complete_continuation(&request, page(vec![second.clone()], 2, 0, None),));
+
+        let token = state.begin_head_refresh().expect("head refresh starts");
+        assert!(state.complete_head_refresh(
+            &token,
+            page(vec![second.clone()], 2, 1, Some("fresh-cursor")),
+            HeadRefreshMode::PrependNewRows,
+        ));
+
+        assert_eq!(state.rows().len(), 1);
+        assert_eq!(state.rows()[0].scan_id, second.scan_id);
+        assert_eq!(state.hidden_archived(), 1);
+        assert_eq!(
+            state.begin_continuation().map(|request| request.cursor),
+            Some("fresh-cursor".to_string()),
+        );
+    }
+
+    #[test]
+    fn head_refresh_updates_loaded_rows_in_place_when_visibility_is_unchanged() {
+        let mut archived = row("alpha", "completed", 1, 0);
+        let mut state = ScanRecordPaginationState::default();
+        state.reset(Some(page(vec![archived.clone()], 2, 0, Some("cursor-1"))));
+        let request = state.begin_continuation().expect("continuation starts");
+        assert!(state.complete_continuation(
+            &request,
+            page(vec![row("beta", "completed", 2, 0)], 2, 0, None),
+        ));
+
+        archived.archived_at = Some(Utc::now());
+        let token = state.begin_head_refresh().expect("head refresh starts");
+        assert!(state.complete_head_refresh(
+            &token,
+            page(vec![archived.clone()], 2, 0, None),
+            HeadRefreshMode::PrependNewRows,
+        ));
+
+        assert_eq!(state.rows().len(), 2);
+        assert!(state.rows()[0].archived_at.is_some());
+    }
+
+    #[test]
+    fn head_refresh_waits_for_an_active_continuation() {
+        let mut state = ScanRecordPaginationState::default();
+        state.reset(Some(page(
+            vec![row("alpha", "completed", 1, 0)],
+            2,
+            0,
+            Some("cursor-1"),
+        )));
+        let _request = state.begin_continuation().expect("continuation starts");
+        assert!(
+            state.begin_head_refresh().is_none(),
+            "merging a head page during a continuation could duplicate rows",
+        );
+    }
+
+    #[test]
+    fn completed_requests_page_the_server_and_restart_without_a_cursor() {
+        let request = completed_request();
+        let head = request.to_query(None);
+        assert_eq!(head.collection.as_param(), "completed");
+        assert_eq!(head.limit, COMPLETED_PAGE_LIMIT);
+        assert!(head.after.is_none());
+        assert!(head.search.is_none());
+
+        let continuation = request.to_query(Some("cursor-1".to_string()));
+        assert_eq!(continuation.after.as_deref(), Some("cursor-1"));
+        assert_eq!(continuation.limit, head.limit);
+
+        let mut narrowed = completed_request();
+        narrowed.search = "gray".to_string();
+        narrowed.status = ScanRecordStatusParam::Failed;
+        let narrowed_query = narrowed.to_query(None);
+        assert_eq!(narrowed_query.search.as_deref(), Some("gray"));
+        assert_eq!(narrowed_query.status.as_param(), "failed");
+        assert!(
+            narrowed_query.after.is_none(),
+            "a changed filter must restart pagination without a cursor",
+        );
+        assert_ne!(
+            narrowed.reset_key(),
+            request.reset_key(),
+            "a changed filter must reset scroll paging",
+        );
+        assert!(narrowed.has_narrowing_filter());
+        assert!(!request.has_narrowing_filter());
+    }
+
+    #[test]
+    fn archived_probe_counts_hidden_rows_without_transferring_them() {
+        let mut request = completed_request();
+        request.include_archived = true;
+        request.search = "gray".to_string();
+        let probe = request.archived_count_query();
+        assert!(!probe.include_archived);
+        assert_eq!(probe.limit, 1);
+        assert_eq!(probe.search.as_deref(), Some("gray"));
+        assert!(probe.after.is_none());
+    }
+
+    #[test]
+    fn only_newest_first_requests_may_prepend_refreshed_head_rows() {
+        let mut request = completed_request();
+        assert_eq!(request.head_refresh_mode(), HeadRefreshMode::PrependNewRows);
+
+        request.direction = ScanRecordDirectionParam::Asc;
+        assert_eq!(
+            request.head_refresh_mode(),
+            HeadRefreshMode::UpdateLoadedOnly,
+        );
+
+        request.direction = ScanRecordDirectionParam::Desc;
+        request.sort = ScanRecordSortParam::Severity;
+        assert_eq!(
+            request.head_refresh_mode(),
+            HeadRefreshMode::UpdateLoadedOnly,
+        );
+    }
+
+    #[test]
+    fn nonterminal_collections_request_bounded_pages_without_cursors() {
+        let active = active_records_query();
+        assert_eq!(active.collection.as_param(), "active");
+        assert!(!active.collection.supports_cursor());
+        assert_eq!(active.limit, ACTIVE_PAGE_LIMIT);
+        assert!(active.after.is_none());
+
+        let system_id = Uuid::from_u128(7);
+        let history = system_history_query(system_id, true);
+        assert_eq!(history.collection.as_param(), "history");
+        assert!(!history.collection.supports_cursor());
+        assert_eq!(history.system_id, Some(system_id));
+        assert_eq!(history.limit, SYSTEM_HISTORY_LIMIT);
+        assert!(history.after.is_none());
+    }
+
+    #[test]
+    fn completed_status_and_revision_options_stay_inside_the_server_contract() {
+        assert_eq!(
+            completed_status_from_value("failed"),
+            ScanRecordStatusParam::Failed,
+        );
+        assert_eq!(
+            completed_status_from_value("in_progress"),
+            ScanRecordStatusParam::All,
+            "an active status is not a terminal filter the server accepts",
+        );
+        assert_eq!(
+            completed_revision_from_value("superseded"),
+            ScanRecordRevisionParam::Superseded,
+        );
+        assert_eq!(
+            completed_revision_from_value("unknown"),
+            ScanRecordRevisionParam::All,
+        );
+        assert_eq!(
+            default_sort_direction(ScanRecordSortParam::Timestamp),
+            ScanRecordDirectionParam::Desc,
+            "Completed history reads newest first",
+        );
+        assert_eq!(
+            default_sort_direction(ScanRecordSortParam::Configuration),
+            ScanRecordDirectionParam::Asc,
+        );
     }
 }

@@ -3811,12 +3811,20 @@ pub async fn complete_job(
     // Idempotent: if the job is already 'success' with matching builder+session,
     // this is a safe no-op. The returned bool indicates whether this was a new
     // completion (true) or an idempotent retry (false).
-    let (completed_job, is_new) = builders::complete_job_atomic(
+    //
+    // The completion policy carries deployment configuration into the
+    // transaction. This handler is the only completion caller that can read
+    // `server.auto_hardening_scans`, so automatic hardening admission is decided
+    // here rather than inside the query layer.
+    let (completed_job, is_new) = builders::complete_job_atomic_with_policy(
         &state.pool,
         &job_id,
         &builder_id,
         verified.builder_session_id.as_ref(),
         request.output_path.as_deref(),
+        builders::BuildCompletionPolicy {
+            auto_hardening_scans: state.server_config.auto_hardening_scans,
+        },
     )
     .await
     .map_err(|err| {

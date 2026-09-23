@@ -52,7 +52,6 @@ use crate::queries::deployment_policies::{
 use crate::queries::derivations::{
     cleanup_partial_derivations, reset_stuck_builds, set_closure_counts,
 };
-use crate::services::hardening_scans::trigger_commit_hardening_scans;
 
 const CLOSURE_COUNT_MAX_CONCURRENT: usize = 2;
 static CLOSURE_COUNT_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
@@ -1983,30 +1982,14 @@ async fn process_pending_commits(
 
                         run_post_finalize_derivation_side_effects(pool, &derivations).await;
 
-                        if server_config.auto_hardening_scans {
-                            match trigger_commit_hardening_scans(
-                                pool.clone(),
-                                commit.id,
-                                &flake.repo_url,
-                                &commit.git_commit_hash,
-                            )
-                            .await
-                            {
-                                Ok(count) if count > 0 => {
-                                    info!(
-                                        "🛡️ Queued {} hardening scans for commit {}",
-                                        count, commit.git_commit_hash
-                                    );
-                                }
-                                Ok(_) => {}
-                                Err(err) => {
-                                    warn!(
-                                        "Failed to queue hardening scans for commit {}: {}",
-                                        commit.git_commit_hash, err
-                                    );
-                                }
-                            }
-                        }
+                        // Automatic hardening admission deliberately does not
+                        // happen here. Evaluation proves only that a
+                        // configuration exists, not that it was built, and
+                        // admitting one scan per evaluated derivation was the
+                        // fan-out that caused the 2026-07-28 memory incident.
+                        // Admission now belongs to the transaction that records
+                        // a successful exact NixOS build. See
+                        // `queries::hardening_scans::enqueue_post_build_hardening_scan_tx`.
 
                         let total = results.len();
                         let with_agent = policy_checks

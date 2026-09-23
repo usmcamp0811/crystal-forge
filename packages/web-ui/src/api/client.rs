@@ -135,24 +135,94 @@ pub async fn fetch_scanning_queue(
     fetch_json(&url).await
 }
 
-/// Fetches an authoritative active, completed, or per-system history collection.
+/// Fetches one bounded, server-filtered page of exact scan lifecycles.
+///
+/// The server owns search, status, revision, latest-revision, ordering, and
+/// archive visibility, so the returned counts and ordering describe the whole
+/// matching collection rather than the rows already loaded by the browser.
+/// Continuation requests pass the previous response's `next_cursor` in
+/// [`ScanningScanRecordQuery::after`].
+///
+/// This function sends [`ScanningScanRecordQuery::limit`] unchanged. It does
+/// not clamp the page size, because a silent clamp would let a caller believe
+/// it received a complete collection. The server answers a page size outside
+/// 1 through 500 with a validation error.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError::Status`] with code 400 when a parameter fails
+/// server validation or when the cursor does not belong to this exact request
+/// identity, 403 when the session is not an administrator, and the transport
+/// or decoding variants for any other failure.
 pub async fn fetch_scanning_scan_records(
-    collection: &str,
-    include_archived: bool,
-    system_id: Option<&Uuid>,
-    limit: Option<i64>,
+    query: &ScanningScanRecordQuery,
 ) -> Result<ScanningScanRecordsResponse, ApiClientError> {
-    let mut url = format!(
-        "{}/scanning/scans?collection={}&include_archived={}&limit={}",
-        base_url(),
-        js_sys::encode_uri_component(collection),
-        include_archived,
-        limit.unwrap_or(500).clamp(1, 500)
+    debug_assert!(
+        (1..=500).contains(&query.limit),
+        "scan-record page size must stay inside the server contract",
     );
-    if let Some(system_id) = system_id {
+    debug_assert!(
+        query.after.is_none() || query.collection.supports_cursor(),
+        "only the completed collection accepts a continuation cursor",
+    );
+    let url = scanning_scan_records_url(query);
+    fetch_json(&url).await
+}
+
+/// Fetches one scan-record page and aborts its browser request after a timeout.
+///
+/// This variant is for periodic live refreshes. Aborting the underlying browser
+/// request prevents stalled refreshes from accumulating across polling ticks.
+///
+/// # Errors
+///
+/// Returns the same errors as [`fetch_scanning_scan_records`]. A request that
+/// exceeds `timeout_ms` returns [`ApiClientError::Network`] after the browser
+/// aborts the fetch.
+pub async fn fetch_scanning_scan_records_with_timeout(
+    query: &ScanningScanRecordQuery,
+    timeout_ms: u32,
+) -> Result<ScanningScanRecordsResponse, ApiClientError> {
+    debug_assert!(
+        (1..=500).contains(&query.limit),
+        "scan-record page size must stay inside the server contract",
+    );
+    debug_assert!(
+        query.after.is_none() || query.collection.supports_cursor(),
+        "only the completed collection accepts a continuation cursor",
+    );
+    let url = scanning_scan_records_url(query);
+    fetch_json_with_timeout(&url, timeout_ms).await
+}
+
+fn scanning_scan_records_url(query: &ScanningScanRecordQuery) -> String {
+    let mut url = format!(
+        "{}/scanning/scans?collection={}&include_archived={}&limit={}&status={}&revision={}&latest_only={}&sort={}&direction={}",
+        base_url(),
+        query.collection.as_param(),
+        query.include_archived,
+        query.limit,
+        query.status.as_param(),
+        query.revision.as_param(),
+        query.latest_only,
+        query.sort.as_param(),
+        query.direction.as_param(),
+    );
+    if let Some(system_id) = query.system_id.as_ref() {
         url.push_str(&format!("&system_id={system_id}"));
     }
-    fetch_json(&url).await
+    if let Some(search) = query
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        url.push_str(&format!("&q={}", js_sys::encode_uri_component(search)));
+    }
+    if let Some(cursor) = query.after.as_deref() {
+        url.push_str(&format!("&after={}", js_sys::encode_uri_component(cursor)));
+    }
+    url
 }
 
 /// Archives or restores exact terminal scan lifecycles.
@@ -2949,6 +3019,15 @@ async fn send_request(
     url: &str,
     body: Option<&str>,
 ) -> Result<(u16, String), ApiClientError> {
+    send_request_with_signal(method, url, body, None).await
+}
+
+async fn send_request_with_signal(
+    method: &str,
+    url: &str,
+    body: Option<&str>,
+    signal: Option<&web_sys::AbortSignal>,
+) -> Result<(u16, String), ApiClientError> {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::JsValue;
     use wasm_bindgen_futures::JsFuture;
@@ -2972,6 +3051,7 @@ async fn send_request(
     if let Some(payload) = body {
         opts.set_body(&JsValue::from_str(payload));
     }
+    opts.set_signal(signal);
 
     let request = web_sys::Request::new_with_str_and_init(url, &opts)
         .map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
@@ -3006,6 +3086,28 @@ async fn send_request(
     let body = text.as_string().unwrap_or_default();
 
     Ok((status as u16, body))
+}
+
+async fn fetch_json_with_timeout<T: serde::de::DeserializeOwned>(
+    url: &str,
+    timeout_ms: u32,
+) -> Result<T, ApiClientError> {
+    let controller = web_sys::AbortController::new()
+        .map_err(|error| ApiClientError::Network(format!("{error:?}")))?;
+    let abort_controller = controller.clone();
+    let timeout = gloo_timers::callback::Timeout::new(timeout_ms, move || {
+        abort_controller.abort();
+    });
+    let result = send_request_with_signal("GET", url, None, Some(&controller.signal())).await;
+    timeout.cancel();
+    let (status, text) = result?;
+    if !(200..300).contains(&status) {
+        return Err(ApiClientError::Status {
+            code: status,
+            body: decode_api_error_message(&text),
+        });
+    }
+    serde_json::from_str(&text).map_err(|error| ApiClientError::Deserialize(error.to_string()))
 }
 
 fn decode_api_error_message(body: &str) -> String {

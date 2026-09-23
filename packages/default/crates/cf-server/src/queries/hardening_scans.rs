@@ -1,7 +1,8 @@
 //! Database queries for hardening scans.
 
 use anyhow::Result;
-use sqlx::{PgPool, Postgres, Transaction};
+use chrono::{DateTime, Utc};
+use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::api::models::SystemCveInventorySelection;
@@ -11,6 +12,119 @@ use crate::hardening::types::{
     ServiceHardeningResult, SystemHardeningPosture, TopVulnerableService,
 };
 use crate::models::hardening_scans::ScanStatus;
+
+/// Bounds the sanitized failure text returned with a hardening attempt.
+///
+/// The limit keeps one attempt summary small enough to embed in every exact
+/// inventory response without turning the response into a log transport.
+const MAX_HARDENING_FAILURE_CHARS: usize = 400;
+
+/// Names the durable reason a hardening scan row exists.
+///
+/// The value is immutable for the life of the row and is persisted in
+/// `hardening_scans.source_trigger` by migration 0274. It separates work a
+/// person requested from work the server admitted on its own, so operators can
+/// tell evidence they asked for from evidence the build pipeline produced.
+/// Existing rows use the persisted `legacy` value because their original
+/// admission path cannot be proved; new code never creates that value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HardeningScanTrigger {
+    /// A person or an API client requested this scan.
+    Manual,
+    /// A successful exact NixOS build admitted this scan in the transaction
+    /// that recorded the build success.
+    PostBuild,
+    /// The hardening worker admitted this scan for an already successfully
+    /// built target that had no hardening evidence.
+    Backfill,
+}
+
+impl HardeningScanTrigger {
+    /// Returns the exact persisted `source_trigger` value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::PostBuild => "post_build",
+            Self::Backfill => "backfill",
+        }
+    }
+}
+
+/// Names the lifecycle state of the newest hardening attempt for a derivation.
+///
+/// The absence of an attempt is represented by `None` in
+/// [`SystemHardeningInventory::attempt`] and means "never scanned". The states
+/// below therefore describe only derivations that have at least one attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HardeningAttemptState {
+    /// The attempt is admitted and waits for the serial worker.
+    Queued,
+    /// The serial worker owns the attempt and is running `nix eval`.
+    Scanning,
+    /// The attempt reached a terminal failure. Earlier completed evidence, when
+    /// it exists, is still reported separately and is not discarded.
+    Failed,
+    /// The attempt produced evidence.
+    Completed,
+}
+
+impl HardeningAttemptState {
+    /// Returns the stable wire value for this state.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Scanning => "scanning",
+            Self::Failed => "failed",
+            Self::Completed => "completed",
+        }
+    }
+
+    /// Returns true while the attempt can still change without a new request.
+    ///
+    /// Callers use this to suppress a duplicate scan request and to decide
+    /// whether a bounded status poll is still useful.
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Queued | Self::Scanning)
+    }
+
+    fn from_status(status: &str) -> Option<Self> {
+        match status {
+            "pending" => Some(Self::Queued),
+            "in_progress" => Some(Self::Scanning),
+            "failed" => Some(Self::Failed),
+            "completed" => Some(Self::Completed),
+            _ => None,
+        }
+    }
+}
+
+/// Describes the newest hardening attempt for one exact derivation.
+///
+/// This is lifecycle information, not evidence. A `Failed` or `Queued` attempt
+/// never replaces or invalidates the completed evidence reported by
+/// [`SystemHardeningInventory::source`].
+#[derive(Debug, Clone)]
+pub struct SystemHardeningAttempt {
+    /// Identifies the newest attempt row.
+    pub scan_id: Uuid,
+    /// Gives the lifecycle state of that attempt.
+    pub state: HardeningAttemptState,
+    /// Gives the immutable admission reason recorded for that attempt.
+    pub source_trigger: String,
+    /// Gives the admission time.
+    pub scheduled_at: Option<DateTime<Utc>>,
+    /// Gives the execution start time, when execution started.
+    pub started_at: Option<DateTime<Utc>>,
+    /// Gives the terminal time, when the attempt reached a terminal state.
+    pub completed_at: Option<DateTime<Utc>>,
+    /// Counts execution attempts recorded on the row.
+    pub attempts: i32,
+    /// Gives redacted, bounded failure text for a failed attempt.
+    ///
+    /// The value is `None` for every non-failed state and may also be `None`
+    /// for a failed attempt that persisted no message.
+    pub error: Option<String>,
+}
 
 /// Contains one exact hardening inventory selection and its completed evidence.
 #[derive(Debug)]
@@ -23,6 +137,12 @@ pub struct SystemHardeningInventory {
     pub source: Option<HardeningScan>,
     /// Contains service rows belonging to exactly `source`.
     pub services: Vec<ServiceHardeningResult>,
+    /// Gives the newest attempt for the exact derivation, or `None` when the
+    /// derivation was never scanned.
+    ///
+    /// This field is independent of `source`. A later failed attempt leaves an
+    /// earlier completed `source` in place.
+    pub attempt: Option<SystemHardeningAttempt>,
     /// Is true for every historical target.
     pub read_only: bool,
 }
@@ -167,6 +287,7 @@ async fn fetch_system_hardening_inventory_tx(
             derivation_id: None,
             source: None,
             services: Vec::new(),
+            attempt: None,
             read_only: false,
         });
     };
@@ -200,13 +321,86 @@ async fn fetch_system_hardening_inventory_tx(
         }
         None => Vec::new(),
     };
+    let attempt = fetch_latest_hardening_attempt_tx(transaction, derivation_id).await?;
     Ok(SystemHardeningInventory {
         selection,
         derivation_id: Some(derivation_id),
         source,
         services,
+        attempt,
         read_only: selection != SystemCveInventorySelection::Current,
     })
+}
+
+/// Reads the newest hardening attempt for one exact derivation.
+///
+/// The newest row is authoritative for lifecycle reporting regardless of its
+/// status. The caller must have already proved that `derivation_id` belongs to
+/// the requesting system; this helper performs no authorization.
+///
+/// Rows whose persisted status is outside the supported lifecycle are reported
+/// as absent rather than guessed, so an unknown future state can never be
+/// displayed as a known one.
+///
+/// # Errors
+///
+/// Returns a database error when the attempt row cannot be read.
+async fn fetch_latest_hardening_attempt_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    derivation_id: i32,
+) -> Result<Option<SystemHardeningAttempt>> {
+    let row = sqlx::query(
+        r#"SELECT id,status,source_trigger,scheduled_at,started_at,completed_at,
+                  attempts,scan_metadata->>'error' AS error_text
+           FROM hardening_scans
+           WHERE derivation_id=$1
+           ORDER BY created_at DESC,id DESC
+           LIMIT 1"#,
+    )
+    .bind(derivation_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let status: String = row.try_get("status")?;
+    let Some(state) = HardeningAttemptState::from_status(&status) else {
+        return Ok(None);
+    };
+    let error = match state {
+        HardeningAttemptState::Failed => row
+            .try_get::<Option<String>, _>("error_text")?
+            .map(|text| sanitize_hardening_failure(&text))
+            .filter(|text| !text.is_empty()),
+        _ => None,
+    };
+
+    Ok(Some(SystemHardeningAttempt {
+        scan_id: row.try_get("id")?,
+        state,
+        source_trigger: row.try_get("source_trigger")?,
+        scheduled_at: row.try_get("scheduled_at")?,
+        started_at: row.try_get("started_at")?,
+        completed_at: row.try_get("completed_at")?,
+        attempts: row.try_get("attempts")?,
+        error,
+    }))
+}
+
+/// Redacts and bounds persisted hardening failure text for browser display.
+///
+/// SECURITY: Scanner failure text can quote Nix evaluation output that contains
+/// credentials from a flake reference. The shared snapshot redaction runs before
+/// any truncation so a secret cannot survive by sitting past the length bound.
+fn sanitize_hardening_failure(value: &str) -> String {
+    crate::security::snapshot_redaction::redact_text(value)
+        .chars()
+        .filter(|character| !character.is_control() || *character == '\n')
+        .take(MAX_HARDENING_FAILURE_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 /// Idempotently enqueue a hardening scan for a derivation.
@@ -223,6 +417,11 @@ async fn fetch_system_hardening_inventory_tx(
 /// IMPORTANT: This function only writes a database row.  It does NOT spawn a
 /// task or start a subprocess.  The actual `nix eval` is performed later by
 /// `run_hardening_scan_queue` in `services/hardening_scans.rs`.
+///
+/// This is the manual admission path. The row inherits the `'manual'`
+/// `source_trigger` default from migration 0274 and carries no build
+/// provenance, which keeps it outside the automatic idempotency slot owned by
+/// [`enqueue_post_build_hardening_scan_tx`].
 pub async fn create_hardening_scan(pool: &PgPool, derivation_id: i32) -> Result<Uuid> {
     let scan_id = Uuid::new_v4();
 
@@ -251,6 +450,225 @@ pub async fn create_hardening_scan(pool: &PgPool, derivation_id: i32) -> Result<
     get_active_scan_for_derivation(pool, derivation_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("active hardening scan disappeared during enqueue"))
+}
+
+/// Columns every admission path inserts, in a single shared order.
+///
+/// Keeping one literal prevents an admission path from silently omitting a
+/// `NOT NULL` counter and inserting a row the worker cannot summarize.
+const HARDENING_ADMISSION_COLUMNS: &str = "id, derivation_id, status, attempts,
+     total_services, well_hardened_count, moderately_hardened_count,
+     poorly_hardened_count, vulnerable_count,
+     source_trigger, source_build_job_id";
+
+/// Admits one automatic hardening scan for a successfully built NixOS target.
+///
+/// ATOMICITY: The caller must invoke this helper inside the same transaction
+/// that records the build success, so admission and build success commit or roll
+/// back together. The helper performs exactly one `INSERT` and never spawns a
+/// task, a subprocess, or a `nix eval`. A production incident on 2026-07-28 was
+/// caused by admission spawning work; do not add a `tokio::spawn` here.
+///
+/// ELIGIBILITY: A row is inserted only when the derivation is a `nixos`
+/// derivation with a realized `store_path`. An unrealized derivation, a package
+/// derivation, and a build that never succeeded therefore admit nothing. When
+/// `source_build_job_id` is supplied it must name a `success` build job for the
+/// same derivation; the predicate is re-checked in SQL so a caller cannot admit
+/// an event for a failed or cancelled attempt.
+///
+/// IDEMPOTENCY: The insert uses an untargeted `ON CONFLICT DO NOTHING`, so it
+/// absorbs both relevant unique indexes. The automatic-event index from 0274
+/// makes repeated and concurrent completion of the same build job produce at
+/// most one row, forever. The active-scan index from 0188 makes an existing
+/// pending or in-progress scan win; an active manual scan is preserved and is
+/// never replaced, superseded, or restarted.
+///
+/// # Parameters
+///
+/// `auto_hardening_scans` mirrors the deployment's `server.auto_hardening_scans`
+/// value and must be read from configuration by the caller. When it is `false`
+/// this function executes no statement and returns `Ok(None)`. The parameter
+/// exists so that admission policy stays owned by configuration instead of by a
+/// process-global or a database mirror.
+///
+/// # Returns
+///
+/// The new scan ID when this call admitted a scan, or `None` when admission was
+/// disabled, the target was ineligible, or an existing row already covered it.
+///
+/// # Errors
+///
+/// Returns a database error when the insert cannot run.
+pub async fn enqueue_post_build_hardening_scan_tx(
+    connection: &mut PgConnection,
+    derivation_id: i32,
+    source_build_job_id: Option<Uuid>,
+    auto_hardening_scans: bool,
+) -> Result<Option<Uuid>> {
+    if !auto_hardening_scans {
+        return Ok(None);
+    }
+
+    let inserted = sqlx::query_scalar::<_, Uuid>(&format!(
+        r#"
+        INSERT INTO hardening_scans ({HARDENING_ADMISSION_COLUMNS})
+        SELECT gen_random_uuid(), derivation.id, 'pending', 0, 0, 0, 0, 0, 0, $3, $2
+        FROM derivations derivation
+        WHERE derivation.id = $1
+          AND derivation.derivation_type = 'nixos'
+          AND derivation.store_path IS NOT NULL
+          AND BTRIM(derivation.store_path) <> ''
+          AND (
+                $2::uuid IS NULL
+                OR EXISTS (
+                    SELECT 1
+                    FROM build_jobs job
+                    WHERE job.id = $2
+                      AND job.derivation_id = derivation.id
+                      AND job.status = 'success'
+                )
+          )
+        ON CONFLICT DO NOTHING
+        RETURNING id
+        "#
+    ))
+    .bind(derivation_id)
+    .bind(source_build_job_id)
+    .bind(HardeningScanTrigger::PostBuild.as_str())
+    .fetch_optional(connection)
+    .await?;
+
+    Ok(inserted)
+}
+
+/// Bounds one backfill cycle to a small fixed number of admitted scans.
+///
+/// The hardening worker runs one `nix eval` at a time, so a larger batch adds
+/// only queue depth and delays manual and post-build work behind historical
+/// work. Five keeps a backlog draining steadily without starving newer requests.
+pub const HARDENING_BACKFILL_BATCH_SIZE: i64 = 5;
+
+/// Admits hardening scans for already built targets that have no evidence.
+///
+/// OWNERSHIP: This pass belongs to the hardening worker. Nothing on a request
+/// path may call it, because a large historical backlog must never be attached
+/// to a user request or to a build completion.
+///
+/// ELIGIBILITY: A candidate must be a `nixos` derivation with a realized
+/// `store_path` and a `success` build job. A derivation that was evaluated but
+/// never built, and a derivation whose only build attempts failed, are therefore
+/// skipped. A derivation whose successful build predates `build_jobs` has no
+/// source identity and is also skipped rather than admitted without provenance.
+///
+/// PRIORITY: Candidates are ordered as currently deployed exact targets, then
+/// the newest derivation of each configuration in each flake, then remaining
+/// history newest first. Operators see evidence for what is running now before
+/// evidence for what ran before.
+///
+/// IDEMPOTENCY: A derivation with any pending, in-progress, or completed scan is
+/// not a candidate, and a build job that already has an automatic event is not a
+/// candidate even after that event failed. A failed automatic event is therefore
+/// never retried silently by this pass; a person must request a new scan. The
+/// untargeted `ON CONFLICT DO NOTHING` absorbs races with concurrent admission.
+///
+/// # Parameters
+///
+/// `auto_hardening_scans` mirrors `server.auto_hardening_scans`. When it is
+/// `false` this function executes no statement and returns `Ok(0)`. `limit`
+/// caps the batch and must be positive.
+///
+/// # Returns
+///
+/// The number of scans admitted by this cycle.
+///
+/// # Errors
+///
+/// Returns a database error when candidate discovery or insertion fails.
+pub async fn enqueue_hardening_backfill_batch(
+    pool: &PgPool,
+    limit: i64,
+    auto_hardening_scans: bool,
+) -> Result<u64> {
+    if !auto_hardening_scans || limit <= 0 {
+        return Ok(0);
+    }
+
+    let result = sqlx::query(&format!(
+        r#"
+        WITH deployed AS (
+            SELECT DISTINCT derivation.id AS derivation_id
+            FROM systems system
+            JOIN LATERAL (
+                SELECT state.store_path
+                FROM system_states state
+                WHERE state.hostname = system.hostname
+                ORDER BY state.timestamp DESC NULLS LAST, state.id DESC
+                LIMIT 1
+            ) state ON TRUE
+            JOIN commits commit ON commit.flake_id = system.flake_id
+            JOIN derivations derivation
+              ON derivation.commit_id = commit.id
+             AND derivation.store_path = state.store_path
+             AND derivation.derivation_type = 'nixos'
+             AND derivation.derivation_name = COALESCE(
+                   NULLIF(BTRIM(system.system_configuration_name), ''), system.hostname)
+            WHERE system.is_active = TRUE
+        ), latest_per_flake AS (
+            SELECT DISTINCT ON (commit.flake_id, derivation.derivation_name)
+                   derivation.id AS derivation_id
+            FROM derivations derivation
+            JOIN commits commit ON commit.id = derivation.commit_id
+            WHERE derivation.derivation_type = 'nixos'
+            ORDER BY commit.flake_id, derivation.derivation_name,
+                     commit.commit_timestamp DESC, derivation.id DESC
+        ), candidate AS (
+            SELECT derivation.id AS derivation_id,
+                   job.id AS build_job_id,
+                   CASE
+                       WHEN deployed.derivation_id IS NOT NULL THEN 0
+                       WHEN latest_per_flake.derivation_id IS NOT NULL THEN 1
+                       ELSE 2
+                   END AS priority,
+                   job.completed_at AS built_at
+            FROM derivations derivation
+            JOIN LATERAL (
+                SELECT attempt.id, attempt.completed_at
+                FROM build_jobs attempt
+                WHERE attempt.derivation_id = derivation.id
+                  AND attempt.status = 'success'
+                ORDER BY attempt.completed_at DESC NULLS LAST, attempt.id DESC
+                LIMIT 1
+            ) job ON TRUE
+            LEFT JOIN deployed ON deployed.derivation_id = derivation.id
+            LEFT JOIN latest_per_flake ON latest_per_flake.derivation_id = derivation.id
+            WHERE derivation.derivation_type = 'nixos'
+              AND derivation.store_path IS NOT NULL
+              AND BTRIM(derivation.store_path) <> ''
+              AND NOT EXISTS (
+                  SELECT 1 FROM hardening_scans scan
+                  WHERE scan.derivation_id = derivation.id
+                    AND scan.status IN ('pending', 'in_progress', 'completed')
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM hardening_scans scan
+                  WHERE scan.source_build_job_id = job.id
+              )
+            ORDER BY priority ASC, job.completed_at DESC NULLS LAST, derivation.id DESC
+            LIMIT $1
+        )
+        INSERT INTO hardening_scans ({HARDENING_ADMISSION_COLUMNS})
+        SELECT gen_random_uuid(), candidate.derivation_id, 'pending', 0, 0, 0, 0, 0, 0,
+               $2, candidate.build_job_id
+        FROM candidate
+        ON CONFLICT DO NOTHING
+        "#
+    ))
+    .bind(limit)
+    .bind(HardeningScanTrigger::Backfill.as_str())
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -359,6 +777,24 @@ pub async fn recover_stale_hardening_scans(pool: &PgPool) -> Result<u64> {
 pub async fn hardening_queue_depth(pool: &PgPool) -> Result<i64> {
     Ok(sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM hardening_scans WHERE status = 'pending'",
+    )
+    .fetch_one(pool)
+    .await?)
+}
+
+/// Counts hardening work that is queued or currently executing.
+///
+/// The backfill owner uses this value to admit historical work only while the
+/// serial worker is idle. A concurrent manual or post-build admission can race
+/// with the check, but one bounded backfill batch can then precede it at most;
+/// subsequent cycles wait until all admitted work drains.
+///
+/// # Errors
+///
+/// Returns a database error when the work count cannot be read.
+pub async fn hardening_active_work_count(pool: &PgPool) -> Result<i64> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM hardening_scans WHERE status IN ('pending', 'in_progress')",
     )
     .fetch_one(pool)
     .await?)
@@ -1003,33 +1439,6 @@ pub async fn delete_justification(pool: &PgPool, justification_id: Uuid) -> Resu
     .await?;
 
     Ok(result.rows_affected() > 0)
-}
-
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct CommitHardeningTarget {
-    pub derivation_id: i32,
-    pub config_name: String,
-}
-
-/// List NixOS derivations for a commit that should receive hardening scans.
-pub async fn list_commit_hardening_targets(
-    pool: &PgPool,
-    commit_id: i32,
-) -> Result<Vec<CommitHardeningTarget>> {
-    let rows = sqlx::query_as::<_, CommitHardeningTarget>(
-        r#"
-        SELECT id AS derivation_id, derivation_name AS config_name
-        FROM derivations
-        WHERE commit_id = $1
-          AND derivation_type = 'nixos'
-        ORDER BY derivation_name ASC
-        "#,
-    )
-    .bind(commit_id)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows)
 }
 
 /// Resolve a system's derivation for hardening scan (similar to CVE scan pattern).

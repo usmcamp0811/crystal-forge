@@ -22,6 +22,13 @@ use tracing::{debug, error, info, warn};
 /// 1. Timeout protection prevents workers from getting stuck for hours
 /// 2. Helper functions for task description and status updates
 /// 3. Better error handling and logging
+///
+/// # Parameters
+///
+/// `auto_hardening_scans` mirrors `server.auto_hardening_scans`. It is passed
+/// down from [`super::run_build_loop`], which loads configuration, so that this
+/// worker's build-success transaction can admit hardening work without reading
+/// configuration itself.
 pub(super) async fn build_worker(
     worker_id: usize,
     worker_uuid: String,
@@ -29,6 +36,7 @@ pub(super) async fn build_worker(
     build_config: BuildConfig,
     cache_config: CacheConfig,
     use_mock_build: bool,
+    auto_hardening_scans: bool,
 ) {
     update_worker_status(
         worker_id,
@@ -172,6 +180,7 @@ pub(super) async fn build_worker(
                             &worker_uuid,
                             derivation.id,
                             &store_path,
+                            auto_hardening_scans,
                         )
                         .await
                         {
@@ -289,12 +298,31 @@ fn should_mock_build_fail(derivation_name: &str) -> bool {
     derivation_name.contains("-control-0")
 }
 
-/// Mark build complete and release reservation
+/// Marks a legacy in-server build complete and releases its reservation.
+///
+/// ATOMICITY: Reservation release, derivation completion, and automatic
+/// hardening admission commit together.
+///
+/// PROVENANCE: This legacy path builds from a `build_reservations` claim and
+/// has no `build_jobs` row, so the admitted hardening scan records no build job
+/// identity. Such an event is deduplicated only by the one-active-scan index
+/// from migration 0188, not by the per-build automatic-event index from 0274.
+///
+/// # Parameters
+///
+/// `auto_hardening_scans` mirrors `server.auto_hardening_scans` and is supplied
+/// by [`super::run_build_loop`], which owns the loaded configuration.
+///
+/// # Errors
+///
+/// Returns an error when the transaction, reservation release, derivation
+/// completion, or hardening admission fails.
 async fn mark_build_complete_and_release(
     pool: &PgPool,
     worker_uuid: &str,
     derivation_id: i32,
     store_path: &str,
+    auto_hardening_scans: bool,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
 
@@ -303,6 +331,14 @@ async fn mark_build_complete_and_release(
 
     // Mark complete
     mark_target_build_complete(&mut *tx, derivation_id, store_path).await?;
+
+    crate::queries::hardening_scans::enqueue_post_build_hardening_scan_tx(
+        &mut tx,
+        derivation_id,
+        None,
+        auto_hardening_scans,
+    )
+    .await?;
 
     tx.commit().await?;
 

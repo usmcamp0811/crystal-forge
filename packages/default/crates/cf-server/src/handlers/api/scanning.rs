@@ -17,10 +17,11 @@ use crate::auth::extractors::RequireAdmin;
 use crate::handlers::api::auth_session::RequireCsrf;
 use crate::handlers::api::rbac::require_admin;
 use crate::queries::scanning::{
-    InvalidCursorError, ScanRecordCollection, ScanSchedulePolicyRow, get_scan_activity,
-    get_scan_deployed, get_scan_queue, get_scan_queue_for_system, get_scan_records,
-    get_scan_schedule_policy, get_scan_stats, get_scan_systems, set_scan_archive_state,
-    update_scan_schedule_policy,
+    InvalidCursorError, InvalidScanRecordCursor, ScanRecordCollection, ScanRecordDirection,
+    ScanRecordRequest, ScanRecordRevision, ScanRecordSort, ScanRecordStatus, ScanSchedulePolicyRow,
+    get_scan_activity, get_scan_deployed, get_scan_queue, get_scan_queue_for_system,
+    get_scan_records, get_scan_schedule_policy, get_scan_stats, get_scan_systems,
+    set_scan_archive_state, update_scan_schedule_policy,
 };
 
 #[derive(Debug, Deserialize, Default)]
@@ -48,10 +49,112 @@ pub struct ScanningRecordParams {
     /// Bounds the response size.
     #[serde(default = "default_limit")]
     pub limit: i64,
+    /// Searches configuration, flake, commit, scan UUID, and derivation ID.
+    #[serde(default, alias = "search")]
+    pub q: Option<String>,
+    /// Selects `all`, `completed`, or `failed` terminal rows.
+    #[serde(default = "default_all")]
+    pub status: String,
+    /// Selects `all`, `deployed`, `recent`, or `superseded` revisions.
+    #[serde(default = "default_all")]
+    pub revision: String,
+    /// Requires the latest ready commit for each flake when true.
+    #[serde(default)]
+    pub latest_only: bool,
+    /// Selects `configuration`, `revision`, `status`, `severity`, or `timestamp`.
+    #[serde(default = "default_record_sort")]
+    pub sort: String,
+    /// Selects `asc` or `desc` primary ordering.
+    #[serde(default = "default_record_direction")]
+    pub direction: String,
+    /// Continues from the opaque cursor returned by the previous page.
+    #[serde(default)]
+    pub after: Option<String>,
 }
 
 fn default_record_collection() -> String {
     "active".to_string()
+}
+
+fn default_all() -> String {
+    "all".to_string()
+}
+
+fn default_record_sort() -> String {
+    "timestamp".to_string()
+}
+
+fn default_record_direction() -> String {
+    "desc".to_string()
+}
+
+fn parse_scanning_record_request(
+    params: ScanningRecordParams,
+) -> Result<ScanRecordRequest, &'static str> {
+    let collection = match params.collection.as_str() {
+        "active" => ScanRecordCollection::Active,
+        "completed" => ScanRecordCollection::Completed,
+        "history" => ScanRecordCollection::History,
+        _ => return Err("collection must be active, completed, or history"),
+    };
+    if !(1..=500).contains(&params.limit) {
+        return Err("limit must be between 1 and 500");
+    }
+    let search = params.q.and_then(|value| {
+        let normalized = value
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        (!normalized.is_empty()).then_some(normalized)
+    });
+    if search
+        .as_ref()
+        .is_some_and(|value| value.chars().count() > 200)
+    {
+        return Err("q must be 200 characters or less after normalization");
+    }
+    let status = match params.status.as_str() {
+        "all" => ScanRecordStatus::All,
+        "completed" => ScanRecordStatus::Completed,
+        "failed" => ScanRecordStatus::Failed,
+        _ => return Err("status must be all, completed, or failed"),
+    };
+    let revision = match params.revision.as_str() {
+        "all" => ScanRecordRevision::All,
+        "deployed" => ScanRecordRevision::Deployed,
+        "recent" => ScanRecordRevision::Recent,
+        "superseded" => ScanRecordRevision::Superseded,
+        _ => return Err("revision must be all, deployed, recent, or superseded"),
+    };
+    let sort = match params.sort.as_str() {
+        "configuration" => ScanRecordSort::Configuration,
+        "revision" => ScanRecordSort::Revision,
+        "status" => ScanRecordSort::Status,
+        "severity" => ScanRecordSort::Severity,
+        "timestamp" => ScanRecordSort::Timestamp,
+        _ => {
+            return Err("sort must be configuration, revision, status, severity, or timestamp");
+        }
+    };
+    let direction = match params.direction.as_str() {
+        "asc" => ScanRecordDirection::Asc,
+        "desc" => ScanRecordDirection::Desc,
+        _ => return Err("direction must be asc or desc"),
+    };
+    Ok(ScanRecordRequest {
+        collection,
+        include_archived: params.include_archived,
+        system_id: params.system_id,
+        limit: params.limit as u16,
+        search,
+        status,
+        revision,
+        latest_only: params.latest_only,
+        sort,
+        direction,
+        after: params.after,
+    })
 }
 
 fn default_limit() -> i64 {
@@ -97,24 +200,11 @@ pub async fn get_scanning_scan_records(
     if require_admin(&pool, &headers).await.is_none() {
         return forbidden_admin();
     }
-    let collection = match params.collection.as_str() {
-        "active" => ScanRecordCollection::Active,
-        "completed" => ScanRecordCollection::Completed,
-        "history" => ScanRecordCollection::History,
-        _ => {
-            return validation_error("collection must be active, completed, or history".into())
-                .into_response();
-        }
+    let request = match parse_scanning_record_request(params) {
+        Ok(request) => request,
+        Err(message) => return validation_error(message.into()).into_response(),
     };
-    match get_scan_records(
-        &pool,
-        collection,
-        params.include_archived,
-        params.system_id,
-        params.limit.clamp(1, 10_000),
-    )
-    .await
-    {
+    match get_scan_records(&pool, &request).await {
         Ok(result) => (
             StatusCode::OK,
             Json(ScanningScanRecordsResponse {
@@ -154,9 +244,15 @@ pub async fn get_scanning_scan_records(
                     .collect(),
                 total: result.total,
                 hidden_archived: result.hidden_archived,
+                has_more: result.has_more,
+                next_cursor: result.next_cursor,
             }),
         )
             .into_response(),
+        Err(error) if error.downcast_ref::<InvalidScanRecordCursor>().is_some() => {
+            validation_error("Invalid or request-incompatible pagination cursor.".into())
+                .into_response()
+        }
         Err(error) => {
             error!("scan record query failed: {error:#}");
             internal_error("Failed to load scan records")
@@ -723,5 +819,80 @@ mod tests {
     #[test]
     fn default_limit_is_fifty() {
         assert_eq!(default_limit(), 50);
+    }
+
+    fn record_params() -> ScanningRecordParams {
+        ScanningRecordParams {
+            collection: "completed".to_string(),
+            include_archived: false,
+            system_id: None,
+            limit: 50,
+            q: None,
+            status: "all".to_string(),
+            revision: "all".to_string(),
+            latest_only: false,
+            sort: "timestamp".to_string(),
+            direction: "desc".to_string(),
+            after: None,
+        }
+    }
+
+    #[test]
+    fn record_params_normalize_search_and_validate_bounds() {
+        let request = parse_scanning_record_request(ScanningRecordParams {
+            q: Some("  Mixed   CASE  ".to_string()),
+            ..record_params()
+        })
+        .expect("valid Completed parameters should parse");
+        assert_eq!(request.search.as_deref(), Some("mixed case"));
+        assert_eq!(request.limit, 50);
+
+        assert_eq!(
+            parse_scanning_record_request(ScanningRecordParams {
+                limit: 501,
+                ..record_params()
+            })
+            .expect_err("oversized pages must fail"),
+            "limit must be between 1 and 500"
+        );
+    }
+
+    #[test]
+    fn record_params_reject_unvalidated_sql_controls() {
+        for (field, params) in [
+            (
+                "status",
+                ScanningRecordParams {
+                    status: "failed DESC".to_string(),
+                    ..record_params()
+                },
+            ),
+            (
+                "revision",
+                ScanningRecordParams {
+                    revision: "current".to_string(),
+                    ..record_params()
+                },
+            ),
+            (
+                "sort",
+                ScanningRecordParams {
+                    sort: "completed_at; DROP TABLE cve_scans".to_string(),
+                    ..record_params()
+                },
+            ),
+            (
+                "direction",
+                ScanningRecordParams {
+                    direction: "sideways".to_string(),
+                    ..record_params()
+                },
+            ),
+        ] {
+            assert!(
+                parse_scanning_record_request(params).is_err(),
+                "invalid {field} must fail before query construction"
+            );
+        }
     }
 }

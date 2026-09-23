@@ -1792,25 +1792,45 @@ in {
         '';
       };
 
-      # IMPORTANT: Keep this false (the default) on memory-constrained hosts.
-      # Setting it to true caused a production OOM on 2026-07-28: every
-      # finalized system re-enqueued the entire commit's derivation set, and
-      # each inserted row immediately spawned a full `nix eval` subprocess.
-      # Nine concurrent hardening evaluators overlapped one bulk nix-eval-jobs
-      # run, driving the server cgroup to 58.5 GiB / 1.9 GiB swap with 0 B
-      # available and the API unresponsive.
+      # Automatic admission is now tied to successful NixOS builds, not to
+      # commit evaluation, and admission is a single database insert that never
+      # spawns a subprocess. The default stays false so upgrading a deployment
+      # never changes its workload on its own.
+      #
+      # The historical reason for the false default was a production OOM on
+      # 2026-07-28 under the old evaluation-time design: every finalized system
+      # re-enqueued the entire commit's derivation set, and each inserted row
+      # immediately spawned a full `nix eval` subprocess. Nine concurrent
+      # hardening evaluators overlapped one bulk nix-eval-jobs run, driving the
+      # server cgroup to 58.5 GiB / 1.9 GiB swap with 0 B available and the API
+      # unresponsive.
       #
       # When false, the crystal-forge-hardening worker still runs and processes
-      # scans queued via the manual API endpoint — only automatic post-commit
-      # enqueueing is suppressed.
+      # scans queued through the manual API endpoint. Only automatic admission
+      # and the bounded backfill are suppressed.
       auto_hardening_scans = lib.mkOption {
         type = lib.types.bool;
         default = false;
         description = lib.mdDoc ''
-          Automatically enqueue systemd hardening scans after successful commit
-          evaluation. Disabled by default because each scan performs an
-          expensive full NixOS evaluation. Manual scan requests remain
-          available when this option is disabled.
+          Automatically admit a systemd hardening scan when an exact NixOS
+          configuration finishes building successfully, and let the hardening
+          worker run a small bounded backfill for already built configurations
+          that have no hardening evidence.
+
+          Admission is one idempotent database insert inside the build-success
+          transaction. It never starts an evaluation. Failed builds, cancelled
+          builds, non-NixOS derivations, and configurations that were evaluated
+          but never built admit nothing.
+
+          Disabled by default so that upgrading does not change the workload of
+          a running deployment. Enabling it is recommended when you want
+          continuous hardening evidence: scan volume tracks real builds, the
+          single serial worker and the shared heavy-Nix lock keep hardening to
+          one evaluation at a time, and the backfill is limited to a small fixed
+          batch per cycle. The cost of enabling it is queue depth and scan
+          latency, not concurrent memory use.
+
+          Manual scan requests remain available when this option is disabled.
         '';
       };
 
