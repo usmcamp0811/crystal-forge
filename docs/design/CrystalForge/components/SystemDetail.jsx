@@ -70,6 +70,12 @@ function useDeployStages(pendingDeploy, onClear) {
 
 function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, onOpenCommit, pendingDeploy, onStartPending, onClearPending, initialTab, initialRev }) {
   const [tab, setTab] = React.useState(initialTab || "overview");
+  const [cveScenarioKey, setCveScenarioKey] = React.useState(() => new URLSearchParams(window.location.search).get("sc1"));
+  React.useEffect(() => {
+    const change = event => setCveScenarioKey(event.detail?.key);
+    window.addEventListener("cf-sc1-design-state", change);
+    return () => window.removeEventListener("cf-sc1-design-state", change);
+  }, []);
   const [editSystem, setEditSystem] = React.useState(false);
   const deployStage = useDeployStages(pendingDeploy, onClearPending);
   React.useEffect(() => { setTab(initialTab || "overview"); }, [sys.id, initialTab]);
@@ -85,6 +91,9 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
     setCommitPeek({ flake: f, sha: c.capture ? null : c.sha, meta: { msg: c.msg, author: c.author, at: c.at } });
   };
   if (!sys) return null;
+  const sc1 = sys.hostname === "orion-db-02" && cveScenarioKey
+    ? window.SC1_CVE_DESIGN?.states[cveScenarioKey]
+    : null;
 
   return (
     <div className="sd-root" data-screen-label="SystemDetail">
@@ -127,8 +136,8 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
           </div>
           <div className="sd-metric">
             <div className="sd-metric-label">Generation</div>
-            <div className="sd-metric-val-num">#{sys.generation}</div>
-            <div className="sd-metric-sub">activated · {sys.lastHeartbeat}</div>
+            <div className="sd-metric-val-num">{["no-report", "invalid-report", "ambiguous"].includes(sc1?.kind) ? "—" : `#${sc1?.target?.generation || sys.generation}`}</div>
+            <div className="sd-metric-sub">{["no-report", "invalid-report", "ambiguous"].includes(sc1?.kind) ? "running generation unavailable" : `activated · ${sys.lastHeartbeat}`}</div>
           </div>
           <div className="sd-metric">
             <div className="sd-metric-label">Uptime</div>
@@ -138,9 +147,9 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
           <div className="sd-metric">
             <div className="sd-metric-label">CVEs</div>
             <div className="sd-metric-val-num" style={{ color: sys.cves.critical > 0 ? "#f87171" : "#34d399" }}>
-              {sys.cves.total}
+              {sc1 && ["unmapped", "ambiguous", "no-report", "invalid-report", "error", "loading"].includes(sc1.kind) ? "—" : sys.cves.total}
             </div>
-            <div className="sd-metric-sub">{sys.cves.critical} critical · {sys.cves.high} high</div>
+            <div className="sd-metric-sub">{sc1 && ["unmapped", "ambiguous", "no-report", "invalid-report", "error", "loading"].includes(sc1.kind) ? "running exposure unavailable" : `${sys.cves.critical} critical · ${sys.cves.high} high`}</div>
           </div>
           <div className="sd-metric">
             <div className="sd-metric-label">Policy</div>
@@ -195,7 +204,7 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
         {tab === "history"    && <HistoryTab sys={sys} onRollback={(sha,gen)=>{ setDeployPreselect({ sha, gen, nonce: Date.now() }); setTab("deploy"); }} onLogsJump={(id)=>{ setTab("logs"); setLogsJump({ id, nonce: Date.now() }); }} onOpenCommit={openCommitPeek} />}
         {tab === "logs"       && <LogsTab sys={sys} jump={logsJump} />}
         {tab === "config"     && window.ConfigExplorerTab && <window.ConfigExplorerTab sys={sys} initialRev={initialRev} onOpenFlake={openCommitPeek} />}
-        {tab === "cves"       && <CvesTab sys={sys} />}
+        {tab === "cves"       && <CvesTab sys={sys} scenarioKey={cveScenarioKey} />}
         {tab === "compliance" && <ComplianceTab sys={sys} onNavigate={onNavigate} />}
         {tab === "hardening"  && <HardeningTab sys={sys} />}
       </div>
@@ -1517,23 +1526,125 @@ function RevScopeBar({ sys, scope, label }) {
   );
 }
 
+// CVE target intent is separate from the Generations/Commits presentation.
+// The design URL stores only a stable selector; the running source is always
+// re-resolved by the scenario, never frozen to the evaluated head.
+function useCveScenarioScope(sys, state) {
+  const readIntent = () => new URLSearchParams(window.location.search).get("cveTarget") || "current";
+  const [intent, setIntentState] = React.useState(readIntent);
+  const [mode, setMode] = React.useState(() => new URLSearchParams(window.location.search).get("cveMode") || "generation");
+  React.useEffect(() => {
+    const onHistory = () => {
+      setIntentState(readIntent());
+      setMode(new URLSearchParams(window.location.search).get("cveMode") || "generation");
+    };
+    window.addEventListener("popstate", onHistory);
+    return () => window.removeEventListener("popstate", onHistory);
+  }, [sys.id]);
+  const updateUrl = (name, value) => {
+    const url = new URL(window.location.href);
+    if (value === "current" && name === "cveTarget") url.searchParams.delete(name);
+    else url.searchParams.set(name, value);
+    window.history.pushState({}, "", url);
+  };
+  const setIntent = (value) => { setIntentState(value); updateUrl("cveTarget", value); };
+  const changeMode = (value) => { setMode(value); updateUrl("cveMode", value); };
+  const a = window.SC1_CVE_DESIGN.a;
+  const b = window.SC1_CVE_DESIGN.b;
+  const old = window.SC1_CVE_DESIGN.old;
+  const selected = intent === "current" ? state?.target
+    : intent === `generation:${a.generation}` || intent === `commit:${a.sha}` ? (state?.kind === "no-scan" ? state.target : a)
+    : intent === `generation:${b.generation}` || intent === `commit:${b.sha}` ? b
+    : intent === `generation:${old.generation}` || intent === `commit:${old.sha}` ? old : null;
+  return { intent, mode, changeMode, setIntent, selected, key: `${intent}:${selected?.source?.scanId || "none"}`, a, b, old };
+}
+
+function CveScenarioScopeBar({ scope, state }) {
+  const { intent, mode, changeMode, setIntent, selected, a, b, old } = scope;
+  const isCurrent = intent === "current";
+  const bIsRunning = state?.target?.sha === b.sha;
+  const options = mode === "generation"
+    ? [[`generation:${b.generation}`, `gen #${b.generation} · ${b.sha}${bIsRunning ? " (current)" : ""}`], [`generation:${a.generation}`, `gen #${a.generation} · ${a.sha}${!bIsRunning && state?.target ? " (current)" : ""}`], [`generation:${old.generation}`, `gen #${old.generation} · ${old.sha}`]]
+    : [[`commit:${b.sha}`, `${b.sha} · ${bIsRunning ? "running now" : "evaluated, not deployed"}`], [`commit:${a.sha}`, `${a.sha} · ${bIsRunning ? "previously deployed" : "observed running in A"}`], [`commit:${old.sha}`, `${old.sha} · previously deployed`]];
+  const present = isCurrent || options.some(([key]) => key === intent);
+  const currentLabel = state?.target
+    ? `Current · ${state.target.generation == null ? "generation unavailable" : `gen #${state.target.generation}`} · ${state.target.sha}`
+    : state?.kind === "no-report" ? "Current · no running report" : "Current · running target unresolved";
+  const sourceMessage = isCurrent && state?.proof ? state.proof
+    : isCurrent && state?.description ? state.description
+    : isCurrent && state?.kind === "loading" ? "Reading the selected target; no scan is being started."
+    : state?.menuError ? "Revision choices could not be refreshed. Current results remain available."
+    : selected?.source ? `Completed ${selected.source.completedAt} · ${selected.source.scanner}` : "No completed scan for this target.";
+  return (
+    <div className={`rev-bar${!isCurrent ? " rev-bar-hist" : ""}`}>
+      <span className="rev-bar-label">Scan target</span>
+      <div className="seg xs" aria-label="Revision scope type">
+        <button type="button" className={mode === "generation" ? "active focus-ring" : "focus-ring"} aria-pressed={mode === "generation"} onClick={() => changeMode("generation")}>Generations</button>
+        <button type="button" className={mode === "commit" ? "active focus-ring" : "focus-ring"} aria-pressed={mode === "commit"} onClick={() => changeMode("commit")}>Commits</button>
+      </div>
+      <select className="cfgx-select focus-ring" aria-label="Scan target" value={intent} onChange={event => setIntent(event.target.value)}>
+        <option value="current">{currentLabel}</option>
+        {!present && <option value={intent}>Selected target · switch view to inspect</option>}
+        {options.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+      </select>
+      <span className="rev-bar-meta" style={{ whiteSpace: "normal", overflow: "visible" }}>{sourceMessage}</span>
+      <span className="rev-bar-state">
+        {isCurrent && state?.kind === "completed" && <span className="chip chip-healthy"><Icon name="check" size={9}/> running now</span>}
+        {!isCurrent && <span className="chip chip-info">selected revision · read-only</span>}
+      </span>
+    </div>
+  );
+}
+
 /* ---------- CVEs ---------- */
-function CvesTab({ sys }) {
+function CvesTab({ sys, scenarioKey }) {
   // CVE exposure belongs to a specific build, so the tab scopes to one rev.
-  const scope = useRevScope(sys);
+  const normalScope = useRevScope(sys);
+  const scenario = sys.hostname === "orion-db-02" ? window.SC1_CVE_DESIGN?.states[scenarioKey] : null;
+  const scenarioScope = useCveScenarioScope(sys, scenario);
+  const scope = scenario ? scenarioScope : normalScope;
   const { ageRank, isCurrent, key: revKey } = scope;
+  const selectedTarget = scenario ? scenarioScope.selected : null;
+  const currentIntent = !scenario || scenarioScope.intent === "current";
+  const readKind = scenario && !currentIntent ? (selectedTarget?.source ? "completed" : "no-scan") : scenario?.kind;
+  const readOnly = !!scenario && (!currentIntent || !scenario.editable || readKind !== "completed");
+  const stateMessage = scenario && !currentIntent && readKind === "no-scan"
+    ? "The selected revision has no completed CVE scan. No other revision's results are substituted."
+    : scenario?.description;
+  const [retry, setRetry] = React.useState("idle");
+  React.useEffect(() => { setRetry("idle"); }, [scenarioKey, scenarioScope.intent]);
+  const retryRead = () => {
+    document.querySelector('.sd-body select[aria-label="Scan target"]')?.focus();
+    setRetry("pending");
+    window.setTimeout(() => {
+      if (scenarioKey === "retry-failed") setRetry("failed");
+      else window.dispatchEvent(new CustomEvent("cf-sc1-design-state", { detail: { key: "retry-success" } }));
+    }, 400);
+  };
+  const effectiveKind = retry === "pending" ? "loading" : retry === "success" ? "completed" : retry === "failed" ? "error" : readKind;
+  const effectiveTarget = retry === "success" ? window.SC1_CVE_DESIGN?.a : selectedTarget;
+  const source = scenario && effectiveKind === "completed" ? effectiveTarget?.source : null;
+  const [draftStart, setDraftStart] = React.useState(null);
+  const draftConflict = draftStart && (draftStart.intent !== scenarioScope.intent || draftStart.scanId !== effectiveTarget?.source?.scanId);
 
   // Older generations/commits ran different package versions and hadn't picked up
   // later patches yet, so exposure grows the further back you look.
   const cveCounts = React.useMemo(() => {
+    if (scenario) {
+      const rows = effectiveKind === "completed" ? effectiveTarget?.rows || [] : [];
+      return { critical: rows.filter(r => r.level === "critical").length, high: rows.filter(r => r.level === "high").length,
+        medium: rows.filter(r => r.level === "medium").length, low: rows.filter(r => r.level === "low").length,
+        unknown: rows.filter(r => r.level === "unknown").length, total: scenario.totalFindings || rows.length };
+    }
     if (isCurrent) return sys.cves;
     const rnd = _hrng(_hseed(sys.id + "|counts|" + revKey));
     const bump = (base) => Math.max(0, base + Math.round(ageRank * (0.5 + rnd()*1.3)));
     const critical = bump(sys.cves.critical), high = bump(sys.cves.high), medium = bump(sys.cves.medium), low = bump(sys.cves.low);
     return { critical, high, medium, low, total: critical+high+medium+low };
-  }, [sys.id, revKey, ageRank]);
+  }, [sys.id, revKey, ageRank, scenarioKey, effectiveKind, effectiveTarget]);
 
   const cves = React.useMemo(() => {
+    if (scenario) return effectiveKind === "completed" ? effectiveTarget?.rows || [] : [];
     const rnd = _hrng(_hseed(sys.id + "|list|" + revKey));
     const n = Math.min(18, cveCounts.critical + cveCounts.high + Math.min(6, cveCounts.medium));
     const levels = [
@@ -1555,29 +1666,31 @@ function CvesTab({ sys }) {
         fix: rnd() > 0.3 ? "available" : "pending",
       };
     });
-  }, [sys.id, revKey, cveCounts]);
+  }, [sys.id, revKey, cveCounts, scenarioKey, effectiveKind, effectiveTarget]);
 
   const chipFor = (l) =>
     l === "critical" ? <span className="chip chip-critical">critical</span> :
     l === "high" ? <span className="chip chip-warning">high</span> :
+    l === "unknown" ? <span className="chip chip-unknown">unknown</span> :
                    <span className="chip chip-unknown">medium</span>;
 
   // Group by package (mirrors the CVEs view)
   const groups = React.useMemo(() => {
-    const sevWeight = { critical: 1000, high: 100, medium: 10, low: 1 };
+    const sevWeight = { critical: 1000, high: 100, medium: 10, low: 1, unknown: 1 };
     const m = new Map();
     cves.forEach(c => { if (!m.has(c.pkg)) m.set(c.pkg, []); m.get(c.pkg).push(c); });
     return [...m.entries()].map(([pkg, list]) => {
-      const counts = { critical: 0, high: 0, medium: 0, low: 0 };
-      let fixable = 0, maxScore = 0, version = list[0].version;
-      list.forEach(c => { counts[c.level] += 1; if (c.fix === "available") fixable += 1; if (parseFloat(c.score) > maxScore) maxScore = parseFloat(c.score); });
+      const counts = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
+      let fixable = 0, maxScore = null, version = list[0].version;
+      list.forEach(c => { counts[c.level] += 1; if (c.fix === "available") fixable += 1; if (c.score != null && Number.isFinite(Number(c.score))) maxScore = Math.max(maxScore ?? 0, Number(c.score)); });
       const score = list.reduce((a, c) => a + sevWeight[c.level], 0);
       return { pkg, list, counts, fixable, maxScore, version, score };
     }).sort((a, b) => b.score - a.score);
   }, [cves]);
 
   const [expanded, setExpanded] = React.useState(null);
-  React.useEffect(() => { if (groups.length && expanded == null) setExpanded(groups[0].pkg); }, [groups]);
+  React.useEffect(() => { if (scenario) setExpanded(null); }, [scenarioScope.key]);
+  React.useEffect(() => { if (groups.length && expanded == null) setExpanded(groups[0].pkg); }, [groups, expanded]);
   // Same disposition question as the CVEs view: accept the risk with a justification,
   // or schedule the patch and open a POA&M. Scoped to this host's environment.
   const [triageCve, setTriageCve] = React.useState(null);
@@ -1602,19 +1715,32 @@ function CvesTab({ sys }) {
 
   return (
     <>
-    <RevScopeBar sys={sys} scope={scope} label="Scan target"/>
+    {scenario ? <CveScenarioScopeBar scope={scenarioScope} state={retry === "pending" ? { ...scenario, kind: "loading", description: null } : scenario}/> : <RevScopeBar sys={sys} scope={scope} label="Scan target"/>}
     <section className="card" style={{ overflow: "hidden" }}>
       <div className="sd-card-head" style={{ padding: "14px 18px" }}>
         <h2>Vulnerabilities</h2>
-        <span className="sd-card-meta">{cves.length} of {cveCounts.total} shown · {groups.length} package{groups.length === 1 ? "" : "s"}</span>
+        <span className="sd-card-meta">{scenario && effectiveKind !== "completed" ? "Inventory unavailable" : `${cves.length} of ${cveCounts.total} shown · ${groups.length} package${groups.length === 1 ? "" : "s"}`}{scenario && source ? ` · scan completed ${source.completedAt}` : ""}</span>
       </div>
-      {cves.length === 0 ? (
+      {scenario && effectiveKind !== "completed" ? (
+        <div className="empty" role={effectiveKind === "error" ? "alert" : "status"} aria-live="polite">
+          {effectiveKind === "loading" ? (
+            <><Spinner size={22}/><h3>{retry === "pending" || scenario?.retry ? "Retrying inventory read…" : "Loading the selected inventory…"}</h3><div>No scan is being started.</div></>
+          ) : effectiveKind === "error" ? (
+            <><h3>Unable to load CVE inventory</h3><div>{retry === "failed" ? "The selected inventory read failed again." : stateMessage}</div><button type="button" className="btn btn-ghost xs focus-ring" style={{ marginTop:12 }} onClick={retryRead}>Retry inventory read</button></>
+          ) : (
+            <><h3>{effectiveKind === "no-scan" ? "No completed CVE scan for this target" : effectiveKind === "unmapped" ? "Running configuration is unmapped" : effectiveKind === "ambiguous" ? "Running target is ambiguous" : effectiveKind === "no-report" ? "No running configuration reported" : "Running target unavailable"}</h3><div>{stateMessage || "No completed scan exists for this selected target. Other revisions remain available above."}</div></>
+          )}
+        </div>
+      ) : cves.length === 0 ? (
         <div className="empty">
-          <h3>No vulnerabilities detected</h3>
-          <div>Last scan: 2h ago.</div>
+          <h3>{scenario ? "No findings in the selected scan" : "No vulnerabilities detected"}</h3>
+          <div>{scenario && source ? `Completed ${source.completedAt} by ${source.scanner}. This scan reported no eligible findings; it does not prove the host has no vulnerabilities.` : "Last scan: 2h ago."}</div>
+          {scenario?.proof && <div style={{ marginTop:8 }}>{scenario.proof}</div>}
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: 14 }}>
+          {scenario?.attempt && <div className="sd-card-meta">{scenario.attempt}</div>}
+          {scenario?.partial && retry !== "success" && <div className="sd-card-meta" role="status">More findings could not be loaded. The rows below are partial; retry the selected page without discarding them. <button type="button" className="btn btn-ghost xs focus-ring" onClick={retryRead}>Retry page</button></div>}
           {groups.map(g => {
             const sevColor = g.counts.critical > 0 ? "#f87171" : g.counts.high > 0 ? "#fbbf24" : g.counts.medium > 0 ? "#60a5fa" : "#9ca3af";
             const isOpen = expanded === g.pkg;
@@ -1627,16 +1753,17 @@ function CvesTab({ sys }) {
                     <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                       <span className="mono" style={{ fontSize: 14, fontWeight: 700 }}>{g.pkg}</span>
                       <span className="mono" style={{ fontSize: 11, color: "var(--cf-text-muted)" }}>{g.version}</span>
-                      <span style={{ fontSize: 12, color: "var(--cf-text-muted)" }}>{g.list.length} CVE{g.list.length === 1 ? "" : "s"}</span>
+                       <span style={{ fontSize: 12, color: "var(--cf-text-muted)" }}>{g.list.length} CVE{g.list.length === 1 ? "" : "s"}</span>
                     </div>
                     <div style={{ fontSize: 11, color: "var(--cf-text-secondary)", marginTop: 2 }}>
-                      max CVSS {g.maxScore.toFixed(1)} · {g.fixable} patchable · {g.list.length - g.fixable} pending
+                       max CVSS {g.maxScore == null ? "unavailable" : g.maxScore.toFixed(1)} · {g.fixable} patchable · {g.list.length - g.fixable} pending
                     </div>
                   </div>
                   <div style={{ display: "flex", gap: 5, flexWrap: "wrap", justifyContent: "flex-end" }}>
                     {g.counts.critical > 0 && <span className="chip chip-critical" style={{ fontSize: 10 }}>{g.counts.critical} crit</span>}
                     {g.counts.high > 0 && <span className="chip chip-warning" style={{ fontSize: 10 }}>{g.counts.high} high</span>}
-                    {g.counts.medium > 0 && <span className="chip chip-unknown" style={{ fontSize: 10 }}>{g.counts.medium} med</span>}
+                       {g.counts.medium > 0 && <span className="chip chip-unknown" style={{ fontSize: 10 }}>{g.counts.medium} med</span>}
+                       {g.counts.unknown > 0 && <span className="chip chip-unknown" style={{ fontSize: 10 }}>{g.counts.unknown} unknown</span>}
                   </div>
                 </button>
                 {isOpen && (
@@ -1656,17 +1783,17 @@ function CvesTab({ sys }) {
                         <tr key={c.id}>
                           <td className="mono" style={{ color: "var(--cf-text-primary)" }}>{c.id}</td>
                           <td>{chipFor(c.level)}</td>
-                          <td className="mono">{c.score}</td>
+                           <td className="mono">{c.score == null ? "—" : c.score}</td>
                           <td>
                             {c.fix === "available"
                               ? <span className="chip chip-healthy">available</span>
                               : <span className="chip chip-unknown">pending</span>}
                           </td>
-                          <td>{triageChip(c)}</td>
+                           <td>{readOnly ? <span className="chip chip-unknown" title="This selected scan cannot authorize triage">read-only</span> : triageChip(c)}</td>
                           <td>
                             <div className="row-actions">
-                              {window.CveTriageModal && (
-                                <button className="btn-icon focus-ring" title={dispOf(c) ? "Edit triage" : "Triage — accept the risk or schedule a patch"} onClick={() => setTriageCve(c)}>
+                               {window.CveTriageModal && !readOnly && (
+                                 <button className="btn-icon focus-ring" title={dispOf(c) ? "Edit triage" : "Triage — accept the risk or schedule a patch"} onClick={() => { setDraftStart({ intent: scenarioScope.intent, scanId: effectiveTarget?.source?.scanId }); setTriageCve(c); }}>
                                   <Icon name={dispOf(c) ? "file" : "shield"} size={14} />
                                 </button>
                               )}
@@ -1694,9 +1821,11 @@ function CvesTab({ sys }) {
           affectedSystems={[sys]}
           envSystems={(typeof SYSTEMS !== "undefined" ? SYSTEMS.filter(s => s.environment === sys.environment) : [sys])}
           hostScope={sys}
+          submissionBlocked={scenario && draftConflict ? "Current evidence changed while this draft was open. Your edits are preserved; close this draft and reopen triage from the latest scan to continue." : null}
           initial={triageCve.dispositions || {}}
           onClose={() => setTriageCve(null)}
           onSubmit={(next) => {
+            if (scenario && draftConflict) return;
             triageCve.dispositions = next;
             const d = (next.hosts && next.hosts[sys.id]) || next[sys.environment];
             triageCve.acceptance = d ? d.state : "outstanding";

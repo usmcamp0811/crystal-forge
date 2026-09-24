@@ -13,9 +13,9 @@ use crate::api::models::{
     CveAffectedSystemDetail, CveDetail, CveFilters, CveFleetStats, CveJustification,
     CveJustificationInput, CveListItem, CvePackageGroup, ExactCveAuthorityFailureReason,
     FleetCveInventorySection, SystemCveCurrentAuthorityState, SystemCveEvidenceRepresentation,
-    SystemCveInventoryAuthority, SystemCveInventoryCandidate, SystemCveInventoryMetadata,
-    SystemCveInventoryParams, SystemCveInventorySelection, SystemCveInventorySeverityCounts,
-    SystemCveInventorySource,
+    SystemCveInventoryAttempt, SystemCveInventoryAuthority, SystemCveInventoryCandidate,
+    SystemCveInventoryMetadata, SystemCveInventoryParams, SystemCveInventorySelection,
+    SystemCveInventorySeverityCounts, SystemCveInventorySource, SystemCveRunningTarget,
 };
 use crate::auth::extractors::AuthenticatedUser;
 
@@ -234,8 +234,12 @@ pub struct SystemCveInventoryQuery {
     pub exact_authority_failure: Option<ExactCveAuthorityFailureReason>,
     /// Gives real provenance for the selected completed scan.
     pub source: Option<SystemCveInventorySource>,
+    /// Gives the newest attempt for the validated target, independent of source.
+    pub attempt: Option<SystemCveInventoryAttempt>,
     /// Reports the explicit current state. Historical selections leave it `None`.
     pub current_state: Option<SystemCveCurrentAuthorityState>,
+    /// Identifies a unique scoped match to the latest reported output.
+    pub running_target: Option<SystemCveRunningTarget>,
     /// Gives the normalized server-validated target identity.
     pub selection: SystemCveInventorySelection,
     /// Gives the selected scan representation when a scan exists.
@@ -453,6 +457,116 @@ struct InventoryAuthorityRow {
     exact_scanner_version: Option<String>,
 }
 
+#[derive(Debug, sqlx::FromRow)]
+struct RunningMappingRow {
+    state_present: bool,
+    store_path: Option<String>,
+    generation: Option<i32>,
+    generation_matches_current_store_path: Option<bool>,
+    reported_at: Option<DateTime<Utc>>,
+    match_count: i64,
+    derivation_id: Option<i32>,
+    commit_hash: Option<String>,
+    retained_derivation_id: Option<i32>,
+    retained_store_path: Option<String>,
+}
+
+// SECURITY: Select the most recent report BEFORE checking its fields. This
+// query counts every scoped derivation, not just the first 1,000 menu entries.
+// Neither a candidate flag nor a completed scan proves output-to-target identity.
+async fn resolve_running_inventory_target(
+    transaction: &mut Transaction<'_, Postgres>,
+    system_id: Uuid,
+) -> Result<(
+    SystemCveCurrentAuthorityState,
+    Option<SystemCveRunningTarget>,
+)> {
+    let row = sqlx::query_as::<_, RunningMappingRow>(
+        r#"WITH selected AS (
+             SELECT system.id,system.hostname,system.flake_id,
+                    COALESCE(NULLIF(BTRIM(system.system_configuration_name), ''),system.hostname)
+                      AS configuration_name
+             FROM systems system WHERE system.id=$1
+           ), observation AS (
+             SELECT selected.*,state.id AS state_id,state.generation,
+                    NULLIF(BTRIM(state.store_path), '') AS store_path,
+                    state.generation_matches_current_store_path,
+                    state.timestamp AS reported_at
+             FROM selected LEFT JOIN LATERAL (
+               SELECT candidate.id,candidate.generation,candidate.store_path,
+                      candidate.generation_matches_current_store_path,candidate.timestamp
+               FROM system_states candidate WHERE candidate.hostname=selected.hostname
+               ORDER BY candidate.timestamp DESC NULLS LAST,candidate.id DESC LIMIT 1
+             ) state ON TRUE
+           )
+           SELECT observation.state_id IS NOT NULL AS state_present,
+                  observation.store_path,observation.generation,
+                  observation.generation_matches_current_store_path,
+                  observation.reported_at,
+                  matches.match_count,matches.derivation_id,matches.commit_hash,
+                  retained.derivation_id AS retained_derivation_id,
+                  retained.source_store_path AS retained_store_path
+           FROM observation
+           CROSS JOIN LATERAL (
+             SELECT COUNT(*)::bigint AS match_count,MIN(derivation.id) AS derivation_id,
+                    MIN(commit.git_commit_hash) AS commit_hash
+             FROM derivations derivation
+             JOIN commits commit ON commit.id=derivation.commit_id
+               AND commit.flake_id=observation.flake_id
+             WHERE derivation.derivation_type='nixos'
+               AND derivation.derivation_name=observation.configuration_name
+               AND COALESCE(derivation.store_path,derivation.expected_store_path)=observation.store_path
+           ) matches
+           LEFT JOIN evaluation_generation_snapshots retained
+             ON retained.system_id=observation.id
+            AND retained.generation=observation.generation"#,
+    )
+    .bind(system_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+
+    if !row.state_present {
+        return Ok((SystemCveCurrentAuthorityState::NoRunningReport, None));
+    }
+    if row.store_path.is_none() || row.generation_matches_current_store_path == Some(false) {
+        return Ok((SystemCveCurrentAuthorityState::InvalidRunningReport, None));
+    }
+    if row.match_count == 0 {
+        return Ok((SystemCveCurrentAuthorityState::UnmappedRunning, None));
+    }
+    if row.match_count != 1 {
+        return Ok((SystemCveCurrentAuthorityState::AmbiguousRunning, None));
+    }
+    let (Some(derivation_id), Some(commit_hash), Some(reported_at)) =
+        (row.derivation_id, row.commit_hash, row.reported_at)
+    else {
+        return Err(anyhow::anyhow!("unique running mapping omitted identity"));
+    };
+    // A retained row that contradicts the independently scoped output identity
+    // is not merely missing proof. Do not show its scan as a downgraded result.
+    if row
+        .retained_derivation_id
+        .is_some_and(|id| id != derivation_id)
+        || row
+            .retained_store_path
+            .as_deref()
+            .is_some_and(|path| Some(path) != row.store_path.as_deref())
+    {
+        return Ok((SystemCveCurrentAuthorityState::InvalidRunningReport, None));
+    }
+    Ok((
+        SystemCveCurrentAuthorityState::MappedRunningNoScan,
+        Some(SystemCveRunningTarget {
+            derivation_id,
+            generation: (row.generation_matches_current_store_path == Some(true))
+                .then_some(row.generation)
+                .flatten(),
+            commit_hash,
+            reported_at,
+        }),
+    ))
+}
+
 fn parse_exact_authority_failure(value: &str) -> Result<ExactCveAuthorityFailureReason> {
     match value {
         "missing_current_generation" => {
@@ -476,13 +590,14 @@ fn parse_exact_authority_failure(value: &str) -> Result<ExactCveAuthorityFailure
     }
 }
 
-/// Fetches one read-only CVE inventory source for a system's current target.
+/// Fetches one CVE inventory source for the latest reported running target.
 ///
-/// The function proves exact current authority before it reads findings. Exact
-/// authority therefore wins for both vulnerable and clean scans. When current
-/// authority or the exact current scan is absent, the function returns an
-/// explicit empty state. It never substitutes another derivation's scan, never
-/// unions sources, and never infers immutable observations from legacy data.
+/// The function first resolves the latest reported running output to one
+/// scoped derivation. Full retained proof permits normal exact Current reads;
+/// missing proof permits only a read-only schema-1 scan of that same target.
+/// Missing, invalid, ambiguous, or unmatched observations return typed empty
+/// states. It never unions sources or infers schema-1 observations from legacy
+/// scan data.
 ///
 /// All authority and row reads use one repeatable-read, read-only transaction.
 /// Legacy rows have no exact observation identity and cannot authorize a
@@ -772,6 +887,33 @@ pub async fn fetch_authorized_system_cve_inventory_candidates(
         .map(Some)
 }
 
+// INVARIANT: The caller first validates derivation_id against the selected
+// system, flake, and configuration. This separate lifecycle query must never
+// select the completed source or infer mutation authority from an attempt.
+async fn newest_system_cve_attempt_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    derivation_id: i32,
+) -> Result<Option<SystemCveInventoryAttempt>> {
+    let row = sqlx::query_as::<_, (Uuid, i32, String, Option<DateTime<Utc>>)>(
+        r#"SELECT id,derivation_id,COALESCE(NULLIF(status,''),'unknown')::text,
+                  created_at
+           FROM cve_scans WHERE derivation_id=$1
+           ORDER BY COALESCE(created_at,scheduled_at) DESC NULLS LAST,id DESC
+           LIMIT 1"#,
+    )
+    .bind(derivation_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    Ok(row.map(
+        |(scan_id, derivation_id, status, created_at)| SystemCveInventoryAttempt {
+            scan_id,
+            derivation_id,
+            status,
+            created_at,
+        },
+    ))
+}
+
 async fn fetch_historical_system_cve_inventory_tx(
     transaction: &mut Transaction<'_, Postgres>,
     system_id: Uuid,
@@ -825,6 +967,8 @@ async fn fetch_historical_system_cve_inventory_tx(
     }
     .ok_or(SystemCveInventoryPageError::TargetUnavailable)?;
 
+    let attempt = newest_system_cve_attempt_tx(transaction, derivation_id).await?;
+
     let scan = sqlx::query_as::<_, (Uuid, DateTime<Utc>, String, Option<String>, i32)>(
         r#"SELECT id,completed_at,scanner_name,scanner_version,evidence_schema_version
            FROM cve_scans
@@ -843,7 +987,9 @@ async fn fetch_historical_system_cve_inventory_tx(
             authority: SystemCveInventoryAuthority::NoScan,
             exact_authority_failure: None,
             source: None,
+            attempt,
             current_state: None,
+            running_target: None,
             selection: page.selection,
             evidence_representation: None,
             read_only: true,
@@ -873,10 +1019,12 @@ async fn fetch_historical_system_cve_inventory_tx(
             scanner_version,
             completed_at,
         },
+        attempt,
         None,
         page.selection,
         evidence_representation,
         true,
+        None,
         page,
     )
     .await
@@ -886,13 +1034,13 @@ async fn fetch_historical_system_cve_inventory_tx(
 ///
 /// # Current authority rules
 ///
-/// A `current` selection resolves the newest completed schema-1 scan whose
-/// `derivation_id` equals the exact authorized current derivation, ordered by
-/// `completed_at DESC` then `id DESC`. The exact current derivation is proven
-/// only through the latest system observation, its generation-store agreement,
-/// the retained generation for that exact generation, the retained immutable
-/// integrity-version-1 evaluation artifact, and the retained NixOS derivation
-/// lineage. Every other outcome returns an explicit empty read-only state.
+/// A `current` selection first checks the latest observation against every
+/// derivation in the registered flake and effective configuration. One match
+/// selects only that derivation's newest completed schema-1 scan by
+/// `completed_at DESC, id DESC`. Retained generation and immutable artifact
+/// proof still gate the fully authoritative `Exact` tier. Missing proof returns
+/// a read-only `MappedRunning` tier; missing or ambiguous mapping returns an
+/// explicit source-less state. This read does not repair retained records.
 async fn fetch_system_cve_inventory_tx(
     transaction: &mut Transaction<'_, Postgres>,
     system_id: Uuid,
@@ -900,6 +1048,11 @@ async fn fetch_system_cve_inventory_tx(
 ) -> Result<SystemCveInventoryQuery> {
     if page.selection != SystemCveInventorySelection::Current {
         return fetch_historical_system_cve_inventory_tx(transaction, system_id, page).await;
+    }
+    let (mapping_state, running_target) =
+        resolve_running_inventory_target(transaction, system_id).await?;
+    if running_target.is_none() {
+        return empty_current_inventory(page, system_id, mapping_state, None, None, None);
     }
     // SECURITY: This prerequisite order mirrors exact-CVE authority without
     // changing any writer predicate. The latest state is selected first, so an
@@ -962,6 +1115,9 @@ async fn fetch_system_cve_inventory_tx(
     .fetch_one(&mut **transaction)
     .await?;
 
+    let running_target = running_target
+        .ok_or_else(|| anyhow::anyhow!("mapped running state omitted its derivation identity"))?;
+    let attempt = newest_system_cve_attempt_tx(transaction, running_target.derivation_id).await?;
     if authority.failure_reason.is_none() {
         let scan_id = authority
             .exact_scan_id
@@ -982,10 +1138,12 @@ async fn fetch_system_cve_inventory_tx(
             SystemCveInventoryAuthority::Exact,
             None,
             source,
+            attempt,
             Some(SystemCveCurrentAuthorityState::ExactCurrentScan),
             SystemCveInventorySelection::Current,
             SystemCveEvidenceRepresentation::Schema1Observations,
             false,
+            Some(running_target),
             page,
         )
         .await;
@@ -996,17 +1154,68 @@ async fn fetch_system_cve_inventory_tx(
         .as_deref()
         .map(parse_exact_authority_failure)
         .transpose()?;
+    // SECURITY: A missing retained proof does not make another revision's scan
+    // usable. Only the uniquely mapped derivation's own schema-1 scan can be
+    // displayed, and that display never hydrates remediation context.
+    let mapped_scan = sqlx::query_as::<_, (Uuid, DateTime<Utc>, String, Option<String>)>(
+        r#"SELECT id,completed_at,scanner_name,scanner_version FROM cve_scans
+           WHERE derivation_id=$1 AND status='completed'
+             AND completed_at IS NOT NULL AND evidence_schema_version=1
+           ORDER BY completed_at DESC,id DESC LIMIT 1"#,
+    )
+    .bind(running_target.derivation_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if let Some((scan_id, completed_at, scanner_name, scanner_version)) = mapped_scan {
+        return fetch_inventory_page_for_source(
+            transaction,
+            system_id,
+            SystemCveInventoryAuthority::MappedRunning,
+            failure,
+            SystemCveInventorySource {
+                scan_id,
+                completed_at,
+                scanner_name,
+                scanner_version,
+            },
+            attempt,
+            Some(SystemCveCurrentAuthorityState::MappedRunningReadOnlyScan),
+            SystemCveInventorySelection::Current,
+            SystemCveEvidenceRepresentation::Schema1Observations,
+            true,
+            Some(running_target),
+            page,
+        )
+        .await;
+    }
+    let no_scan_state = if failure == Some(ExactCveAuthorityFailureReason::NoSchema1CurrentScan) {
+        SystemCveCurrentAuthorityState::NoCurrentScan
+    } else {
+        SystemCveCurrentAuthorityState::MappedRunningNoScan
+    };
+    empty_current_inventory(
+        page,
+        system_id,
+        no_scan_state,
+        failure,
+        Some(running_target),
+        attempt,
+    )
+}
+
+fn empty_current_inventory(
+    page: &SystemCveInventoryPageRequest,
+    system_id: Uuid,
+    current_state: SystemCveCurrentAuthorityState,
+    failure: Option<ExactCveAuthorityFailureReason>,
+    running_target: Option<SystemCveRunningTarget>,
+    attempt: Option<SystemCveInventoryAttempt>,
+) -> Result<SystemCveInventoryQuery> {
     // SECURITY: Current has no evidence fallback. Substituting another
     // derivation's completed scan would present findings from a revision that
     // the system does not run and would let a stale scan authorize triage or
     // POA&M mutation. Both explicit states below are read-only, carry no
     // source, and return no rows.
-    let current_state = match failure {
-        Some(ExactCveAuthorityFailureReason::NoSchema1CurrentScan) => {
-            SystemCveCurrentAuthorityState::NoCurrentScan
-        }
-        _ => SystemCveCurrentAuthorityState::CurrentAuthorityUnavailable,
-    };
     if let Some(cursor) = page.after.as_deref() {
         // A cursor was issued against a source that this read no longer
         // selects. Validate its encoding first so a malformed cursor keeps
@@ -1018,14 +1227,16 @@ async fn fetch_system_cve_inventory_tx(
         authority: SystemCveInventoryAuthority::NoScan,
         exact_authority_failure: failure,
         source: None,
+        attempt,
         current_state: Some(current_state),
+        running_target: running_target.clone(),
         selection: SystemCveInventorySelection::Current,
         evidence_representation: None,
         read_only: true,
         rows: Vec::new(),
         metadata: SystemCveInventoryMetadata::default(),
         inventory_revision: inventory_revision(&format!(
-            "{system_id}|current|{current_state:?}|{failure:?}"
+            "{system_id}|current|{current_state:?}|{failure:?}|{running_target:?}"
         )),
         has_more: false,
         next_cursor: None,
@@ -1124,10 +1335,12 @@ async fn fetch_inventory_page_for_source(
     authority: SystemCveInventoryAuthority,
     exact_authority_failure: Option<ExactCveAuthorityFailureReason>,
     source: SystemCveInventorySource,
+    attempt: Option<SystemCveInventoryAttempt>,
     current_state: Option<SystemCveCurrentAuthorityState>,
     selection: SystemCveInventorySelection,
     evidence_representation: SystemCveEvidenceRepresentation,
     read_only: bool,
+    running_target: Option<SystemCveRunningTarget>,
     page: &SystemCveInventoryPageRequest,
 ) -> Result<SystemCveInventoryQuery> {
     let fingerprint = page.filter_fingerprint();
@@ -1166,6 +1379,7 @@ async fn fetch_inventory_page_for_source(
         .bind(&page.statuses)
         .bind(match authority {
             SystemCveInventoryAuthority::Exact => "exact",
+            SystemCveInventoryAuthority::MappedRunning => "mapped_running",
             SystemCveInventoryAuthority::Legacy => "legacy",
             SystemCveInventoryAuthority::NoScan => "no_scan",
         })
@@ -1218,7 +1432,9 @@ async fn fetch_inventory_page_for_source(
         authority,
         exact_authority_failure,
         source: Some(source),
+        attempt,
         current_state,
+        running_target,
         selection,
         evidence_representation: Some(evidence_representation),
         read_only,
@@ -2766,6 +2982,625 @@ mod tests {
         user_id
     }
 
+    async fn attempt_test_derivation(
+        pool: &PgPool,
+        system: &System,
+        commit_id: i32,
+        suffix: &str,
+    ) -> i32 {
+        sqlx::query_scalar(
+            r#"INSERT INTO derivations(
+                 derivation_name,derivation_path,derivation_type,commit_id,status_id,
+                 completed_at,store_path)
+               VALUES($1,$2,'nixos',$3,
+                 (SELECT id FROM derivation_statuses WHERE name='build-complete' LIMIT 1),
+                 now(),$4) RETURNING id"#,
+        )
+        .bind(&system.hostname)
+        .bind(format!("/nix/store/{suffix}-attempt.drv"))
+        .bind(commit_id)
+        .bind(format!("/nix/store/{suffix}-attempt"))
+        .fetch_one(pool)
+        .await
+        .expect("attempt test derivation should persist")
+    }
+
+    async fn attempt_test_scan(
+        pool: &PgPool,
+        derivation_id: i32,
+        scan_id: Uuid,
+        status: &str,
+        created_at: &str,
+        completed_at: Option<&str>,
+    ) {
+        sqlx::query(
+            r#"INSERT INTO cve_scans(
+                 id,derivation_id,scanner_name,status,created_at,evidence_schema_version)
+               VALUES($1,$2,'sc1-attempt',$3,$4::timestamptz,0)"#,
+        )
+        .bind(scan_id)
+        .bind(derivation_id)
+        .bind(if completed_at.is_some() {
+            "in_progress"
+        } else {
+            status
+        })
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .expect("attempt test scan should persist");
+        if let Some(completed_at) = completed_at {
+            sqlx::query(
+                "UPDATE cve_scans SET status='completed',completed_at=$2::timestamptz,evidence_schema_version=1 WHERE id=$1",
+            )
+            .bind(scan_id)
+            .bind(completed_at)
+            .execute(pool)
+            .await
+            .expect("completed attempt should atomically seal its evidence");
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn newest_attempt_keeps_completed_evidence_after_failed_queued_and_scanning(
+        pool: PgPool,
+    ) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (system, commit_id) = inventory_test_system(&pool, &suffix).await;
+        let derivation_id = attempt_test_derivation(&pool, &system, commit_id, &suffix).await;
+        sqlx::query(
+            r#"INSERT INTO system_states(hostname,change_reason,store_path,generation,
+                 generation_matches_current_store_path,timestamp)
+               VALUES($1,'startup',$2,7,true,now())"#,
+        )
+        .bind(&system.hostname)
+        .bind(format!("/nix/store/{suffix}-attempt"))
+        .execute(&pool)
+        .await
+        .expect("running attempt test report should persist");
+
+        let source_id = Uuid::new_v4();
+        attempt_test_scan(
+            &pool,
+            derivation_id,
+            source_id,
+            "completed",
+            "2026-09-23T10:00:00Z",
+            Some("2026-09-23T10:01:00Z"),
+        )
+        .await;
+        for (status, created_at) in [
+            ("failed", "2026-09-23T10:02:00Z"),
+            ("pending", "2026-09-23T10:03:00Z"),
+            ("in_progress", "2026-09-23T10:04:00Z"),
+        ] {
+            let attempt_id = Uuid::new_v4();
+            attempt_test_scan(&pool, derivation_id, attempt_id, status, created_at, None).await;
+            let inventory = fetch_system_cve_inventory(&pool, system.id)
+                .await
+                .expect("the completed source and newest attempt should coexist");
+            assert_eq!(
+                inventory.source.as_ref().map(|source| source.scan_id),
+                Some(source_id)
+            );
+            assert_eq!(
+                inventory.attempt.as_ref().map(|attempt| attempt.scan_id),
+                Some(attempt_id)
+            );
+            assert_eq!(
+                inventory
+                    .attempt
+                    .as_ref()
+                    .map(|attempt| attempt.status.as_str()),
+                Some(status)
+            );
+            assert_eq!(
+                inventory
+                    .attempt
+                    .as_ref()
+                    .map(|attempt| attempt.derivation_id),
+                Some(derivation_id)
+            );
+            assert_eq!(
+                inventory.metadata.total_findings, 0,
+                "a completed clean source remains clean"
+            );
+            assert_eq!(
+                inventory.authority,
+                SystemCveInventoryAuthority::MappedRunning
+            );
+            assert!(inventory.read_only);
+            if status == "pending" {
+                sqlx::query("UPDATE cve_scans SET status='failed' WHERE id=$1")
+                    .bind(attempt_id)
+                    .execute(&pool)
+                    .await
+                    .expect("prior queued attempt must become terminal before a new active scan");
+            }
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn newest_attempt_without_source_is_target_bound_and_orders_timestamp_then_id(
+        pool: PgPool,
+    ) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (system, commit_id) = inventory_test_system(&pool, &suffix).await;
+        let a_id = attempt_test_derivation(&pool, &system, commit_id, &format!("{suffix}-a")).await;
+        let b_commit_id: i32 = sqlx::query_scalar(
+            r#"INSERT INTO commits(
+                 flake_id,git_commit_hash,commit_timestamp,message,author,
+                 evaluation_status,evaluation_completed_at)
+               SELECT flake_id,$1,now(),'attempt B','test','complete',now()
+               FROM commits WHERE id=$2 RETURNING id"#,
+        )
+        .bind(format!("{suffix:b<40}"))
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("second exact target commit should persist");
+        let b_id =
+            attempt_test_derivation(&pool, &system, b_commit_id, &format!("{suffix}-b")).await;
+        let source_id = Uuid::from_u128(0x80);
+        attempt_test_scan(
+            &pool,
+            a_id,
+            source_id,
+            "completed",
+            "2026-09-23T10:00:00Z",
+            Some("2026-09-23T10:01:00Z"),
+        )
+        .await;
+        let a_selection = SystemCveInventoryPageRequest::from_params(SystemCveInventoryParams {
+            target: Some("exact_derivation".to_string()),
+            target_id: Some(a_id.to_string()),
+            ..Default::default()
+        })
+        .expect("A selection should parse");
+        let b_selection = SystemCveInventoryPageRequest::from_params(SystemCveInventoryParams {
+            target: Some("exact_derivation".to_string()),
+            target_id: Some(b_id.to_string()),
+            ..Default::default()
+        })
+        .expect("B selection should parse");
+        for (status, created_at) in [
+            ("failed", "2026-09-23T10:05:00Z"),
+            ("in_progress", "2026-09-23T10:06:00Z"),
+        ] {
+            let attempt_id = Uuid::new_v4();
+            attempt_test_scan(&pool, b_id, attempt_id, status, created_at, None).await;
+            let b = fetch_system_cve_inventory_page(&pool, system.id, &b_selection)
+                .await
+                .expect("B must remain readable without a completed source");
+            assert!(b.source.is_none());
+            assert_eq!(
+                b.attempt.as_ref().map(|attempt| attempt.scan_id),
+                Some(attempt_id)
+            );
+            assert_eq!(
+                b.attempt.as_ref().map(|attempt| attempt.status.as_str()),
+                Some(status)
+            );
+            let a = fetch_system_cve_inventory_page(&pool, system.id, &a_selection)
+                .await
+                .expect("B's newer attempt must not affect A");
+            assert_eq!(
+                a.source.as_ref().map(|source| source.scan_id),
+                Some(source_id)
+            );
+            assert_eq!(
+                a.attempt.as_ref().map(|attempt| attempt.scan_id),
+                Some(source_id)
+            );
+        }
+
+        let earlier_id = Uuid::from_u128(0x91);
+        let later_id = Uuid::from_u128(0x92);
+        attempt_test_scan(
+            &pool,
+            a_id,
+            later_id,
+            "failed",
+            "2026-09-23T10:10:00Z",
+            None,
+        )
+        .await;
+        attempt_test_scan(
+            &pool,
+            a_id,
+            earlier_id,
+            "pending",
+            "2026-09-23T10:10:00Z",
+            None,
+        )
+        .await;
+        let a = fetch_system_cve_inventory_page(&pool, system.id, &a_selection)
+            .await
+            .expect("tie-breaking must be independent of insertion order");
+        assert_eq!(
+            a.source.as_ref().map(|source| source.scan_id),
+            Some(source_id)
+        );
+        assert_eq!(
+            a.attempt.as_ref().map(|attempt| attempt.scan_id),
+            Some(later_id)
+        );
+        assert_eq!(
+            a.attempt.as_ref().map(|attempt| attempt.status.as_str()),
+            Some("failed")
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn current_read_maps_latest_report_to_unique_scoped_scan_without_proof(pool: PgPool) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (system, commit_id) = inventory_test_system(&pool, &suffix).await;
+        let store_path = format!("/nix/store/{suffix}-running");
+        let derivation_id: i32 = sqlx::query_scalar(
+            r#"INSERT INTO derivations(
+                 derivation_name,derivation_path,derivation_type,commit_id,status_id,
+                 completed_at,store_path)
+               VALUES($1,$2,'nixos',$3,
+                 (SELECT id FROM derivation_statuses WHERE name='build-complete' LIMIT 1),
+                 now(),$4) RETURNING id"#,
+        )
+        .bind(&system.hostname)
+        .bind(format!("/nix/store/{suffix}-running.drv"))
+        .bind(commit_id)
+        .bind(&store_path)
+        .fetch_one(&pool)
+        .await
+        .expect("running derivation should persist");
+
+        let missing_report = fetch_system_cve_inventory(&pool, system.id)
+            .await
+            .expect("missing state should resolve");
+        assert_eq!(
+            missing_report.current_state,
+            Some(SystemCveCurrentAuthorityState::NoRunningReport)
+        );
+        sqlx::query(
+            r#"INSERT INTO system_states(hostname,change_reason,store_path,generation,
+                 generation_matches_current_store_path,timestamp)
+               VALUES($1,'startup',$2,4,true,now())"#,
+        )
+        .bind(&system.hostname)
+        .bind(&store_path)
+        .execute(&pool)
+        .await
+        .expect("reported local activation should persist");
+        let before_scan = fetch_system_cve_inventory(&pool, system.id)
+            .await
+            .expect("known but unscanned target should resolve");
+        assert_eq!(
+            before_scan.current_state,
+            Some(SystemCveCurrentAuthorityState::MappedRunningNoScan)
+        );
+        assert_eq!(
+            before_scan
+                .running_target
+                .as_ref()
+                .map(|target| target.derivation_id),
+            Some(derivation_id)
+        );
+        assert!(before_scan.source.is_none());
+        assert!(before_scan.read_only);
+
+        let scan_id: Uuid = sqlx::query_scalar(
+            r#"INSERT INTO cve_scans(derivation_id,scanner_name,status)
+               VALUES($1,'sc1-local','in_progress') RETURNING id"#,
+        )
+        .bind(derivation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("scan should persist");
+        sqlx::query(
+            "UPDATE cve_scans SET status='completed', completed_at=now(), evidence_schema_version=1 WHERE id=$1",
+        )
+        .bind(scan_id)
+        .execute(&pool)
+        .await
+        .expect("schema-1 scan should complete");
+        let mapped = fetch_system_cve_inventory(&pool, system.id)
+            .await
+            .expect("mapped scan should remain readable");
+        assert_eq!(mapped.authority, SystemCveInventoryAuthority::MappedRunning);
+        assert_eq!(
+            mapped.current_state,
+            Some(SystemCveCurrentAuthorityState::MappedRunningReadOnlyScan)
+        );
+        assert_eq!(
+            mapped.exact_authority_failure,
+            Some(ExactCveAuthorityFailureReason::RetainedGenerationUnavailable)
+        );
+        assert_eq!(
+            mapped.source.as_ref().map(|source| source.scan_id),
+            Some(scan_id)
+        );
+        assert_eq!(
+            mapped
+                .running_target
+                .as_ref()
+                .map(|target| target.derivation_id),
+            Some(derivation_id)
+        );
+        assert!(mapped.read_only);
+        assert!(
+            mapped.rows.is_empty(),
+            "a completed empty source is not an absent source"
+        );
+
+        let populated_scan_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO cve_scans(derivation_id,scanner_name,status) VALUES($1,'sc1-local','in_progress') RETURNING id",
+        )
+        .bind(derivation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("new mutable scan should persist");
+        for number in [1, 2] {
+            let cve_id = format!("CVE-2099-{number:04}");
+            sqlx::query(
+                "INSERT INTO cves(id,cvss_v3_score,description,published_date) VALUES($1,8.0,'SC1 scan evidence','2099-01-01')",
+            )
+            .bind(&cve_id)
+            .execute(&pool)
+            .await
+            .expect("CVE metadata should persist");
+            sqlx::query(
+                r#"INSERT INTO cve_scan_vulnerability_observations(
+                     scan_id,canonical_cve_id,canonical_package_name,
+                     observed_package_name,observed_package_version,
+                     observed_derivation_path,is_whitelisted,detection_method)
+                   VALUES($1,$2,$3,$3,'1.0',$4,false,'sc1-local')"#,
+            )
+            .bind(populated_scan_id)
+            .bind(&cve_id)
+            .bind(format!("sc1-package-{number}"))
+            .bind(format!("/nix/store/{suffix}-sc1-package-{number}.drv"))
+            .execute(&pool)
+            .await
+            .expect("schema-1 observation should persist");
+        }
+        sqlx::query("UPDATE cve_scans SET status='completed',completed_at=now()+interval '1 minute',evidence_schema_version=1 WHERE id=$1")
+            .bind(populated_scan_id)
+            .execute(&pool)
+            .await
+            .expect("populated scan should seal");
+        let first_request = SystemCveInventoryPageRequest::from_params(SystemCveInventoryParams {
+            limit: Some(1),
+            ..SystemCveInventoryParams::default()
+        })
+        .expect("bounded request should validate");
+        let first_page = fetch_system_cve_inventory_page(&pool, system.id, &first_request)
+            .await
+            .expect("first read-only page should load");
+        assert_eq!(
+            first_page.authority,
+            SystemCveInventoryAuthority::MappedRunning
+        );
+        assert_eq!(
+            first_page.source.as_ref().map(|source| source.scan_id),
+            Some(populated_scan_id)
+        );
+        assert_eq!(
+            first_page
+                .running_target
+                .as_ref()
+                .map(|target| target.derivation_id),
+            Some(derivation_id)
+        );
+        assert_eq!(first_page.metadata.total_findings, 2);
+        assert_eq!(first_page.rows[0].cve_id, "CVE-2099-0001");
+        assert!(first_page.read_only && first_page.has_more);
+        let cursor = first_page
+            .next_cursor
+            .clone()
+            .expect("second page should have a cursor");
+        let second_request = SystemCveInventoryPageRequest::from_params(SystemCveInventoryParams {
+            limit: Some(1),
+            after: Some(cursor.clone()),
+            ..SystemCveInventoryParams::default()
+        })
+        .expect("continuation request should validate");
+        let second_page = fetch_system_cve_inventory_page(&pool, system.id, &second_request)
+            .await
+            .expect("same-source continuation should load");
+        assert_eq!(second_page.rows[0].cve_id, "CVE-2099-0002");
+        assert_eq!(second_page.source, first_page.source);
+        assert_eq!(second_page.authority, first_page.authority);
+        assert!(!second_page.has_more);
+
+        let environment_id: Uuid =
+            sqlx::query_scalar("INSERT INTO environments(name) VALUES($1) RETURNING id")
+                .bind(format!("sc1-{suffix}"))
+                .fetch_one(&pool)
+                .await
+                .expect("triage test environment should persist");
+        sqlx::query("UPDATE systems SET environment_id=$2 WHERE id=$1")
+            .bind(system.id)
+            .bind(environment_id)
+            .execute(&pool)
+            .await
+            .expect("triage test system should join the environment");
+        let admin = inventory_test_user(&pool, "admin", true).await;
+        let actor = crate::services::poam::PoamActor {
+            user_id: admin,
+            identifier: admin.to_string(),
+            is_admin: true,
+            can_mutate: true,
+            environment_ids: vec![environment_id],
+            request_origin: None,
+        };
+        let detail = crate::services::poam::system_cve_triage_detail(
+            &pool,
+            &actor,
+            system.id,
+            "CVE-2099-0001",
+            "sc1-package-1",
+        )
+        .await;
+        assert!(matches!(
+            detail,
+            Err(crate::services::poam::PoamError::NotFound)
+        ));
+        let mutation = crate::services::poam::triage_system_cve(
+            &pool,
+            &actor,
+            system.id,
+            "CVE-2099-0001",
+            crate::api::models::SystemCveTriageRequest {
+                canonical_package_name: "sc1-package-1".into(),
+                scope: crate::api::models::SystemCveTriageScopeChoice::Host,
+                action: crate::api::models::SystemCveTriageAction::AcceptRisk {
+                    justification: "The risk is accepted for this test only.".into(),
+                    review_date: None,
+                },
+                poam: None,
+            },
+            &crate::services::poam::SystemClock,
+        )
+        .await;
+        assert!(matches!(
+            mutation,
+            Err(crate::services::poam::PoamError::NotFound)
+        ));
+
+        // A later failed scan cannot erase the earlier completed source.
+        let failed_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO cve_scans(derivation_id,scanner_name,status) VALUES($1,'sc1-local','in_progress') RETURNING id",
+        )
+        .bind(derivation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("retry should persist");
+        sqlx::query("UPDATE cve_scans SET status='failed',completed_at=now()+interval '1 minute' WHERE id=$1")
+            .bind(failed_id)
+            .execute(&pool)
+            .await
+            .expect("failed retry should persist");
+        let after_failure = fetch_system_cve_inventory(&pool, system.id)
+            .await
+            .expect("completed evidence must survive failure");
+        assert_eq!(
+            after_failure.source.as_ref().map(|source| source.scan_id),
+            Some(populated_scan_id)
+        );
+        assert_eq!(after_failure.rows.len(), 2);
+
+        let clean_replacement: Uuid = sqlx::query_scalar(
+            "INSERT INTO cve_scans(derivation_id,scanner_name,status) VALUES($1,'sc1-local','in_progress') RETURNING id",
+        )
+        .bind(derivation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("replacement scan should persist");
+        sqlx::query(
+            "UPDATE cve_scans SET status='completed',completed_at=now()+interval '2 minutes',evidence_schema_version=1 WHERE id=$1",
+        )
+        .bind(clean_replacement)
+        .execute(&pool)
+        .await
+        .expect("replacement scan should complete");
+        let changed = fetch_system_cve_inventory_page(&pool, system.id, &second_request)
+            .await
+            .expect_err("old cursor must not page a newer source");
+        assert!(matches!(
+            system_cve_inventory_page_error(&changed),
+            Some(SystemCveInventoryPageError::InventoryChanged)
+        ));
+
+        // An out-of-scope derivation with the same expected output is not a
+        // second authorized target and cannot supply Current evidence.
+        let foreign_suffix = Uuid::new_v4().simple().to_string();
+        let (_, foreign_commit_id) = inventory_test_system(&pool, &foreign_suffix).await;
+        sqlx::query(
+            r#"INSERT INTO derivations(derivation_name,derivation_path,derivation_type,
+                 commit_id,status_id,expected_store_path)
+               VALUES($1,$2,'nixos',$3,
+                 (SELECT id FROM derivation_statuses WHERE name='dry-run-pending' LIMIT 1),$4)"#,
+        )
+        .bind(&system.hostname)
+        .bind(format!("/nix/store/{suffix}-foreign.drv"))
+        .bind(foreign_commit_id)
+        .bind(&store_path)
+        .execute(&pool)
+        .await
+        .expect("foreign derivation should persist");
+        let scoped = fetch_system_cve_inventory(&pool, system.id)
+            .await
+            .expect("foreign flake must not affect Current mapping");
+        assert_eq!(
+            scoped
+                .running_target
+                .as_ref()
+                .map(|target| target.derivation_id),
+            Some(derivation_id)
+        );
+
+        let alternate_hash = "f".repeat(40);
+        let repo_url = format!("https://example.test/cve-inventory-{suffix}.git");
+        insert_commit_with_metadata(
+            &pool,
+            &alternate_hash,
+            &repo_url,
+            Utc::now(),
+            Some("test"),
+            Some("competing output"),
+        )
+        .await
+        .expect("second scoped commit should persist");
+        let alternate_id = get_commit_by_hash(&pool, &alternate_hash)
+            .await
+            .expect("second scoped commit should load")
+            .id;
+        sqlx::query(
+            r#"INSERT INTO derivations(derivation_name,derivation_path,derivation_type,
+                 commit_id,status_id,expected_store_path)
+               VALUES($1,$2,'nixos',$3,
+                 (SELECT id FROM derivation_statuses WHERE name='dry-run-pending' LIMIT 1),$4)"#,
+        )
+        .bind(&system.hostname)
+        .bind(format!("/nix/store/{suffix}-competing.drv"))
+        .bind(alternate_id)
+        .bind(&store_path)
+        .execute(&pool)
+        .await
+        .expect("second scoped derivation should persist");
+        let ambiguous = fetch_system_cve_inventory(&pool, system.id)
+            .await
+            .expect("multiple scoped targets must not select a scan");
+        assert_eq!(
+            ambiguous.current_state,
+            Some(SystemCveCurrentAuthorityState::AmbiguousRunning)
+        );
+        assert!(ambiguous.source.is_none());
+        assert!(ambiguous.running_target.is_none());
+
+        sqlx::query(
+            r#"INSERT INTO system_states(hostname,change_reason,store_path,generation,
+                 generation_matches_current_store_path,timestamp)
+               VALUES($1,'startup',$2,5,true,now()+interval '2 minutes')"#,
+        )
+        .bind(&system.hostname)
+        .bind(format!("/nix/store/{suffix}-unmapped"))
+        .execute(&pool)
+        .await
+        .expect("latest unmapped observation should persist");
+        let unmapped = fetch_system_cve_inventory(&pool, system.id)
+            .await
+            .expect("latest report must not fall back to earlier scan");
+        assert_eq!(
+            unmapped.current_state,
+            Some(SystemCveCurrentAuthorityState::UnmappedRunning)
+        );
+        assert_eq!(unmapped.authority, SystemCveInventoryAuthority::NoScan);
+        assert!(unmapped.source.is_none());
+        assert!(unmapped.running_target.is_none());
+    }
+
     // ── Query builder unit tests (pure logic, no DB connection needed) ──
 
     fn build_list_query(filters: &CveFilters) -> String {
@@ -3013,13 +3848,10 @@ mod tests {
             .await
             .expect("legacy inventory should load");
         assert_eq!(legacy.authority, SystemCveInventoryAuthority::NoScan);
-        assert_eq!(
-            legacy.exact_authority_failure,
-            Some(ExactCveAuthorityFailureReason::MissingCurrentGeneration)
-        );
+        assert_eq!(legacy.exact_authority_failure, None);
         assert_eq!(
             legacy.current_state,
-            Some(SystemCveCurrentAuthorityState::CurrentAuthorityUnavailable)
+            Some(SystemCveCurrentAuthorityState::NoRunningReport)
         );
         assert!(
             legacy.source.is_none(),
@@ -3337,26 +4169,37 @@ mod tests {
         .execute(&pool)
         .await
         .expect("unretained current state should persist");
-        // The system's exact current identity moved to generation 8, which has
-        // no retained-generation row. Current must report the explicit
-        // unavailable state rather than substituting the prior exact-clean
-        // evidence, even though that evidence is otherwise valid history.
+        // Generation 8 lacks retained proof, but its reported output still
+        // uniquely maps to the exact derivation. The same-target completed
+        // scan remains readable; it must not gain remediation authority.
         let unretained = fetch_system_cve_inventory(&pool, legacy_system.id)
             .await
             .expect("unretained inventory should report an explicit state");
-        assert_eq!(unretained.authority, SystemCveInventoryAuthority::NoScan);
+        assert_eq!(
+            unretained.authority,
+            SystemCveInventoryAuthority::MappedRunning
+        );
         assert_eq!(
             unretained.exact_authority_failure,
             Some(ExactCveAuthorityFailureReason::RetainedGenerationUnavailable)
         );
         assert_eq!(
             unretained.current_state,
-            Some(SystemCveCurrentAuthorityState::CurrentAuthorityUnavailable)
+            Some(SystemCveCurrentAuthorityState::MappedRunningReadOnlyScan)
         );
-        assert!(
-            unretained.source.is_none(),
-            "a missing retained generation must not fall back to older exact evidence"
+        assert_eq!(
+            unretained.source.as_ref().map(|source| source.scan_id),
+            Some(exact_clean_scan_id)
         );
+        assert_eq!(
+            unretained
+                .running_target
+                .as_ref()
+                .map(|target| target.derivation_id),
+            Some(exact_derivation.id)
+        );
+        assert!(unretained.read_only);
+        assert!(unretained.rows.is_empty());
 
         sqlx::query(
             r#"INSERT INTO system_states(
@@ -3373,13 +4216,10 @@ mod tests {
             .await
             .expect("mismatched inventory should report an explicit state");
         assert_eq!(mismatch.authority, SystemCveInventoryAuthority::NoScan);
-        assert_eq!(
-            mismatch.exact_authority_failure,
-            Some(ExactCveAuthorityFailureReason::CurrentStoreMismatch)
-        );
+        assert_eq!(mismatch.exact_authority_failure, None);
         assert_eq!(
             mismatch.current_state,
-            Some(SystemCveCurrentAuthorityState::CurrentAuthorityUnavailable)
+            Some(SystemCveCurrentAuthorityState::InvalidRunningReport)
         );
         assert!(
             mismatch.source.is_none(),
@@ -3448,19 +4288,23 @@ mod tests {
         let unverified = fetch_system_cve_inventory(&pool, legacy_system.id)
             .await
             .expect("unverified lineage should report an explicit state");
-        assert_eq!(unverified.authority, SystemCveInventoryAuthority::NoScan);
+        assert_eq!(
+            unverified.authority,
+            SystemCveInventoryAuthority::MappedRunning
+        );
         assert_eq!(
             unverified.exact_authority_failure,
             Some(ExactCveAuthorityFailureReason::LineageUnverified)
         );
         assert_eq!(
             unverified.current_state,
-            Some(SystemCveCurrentAuthorityState::CurrentAuthorityUnavailable)
+            Some(SystemCveCurrentAuthorityState::MappedRunningReadOnlyScan)
         );
-        assert!(
-            unverified.source.is_none(),
-            "unverified lineage must not fall back to older exact evidence"
+        assert_eq!(
+            unverified.source.as_ref().map(|source| source.scan_id),
+            Some(exact_clean_scan_id)
         );
+        assert!(unverified.read_only);
         assert!(unverified.rows.is_empty());
     }
 

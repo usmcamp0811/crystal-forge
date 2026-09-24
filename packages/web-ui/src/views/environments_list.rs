@@ -1072,7 +1072,7 @@ fn EnvPanelSystems(props: EnvPanelSystemsProps) -> Element {
                                     let nav = nav.clone();
                                     let system_id = system.id.to_string();
                                     move |_| {
-                                        nav.push(Route::SystemDetailView { id: system_id.clone(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new() });
+                                        nav.push(Route::SystemDetailView { id: system_id.clone(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new(), cve_target: String::new(), cve_mode: String::new() });
                                     }
                                 },
                                 span { class: "status-dot", style: "--status-color: {system_status_color(&system.health_status)};" }

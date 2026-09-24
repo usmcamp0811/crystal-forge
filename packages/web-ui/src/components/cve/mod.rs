@@ -9,11 +9,14 @@ use uuid::Uuid;
 
 use crate::api::models::{
     CveSeverity, ExactCveAuthorityFailureReason, SystemCveCurrentAuthorityState,
-    SystemCveInventoryAuthority, SystemCveInventoryMetadata, SystemCveInventoryPageResponse,
-    SystemCveInventoryRowIdentity, SystemCveInventorySource, SystemCveInventoryVulnerability,
+    SystemCveInventoryAttempt, SystemCveInventoryAuthority, SystemCveInventoryMetadata,
+    SystemCveInventoryPageResponse, SystemCveInventoryRowIdentity, SystemCveInventorySource,
+    SystemCveInventoryVulnerability,
 };
 #[cfg(test)]
-use crate::api::models::{SystemCveEvidenceRepresentation, SystemCveInventorySelection};
+use crate::api::models::{
+    SystemCveEvidenceRepresentation, SystemCveInventorySelection, SystemCveRunningTarget,
+};
 use crate::components::cve::triage::{SystemCveTriageDialog, fixed_version_label};
 #[cfg(test)]
 use crate::theme;
@@ -126,6 +129,12 @@ impl CveInventoryPaginationState {
         };
         if current.authority != page.authority
             || current.source != page.source
+            || current.system_id != page.system_id
+            || current.selection != page.selection
+            || current.current_state != page.current_state
+            || current.running_target != page.running_target
+            || current.read_only != page.read_only
+            || current.evidence_representation != page.evidence_representation
             || current.inventory_revision != page.inventory_revision
         {
             return false;
@@ -142,6 +151,9 @@ impl CveInventoryPaginationState {
                 .filter(|row| identities.insert(row.stable_identity.clone())),
         );
         current.metadata = page.metadata;
+        // Lifecycle changes do not invalidate a stable completed source or its
+        // cursor. A continuation can report a newer attempt independently.
+        current.attempt = page.attempt;
         current.has_more = page.has_more;
         current.next_cursor = page.next_cursor;
         current.exact_authority_failure = page.exact_authority_failure;
@@ -193,6 +205,9 @@ pub fn CvesTab(
     current_state: Option<SystemCveCurrentAuthorityState>,
     /// Gives real provenance for the selected completed scan.
     inventory_source: Option<SystemCveInventorySource>,
+    /// Gives lifecycle metadata for the selected target, not evidence authority.
+    #[props(default = None)]
+    inventory_attempt: Option<SystemCveInventoryAttempt>,
     /// Reports why exact remediation authority was unavailable.
     exact_authority_failure: Option<ExactCveAuthorityFailureReason>,
     /// Is true when the selected revision is historical and immutable.
@@ -219,6 +234,8 @@ pub fn CvesTab(
     /// Gives the latest continuation failure without replacing loaded rows.
     #[props(default = None)]
     continuation_error: Option<String>,
+    /// Repeats the selected inventory read without scheduling a scan.
+    on_retry_read: EventHandler<()>,
     /// Requests the next server-issued page.
     on_load_more: EventHandler<()>,
 ) -> Element {
@@ -231,6 +248,7 @@ pub fn CvesTab(
         use_signal(HashMap::new);
     let mut triage_target: Signal<Option<PackageCve>> = use_signal(|| None);
     let mut triage_dialog_detail: Signal<Option<SystemCveTriageDetail>> = use_signal(|| None);
+    let mut dialog_start_key: Signal<Option<String>> = use_signal(|| None);
     let mut triage_opening: Signal<Option<SystemCveInventoryRowIdentity>> = use_signal(|| None);
     let mut triage_open_generation = use_signal(|| 0_u64);
     let mut triage_hydration_generation = use_signal(|| 0_u64);
@@ -241,8 +259,13 @@ pub fn CvesTab(
         default_expansion_applied.set(false);
         save_status.set(None);
         triage_details.write().clear();
-        triage_target.set(None);
-        triage_dialog_detail.set(None);
+        // CONCURRENCY: Refresh invalidates row hydration, but a mounted draft
+        // retains its starting evidence and scope. The modal footer blocks
+        // submission until the operator closes and reopens it from new evidence.
+        if triage_dialog_detail.peek().is_none() {
+            triage_target.set(None);
+            dialog_start_key.set(None);
+        }
         triage_opening.set(None);
         let next_open_generation = (*triage_open_generation.peek()).wrapping_add(1);
         triage_open_generation.set(next_open_generation);
@@ -282,81 +305,13 @@ pub fn CvesTab(
                 || message.contains("changed")
         })
         .unwrap_or(false);
-
-    // Loading state — show a spinner instead of an empty/fake list while the
-    // vulnerabilities resource is still in flight.
-    if loading {
-        return rsx! {
-            div {
-                class: "empty",
-                "data-testid": "system-cves-loading",
-                crate::components::loading::DashboardLoadingSpinner {
-                    label: "Loading vulnerabilities".to_string(),
-                    size: 36,
-                }
-                div { "Fetching the latest CVE scan results." }
-            }
-        };
-    }
-
-    // Error state — never render mock CVEs on API failure (security data).
-    if let Some(message) = error {
-        return rsx! {
-            div {
-                class: "empty",
-                "data-testid": "system-cves-error",
-                h3 { "Unable to load vulnerabilities" }
-                div { "{message}" }
-            }
-        };
-    }
+    let (empty_title, empty_description) = cve_empty_state(current_state, read_only);
+    let attempt_notice =
+        newer_attempt_notice(inventory_attempt.as_ref(), inventory_source.as_ref());
 
     rsx! {
             div {
                 style: "display:flex;flex-direction:column;gap:14px;",
-
-            match inventory_authority {
-                Some(SystemCveInventoryAuthority::Exact) => rsx! {
-                    div { class: "sd-callout sd-callout-success", "data-testid": "system-cves-exact",
-                        strong { if read_only { if total_findings == 0 { "Historical exact scan clean. " } else { "Historical exact scan findings. " } } else if total_findings == 0 { "Exact scan clean. " } else { "Exact scan findings. " } }
-                        if read_only { "This inventory is bound to the selected historical derivation. Triage and remediation mutations are unavailable." }
-                        else { "This inventory is bound to the current evaluated deployment and supports exact remediation." }
-                        if let Some(source) = inventory_source.as_ref() {
-                            div { class: "text-xs", "Completed {source.completed_at} by {source.scanner_name}." }
-                        }
-                    }
-                },
-                Some(SystemCveInventoryAuthority::Legacy) => rsx! {
-                    div { class: "sd-callout sd-callout-warning", "data-testid": "system-cves-legacy",
-                        strong { if total_findings == 0 { "Historical scan clean. " } else { "Historical scan findings. " } }
-                        "The current evaluated deployment and a schema-1 CVE scan are required for environment triage, POA&M, patch scheduling, verification, and closure. Existing ordinary inventory justification is not a triage disposition and is never shown as accepted risk."
-                        if let Some(reason) = exact_authority_failure {
-                            div { class: "text-xs", "Exact authority unavailable: {exact_authority_reason_label(reason)}." }
-                        }
-                        if let Some(source) = inventory_source.as_ref() {
-                            div { class: "text-xs", "Completed {source.completed_at} by {source.scanner_name}." }
-                        }
-                    }
-                },
-                Some(SystemCveInventoryAuthority::NoScan) => rsx! {
-                    div { class: "sd-callout sd-callout-warning", "data-testid": "system-cves-no-scan",
-                        if current_state == Some(SystemCveCurrentAuthorityState::CurrentAuthorityUnavailable) {
-                            strong { "Current CVE evidence unavailable. " }
-                            "The server could not resolve one authoritative current deployment target. Historical inventories remain separate and read-only."
-                        } else if read_only {
-                            strong { "No completed CVE scan for this historical target. " }
-                            "Evidence from another revision is not substituted."
-                        } else {
-                            strong { "No completed current CVE scan. " }
-                            "The current evaluated deployment and a CVE scan are required before inventory or exact remediation is available."
-                        }
-                        if let Some(reason) = exact_authority_failure {
-                            div { class: "text-xs", "Exact authority unavailable: {exact_authority_reason_label(reason)}." }
-                        }
-                    }
-                },
-                None => rsx! {},
-            }
 
             if let Some(message) = save_status() {
                 div {
@@ -380,24 +335,49 @@ pub fn CvesTab(
                     h2 { "Vulnerabilities" }
                     span {
                         class: "sd-card-meta",
-                        "{format_count(shown_finding_count)} of {format_count(total_findings)} shown · {format_count(shown_package_count as i64)} of {format_count(inventory_metadata.total_packages)} package{shown_package_suffix} loaded"
+                        if loading || error.is_some() || inventory_authority == Some(SystemCveInventoryAuthority::NoScan) {
+                            "Inventory unavailable"
+                        } else {
+                            "{format_count(shown_finding_count)} of {format_count(total_findings)} shown · {format_count(shown_package_count as i64)} of {format_count(inventory_metadata.total_packages)} package{shown_package_suffix} loaded"
+                            if let Some(source) = inventory_source.as_ref() { " · scan completed {source.completed_at}" }
+                        }
                     }
                 }
 
-                if filtered_groups.is_empty() {
+                if loading {
+                    div { class: "empty", role: "status", "data-testid": "system-cves-loading",
+                        crate::components::loading::DashboardLoadingSpinner { label: "Loading the selected inventory".to_string(), size: 36 }
+                        div { "No scan is being started." }
+                    }
+                } else if let Some(message) = error.as_ref() {
+                    div { class: "empty", role: "alert", "data-testid": "system-cves-error",
+                        h3 { "Unable to load CVE inventory" }
+                        div { "{message}" }
+                        button { r#type: "button", class: "btn btn-ghost xs focus-ring", onclick: move |_| on_retry_read.call(()), "Retry inventory read" }
+                    }
+                } else if filtered_groups.is_empty() {
                     div {
                         class: "empty",
-                        if inventory_authority == Some(SystemCveInventoryAuthority::NoScan) {
-                            h3 { "No scan inventory available" }
-                            div { "Run a CVE scan after the current deployment is evaluated." }
+                        if inventory_source.is_none() {
+                            h3 { "{empty_title}" }
+                            div { "{empty_description}" }
+                            if let Some(reason) = exact_authority_failure { div { "Exact proof: {exact_authority_reason_label(reason)}." } }
                         } else {
-                            h3 { "No vulnerabilities detected" }
-                            div { "The selected completed scan did not report package-level CVEs for this host." }
+                            h3 { "No findings in the selected scan" }
+                            if let Some(source) = inventory_source.as_ref() {
+                                div { "Completed {source.completed_at} by {source.scanner_name}. This scan reported no eligible findings; it does not prove the host has no vulnerabilities." }
+                            }
+                            if let Some(message) = attempt_notice {
+                                div { class: "sd-card-meta", "{message}" }
+                            }
                         }
                     }
                 } else {
                     div {
                         style: "display: flex; flex-direction: column; gap: 10px; padding: 14px;",
+                        if let Some(message) = attempt_notice {
+                            div { class: "sd-card-meta", "{message}" }
+                        }
                         for group in filtered_groups {
                             {
                                 let group_key = group.canonical_package_name.clone();
@@ -568,11 +548,12 @@ pub fn CvesTab(
                                                                 .cvss_score
                                                                 .map(|score| format!("{score:.1}"))
                                                                 .unwrap_or_else(|| "—".to_string());
-                                                            let row_key = format!(
+                                                             let row_key = format!(
                                                                 "{}\0{}",
                                                                 cve.stable_identity.canonical_cve_id,
                                                                 cve.stable_identity.canonical_package_name
-                                                            );
+                                                             );
+                                                             let target_key_for_dialog = inventory_target_key.clone();
                                                             let conflict_key = format!("{row_key}-conflict");
                                                             let cache_entry = triage_details
                                                                 .read()
@@ -660,9 +641,10 @@ pub fn CvesTab(
                                                                                      aria_disabled: row_opening,
                                                                                      aria_busy: row_opening,
                                                                                      title: "Load authoritative environment triage",
-                                                                                     onclick: {
-                                                                                         let target = cve.clone();
-                                                                                         move |_| {
+                                                                                      onclick: {
+                                                                                          let target = cve.clone();
+                                                                                          let start_key = target_key_for_dialog.clone();
+                                                                                          move |_| {
                                                                                              // Keep the trigger focused while detail loads so the
                                                                                              // dialog can restore focus to it after unmount.
                                                                                              if row_opening {
@@ -672,7 +654,8 @@ pub fn CvesTab(
                                                                                              let identity = target.stable_identity.clone();
                                                                                              let cve_id = target.cve_id.clone();
                                                                                             let package = target.stable_identity.canonical_package_name.clone();
-                                                                                             triage_target.set(Some(target));
+                                                                                              triage_target.set(Some(target));
+                                                                                              dialog_start_key.set(Some(start_key.clone()));
                                                                                              triage_dialog_detail.set(None);
                                                                                             triage_hydration_tokens.write().remove(&identity);
                                                                                             triage_opening.set(Some(identity.clone()));
@@ -750,15 +733,16 @@ pub fn CvesTab(
                 if let Some(message) = continuation_error.as_ref() {
                     div {
                         role: "alert",
-                        class: "sd-callout sd-callout-danger",
+                        class: "sd-card-meta",
+                        style: "padding: 0 14px 14px;",
                         "data-testid": "system-cves-continuation-error",
-                        div { "Unable to load more vulnerabilities: {message}" }
+                        span { "More findings could not be loaded. The rows above are partial; retry the selected page without discarding them. {message}" }
                         button {
-                            class: "btn btn-ghost focus-ring",
+                            class: "btn btn-ghost xs focus-ring",
                             disabled: continuation_loading,
                             aria_label: "Retry loading more vulnerabilities",
                             onclick: move |_| on_load_more.call(()),
-                            "Retry"
+                            "Retry page"
                         }
                     }
                 }
@@ -789,12 +773,16 @@ pub fn CvesTab(
                     cvss_score: target.cvss_score,
                     fixed_version: target.fixed_version.clone(),
                     fix_available: target.has_fix,
+                    submission_blocked: dialog_start_key.read().as_ref()
+                        .filter(|start_key| *start_key != &inventory_target_key)
+                        .map(|_| "Current evidence changed while this draft was open. Your edits are preserved; close this draft and reopen triage from the latest scan to continue.".to_string()),
                     on_close: move |_| {
                         let generation = (*triage_open_generation.peek()).wrapping_add(1);
                         triage_open_generation.set(generation);
                         triage_opening.set(None);
                         triage_dialog_detail.set(None);
                         triage_target.set(None);
+                        dialog_start_key.set(None);
                     },
                     on_success: move |response: poam_api::SystemCveTriageResponse| {
                         if !system_triage_detail_matches(&dialog_identity, system_id, &response.detail) {
@@ -807,6 +795,7 @@ pub fn CvesTab(
                             );
                             triage_dialog_detail.set(None);
                             triage_target.set(None);
+                            dialog_start_key.set(None);
                             save_status.set(Some("CVE evidence changed: the mutation response did not match the selected triage scope.".to_string()));
                             on_saved.call(());
                             return;
@@ -817,6 +806,7 @@ pub fn CvesTab(
                         );
                         triage_dialog_detail.set(None);
                         triage_target.set(None);
+                        dialog_start_key.set(None);
                         save_status.set(Some("CVE triage updated. Accepted and scheduled states do not prove remediation or verification; closure requires later exact evidence.".to_string()));
                         on_saved.call(());
                         if let Some(poam_id) = response.poam_id {
@@ -826,6 +816,7 @@ pub fn CvesTab(
                     on_conflict: move |message: String| {
                         triage_dialog_detail.set(None);
                         triage_target.set(None);
+                        dialog_start_key.set(None);
                         triage_details.write().clear();
                         save_status.set(Some(format!("CVE evidence changed: {message}")));
                         on_saved.call(());
@@ -838,7 +829,8 @@ pub fn CvesTab(
     }
 }
 
-fn exact_authority_reason_label(reason: ExactCveAuthorityFailureReason) -> &'static str {
+/// Returns the operator-facing name of one failed exact-remediation prerequisite.
+pub(crate) fn exact_authority_reason_label(reason: ExactCveAuthorityFailureReason) -> &'static str {
     match reason {
         ExactCveAuthorityFailureReason::MissingCurrentGeneration => "current generation missing",
         ExactCveAuthorityFailureReason::CurrentStoreMismatch => "current generation/store mismatch",
@@ -857,6 +849,79 @@ fn exact_authority_reason_label(reason: ExactCveAuthorityFailureReason) -> &'sta
         ExactCveAuthorityFailureReason::NoSchema1CurrentScan => {
             "no schema-1 scan for the current deployment"
         }
+    }
+}
+
+// These states occupy the design's existing empty slot. None implies a clean
+// scan: only a present completed source with zero findings may say that.
+fn cve_empty_state(
+    current: Option<SystemCveCurrentAuthorityState>,
+    read_only: bool,
+) -> (&'static str, &'static str) {
+    match current {
+        Some(SystemCveCurrentAuthorityState::UnmappedRunning) => (
+            "Running configuration is unmapped",
+            "The reported running output does not match a known configuration. No Current scan is available. Choose a known revision to inspect its own results.",
+        ),
+        Some(SystemCveCurrentAuthorityState::AmbiguousRunning) => (
+            "Running target is ambiguous",
+            "More than one registered target matches the reported running output. Current scan results cannot be selected.",
+        ),
+        Some(SystemCveCurrentAuthorityState::NoRunningReport) => (
+            "No running configuration reported",
+            "No usable running configuration has been reported. Known revisions can still be inspected.",
+        ),
+        Some(SystemCveCurrentAuthorityState::InvalidRunningReport) => (
+            "Running target unavailable",
+            "The latest running report has conflicting or incomplete target information. Current results are unavailable.",
+        ),
+        Some(
+            SystemCveCurrentAuthorityState::MappedRunningNoScan
+            | SystemCveCurrentAuthorityState::NoCurrentScan,
+        ) => (
+            "No completed CVE scan for this target",
+            "The reported running target has no completed eligible scan. Another revision's results are not substituted; scanning cannot repair missing deployment proof.",
+        ),
+        Some(SystemCveCurrentAuthorityState::CurrentAuthorityUnavailable) => (
+            "Running target unavailable",
+            "The server could not prove Current identity. Choose a known revision to inspect its own results.",
+        ),
+        _ if read_only => (
+            "No completed CVE scan for this target",
+            "This selected revision has no completed scan. Another revision's results are not substituted.",
+        ),
+        _ => (
+            "No completed CVE scan for this target",
+            "No eligible completed scan exists for the selected target.",
+        ),
+    }
+}
+
+// The approved card has a source-local attempt notice. A missing source never
+// becomes a clean scan, and an attempt cannot supply remediation authority.
+fn newer_attempt_notice(
+    attempt: Option<&SystemCveInventoryAttempt>,
+    source: Option<&SystemCveInventorySource>,
+) -> Option<&'static str> {
+    let (attempt, source) = (attempt?, source?);
+    // An attempt with a different ID is not necessarily newer than the
+    // completed source: another active scan may have finished after it.
+    if attempt.scan_id == source.scan_id
+        || !attempt
+            .created_at
+            .is_some_and(|created_at| created_at > source.completed_at)
+    {
+        return None;
+    }
+    match attempt.status.as_str() {
+        "failed" => Some("A newer scan failed. Showing the last completed scan for this target."),
+        "pending" | "awaiting_build" | "awaiting_closure" => {
+            Some("A newer scan is queued. Showing the last completed scan for this target.")
+        }
+        "in_progress" => {
+            Some("A newer scan is in progress. Showing the last completed scan for this target.")
+        }
+        _ => None,
     }
 }
 
@@ -1081,6 +1146,7 @@ enum SystemTriageRowState {
     AcceptedEnvironment,
     ScheduledEnvironment,
     Legacy,
+    ReadOnly,
     NoScan,
     Conflict,
     Whitelisted,
@@ -1099,6 +1165,7 @@ impl SystemTriageRowState {
             Self::AcceptedEnvironment => "Accepted · env",
             Self::ScheduledEnvironment => "Scheduled · env",
             Self::Legacy => "Historical inventory",
+            Self::ReadOnly => "Read-only",
             Self::NoScan => "No scan",
             Self::Conflict => "Conflict",
             Self::Whitelisted => "Whitelisted",
@@ -1118,6 +1185,7 @@ impl SystemTriageRowState {
             | Self::Loading
             | Self::LoadFailed
             | Self::Legacy
+            | Self::ReadOnly
             | Self::NoScan
             | Self::Whitelisted
             | Self::Unavailable => "chip-unknown",
@@ -1143,6 +1211,7 @@ fn system_triage_row_state(
 ) -> SystemTriageRowState {
     match authority {
         Some(SystemCveInventoryAuthority::Legacy) => return SystemTriageRowState::Legacy,
+        Some(SystemCveInventoryAuthority::MappedRunning) => return SystemTriageRowState::ReadOnly,
         Some(SystemCveInventoryAuthority::NoScan) => return SystemTriageRowState::NoScan,
         None => return SystemTriageRowState::Unavailable,
         Some(SystemCveInventoryAuthority::Exact) => {}
@@ -1397,6 +1466,15 @@ mod tests {
             authority: SystemCveInventoryAuthority::Exact,
             exact_authority_failure: None,
             current_state: Some(SystemCveCurrentAuthorityState::ExactCurrentScan),
+            system_id: Some(Uuid::from_u128(1)),
+            running_target: Some(SystemCveRunningTarget {
+                derivation_id: 42,
+                generation: Some(7),
+                commit_hash: "a".repeat(40),
+                reported_at: chrono::DateTime::parse_from_rfc3339("2026-09-14T20:00:00Z")
+                    .expect("test observation time should parse")
+                    .with_timezone(&chrono::Utc),
+            }),
             source: Some(SystemCveInventorySource {
                 scan_id,
                 scanner_name: "vulnix".into(),
@@ -1405,6 +1483,7 @@ mod tests {
                     .expect("test timestamp should parse")
                     .with_timezone(&chrono::Utc),
             }),
+            attempt: None,
             selection: SystemCveInventorySelection::Current,
             evidence_representation: Some(SystemCveEvidenceRepresentation::Schema1Observations),
             read_only: false,
@@ -1419,6 +1498,46 @@ mod tests {
             has_more: next_cursor.is_some(),
             next_cursor: next_cursor.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn attempt_notice_never_promotes_an_attempt_to_a_completed_source() {
+        let source_id = Uuid::from_u128(41);
+        let page = inventory_page(source_id, vec![], 0, None);
+        let source = page.source.as_ref();
+        let mut attempt = SystemCveInventoryAttempt {
+            scan_id: Uuid::from_u128(42),
+            derivation_id: 42,
+            status: "failed".to_string(),
+            created_at: Some(
+                chrono::DateTime::parse_from_rfc3339("2026-09-15T10:00:00Z")
+                    .expect("attempt timestamp should parse")
+                    .with_timezone(&chrono::Utc),
+            ),
+        };
+        assert_eq!(
+            super::newer_attempt_notice(Some(&attempt), source),
+            Some("A newer scan failed. Showing the last completed scan for this target.")
+        );
+        attempt.status = "pending".to_string();
+        assert_eq!(
+            super::newer_attempt_notice(Some(&attempt), source),
+            Some("A newer scan is queued. Showing the last completed scan for this target.")
+        );
+        attempt.status = "in_progress".to_string();
+        assert_eq!(
+            super::newer_attempt_notice(Some(&attempt), source),
+            Some("A newer scan is in progress. Showing the last completed scan for this target.")
+        );
+        assert_eq!(super::newer_attempt_notice(Some(&attempt), None), None);
+        attempt.created_at = Some(
+            chrono::DateTime::parse_from_rfc3339("2026-09-14T20:00:00Z")
+                .expect("older timestamp should parse")
+                .with_timezone(&chrono::Utc),
+        );
+        assert_eq!(super::newer_attempt_notice(Some(&attempt), source), None);
+        attempt.scan_id = source_id;
+        assert_eq!(super::newer_attempt_notice(Some(&attempt), source), None);
     }
 
     #[test]
@@ -1447,6 +1566,41 @@ mod tests {
         assert_eq!(inventory.vulnerabilities.len(), 2);
         assert_eq!(inventory.metadata.total_findings, 1315);
         assert_eq!(inventory.next_cursor.as_deref(), Some("page-3"));
+    }
+
+    #[test]
+    fn pagination_updates_newest_attempt_without_replacing_completed_source() {
+        let scan_id = Uuid::from_u128(440);
+        let mut state = CveInventoryPaginationState::default();
+        state.reset(Some(inventory_page(
+            scan_id,
+            vec![vulnerability("3.4.1", None)],
+            2,
+            Some("page-2"),
+        )));
+        let request = state
+            .begin_continuation()
+            .expect("continuation should start");
+        let mut next_page = inventory_page(scan_id, vec![], 2, None);
+        next_page.attempt = Some(SystemCveInventoryAttempt {
+            scan_id: Uuid::from_u128(441),
+            derivation_id: 42,
+            status: "failed".into(),
+            created_at: None,
+        });
+        assert!(state.complete_continuation(&request, next_page));
+        let inventory = state
+            .inventory
+            .expect("completed source must remain loaded");
+        assert_eq!(
+            inventory.source.as_ref().map(|source| source.scan_id),
+            Some(scan_id)
+        );
+        assert_eq!(
+            inventory.attempt.as_ref().map(|attempt| attempt.scan_id),
+            Some(Uuid::from_u128(441))
+        );
+        assert_eq!(inventory.vulnerabilities.len(), 1);
     }
 
     #[test]
@@ -1498,6 +1652,47 @@ mod tests {
         changed.inventory_revision = "changed-revision".into();
 
         assert!(!state.complete_continuation(&request, changed));
+    }
+
+    #[test]
+    fn pagination_rejects_changed_system_target_and_read_tier() {
+        let scan_id = Uuid::from_u128(440);
+        for changed in [
+            {
+                let mut page = inventory_page(scan_id, vec![], 2, None);
+                page.system_id = Some(Uuid::from_u128(2));
+                page
+            },
+            {
+                let mut page = inventory_page(scan_id, vec![], 2, None);
+                page.selection = SystemCveInventorySelection::ExactDerivation { derivation_id: 42 };
+                page
+            },
+            {
+                let mut page = inventory_page(scan_id, vec![], 2, None);
+                page.read_only = true;
+                page.authority = SystemCveInventoryAuthority::MappedRunning;
+                page.current_state =
+                    Some(SystemCveCurrentAuthorityState::MappedRunningReadOnlyScan);
+                page
+            },
+            {
+                let mut page = inventory_page(scan_id, vec![], 2, None);
+                page.running_target.as_mut().unwrap().derivation_id = 99;
+                page
+            },
+        ] {
+            let mut state = CveInventoryPaginationState::default();
+            state.reset(Some(inventory_page(
+                scan_id,
+                vec![vulnerability("3.4.1", None)],
+                2,
+                Some("page-2"),
+            )));
+            let request = state.begin_continuation().expect("page must be pending");
+            assert!(!state.complete_continuation(&request, changed));
+            assert_eq!(state.inventory.as_ref().unwrap().vulnerabilities.len(), 1);
+        }
     }
 
     #[test]

@@ -518,6 +518,11 @@ pub(crate) fn SystemCveTriageDialog(
     cvss_score: Option<f32>,
     fixed_version: Option<String>,
     fix_available: bool,
+    /// Holds the draft against its starting context after an in-app refresh.
+    /// A new Current read never rewrites the mounted form or bypasses the
+    /// server's existing stale-write validation.
+    #[props(default)]
+    submission_blocked: Option<String>,
     on_close: EventHandler<()>,
     on_success: EventHandler<poam_api::SystemCveTriageResponse>,
     on_conflict: EventHandler<String>,
@@ -584,13 +589,19 @@ pub(crate) fn SystemCveTriageDialog(
     let can_submit = draft
         .read()
         .can_submit_system(&detail.canonical_package_name, scope())
-        && (choice != Some(EnvironmentTriageChoice::Open) || direct_disposition_exists);
+        && (choice != Some(EnvironmentTriageChoice::Open) || direct_disposition_exists)
+        && submission_blocked.is_none();
     let dialog_label = format!(
         "Triage {} {}",
         detail.canonical_cve_id, detail.canonical_package_name
     );
     let submit_detail = detail.clone();
+    let blocked_for_submit = submission_blocked.clone();
     let submit = move |_: MouseEvent| {
+        if let Some(message) = blocked_for_submit.as_ref() {
+            error.set(Some(message.clone()));
+            return;
+        }
         let request = match draft
             .read()
             .system_request(&submit_detail.canonical_package_name, scope())
@@ -767,7 +778,11 @@ pub(crate) fn SystemCveTriageDialog(
                 }
             }
             div { class: "modal-foot cve-triage-foot",
-                div { class: "cve-triage-outcome", if host_scoped { "{detail.scope.selected_system_hostname} only" } else { "All of {detail.scope.environment_name} · {detail.scope.exact_affected_system_count} exact observed host(s)" } }
+                div { class: "cve-triage-outcome", role: if submission_blocked.is_some() { "status" } else { "note" },
+                    if let Some(message) = submission_blocked.as_ref() { "{message}" }
+                    else if host_scoped { "{detail.scope.selected_system_hostname} only" }
+                    else { "All of {detail.scope.environment_name} · {detail.scope.exact_affected_system_count} exact observed host(s)" }
+                }
                 button { class: "btn btn-ghost focus-ring", disabled: pending(), onclick: move |_| on_close.call(()), "Cancel" }
                 button { class: "btn btn-primary focus-ring", "data-testid": "cve-triage-submit", disabled: pending() || !can_submit, onclick: submit, if pending() { "Applying..." } else { "Apply triage" } }
             }

@@ -43,7 +43,9 @@ pub enum Route {
     #[route("/environments?:..query")]
     EnvironmentsView { query: String },
 
-    #[route("/systems/:id?:tab&:poam&:config_mode&:revision&:generation&:deploy_generation")]
+    #[route(
+        "/systems/:id?:tab&:poam&:config_mode&:revision&:generation&:deploy_generation&:cve_target&:cve_mode"
+    )]
     SystemDetailView {
         id: String,
         tab: String,
@@ -52,6 +54,8 @@ pub enum Route {
         revision: String,
         generation: String,
         deploy_generation: String,
+        cve_target: String,
+        cve_mode: String,
     },
 
     #[route("/flakes?:..query")]

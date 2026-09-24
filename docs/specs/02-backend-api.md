@@ -912,20 +912,46 @@ part of the stable finding identity.
 |--------|----------|------|-------------|
 | GET | `/systems/:id/cves` | Viewer+ | Return the compatible bare array of current exact findings |
 | GET | `/systems/:id/cve-inventory` | Viewer+ | Return the complete compatibility inventory up to 1,000 rows |
-| GET | `/systems/:id/cve-inventory-page` | Viewer+ | Return a bounded typed exact, legacy, or no-scan inventory page |
+| GET | `/systems/:id/cve-inventory-page` | Viewer+ | Return a bounded exact, read-only mapped-running, historical, or no-scan inventory page |
 
 The paged inventory response contains `authority`, `exact_authority_failure`,
-`current_state`, `selection`, `evidence_representation`, `read_only`, `source`,
+`current_state`, `running_target`, `system_id`, `selection`, `attempt`,
+`evidence_representation`, `read_only`, `source`,
 `vulnerabilities`, `metadata`, `has_more`, `inventory_revision`, and
-`next_cursor`. `authority` is `exact`, `legacy`, or `no_scan`. `source` contains
+`next_cursor`. `authority` is `exact`, `mapped_running`, `legacy`, or `no_scan`.
+`source` contains
 the real scan ID, scanner name and optional version, and completion time.
+`attempt` is optional and records the newest scan ID, derivation ID, persisted
+status, and creation time for the selected exact derivation. It is ordered by
+`COALESCE(created_at, scheduled_at) DESC NULLS LAST, id DESC` in the same read
+transaction. The newest attempt is independent of `source`: a newer pending,
+in-progress, or failed scan does not replace completed evidence or authorize
+triage. An unmapped Current selection has neither an exact attempt nor a source.
+The attempt does not change inventory pagination or the source revision. The
+client shows a "newer attempt" notice only when the attempt's creation time is
+after the selected source's completion time. An older or undated attempt does
+not claim to be newer.
 
-For `selection=current`, the server resolves only the newest completed schema-1
-scan for the exact authorized running derivation. It never substitutes another
-derivation or a schema-0 projection. `current_state` is `exact_current_scan`,
-`no_current_scan`, or `current_authority_unavailable`; the latter two return
-`no_scan` with no source. A clean exact scan remains exact with an empty finding
-array.
+For `selection=current`, the server selects the latest reported state before
+checking its validity. It counts every derivation whose output matches that
+report in the registered flake and effective configuration; the bounded
+candidate menu does not prove uniqueness. A unique mapping selects that exact
+derivation's newest completed schema-1 scan by `completed_at DESC, id DESC`.
+`exact_current_scan` retains the existing full retained-generation authority.
+If retained proof fails, `mapped_running_read_only_scan` and authority
+`mapped_running` return the same derivation's scan, `running_target`, and the
+first failed proof prerequisite, but never exact remediation context or write
+authority. `mapped_running_no_scan` distinguishes a uniquely mapped target
+without eligible evidence. `no_running_report`, `invalid_running_report`,
+`unmapped_running`, and `ambiguous_running` return source-less `no_scan` states.
+`no_current_scan` remains the full-proof target without an eligible scan;
+`current_authority_unavailable` is a compatibility state from earlier servers.
+`system_id` is returned on paged responses and `running_target` contains only
+the unique derivation ID, registered commit hash, trusted reported generation
+when bound to the output, and report time. An absent source never claims clean;
+a completed scan with zero eligible findings retains its source and totals.
+Unsupported enum values make older clients fail to parse conservatively instead
+of treating mapped-running evidence as fully authorized `exact` evidence.
 
 Historical `retained_generation` and `exact_derivation` selections remain
 exactly bound and read-only. Their evidence can be schema-1 observations or a
@@ -935,11 +961,14 @@ or `target=exact_derivation&target_id=<derivation integer>`. Current is the
 default and can be requested explicitly with `target=current`; it has no
 `target_id`.
 Sources are never unioned. Historical findings can include ordinary system
-justification state, but never server-issued exact remediation context. POA&M
+justification state, but never server-issued exact remediation context. The
+mapped-running read-only tier also omits that context. POA&M
 creation, patch scheduling, finding attach/link/reopen, verification, and
 closure continue to resolve retained generation, store path, verified lineage,
 certified snapshot, schema-1 scan, and immutable observation authority
-independently and fail closed for historical or no-scan input.
+independently and fail closed for historical, mapped-running, or no-scan input.
+Inventory GET requests run in read-only repeatable-read transactions and do not
+repair retained proof, enqueue scans, run Nix, or persist deployments.
 
 The paged route accepts `limit` from 1 through 500 with a default of 100, an opaque
 `after` cursor, `q` up to 200 normalized characters, comma-separated `severity`

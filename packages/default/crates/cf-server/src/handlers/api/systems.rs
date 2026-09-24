@@ -1555,38 +1555,14 @@ pub async fn get_system_cves(
     (StatusCode::OK, Json(vulnerabilities)).into_response()
 }
 
-/// Repairs a missed retained generation before a current inventory read.
-///
-/// Current CVE authority requires the retained generation for the system's
-/// latest observation. Ordinary ingestion can miss that row when the
-/// authoritative deployment binding was not the newest deployment for the
-/// observed store path, or when the binding completed after ingestion. The
-/// bounded repair inserts only the immutable relationship that ingestion should
-/// have created, and only when exactly one eligible deployment binding proves
-/// the complete identity.
-///
-/// The repair is idempotent and never mutates a retained row. A failure is a
-/// non-fatal no-op: the read then reports an explicit unavailable current
-/// state rather than substituting other evidence.
-async fn repair_current_generation_retention(pool: &PgPool, system_id: Uuid) {
-    if let Err(error) =
-        crate::queries::evaluation_snapshots::reconcile_current_generation_retention(
-            pool, system_id,
-        )
-        .await
-    {
-        tracing::debug!("current generation retention repair failed: {error:?}");
-    }
-}
-
 /// Returns the complete compatibility CVE inventory for one visible system.
 ///
 /// The response preserves the original DTO and rejects inventories above 1,000
 /// stable rows. New browser clients use [`get_system_cve_inventory_page`].
 ///
-/// The `current` selection never substitutes another derivation's scan. When
-/// the exact current scan or current authority is absent, `authority` is
-/// `NoScan` and `current_state` reports the explicit state.
+/// The `current` selection never substitutes another derivation's scan.
+/// A uniquely mapped but unproved target may return `MappedRunning`, without
+/// remediation context. Every source-less state returns `NoScan`.
 pub async fn get_system_cve_inventory(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -1602,8 +1578,8 @@ pub async fn get_system_cve_inventory(
         Ok(value) => value,
         Err(_) => return internal_error("Failed to load environment memberships"),
     };
-    // SECURITY: Retention reconciliation writes durable rows. Prove system
-    // visibility before allowing this read path to trigger that repair.
+    // SECURITY: Inventory GET does not repair retained proof or write records.
+    // The authorized read snapshot resolves the latest reported state as-is.
     let access = match find_system_access_row(&pool, system_id).await {
         Ok(Some(value)) => value,
         Ok(None) => return not_found(),
@@ -1620,7 +1596,6 @@ pub async fn get_system_cve_inventory(
         environment_ids: environment_memberships.iter().copied().collect(),
         request_origin: None,
     };
-    repair_current_generation_retention(&pool, system_id).await;
     let mut transaction = match pool.begin().await {
         Ok(value) => value,
         Err(_) => return internal_error("Failed to load system CVE inventory"),
@@ -1719,6 +1694,7 @@ pub async fn get_system_cve_inventory(
             exact_authority_failure: inventory.exact_authority_failure,
             source: inventory.source,
             current_state: inventory.current_state,
+            running_target: inventory.running_target,
             vulnerabilities,
         }),
     )
@@ -1728,7 +1704,7 @@ pub async fn get_system_cve_inventory(
 /// Returns one bounded typed CVE inventory page for one visible system.
 ///
 /// The response separates display inventory authority from exact remediation
-/// authority. Legacy findings remain visible but never receive exact
+/// authority. Legacy and read-only mapped-running findings never receive exact
 /// relationship context. Authentication and environment failures remain
 /// non-disclosing, consistent with the existing system CVE endpoint.
 pub async fn get_system_cve_inventory_page(
@@ -1747,8 +1723,7 @@ pub async fn get_system_cve_inventory_page(
         Ok(value) => value,
         Err(_) => return internal_error("Failed to load environment memberships"),
     };
-    // SECURITY: Retention reconciliation writes durable rows. Prove system
-    // visibility before allowing this read path to trigger that repair.
+    // SECURITY: Inventory GET does not repair retained proof or write records.
     let access = match find_system_access_row(&pool, system_id).await {
         Ok(Some(value)) => value,
         Ok(None) => return not_found(),
@@ -1774,9 +1749,6 @@ pub async fn get_system_cve_inventory_page(
             return bad_request(&message);
         }
     };
-    if page.selection() == crate::api::models::SystemCveInventorySelection::Current {
-        repair_current_generation_retention(&pool, system_id).await;
-    }
     let mut transaction = match pool.begin().await {
         Ok(value) => value,
         Err(_) => return internal_error("Failed to load system CVE inventory"),
@@ -1866,7 +1838,10 @@ pub async fn get_system_cve_inventory_page(
             authority: inventory.authority,
             exact_authority_failure: inventory.exact_authority_failure,
             source: inventory.source,
+            attempt: inventory.attempt,
             current_state: inventory.current_state,
+            running_target: inventory.running_target,
+            system_id: Some(system_id),
             selection: inventory.selection,
             evidence_representation: inventory.evidence_representation,
             read_only: inventory.read_only,
@@ -5291,7 +5266,9 @@ mod tests {
         )
         .await
         .into_response();
-        assert_eq!(invalid_query.status(), StatusCode::BAD_REQUEST);
+        // SECURITY: An absent or hidden system returns 404 before query
+        // validation, so malformed input cannot disclose its visibility.
+        assert_eq!(invalid_query.status(), StatusCode::NOT_FOUND);
 
         let absent_legacy =
             get_system_cve_inventory(State(pool.clone()), headers.clone(), Path(absent_system))
@@ -5365,6 +5342,31 @@ mod tests {
             &[row],
         );
         assert!(legacy.is_empty());
+        let mapped = inventory_relationship_keys(
+            crate::api::models::SystemCveInventoryAuthority::MappedRunning,
+            &[crate::queries::cves::ExactSystemVulnerabilityRow {
+                scan_id: Uuid::new_v4(),
+                occurrence_derivation_path: "/nix/store/mapped-row.drv".into(),
+                cve_id: "CVE-2099-0001".into(),
+                canonical_package_name: "page-package".into(),
+                package_name: "observed-page-package".into(),
+                installed_version: "1.0".into(),
+                severity: "high".into(),
+                cvss_score: Some(8.0),
+                description: "mapped read-only finding".into(),
+                fixed_version: None,
+                first_seen: None,
+                published_at: None,
+                status: "open".into(),
+                justification_category: None,
+                justification_reason: None,
+                justification_updated_at: None,
+            }],
+        );
+        assert!(
+            mapped.is_empty(),
+            "mapped-running reads must not hydrate remediation"
+        );
     }
 
     #[tokio::test]
@@ -5489,6 +5491,7 @@ mod tests {
             // An absent current state must stay off the wire so existing
             // clients keep parsing the unchanged compatibility payload.
             current_state: None,
+            running_target: None,
             vulnerabilities: vec![SystemVulnerability {
                 cve_id: "CVE-2099-0001".into(),
                 severity: parse_legacy_cve_severity("unrecognized"),

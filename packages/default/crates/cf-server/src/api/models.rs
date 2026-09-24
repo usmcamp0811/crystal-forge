@@ -684,7 +684,7 @@ pub struct SystemCveInventoryVulnerability {
 ///
 /// # Invariants
 ///
-/// A `current` selection produces only `Exact` or `NoScan`. `Legacy` is
+/// A `current` selection produces `Exact`, `MappedRunning`, or `NoScan`. `Legacy` is
 /// reachable only from a historical selection, is always read-only, and never
 /// describes the running deployment.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -693,6 +693,9 @@ pub enum SystemCveInventoryAuthority {
     /// Uses immutable schema-1 observations for the exact selected derivation.
     #[default]
     Exact,
+    /// Displays a schema-1 scan for a uniquely mapped running derivation without
+    /// retained deployment proof. This tier cannot authorize mutations.
+    MappedRunning,
     /// Uses a completed historical scan for an explicitly selected past target.
     Legacy,
     /// Reports that no completed scan is usable for inventory display.
@@ -734,29 +737,60 @@ pub enum ExactCveAuthorityFailureReason {
 /// - [`Self::ExactCurrentScan`]: The server proved the exact authorized current
 ///   derivation and returned its newest completed schema-1 scan. The response is
 ///   mutable and can authorize triage.
-/// - [`Self::NoCurrentScan`]: The server proved the exact authorized current
-///   derivation, but that derivation has no completed schema-1 scan. The
-///   response has no source, no rows, and is read-only.
-/// - [`Self::CurrentAuthorityUnavailable`]: The server could not prove current
-///   identity or current authority. The response has no source, no rows, and is
-///   read-only. `exact_authority_failure` reports the first failed
-///   prerequisite.
+/// - [`Self::MappedRunningReadOnlyScan`]: One registered derivation matches the
+///   latest reported output and supplies schema-1 findings, but strict retained
+///   proof failed. It has a source and rows but no mutation authority.
+/// - [`Self::NoCurrentScan`] and [`Self::MappedRunningNoScan`]: One scoped
+///   derivation is known but no completed schema-1 scan exists. The former has
+///   complete deployment proof; the latter does not.
+/// - [`Self::NoRunningReport`], [`Self::InvalidRunningReport`],
+///   [`Self::UnmappedRunning`], and [`Self::AmbiguousRunning`] distinguish
+///   missing, contradictory, unmatched, and non-unique latest observations.
+/// - [`Self::CurrentAuthorityUnavailable`]: A compatibility state used by
+///   earlier servers; it never grants remediation authority.
 ///
 /// # Invariants
 ///
 /// A `current` response never contains findings from another derivation's scan.
-/// [`Self::NoCurrentScan`] and [`Self::CurrentAuthorityUnavailable`] are never
-/// mutable and never carry [`SystemCveInventorySource`].
+/// Only [`Self::ExactCurrentScan`] may authorize remediation. Every no-scan
+/// state has no source and no rows. Neither an evidence source nor matching
+/// output alone grants mutation authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemCveCurrentAuthorityState {
     /// Returns the newest completed schema-1 scan for the exact current
     /// derivation.
     ExactCurrentScan,
+    /// Shows a uniquely mapped running derivation's scan without mutation proof.
+    MappedRunningReadOnlyScan,
+    /// The mapped running derivation has no eligible completed schema-1 scan.
+    MappedRunningNoScan,
+    /// No system state report exists for the registered hostname.
+    NoRunningReport,
+    /// The latest report has no usable store path or contradicts its identity.
+    InvalidRunningReport,
+    /// The latest reported output has no registered-flake/configuration target.
+    UnmappedRunning,
+    /// More than one scoped derivation matches the latest reported output.
+    AmbiguousRunning,
     /// Reports that the exact current derivation has no completed schema-1 scan.
     NoCurrentScan,
     /// Reports that current identity or current authority could not be proven.
     CurrentAuthorityUnavailable,
+}
+
+/// Describes a uniquely identified reported running target without granting
+/// retained deployment authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveRunningTarget {
+    /// Identifies the one derivation in the registered flake/configuration.
+    pub derivation_id: i32,
+    /// Gives a generation only when the latest report binds it to the output.
+    pub generation: Option<i32>,
+    /// Gives the full registered commit hash of this derivation.
+    pub commit_hash: String,
+    /// Gives the latest report's timestamp, not an inferred deployment time.
+    pub reported_at: DateTime<Utc>,
 }
 
 /// Gives provenance for the scan selected by a system inventory read.
@@ -772,11 +806,30 @@ pub struct SystemCveInventorySource {
     pub completed_at: DateTime<Utc>,
 }
 
+/// Describes the newest CVE scan attempt for one validated exact derivation.
+///
+/// An attempt is independent of the completed [`SystemCveInventorySource`]. A
+/// failed or active attempt does not replace completed evidence or grant write
+/// authority. `created_at` may be absent on older persisted scan rows; ties and
+/// absent timestamps are resolved by scan ID after timestamp ordering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveInventoryAttempt {
+    /// Identifies the scan attempt, not necessarily the completed source.
+    pub scan_id: Uuid,
+    /// Binds this attempt to the server-validated selected derivation.
+    pub derivation_id: i32,
+    /// Gives the persisted scan lifecycle status without promoting it to evidence.
+    pub status: String,
+    /// Gives the creation time used to order attempts when present.
+    pub created_at: Option<DateTime<Utc>>,
+}
+
 /// Selects one server-authorized system CVE inventory target.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SystemCveInventorySelection {
-    /// Resolves the system's current deployment through exact authority rules.
+    /// Resolves the latest reported running output. Read-only mapped evidence
+    /// does not relax the separate exact-current mutation proof.
     #[default]
     Current,
     /// Resolves one retained generation by its server-issued row identity.
@@ -931,11 +984,11 @@ pub struct SystemCveInventoryParams {
 ///
 /// # Invariants
 ///
-/// A `current` read never returns `Legacy` authority. Another derivation's scan
-/// is never substituted for the current deployment. When the exact current
-/// derivation has no completed schema-1 scan, or when current authority cannot
-/// be proven, `authority` is `NoScan`, `source` is `None`, `vulnerabilities` is
-/// empty, and `current_state` reports which of the two explicit states applies.
+/// A `current` read never returns `Legacy` authority. `MappedRunning` contains
+/// only the uniquely mapped running derivation's own schema-1 scan, without
+/// remediation context; clients that do not understand this enum variant fail
+/// to deserialize rather than treating it as fully authoritative `Exact`.
+/// Unmapped and source-less states have no findings and never claim clean.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemCveInventoryResponse {
     /// Identifies the authority selected for this response.
@@ -947,6 +1000,9 @@ pub struct SystemCveInventoryResponse {
     /// Reports the explicit `current` state. Older clients may ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_state: Option<SystemCveCurrentAuthorityState>,
+    /// Identifies the latest uniquely mapped running target, if one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_target: Option<SystemCveRunningTarget>,
     /// Contains all findings from only the selected source.
     pub vulnerabilities: Vec<SystemVulnerability>,
 }
@@ -958,10 +1014,11 @@ pub struct SystemCveInventoryResponse {
 ///
 /// # Selection contract
 ///
-/// A `current` selection resolves the newest completed schema-1 scan for the
-/// exact authorized current derivation only. It never substitutes another
-/// derivation's scan, and it never returns `Legacy` authority. `current_state`
-/// reports which explicit current state applies.
+/// A `current` selection first maps the latest reported output within the
+/// registered flake and effective configuration. It returns the selected
+/// derivation's newest completed schema-1 scan. `Exact` requires strict
+/// retained proof; `MappedRunning` is read-only and never hydrates remediation.
+/// Neither path substitutes another derivation or uses the candidate menu cap.
 ///
 /// A `retained_generation` or `exact_derivation` selection resolves the newest
 /// completed scan for exactly that target. Every historical selection is
@@ -974,9 +1031,18 @@ pub struct SystemCveInventoryPageResponse {
     pub exact_authority_failure: Option<ExactCveAuthorityFailureReason>,
     /// Gives the selected scan provenance, including for a clean scan.
     pub source: Option<SystemCveInventorySource>,
+    /// Gives the newest attempt for the selected exact derivation, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<SystemCveInventoryAttempt>,
     /// Reports the explicit `current` state. Historical selections omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_state: Option<SystemCveCurrentAuthorityState>,
+    /// Identifies the latest uniquely mapped running target, if one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_target: Option<SystemCveRunningTarget>,
+    /// Binds this response to the system selected by its authorized request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_id: Option<Uuid>,
     /// Gives the normalized server-validated target identity.
     pub selection: SystemCveInventorySelection,
     /// Gives the selected scan representation when a scan exists.
@@ -4465,7 +4531,10 @@ mod tests {
             authority: SystemCveInventoryAuthority::NoScan,
             exact_authority_failure: Some(ExactCveAuthorityFailureReason::MissingCurrentGeneration),
             source: None,
+            attempt: None,
             current_state: Some(SystemCveCurrentAuthorityState::CurrentAuthorityUnavailable),
+            running_target: None,
+            system_id: None,
             selection: SystemCveInventorySelection::Current,
             evidence_representation: None,
             read_only: false,

@@ -5342,6 +5342,8 @@ pub enum SystemCveInventoryAuthority {
     /// Uses immutable schema-1 observations for the exact deployed generation.
     #[default]
     Exact,
+    /// Shows the reported running target's scan without retained proof or writes.
+    MappedRunning,
     /// Uses the bounded latest completed legacy scan.
     Legacy,
     /// Reports that no completed scan is usable for inventory display.
@@ -5381,10 +5383,36 @@ pub enum ExactCveAuthorityFailureReason {
 pub enum SystemCveCurrentAuthorityState {
     /// Uses the newest completed schema-1 scan for the exact running derivation.
     ExactCurrentScan,
+    /// Shows matching schema-1 findings without retained remediation proof.
+    MappedRunningReadOnlyScan,
+    /// Identifies a mapped running target without a completed schema-1 scan.
+    MappedRunningNoScan,
+    /// No running-state report exists.
+    NoRunningReport,
+    /// The latest report has incomplete or contradictory identity.
+    InvalidRunningReport,
+    /// The reported output has no registered flake/configuration derivation.
+    UnmappedRunning,
+    /// More than one scoped derivation matches the reported output.
+    AmbiguousRunning,
     /// Reports that the exact running derivation has no completed schema-1 scan.
     NoCurrentScan,
     /// Reports that the server could not prove the current deployment identity.
     CurrentAuthorityUnavailable,
+}
+
+/// Identifies a uniquely matched reported running derivation independently
+/// from the retained-generation proof required for mutations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveRunningTarget {
+    /// Identifies the registered target; this is not a mutation credential.
+    pub derivation_id: i32,
+    /// Gives the reported generation only when it matches the running output.
+    pub generation: Option<i32>,
+    /// Gives the target's full registered commit hash.
+    pub commit_hash: String,
+    /// Gives the latest observation time.
+    pub reported_at: DateTime<Utc>,
 }
 
 /// Gives provenance for the selected completed CVE scan.
@@ -5398,6 +5426,21 @@ pub struct SystemCveInventorySource {
     pub scanner_version: Option<String>,
     /// Gives the real scan completion time.
     pub completed_at: DateTime<Utc>,
+}
+
+/// Describes the newest scan attempt for one server-validated exact target.
+///
+/// This lifecycle fact cannot replace a completed source or authorize triage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveInventoryAttempt {
+    /// Identifies the attempt, which may differ from the source scan.
+    pub scan_id: Uuid,
+    /// Identifies the exact derivation selected by the server.
+    pub derivation_id: i32,
+    /// Gives the persisted lifecycle status.
+    pub status: String,
+    /// Gives the persisted creation timestamp when present.
+    pub created_at: Option<DateTime<Utc>>,
 }
 
 /// Selects one server-authorized system CVE inventory target.
@@ -5484,8 +5527,17 @@ pub struct SystemCveInventoryPageResponse {
     /// Reports the explicit state when [`Self::selection`] is Current.
     #[serde(default)]
     pub current_state: Option<SystemCveCurrentAuthorityState>,
+    /// Gives the uniquely mapped running identity when the server proved it.
+    #[serde(default)]
+    pub running_target: Option<SystemCveRunningTarget>,
+    /// Binds the payload to the requested visible system; older servers omit it.
+    #[serde(default)]
+    pub system_id: Option<Uuid>,
     /// Gives scan provenance, including when the scan is clean.
     pub source: Option<SystemCveInventorySource>,
+    /// Gives the newest attempt for this exact target independently of source.
+    #[serde(default)]
+    pub attempt: Option<SystemCveInventoryAttempt>,
     #[serde(default)]
     pub selection: SystemCveInventorySelection,
     #[serde(default)]

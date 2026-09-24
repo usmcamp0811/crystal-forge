@@ -366,9 +366,9 @@ fn normalize_legacy_inventory_sections(systems: &mut [CveAffectedSystemDetail]) 
     for system in systems {
         system.inventory_section = match system.inventory_authority {
             SystemCveInventoryAuthority::Legacy => FleetCveInventorySection::Historical,
-            SystemCveInventoryAuthority::Exact | SystemCveInventoryAuthority::NoScan => {
-                FleetCveInventorySection::Current
-            }
+            SystemCveInventoryAuthority::Exact
+            | SystemCveInventoryAuthority::MappedRunning
+            | SystemCveInventoryAuthority::NoScan => FleetCveInventorySection::Current,
         };
     }
 }

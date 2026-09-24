@@ -816,7 +816,7 @@ const CVE_CHOICES = [
   { v:"scheduled", label:"Schedule patch" },
 ];
 
-function CveTriageModal({ cve, affectedSystems, envSystems, initial, onClose, onSubmit, hostScope }) {
+function CveTriageModal({ cve, affectedSystems, envSystems, initial, onClose, onSubmit, hostScope, submissionBlocked }) {
   // Opened from a host, the default blast radius is that host alone — deciding for
   // a whole environment from one machine's page is rarely what you meant.
   const [scope, setScope] = React.useState("host");
@@ -880,7 +880,7 @@ function CveTriageModal({ cve, affectedSystems, envSystems, initial, onClose, on
   // real change, even though nothing is accepted or scheduled.
   const revoking = hostScoped && seeded.length > 0 && openEnvs.length > 0;
   const touched = acceptedEnvs.length + scheduledEnvs.length > 0 || revoking;
-  const canSubmit = touched && !acceptNeedsText && !scheduleNeedsFields;
+  const canSubmit = touched && !acceptNeedsText && !scheduleNeedsFields && !submissionBlocked;
 
   React.useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); onClose(); } };
@@ -1094,12 +1094,12 @@ function CveTriageModal({ cve, affectedSystems, envSystems, initial, onClose, on
 
         <div className="modal-foot">
           <div style={{ marginRight:"auto", fontSize:11.5, color:"var(--cf-text-muted)" }}>
-            {!touched ? "Nothing dispositioned yet"
+            {submissionBlocked || (!touched ? "Nothing dispositioned yet"
               : revoking ? `${hostScope.hostname} reverts to the ${hostScope.environment} decision`
               : [scheduledEnvs.length ? (seedScheduled ? "updates 1 POA&M" : "creates 1 POA&M") : null,
                  acceptedEnvs.length ? `1 waiver · ${envWide ? "all hosts" : `${acceptedHosts.length} host${acceptedHosts.length === 1 ? "" : "s"}`}` : null,
                  !hostScoped && openEnvs.length ? `${openEnvs.length} env${openEnvs.length === 1 ? "" : "s"} left open` : null,
-                ].filter(Boolean).join(" · ")}
+                 ].filter(Boolean).join(" · "))}
           </div>
           <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
           <button className="btn btn-primary focus-ring" disabled={!canSubmit}

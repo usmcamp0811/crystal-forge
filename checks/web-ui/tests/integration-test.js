@@ -5145,7 +5145,7 @@ async function phase6Api(page, requestPath, options = {}) {
   return result;
 }
 
-function createTask326CurrentCveAuthorityFixture() {
+function createTask326CurrentCveAuthorityFixture({ retainCurrent = true } = {}) {
   const suffix = crypto.randomUUID();
   const systemId = crypto.randomUUID();
   const currentScanId = crypto.randomUUID();
@@ -5240,7 +5240,8 @@ function createTask326CurrentCveAuthorityFixture() {
     const historicalDerivationId = Number(target[1]);
     const commitId = Number(target[2]);
     const historicalCommitId = Number(target[3]);
-    Object.assign(fixture, { currentDerivationId, historicalDerivationId, historicalCommitId });
+    const currentCommitHash = runFixtureSql(`SELECT git_commit_hash FROM commits WHERE id=${commitId};`);
+    Object.assign(fixture, { currentDerivationId, historicalDerivationId, historicalCommitId, currentCommitHash });
     runFixtureSql(`
       INSERT INTO evaluation_snapshots (
         id, commit_id, configuration_name, schema_version, lifecycle, integrity_version,
@@ -5258,14 +5259,14 @@ function createTask326CurrentCveAuthorityFixture() {
     `));
     if (certified !== 1) throw new Error(`Could not certify TASK-326 snapshot ${snapshotId}`);
     runFixtureSql(`
-    BEGIN;
-    INSERT INTO evaluation_generation_snapshots (
+      BEGIN;
+    ${retainCurrent ? `INSERT INTO evaluation_generation_snapshots (
       system_id, generation, snapshot_id, derivation_id, commit_id,
       source_store_path, configuration_name, lineage_verified
     ) VALUES (
       '${systemId}'::uuid, 74, '${snapshotId}'::uuid, ${currentDerivationId}, ${commitId},
       $path$${currentStorePath}$path$, $name$${configurationName}$name$, true
-    );
+    );` : ""}
     INSERT INTO system_states (
       hostname, change_reason, store_path, generation,
       generation_matches_current_store_path, timestamp
@@ -9947,12 +9948,22 @@ const steps = [
         },
       };
       await page.route(`**/api/v1/systems/${systemId}/cve-inventory*`, async (route) => {
+        if (new URL(route.request().url()).pathname.endsWith("/cve-inventory-sources")) {
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items: [] }) });
+          return;
+        }
         await route.fulfill({
           status: 200,
           contentType: "application/json",
           body: JSON.stringify({
+          system_id: systemId,
           authority: "exact",
           exact_authority_failure: null,
+          current_state: "exact_current_scan",
+          running_target: { derivation_id: 42, generation: 74, commit_hash: "1111111111111111111111111111111111111111", reported_at: "2026-04-07T08:10:00Z" },
+          selection: { kind: "current" },
+          evidence_representation: "schema1_observations",
+          read_only: false,
           source: {
             scan_id: exactObservation.scan_id,
             scanner_name: "vulnix",
@@ -10110,7 +10121,7 @@ const steps = [
         const packageToggle = page.locator("button[aria-controls^='system-cve-package-']").filter({ hasText: "linuxPackages_6_10.kernel" }).first();
         const showInventory = async () => {
           await page.getByRole("tab", { name: "CVEs" }).first().click();
-          await assertVisible(page.getByTestId("system-cves-exact"), "Expected exact CVE inventory authority", 12000);
+          await assertVisible(page.getByRole("combobox", { name: "Scan target" }), "Expected selected Current CVE inventory target", 12000);
           if ((await packageToggle.getAttribute("aria-expanded")) !== "true") await packageToggle.click();
         };
         const openTriage = async () => {
@@ -10284,12 +10295,22 @@ const steps = [
           await routeStandaloneUiBootstrap(viewerPage, "Viewer");
           await routeSystemsWarningData(viewerPage);
           await viewerPage.route(`**/api/v1/systems/${systemId}/cve-inventory*`, async (route) => {
+            if (new URL(route.request().url()).pathname.endsWith("/cve-inventory-sources")) {
+              await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items: [] }) });
+              return;
+            }
             await route.fulfill({
               status: 200,
               contentType: "application/json",
               body: JSON.stringify({
+                system_id: systemId,
                 authority: "exact",
                 exact_authority_failure: null,
+                current_state: "exact_current_scan",
+                running_target: { derivation_id: 42, generation: 74, commit_hash: "1111111111111111111111111111111111111111", reported_at: "2026-04-07T08:10:00Z" },
+                selection: { kind: "current" },
+                evidence_representation: "schema1_observations",
+                read_only: false,
                 source: { scan_id: exactObservation.scan_id, scanner_name: "vulnix", scanner_version: "1.10.1", completed_at: "2026-04-10T09:00:00Z" },
                 vulnerabilities: [inventoryRow],
                 metadata: { total_findings: 1, total_cves: 1, total_packages: 1, severity: { critical: 0, high: 1, medium: 0, low: 0, unknown: 0 } },
@@ -10325,6 +10346,20 @@ const steps = [
     description: "System detail incrementally loads bounded CVE pages with authoritative totals and preserves exact, legacy, clean, and no-scan states",
     action: async (page) => {
       await routeSystemsWarningData(page);
+      const mockSystemId = "00000000-0000-0000-0000-0000000000a1";
+      const currentHash = "1111111111111111111111111111111111111111";
+      const historicalHash = "2222222222222222222222222222222222222222";
+      await page.route(`**/api/v1/systems/${mockSystemId}/commits*`, async (route) => route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          current_commit: currentHash,
+          commits: [
+            { sha: currentHash, short_sha: "11111111", message: "Running commit", author: "Operator", timestamp: "2026-04-07T08:10:00Z", config_inspectable: true, deployed_here: true },
+            { sha: historicalHash, short_sha: "22222222", message: "Older commit", author: "Operator", timestamp: "2026-04-06T22:00:00Z", config_inspectable: true, deployed_here: true },
+          ],
+        }),
+      }));
       let inventoryState = "exact-large";
       const firstCursor = "page-100";
       const inventoryRequests = [];
@@ -10390,33 +10425,37 @@ const steps = [
           const requestUrl = new URL(route.request().url());
           if (requestUrl.pathname.endsWith("/cve-inventory-sources")) {
             const exactCandidate = inventoryState === "exact-large" || inventoryState === "exact-clean";
-            const noScanCandidate = inventoryState === "no-scan";
             await route.fulfill({
               status: 200,
               contentType: "application/json",
               body: JSON.stringify({
                 items: [{
                   selection: { kind: "current" },
-                  generation: 74,
-                  commit_hash: "1111111111111111111111111111111111111111",
-                  derivation_id: 42,
+                  generation: exactCandidate ? 74 : null,
+                  commit_hash: exactCandidate ? currentHash : null,
+                  derivation_id: exactCandidate ? 42 : null,
                   is_current: true,
-                  is_latest_per_flake: true,
-                  source: noScanCandidate ? null : {
-                    scan_id: exactCandidate
-                      ? "00000000-0000-0000-0000-000000000c45"
-                      : "00000000-0000-0000-0000-000000000c44",
+                  is_latest_per_flake: exactCandidate,
+                  source: exactCandidate ? {
+                    scan_id: "00000000-0000-0000-0000-000000000c45",
                     scanner_name: "vulnix",
-                    scanner_version: exactCandidate ? "1.10.1" : "0.8.0",
-                    completed_at: exactCandidate
-                      ? "2026-04-10T09:00:00Z"
-                      : "2026-04-09T08:00:00Z",
-                  },
-                  evidence_representation: noScanCandidate
-                    ? null
-                    : exactCandidate ? "schema1_observations" : "schema0_projection",
-                  scan_available: !noScanCandidate,
+                    scanner_version: "1.10.1",
+                    completed_at: "2026-04-10T09:00:00Z",
+                  } : null,
+                  evidence_representation: exactCandidate ? "schema1_observations" : null,
+                  scan_available: exactCandidate,
                   read_only: !exactCandidate,
+                }, {
+                  selection: { kind: "exact_derivation", derivation_id: 41 },
+                  generation: null,
+                  commit_hash: historicalHash,
+                  derivation_id: 41,
+                  is_current: false,
+                  is_latest_per_flake: false,
+                  source: { scan_id: "00000000-0000-0000-0000-000000000c44", scanner_name: "vulnix", scanner_version: "0.8.0", completed_at: "2026-04-09T08:00:00Z" },
+                  evidence_representation: "schema0_projection",
+                  scan_available: true,
+                  read_only: true,
                 }],
               }),
             });
@@ -10457,9 +10496,11 @@ const steps = [
               status: 200,
               contentType: "application/json",
               body: JSON.stringify({
+                system_id: mockSystemId,
                 authority: "exact",
                 exact_authority_failure: null,
                 current_state: "exact_current_scan",
+                running_target: { derivation_id: 42, generation: 74, commit_hash: currentHash, reported_at: "2026-04-07T08:10:00Z" },
                 selection: { kind: "current" },
                 evidence_representation: "schema1_observations",
                 read_only: false,
@@ -10503,23 +10544,21 @@ const steps = [
             : [];
           const noScan = inventoryState === "no-scan";
           const exact = inventoryState === "exact-clean";
-          // COMPATIBILITY: Legacy responses exercise rolling upgrades from a
-          // server that predates the no-fallback Current authority contract.
-          // The SQL-backed fixture below verifies the current production shape.
+          const historical = inventoryState.startsWith("legacy-");
           await route.fulfill({
             status: 200,
             contentType: "application/json",
             body: JSON.stringify({
+              system_id: mockSystemId,
               authority: noScan ? "no_scan" : exact ? "exact" : "legacy",
-              exact_authority_failure: exact
+              exact_authority_failure: historical || exact
                 ? null
-                : noScan
-                ? "missing_current_generation"
-                 : "no_schema1_current_scan",
-              current_state: exact
+                : "missing_current_generation",
+              current_state: historical ? null : exact
                 ? "exact_current_scan"
-                : noScan ? "current_authority_unavailable" : null,
-              selection: { kind: "current" },
+                : "current_authority_unavailable",
+              selection: historical ? { kind: "exact_derivation", derivation_id: 41 } : { kind: "current" },
+              running_target: exact ? { derivation_id: 42, generation: 74, commit_hash: currentHash, reported_at: "2026-04-07T08:10:00Z" } : null,
               evidence_representation: noScan
                 ? null
                 : exact ? "schema1_observations" : "schema0_projection",
@@ -10572,7 +10611,9 @@ const steps = [
       });
 
       const openCves = async () => {
-        await page.goto(`${baseUrl}/systems/00000000-0000-0000-0000-0000000000a1`, {
+        const historical = inventoryState.startsWith("legacy-");
+        const query = historical ? "?tab=cves&cve_target=derivation:41&cve_mode=commit" : "";
+        await page.goto(`${baseUrl}/systems/${mockSystemId}${query}`, {
           timeout: LOAD_TIMEOUT,
         });
         await page.getByRole("tab", { name: "CVEs" }).first().click();
@@ -10581,12 +10622,12 @@ const steps = [
       try {
         await openCves();
         await assertVisible(
-          page.getByTestId("system-cves-exact"),
-          "Expected exact CVE inventory state",
+          page.getByRole("combobox", { name: "Scan target" }),
+          "Expected selected CVE scan target",
           12000,
         );
         await assertVisible(
-          page.getByText("100 of 1,315 shown · 100 of 1,315 packages loaded", { exact: true }),
+          page.getByText("100 of 1,315 shown · 100 of 1,315 packages loaded", { exact: false }),
           "Expected first page to show authoritative full-scope totals",
         );
         if (inventoryRequests.length !== 1 || inventoryRequests[0].searchParams.has("after")) {
@@ -10647,7 +10688,7 @@ const steps = [
           throw new Error("Expected a changed-inventory conflict to restart from page zero");
         }
         await assertVisible(
-          page.getByText("100 of 1,315 shown · 100 of 1,315 packages loaded", { exact: true }),
+          page.getByText("100 of 1,315 shown · 100 of 1,315 packages loaded", { exact: false }),
           "Expected the conflict restart to render the replacement first page",
         );
         for (let pageIndex = 1; pageIndex <= 13; pageIndex += 1) {
@@ -10664,13 +10705,13 @@ const steps = [
           await continuation;
           const loaded = Math.min(100 + pageIndex * 100, largeInventory.length);
           await assertVisible(
-            page.getByText(`${loaded.toLocaleString("en-US")} of 1,315 shown · ${loaded.toLocaleString("en-US")} of 1,315 packages loaded`, { exact: true }),
+            page.getByText(`${loaded.toLocaleString("en-US")} of 1,315 shown · ${loaded.toLocaleString("en-US")} of 1,315 packages loaded`, { exact: false }),
             `Expected inventory page ${pageIndex + 1} to render before the next continuation`,
             12000,
           );
         }
         await assertVisible(
-          page.getByText("1,315 of 1,315 shown · 1,315 of 1,315 packages loaded", { exact: true }),
+          page.getByText("1,315 of 1,315 shown · 1,315 of 1,315 packages loaded", { exact: false }),
           "Expected every stable identity to remain reachable without duplicate rows",
           12000,
         );
@@ -10681,14 +10722,97 @@ const steps = [
           throw new Error("Expected duplicate stable identity to render once after append");
         }
 
+        // A mounted authoritative draft is not discarded when an existing
+        // continuation control detects a changed Current inventory and retries
+        // its first page. Use the control behind the modal programmatically;
+        // no test-only refresh control or database write is introduced.
+        await openCves();
+        await page.getByRole("button", { name: /package-0000/ }).click();
+        await page.getByTestId("system-cve-triage-open").click();
+        const draft = page.getByRole("dialog", { name: "Triage CVE-2026-0000 package-0000" });
+        await assertVisible(draft, "Expected an authoritative mounted triage draft");
+        await draft.getByRole("button", { name: "Accept risk" }).click();
+        const unsaved = "SC1 draft remains bound to its original Current evidence and host.";
+        await draft.getByTestId("cve-accept-justification").fill(unsaved);
+        rejectNextContinuation = true;
+        const draftConflict = page.waitForResponse((response) => response.url().includes("/cve-inventory-page") && response.status() === 409);
+        await page.getByTestId("system-cves-load-more").evaluate((button) => button.click());
+        await draftConflict;
+        await assertVisible(draft, "Current refresh must not unmount the open triage draft");
+        if (await draft.getByTestId("cve-accept-justification").inputValue() !== unsaved) {
+          throw new Error("Current refresh erased unsaved triage fields");
+        }
+        await assertVisible(draft.getByText("Current evidence changed while this draft was open.", { exact: false }), "Approved draft conflict footer must retain the starting context");
+        if (await draft.getByTestId("cve-triage-submit").isEnabled()) {
+          throw new Error("A draft bound to the old Current evidence may not submit after refresh");
+        }
+        await draft.getByRole("button", { name: "Close triage editor" }).click();
+
+        // Presentation-only role contexts. The SQLx and direct API checks
+        // below independently prove server authorization; whoami is mocked
+        // here only to exercise the controls rendered for each role.
+        const roleBrowser = page.context().browser();
+        if (!roleBrowser) throw new Error("SC1 role presentation requires a browser instance");
+        const roleInventory = {
+          system_id: mockSystemId,
+          authority: "exact",
+          exact_authority_failure: null,
+          current_state: "exact_current_scan",
+          running_target: { derivation_id: 42, generation: 74, commit_hash: currentHash, reported_at: "2026-04-07T08:10:00Z" },
+          selection: { kind: "current" },
+          evidence_representation: "schema1_observations",
+          read_only: false,
+          source: { scan_id: "00000000-0000-0000-0000-000000000c45", scanner_name: "vulnix", scanner_version: "1.10.1", completed_at: "2026-04-10T09:00:00Z" },
+          vulnerabilities: [largeInventory[0]],
+          metadata: metadata(1, true),
+          inventory_revision: "sc1-role-exact",
+          has_more: false,
+          next_cursor: null,
+        };
+        for (const role of ["Viewer", "Operator", "Admin"]) {
+          const roleContext = await roleBrowser.newContext({ viewport: VIEWPORTS.desktop });
+          const rolePage = await roleContext.newPage();
+          let readTier = "exact";
+          try {
+            await suppressOnboardingCoach(rolePage);
+            await routeStandaloneUiBootstrap(rolePage, role);
+            await routeSystemsWarningData(rolePage);
+            await rolePage.route(`**/api/v1/systems/${mockSystemId}/cve-inventory*`, async (route) => {
+              const path = new URL(route.request().url()).pathname;
+              const body = path.endsWith("/cve-inventory-sources")
+                ? { items: [] }
+                : readTier === "exact" ? roleInventory : {
+                    ...roleInventory,
+                    authority: "mapped_running",
+                    exact_authority_failure: "retained_generation_unavailable",
+                    current_state: "mapped_running_read_only_scan",
+                    read_only: true,
+                    vulnerabilities: [{ ...largeInventory[0], remediation: null }],
+                    inventory_revision: "sc1-role-read-only",
+                  };
+              await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+            });
+            await rolePage.goto(`${baseUrl}/systems/${mockSystemId}?tab=cves`, { timeout: LOAD_TIMEOUT });
+            await assertVisible(rolePage.getByText("CVE-2026-0000", { exact: true }), `${role} should see the exact finding`);
+            await assertCount(rolePage.getByTestId("system-cve-triage-open"), role === "Viewer" ? 0 : 1, `${role} exact triage control must follow role capability`);
+            readTier = "mapped";
+            await rolePage.reload({ timeout: LOAD_TIMEOUT });
+            await assertVisible(rolePage.getByText("CVE-2026-0000", { exact: true }), `${role} should see read-only mapped evidence`);
+            await assertCount(rolePage.getByTestId("system-cve-triage-open"), 0, `${role} must not receive a mapped-running triage control`);
+          } finally {
+            await rolePage.unrouteAll({ behavior: "ignoreErrors" }).catch(() => {});
+            await roleContext.close().catch(() => {});
+          }
+        }
+
         inventoryState = "legacy-findings";
         await openCves();
-        const legacy = page.getByTestId("system-cves-legacy");
-        await assertVisible(legacy, "Expected legacy CVE inventory state", 12000);
-        await assertVisible(
-          legacy.getByText("Historical scan findings.", { exact: false }),
-          "Expected historical findings guidance",
-        );
+        const historicalTarget = page.getByRole("combobox", { name: "Scan target" });
+        await assertVisible(historicalTarget, "Expected a selectable historical scan target");
+        const historicalValue = await historicalTarget.inputValue();
+        if (historicalValue !== "derivation:41") {
+          throw new Error(`Explicit historical derivation was not selected: ${historicalValue} at ${page.url()}`);
+        }
         await assertVisible(
           page.getByText("legacy-openssl", { exact: true }),
           "Expected pre-upgrade finding to remain visible",
@@ -10710,38 +10834,35 @@ const steps = [
         inventoryState = "exact-clean";
         await openCves();
         await assertVisible(
-          page.getByTestId("system-cves-exact").getByText("Exact scan clean.", { exact: false }),
+          page.getByText("No findings in the selected scan", { exact: true }),
           "Expected exact-clean state to use authoritative zero totals",
           12000,
         );
 
         inventoryState = "legacy-clean";
         await openCves();
+        const historicalCleanTarget = page.getByRole("combobox", { name: "Scan target" });
+        await assertVisible(historicalCleanTarget, "Expected a historical clean scan target", 12000);
+        if (await historicalCleanTarget.inputValue() !== "derivation:41") {
+          throw new Error("Completed historical scan must retain its explicit target");
+        }
         await assertVisible(
-          page.getByTestId("system-cves-legacy").getByText("Historical scan clean.", { exact: false }),
-          "Expected historical-clean state to remain distinct from no scan",
-          12000,
-        );
-        await assertVisible(
-          page.getByText("No vulnerabilities detected", { exact: true }),
+          page.getByText("No findings in the selected scan", { exact: true }),
           "Expected a completed legacy-clean scan to render a clean result",
         );
 
         inventoryState = "no-scan";
         await openCves();
         await assertVisible(
-          page.getByTestId("system-cves-no-scan"),
+          page.getByText("Running target unavailable", { exact: true }),
           "Expected no-scan CVE inventory state",
           12000,
         );
         await assertVisible(
-          page.getByText("No scan inventory available", { exact: true }),
-          "Expected no-scan state not to claim a clean result",
-        );
-        await assertVisible(
-          page.getByText("The server could not resolve one authoritative current deployment target. Historical inventories remain separate and read-only."),
+          page.getByText("The server could not prove Current identity. Choose a known revision to inspect its own results."),
           "Expected no-scan authority boundary to remain explicit",
         );
+        await assertCount(page.getByText("No findings in the selected scan"), 0, "Missing source must not claim a clean scan");
         await assertCount(
           page.getByTestId("system-cve-triage-open"),
           0,
@@ -10751,11 +10872,24 @@ const steps = [
         await page.unroute(
           "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-inventory*",
         );
+        await page.unroute(`**/api/v1/systems/${mockSystemId}/commits*`);
         await page.unroute(inventoryTriageRoute);
         await unrouteSystemsWarningData(page);
       }
 
       const authorityFixture = createTask326CurrentCveAuthorityFixture();
+      const authorityCommitsRoute = `**/api/v1/systems/${authorityFixture.systemId}/commits*`;
+      await page.route(authorityCommitsRoute, async (route) => route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          current_commit: authorityFixture.currentCommitHash,
+          commits: [
+            { sha: authorityFixture.currentCommitHash, short_sha: authorityFixture.currentCommitHash.slice(0, 8), message: "Observed A", author: "Web UI test", timestamp: "2026-09-21T10:00:00Z", config_inspectable: true, deployed_here: true },
+            { sha: authorityFixture.historicalRevision, short_sha: authorityFixture.historicalRevision.slice(0, 8), message: "Scanned B", author: "Web UI test", timestamp: "2026-09-22T10:00:00Z", config_inspectable: true, deployed_here: true },
+          ],
+        }),
+      }));
       try {
         const historical = (await phase6Api(
           page,
@@ -10804,11 +10938,13 @@ const steps = [
         };
         if (
           current.authority !== "exact"
+          || current.system_id !== authorityFixture.systemId
           || current.current_state !== "exact_current_scan"
           || current.exact_authority_failure !== null
           || current.selection?.kind !== "current"
           || current.evidence_representation !== "schema1_observations"
           || current.read_only !== false
+          || current.running_target?.derivation_id !== authorityFixture.currentDerivationId
           || current.source?.scan_id !== authorityFixture.currentScanId
           || current.source?.scanner_name !== "current-authority-scanner"
           || current.source?.scanner_version !== "2.6.0"
@@ -10831,25 +10967,243 @@ const steps = [
           throw new Error(`Current CVE inventory leaked historical findings: ${JSON.stringify(current.vulnerabilities)}`);
         }
 
-        const exactBanner = page.getByTestId("system-cves-exact");
-        await assertVisible(exactBanner, "Expected exact Current CVE authority", 12000);
-        await assertVisible(exactBanner.getByText("Exact scan findings.", { exact: false }), "Expected exact Current finding state");
-        await assertVisible(
-          exactBanner.getByText("This inventory is bound to the current evaluated deployment and supports exact remediation.", { exact: false }),
-          "Expected current-deployment authority disclosure",
-        );
-        await assertVisible(exactBanner.getByText(/by current-authority-scanner\./), "Expected exact Current scanner provenance");
-        await assertVisible(page.getByText("1 of 1 shown · 1 of 1 package loaded", { exact: true }), "Expected exact Current totals");
+        await assertVisible(page.getByRole("combobox", { name: "Scan target" }), "Expected exact Current CVE target", 12000);
+        await assertVisible(page.getByText("1 of 1 shown · 1 of 1 package loaded", { exact: false }), "Expected source-labelled exact Current totals");
         await assertVisible(page.getByRole("button", { name: /current-authority-package/ }), "Expected current exact package group");
         await assertVisible(page.getByText(authorityFixture.currentCveId, { exact: true }), "Expected current exact CVE");
         await assertVisible(page.getByText("3.2.1-current", { exact: true }), "Expected current exact installed version");
         await assertCount(page.getByText(authorityFixture.historicalCveId, { exact: true }), 0, "Current must exclude the historical CVE");
         await assertCount(page.getByText("historical-only-package", { exact: true }), 0, "Current must exclude the historical package");
         await assertCount(page.getByText("0.9-historical", { exact: true }), 0, "Current must exclude historical package metadata");
-        await assertCount(page.getByTestId("system-cves-legacy"), 0, "Current must never report historical authority");
-        await assertCount(page.getByTestId("system-cves-no-scan"), 0, "Valid exact Current evidence must not report no scan");
+        await assertCount(page.getByText("No findings in the selected scan"), 0, "Nonempty Current must not claim a clean scan");
+
+        // Keep the System Detail component mounted while changing its target.
+        // The first Current A response is real API evidence captured above; the
+        // held response is a controlled stale-delivery simulation, not a claim
+        // that the server returned A after reporting B.
+        const changeCveIntent = async (target) => {
+          if (target) await page.getByRole("button", { name: "Commits", exact: true }).first().click({ force: true });
+          await page.getByRole("combobox", { name: "Scan target" }).selectOption(target || "current", { force: true });
+        };
+        const reportTarget = (derivationId, generation, minutes) => {
+          const storePath = runFixtureSql(`SELECT store_path FROM derivations WHERE id=${derivationId};`);
+          runFixtureSql(`INSERT INTO system_states(hostname,change_reason,store_path,
+            generation,generation_matches_current_store_path,timestamp)
+            VALUES ($hostname$${authorityFixture.hostname}$hostname$,'startup',
+              $path$${storePath}$path$,${generation},true,now()+interval '${minutes} minutes');`);
+        };
+        const historicalIntent = `derivation:${authorityFixture.historicalDerivationId}`;
+        let holdNextCurrent = true;
+        let releaseA;
+        const heldA = new Promise((resolve) => { releaseA = resolve; });
+        let settleA;
+        const lateAOutcome = new Promise((resolve) => { settleA = resolve; });
+        const inventoryRoute = `**/api/v1/systems/${authorityFixture.systemId}/cve-inventory-page*`;
+        await page.route(inventoryRoute, async (route) => {
+          const url = new URL(route.request().url());
+          if (url.searchParams.has("target") || !holdNextCurrent) {
+            await route.continue();
+            return;
+          }
+          holdNextCurrent = false;
+          await heldA;
+          try {
+            await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(current) });
+            settleA("delivered");
+          } catch {
+            // Changing selection may cancel A before the held response is sent.
+            settleA("canceled");
+          }
+        });
+        try {
+          await changeCveIntent(historicalIntent);
+          await assertVisible(page.getByText(authorityFixture.historicalCveId, { exact: true }), "Explicit B must load before starting the stale A read");
+          const aRequest = page.waitForRequest((request) => {
+            const url = new URL(request.url());
+            return url.pathname.endsWith(`/${authorityFixture.systemId}/cve-inventory-page`)
+              && !url.searchParams.has("target");
+          }, { timeout: 12000 });
+          await changeCveIntent(null);
+          await aRequest;
+          reportTarget(authorityFixture.historicalDerivationId, 75, 1);
+          await changeCveIntent(historicalIntent);
+          await assertVisible(page.getByText(authorityFixture.historicalCveId, { exact: true }), "Historical B must remain browsable while A is held");
+          const currentBResponse = page.waitForResponse((response) => {
+            const url = new URL(response.url());
+            return url.pathname.endsWith(`/${authorityFixture.systemId}/cve-inventory-page`)
+              && !url.searchParams.has("target") && response.status() === 200;
+          }, { timeout: 12000 });
+          await changeCveIntent(null);
+          const currentB = await (await currentBResponse).json();
+          if (currentB.selection?.kind !== "current"
+              || currentB.running_target?.derivation_id !== authorityFixture.historicalDerivationId
+              || currentB.source?.scan_id !== authorityFixture.historicalScanId) {
+            throw new Error(`Current failed to follow reported activation B: ${JSON.stringify(currentB)}`);
+          }
+          await assertVisible(page.getByText(authorityFixture.historicalCveId, { exact: true }), "Reported activation B must win the new Current read");
+          const lateAResponse = page.waitForResponse((response) => {
+            const url = new URL(response.url());
+            return url.pathname.endsWith(`/${authorityFixture.systemId}/cve-inventory-page`)
+              && !url.searchParams.has("target")
+              && response.status() === 200;
+          }, { timeout: 12000 });
+          releaseA();
+          const lateOutcome = await lateAOutcome;
+          if (lateOutcome !== "delivered") throw new Error("Late A was canceled; delivered-response race was not exercised");
+          const staleResponse = await lateAResponse;
+          if ((await staleResponse.json()).source?.scan_id !== authorityFixture.currentScanId) {
+            throw new Error("Held response was not source A");
+          }
+          await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+          await assertCount(page.getByText(authorityFixture.currentCveId, { exact: true }), 0, "Late A must not overwrite the observed B source");
+          await assertCount(page.getByTestId("system-cve-triage-open"), 0, "Read-only B must not gain A's triage authority");
+        } finally {
+          releaseA();
+          await page.unroute(inventoryRoute);
+        }
+
       } finally {
+        await page.unroute(authorityCommitsRoute);
         removeTask326CurrentCveAuthorityFixture(authorityFixture);
+      }
+
+      // SC1: SQL/API-produced evidence, not an intercepted inventory response.
+      // A scan of uniquely mapped running A is readable without retained proof,
+      // but its identity never grants mutation authority. Scanned B is newer.
+      const mappedFixture = createTask326CurrentCveAuthorityFixture({ retainCurrent: false });
+      try {
+        const currentPath = `/api/v1/systems/${mappedFixture.systemId}/cve-inventory-page?limit=100`;
+        const mapped = (await phase6Api(page, currentPath)).body;
+        if (mapped.system_id !== mappedFixture.systemId
+            || mapped.selection?.kind !== "current"
+            || mapped.authority !== "mapped_running"
+            || mapped.current_state !== "mapped_running_read_only_scan"
+            || mapped.exact_authority_failure !== "retained_generation_unavailable"
+             || mapped.running_target?.derivation_id !== mappedFixture.currentDerivationId
+             || mapped.source?.scan_id !== mappedFixture.currentScanId
+             || mapped.attempt?.scan_id !== mappedFixture.currentScanId
+             || mapped.attempt?.derivation_id !== mappedFixture.currentDerivationId
+            || mapped.read_only !== true
+            || mapped.vulnerabilities?.length !== 1
+            || mapped.vulnerabilities[0]?.cve_id !== mappedFixture.currentCveId
+            || mapped.vulnerabilities[0]?.remediation != null
+            || mapped.vulnerabilities.some(row => row.cve_id === mappedFixture.historicalCveId)) {
+          throw new Error(`Mapped-running read crossed its proof/source boundary: ${JSON.stringify(mapped)}`);
+        }
+        const triagePath = `/api/v1/systems/${mappedFixture.systemId}/cves/${mappedFixture.currentCveId}/triage`;
+        const triageRead = await phase6ApiResponse(page, `${triagePath}?package=current-authority-package`);
+        if (triageRead.status !== 404) {
+          throw new Error(`Unproved Current must not expose triage detail: ${triageRead.status}`);
+        }
+        const triageWrite = await phase6ApiResponse(page, triagePath, {
+          method: "POST",
+          body: JSON.stringify({ canonical_package_name: "current-authority-package", scope: "host", action: "accept_risk", justification: "Read-only evidence cannot accept risk", review_date: null, poam: null }),
+        });
+        if (triageWrite.status !== 404) {
+          throw new Error(`Unproved Current must reject direct triage writes: ${triageWrite.status}`);
+        }
+
+        await page.goto(`${baseUrl}/systems/${mappedFixture.systemId}`, { timeout: LOAD_TIMEOUT });
+        await page.getByRole("tab", { name: "CVEs" }).first().click();
+        await assertVisible(page.getByText(mappedFixture.currentCveId, { exact: true }), "Mapped-running source A must display its own finding");
+        await assertVisible(page.getByText(/Retained deployment proof is unavailable/i), "Read-only Current must expose the failed proof prerequisite");
+        await assertCount(page.getByTestId("system-cve-triage-open"), 0, "Mapped-running evidence cannot expose a triage write");
+        await assertCount(page.getByText(mappedFixture.historicalCveId, { exact: true }), 0, "Newer scanned B must not replace A");
+        await captureWorkflowViewportState(page, "12ha-system-detail-cve-inventory-fallbacks", "mapped-running-read-only", "desktop");
+        await captureWorkflowViewportState(page, "12ha-system-detail-cve-inventory-fallbacks", "mapped-running-read-only", "narrowDesktop");
+
+        const failedAttemptId = crypto.randomUUID();
+        runFixtureSql(`INSERT INTO cve_scans(id,derivation_id,scanner_name,status,created_at)
+          VALUES ('${failedAttemptId}'::uuid,${mappedFixture.currentDerivationId},
+                  'current-authority-scanner','failed',now()+interval '2 minutes');`);
+        const failedAttempt = (await phase6Api(page, currentPath)).body;
+        if (failedAttempt.source?.scan_id !== mappedFixture.currentScanId
+            || failedAttempt.attempt?.scan_id !== failedAttemptId
+            || failedAttempt.attempt?.derivation_id !== mappedFixture.currentDerivationId
+            || failedAttempt.attempt?.status !== "failed") {
+          throw new Error(`A later failed attempt displaced completed A: ${JSON.stringify(failedAttempt)}`);
+        }
+        await page.reload({ timeout: LOAD_TIMEOUT });
+        await assertVisible(page.getByText("A newer scan failed. Showing the last completed scan for this target."), "Approved failed-attempt notice must retain A's evidence");
+        const queuedAttemptId = crypto.randomUUID();
+        runFixtureSql(`INSERT INTO cve_scans(id,derivation_id,scanner_name,status,created_at)
+          VALUES ('${queuedAttemptId}'::uuid,${mappedFixture.currentDerivationId},
+                  'current-authority-scanner','pending',now()+interval '3 minutes');`);
+        const queuedAttempt = (await phase6Api(page, currentPath)).body;
+        if (queuedAttempt.source?.scan_id !== mappedFixture.currentScanId
+            || queuedAttempt.attempt?.scan_id !== queuedAttemptId
+            || queuedAttempt.attempt?.status !== "pending") {
+          throw new Error(`A queued attempt displaced completed A: ${JSON.stringify(queuedAttempt)}`);
+        }
+        await page.reload({ timeout: LOAD_TIMEOUT });
+        await assertVisible(page.getByText("A newer scan is queued. Showing the last completed scan for this target."), "Approved queued-attempt notice must retain A's evidence");
+
+        runFixtureSql(`INSERT INTO system_states(
+          hostname,change_reason,store_path,generation,
+          generation_matches_current_store_path,timestamp
+        ) VALUES ($hostname$${mappedFixture.hostname}$hostname$,'startup',
+          '/nix/store/33333333333333333333333333333333-unmapped',75,true,
+          now()+interval '1 minute');`);
+        const unmapped = (await phase6Api(page, currentPath)).body;
+        if (unmapped.system_id !== mappedFixture.systemId
+            || unmapped.current_state !== "unmapped_running"
+            || unmapped.authority !== "no_scan"
+            || unmapped.source !== null
+            || unmapped.running_target != null
+            || unmapped.vulnerabilities?.length !== 0) {
+          throw new Error(`Unmapped Current substituted another revision: ${JSON.stringify(unmapped)}`);
+        }
+        await page.reload({ timeout: LOAD_TIMEOUT });
+        await page.getByRole("tab", { name: "CVEs" }).first().click();
+        await assertVisible(page.getByText("Running configuration is unmapped", { exact: true }), "Unmapped Current must have its own empty state");
+        await assertCount(page.getByText(mappedFixture.currentCveId, { exact: true }), 0, "Unmapped Current must not retain A's rows");
+        await assertCount(page.getByText(mappedFixture.historicalCveId, { exact: true }), 0, "Unmapped Current must not display B automatically");
+        await captureWorkflowViewportState(page, "12ha-system-detail-cve-inventory-fallbacks", "unmapped-current", "desktop");
+        await captureWorkflowViewportState(page, "12ha-system-detail-cve-inventory-fallbacks", "unmapped-current", "narrowDesktop");
+        const historical = (await phase6Api(
+          page,
+          `${currentPath}&target=exact_derivation&target_id=${mappedFixture.historicalDerivationId}`,
+        )).body;
+        if (historical.selection?.derivation_id !== mappedFixture.historicalDerivationId
+            || historical.source?.scan_id !== mappedFixture.historicalScanId
+            || historical.vulnerabilities?.[0]?.cve_id !== mappedFixture.historicalCveId
+            || historical.read_only !== true) {
+          throw new Error(`Explicit B must remain independently readable: ${JSON.stringify(historical)}`);
+        }
+        const absentId = crypto.randomUUID();
+        const hidden = await phase6ApiResponse(page, `/api/v1/systems/${absentId}/cve-inventory-page?limit=100&after=not-a-cursor`);
+        if (hidden.status !== 404) {
+          throw new Error(`An absent/hidden system disclosed cursor validity: ${hidden.status}`);
+        }
+        const foreignToken = crypto.randomUUID();
+        const foreignFlakeId = Number(runFixtureSql(`WITH inserted AS (
+          INSERT INTO flakes(name,repo_url,branch,build_scope)
+          VALUES ('sc1-foreign-${foreignToken}','https://example.test/sc1-foreign-${foreignToken}.git','main','cf_systems_only') RETURNING id
+        ) SELECT id FROM inserted;`));
+        try {
+          const foreignHash = createHash("sha1").update(foreignToken).digest("hex");
+          const foreignCommitId = Number(runFixtureSql(`WITH inserted AS (INSERT INTO commits(
+            flake_id,git_commit_hash,commit_timestamp,message,author,
+            evaluation_status,evaluation_completed_at)
+            VALUES (${foreignFlakeId},'${foreignHash}',now(),'SC1 foreign target','Web UI test','complete',now()) RETURNING id
+          ) SELECT id FROM inserted;`));
+          const foreignDerivationId = Number(runFixtureSql(`WITH inserted AS (INSERT INTO derivations(
+            commit_id,derivation_type,derivation_name,derivation_path,
+            store_path,expected_store_path,status_id,attempt_count,completed_at,policy_results)
+            VALUES (${foreignCommitId},'nixos',$name$${mappedFixture.configurationName}$name$,
+              '/nix/store/${foreignToken}-foreign.drv','/nix/store/${foreignToken}-foreign',
+              '/nix/store/${foreignToken}-foreign',10,1,now(),'{}'::jsonb) RETURNING id
+          ) SELECT id FROM inserted;`));
+          const foreign = await phase6ApiResponse(page,
+            `/api/v1/systems/${mappedFixture.systemId}/cve-inventory-page?limit=100&target=exact_derivation&target_id=${foreignDerivationId}`);
+          if (foreign.status !== 404) {
+            throw new Error(`A foreign-flake derivation disclosed evidence: ${foreign.status}`);
+          }
+        } finally {
+          runFixtureSql(`DELETE FROM flakes WHERE name='sc1-foreign-${foreignToken}';`);
+        }
+      } finally {
+        removeTask326CurrentCveAuthorityFixture(mappedFixture);
       }
     },
   },

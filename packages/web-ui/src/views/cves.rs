@@ -1986,13 +1986,13 @@ fn FleetHostRows(systems: Vec<crate::api::models::CveAffectedSystemDetail>) -> E
         div { class: "cve-fleet-hosts",
             for system in systems {
                 div { class: "cve-fleet-host", "data-testid": "cve-fleet-host",
-                    Link { to: Route::SystemDetailView { id: system.system_id.to_string(), tab: "cves".to_string(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new() }, class: "mono focus-ring cve-host-name", "{system.hostname}" }
+                    Link { to: Route::SystemDetailView { id: system.system_id.to_string(), tab: "cves".to_string(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new(), cve_target: String::new(), cve_mode: String::new() }, class: "mono focus-ring cve-host-name", "{system.hostname}" }
                     span { class: "mono truncate", title: "{system.flake_name.as_deref().unwrap_or(\"Unknown flake\")}", "{system.flake_name.as_deref().unwrap_or(\"Unknown flake\")}" }
                     span { class: "mono truncate", title: "{system.commit_hash.as_deref().unwrap_or(\"Unknown revision\")}", "{system.commit_hash.as_deref().unwrap_or(\"Unknown revision\")}" }
                     span { class: "mono", "{system.current_package_version.as_deref().unwrap_or(\"Unknown version\")}" }
                     span { class: "chip", "{inventory_section_row_label(system.inventory_section)}" }
                     span { class: "chip", if system.inventory_authority == SystemCveInventoryAuthority::Exact { "EXACT" } else { "LEGACY EVIDENCE" } }
-                    Link { to: Route::SystemDetailView { id: system.system_id.to_string(), tab: "cves".to_string(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new() }, class: "btn-icon focus-ring", aria_label: "Open {system.hostname}", Icon { name: IconName::ArrowRight, size: 13 } }
+                    Link { to: Route::SystemDetailView { id: system.system_id.to_string(), tab: "cves".to_string(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new(), cve_target: String::new(), cve_mode: String::new() }, class: "btn-icon focus-ring", aria_label: "Open {system.hostname}", Icon { name: IconName::ArrowRight, size: 13 } }
                 }
             }
         }
