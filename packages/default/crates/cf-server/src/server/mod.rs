@@ -1310,6 +1310,30 @@ pub fn spawn_background_tasks(
             attention_reconciliation_pool,
         ),
     );
+    // CONCURRENCY: Bounded pages advance past unprovable systems instead of
+    // repeatedly locking the same first page. Each candidate rechecks the
+    // latest observation under the snapshot-writer lock before insertion.
+    let external_reconciliation_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut cursor = None;
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            match crate::queries::evaluation_snapshots::reconcile_external_current_generation_page(
+                &external_reconciliation_pool,
+                cursor,
+            )
+            .await
+            {
+                Ok(next) => cursor = next,
+                Err(error) => tracing::warn!(
+                    error = %error,
+                    "External Current generation reconciliation will retry next cycle"
+                ),
+            }
+        }
+    });
     let attention_cleanup_pool = pool.clone();
     tokio::spawn(
         crate::tasks::attention_reconciliation::run_attention_cleanup_loop(attention_cleanup_pool),

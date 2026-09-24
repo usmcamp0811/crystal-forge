@@ -17,15 +17,19 @@ and blocks its UI acceptance. It does not block independent backend work.
 
 ## Scope
 
-SC1 corrects target and scan selection only. Unmapped Current stays unmapped.
-A uniquely mapped running derivation can supply its schema-1 scan read-only when
-strict deployment proof is missing. Current follows observed deployment changes
-on refresh. Explicit target selections remain exact. A new evaluation adds a
-browsing choice; it does not change the running configuration.
+SC1 corrects target, scan selection and trusted reconciliation of a known
+external activation. Unmapped Current stays unmapped. A uniquely mapped
+running derivation can supply its schema-1 scan provisionally read-only while
+retained proof is missing. Server-owned ingestion or bounded repair may bind
+the observed generation to a real certified artifact with external provenance;
+normal Current triage then applies. Current follows observed activation changes
+on refresh. Explicit targets remain read-only and exact. A new evaluation adds
+a browsing choice; it does not change the running configuration.
 
-Header/count consolidation remains SC2. Host/environment triage and continuity
-remain later slices. The working completion mapping is not approval for a new UI
-badge, status widget or automatic formal closure.
+Header/count consolidation remains SC2. New host/environment triage controls
+and cross-generation continuity remain later slices; SC1 reuses the existing
+exact Current triage pipeline after reconciliation. The working completion
+mapping is not approval for a new UI badge, status widget or automatic closure.
 
 ## Evidence and contents
 

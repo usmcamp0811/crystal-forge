@@ -48,22 +48,27 @@ Fail: B appears by default because it is newer, evaluated, or scanned.
 ## 2. Confirm local activation is not penalized by origin
 
 Open the mapped local-activation fixture. The target must be the reconciled
-running configuration. With full proof, use normal Current behavior. Without
-complete proof, use the next test's read-only behavior. Do not show flake head
-or call a known output unmapped solely because activation happened outside CF.
+running configuration. Before retained proof is persisted, use the next test's
+provisional read-only behavior. After trusted reconciliation, use normal Current
+triage even if the target is behind flake head. Do not show flake head or call a
+known output unmapped solely because activation happened outside CF.
 
-## 3. Read a mapped scan with missing deployment proof
+## 3. Reconcile a mapped scan with missing deployment proof
 
 Open the fixture with uniquely mapped A, completed SA, and no retained binding.
 The designed package list and findings must appear. Check the source UUID,
 time, scanner and target through API evidence and existing design fields. The
 existing designed state must communicate the missing proof and read-only
-restriction. A missing design state is a blocker, not an instruction for a new
-notice. No remediation write control may be enabled for this evidence.
+restriction until server-owned reconciliation succeeds. A missing design state
+is a blocker, not an instruction for a new notice. No remediation write control
+may be enabled for provisional evidence.
 
-The agent must also show an automated direct-API negative test for the mutation
-boundary. Disabled UI alone is insufficient. Check the case with zero findings:
-it must identify a completed empty scan, not claim full proof or permanent safety.
+The agent must also show an automated direct-API negative test before trusted
+retention and a positive test after it. Disabled UI alone is insufficient.
+Verify the existing host/environment triage and POA&M flow uses the actual
+retained artifact and records external provenance without a CF deployment event.
+Check the case with zero findings: it must identify a completed empty scan,
+not claim full proof or permanent safety.
 
 ## 4. Keep unmapped output unmapped
 

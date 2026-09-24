@@ -937,8 +937,21 @@ checking its validity. It counts every derivation whose output matches that
 report in the registered flake and effective configuration; the bounded
 candidate menu does not prove uniqueness. A unique mapping selects that exact
 derivation's newest completed schema-1 scan by `completed_at DESC, id DESC`.
-`exact_current_scan` retains the existing full retained-generation authority.
-If retained proof fails, `mapped_running_read_only_scan` and authority
+`exact_current_scan` requires full retained-generation authority. A server-owned
+reconciliation can retain a uniquely mapped external/local activation without
+creating a CF deployment. It requires the latest consistent generation/output
+report, exactly one NixOS derivation in the registered flake and effective
+configuration, its selected available certified schema-1 evaluation artifact
+completed before that report, and a completed schema-1 scan of that derivation.
+The immutable retained row records `external_reconciled` provenance rather than
+claiming a CF deployment. Ingestion checks new reports; a bounded periodic
+repair checks already-reported Current generations. Both use the snapshot-writer
+lock. An unprovable report stays provisional and does not create a retained row.
+Archived commits remain eligible for provisional mapped evidence, but cannot
+establish a new external retained binding; an active behind-head commit can.
+Once reconciled, the existing exact Current triage and POA&M pipeline applies;
+origin does not restrict those actions. If retained proof fails,
+`mapped_running_read_only_scan` and authority
 `mapped_running` return the same derivation's scan, `running_target`, and the
 first failed proof prerequisite, but never exact remediation context or write
 authority. `mapped_running_no_scan` distinguishes a uniquely mapped target

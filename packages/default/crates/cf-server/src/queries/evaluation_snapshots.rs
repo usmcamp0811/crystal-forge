@@ -1612,15 +1612,122 @@ pub(crate) async fn reconcile_current_generation_retention_tx(
     Ok(inserted.rows_affected() == 1)
 }
 
+/// Retains a uniquely reconciled external activation against its real artifact.
+///
+/// This server-owned path starts from the latest agent observation. It requires
+/// an explicit generation/store match, exactly one NixOS derivation in the
+/// registered flake and effective configuration, the currently selected
+/// certified available V1 artifact for that derivation's commit/configuration,
+/// and a completed schema-1 scan for the same derivation. The artifact must
+/// have completed before the observation. Archived commits remain readable
+/// as provisional mapped evidence but do not establish a new retained binding:
+/// archive state removes them from the active source registry. A behind-head
+/// commit that is still active remains eligible. An external activation never
+/// creates a `pending_system_deployments` row; `binding_origin` retains that fact.
+///
+/// # Concurrency
+///
+/// Callers must hold the snapshot-writer lock before invoking this function.
+/// The lock serializes state ingestion and artifact reclamation. The immutable
+/// `(system_id, generation)` key and `ON CONFLICT DO NOTHING` make repeated or
+/// competing reconciliation insert at most one binding. An existing
+/// contradictory binding remains untouched and cannot be promoted.
+///
+/// # Errors
+///
+/// Returns a database error when PostgreSQL cannot resolve or retain the
+/// observed generation. Missing or ambiguous evidence is an ordinary no-op.
+pub(crate) async fn reconcile_external_observed_generation_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_id: Uuid,
+) -> Result<bool> {
+    let inserted = sqlx::query(
+        r#"
+        WITH observed AS (
+            SELECT system.id AS system_id,system.flake_id,
+                   COALESCE(NULLIF(btrim(system.system_configuration_name),''),system.hostname)
+                     AS configuration_name,
+                   state.generation,state.store_path,state.timestamp
+            FROM systems system
+            JOIN LATERAL (
+                SELECT candidate.generation,candidate.store_path,candidate.timestamp,
+                       candidate.generation_matches_current_store_path
+                FROM system_states candidate
+                WHERE candidate.hostname=system.hostname
+                ORDER BY candidate.timestamp DESC NULLS LAST,candidate.id DESC
+                LIMIT 1
+            ) state ON true
+            WHERE system.id=$1 AND system.is_active
+              AND state.generation IS NOT NULL
+              AND state.store_path IS NOT NULL AND btrim(state.store_path)<>''
+              AND state.timestamp IS NOT NULL
+              AND state.generation_matches_current_store_path IS TRUE
+              AND NOT EXISTS (
+                  SELECT 1 FROM evaluation_generation_snapshots retained
+                  WHERE retained.system_id=system.id
+                    AND retained.generation=state.generation
+              )
+        ), matching AS (
+            SELECT observed.*,derivation.id AS derivation_id,
+                   derivation.commit_id,commit.source_archived
+            FROM observed
+            JOIN derivations derivation ON derivation.derivation_type='nixos'
+              AND derivation.derivation_name=observed.configuration_name
+              AND COALESCE(derivation.store_path,derivation.expected_store_path)=observed.store_path
+            JOIN commits commit ON commit.id=derivation.commit_id
+              AND commit.flake_id=observed.flake_id
+        ), authoritative AS (
+            SELECT matching.*,artifact.id AS snapshot_id
+            FROM matching
+            JOIN evaluation_snapshot_selections selection
+              ON selection.commit_id=matching.commit_id
+             AND selection.configuration_name=matching.configuration_name
+            JOIN evaluation_snapshots artifact
+              ON artifact.id=selection.current_snapshot_id
+             AND artifact.commit_id=matching.commit_id
+             AND artifact.configuration_name=matching.configuration_name
+             AND artifact.lifecycle='available'
+             AND artifact.schema_version=1 AND artifact.integrity_version=1
+             AND artifact.completed_at IS NOT NULL
+             AND artifact.completed_at<=matching.timestamp
+            WHERE (SELECT COUNT(*) FROM matching)=1
+              AND matching.source_archived=false
+              AND EXISTS (
+                  SELECT 1 FROM cve_scans scan
+                  WHERE scan.derivation_id=matching.derivation_id
+                    AND scan.status='completed'
+                    AND scan.completed_at IS NOT NULL
+                    AND scan.evidence_schema_version=1
+              )
+        )
+        INSERT INTO evaluation_generation_snapshots (
+            system_id,generation,snapshot_id,derivation_id,commit_id,
+            source_store_path,configuration_name,lineage_verified,binding_origin
+        )
+        SELECT system_id,generation,snapshot_id,derivation_id,commit_id,
+               store_path,configuration_name,true,'external_reconciled'
+        FROM authoritative
+        ON CONFLICT (system_id,generation) DO NOTHING
+        "#,
+    )
+    .bind(system_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(inserted.rows_affected() == 1)
+}
+
 /// Retains one observed generation and repairs a missed earlier retention.
 ///
 /// Ingestion calls this function instead of [`retain_generation_snapshot_tx`]
 /// when the observed system identity is known. The ordinary retention path runs
 /// first and keeps its exact semantics. When it retains nothing, the bounded
-/// repair in [`reconcile_current_generation_retention_tx`] runs against the
-/// same transaction, which recovers an observation whose authoritative
-/// deployment binding was not the newest deployment for the observed store
-/// path.
+/// `reconcile_current_generation_retention_tx` repair runs against the same
+/// transaction. It recovers an observation whose authoritative deployment
+/// binding was not the newest deployment for the observed store path. If that
+/// repair retains nothing, external reconciliation checks the latest reported
+/// generation against the uniquely scoped derivation, certified selected
+/// artifact and completed schema-1 scan. Neither fallback fabricates a CF
+/// deployment or changes an existing immutable binding.
 ///
 /// The repair reads the latest persisted observation. Callers MUST insert the
 /// observation before calling this function.
@@ -1651,7 +1758,10 @@ pub async fn retain_observed_generation_snapshot_tx(
     // The advisory lock is re-entrant, so taking it here preserves the
     // repository lock order in both cases.
     lock_snapshot_writer_tx(tx).await?;
-    reconcile_current_generation_retention_tx(tx, system_id).await
+    if reconcile_current_generation_retention_tx(tx, system_id).await? {
+        return Ok(true);
+    }
+    reconcile_external_observed_generation_tx(tx, system_id).await
 }
 
 /// Repairs the latest observed generation retention in its own transaction.
@@ -1710,6 +1820,85 @@ pub async fn reconcile_current_generation_retention(
     let inserted = reconcile_current_generation_retention_tx(&mut tx, system_id).await?;
     tx.commit().await?;
     Ok(inserted)
+}
+
+/// Repairs one already-reported Current generation without an inventory GET.
+///
+/// # Errors
+///
+/// Returns an error when the transaction, snapshot-writer lock, candidate
+/// lookup, or insert fails. An unprovable observation is an ordinary no-op.
+///
+/// # Examples
+///
+/// ```no_run
+/// # async fn repair(pool: &sqlx::PgPool, system_id: uuid::Uuid) -> anyhow::Result<()> {
+/// use crystal_forge::queries::evaluation_snapshots::reconcile_external_current_generation;
+///
+/// // `false` also covers a prior binding or an unprovable latest report.
+/// let _inserted = reconcile_external_current_generation(pool, system_id).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn reconcile_external_current_generation(pool: &PgPool, system_id: Uuid) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    lock_snapshot_writer_tx(&mut tx).await?;
+    let inserted = reconcile_external_observed_generation_tx(&mut tx, system_id).await?;
+    tx.commit().await?;
+    Ok(inserted)
+}
+
+/// Examines one bounded UUID page of active systems with missing Current proof.
+///
+/// The returned cursor advances even when a candidate cannot be reconciled.
+/// A scan through the end of the active-system set returns `None`, so the next
+/// tick starts again at the beginning. This prevents an ambiguous first page
+/// from starving a later already-observed generation.
+///
+/// # Errors
+///
+/// Returns an error if candidate selection fails. Each candidate retains its
+/// own short transaction; a failed candidate is logged and does not block
+/// other systems in the page or prevent cursor advancement.
+pub(crate) async fn reconcile_external_current_generation_page(
+    pool: &PgPool,
+    after: Option<Uuid>,
+) -> Result<Option<Uuid>> {
+    // This limit bounds advisory-lock acquisition and database work per tick.
+    const SYSTEMS_PER_TICK: i64 = 16;
+    let ids = sqlx::query_scalar::<_, Uuid>(
+        r#"SELECT system.id FROM systems system
+           JOIN LATERAL (
+             SELECT candidate.generation,candidate.store_path,
+                    candidate.generation_matches_current_store_path
+             FROM system_states candidate
+             WHERE candidate.hostname=system.hostname
+             ORDER BY candidate.timestamp DESC NULLS LAST,candidate.id DESC
+             LIMIT 1
+           ) state ON true
+           WHERE system.is_active AND ($1::uuid IS NULL OR system.id>$1)
+             AND state.generation IS NOT NULL
+             AND state.store_path IS NOT NULL AND btrim(state.store_path)<>''
+             AND state.generation_matches_current_store_path IS TRUE
+             AND NOT EXISTS (
+               SELECT 1 FROM evaluation_generation_snapshots retained
+               WHERE retained.system_id=system.id AND retained.generation=state.generation
+             )
+           ORDER BY system.id LIMIT $2"#,
+    )
+    .bind(after)
+    .bind(SYSTEMS_PER_TICK)
+    .fetch_all(pool)
+    .await?;
+    for id in &ids {
+        if let Err(error) = reconcile_external_current_generation(pool, *id).await {
+            tracing::warn!(system_id = %id, error = %error,
+                "External Current generation reconciliation failed for candidate");
+        }
+    }
+    Ok((ids.len() == SYSTEMS_PER_TICK as usize)
+        .then(|| ids.last().copied())
+        .flatten())
 }
 
 /// Selects a commit-mode snapshot and its first-parent baseline.

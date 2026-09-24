@@ -5170,6 +5170,7 @@ function createTask326CurrentCveAuthorityFixture({ retainCurrent = true } = {}) 
     configurationName,
     historicalRevision,
     currentDerivationId: null,
+    currentCommitId: null,
     historicalDerivationId: null,
     historicalCommitId: null,
     currentScanId,
@@ -5241,7 +5242,7 @@ function createTask326CurrentCveAuthorityFixture({ retainCurrent = true } = {}) 
     const commitId = Number(target[2]);
     const historicalCommitId = Number(target[3]);
     const currentCommitHash = runFixtureSql(`SELECT git_commit_hash FROM commits WHERE id=${commitId};`);
-    Object.assign(fixture, { currentDerivationId, historicalDerivationId, historicalCommitId, currentCommitHash });
+    Object.assign(fixture, { currentDerivationId, currentCommitId: commitId, historicalDerivationId, historicalCommitId, currentCommitHash });
     runFixtureSql(`
       INSERT INTO evaluation_snapshots (
         id, commit_id, configuration_name, schema_version, lifecycle, integrity_version,
@@ -5330,6 +5331,7 @@ function removeTask326CurrentCveAuthorityFixture(fixture) {
     DELETE FROM system_states WHERE hostname=$hostname$${fixture.hostname}$hostname$;
     DELETE FROM evaluation_generation_snapshots WHERE system_id='${fixture.systemId}'::uuid;
     DELETE FROM systems WHERE id='${fixture.systemId}'::uuid;
+    DELETE FROM evaluation_snapshot_selections WHERE current_snapshot_id='${fixture.snapshotId}'::uuid;
     DELETE FROM evaluation_snapshots WHERE id='${fixture.snapshotId}'::uuid;
     DELETE FROM derivations WHERE derivation_name=$name$${fixture.configurationName}$name$;
     DELETE FROM commits WHERE git_commit_hash='${fixture.historicalRevision}';
@@ -11204,6 +11206,58 @@ const steps = [
         }
       } finally {
         removeTask326CurrentCveAuthorityFixture(mappedFixture);
+      }
+
+      // The database trigger independently checks external provenance before
+      // accepting the retained row. This fixture verifies the existing exact
+      // API/UI triage pipeline after trusted retention; the isolated Rust
+      // regressions exercise the server-owned ingestion/repair function itself.
+      const reconciledFixture = createTask326CurrentCveAuthorityFixture({ retainCurrent: false });
+      try {
+        const currentPath = `/api/v1/systems/${reconciledFixture.systemId}/cve-inventory-page?limit=100`;
+        const provisional = (await phase6Api(page, currentPath)).body;
+        if (provisional.authority !== "mapped_running" || provisional.read_only !== true) {
+          throw new Error(`The external fixture must begin read-only: ${JSON.stringify(provisional)}`);
+        }
+        runFixtureSql(`INSERT INTO evaluation_snapshot_selections(
+          commit_id,configuration_name,current_snapshot_id)
+          VALUES (${reconciledFixture.currentCommitId},
+            $name$${reconciledFixture.configurationName}$name$,
+            '${reconciledFixture.snapshotId}'::uuid);`);
+        runFixtureSql(`INSERT INTO evaluation_generation_snapshots(
+          system_id,generation,snapshot_id,derivation_id,commit_id,
+          source_store_path,configuration_name,lineage_verified,binding_origin)
+          SELECT '${reconciledFixture.systemId}'::uuid,74,
+            '${reconciledFixture.snapshotId}'::uuid,
+            ${reconciledFixture.currentDerivationId},
+            ${reconciledFixture.currentCommitId},derivation.store_path,
+            $name$${reconciledFixture.configurationName}$name$,
+            true,'external_reconciled'
+          FROM derivations derivation
+          WHERE derivation.id=${reconciledFixture.currentDerivationId}
+          ON CONFLICT (system_id,generation) DO NOTHING;`);
+        const exact = (await phase6Api(page, currentPath)).body;
+        if (exact.authority !== "exact"
+            || exact.current_state !== "exact_current_scan"
+            || exact.read_only !== false
+            || exact.source?.scan_id !== reconciledFixture.currentScanId
+            || exact.vulnerabilities?.[0]?.cve_id !== reconciledFixture.currentCveId
+            || !exact.vulnerabilities[0].remediation) {
+          throw new Error(`External Current did not acquire exact context from its retained artifact: ${JSON.stringify(exact)}`);
+        }
+        const triageRead = await phase6ApiResponse(page,
+          `/api/v1/systems/${reconciledFixture.systemId}/cves/${reconciledFixture.currentCveId}/triage?package=current-authority-package`);
+        if (triageRead.status !== 200 || triageRead.body?.canonical_cve_id !== reconciledFixture.currentCveId) {
+          throw new Error(`The normal Current triage detail rejected reconciled evidence: ${triageRead.status}`);
+        }
+        await page.goto(`${baseUrl}/systems/${reconciledFixture.systemId}?tab=cves`, { timeout: LOAD_TIMEOUT });
+        await assertVisible(page.getByTestId("system-cve-triage-open"), "Reconciled external Current must expose normal triage");
+        await page.getByTestId("system-cve-triage-open").click();
+        const triage = page.getByRole("dialog", { name: `Triage ${reconciledFixture.currentCveId} current-authority-package` });
+        await assertVisible(triage, "Reconciled external Current must open the normal triage dialog");
+        await triage.getByRole("button", { name: "Close triage editor" }).click();
+      } finally {
+        removeTask326CurrentCveAuthorityFixture(reconciledFixture);
       }
     },
   },

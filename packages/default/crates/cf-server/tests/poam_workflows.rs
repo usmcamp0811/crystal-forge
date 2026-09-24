@@ -3,8 +3,8 @@ use chrono::{DateTime, NaiveDate, TimeDelta, TimeZone, Utc};
 use crystal_forge::api::models::{
     CveEnvironmentDisposition, CveEnvironmentTriageAction, CveFilters, FleetCveInventorySection,
     FleetCveMutationDetailScope, FleetCvePoamRequest, FleetCveTriageRequest, FleetCveTriageRollup,
-    SystemCveEffectiveDispositionSource, SystemCveTriageAction, SystemCveTriageRequest,
-    SystemCveTriageScopeChoice, SystemCveTriageScopeKind,
+    SystemCveEffectiveDispositionSource, SystemCveInventoryParams, SystemCveTriageAction,
+    SystemCveTriageRequest, SystemCveTriageScopeChoice, SystemCveTriageScopeKind,
 };
 use crystal_forge::auth::extractors::AuthenticatedUser;
 use crystal_forge::auth::session::{
@@ -33,10 +33,10 @@ use crystal_forge::models::poam::{
 use crystal_forge::models::system_states::SystemState;
 use crystal_forge::queries::compliance::nix_policy_observation_reference;
 use crystal_forge::queries::cves::{
-    CveExportError, CveReadScope, MAX_CVE_EXPORT_ROWS, fetch_cve_affected_systems,
-    fetch_cve_detail, fetch_cve_fleet_stats, fetch_cve_justifications, fetch_cve_list,
-    fetch_cve_packages_grouped, fetch_cves_for_export, fetch_exact_system_vulnerabilities,
-    fetch_package_names,
+    CveExportError, CveReadScope, MAX_CVE_EXPORT_ROWS, SystemCveInventoryPageRequest,
+    fetch_cve_affected_systems, fetch_cve_detail, fetch_cve_fleet_stats, fetch_cve_justifications,
+    fetch_cve_list, fetch_cve_packages_grouped, fetch_cves_for_export,
+    fetch_exact_system_vulnerabilities, fetch_package_names, fetch_system_cve_inventory_page,
 };
 use crystal_forge::queries::poam;
 use crystal_forge::queries::users::insert_user;
@@ -45,7 +45,7 @@ use crystal_forge::queries::{
     commits::insert_commit,
     deployment_policies::create_deployment_policy,
     derivations::{SuccessfulEvalWrite, record_successful_eval_result},
-    evaluation_snapshots::persist_available_snapshot_tx,
+    evaluation_snapshots::{persist_available_snapshot_tx, reconcile_external_current_generation},
     flakes::insert_flake,
     system_states::insert_system_state,
 };
@@ -1847,6 +1847,471 @@ async fn system_cve_triage_derives_full_environment_and_preserves_shared_poam_su
             .await
             .unwrap();
     assert_eq!(verification_count, 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn external_current_reconciliation_uses_normal_triage_and_real_poam_baseline(pool: PgPool) {
+    let first = assessment_fixture(&pool).await;
+    let peer = assessment_fixture(&pool).await;
+    let actor = admin_actor(first.user_id);
+    sync_user_role(&pool, actor.user_id, AuthRole::Admin)
+        .await
+        .expect("admin should be authorized");
+    let environment_id = assign_environment(&pool, "external-triage", &[&first, &peer]).await;
+    let clock = FixedClock(Utc::now());
+    let cve_id = "CVE-2026-32691";
+    let package = "external-current-package";
+    let flake_id: i32 = sqlx::query_scalar("SELECT flake_id FROM systems WHERE id=$1")
+        .bind(first.system_id)
+        .fetch_one(&pool)
+        .await
+        .expect("selected system should have a registered flake");
+    let head_id: i32 = sqlx::query_scalar(
+        r#"INSERT INTO commits(flake_id,git_commit_hash,commit_timestamp)
+           VALUES($1,$2,now()+interval '1 minute') RETURNING id"#,
+    )
+    .bind(flake_id)
+    .bind(Uuid::new_v4().simple().to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("a newer unactivated flake head should persist");
+    sqlx::query(
+        "INSERT INTO flake_branch_commit_snapshot(flake_id,commit_id,position) VALUES($1,$2,0)",
+    )
+    .bind(flake_id)
+    .bind(head_id)
+    .execute(&pool)
+    .await
+    .expect("newer head should be tracked independently of running Current");
+    for fixture in [&first, &peer] {
+        seal_exact_cve_scan(
+            &pool,
+            fixture,
+            clock.now(),
+            Some((cve_id, package, "1.0", false)),
+        )
+        .await;
+    }
+
+    // The new generation uses the same exact registered output but has no CF
+    // deployment request. The peer remains normally retained generation 1.
+    sqlx::query(
+        r#"INSERT INTO system_states(
+             hostname,change_reason,store_path,generation,
+             generation_matches_current_store_path,timestamp)
+           SELECT hostname,'startup',$2,2,true,clock_timestamp()+interval '1 minute'
+           FROM systems WHERE id=$1"#,
+    )
+    .bind(first.system_id)
+    .bind(&first.store_path)
+    .execute(&pool)
+    .await
+    .expect("external generation report should persist");
+
+    assert!(matches!(
+        poam_service::system_cve_triage_detail(&pool, &actor, first.system_id, cve_id, package)
+            .await,
+        Err(PoamError::NotFound)
+    ));
+    assert!(
+        reconcile_external_current_generation(&pool, first.system_id)
+            .await
+            .expect("one external generation should reconcile")
+    );
+    assert!(
+        !reconcile_external_current_generation(&pool, first.system_id)
+            .await
+            .expect("repeated reconciliation should be idempotent")
+    );
+
+    let (retained_id, artifact_id, origin, generation): (Uuid, Uuid, String, i32) =
+        sqlx::query_as(
+            "SELECT id,snapshot_id,binding_origin,generation FROM evaluation_generation_snapshots WHERE system_id=$1 AND generation=2",
+        )
+        .bind(first.system_id)
+        .fetch_one(&pool)
+        .await
+        .expect("external generation should retain an actual artifact");
+    assert_eq!(generation, 2);
+    assert_eq!(origin, "external_reconciled");
+    let artifact_matches: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM evaluation_snapshots WHERE id=$1 AND lifecycle='available' AND schema_version=1 AND integrity_version=1)",
+    )
+    .bind(artifact_id)
+    .fetch_one(&pool)
+    .await
+    .expect("artifact should remain readable");
+    assert!(artifact_matches);
+    let fabricated_deployments: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pending_system_deployments WHERE system_id=$1")
+            .bind(first.system_id)
+            .fetch_one(&pool)
+            .await
+            .expect("deployment provenance should remain separate");
+    assert_eq!(fabricated_deployments, 0);
+
+    let historical = SystemCveInventoryPageRequest::from_params(SystemCveInventoryParams {
+        target: Some("exact_derivation".into()),
+        target_id: Some(first.derivation_id.to_string()),
+        ..Default::default()
+    })
+    .expect("explicit derivation should validate");
+    let historical_read = fetch_system_cve_inventory_page(&pool, first.system_id, &historical)
+        .await
+        .expect("explicit target remains independently readable");
+    assert!(
+        historical_read.read_only,
+        "explicit browsing never grants Current triage"
+    );
+
+    let detail =
+        poam_service::system_cve_triage_detail(&pool, &actor, first.system_id, cve_id, package)
+            .await
+            .expect("reconciled external Current must use normal detail");
+    assert_eq!(detail.scope.environment_id, environment_id);
+    assert_eq!(detail.scope.exact_affected_system_count, 2);
+
+    let accepted = poam_service::triage_system_cve(
+        &pool,
+        &actor,
+        first.system_id,
+        cve_id,
+        SystemCveTriageRequest {
+            canonical_package_name: package.into(),
+            scope: SystemCveTriageScopeChoice::Host,
+            action: SystemCveTriageAction::AcceptRisk {
+                justification: "The external host has verified compensating controls".into(),
+                review_date: None,
+            },
+            poam: None,
+        },
+        &clock,
+    )
+    .await
+    .expect("host risk acceptance should persist");
+    assert_eq!(
+        accepted.detail.effective_source,
+        SystemCveEffectiveDispositionSource::Host
+    );
+    let reopened =
+        poam_service::system_cve_triage_detail(&pool, &actor, first.system_id, cve_id, package)
+            .await
+            .expect("host risk acceptance should reopen");
+    assert!(matches!(
+        reopened.host_disposition,
+        Some(CveEnvironmentDisposition::Accepted { .. })
+    ));
+
+    let environment = poam_service::triage_system_cve(
+        &pool,
+        &actor,
+        first.system_id,
+        cve_id,
+        SystemCveTriageRequest {
+            canonical_package_name: package.into(),
+            scope: SystemCveTriageScopeChoice::Environment,
+            action: SystemCveTriageAction::AcceptRisk {
+                justification: "The environment limits exposure to this finding".into(),
+                review_date: None,
+            },
+            poam: None,
+        },
+        &clock,
+    )
+    .await
+    .expect("environment acceptance should include the reconciled host");
+    assert!(environment.detail.environment_disposition.is_some());
+    assert_eq!(
+        environment.detail.effective_source,
+        SystemCveEffectiveDispositionSource::Host
+    );
+
+    poam_service::triage_system_cve(
+        &pool,
+        &actor,
+        first.system_id,
+        cve_id,
+        SystemCveTriageRequest {
+            canonical_package_name: package.into(),
+            scope: SystemCveTriageScopeChoice::Host,
+            action: SystemCveTriageAction::LeaveOpen,
+            poam: None,
+        },
+        &clock,
+    )
+    .await
+    .expect("clearing host override should restore environment ownership");
+    let scheduled = poam_service::triage_system_cve(
+        &pool,
+        &actor,
+        first.system_id,
+        cve_id,
+        SystemCveTriageRequest {
+            canonical_package_name: package.into(),
+            scope: SystemCveTriageScopeChoice::Environment,
+            action: SystemCveTriageAction::SchedulePatch,
+            poam: Some(fleet_poam_request(actor.user_id, &clock)),
+        },
+        &clock,
+    )
+    .await
+    .expect("existing environment scheduler should create the POA&M");
+    let poam_id = scheduled.poam_id.expect("schedule should create POA&M");
+    let baseline: Uuid = sqlx::query_scalar(
+        "SELECT baseline_generation_snapshot_id FROM poam_cve_finding_links WHERE poam_id=$1 AND system_id=$2 AND retired_at IS NULL",
+    )
+    .bind(poam_id)
+    .bind(first.system_id)
+    .fetch_one(&pool)
+    .await
+    .expect("external subject should have a real baseline link");
+    assert_eq!(baseline, retained_id);
+    let reused = poam_service::triage_system_cve(
+        &pool,
+        &actor,
+        first.system_id,
+        cve_id,
+        SystemCveTriageRequest {
+            canonical_package_name: package.into(),
+            scope: SystemCveTriageScopeChoice::Environment,
+            action: SystemCveTriageAction::SchedulePatch,
+            poam: Some(fleet_poam_request(actor.user_id, &clock)),
+        },
+        &clock,
+    )
+    .await
+    .expect("compatible environment schedule should reuse POA&M");
+    assert_eq!(reused.poam_id, Some(poam_id));
+    assert!(reused.poam_reused);
+}
+
+async fn report_external_generation(
+    pool: &PgPool,
+    fixture: &AssessmentFixture,
+    generation: i32,
+    store_path: &str,
+    matches_current: bool,
+    minutes: i32,
+) {
+    sqlx::query(
+        r#"INSERT INTO system_states(
+             hostname,change_reason,store_path,generation,
+             generation_matches_current_store_path,timestamp)
+           SELECT hostname,'startup',$2,$3,$4,
+                  clock_timestamp()+($5::text || ' minutes')::interval
+           FROM systems WHERE id=$1"#,
+    )
+    .bind(fixture.system_id)
+    .bind(store_path)
+    .bind(generation)
+    .bind(matches_current)
+    .bind(minutes)
+    .execute(pool)
+    .await
+    .expect("external observation should persist");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn external_reconciliation_rejects_missing_schema1_and_foreign_or_invalid_outputs(
+    pool: PgPool,
+) {
+    let fixture = assessment_fixture(&pool).await;
+    let foreign = assessment_fixture(&pool).await;
+    report_external_generation(&pool, &fixture, 2, &fixture.store_path, true, 1).await;
+    assert!(
+        !reconcile_external_current_generation(&pool, fixture.system_id)
+            .await
+            .expect("missing scan must not authorize reconciliation")
+    );
+
+    seal_exact_cve_scan(
+        &pool,
+        &foreign,
+        Utc::now(),
+        Some(("CVE-2026-32692", "foreign-package", "1.0", false)),
+    )
+    .await;
+    assert!(
+        !reconcile_external_current_generation(&pool, fixture.system_id)
+            .await
+            .expect("another derivation's scan must not authorize this target")
+    );
+
+    let legacy_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO cve_scans(derivation_id,scanner_name,status) VALUES($1,'legacy','in_progress') RETURNING id",
+    )
+    .bind(fixture.derivation_id)
+    .fetch_one(&pool)
+    .await
+    .expect("legacy scan should start unsealed");
+    sqlx::query("UPDATE cve_scans SET status='completed',completed_at=now() WHERE id=$1")
+        .bind(legacy_id)
+        .execute(&pool)
+        .await
+        .expect("legacy schema-0 scan should complete");
+    assert!(
+        !reconcile_external_current_generation(&pool, fixture.system_id)
+            .await
+            .expect("schema-0 scan cannot authorize external retention")
+    );
+
+    seal_exact_cve_scan(
+        &pool,
+        &fixture,
+        Utc::now(),
+        Some(("CVE-2026-32693", "local-package", "1.0", false)),
+    )
+    .await;
+    report_external_generation(&pool, &fixture, 3, "/nix/store/unmapped-external", true, 2).await;
+    assert!(
+        !reconcile_external_current_generation(&pool, fixture.system_id)
+            .await
+            .expect("unmapped output cannot borrow the scanned target")
+    );
+    report_external_generation(&pool, &fixture, 4, &fixture.store_path, false, 3).await;
+    assert!(
+        !reconcile_external_current_generation(&pool, fixture.system_id)
+            .await
+            .expect("contradictory generation/path report cannot reconcile")
+    );
+    report_external_generation(&pool, &fixture, 5, &foreign.store_path, true, 4).await;
+    assert!(
+        !reconcile_external_current_generation(&pool, fixture.system_id)
+            .await
+            .expect("foreign flake and configuration cannot reconcile")
+    );
+    let retained_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM evaluation_generation_snapshots WHERE system_id=$1 AND binding_origin='external_reconciled'",
+    )
+    .bind(fixture.system_id)
+    .fetch_one(&pool)
+    .await
+    .expect("external bindings should be countable");
+    assert_eq!(retained_count, 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn external_reconciliation_rejects_ambiguous_mapping_and_serializes_duplicate_reports(
+    pool: PgPool,
+) {
+    let fixture = assessment_fixture(&pool).await;
+    seal_exact_cve_scan(
+        &pool,
+        &fixture,
+        Utc::now(),
+        Some(("CVE-2026-32694", "ambiguous-package", "1.0", false)),
+    )
+    .await;
+    report_external_generation(&pool, &fixture, 2, &fixture.store_path, true, 1).await;
+    let (commit_id, flake_id, configuration): (i32, i32, String) = sqlx::query_as(
+        r#"SELECT derivation.commit_id,commit.flake_id,derivation.derivation_name
+           FROM derivations derivation JOIN commits commit ON commit.id=derivation.commit_id
+           WHERE derivation.id=$1"#,
+    )
+    .bind(fixture.derivation_id)
+    .fetch_one(&pool)
+    .await
+    .expect("original target lineage should exist");
+    let second_commit: i32 = sqlx::query_scalar(
+        r#"INSERT INTO commits(flake_id,git_commit_hash,commit_timestamp)
+           VALUES($1,$2,now()) RETURNING id"#,
+    )
+    .bind(flake_id)
+    .bind(Uuid::new_v4().simple().to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("same-flake second commit should persist");
+    assert_ne!(second_commit, commit_id);
+    sqlx::query(
+        r#"INSERT INTO derivations(
+             commit_id,derivation_type,derivation_name,derivation_path,
+             store_path,status_id)
+           VALUES($1,'nixos',$2,$3,$4,10)"#,
+    )
+    .bind(second_commit)
+    .bind(configuration)
+    .bind(format!(
+        "/nix/store/{}-duplicate-output.drv",
+        Uuid::new_v4().simple()
+    ))
+    .bind(&fixture.store_path)
+    .execute(&pool)
+    .await
+    .expect("ambiguous same-output target should persist");
+    sqlx::query("UPDATE commits SET source_archived=true WHERE id=$1")
+        .bind(second_commit)
+        .execute(&pool)
+        .await
+        .expect("competing source can be archived without removing its derivation");
+    assert!(
+        !reconcile_external_current_generation(&pool, fixture.system_id)
+            .await
+            .expect("an archived competing mapping must still count toward ambiguity")
+    );
+    sqlx::query("UPDATE commits SET source_archived=false WHERE id=$1")
+        .bind(second_commit)
+        .execute(&pool)
+        .await
+        .expect("competing source should return to the active registry");
+    assert!(
+        !reconcile_external_current_generation(&pool, fixture.system_id)
+            .await
+            .expect("two scoped matching derivations must fail closed")
+    );
+
+    let independent = assessment_fixture(&pool).await;
+    seal_exact_cve_scan(
+        &pool,
+        &independent,
+        Utc::now(),
+        Some(("CVE-2026-32695", "concurrent-package", "1.0", false)),
+    )
+    .await;
+    report_external_generation(&pool, &independent, 2, &independent.store_path, true, 1).await;
+    let (first, second) = tokio::join!(
+        reconcile_external_current_generation(&pool, independent.system_id),
+        reconcile_external_current_generation(&pool, independent.system_id)
+    );
+    assert_ne!(
+        first.expect("first attempt should succeed"),
+        second.expect("second attempt should succeed")
+    );
+    report_external_generation(&pool, &independent, 2, &independent.store_path, true, 2).await;
+    assert!(
+        !reconcile_external_current_generation(&pool, independent.system_id)
+            .await
+            .expect("repeat report must not insert duplicate")
+    );
+    let bindings: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM evaluation_generation_snapshots WHERE system_id=$1 AND generation=2",
+    )
+    .bind(independent.system_id)
+    .fetch_one(&pool)
+    .await
+    .expect("retained-generation key should be unique");
+    assert_eq!(bindings, 1);
+
+    let archived = assessment_fixture(&pool).await;
+    seal_exact_cve_scan(
+        &pool,
+        &archived,
+        Utc::now(),
+        Some(("CVE-2026-32696", "archived-package", "1.0", false)),
+    )
+    .await;
+    report_external_generation(&pool, &archived, 2, &archived.store_path, true, 1).await;
+    sqlx::query(
+        "UPDATE commits SET source_archived=true WHERE id=(SELECT commit_id FROM derivations WHERE id=$1)",
+    )
+    .bind(archived.derivation_id)
+    .execute(&pool)
+    .await
+    .expect("sole source should be archived");
+    assert!(
+        !reconcile_external_current_generation(&pool, archived.system_id)
+            .await
+            .expect("a sole archived source can be read provisionally, not retained")
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]

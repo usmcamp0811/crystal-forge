@@ -514,9 +514,9 @@ A Current candidate's non-null derivation ID does not prove uniqueness or comple
 | Condition | Default or selected target | Evidence outcome | Required explanation |
 |---|---|---|---|
 | Reported running configuration maps to a known target | Current, normally Generations mode | Read evidence for that exact target only. | Show real observed generation, target identity, and source. |
-| Local activation maps to a known target | Same Current behavior as a CF activation | Use normal authority when its proof exists; otherwise use the agreed read-only tier. | Do not classify a known equivalent end state as permanently untrusted because of its trigger. |
+| Local activation maps to a known target | Same Current behavior as a CF activation | Use provisional read-only evidence until trusted server reconciliation retains exact proof, then use normal Current triage. | Preserve external origin as provenance; do not impose a permanent capability penalty. |
 | Running target is an older commit or rollback | Actual observed running target | Do not prefer the highest generation or newest commit. | Report the actual observation and its time. |
-| Target is uniquely mapped and strict proof is missing | Same Current target | Show its completed schema-1 scan read-only, when present. | Show the failed proof prerequisite and unavailable actions. |
+| Target is uniquely mapped and strict proof is missing | Same Current target | Show its completed schema-1 scan provisionally read-only, when present. Reconcile exact observation and artifact server-side. | Show the failed proof prerequisite until trusted retention succeeds; then use normal Current actions. |
 | Target is mapped but no eligible completed scan exists | Same Current target | No scan. | No completed scan for this target; never substitute an older or head scan. |
 | Reported running output is unmapped | Current intent remains selected; mapping state is unmapped | No Current CVE inventory in SC1. | Running configuration is unmapped; no scan is available for it. |
 | Running mapping is ambiguous | Current unresolved state | No arbitrary source. | Mapping is ambiguous; do not infer no report or local activation. |
@@ -1059,7 +1059,7 @@ The owner requested bounded chunks that can be exercised independently. Do not i
 
 | Slice | Outcome | Explicit boundary |
 |---|---|---|
-| **SC1: Target and scan selection** | Current-first CVE browsing; unique mapped scan read-only when proof is missing; unmapped stays empty; exact target navigation and coherent refresh. | No local scanner, no new write authority, no continuity or closure rewrite. |
+| **SC1: Target and scan selection** | Current-first CVE browsing; uniquely mapped scan provisionally read-only, then normal triage after server-owned trusted external reconciliation; unmapped stays empty; exact target navigation and coherent refresh. | No local scanner, fabricated CF deployment, weaker writer predicate, or cross-generation continuity/closure rewrite. |
 | **SC2: Inventory and count consistency** | Running header distinct CVEs; selected-tab findings and full pagination; provenance and agreed cross-screen count rules. | Do not claim SC1 already repaired the legacy header or Scanning clean badge. |
 | **SC3: Host triage workflow** | Accurate effective state, host-only save/reopen, existing POA&M navigation, and reliable post-save refresh. | Preserve host/environment separation and typed ownership. |
 | **SC4: Environment decisions and overrides** | Show current scope, direct overrides, and environment-owned subjects; preserve peer/host ownership under conflicts. | Do not conceal dynamic membership requirements behind a static UI count. |
@@ -1099,19 +1099,19 @@ This is a diagnostic checklist, not a request to write or repair data. A missing
 
 ### D1. Read a matching scan without complete deployment proof
 
-**AGREED / SC1:** Show a completed schema-1 scan when the server uniquely maps the latest reported running output to the system's registered flake/configuration and exact derivation. Keep the failed proof prerequisite visible. The result is valid read-only feedback, not full remediation authority.
+**AGREED / SC1, superseded 2026-09-24:** Show a completed schema-1 scan when the server uniquely maps the latest reported running output to the system's registered flake/configuration and exact derivation. Keep the failed proof prerequisite visible until a trusted server-owned reconciliation retains the observed generation against its real available certified immutable artifact. Before reconciliation, this result is valid read-only feedback. After reconciliation, it is normal actionable Current evidence for existing host/environment CVE triage and POA&M, regardless of deployment origin or distance from flake head.
 
-Do not return the existing fully authoritative state for this result. Do not hydrate mutation context, change write checks, manufacture retained-generation evidence, or select a different target's scan. Missing proof and missing scan are different facts.
+Do not return the existing fully authoritative state before reconciliation. Never hydrate mutation context for provisional evidence, weaken writer checks, manufacture a CF deployment event, or select another target's scan. Reconciliation must prove the latest report's generation/store consistency, one scoped NixOS derivation and its immutable available evaluation artifact under server ownership; persist distinct external-activation provenance. Missing proof and missing scan are different facts.
 
 ### D2. Out-of-band activation and unmapped output
 
-**AGREED / SC1:** Out-of-band means a switch outside CF's control. If its result reconciles to a known configuration, treat its equivalent end state like a normal CF deployment. Capability still depends on the proof actually established. A missing proof record invokes D1 rather than a permanent origin-based penalty.
+**AGREED / SC1:** Out-of-band means a switch outside CF's control. If its result reconciles to a known configuration and the server retains its exact verified observation/artifact binding, treat its equivalent end state like a normal CF deployment for Current CVE triage. A missing proof record invokes provisional read-only D1 until reconciliation, not a permanent origin-based penalty.
 
 If the result cannot be mapped, show **Unmapped** and no Current CVE inventory. This replaces the earlier automatic flake-head fallback. The operator can still browse a known commit explicitly; that does not describe the unknown running output.
 
 **AGREED / LATER:** Optional agent-local Vulnix scanning may provide observational feedback for unmapped running output. Record its lower evidence grade separately. Leave it unimplemented in SC1, including its UI toggles.
 
-Trusted reconciliation of a known external activation must verify real facts. The read-only fix is not authority to insert a fictitious CF deployment or fabricate lineage records.
+Trusted reconciliation of a known external activation must verify real facts. The provisional read-only view is not authority to insert a fictitious CF deployment or fabricated lineage records. State ingestion and a bounded, fair repair for already-observed Current generations may create only a verified immutable retained binding with explicit provenance. This 2026-09-24 decision supersedes the prior SC1 prohibition on proof-repair migrations and mutation eligibility changes where the exact reconciliation requirements are met.
 
 ### D3. CVEs and findings have different units
 
@@ -1181,7 +1181,7 @@ flowchart LR
 
 For SC1, this version's agreed decisions and `system-cves-chunk-1.md` control domain behavior. The owner's Claude design controls UI composition and interaction. Neither is permission to silently violate the other. Resolve a missing or conflicting presentation in the Claude design workflow. Original AS-BUILT sections remain evidence of behavior to change. Old head-fallback tests must be updated to the new expected result; unrelated failure and authorization tests must remain.
 
-The fleet audit D05 and cross-view ledger CPC03 are resolved only for this precise read-only mapped-running case. Systems D3/D4 record the approved units and header scope. The later continuity direction addresses CPC13 and the fleet continuity proposal at the product level; it does not approve every persistence, reconciliation, or closure detail in those documents.
+The fleet audit D05 and cross-view ledger CPC03 require the provisional mapped read and the 2026-09-24 trusted reconciliation transition. Systems D3/D4 record the approved units and header scope. The later continuity direction addresses CPC13 and the fleet continuity proposal at the product level; it does not approve every persistence or closure detail in those documents.
 
 Before SC5, reconcile the owning continuity specification, fleet triage guide, API contract, and cross-view ledger as complete replacement files. Do not have a UI-only agent resolve conflicting lifecycle rules by changing whichever check blocks its test.
 

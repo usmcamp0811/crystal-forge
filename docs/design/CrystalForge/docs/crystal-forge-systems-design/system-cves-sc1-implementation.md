@@ -20,6 +20,24 @@ Missing retained proof leaves the scan readable under
 The inventory GET runs in a read-only transaction. Direct triage still performs
 its own full-proof authorization check.
 
+The new `binding_origin` on immutable retained generations distinguishes an
+unknown pre-migration origin, CF-issued deployment, and reconciled external
+activation. State and heartbeat ingestion attempt CF-bound retention before
+external reconciliation. External reconciliation requires the latest consistent
+generation/output report, exactly one scoped NixOS derivation, the selected
+certified available schema-1 artifact completed by the report time, and a
+completed schema-1 scan of that derivation. It takes the snapshot-writer lock,
+never fabricates a deployment, and inserts nothing on missing or ambiguous
+proof. The additive migration `0278` makes an archived same-output derivation
+count toward ambiguity, even though an archived sole target stays provisional.
+A background repair examines up to 16 already-observed candidates each
+60 seconds; its cursor advances past unprovable or failed candidates. An
+individual failed repair is logged without blocking later systems. Repeated
+reports and repair passes do not rewrite retained bindings. A successful
+external binding enters the unchanged exact Current triage and POA&M writer
+pipeline with its real retained artifact baseline. Explicit historical targets
+still cannot use that Current authority.
+
 The CVE target and mode are independent URL parameters. Dioxus must retain
 `cve_target` and `cve_mode` in the System Detail route declaration. The view
 checks system identity, selection, source, read tier, and request epoch before
@@ -42,6 +60,12 @@ authoritative screenshot comparison remains blocked by TASK-440.
 | Missing metadata | The read response supplies newest same-target attempt metadata independently from the completed source. The existing package-first card notice displays newer failed and queued attempts. In-progress attempts use that same approved notice location. |
 | Changed interactions | An explicit generation or derivation stays selected across URL navigation. Current follows a reported running target. The host check holds an A response, records reported activation B, selects the new Current B, and confirms that late A cannot replace B. A second host check holds an unsaved triage draft through a Current continuation conflict and confirms that the approved conflict footer blocks submission without discarding fields. |
 | Hierarchy differences and additions | No new section or control was added to the package-first hierarchy. A source-less state does not claim the host is clean. The server-owned read-only reason uses the existing reference notice pattern. |
+
+The supported host 12ha regression also starts with provisional external
+evidence, installs a fixture row only after the database trigger validates
+its selected artifact and latest observation, then checks the real exact
+inventory, triage-detail API and dialog. Separate isolated Rust tests exercise
+the server-owned reconciliation rather than relying on this fixture insert.
 
 ## Verification boundary
 
