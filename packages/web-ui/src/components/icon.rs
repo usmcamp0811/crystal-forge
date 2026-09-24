@@ -10,6 +10,8 @@ pub enum IconName {
     X,
     Download,
     Shield,
+    /// Draws the activity pulse used for remediation in the approved design.
+    Activity,
     Git,
     ChevronRight,
     ChevronDown,
@@ -117,6 +119,9 @@ pub fn Icon(name: IconName, #[props(default = 16)] size: u32) -> Element {
                 stroke_linecap: "round",
                 stroke_linejoin: "round"
             }
+        },
+        IconName::Activity => rsx! {
+            path { d: "M3 12h4l3 8 4-16 3 8h4" }
         },
         IconName::Git => rsx! {
             circle { cx: "12", cy: "18", r: "3" }

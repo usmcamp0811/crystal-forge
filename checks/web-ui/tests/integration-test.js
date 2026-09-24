@@ -10026,6 +10026,7 @@ const steps = [
       let environmentDisposition = null;
       const scheduledPoamSubjects = [];
       const triageRequests = [];
+      let triageReads = 0;
       const actor = { user_id: "00000000-0000-0000-0000-0000000000f1", display: "Morgan Reyes" };
       const acceptedDisposition = (body) => ({
         state: "accepted",
@@ -10071,6 +10072,7 @@ const steps = [
         const request = route.request();
         const url = new URL(request.url());
         if (request.method() === "GET") {
+          triageReads += 1;
           if (url.searchParams.get("package") !== "linuxPackages_6_10.kernel") {
             throw new Error(`System triage GET lost exact package identity: ${url.search}`);
           }
@@ -10146,11 +10148,11 @@ const steps = [
           if (text !== label) throw new Error(`Expected triage chip '${label}', got '${text}'`);
           await assertAttribute(chip, "title", title, `Expected ${label} scope tooltip`);
         };
-        const fillScheduledPoam = async (dialog, title = poam.title) => {
-          await dialog.getByTestId("cve-poam-title").fill(title);
+        const fillScheduledPoam = async (dialog) => {
+          await assertCount(dialog.getByTestId("cve-poam-title"), 0, "Triage must generate the POA&M title internally");
+          await assertCount(dialog.getByTestId("cve-poam-risk"), 0, "Triage must derive risk internally");
           await dialog.getByTestId("cve-poam-target").fill(poam.target_date);
           await dialog.getByTestId("cve-poam-plan").fill(poam.plan);
-          await dialog.getByTestId("cve-poam-risk").selectOption("medium");
           await dialog.getByTestId("cve-poam-assignee").selectOption("group:platform-operators");
         };
 
@@ -10163,15 +10165,44 @@ const steps = [
         await assertVisible(page.getByText("available — version pending", { exact: true }), "Fix availability must not invent an exact version");
 
         const triageTrigger = page.getByTestId("system-cve-triage-open");
+        await assertAttribute(triageTrigger, "title", "Triage — accept the risk or schedule a patch", "A hydrated GET with no disposition must retain the shield action");
+        const noOpMutations = [];
+        const recordNoOpMutation = (request) => {
+          if (!["GET", "OPTIONS"].includes(request.method()) && new URL(request.url()).pathname.startsWith("/api/v1/")) {
+            noOpMutations.push(`${request.method()} ${new URL(request.url()).pathname}`);
+          }
+        };
+        page.on("request", recordNoOpMutation);
+        const noOpClose = async (name, close) => {
+          const readsBefore = triageReads;
+          const writesBefore = triageRequests.length;
+          const opened = await openTriage();
+          if (triageReads <= readsBefore) throw new Error(`${name}: opening did not GET authoritative triage detail`);
+          await assertAttribute(triageTrigger, "title", "Triage — accept the risk or schedule a patch", `${name}: GET alone must not imply saved triage`);
+          await close(opened);
+          await assertHidden(opened, `${name}: closing must unmount triage`);
+          if (triageRequests.length !== writesBefore) throw new Error(`${name}: no-op close sent a mutation request`);
+          if (noOpMutations.length) throw new Error(`${name}: no-op close sent API mutation(s): ${noOpMutations.join(", ")}`);
+          await assertAttribute(triageTrigger, "title", "Triage — accept the risk or schedule a patch", `${name}: closing must retain new-triage shield`);
+          await assertVisible(page.getByTestId("system-cve-triage-state").filter({ hasText: "Outstanding" }), `${name}: no disposition may appear`);
+        };
+        await noOpClose("X", (opened) => opened.getByRole("button", { name: "Close triage editor" }).click());
+        await noOpClose("Cancel", (opened) => opened.getByRole("button", { name: "Cancel" }).click());
+        await noOpClose("Backdrop", () => page.getByRole("button", { name: "Close Triage CVE-2025-1111 linuxPackages_6_10.kernel" }).click({ position: { x: 10, y: 10 } }));
         let dialog = await openTriage();
         await assertAttribute(dialog.getByTestId("cve-triage-scope-host"), "aria-checked", "true", "System Detail triage must default to host scope");
         await assertVisible(dialog.getByText("warning-system-01 only", { exact: true }).first(), "Expected hostname-only default scope copy");
         await assertVisible(dialog.getByText("Decide for this host alone, or for every host in its environment."), "Expected host/environment header copy");
         await assertVisible(dialog.getByText("Production", { exact: true }).first(), "Expected server-derived environment");
-        await assertVisible(dialog.getByText("Accepted and scheduled states do not prove remediation or verification."), "Expected evidence-boundary copy");
+        await assertVisible(dialog.getByText("carried over automatically"), "Approved vulnerability context must be present");
+        await assertVisible(dialog.getByText("Nothing dispositioned yet"), "No disposition must use the approved footer summary");
         await assertVisible(dialog.getByText("available — version pending", { exact: true }), "Dialog must preserve unavailable exact-version truth");
         await page.keyboard.press("Escape");
         await assertHidden(dialog, "Escape should close System Detail triage");
+        if (triageRequests.length !== 0) throw new Error("Escape no-op close sent a mutation request");
+        if (noOpMutations.length) throw new Error(`Escape no-op close sent API mutation(s): ${noOpMutations.join(", ")}`);
+        page.off("request", recordNoOpMutation);
+        await assertAttribute(triageTrigger, "title", "Triage — accept the risk or schedule a patch", "Escape must retain the new-triage shield");
         if (!(await triageTrigger.evaluate((element) => element === document.activeElement))) {
           throw new Error("Closing System Detail triage did not restore trigger focus");
         }
@@ -10179,10 +10210,14 @@ const steps = [
         dialog = await openTriage();
         await dialog.getByRole("button", { name: "Schedule patch" }).click();
         const generatedPlan = await dialog.getByTestId("cve-poam-plan").inputValue();
-        if (!/linuxPackages_6_10\.kernel/.test(generatedPlan) || !/exact follow-up scan/i.test(generatedPlan) || /the patched release|6\.10\.14/i.test(generatedPlan)) {
-          throw new Error(`Generated remediation plan was not truthfully generic: ${generatedPlan}`);
+        if (generatedPlan !== "") {
+          throw new Error(`Approved optional remediation plan must start blank: ${generatedPlan}`);
         }
+        await assertVisible(dialog.getByTestId("cve-triage-poam"), "Scheduled POA&M must use the blue design panel");
+        await assertVisible(dialog.getByText("creates 1 POA&M"), "Scheduled footer must summarize the mutation");
         await dialog.getByRole("button", { name: "Accept risk" }).click();
+        await assertVisible(dialog.getByTestId("cve-triage-waiver"), "Accepted risk must use the purple waiver panel");
+        await assertVisible(dialog.getByText("1 waiver · 1 host"), "Accepted footer must summarize the mutation");
         await dialog.getByTestId("cve-accept-justification").fill("Host draft must not cross scopes.");
         await dialog.getByTestId("cve-triage-scope-environment").click();
         await assertAttribute(dialog.getByTestId("cve-triage-scope-environment"), "aria-checked", "true", "Environment scope switch should be explicit");
@@ -10206,6 +10241,7 @@ const steps = [
         await dialog.getByTestId("cve-triage-submit").click();
         await assertHidden(dialog, "Expected accepted triage submission to close the dialog");
         await assertTriageChip("Accepted", "Risk accepted for this host (warning-system-01)");
+        await assertAttribute(triageTrigger, "title", "Edit triage", "Saved accepted risk must show the file action");
         if (triageRequests[0].scope !== "host" || triageRequests[0].canonical_package_name !== "linuxPackages_6_10.kernel" || triageRequests[0].review_date !== "2026-10-01") {
           throw new Error(`Accepted triage request lost package or review date: ${JSON.stringify(triageRequests[0])}`);
         }
@@ -10221,10 +10257,10 @@ const steps = [
             url.searchParams.get("poam") === poamId,
         );
         const scheduledRequest = triageRequests[1];
-        if (scheduledRequest.scope !== "host" || scheduledRequest.action !== "schedule_patch" || scheduledRequest.poam.assignee.kind !== "oidc_group" || scheduledRequest.poam.assignee.group_name !== "platform-operators" || scheduledRequest.poam.risk !== "medium" || scheduledRequest.poam.default_milestones !== true) {
+        if (scheduledRequest.scope !== "host" || scheduledRequest.action !== "schedule_patch" || scheduledRequest.poam.assignee.kind !== "oidc_group" || scheduledRequest.poam.assignee.group_name !== "platform-operators" || scheduledRequest.poam.risk !== "high" || scheduledRequest.poam.default_milestones !== true) {
           throw new Error(`Scheduled triage request changed owner, risk, or milestone intent: ${JSON.stringify(scheduledRequest)}`);
         }
-        if (scheduledRequest.poam.title !== poam.title || scheduledRequest.poam.target_date !== poam.target_date || scheduledRequest.poam.plan !== poam.plan) {
+        if (scheduledRequest.poam.title !== "CVE-2025-1111 - patch linuxPackages_6_10.kernel on warning-system-01" || scheduledRequest.poam.target_date !== poam.target_date || scheduledRequest.poam.plan !== poam.plan) {
           throw new Error(`Scheduled triage request changed due date or plan: ${JSON.stringify(scheduledRequest.poam)}`);
         }
 
@@ -10252,7 +10288,7 @@ const steps = [
         dialog = await openTriage();
         await dialog.getByTestId("cve-triage-scope-environment").click();
         await dialog.getByRole("button", { name: "Schedule patch" }).click();
-        await fillScheduledPoam(dialog, "Patch Production kernels");
+        await fillScheduledPoam(dialog);
         await dialog.getByTestId("cve-triage-submit").click();
         await page.waitForURL((url) => url.searchParams.get("poam") === environmentPoamId);
         await page.goto(`${baseUrl}/systems/${systemId}`, { timeout: LOAD_TIMEOUT });
@@ -10265,7 +10301,7 @@ const steps = [
         dialog = await openTriage();
         await dialog.getByTestId("cve-triage-scope-environment").click();
         await assertVisible(dialog.getByText("reuse the existing compatible POA&M"), "Expected compatible environment POA&M reuse outcome");
-        await assertDisabled(dialog.getByTestId("cve-poam-risk"), "Reused POA&M risk must remain server-authored");
+        await assertCount(dialog.getByTestId("cve-poam-risk"), 0, "Reused POA&M risk must remain server-authored without a triage control");
         await captureWorkflowViewportState(page, "12h-system-detail-cves-grouped-justification", "scheduled-triage-modal", "narrowDesktop");
         await dialog.getByTestId("cve-triage-submit").click();
         await page.waitForURL(
@@ -13573,20 +13609,14 @@ const steps = [
       );
       if (triageBodies.length !== 0) throw new Error("Review-date validation sent a triage request");
       await reviewDate.fill("");
-      if (await triageDialog.getByTestId("cve-poam-title").inputValue() !== "Existing OpenSSL fleet remediation") {
-        throw new Error("Scheduled POA&M title did not initialize from fleet metadata");
-      }
+      await assertCount(triageDialog.getByTestId("cve-poam-title"), 0, "CVE triage must not expose an editable POA&M title");
       if (await triageDialog.getByTestId("cve-poam-target").inputValue() !== "2026-10-15") {
         throw new Error("Scheduled POA&M target date did not initialize from fleet metadata");
       }
       if (await triageDialog.getByTestId("cve-poam-plan").inputValue() !== "Promote the fixed OpenSSL package and verify exact scan absence.") {
         throw new Error("Scheduled POA&M plan did not initialize from fleet metadata");
       }
-      const riskInput = triageDialog.getByTestId("cve-poam-risk");
-      if (await riskInput.inputValue() !== "high") {
-        throw new Error("Scheduled POA&M risk did not initialize from compatible fleet metadata");
-      }
-      await assertDisabled(riskInput, "Compatible POA&M reuse must preserve the server-authored risk");
+      await assertCount(triageDialog.getByTestId("cve-poam-risk"), 0, "Compatible reuse must not expose an editable risk control");
       const assignee = triageDialog.getByTestId("cve-poam-assignee");
       if (await assignee.inputValue() !== "group:platform-operators") {
         throw new Error("Typed scheduled POA&M assignee did not initialize from fleet metadata");
@@ -13616,6 +13646,9 @@ const steps = [
       );
       if (triageBodies.length !== 1) throw new Error(`Expected one conflicted triage POST, got ${triageBodies.length}`);
       const firstTriage = triageBodies[0];
+      if (firstTriage.poam.title !== "Existing OpenSSL fleet remediation" || firstTriage.poam.risk !== "high") {
+        throw new Error(`Compatible POA&M reuse did not preserve server-authored title and risk: ${JSON.stringify(firstTriage.poam)}`);
+      }
       if (JSON.stringify(firstTriage).match(/system_id|hostname|actor|evidence/i)) {
         throw new Error(`Fleet triage body leaked server-owned authority: ${JSON.stringify(firstTriage)}`);
       }
@@ -20071,6 +20104,22 @@ security.audit.enable = true;</fixtext>
         }
       const detail = page.getByTestId("poam-detail");
       await detail.waitFor({ state: "visible", timeout: 15000 });
+      const hierarchy = await detail.locator(".poam-tray-section > header h3").allTextContents();
+      const position = (prefix) => hierarchy.findIndex((heading) => heading.trim().startsWith(prefix));
+      for (const [earlier, later] of [
+        ["Remediation status", "Linked findings"],
+        ["Linked findings", "Remediation plan"],
+        ["Remediation plan", "Milestones"],
+        ["Milestones", "Activity"],
+        ["Activity", "POA&M metadata"],
+        ["POA&M metadata", "Baseline assignment references"],
+      ]) {
+        if (position(earlier) < 0 || position(later) <= position(earlier)) {
+          throw new Error(`POA&M tray lost its primary design hierarchy: ${JSON.stringify(hierarchy)}`);
+        }
+      }
+      await assertVisible(detail.getByRole("button", { name: "Save metadata", exact: true }), "Metadata remains editable through explicit save");
+      await assertVisible(detail.getByRole("button", { name: "Save plan", exact: true }), "Remediation text retains its independent save");
       await assertVisible(detail.getByText(created.human_id, { exact: true }), "Expected returned human POA&M ID");
       await assertVisible(detail.getByText("Open", { exact: true }).first(), "Expected returned Open status");
       await assertVisible(
@@ -20088,6 +20137,21 @@ security.audit.enable = true;</fixtext>
         throw new Error(`Expected returned due date, got ${JSON.stringify(await returnedDueDate.textContent())}`);
       }
       if (!page.url().includes(`poam=${created.id}`)) throw new Error(`POA&M detail route omitted exact ID: ${page.url()}`);
+      const savedDetailUrl = page.url();
+      let unsavedPatches = 0;
+      const countUnsavedPatch = (request) => {
+        if (request.method() === "PATCH" && new URL(request.url()).pathname === `/api/v1/poams/${created.id}`) unsavedPatches += 1;
+      };
+      page.on("request", countUnsavedPatch);
+      await detail.getByLabel("Title", { exact: true }).fill("Unsaved title must not persist");
+      await detail.getByPlaceholder("What will change, where, and how it will be verified").fill("Unsaved plan must not persist");
+      await detail.getByRole("button", { name: "Close", exact: true }).click();
+      await page.goto(savedDetailUrl, { waitUntil: "domcontentloaded", timeout: LOAD_TIMEOUT });
+      await detail.waitFor({ state: "visible", timeout: 15000 });
+      page.off("request", countUnsavedPatch);
+      if (unsavedPatches !== 0) throw new Error(`Closing an unsaved POA&M draft sent ${unsavedPatches} metadata writes`);
+      await assertValue(detail.getByLabel("Title", { exact: true }), created.title, "Unsaved metadata must not claim persistence");
+      await assertValue(detail.getByPlaceholder("What will change, where, and how it will be verified"), created.plan, "Unsaved remediation plan must not claim persistence");
 
       const exactEvidence = detail.getByTestId("poam-linked-finding").filter({ hasText: system.hostname });
       await exactEvidence.getByRole("button", { name: "Evidence", exact: true }).click();
@@ -22861,7 +22925,7 @@ function runStaticHarnessContracts() {
   );
   assertContract(
     scenario16.includes('getByTestId("cve-poam-risk")') &&
-      scenario16.includes("Compatible POA&M reuse must preserve the server-authored risk"),
+      scenario16.includes("Compatible POA&M reuse did not preserve server-authored title and risk"),
     "16-cves must retain shared risk and compatible POA&M reuse coverage",
   );
   for (const contract of [

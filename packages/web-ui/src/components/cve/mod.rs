@@ -18,6 +18,7 @@ use crate::api::models::{
     SystemCveEvidenceRepresentation, SystemCveInventorySelection, SystemCveRunningTarget,
 };
 use crate::components::cve::triage::{SystemCveTriageDialog, fixed_version_label};
+use crate::components::icon::{Icon, IconName};
 #[cfg(test)]
 use crate::theme;
 use crate::views::poam_api::{
@@ -278,14 +279,70 @@ pub fn CvesTab(
     // example does not include a filter/search bar; filtering remains available on the
     // dedicated CVE surface, while this tab focuses on the per-system package rollup.
     let filtered_groups = group_vulnerabilities_by_package(&vulnerabilities);
+    let exact_remediation_allowed =
+        inventory_allows_exact_remediation(inventory_authority, allow_mutations);
     let first_package = filtered_groups
         .first()
         .map(|group| group.canonical_package_name.clone());
+    let first_package_rows = filtered_groups
+        .first()
+        .map(|group| group.cves.clone())
+        .unwrap_or_default();
     use_effect(move || {
         if !default_expansion_applied() {
             if let Some(package) = first_package.clone() {
                 expanded_cve.set(Some(package));
                 default_expansion_applied.set(true);
+                // A successful mutation refresh discards the old detail cache.
+                // Hydrate the automatically expanded package as well, so a
+                // persisted decision never looks like an unsaved new action
+                // merely because no one manually toggled the package.
+                if exact_remediation_allowed {
+                    let generation = (*triage_hydration_generation.peek()).wrapping_add(1);
+                    triage_hydration_generation.set(generation);
+                    for target in first_package_rows.clone() {
+                        if system_triage_row_state(inventory_authority, &target, system_id, None)
+                            != SystemTriageRowState::Review
+                            || triage_details.read().contains_key(&target.stable_identity)
+                        {
+                            continue;
+                        }
+                        let identity = target.stable_identity.clone();
+                        let cve_id = target.cve_id.clone();
+                        let package = identity.canonical_package_name.clone();
+                        triage_details
+                            .write()
+                            .insert(identity.clone(), SystemTriageCacheEntry::Loading);
+                        triage_hydration_tokens
+                            .write()
+                            .insert(identity.clone(), generation);
+                        spawn(async move {
+                            let result = poam_api::fetch_system_cve_triage_detail(
+                                system_id, &cve_id, &package,
+                            )
+                            .await;
+                            if triage_hydration_tokens.peek().get(&identity) != Some(&generation) {
+                                return;
+                            }
+                            triage_hydration_tokens.write().remove(&identity);
+                            let entry = match result {
+                                Ok(detail)
+                                    if system_triage_detail_matches(&identity, system_id, &detail) =>
+                                {
+                                    SystemTriageCacheEntry::Loaded(detail)
+                                }
+                                Ok(_) => SystemTriageCacheEntry::Unavailable(
+                                    "The server returned triage for a different CVE, package, or system scope."
+                                        .to_string(),
+                                ),
+                                Err(error) => SystemTriageCacheEntry::Unavailable(format!(
+                                    "Authoritative triage is unavailable: {error}"
+                                )),
+                            };
+                            triage_details.write().insert(identity, entry);
+                        });
+                    }
+                }
             }
         }
     });
@@ -294,8 +351,6 @@ pub fn CvesTab(
     let shown_package_suffix = if shown_package_count == 1 { "" } else { "s" };
     let shown_finding_count = vulnerabilities.len() as i64;
     let total_findings = inventory_metadata.total_findings;
-    let exact_remediation_allowed =
-        inventory_allows_exact_remediation(inventory_authority, allow_mutations);
     let status_is_error = save_status
         .read()
         .as_ref()
@@ -607,7 +662,8 @@ pub fn CvesTab(
                                                                       cve,
                                                                       system_id,
                                                                       None,
-                                                                  ) == SystemTriageRowState::Review;
+                                                                   ) == SystemTriageRowState::Review;
+                                                            let (action_icon, action_label) = system_triage_action(cached_detail);
 
                                                             rsx! {
                                                                 tr {
@@ -636,11 +692,12 @@ pub fn CvesTab(
                                                                          div { class: "row-actions",
                                                                              if triage_actionable {
                                                                                  button {
-                                                                                     class: "btn btn-ghost xs focus-ring",
-                                                                                     "data-testid": "system-cve-triage-open",
+                                                                                      class: "btn-icon focus-ring",
+                                                                                      "data-testid": "system-cve-triage-open",
+                                                                                      aria_label: "{action_label}",
                                                                                      aria_disabled: row_opening,
                                                                                      aria_busy: row_opening,
-                                                                                     title: "Load authoritative environment triage",
+                                                                                      title: "{action_label}",
                                                                                       onclick: {
                                                                                           let target = cve.clone();
                                                                                           let start_key = target_key_for_dialog.clone();
@@ -692,7 +749,7 @@ pub fn CvesTab(
                                                                                              });
                                                                                          }
                                                                                      },
-                                                                                     if cached_detail.is_some() { "Edit triage" } else { "Triage" }
+                                                                                      Icon { name: action_icon, size: 14 }
                                                                                  }
                                                                              }
                                                                              a {
@@ -1201,6 +1258,20 @@ fn system_triage_detail_matches(
     detail.canonical_cve_id == identity.canonical_cve_id
         && detail.canonical_package_name == identity.canonical_package_name
         && detail.scope.selected_system_id == system_id
+}
+
+fn system_triage_action(detail: Option<&SystemCveTriageDetail>) -> (IconName, &'static str) {
+    // A cached authoritative GET only hydrates the row. The effective
+    // disposition, including an inherited environment decision, is the
+    // server-owned evidence of a persisted triage decision.
+    if detail.is_some_and(|detail| detail.effective_disposition.is_some()) {
+        (IconName::File, "Edit triage")
+    } else {
+        (
+            IconName::Shield,
+            "Triage — accept the risk or schedule a patch",
+        )
+    }
 }
 
 fn system_triage_row_state(
@@ -1959,6 +2030,17 @@ mod tests {
             }
         }))
         .unwrap();
+        let mut outstanding = accepted.clone();
+        outstanding.host_disposition = None;
+        outstanding.effective_disposition = None;
+        outstanding.disposition = None;
+        outstanding.effective_source = poam_api::SystemCveEffectiveDispositionSource::None;
+        assert_eq!(system_triage_action(None).0, IconName::Shield);
+        assert_eq!(system_triage_action(Some(&outstanding)).0, IconName::Shield);
+        assert_eq!(
+            system_triage_action(Some(&accepted)),
+            (IconName::File, "Edit triage")
+        );
         assert_eq!(
             system_triage_row_state(
                 Some(SystemCveInventoryAuthority::Exact),
@@ -1982,6 +2064,7 @@ mod tests {
         inherited.host_disposition = None;
         inherited.environment_disposition = inherited.effective_disposition.clone();
         inherited.effective_source = poam_api::SystemCveEffectiveDispositionSource::Environment;
+        assert_eq!(system_triage_action(Some(&inherited)).0, IconName::File);
         assert_eq!(
             system_triage_row_state(
                 Some(SystemCveInventoryAuthority::Exact),

@@ -22,7 +22,6 @@ use crate::api::models::{
 };
 use crate::components::cve::triage::{
     CveTriageDraft, EnvironmentTriageChoice, catalog_contains_assignee, fixed_version_label,
-    parse_risk, risk_value,
 };
 use crate::components::dialog_focus::{
     DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel, DialogInitialFocus,
@@ -2155,27 +2154,25 @@ fn FleetCveTriageDialog(
                             div { class: "sd-callout sd-callout-info", "The POA&M owns remediation for scheduled exact subjects. Verification and closure require a later exact scan that no longer reports this CVE and package." }
                         }
                         if let Some(message) = &draft.read().preservation_error { div { class: "sd-callout sd-callout-warn", role: "alert", "{message}" } }
-                        label { class: "field", span { "Title" } input { value: "{draft.read().title}", "data-testid": "cve-poam-title", readonly: existing_poam_reuse, oninput: move |event| draft.write().title = event.value() } }
                         div { class: "cve-triage-poam-grid",
-                            label { class: "field", span { "Target completion" } input { r#type: "date", value: "{draft.read().target_date}", "data-testid": "cve-poam-target", readonly: existing_poam_reuse, oninput: move |event| draft.write().target_date = event.value() } }
-                            label { class: "field", span { "Risk" } select { value: "{risk_value(draft.read().risk)}", "data-testid": "cve-poam-risk", disabled: existing_poam_reuse, onchange: move |event| draft.write().risk = parse_risk(&event.value()), option { value: "high", "CAT I - High" } option { value: "medium", "CAT II - Medium" } option { value: "low", "CAT III - Low" } } }
-                        }
-                        label { class: "field", span { "Remediation plan" } textarea { value: "{draft.read().plan}", "data-testid": "cve-poam-plan", readonly: existing_poam_reuse, oninput: move |event| draft.write().plan = event.value() } }
-                        label { class: "field", span { "Assignee · required" }
-                            select { value: "{draft.read().assignee}", "data-testid": "cve-poam-assignee", disabled: existing_poam_reuse || catalog.read().is_none(), onchange: move |event| draft.write().assignee = event.value(),
-                                option { value: "", disabled: true, "Select a user or group" }
-                                if let Some(assignee) = hydrated_assignee.as_ref().filter(|_| !hydrated_assignee_in_catalog) { option { value: "{assignee.value}", "{assignee.label} (current)" } }
-                                if let Some(Ok(catalog)) = &*catalog.read() {
-                                    optgroup { label: "People", for person in &catalog.people { option { value: "user:{person.user_id}", "{person.label}" } } }
-                                    optgroup { label: "Groups", for group in &catalog.groups { option { value: "group:{group.group_name}", "{group.group_name}" } } }
+                            label { class: "field", span { "Owner" }
+                                select { value: "{draft.read().assignee}", "data-testid": "cve-poam-assignee", disabled: existing_poam_reuse || catalog.read().is_none(), onchange: move |event| draft.write().assignee = event.value(),
+                                    option { value: "", disabled: true, "Select a user or group" }
+                                    if let Some(assignee) = hydrated_assignee.as_ref().filter(|_| !hydrated_assignee_in_catalog) { option { value: "{assignee.value}", "{assignee.label} (current)" } }
+                                    if let Some(Ok(catalog)) = &*catalog.read() {
+                                        optgroup { label: "People", for person in &catalog.people { option { value: "user:{person.user_id}", "{person.label}" } } }
+                                        optgroup { label: "Groups", for group in &catalog.groups { option { value: "group:{group.group_name}", "{group.group_name}" } } }
+                                    }
                                 }
+                                if let Some(Err(message)) = &*catalog.read() { small { role: "alert", "Assignees unavailable: {message}" } }
                             }
-                            if let Some(Err(message)) = &*catalog.read() { small { role: "alert", "Assignees unavailable: {message}" } }
+                            label { class: "field", span { "Target completion" } input { r#type: "date", value: "{draft.read().target_date}", "data-testid": "cve-poam-target", readonly: existing_poam_reuse, oninput: move |event| draft.write().target_date = event.value() } }
                         }
+                        label { class: "field", span { "Remediation plan · optional now, expected before review" } textarea { value: "{draft.read().plan}", "data-testid": "cve-poam-plan", readonly: existing_poam_reuse, oninput: move |event| draft.write().plan = event.value() } }
                         if existing_poam_reuse {
                             small { "Existing milestones remain unchanged." }
                         } else {
-                            label { class: "poam-check", input { r#type: "checkbox", checked: draft.read().default_milestones, onchange: move |event| draft.write().default_milestones = event.checked() } span { "Add the default vulnerability remediation milestones" } }
+                            label { class: "poam-check", input { r#type: "checkbox", checked: draft.read().default_milestones, onchange: move |event| draft.write().default_milestones = event.checked() } span { "Start from standard patch milestones " small { "— identify version, staging, rollout, verify scan. Editable after creation." } } }
                         }
                     }
                 }
@@ -2240,6 +2237,7 @@ mod tests {
                 ),
             ],
             title: "Patch openssl fleet".to_string(),
+            default_plan: "Upgrade openssl and verify with an exact follow-up scan.".to_string(),
             target_date: "2026-10-15".to_string(),
             plan: "Promote the fixed package through environments.".to_string(),
             assignee: "group:platform-operators".to_string(),
@@ -2460,13 +2458,13 @@ mod tests {
     }
 
     #[test]
-    fn triage_validation_rejects_incomplete_poam_and_invalid_assignee_shape() {
+    fn triage_generates_optional_plan_but_rejects_invalid_assignee_shape() {
         let mut draft = triage_draft();
         draft.environments[0].justification = "Internal-only service.".to_string();
         draft.plan.clear();
         assert_eq!(
-            draft.fleet_request("openssl").unwrap_err(),
-            "Enter a remediation plan for scheduled patching."
+            draft.fleet_request("openssl").unwrap().poam.unwrap().plan,
+            draft.default_plan
         );
 
         draft.plan = "Promote and verify the fixed package.".to_string();

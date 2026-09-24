@@ -59,6 +59,8 @@ pub(crate) struct HydratedAssigneeOption {
 pub(crate) struct CveTriageDraft {
     pub(crate) environments: Vec<EnvironmentTriageDraft>,
     pub(crate) title: String,
+    /// Supplies an API-valid plan when the approved optional plan field is blank.
+    pub(crate) default_plan: String,
     pub(crate) target_date: String,
     pub(crate) plan: String,
     pub(crate) assignee: String,
@@ -142,7 +144,7 @@ impl CveTriageDraft {
                 detail.canonical_package_name,
                 detail.scope.selected_system_hostname
             );
-            draft.plan = format!(
+            draft.default_plan = format!(
                 "Upgrade {} to {} on {} and verify with an exact follow-up scan.",
                 detail.canonical_package_name, fix_target, detail.scope.selected_system_hostname
             );
@@ -189,7 +191,16 @@ impl CveTriageDraft {
         let mut draft = Self {
             environments: environment_drafts,
             title: format!("{cve_id} - patch {package}"),
-            target_date: String::new(),
+            default_plan: format!(
+                "Upgrade {package} to a patched release and verify with an exact follow-up scan."
+            ),
+            target_date: (chrono::Utc::now().date_naive()
+                + chrono::Duration::days(match severity.to_ascii_lowercase().as_str() {
+                    "critical" => 14,
+                    "high" => 30,
+                    _ => 56,
+                }))
+            .to_string(),
             plan: String::new(),
             assignee: String::new(),
             hydrated_assignee: None,
@@ -309,16 +320,23 @@ impl CveTriageDraft {
             return Err(message.clone());
         }
         if self.title.trim().is_empty() {
-            return Err("Enter a POA&M title for scheduled patching.".to_string());
+            return Err(
+                "The generated POA&M title is unavailable for scheduled patching.".to_string(),
+            );
         }
-        if self.plan.trim().is_empty() {
-            return Err("Enter a remediation plan for scheduled patching.".to_string());
-        }
+        // The triage design permits an empty plan at creation. The API still
+        // requires one, so submit the generated plan without implying the user
+        // authored or saved the optional text field.
+        let plan = if self.plan.trim().is_empty() {
+            self.default_plan.trim()
+        } else {
+            self.plan.trim()
+        };
         let target_date = chrono::NaiveDate::parse_from_str(self.target_date.trim(), "%Y-%m-%d")
             .map_err(|_| "Enter a valid POA&M target date.".to_string())?;
         Ok(Some(poam_api::FleetCvePoamRequest {
             title: self.title.trim().to_string(),
-            plan: self.plan.trim().to_string(),
+            plan: plan.to_string(),
             assignee: parse_assignee(&self.assignee)?,
             target_date,
             risk: self.risk,
@@ -586,6 +604,12 @@ pub(crate) fn SystemCveTriageDialog(
         }
     };
     let choice = current.as_ref().map(|item| item.choice);
+    let choice_value = choice.map(EnvironmentTriageChoice::value).unwrap_or("open");
+    let decision_name = if host_scoped {
+        &detail.scope.selected_system_hostname
+    } else {
+        &detail.scope.environment_name
+    };
     let can_submit = draft
         .read()
         .can_submit_system(&detail.canonical_package_name, scope())
@@ -597,6 +621,28 @@ pub(crate) fn SystemCveTriageDialog(
     );
     let submit_detail = detail.clone();
     let blocked_for_submit = submission_blocked.clone();
+    let outcome = match choice {
+        Some(EnvironmentTriageChoice::Accepted) => {
+            if host_scoped {
+                "1 waiver · 1 host".to_string()
+            } else {
+                format!("1 waiver · all hosts in {}", detail.scope.environment_name)
+            }
+        }
+        Some(EnvironmentTriageChoice::Scheduled) => {
+            if existing_poam_reuse {
+                "reuses 1 POA&M".to_string()
+            } else {
+                "creates 1 POA&M".to_string()
+            }
+        }
+        _ if direct_disposition_exists && host_scoped => format!(
+            "{} reverts to the {} decision",
+            detail.scope.selected_system_hostname, detail.scope.environment_name
+        ),
+        _ if direct_disposition_exists => "Leaves current exact hosts outstanding".to_string(),
+        _ => "Nothing dispositioned yet".to_string(),
+    };
     let submit = move |_: MouseEvent| {
         if let Some(message) = blocked_for_submit.as_ref() {
             error.set(Some(message.clone()));
@@ -649,21 +695,18 @@ pub(crate) fn SystemCveTriageDialog(
                 button { class: "btn-icon focus-ring", aria_label: "Close triage editor", autofocus: true, disabled: pending(), onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } }
             }
             div { class: "modal-body cve-triage-body",
-                p { "The server derives both scopes from current exact evidence. Accepted and scheduled states do not prove remediation or verification. Closure requires later exact evidence." }
-                div { class: "cve-triage-context", "data-testid": "cve-triage-context",
-                    header { Icon { name: IconName::Shield, size: 12 } " Vulnerability" span { "Scope is server-owned" } }
-                    div { class: "cve-triage-context-grid",
+                div { class: "poam-ctx cve-triage-context", "data-testid": "cve-triage-context",
+                    header { class: "poam-ctx-head", Icon { name: IconName::Shield, size: 12 } " Vulnerability" span { "carried over automatically" } }
+                    div { class: "poam-ctx-grid cve-triage-context-grid",
                         div { span { "CVE" } strong { class: "mono", "{detail.canonical_cve_id}" } }
                         div { span { "Package" } strong { class: "mono", "{detail.canonical_package_name}" } }
                         div { span { "CVSS" } strong { "{cvss} · {severity}" } }
-                        div { span { "Host" } strong { "{detail.scope.selected_system_hostname}" } }
-                        div { span { "Environment" } strong { "{detail.scope.environment_name}" } }
                         div { span { "Affected hosts" } strong { if host_scoped { "1" } else { "{detail.scope.exact_affected_system_count}" } } }
                         div { span { "Fix" } strong { class: "mono", "{fix}" } }
                     }
                 }
                 if let Some(message) = error() { div { class: "sd-callout sd-callout-danger", role: "alert", "{message}" } }
-                div { class: "field",
+                div { class: "field cve-triage-scope",
                     span { "Applies to" }
                     div { class: "seg", role: "radiogroup", aria_label: "Applies to",
                         button {
@@ -717,7 +760,7 @@ pub(crate) fn SystemCveTriageDialog(
                             "All of {detail.scope.environment_name}"
                         }
                     }
-                    small {
+                    small { class: "help",
                         if host_scoped {
                             "A host-specific decision overrides the environment default for this machine only."
                             if inherited_help {
@@ -732,47 +775,60 @@ pub(crate) fn SystemCveTriageDialog(
                         }
                     }
                 }
-                fieldset { class: "cve-triage-env", "data-testid": "cve-triage-environment",
-                    legend { if host_scoped { "{detail.scope.selected_system_hostname} · host override" } else { "{detail.scope.environment_name} · {detail.scope.exact_affected_system_count} exact host(s)" } }
-                    div { class: "seg", role: "group", aria_label: if host_scoped { "Disposition for {detail.scope.selected_system_hostname}" } else { "Disposition for {detail.scope.environment_name}" },
-                        for (choice, label) in [(EnvironmentTriageChoice::Open, "Leave outstanding"), (EnvironmentTriageChoice::Accepted, "Accept risk"), (EnvironmentTriageChoice::Scheduled, "Schedule patch")] {
-                            button { r#type: "button", class: if current.as_ref().map(|item| item.choice) == Some(choice) { "active" } else { "" }, aria_pressed: if current.as_ref().map(|item| item.choice) == Some(choice) { "true" } else { "false" }, "data-action": "{choice.value()}", onclick: move |_| draft.write().set_choice(environment_id, choice), if host_scoped && choice == EnvironmentTriageChoice::Open { "Use environment default" } else { "{label}" } }
+                div { class: "field cve-triage-disposition", "data-testid": "cve-triage-environment",
+                    span { if host_scoped { "Disposition" } else { "Disposition by environment" } }
+                    div { class: "cve-triage-decision-row", "data-choice": "{choice_value}",
+                        span { class: "cve-triage-decision-identity",
+                            span { class: "cve-triage-decision-dot" }
+                            strong { "{decision_name}" }
+                            small { if host_scoped { "{detail.scope.environment_name}" } else { "{detail.scope.exact_affected_system_count} hosts" } }
+                        }
+                        div { class: "seg", role: "group", aria_label: if host_scoped { "Disposition for {detail.scope.selected_system_hostname}" } else { "Disposition for {detail.scope.environment_name}" },
+                            for (choice, label) in [(EnvironmentTriageChoice::Open, "Leave open"), (EnvironmentTriageChoice::Accepted, "Accept risk"), (EnvironmentTriageChoice::Scheduled, "Schedule patch")] {
+                                button { r#type: "button", class: if current.as_ref().map(|item| item.choice) == Some(choice) { "active" } else { "" }, aria_pressed: if current.as_ref().map(|item| item.choice) == Some(choice) { "true" } else { "false" }, "data-action": "{choice.value()}", onclick: move |_| draft.write().set_choice(environment_id, choice), if host_scoped && choice == EnvironmentTriageChoice::Open && direct_disposition_exists { "Use environment default" } else { "{label}" } }
+                            }
                         }
                     }
-                    if current.as_ref().map(|item| item.choice) == Some(EnvironmentTriageChoice::Accepted) {
-                        label { class: "field", span { "Justification · required" } textarea { value: "{current.as_ref().map(|item| item.justification.as_str()).unwrap_or_default()}", "data-testid": "cve-accept-justification", oninput: move |event| if let Some(item) = draft.write().environments.first_mut() { item.justification = event.value(); } } }
-                        label { class: "field", span { "Review date · optional" } input { r#type: "date", value: "{current.as_ref().map(|item| item.review_date.as_str()).unwrap_or_default()}", "data-testid": "cve-accept-review-date", oninput: move |event| if let Some(item) = draft.write().environments.first_mut() { item.review_date = event.value(); } } }
+                }
+                if current.as_ref().map(|item| item.choice) == Some(EnvironmentTriageChoice::Accepted) {
+                    div { class: "cve-triage-panel cve-triage-waiver", "data-testid": "cve-triage-waiver",
+                        div { class: "cve-triage-panel-title", Icon { name: IconName::Check, size: 12 } " Waiver — " if host_scoped { "{detail.scope.selected_system_hostname} · 1 host" } else { "{detail.scope.environment_name} · all hosts" } }
+                        label { class: "field", span { "Justification · required" } textarea { class: "input focus-ring", rows: "2", placeholder: "Why is this acceptable / what is the compensating control?", value: "{current.as_ref().map(|item| item.justification.as_str()).unwrap_or_default()}", "data-testid": "cve-accept-justification", oninput: move |event| if let Some(item) = draft.write().environments.first_mut() { item.justification = event.value(); } } }
+                        div { class: "cve-triage-quick-fill",
+                            for justification in ["Mitigated by network segmentation; service is internal-only.", "Compensating control via WAF rule.", "Vulnerable code path not reachable in this deployment.", "False positive — upstream backport already applied."] {
+                                button { r#type: "button", class: "focus-ring", title: "{justification}", onclick: move |_| if let Some(item) = draft.write().environments.first_mut() { item.justification = justification.to_string(); }, "{justification}" }
+                            }
+                        }
+                        if current.as_ref().is_some_and(|item| !item.justification.is_empty() && item.justification.trim().len() < 10) { small { class: "help", "Add a bit more detail (min 10 chars)." } }
+                        label { class: "field cve-triage-review-date", span { "Review date · optional" } input { class: "input focus-ring", r#type: "date", value: "{current.as_ref().map(|item| item.review_date.as_str()).unwrap_or_default()}", "data-testid": "cve-accept-review-date", oninput: move |event| if let Some(item) = draft.write().environments.first_mut() { item.review_date = event.value(); } } small { class: "help", "An acceptance with no review date is what assessors flag most often." } }
                     }
                 }
                 if scheduled {
-                    fieldset { class: "cve-triage-poam", legend { if host_scoped { "POA&M for {detail.scope.selected_system_hostname}" } else { "POA&M for scheduled exact hosts" } }
+                    div { class: "cve-triage-panel cve-triage-poam", "data-testid": "cve-triage-poam",
+                        div { class: "cve-triage-panel-title", Icon { name: IconName::Plus, size: 12 } " POA&M — " if host_scoped { "{detail.scope.selected_system_hostname} · 1 host" } else { "{detail.scope.environment_name} · {detail.scope.exact_affected_system_count} hosts" } }
                         if existing_poam_reuse {
-                            div { class: "sd-callout sd-callout-info", "This schedule will reuse the existing compatible POA&M. Its metadata and milestones are not changed. Verification and closure require a later exact scan that no longer reports this CVE and package." }
-                        } else {
-                            div { class: "sd-callout sd-callout-info", "The POA&M records planned remediation. Verification and closure require a later exact scan that no longer reports this CVE and package." }
+                            small { class: "help", "This schedule will reuse the existing compatible POA&M. Its metadata and milestones are not changed." }
                         }
                         if let Some(message) = &draft.read().preservation_error { div { class: "sd-callout sd-callout-warn", role: "alert", "{message}" } }
-                        label { class: "field", span { "Title" } input { value: "{draft.read().title}", "data-testid": "cve-poam-title", readonly: existing_poam_reuse, oninput: move |event| draft.write().title = event.value() } }
                         div { class: "cve-triage-poam-grid",
-                            label { class: "field", span { "Target completion" } input { r#type: "date", value: "{draft.read().target_date}", "data-testid": "cve-poam-target", readonly: existing_poam_reuse, oninput: move |event| draft.write().target_date = event.value() } }
-                            label { class: "field", span { "Risk" } select { value: "{risk_value(draft.read().risk)}", "data-testid": "cve-poam-risk", disabled: existing_poam_reuse, onchange: move |event| draft.write().risk = parse_risk(&event.value()), option { value: "high", "CAT I - High" } option { value: "medium", "CAT II - Medium" } option { value: "low", "CAT III - Low" } } }
-                        }
-                        label { class: "field", span { "Remediation plan" } textarea { value: "{draft.read().plan}", "data-testid": "cve-poam-plan", readonly: existing_poam_reuse, oninput: move |event| draft.write().plan = event.value() } }
-                        label { class: "field", span { "Assignee · required" }
-                            select { value: "{draft.read().assignee}", "data-testid": "cve-poam-assignee", disabled: existing_poam_reuse || catalog.read().is_none(), onchange: move |event| draft.write().assignee = event.value(),
-                                option { value: "", disabled: true, "Select a user or group" }
-                                if let Some(assignee) = hydrated_assignee.as_ref().filter(|_| !hydrated_assignee_in_catalog) { option { value: "{assignee.value}", "{assignee.label} (current)" } }
-                                if let Some(Ok(catalog)) = &*catalog.read() {
-                                    optgroup { label: "People", for person in &catalog.people { option { value: "user:{person.user_id}", "{person.label}" } } }
-                                    optgroup { label: "Groups", for group in &catalog.groups { option { value: "group:{group.group_name}", "{group.group_name}" } } }
+                            label { class: "field", span { "Owner" }
+                                select { class: "input focus-ring", value: "{draft.read().assignee}", "data-testid": "cve-poam-assignee", disabled: existing_poam_reuse || catalog.read().is_none(), onchange: move |event| draft.write().assignee = event.value(),
+                                    option { value: "", disabled: true, "Select a user or group" }
+                                    if let Some(assignee) = hydrated_assignee.as_ref().filter(|_| !hydrated_assignee_in_catalog) { option { value: "{assignee.value}", "{assignee.label} (current)" } }
+                                    if let Some(Ok(catalog)) = &*catalog.read() {
+                                        optgroup { label: "People", for person in &catalog.people { option { value: "user:{person.user_id}", "{person.label}" } } }
+                                        optgroup { label: "Groups", for group in &catalog.groups { option { value: "group:{group.group_name}", "{group.group_name}" } } }
+                                    }
                                 }
+                                if let Some(Err(message)) = &*catalog.read() { small { role: "alert", "Assignees unavailable: {message}" } }
                             }
-                            if let Some(Err(message)) = &*catalog.read() { small { role: "alert", "Assignees unavailable: {message}" } }
+                            label { class: "field", span { "Target completion" } input { class: "input focus-ring", r#type: "date", value: "{draft.read().target_date}", "data-testid": "cve-poam-target", readonly: existing_poam_reuse, oninput: move |event| draft.write().target_date = event.value() } }
                         }
+                        label { class: "field", span { "Remediation plan · optional now, expected before review" } textarea { class: "input focus-ring", rows: "2", placeholder: "Upgrade {detail.canonical_package_name} to a patched release, roll out, and verify the scan clears", value: "{draft.read().plan}", "data-testid": "cve-poam-plan", readonly: existing_poam_reuse, oninput: move |event| draft.write().plan = event.value() } }
                         if existing_poam_reuse {
-                            small { "Existing milestones remain unchanged." }
+                            small { class: "help", "Existing milestones remain unchanged." }
                         } else {
-                            label { class: "poam-check", input { r#type: "checkbox", checked: draft.read().default_milestones, onchange: move |event| draft.write().default_milestones = event.checked() } span { "Add the default vulnerability remediation milestones" } }
+                            label { class: "poam-check", input { r#type: "checkbox", checked: draft.read().default_milestones, onchange: move |event| draft.write().default_milestones = event.checked() } span { "Start from standard patch milestones " small { "— identify version, staging, rollout, verify scan. Editable after creation." } } }
                         }
                     }
                 }
@@ -780,11 +836,10 @@ pub(crate) fn SystemCveTriageDialog(
             div { class: "modal-foot cve-triage-foot",
                 div { class: "cve-triage-outcome", role: if submission_blocked.is_some() { "status" } else { "note" },
                     if let Some(message) = submission_blocked.as_ref() { "{message}" }
-                    else if host_scoped { "{detail.scope.selected_system_hostname} only" }
-                    else { "All of {detail.scope.environment_name} · {detail.scope.exact_affected_system_count} exact observed host(s)" }
+                    else { "{outcome}" }
                 }
                 button { class: "btn btn-ghost focus-ring", disabled: pending(), onclick: move |_| on_close.call(()), "Cancel" }
-                button { class: "btn btn-primary focus-ring", "data-testid": "cve-triage-submit", disabled: pending() || !can_submit, onclick: submit, if pending() { "Applying..." } else { "Apply triage" } }
+                button { class: "btn btn-primary focus-ring", "data-testid": "cve-triage-submit", disabled: pending() || !can_submit, onclick: submit, Icon { name: IconName::Check, size: 13 } if pending() { "Applying..." } else { "Apply triage" } }
             }
             DialogFocusSentinel { dialog_id: "system-cve-triage-dialog", boundary: DialogFocusBoundary::First }
         }
@@ -795,24 +850,6 @@ fn disposition_label(disposition: &poam_api::CveEnvironmentDisposition) -> &'sta
     match disposition {
         poam_api::CveEnvironmentDisposition::Accepted { .. } => "accepted",
         poam_api::CveEnvironmentDisposition::Scheduled { .. } => "scheduled",
-    }
-}
-
-/// Returns the stable form value for a POA&M risk.
-pub(crate) const fn risk_value(risk: poam_api::PoamRisk) -> &'static str {
-    match risk {
-        poam_api::PoamRisk::High => "high",
-        poam_api::PoamRisk::Medium => "medium",
-        poam_api::PoamRisk::Low => "low",
-    }
-}
-
-/// Parses a risk form value and fails closed to high risk.
-pub(crate) fn parse_risk(value: &str) -> poam_api::PoamRisk {
-    match value {
-        "medium" => poam_api::PoamRisk::Medium,
-        "low" => poam_api::PoamRisk::Low,
-        _ => poam_api::PoamRisk::High,
     }
 }
 
@@ -911,8 +948,8 @@ mod tests {
         assert_eq!(host.environments[0].choice, EnvironmentTriageChoice::Open);
         assert!(host.environments[0].justification.is_empty());
         assert!(host.title.contains("prod-web-01"));
-        assert!(host.plan.contains("a patched release"));
-        assert!(host.plan.contains("prod-web-01"));
+        assert!(host.default_plan.contains("a patched release"));
+        assert!(host.default_plan.contains("prod-web-01"));
 
         host.environments[0].choice = EnvironmentTriageChoice::Scheduled;
         host.plan = "Unsaved host-only plan".to_string();
@@ -942,6 +979,43 @@ mod tests {
             "available — version pending"
         );
         assert_eq!(fixed_version_label(Some("3.4.2"), true), "3.4.2");
+    }
+
+    #[test]
+    fn blank_scheduled_plan_keeps_optional_editor_and_sends_derived_metadata() {
+        let mut draft = CveTriageDraft::from_system_detail(
+            &detail(serde_json::Value::Null, serde_json::Value::Null),
+            "high",
+            SystemCveTriageScopeChoice::Host,
+            None,
+            false,
+        );
+        assert!(draft.plan.is_empty());
+        draft.environments[0].choice = EnvironmentTriageChoice::Scheduled;
+        draft.assignee = "group:platform-operators".to_string();
+        let request = draft
+            .system_request("openssl", SystemCveTriageScopeChoice::Host)
+            .unwrap();
+        let poam = request.poam.unwrap();
+        assert_eq!(poam.title, "CVE-2026-3262 - patch openssl on prod-web-01");
+        assert_eq!(poam.risk, PoamRisk::High);
+        assert_eq!(poam.plan, draft.default_plan);
+        assert!(poam.plan.contains("exact follow-up scan"));
+        assert!(poam.default_milestones);
+        assert!(matches!(
+            poam.assignee,
+            poam_api::PoamAssigneeRequest::OidcGroup { ref group_name }
+                if group_name == "platform-operators"
+        ));
+        draft.default_milestones = false;
+        assert!(
+            !draft
+                .system_request("openssl", SystemCveTriageScopeChoice::Host)
+                .unwrap()
+                .poam
+                .unwrap()
+                .default_milestones
+        );
     }
 
     #[test]
