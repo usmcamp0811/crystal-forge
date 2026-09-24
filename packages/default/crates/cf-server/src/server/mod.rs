@@ -1334,6 +1334,25 @@ pub fn spawn_background_tasks(
             }
         }
     });
+    let scheduled_cve_reconciliation_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut cursor = None;
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(90));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            match crate::services::poam::reconcile_scheduled_environment_cve_page(
+                &scheduled_cve_reconciliation_pool,
+                cursor,
+            )
+            .await
+            {
+                Ok(next) => cursor = next,
+                Err(error) => tracing::warn!(error = ?error,
+                    "Scheduled CVE membership reconciliation will retry next cycle"),
+            }
+        }
+    });
     let attention_cleanup_pool = pool.clone();
     tokio::spawn(
         crate::tasks::attention_reconciliation::run_attention_cleanup_loop(attention_cleanup_pool),

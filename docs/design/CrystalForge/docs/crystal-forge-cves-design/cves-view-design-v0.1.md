@@ -9,6 +9,15 @@
 **Suggested repository location:** `docs/cves-view-architecture.md`  
 **Repository status:** Not committed. No application code, database, backlog, branch, or merge request was changed.
 
+**Precedence for current work:** This review and its AS-BUILT diagrams are
+time-pinned to `58006084`; they remain evidence of the inspected source, not
+the current product contract. The owner-approved
+[CVE/POA&M continuity design, Section 29](../../cve-poam-evidence-continuity-design-spec.md#29-acceptance-criteria)
+supersedes this audit's retained-artifact CVE gate, unchanged-lineage
+verification, and bidirectional scheduled-membership equality. TASK-326.2.2
+is implementing it. This annotation neither re-runs the audit's checks nor
+claims that the new contract is fully implemented.
+
 ---
 
 ## 1. Purpose, evidence, and review boundary
@@ -26,7 +35,10 @@ The purpose is to establish what the code does now and what a consistent product
 | **PROPOSED** | A contract for review. It is not implemented or approved by this document. |
 | **UNVERIFIED** | Requires execution, live records, browser inspection, or inspection outside the recorded source scope. |
 
-“Must” in a proposed section defines the proposal only. The audit does not approve the proposed read-only Current fallback from the companion Systems document. That decision remains open.
+“Must” in a proposed section defined the proposal at the review date. The
+audit did not approve the companion Systems read-only fallback. That decision
+was later superseded for exact Current CVE evidence by the continuity design;
+Config inspection and rollback still use their separate authority.
 
 ### 1.2 Inspection performed
 
@@ -51,7 +63,7 @@ The existing Systems document remains a separate draft. This review establishes 
 | Current, scheduled, historical, and count semantics | [Sections 7–9](#7-inventory-selection-and-authority) |
 | Frontend refresh, navigation, and drawer behavior | [Sections 10–11](#10-page-state-navigation-and-refresh) |
 | Risk acceptance, host overrides, and POA&M transactions | [Sections 12–14](#12-triage-decisions-and-host-override-precedence) |
-| Existing proposal for evidence continuity across commits | [Section 15](#15-existing-proposal-evidence-continuity-across-deployments) |
+| Normative target for evidence continuity across commits | [Section 15](#15-normative-target-evidence-continuity-across-deployments) |
 | Errors, design comparison, performance, and security | [Sections 16–19](#16-loading-error-empty-and-stale-state-contracts) |
 | Confirmed gaps and proposed target contract | [Sections 20–21](#20-consolidated-gap-register) |
 | Workflows, regression matrix, and decisions | [Sections 22–25](#22-end-to-end-workflow-examples) |
@@ -69,7 +81,7 @@ The existing Systems document remains a separate draft. This review establishes 
 |---|---|---|
 | `docs/fleet-cve-triage.md` | Canonical advisory identity, environment decisions, inventory sections, exact subjects, POA&M reuse, closure, and bounds. | Some descriptions of complete environment ownership predate host overrides. It does not describe the complete frontend refresh graph. |
 | `docs/specs/02-backend-api.md` | Routes, current versus historical inventory, triage request shape, typed assignees, errors, and exact evidence. | Some text still treats every Current exact host as an environment-owned mutation subject. Its “Historical” wording is broader than the compatibility fallback implemented by the fleet query. |
-| `docs/design/CrystalForge/cve-poam-evidence-continuity-design-spec.md` | A detailed proposal for stable finding episodes, moving current evidence, dynamic membership, and verification across deployments. | Explicitly a **proposed design**. The strict baseline-generation verification rule remains in production source. |
+| `docs/design/CrystalForge/cve-poam-evidence-continuity-design-spec.md` | Owner-approved normative target for stable findings, exact Current CVE authority, optional retained provenance, dynamic membership, and cross-revision verification. | TASK-326.2.2 implementation and verification remain in progress. The audit's strict baseline-generation rule describes pinned source only. |
 | `docs/design/CrystalForge/components/CvesView.jsx` | Page structure, grouped/flat modes, drawer hierarchy, environment actions, and editor presentation. | Uses mock data, local mutations, fabricated timing, and simplified authority. Those mechanics cannot define production evidence or permission rules. |
 | `docs/specs/01-frontend-views.md` | Route and view index entries for `/cves`. | The CVE search found route/index coverage, not a complete current fleet-CVEs contract. |
 | TASK-326.2 | Shared fleet/System Detail triage, typed POA&M reuse, authority preservation, and browser checks. | Primarily a Scanning and per-system triage task. Checked acceptance boxes and agent notes are not independent evidence of current correctness. |
@@ -79,11 +91,22 @@ Sources: [C02], [C03], [C04], [C05], [C27], [C29].
 
 ### 2.2 Conflicts that must remain explicit
 
-**Verification after deployment.** Current service code requires the baseline scan derivation, retained generation, generation number, and target store path to remain unchanged. The continuity proposal intentionally removes that freeze while retaining the immutable baseline. These are different security and lifecycle contracts. Section 15 compares them. [C04], [C17]
+**Verification after deployment.** At the reviewed SHA, service code required
+baseline scan derivation, retained generation, generation number, and target
+store path to stay unchanged. The normative continuity design removes that
+freeze while preserving the immutable scan/occurrence baseline. Section 15
+describes the target. The old rule is not a TASK-326.2.2 acceptance gate.
+[C04], [C17]
 
 **Environment ownership versus host overrides.** Host overrides exist in the schema and service. Environment scheduling excludes hosts with a direct override. Fleet rollups still describe environment decisions, not the effective decision on every host. The specification needs to name both quantities instead of treating them as equivalent. [C02], [C12], [C13], [C15]
 
-**Future hosts versus a fixed linked subject set.** The shared System Detail editor describes environment decisions as applying to hosts added later. Current scheduled coherence requires the current non-overridden subject set to match active POA&M links. The inspected triage path does not automatically add a new host when a later scan changes the set. The continuity proposal contains such a reconciliation design, but that does not establish an implemented worker. [C04], [C07], [C12], [C13], [C15]
+**Future hosts versus a fixed linked subject set.** At the reviewed SHA,
+scheduled coherence required equality and the inspected triage path did not
+automatically add a host after a later scan. The continuity contract instead
+requires current affected non-overridden subjects to be a subset of active
+POA&M links, with bounded server-owned reconciliation and periodic repair.
+Historical clean and moved-out links remain history. This audit does not prove
+that reconciliation is implemented. [C04], [C07], [C12], [C13], [C15]
 
 **Historical evidence versus a history browser.** The fleet query exposes a latest compatibility inventory for hosts without Current or scheduled exact authority. It does not enumerate all retained generations or all previous scans. “Historical evidence” on this page must not be read as “complete historical inventory.” [C09], [C14]
 
@@ -91,7 +114,11 @@ Sources: [C02], [C03], [C04], [C05], [C27], [C29].
 
 ### 2.3 Proposed documentation ownership
 
-After review, use this document for fleet-page composition, data sources, count units, refresh behavior, and cross-screen consistency. Keep exact triage and POA&M domain rules in their domain specifications. Resolve the continuity proposal explicitly before changing verification. Replace duplicated stale explanations with links to the authoritative contract.
+Use this document for the pinned fleet-page composition, data sources, count
+units, refresh behavior, and cross-screen findings. For Current CVE authority,
+triage, and POA&M domain rules, use the normative continuity design and the
+updated API/fleet contracts. Do not promote this audit's AS-BUILT predicates
+or still-open proposal labels into later acceptance requirements.
 
 ---
 
@@ -149,7 +176,7 @@ Sources: [C06], [C07], [C08], [C09], [C15], [C17], [C20].
 | Package group | All returned advisory/package rows for one canonical package name. |
 | Exact occurrence | An immutable observation identified by scan, observed derivation path, canonical CVE, and canonical package. |
 | Stable finding | One `(system_id, canonical_cve_id, canonical_package_name)` record in `poam_cve_findings`. Version is evidence, not finding identity. |
-| Current target | The latest observed running system state, resolved through the required retained-generation and derivation proof. |
+| Current target | The latest consistent observed generation/store path uniquely resolved to a NixOS derivation within the registered flake and effective configuration. The newest completed schema-1 scan supplies CVE evidence; retained-generation provenance is optional. |
 | Scheduled deployment target | The newest eligible active deployment intent and its exact scan. This is not the running configuration. |
 | Environment decision | The active accepted-risk or scheduled-remediation row for a CVE/package/environment. No active row means OPEN. |
 | Host override | A direct accepted or scheduled decision for a CVE/package/system. It takes precedence over the environment decision. |
@@ -178,6 +205,10 @@ The current fleet source selectors use the latest completed eligible scan. A new
 ---
 
 ## 5. Persistence and identity relationships
+
+The following diagram records the pinned schema. Its mandatory retained link
+is superseded by optional provenance in the continuity contract. The separate
+Mermaid source remains time-pinned audit evidence.
 
 The diagram shows the principal relationships used by the reviewed paths. It is a conceptual schema map, not a complete DDL inventory. In particular, the separate current selectors for evaluation artifacts are omitted. [C09], [C10], [C12], [C14], [C15], [C17]
 
@@ -264,7 +295,7 @@ The arrows describe database dependencies inspected in the readers and writer pa
 | Advisory title, score, vector, publication, exploitation flag | List/detail queries | `cves` joined to visible inventory pairs. | Mutable enrichment. A field's presence does not prove a fresh upstream feed. |
 | Installed version on an aggregate row | Shared inventory CTE | Role-preferred lexical `MAX(installed_version)`. | A representative value, not proof that all hosts run one version. |
 | Fixed version and fix availability | Shared inventory CTE and exact package lookup | `package_vulnerabilities.fixed_version`. | Known package metadata; no proof that a deployable flake target contains the fix. |
-| Current host membership | Fleet inventory and exact triage detail | Latest state, retained generation, artifact, derivation, schema-1 scan. | Current authority requires the complete chain. |
+| Current host membership | Fleet inventory and exact triage detail | Latest consistent state, unique scoped NixOS derivation, newest completed schema-1 scan. | Retained evaluation provenance is optional for CVE authority; Config and rollback use separate proof. |
 | Scheduled configuration membership | Fleet inventory | `view_active_scheduled_cve_scan_targets` and occurrence view. | Active deployment intent, not current runtime and not a POA&M decision. |
 | Historical host membership | Fleet inventory | `view_system_vulnerabilities` fallback. | Latest compatibility projection only for hosts without either exact authority. |
 | Environment accepted/scheduled display | `GET /cves/:id/fleet?package=...` | Disposition service, current subjects, coherence checks, POA&M metadata. | Environment default, not a complete host-effective rollup. |
@@ -295,6 +326,15 @@ Fleet inventory GETs query stored data. Triage writes operator decisions and POA
 ### 7.1 Current exact selection
 
 **AS-BUILT:** The fleet CTE first selects the latest state for each visible active system. It then checks that state's generation, store path, and generation/store agreement. It requires the matching retained generation, verified lineage, available integrity-version-1 artifact, matching exact NixOS derivation, and latest completed schema-1 scan. Scan selection orders by completion time and scan ID. [C09]
+
+This is the pinned query, not the continuity contract. The target shared
+`view_current_cve_authority` selects the latest state before validity checks,
+then exactly one scoped NixOS derivation and its newest completed schema-1 scan.
+External activation, unavailable evaluation artifact, archived or behind-head
+commit, and absent retained-generation ID do not by themselves bar Current CVE
+actions. Missing or inconsistent observation, ambiguous/foreign mapping, or
+no exact schema-1 scan fails closed. No evidence is not clean. Explicit
+historical and scheduled targets remain read-only for Current mutations.
 
 A valid older state must not substitute for an invalid newest state. A completed scan from another derivation must not substitute for the resolved running target. A completed clean scan supplies authority even when it supplies no finding rows. The clean result suppresses stale compatibility findings for that host. [C09], [C24]
 
@@ -728,13 +768,28 @@ A lost success response creates an unknown client outcome. The browser must read
 
 ### 14.1 Baseline contents
 
-A link captures the source scan, scan derivation, scan completion time, retained-generation UUID, generation number, target store path, occurrence derivation path, and observed package version. The server resolves these fields. A client cannot construct a baseline by copying display metadata. [C10], [C17], [C22]
+A link captures the source scan, scan derivation, scan completion time,
+observed generation and store path, occurrence derivation path, observed
+package version, and optional retained-generation UUID. At the audited SHA the
+UUID was required; under the continuity contract it can be NULL when exact
+Current scan and occurrence proof exists. Existing non-null baselines remain
+valid and immutable. A client cannot construct a baseline from display metadata.
+[C10], [C17], [C22]
 
 The baseline proves that the finding existed when linked. It does not prove remediation. It remains useful after a scan changes, a finding disappears, or the POA&M closes.
 
 ### 14.2 AS-BUILT verification predicate
 
 `current_cve_verification_items_tx` resolves the current exact deployment again. It requires current lineage to equal the link-time baseline lineage before it searches for a newer scan. The compared fields include scan derivation, retained generation identity, generation number, and target store path. [C17]
+
+This diagram records the audited predicate, not the normative verification
+rule. Under the continuity contract, server verification re-resolves the exact
+observed Current derivation and scan independently of baseline lineage. PASS
+requires a strictly newer completed schema-1 scan without the canonical
+CVE/package occurrence. A changed commit, generation, derivation, or package
+version alone cannot cause MISSING. Present, whitelisted, justified, missing,
+historical, or inconsistent evidence cannot yield PASS; a clean scan only makes
+the open episode a remediation candidate, never an automatic closure.
 
 ```mermaid
 flowchart TD
@@ -761,7 +816,8 @@ Suppose a finding is linked on generation A. The operator deploys a fixed genera
 
 The same problem can occur when a new generation has the same store path but a different retained-generation identity. This is an explicit existing rule, not a missing UI refresh. A frontend fix cannot resolve it without changing the domain predicate.
 
-This rule conflicts with the already-written continuity proposal. The audit records that conflict; it does not authorize removal of the check. [C04]
+This audited rule conflicts with the later approved continuity contract. Keep
+it as time-pinned evidence, not as an instruction to restore the check. [C04]
 
 ### 14.4 Close is a separate, evidence-producing operation
 
@@ -773,23 +829,32 @@ On successful close, the service retires active finding links, retires the assoc
 
 ### 14.5 Reopen and recurrence
 
-Reopen checks that another active POA&M has not claimed a closure finding. For environment-backed findings, current exact subjects, excluding direct overrides, must equal the closure subject set. Conflicting active decisions block restoration. Host-backed restoration has its own active-host and current-occurrence checks. [C26]
+At the audited SHA, reopen checked that no other active POA&M had claimed the
+closure finding. For environment-backed findings it required current exact
+non-overridden subjects to equal the closure set. That equality is time-pinned
+behavior, not the continuity target: current affected owned subjects require
+coverage while historical links remain history. Conflicting active decisions
+still block restoration. Reopen must not silently restart a completed episode.
+[C26]
 
 The service restores links by copying the original baseline fields. Reopen does not replace baseline evidence with the latest scan. A recurrence does not automatically reopen a completed POA&M. The continuity proposal instead describes a new episode after closure; that proposal is not the same as a verified current implementation. [C04], [C26]
 
 ---
 
-## 15. Existing proposal: evidence continuity across deployments
+## 15. Normative target: evidence continuity across deployments
 
-This section summarizes the repository's **proposed** continuity specification. It is not a new approval and is not presented as current source behavior. [C04]
+The audited comparison below was written while continuity was a proposal. The
+owner-approved continuity design now controls the target. The AS-BUILT column
+remains pinned to the review SHA; the target column is not proof of completed
+implementation or validation. [C04]
 
-### 15.1 What the proposal changes
+### 15.1 What the target changes
 
-| Concern | AS-BUILT | Existing continuity proposal |
+| Concern | AS-BUILT at audited SHA | Normative continuity target |
 |---|---|---|
 | Baseline | Immutable link-time evidence. | Preserve the same immutable baseline. |
 | Current verification target | Must retain the baseline deployment lineage. | Resolve the latest authoritative running target independently of baseline generation. |
-| Finding identity | Stable system/CVE/package record, with baseline-bearing links. | Stable finding plus an explicit continuity/episode model across deployments. |
+| Finding identity | Stable system/CVE/package record, with baseline-bearing links. | Keep that stable identity and the existing POA&M link model; no parallel evidence model or POA&M/commit link. |
 | Environment schedule coherence | Current non-overridden subjects must match active linked ownership. | Current owned subjects must be covered by the episode's retained membership; old members remain audit history. |
 | New affected host | Can make the current linked subject set incomplete. | Reconciliation adds the new subject idempotently. |
 | Clean host | Current occurrence can disappear while its baseline link remains. | Retain membership and record resolved current evidence. |
@@ -799,7 +864,7 @@ This section summarizes the repository's **proposed** continuity specification. 
 
 Sources: [C04], [C12], [C15], [C17], [C26].
 
-### 15.2 Proposed separation of baseline and latest evidence
+### 15.2 Separation of baseline and latest evidence
 
 ```mermaid
 flowchart LR
@@ -815,19 +880,34 @@ flowchart LR
     H -->|No or unknown| J["MISSING or failed verification"]
 ```
 
-The proposal must preserve the distinction between “the canonical pair is absent from a complete authorized scan” and “the UI returned no rows.” Unknown coverage, missing target identity, failed scanning, and unproven deployment lineage must not become PASS.
+The continuity contract distinguishes absence of a canonical pair in a
+completed exact Current scan from an empty UI result. Unknown coverage, missing
+or inconsistent Current identity, and failed scanning must not become PASS.
+Absent retained lineage alone does not bar an otherwise exact CVE scan.
 
-### 15.3 Design choices still required
+### 15.3 Continuity boundary
 
-The proposal needs an approved rule for scan freshness, completeness, and the meaning of a removed package. It also needs exact ownership rules when hosts move environments, a direct override appears, a new host becomes affected, or the same canonical package has multiple observed versions. [PROPOSED]
+The normative design requires newest completed schema-1 evidence for the exact
+Current derivation. A clean scan without the canonical pair is candidate
+remediation; absent evidence is not clean. Stable finding identity does not
+include package version. Host overrides precede environment ownership; new
+affected subjects are added idempotently by bounded server reconciliation on
+scan, state, environment, and disposition changes and periodic repair. An
+environment move does not erase old membership history.
 
-A safe implementation would retain baseline and verification evidence independently. It would not update the old scan, rewrite the baseline generation, or repair lineage by inventing retained-generation records. A source-generation change alone would no longer mean MISSING, but the new current source would still need an independently valid authority chain.
+Keep immutable scan/occurrence baselines and sealed verification history. Do
+not invent retained-generation records or Config artifacts. The server must
+recheck exact Current CVE authority under writer locks before mutation. A
+changed generation alone is not MISSING; an unavailable or ambiguous source is.
 
-### 15.4 Relationship to the Systems draft
+### 15.4 Relationship to System Detail
 
-The Systems draft asks whether a uniquely mapped running derivation may show read-only evidence without retained-generation proof. That is a **read policy** decision. The continuity proposal concerns **remediation verification across valid deployments**. Approving one does not automatically approve the other.
-
-A product can permit a clearly labelled read-only inventory while still rejecting a remediation mutation. It can also support verification across valid retained generations while continuing to reject unproven Current evidence. The implementation should not couple these decisions accidentally.
+SC1's earlier read-only tier waited for an evaluation-backed retained binding.
+The continuity contract supersedes that gate for exact Current CVE triage and
+verification. A uniquely resolved running derivation with a completed schema-1
+scan can authorize CVE actions without retained provenance, regardless of
+activation origin. Historical selections and unresolved Current states stay
+read-only. CVE evidence does not authorize Config inspection or rollback.
 
 ---
 
@@ -1027,11 +1107,11 @@ Sources: [C05], [C06], [C07], [C08], [C09], [C10], [C11], [C12], [C13], [C14], [
 
 | ID | Existing condition | Decision needed |
 |---|---|---|
-| CVD01 | Verification freezes baseline deployment identity. A clean later deployment returns MISSING. | Approve or reject the existing continuity proposal's latest-authoritative-target verification rule. |
-| CVD02 | Environment schedule coherence requires current membership equality. New hosts or disappeared findings can make a schedule incoherent. | Decide between fixed membership and a reconciled active episode with retained historical members. |
-| CVD03 | The UI describes coverage of future hosts, but automatic membership reconciliation was not established. | Define the actual inheritance and scheduling guarantee, then assign a server-owned reconciliation mechanism if required. |
+| CVD01 | At the audited SHA verification froze baseline deployment identity. | Superseded: verify against strictly newer exact Current CVE evidence across revisions. Implementation and tests remain open. |
+| CVD02 | At the audited SHA environment coherence required membership equality. | Superseded: current affected owned subjects are a subset of active links; extra historical links remain. |
+| CVD03 | The audited UI described future-host coverage without an established worker. | Superseded: bounded server-owned idempotent reconciliation with periodic repair is required, not proven by this audit. |
 | CVD04 | Fleet Historical is a compatibility fallback, not complete retained history. | Keep and rename that role, or add an explicit historical collection without promoting its authority. |
-| CVD05 | Current inventory requires retained proof; Systems draft proposes a separate read-only option. | Decide the read policy independently from triage and verification authorization. |
+| CVD05 | At the audited SHA Current CVE action required retained proof. | Superseded: exact observed Current CVE evidence is actionable without retained proof; Config and rollback remain separate. |
 
 Sources: [C02], [C04], [C07], [C09], [C12], [C15], [C17].
 
@@ -1153,25 +1233,44 @@ Acceptance does not remove the occurrence. The host remains affected in inventor
 
 Two hosts share an environment. One has a direct accepted override. The environment schedules remediation for the other host. The server must not attach the overridden host to the environment's POA&M. The fleet drawer must explain why the environment count and owned remediation count differ. [C12], [C15]
 
-Removing the direct override restores environment inheritance. Whether an existing schedule automatically adds that host is part of the continuity/reconciliation decision, not a behavior to infer from the word “inherit.”
+Removing the direct override restores environment inheritance. Under the
+continuity contract, bounded server reconciliation must add a newly affected
+environment-owned host to an active scheduled POA&M. This audit did not test
+that repair.
 
 ### 22.4 A new affected host appears
 
-An environment schedule was created for hosts A and B. Host C later becomes a Current exact subject for the same pair. The active link set no longer equals the complete current non-overridden set. Current coherence can stop reporting the original schedule as coherent. The existing continuity proposal would instead reconcile C into the active episode. [C04], [C12], [C15]
+An environment schedule was created for hosts A and B. Host C later becomes a
+Current exact subject for the same pair. At the audited SHA, equality could
+make the schedule incoherent. The continuity contract requires the server to
+link C idempotently to the same active episode, unless C has a host override.
+Clean or moved-out A/B links remain historical. [C04], [C12], [C15]
 
 A frontend refresh alone cannot create the missing durable ownership. It must not report full scheduled coverage while the server still lacks C's link.
 
 ### 22.5 Patch, deploy, scan, verify
 
-The operator links evidence from generation A, updates the flake, deploys generation B, and obtains a clean B scan. Current verification code rejects the changed baseline lineage with MISSING. The continuity proposal permits using B only after independently resolving its current authority and requiring newer valid evidence. [C04], [C17]
+The operator links evidence from generation A, updates the flake, deploys
+generation B, and obtains a clean B scan. At the audited SHA, verification
+returned MISSING for changed lineage. Under the normative contract, B can
+establish PASS only if its exact completed schema-1 scan is strictly newer than
+the immutable A baseline and its Current authority resolves independently.
+[C04], [C17]
 
-This workflow is the principal architecture decision for remediation usefulness. It needs a database-backed end-to-end test, not only an editor screenshot.
+This approved workflow needs a database-backed end-to-end test, not only an
+editor screenshot. The pinned audit did not run that test.
 
 ### 22.6 Rescan with no retained Current proof
 
-An Admin queues a fleet rescan. A realized derivation can qualify through the scan-admission resolver without satisfying retained-generation Current authority. The worker can produce a completed scan while the System Detail Current CVE inventory remains unavailable. This is not evidence that the scanner failed. It is a difference between admission and display/mutation proof. [C09], [C20]
+An Admin queues a fleet rescan. Scan admission is not itself Current CVE
+authority. At the audited SHA, a completed scan could remain read-only because
+retained-generation proof was absent. Under the continuity contract, a scan
+for the uniquely scoped latest consistent observed derivation supplies CVE
+authority even without retained proof; an unmapped or inconsistent observation
+does not. [C09], [C20]
 
-A useful UI must state which prerequisite is missing and which action can actually repair it. Repeatedly queueing the same scan does not establish deployment lineage.
+A useful UI must state which CVE prerequisite is missing. Repeatedly queueing
+the same scan cannot repair an ambiguous or inconsistent running observation.
 
 ### 22.7 Lost mutation response
 
@@ -1258,9 +1357,9 @@ The rows below are a proposed verification matrix. “Protect existing” means 
 | CVT42 | Conflict refresh is slow or fails. | No premature “refresh completed”; stale draft cannot authorize a write. | Repair |
 | CVT43 | Statistics or package-choice request fails. | Local error/retry; no fake zero, no lost selected filter. | Repair |
 | CVT44 | Remove final scheduled environment subject. | Respect POA&M lifecycle guard; do not overgeneralize host-only exception. | Protect existing |
-| CVT45 | New host joins an accepted/scheduled environment. | Behavior matches approved inheritance and episode membership contract. | Decision |
-| CVT46 | Link on A, deploy affected B, deploy clean C, then verify. | Approved continuity rule is tested through real evidence and deployment records. | Decision |
-| CVT47 | Same store path, different retained generation. | Baseline and current are not silently rewritten; approved verification rule applies. | Decision |
+| CVT45 | New host joins an accepted/scheduled environment. | Accepted decision applies unless overridden; scheduled subject is linked idempotently by server repair. | Normative; unverified here |
+| CVT46 | Link on A, deploy affected B, deploy clean C, then verify. | Same finding/POA&M and immutable A baseline; only strictly newer clean exact Current scan can PASS. | Normative; unverified here |
+| CVT47 | Same store path, different retained generation. | Baseline stays immutable; exact Current CVE proof, not retained-ID equality, controls verification. | Normative; unverified here |
 | CVT48 | New scan contains whitelist or ordinary justification. | WHITELISTED/JUSTIFIED are not PASS. | Protect existing |
 | CVT49 | Verification uses baseline scan or an older scan. | Cannot pass as newer remediation evidence. | Protect existing |
 | CVT50 | Close fails evidence preconditions. | Rejected attempt persists; 412 returns committed revision; UI adopts it. | Protect existing |
@@ -1289,9 +1388,13 @@ Parent invalidation, clearer count labels, role-preserving navigation, local err
 
 Current-subject resolver consolidation affects security and coherence. It requires database fixtures for latest invalid observations, environment movement, clean scans, same-name flakes, and host overrides. It must not reintroduce a fallback by selecting an older valid state.
 
-### 24.2 Changes that require a domain decision
+### 24.2 Approved domain changes still requiring verification
 
-The continuity proposal, dynamic environment membership, finding episodes, and verification across generations change persistence and authorization semantics. They require a reviewed migration and reconciliation design. A UI-only task must not implement these rules through local state or direct SQL backfills.
+The normative continuity design approves optional retained provenance, dynamic
+environment membership, and verification across revisions. TASK-326.2.2 must
+implement these with an additive migration, server-owned reconciliation, and
+isolated tests. A UI-only task must not emulate them with local state or direct
+SQL backfills.
 
 Do not edit an applied migration to change the raw occurrence view. Add a forward migration if the approved repair changes that view or its dependent functions. Preserve immutable baseline records and clearly identify any compatibility projection that still uses older semantics.
 
@@ -1309,7 +1412,8 @@ For a future implementation, record the exact application SHA, applied migration
 
 ## 25. Decision register
 
-These questions are recorded for later review. None requires an immediate answer to use this document.
+These questions were recorded at the audit date. D05-D07 were resolved for the
+CVE domain by the normative continuity design; other questions remain separate.
 
 | ID | Decision | Recommended direction for discussion | Consequence |
 |---|---|---|---|
@@ -1317,9 +1421,9 @@ These questions are recorded for later review. None requires an immediate answer
 | D02 | What should “CVEs” count? | Show unique advisories and advisory/package pairs as named separate units. | Avoids comparing scanner occurrences with deduplicated fleet rows. |
 | D03 | What is the affected-host bar denominator? | Use a named, server-supplied visible fleet denominator or remove the implied fleet percentage. | Makes grouped and flat modes comparable. |
 | D04 | What does Historical mean on the fleet page? | Rename the current compatibility fallback or add a separate exact history collection. | Prevents users from treating a fallback as a complete archive. |
-| D05 | Can Current evidence be displayed without retained proof? | Decide the companion Systems read-only proposal separately from mutation authority. | Changes display availability, not automatically remediation permissions. |
-| D06 | Can verification use a later valid deployment? | Review and adopt an explicit version of the existing continuity proposal rather than patching the baseline check alone. | Enables the normal patch/deploy/verify workflow while preserving audit history. |
-| D07 | Do environment schedules cover new hosts automatically? | Use server-owned reconciliation and explicit episode membership if that guarantee is intended. | Requires durable ownership updates and concurrency tests. |
+| D05 | Can Current evidence be displayed without retained proof? | Resolved for CVEs: exact observed Current with a completed schema-1 scan is actionable without retained proof. | Config/rollback authority remains separate. |
+| D06 | Can verification use a later valid deployment? | Resolved: later exact Current scan can PASS across revisions if strictly newer and clean. | Preserve immutable baseline and sealed verification history. |
+| D07 | Do environment schedules cover new hosts automatically? | Resolved: bounded server-owned reconciliation adds current affected non-overridden subjects. | Requires durable ownership updates, periodic repair, and concurrency tests. |
 | D08 | When does acceptance need reconsideration? | Define review-date, severity, exploitation, and scope-change rules explicitly. | A stored accepted decision alone does not define policy expiry. |
 | D09 | What makes an evidence source fresh and complete? | Separate source selection, completeness, and a policy-defined freshness state. | Controls clean claims, warnings, and possibly verification eligibility. |
 | D10 | How should fleet reads refresh? | One invalidation model with bounded requests; choose polling/events after defining the contract. | Avoids adding independent timers to each component. |

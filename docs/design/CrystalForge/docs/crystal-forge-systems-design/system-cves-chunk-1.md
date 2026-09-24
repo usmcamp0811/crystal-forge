@@ -8,11 +8,19 @@
 **Parent design:** `systems-view-design-v0.1.md`, internal version 0.3, Sections 1.0, 10, 11.4, and 22.  
 **Slice ID:** SC1. This is not a pre-existing Backlog task ID.
 
+**Precedence:** This is the time-pinned TASK-326.2.1 SC1 handoff at
+`327d03b6`. Its retained-artifact gate and deferred cross-revision behavior
+describe that slice, not the TASK-326.2.2 target. The
+[CVE/POA&M continuity design, Section 29](../../cve-poam-evidence-continuity-design-spec.md#29-acceptance-criteria)
+supersedes those rules for Current CVE actions and verification. TASK-326.2.2
+is in progress; this annotation does not certify its implementation or SC1's
+blocked browser validation.
+
 ## 1. Outcome
 
 An operator can open System Detail → CVEs and determine which running or explicitly selected configuration a scan describes. The page must show matching results, an honest no-scan state, or an honest unmapped/unavailable state. It must never substitute flake-head evidence for an unmapped running system.
 
-The page may show the schema-1 scan of a uniquely mapped running derivation before retained proof exists. It is read-only until server-owned reconciliation binds the observed generation to a real available, certified evaluation artifact and its one exact registered derivation. Once that proof exists, Current uses the normal host/environment CVE triage and POA&M pipeline. Deployment origin remains distinct provenance; it does not permanently remove triage capability.
+For this SC1 slice, the page showed the schema-1 scan of a uniquely mapped running derivation as read-only until retained proof existed. Under the later continuity contract, latest consistent observed generation/store, a unique registered-flake/effective-configuration NixOS derivation, and its newest completed schema-1 scan authorize Current CVE action without retained evaluation proof. External activation is not a permanent read-only reason. Config and rollback retain their own proof rules.
 
 Stop after this workflow is implemented, verified, and available for manual review. Do not implement the rest of the Systems audit.
 
@@ -20,9 +28,9 @@ Stop after this workflow is implemented, verified, and available for manual revi
 
 The owner changed the earlier head-fallback requirement. The controlling default is now **Current**, with no automatic head substitution when running output is unmapped.
 
-A local activation is a description of how a switch happened. It is not itself a reason to reject a known equivalent configuration. A known, server-reconciled target has the normal Current behavior. A uniquely mapped target without retained proof can show read-only scan feedback pending reconciliation. Unmapped output has no Current scan in SC1.
+A local activation describes switch origin, not CVE authority. SC1 required server reconciliation before action; the later continuity contract does not. Unmapped output has no Current scan. Historical selections remain inspection-only.
 
-The future local-agent Vulnix feature is noted but excluded. Captured-start POA&M edits and cross-revision continuity are also excluded from this implementation. Preserve their future requirement, but do not remove current writer protections to approximate them.
+The future local-agent Vulnix feature remains excluded from SC1. Captured-start POA&M edits and cross-revision continuity were excluded from this slice; TASK-326.2.2 owns the later contract. Do not use SC1's exclusion as a product prohibition.
 
 Only Section 22's agreed statements and this slice are implementation instructions. The original AS-BUILT sections and old tests are evidence of code, not permission to retain a superseded requirement. Other PROPOSED architecture sections are not a mandate for a general rewrite.
 
@@ -65,9 +73,9 @@ The implementation must distinguish these facts. The field names below are logic
 | Running mapping | Known unique target, unmapped, ambiguous, no usable report, or invalid/conflicting data. |
 | Resolved target | Server-owned derivation and its registered flake/configuration; full commit and actual generation only when established. |
 | Selected source | One completed eligible scan, its UUID, completion time, scanner name/version, and evidence representation. |
-| Proof | Existing strict Current remediation proof, including an independently verified externally reconciled retained generation, or its missing/invalid prerequisite. |
+| Proof | SC1 required a verified retained generation. The continuity contract instead uses latest-first exact CVE authority; retained proof is optional provenance. |
 | Read capability | Whether this exact source can be displayed to this actor. |
-| Mutation capability | Existing strict domain and role checks. A provisional mapped read never grants it; successful trusted reconciliation restores normal Current authority. |
+| Mutation capability | Role and scope checks plus server-resolved exact Current CVE evidence. A mapped read without exact Current authority never grants it. |
 
 A source-less result must not use zero as the only indication of missing evidence. A report with no generation must not invent generation 0. A generation/store mismatch must not claim that the reported generation belongs to the selected output.
 
@@ -77,7 +85,17 @@ Preserve the normal Current inventory path and existing mutation behavior. Use t
 
 A known local activation that has the required proof follows the same path. Do not add an origin-based mutation restriction.
 
-### 4.2 Current with a uniquely mapped target pending reconciliation
+### 4.2 Current with a uniquely mapped target
+
+The following reconciliation gate records SC1's earlier implementation target.
+It is superseded for CVE mutation by the continuity contract: a latest consistent
+report, unique scoped NixOS derivation, and newest completed schema-1 scan are
+enough for normal authorized Current triage and POA&M actions. An unavailable
+Config artifact or absent retained generation alone cannot force read-only.
+The server must re-resolve exact scan/occurrence authority under writer locks.
+Missing, invalid, ambiguous, foreign, schema-0-only, or historical evidence
+cannot authorize a mutation; no scan is not clean. Server-owned reconciliation
+of environment POA&M membership is a separate bounded, idempotent process.
 
 Resolve the reported running output from authoritative server records. Scope the mapping to the system's registered flake and effective configuration. Prove that one eligible target identity exists; do not pick the first result. A candidate menu truncated to 1,000 entries cannot establish this uniqueness.
 
@@ -135,7 +153,11 @@ Authorize the system before exposing source identity or cursor diagnostics. Keep
 
 A non-null Current candidate derivation ID is not proof: the current query uses separate left joins for derivation and scoped commit. A failed flake-scoped commit join can leave the derivation ID populated. New mapping logic must not inherit this defect.
 
-Do not emit the existing fully authoritative Exact/ExactCurrentScan semantics before reconciliation succeeds. Use explicit additive read metadata or a safely versioned provisional state. Test supported old/new client behavior. Older clients may show a conservative unavailable/read-only state pending reconciliation, but must not acquire write controls without strict persisted proof.
+For the SC1 implementation, Exact/ExactCurrentScan waited for reconciliation.
+That gate is not the later CVE contract. Preserve safe older-client parsing and
+server authorization: a client cannot promote a mapped/historical/no-scan row,
+but an exact Current row does not need an evaluation artifact. Never use CVE
+authority to authorize Config inspection or rollback.
 
 Preserve the strict writer predicates. A server-owned reconciliation can insert an exact retained generation from verified observation and artifact facts; it does not fabricate a CF deployment. GET must not run Nix, enqueue scans, persist a deployment, insert a retained generation, create a POA&M, or change a disposition. Update SQLx metadata only with a verified task-owned database if checked query shapes change.
 
@@ -179,6 +201,11 @@ Every case needs exact identity checks through API/test evidence and visible-sta
 | SC1-15 | All affected visible states, including read-only, unmapped, unavailable, and error | Each maps to a named Claude design component/state. No invented UI or reference edits. Missing design states are reported and block their UI acceptance. |
 
 Browser coverage must include actual API-produced data for SC1-03 and SC1-04, not only unrelated hard-coded responses. Use an isolated fixture database. Network stubs are useful for races and failures, but are not proof that SQL selected the correct source.
+
+SC1-02, SC1-03, SC1-08, SC1-13, and SC1-14 record the pinned SC1 gate and
+deferred continuity work. Their retained-proof or unchanged-generation expected
+results are not acceptance tests for TASK-326.2.2. Section 29 of the continuity
+design requires the exact unretained Current case and cross-revision lifecycle.
 
 Compare the implementation with the authoritative Claude design at matching wide/narrow widths and light/dark themes, using equivalent fixture data. Record missing sections, reordered sections, merged concepts, missing metadata, changed interactions, and hierarchy differences. Added UI must also be reported. Do not edit the design, its fixtures, or visual baselines to accept an invented presentation. Metadata absent from the design is an input to the design-gap workflow, not permission to add a field.
 

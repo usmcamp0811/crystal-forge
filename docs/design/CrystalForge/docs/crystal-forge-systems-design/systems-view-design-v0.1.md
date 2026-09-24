@@ -1095,17 +1095,35 @@ This is a diagnostic checklist, not a request to write or repair data. A missing
 
 ## 22. Owner decisions and implementation scope
 
+The D1/D2 retained-artifact gate below records the pinned SC1 decision. The
+[CVE/POA&M continuity design, Section 29](../../cve-poam-evidence-continuity-design-spec.md#29-acceptance-criteria)
+supersedes it for Current CVE mutation and cross-revision verification. Exact
+latest consistent observed state, unique scoped NixOS derivation, and newest
+completed schema-1 scan authorize CVE action without retained evaluation proof.
+Historical selections remain read-only. Config and rollback retain separate
+authority. TASK-326.2.2 is in progress; this note does not verify the change.
+
 **Decision date:** 2026-09-23. These decisions come from the owner's responses to the four System Detail CVEs questions. They are newer than the open-decision tables in the original audits. They do not approve every broader architecture proposal.
 
 ### D1. Read a matching scan without complete deployment proof
 
 **AGREED / SC1, superseded 2026-09-24:** Show a completed schema-1 scan when the server uniquely maps the latest reported running output to the system's registered flake/configuration and exact derivation. Keep the failed proof prerequisite visible until a trusted server-owned reconciliation retains the observed generation against its real available certified immutable artifact. Before reconciliation, this result is valid read-only feedback. After reconciliation, it is normal actionable Current evidence for existing host/environment CVE triage and POA&M, regardless of deployment origin or distance from flake head.
 
-Do not return the existing fully authoritative state before reconciliation. Never hydrate mutation context for provisional evidence, weaken writer checks, manufacture a CF deployment event, or select another target's scan. Reconciliation must prove the latest report's generation/store consistency, one scoped NixOS derivation and its immutable available evaluation artifact under server ownership; persist distinct external-activation provenance. Missing proof and missing scan are different facts.
+For SC1, do not return the existing fully authoritative state before retained
+reconciliation. That retained-artifact restriction is superseded for the CVE
+domain, not for Config or rollback. Never hydrate mutation context from
+historical, ambiguous, or missing exact Current evidence. Do not fabricate a
+CF deployment or select another target's scan. Missing retained proof and
+missing CVE scan are different facts.
 
 ### D2. Out-of-band activation and unmapped output
 
-**AGREED / SC1:** Out-of-band means a switch outside CF's control. If its result reconciles to a known configuration and the server retains its exact verified observation/artifact binding, treat its equivalent end state like a normal CF deployment for Current CVE triage. A missing proof record invokes provisional read-only D1 until reconciliation, not a permanent origin-based penalty.
+**AGREED / SC1, superseded for CVE authority:** Out-of-band means a switch
+outside CF's control. SC1 waited for an exact retained observation/artifact
+binding before Current CVE triage. The continuity contract instead makes a
+uniquely mapped, consistently reported Current derivation with a completed
+schema-1 scan actionable without that binding. Origin never changes CVE
+authority; unmapped output still has no Current scan.
 
 If the result cannot be mapped, show **Unmapped** and no Current CVE inventory. This replaces the earlier automatic flake-head fallback. The operator can still browse a known commit explicitly; that does not describe the unknown running output.
 

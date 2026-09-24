@@ -12,6 +12,11 @@ This draft covers the fleet `/cves` page, grouped and flat inventory, filters,
 statistics, the inventory drawer, environment triage, host overrides, scan
 admission, and the exact-CVE POA&M lifecycle. It keeps current code, existing
 specifications, and proposed behavior separate.
+Its AS-BUILT evidence and Mermaid sources remain pinned to the audited SHA.
+The [CVE/POA&M continuity design, Section 29](../../cve-poam-evidence-continuity-design-spec.md#29-acceptance-criteria)
+now supersedes the audited retained-artifact CVE gate, frozen verification
+lineage, and membership equality. TASK-326.2.2 is in progress; this audit did
+not verify its implementation. Config and rollback authority remains separate.
 
 ## Review order
 
@@ -21,9 +26,10 @@ host overrides, transactions, and the current verification rule. Section 15
 compares the existing continuity proposal. Sections 20 and 25 contain the gap
 and decision registers. Section 23 contains 56 regression scenarios.
 
-The baseline-generation verification rule, dynamic environment membership,
-and read-only Current inventory are separate decisions. The draft does not
-approve any of them by implication.
+The baseline-generation verification rule and read-only Current inventory
+describe the audited source, not the later CVE contract. Dynamic environment
+membership and cross-revision verification are required by the continuity
+design, not established as implemented by this audit.
 
 ## Bundle contents
 

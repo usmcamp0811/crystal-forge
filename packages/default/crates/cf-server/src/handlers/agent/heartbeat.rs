@@ -341,6 +341,15 @@ pub async fn log(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
+    // Routine heartbeats do not change Current evidence. A full state row
+    // triggers best-effort membership repair only after its commit succeeds.
+    if force_full_state_for_reboot || heartbeat_or_state.is_err() {
+        crate::services::poam::schedule_scheduled_environment_cve_reconciliation_for_system(
+            &pool,
+            agent_request.system.id,
+        );
+    }
+
     // Reconcile system health attention after the heartbeat/state change.
     let _ = reconcile_system_health_attention(
         &pool,

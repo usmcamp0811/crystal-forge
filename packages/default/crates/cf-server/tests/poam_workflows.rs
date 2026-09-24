@@ -1,4 +1,5 @@
 use axum::{Router, routing::get};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, NaiveDate, TimeDelta, TimeZone, Utc};
 use crystal_forge::api::models::{
     CveEnvironmentDisposition, CveEnvironmentTriageAction, CveFilters, FleetCveInventorySection,
@@ -14,6 +15,7 @@ use crystal_forge::compliance::canonical::semantic_digest;
 use crystal_forge::compliance::resolver::{
     EffectivePolicySet, ResolutionOutcome, resolve_system_effective_policies,
 };
+use crystal_forge::handlers::agent::state as agent_state_handler;
 use crystal_forge::handlers::agent_request::CFState;
 use crystal_forge::handlers::api::cves as cve_handlers;
 use crystal_forge::handlers::api::poam as poam_handlers;
@@ -53,6 +55,7 @@ use crystal_forge::queue::QueueNotifier;
 use crystal_forge::server::jobs::BackgroundJobRegistry;
 use crystal_forge::services::composite_enforcement::persist_evaluation_assessments_in_tx;
 use crystal_forge::services::poam::{self as poam_service, PoamActor, PoamClock, PoamError};
+use ed25519_dalek::Signer;
 use sqlx::{PgPool, Postgres, Transaction, migrate::Migrate};
 use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
@@ -196,6 +199,317 @@ async fn migration_0260_upgrades_a_database_with_0259_already_applied(pool: PgPo
     .await
     .unwrap();
     assert_eq!(objects_exist, (true, true, true, true));
+}
+
+#[sqlx::test(migrations = false)]
+async fn migration_0279_to_0284_preserves_populated_retained_cve_poam(pool: PgPool) {
+    apply_migrations_through(&pool, 278).await;
+    let scheduled = assessment_fixture(&pool).await;
+    let accepted = assessment_fixture(&pool).await;
+    let actor = admin_actor(scheduled.user_id);
+    sync_user_role(&pool, actor.user_id, AuthRole::Admin)
+        .await
+        .unwrap();
+    let clock = FixedClock(Utc::now());
+    let cve = "CVE-2026-32702";
+    let package = "upgrade-continuity-package";
+    let scheduled_environment = assign_environment(&pool, "upgrade-scheduled", &[&scheduled]).await;
+    let accepted_environment = assign_environment(&pool, "upgrade-accepted", &[&accepted]).await;
+    let scheduled_observation = seal_exact_cve_scan(
+        &pool,
+        &scheduled,
+        clock.now() - TimeDelta::minutes(2),
+        Some((cve, package, "1.0", false)),
+    )
+    .await
+    .unwrap();
+    seal_exact_cve_scan(
+        &pool,
+        &accepted,
+        clock.now() - TimeDelta::minutes(2),
+        Some((cve, package, "1.0", false)),
+    )
+    .await;
+    let retained_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM evaluation_generation_snapshots WHERE system_id=$1 AND generation=1",
+    )
+    .bind(scheduled.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let mut legacy_tx = pool.begin().await.unwrap();
+    let poam_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO poams(title,plan,owner,owner_kind,owner_user_id,
+                              target_date,risk,created_by)
+           VALUES('Upgrade CVE remediation','Deploy clean scan','Upgrade owner',
+                  'user',$1,$2,'high',$1) RETURNING id"#,
+    )
+    .bind(actor.user_id)
+    .bind(clock.today() + TimeDelta::days(30))
+    .fetch_one(&mut *legacy_tx)
+    .await
+    .unwrap();
+    let finding_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO poam_cve_findings(system_id,canonical_cve_id,canonical_package_name) VALUES($1,$2,$3) RETURNING id",
+    )
+    .bind(scheduled.system_id)
+    .bind(cve)
+    .bind(package)
+    .fetch_one(&mut *legacy_tx)
+    .await
+    .unwrap();
+    let link_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO poam_cve_finding_links(
+             poam_id,cve_finding_id,system_id,canonical_cve_id,
+             canonical_package_name,baseline_scan_id,baseline_scan_derivation_id,
+             baseline_scan_completed_at,baseline_generation_snapshot_id,
+             baseline_generation,baseline_target_store_path,
+             baseline_occurrence_derivation_path,baseline_observed_package_version,linked_by)
+           SELECT $1,$2,$3,$4,$5,scan.id,scan.derivation_id,scan.completed_at,
+                  retained.id,retained.generation,retained.source_store_path,
+                  observation.observed_derivation_path,
+                  observation.observed_package_version,$6
+           FROM cve_scans scan
+           JOIN cve_scan_vulnerability_observations observation
+             ON observation.scan_id=scan.id AND observation.canonical_cve_id=$4
+              AND observation.canonical_package_name=$5
+           JOIN evaluation_generation_snapshots retained
+             ON retained.system_id=$3 AND retained.derivation_id=scan.derivation_id
+           WHERE scan.id=$7 RETURNING id"#,
+    )
+    .bind(poam_id)
+    .bind(finding_id)
+    .bind(scheduled.system_id)
+    .bind(cve)
+    .bind(package)
+    .bind(actor.user_id)
+    .bind(scheduled_observation.scan_id)
+    .fetch_one(&mut *legacy_tx)
+    .await
+    .unwrap();
+    legacy_tx.commit().await.unwrap();
+    let scheduled_disposition_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO cve_environment_dispositions(
+             environment_id,canonical_cve_id,canonical_package_name,state,
+             poam_id,scheduled_by,scheduled_at)
+           VALUES($1,$2,$3,'scheduled',$4,$5,now()) RETURNING id"#,
+    )
+    .bind(scheduled_environment)
+    .bind(cve)
+    .bind(package)
+    .bind(poam_id)
+    .bind(actor.user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let accepted_disposition_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO cve_environment_dispositions(
+             environment_id,canonical_cve_id,canonical_package_name,state,
+             justification,accepted_by,accepted_at)
+           VALUES($1,$2,$3,'accepted','Isolated upgrade risk',$4,now()) RETURNING id"#,
+    )
+    .bind(accepted_environment)
+    .bind(cve)
+    .bind(package)
+    .bind(actor.user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let before: (Uuid, Uuid, i32, String, Option<DateTime<Utc>>) = sqlx::query_as(
+        "SELECT baseline_scan_id,baseline_generation_snapshot_id,baseline_generation,baseline_observed_package_version,retired_at FROM poam_cve_finding_links WHERE id=$1",
+    )
+    .bind(link_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(before.0, scheduled_observation.scan_id);
+    assert_eq!(before.1, retained_id);
+    assert_eq!(before.2, 1);
+    assert_eq!(before.3, "1.0");
+    assert_eq!(before.4, None);
+    let artifacts_before: (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM evaluation_snapshots),(SELECT count(*) FROM evaluation_generation_snapshots),(SELECT count(*) FROM pending_system_deployments)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT cve_coherent_environment_disposition_state($1,$2,$3)",
+        )
+        .bind(cve)
+        .bind(package)
+        .bind(scheduled_environment)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        Some("scheduled".into())
+    );
+
+    for version in [279, 280, 281, 282, 283, 284] {
+        apply_migration(&pool, version).await;
+    }
+    let artifacts_after: (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM evaluation_snapshots),(SELECT count(*) FROM evaluation_generation_snapshots),(SELECT count(*) FROM pending_system_deployments)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(artifacts_after, artifacts_before);
+    let after: (Uuid, Option<Uuid>, i32, String, Option<DateTime<Utc>>) = sqlx::query_as(
+        "SELECT baseline_scan_id,baseline_generation_snapshot_id,baseline_generation,baseline_observed_package_version,retired_at FROM poam_cve_finding_links WHERE id=$1",
+    )
+    .bind(link_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        after,
+        (before.0, Some(before.1), before.2, before.3, before.4)
+    );
+    let disposition_history: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM cve_environment_dispositions WHERE canonical_cve_id=$1 ORDER BY id",
+    )
+    .bind(cve)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        disposition_history,
+        [scheduled_disposition_id, accepted_disposition_id]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    );
+    let nullable_columns: i64 = sqlx::query_scalar(
+        r#"SELECT count(*) FROM information_schema.columns
+           WHERE table_schema='public' AND is_nullable='YES'
+             AND (table_name,column_name) IN (
+               ('poam_cve_finding_links','baseline_generation_snapshot_id'),
+               ('poam_cve_verification_items','baseline_generation_snapshot_id'))"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(nullable_columns, 2);
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT cve_coherent_environment_disposition_state($1,$2,$3)",
+        )
+        .bind(cve)
+        .bind(package)
+        .bind(scheduled_environment)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        Some("scheduled".into())
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT cve_coherent_environment_disposition_state($1,$2,$3)",
+        )
+        .bind(cve)
+        .bind(package)
+        .bind(accepted_environment)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        Some("accepted".into())
+    );
+    let rows = fetch_cve_list(&pool, &CveReadScope::All, &CveFilters::default())
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].triage_status, "outstanding");
+    let detail = poam_service::fleet_cve_detail(&pool, &actor, cve, package)
+        .await
+        .unwrap();
+    assert_eq!(detail.rollup, FleetCveTriageRollup::Partial);
+    assert_eq!(detail.affected_system_count, 2);
+    assert!(detail.environments.iter().any(|environment| {
+        environment.environment_id == scheduled_environment
+            && matches!(environment.disposition, Some(CveEnvironmentDisposition::Scheduled { poam_id: id, .. }) if id == poam_id)
+    }));
+    seal_exact_cve_scan(&pool, &scheduled, clock.now(), None).await;
+    let awaiting = poam_service::transition(
+        &pool,
+        &actor,
+        poam_id,
+        TransitionPoamRequest {
+            revision: 1,
+            status: PoamStatus::AwaitingVerification,
+            note: None,
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    let verified = poam_service::verify(&pool, &actor, poam_id, awaiting.poam.revision, &clock)
+        .await
+        .unwrap();
+    assert_eq!(verified["outcome"], "accepted");
+    assert_eq!(verified["cve_items"][0]["result"], "pass");
+    assert_eq!(
+        poam_service::detail(&pool, &actor, poam_id, &clock)
+            .await
+            .unwrap()
+            .verification_attempts[0]
+            .cve_items[0]
+            .baseline_generation_snapshot_id,
+        Some(retained_id)
+    );
+
+    let unretained = assessment_fixture(&pool).await;
+    sqlx::query("DELETE FROM evaluation_generation_snapshots WHERE system_id=$1")
+        .bind(unretained.system_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let unretained_observation = seal_exact_cve_scan(
+        &pool,
+        &unretained,
+        clock.now(),
+        Some(("CVE-2026-32703", package, "2.0", false)),
+    )
+    .await
+    .unwrap();
+    let new_poam = poam_service::create_cve(
+        &pool,
+        &actor,
+        CreateCvePoamRequest {
+            observation: unretained_observation.clone(),
+            title: "Unretained upgrade finding".into(),
+            plan: "Deploy a fix".into(),
+            owner: "Upgrade owner".into(),
+            assignee: None,
+            target_date: None,
+            risk: PoamRisk::High,
+            default_milestones: false,
+            assignment_version_ids: vec![],
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        new_poam.cve_findings[0].baseline_generation_snapshot_id,
+        None
+    );
+    assert_eq!(
+        new_poam.cve_findings[0].baseline_scan_id,
+        unretained_observation.scan_id
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM evaluation_generation_snapshots WHERE system_id=$1"
+        )
+        .bind(unretained.system_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -1052,6 +1366,1171 @@ async fn assert_cve_open_everywhere(
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn environment_move_retains_mixed_history_and_separates_visible_poams(pool: PgPool) {
+    let moved = assessment_fixture(&pool).await;
+    let overridden = assessment_fixture(&pool).await;
+    let actor = admin_actor(moved.user_id);
+    sync_user_role(&pool, actor.user_id, AuthRole::Admin)
+        .await
+        .unwrap();
+    let clock = FixedClock(Utc::now());
+    let cve = "CVE-2026-32704";
+    let package = "move-history-package";
+    let environment_a = assign_environment(&pool, "move-source-a", &[&moved, &overridden]).await;
+    let environment_b = assign_environment(&pool, "move-destination-b", &[]).await;
+    let (hostname, configuration, flake_name): (String, Option<String>, String) = sqlx::query_as(
+        "SELECT system.hostname,system.system_configuration_name,flake.name FROM systems system JOIN flakes flake ON flake.id=system.flake_id WHERE system.id=$1",
+    )
+    .bind(moved.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    for subject in [&moved, &overridden] {
+        seal_exact_cve_scan(
+            &pool,
+            subject,
+            clock.now(),
+            Some((cve, package, "1.0", false)),
+        )
+        .await;
+    }
+    let scheduled_a = poam_service::triage_fleet_cve(
+        &pool,
+        &actor,
+        cve,
+        FleetCveTriageRequest {
+            canonical_package_name: package.into(),
+            actions: vec![CveEnvironmentTriageAction::SchedulePatch {
+                environment_id: environment_a,
+            }],
+            poam: Some(fleet_poam_request(actor.user_id, &clock)),
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    let a_poam = scheduled_a.poam_id.unwrap();
+    let baseline: (Uuid, Uuid, Option<Uuid>, String) = sqlx::query_as(
+        "SELECT id,baseline_scan_id,baseline_generation_snapshot_id,baseline_observed_package_version FROM poam_cve_finding_links WHERE poam_id=$1 AND system_id=$2 AND retired_at IS NULL",
+    )
+    .bind(a_poam)
+    .bind(moved.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let host_override = poam_service::triage_system_cve(
+        &pool,
+        &actor,
+        overridden.system_id,
+        cve,
+        SystemCveTriageRequest {
+            canonical_package_name: package.into(),
+            scope: SystemCveTriageScopeChoice::Host,
+            action: SystemCveTriageAction::AcceptRisk {
+                justification: "Independent host controls survive the move".into(),
+                review_date: None,
+            },
+            poam: None,
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        host_override.detail.effective_source,
+        SystemCveEffectiveDispositionSource::Host
+    );
+    let nonmove: (String, bool) = sqlx::query_as(
+        "SELECT retirement_reason,retired_at IS NOT NULL FROM poam_cve_finding_links WHERE poam_id=$1 AND system_id=$2 ORDER BY linked_at LIMIT 1",
+    )
+    .bind(a_poam)
+    .bind(overridden.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(nonmove.1);
+    assert_ne!(nonmove.0, "environment_moved");
+
+    let base = poam_http_server(pool.clone()).await;
+    let token = session(&pool, actor.user_id, AuthRole::Admin).await;
+    let client = reqwest::Client::new();
+    let patch = http_request(
+        &client,
+        reqwest::Method::PATCH,
+        format!("{base}/api/v1/systems/{}", moved.system_id),
+        &token,
+        Some("move-history-csrf"),
+    )
+    .json(&serde_json::json!({
+        "hostname": hostname,
+        "system_configuration_name": configuration,
+        "environment": "move-destination-b",
+        "flake_name": flake_name,
+        "deployment_policy": "manual"
+    }))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(
+        patch.status(),
+        reqwest::StatusCode::OK,
+        "{}",
+        patch.text().await.unwrap()
+    );
+    let moved_link: (Uuid, Option<DateTime<Utc>>, String, Uuid, Option<Uuid>, String) = sqlx::query_as(
+        "SELECT id,retired_at,retirement_reason,baseline_scan_id,baseline_generation_snapshot_id,baseline_observed_package_version FROM poam_cve_finding_links WHERE id=$1",
+    )
+    .bind(baseline.0)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(moved_link.0, baseline.0);
+    assert!(moved_link.1.is_some());
+    assert_eq!(moved_link.2, "environment_moved");
+    assert_eq!(
+        (moved_link.3, moved_link.4, moved_link.5),
+        (baseline.1, baseline.2, baseline.3)
+    );
+    let a_detail = poam_service::detail(&pool, &actor, a_poam, &clock)
+        .await
+        .unwrap();
+    assert_ne!(a_detail.poam.status, "completed");
+    assert_eq!(
+        a_detail
+            .cve_findings
+            .iter()
+            .filter(|finding| finding.link_active)
+            .count(),
+        0
+    );
+    assert_eq!(a_detail.cve_findings.len(), 2);
+    let live_a: (Uuid, String) = sqlx::query_as(
+        "SELECT poam_id,state FROM cve_current_environment_dispositions WHERE environment_id=$1 AND canonical_cve_id=$2 AND canonical_package_name=$3",
+    )
+    .bind(environment_a)
+    .bind(cve)
+    .bind(package)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(live_a, (a_poam, "scheduled".into()));
+    assert_eq!(
+        poam_service::system_cve_triage_detail(&pool, &actor, overridden.system_id, cve, package)
+            .await
+            .unwrap()
+            .effective_source,
+        SystemCveEffectiveDispositionSource::Host
+    );
+
+    let scheduled_b = poam_service::triage_system_cve(
+        &pool,
+        &actor,
+        moved.system_id,
+        cve,
+        SystemCveTriageRequest {
+            canonical_package_name: package.into(),
+            scope: SystemCveTriageScopeChoice::Environment,
+            action: SystemCveTriageAction::SchedulePatch,
+            poam: Some(fleet_poam_request(actor.user_id, &clock)),
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    let b_poam = scheduled_b.poam_id.unwrap();
+    assert_ne!(b_poam, a_poam);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM poam_cve_finding_links WHERE poam_id=$1 AND system_id=$2 AND retired_at IS NULL"
+        )
+        .bind(b_poam)
+        .bind(moved.system_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+
+    let a_reader = assessment_fixture(&pool).await;
+    sync_user_role(&pool, a_reader.user_id, AuthRole::Viewer)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO user_environment_memberships(user_id,environment_id) VALUES($1,$2)")
+        .bind(a_reader.user_id)
+        .bind(environment_a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let scoped = PoamActor {
+        user_id: a_reader.user_id,
+        identifier: "a-only-reader".into(),
+        is_admin: false,
+        can_mutate: false,
+        environment_ids: vec![environment_a],
+        request_origin: None,
+    };
+    assert_eq!(
+        poam_service::detail(&pool, &scoped, a_poam, &clock)
+            .await
+            .unwrap()
+            .poam
+            .id,
+        a_poam
+    );
+    assert!(matches!(
+        poam_service::detail(&pool, &scoped, b_poam, &clock).await,
+        Err(PoamError::NotFound)
+    ));
+    let scoped_list = poam_service::list(&pool, &scoped, &PoamListQuery::default(), &clock)
+        .await
+        .unwrap();
+    assert!(scoped_list.items.iter().any(|item| item.id == a_poam));
+    assert!(!scoped_list.items.iter().any(|item| item.id == b_poam));
+    let searched = poam_service::list(
+        &pool,
+        &scoped,
+        &PoamListQuery {
+            q: Some(hostname),
+            ..Default::default()
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert!(
+        searched.items.is_empty(),
+        "A-only search cannot disclose B's current hostname"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT cve_coherent_environment_disposition_state($1,$2,$3)"
+        )
+        .bind(cve)
+        .bind(package)
+        .bind(environment_b)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        Some("scheduled".into())
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn scheduled_environment_reconciles_and_verifies_over_one_hundred_members(pool: PgPool) {
+    let first = assessment_fixture(&pool).await;
+    let actor = admin_actor(first.user_id);
+    sync_user_role(&pool, actor.user_id, AuthRole::Admin)
+        .await
+        .unwrap();
+    let clock = FixedClock(Utc::now());
+    let cve = "CVE-2026-32705";
+    let package = "paged-continuity-package";
+    let environment = assign_environment(&pool, "paged-continuity-environment", &[&first]).await;
+    let initial = seal_exact_cve_scan(
+        &pool,
+        &first,
+        clock.now() - TimeDelta::minutes(2),
+        Some((cve, package, "1.0", false)),
+    )
+    .await
+    .unwrap();
+    let scheduled = poam_service::triage_fleet_cve(
+        &pool,
+        &actor,
+        cve,
+        FleetCveTriageRequest {
+            canonical_package_name: package.into(),
+            actions: vec![CveEnvironmentTriageAction::SchedulePatch {
+                environment_id: environment,
+            }],
+            poam: Some(fleet_poam_request(actor.user_id, &clock)),
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    let poam_id = scheduled.poam_id.unwrap();
+    let (hostname, flake_id): (String, i32) =
+        sqlx::query_as("SELECT hostname,flake_id FROM systems WHERE id=$1")
+            .bind(first.system_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let prefix = format!("page-{}-", Uuid::new_v4().simple());
+    let additional_ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"INSERT INTO systems(hostname,is_active,public_key,derivation,reachability,
+                               flake_id,system_configuration_name,environment_id)
+           SELECT $1 || series.n,true,'page-key-' || $1 || series.n,
+                  'page-key-' || $1 || series.n,'direct',$2,$3,$4
+           FROM generate_series(1,120) AS series(n) RETURNING id"#,
+    )
+    .bind(&prefix)
+    .bind(flake_id)
+    .bind(&hostname)
+    .bind(environment)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(additional_ids.len(), 120);
+    sqlx::query(
+        r#"INSERT INTO system_states(hostname,change_reason,store_path,generation,
+                                     generation_matches_current_store_path,timestamp)
+           SELECT hostname,'startup',$2,1,true,clock_timestamp() + interval '1 minute'
+           FROM systems WHERE id=ANY($1)"#,
+    )
+    .bind(&additional_ids)
+    .bind(&first.store_path)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let affected: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM view_current_exact_cve_occurrences WHERE cve_id=$1 AND package_name=$2 AND environment_id=$3",
+    )
+    .bind(cve)
+    .bind(package)
+    .bind(environment)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(affected, 121);
+
+    assert_eq!(
+        poam_service::reconcile_scheduled_environment_cve_page(&pool, None)
+            .await
+            .unwrap(),
+        None
+    );
+    let first_page: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM poam_cve_finding_links WHERE poam_id=$1 AND retired_at IS NULL",
+    )
+    .bind(poam_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        first_page, 101,
+        "one repair adds at most 100 missing subjects"
+    );
+    let awaiting = poam_service::transition(
+        &pool,
+        &actor,
+        poam_id,
+        TransitionPoamRequest {
+            revision: 1,
+            status: PoamStatus::AwaitingVerification,
+            note: None,
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    let rejected = poam_service::verify(&pool, &actor, poam_id, awaiting.poam.revision, &clock)
+        .await
+        .unwrap();
+    assert_eq!(rejected["outcome"], "rejected");
+    assert_eq!(rejected["cve_items"].as_array().unwrap().len(), 101);
+    assert!(matches!(
+        poam_service::close(
+            &pool,
+            &actor,
+            poam_id,
+            rejected["revision"].as_i64().unwrap(),
+            &clock
+        )
+        .await,
+        Err(PoamError::Precondition("closure_not_ready", _, _))
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM poam_cve_finding_links WHERE poam_id=$1 AND retired_at IS NULL"
+        )
+        .bind(poam_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        101
+    );
+
+    poam_service::reconcile_scheduled_environment_cve_page(&pool, None)
+        .await
+        .unwrap();
+    poam_service::reconcile_scheduled_environment_cve_page(&pool, None)
+        .await
+        .unwrap();
+    let linked: (i64, i64) = sqlx::query_as(
+        "SELECT count(*),count(DISTINCT system_id) FROM poam_cve_finding_links WHERE poam_id=$1 AND retired_at IS NULL",
+    )
+    .bind(poam_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(linked, (121, 121));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM poams WHERE id=$1")
+            .bind(poam_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    seal_exact_cve_scan(&pool, &first, clock.now() + TimeDelta::minutes(2), None).await;
+    let revision: i64 = sqlx::query_scalar("SELECT revision FROM poams WHERE id=$1")
+        .bind(poam_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let passed = poam_service::verify(&pool, &actor, poam_id, revision, &clock)
+        .await
+        .unwrap();
+    assert_eq!(passed["outcome"], "accepted");
+    assert_eq!(passed["cve_items"].as_array().unwrap().len(), 121);
+    assert!(
+        passed["cve_items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["result"] == "pass")
+    );
+    let passed_id = Uuid::parse_str(passed["attempt_id"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM poam_cve_verification_items WHERE attempt_id=$1 AND result='pass' AND baseline_scan_id=$2"
+        ).bind(passed_id).bind(initial.scan_id).fetch_one(&pool).await.unwrap(),
+        121
+    );
+    let closed = poam_service::close(
+        &pool,
+        &actor,
+        poam_id,
+        passed["revision"].as_i64().unwrap(),
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(closed.poam.status, "completed");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM poam_cve_finding_links WHERE poam_id=$1 AND retired_at IS NULL"
+        )
+        .bind(poam_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+}
+
+async fn replay_retired_cve_link(
+    pool: &PgPool,
+    link_id: Uuid,
+    cve_id: &str,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    // CONCURRENCY: Production writers take the canonical CVE key before
+    // reading link rows. The direct-SQL test must follow the same order while
+    // an asynchronous disposition reconciliation may be running.
+    sqlx::query("SELECT lock_poam_cve_key($1)")
+        .bind(cve_id)
+        .execute(&mut *tx)
+        .await?;
+    let inserted = sqlx::query(
+        r#"INSERT INTO poam_cve_finding_links(
+             poam_id,cve_finding_id,system_id,canonical_cve_id,
+             canonical_package_name,baseline_scan_id,baseline_scan_derivation_id,
+             baseline_scan_completed_at,baseline_generation_snapshot_id,
+             baseline_generation,baseline_target_store_path,
+             baseline_occurrence_derivation_path,baseline_observed_package_version,linked_by)
+           SELECT poam_id,cve_finding_id,system_id,canonical_cve_id,
+                  canonical_package_name,baseline_scan_id,baseline_scan_derivation_id,
+                  baseline_scan_completed_at,baseline_generation_snapshot_id,
+                  baseline_generation,baseline_target_store_path,
+                  baseline_occurrence_derivation_path,baseline_observed_package_version,linked_by
+           FROM poam_cve_finding_links WHERE id=$1"#,
+    )
+    .bind(link_id)
+    .execute(&mut *tx)
+    .await;
+    tx.rollback().await?;
+    inserted.map(|_| ())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn retired_nonclosure_cve_link_replay_requires_current_and_no_accepted_host(pool: PgPool) {
+    let fixture = assessment_fixture(&pool).await;
+    let peer = assessment_fixture(&pool).await;
+    let actor = admin_actor(fixture.user_id);
+    sync_user_role(&pool, actor.user_id, AuthRole::Admin)
+        .await
+        .unwrap();
+    let clock = FixedClock(Utc::now());
+    let cve = "CVE-2026-32700";
+    let package = "replay-guard-package";
+    let environment =
+        assign_environment(&pool, "replay-guard-environment", &[&fixture, &peer]).await;
+    for subject in [&fixture, &peer] {
+        seal_exact_cve_scan(
+            &pool,
+            subject,
+            clock.now(),
+            Some((cve, package, "1.0", false)),
+        )
+        .await;
+    }
+    let scheduled = poam_service::triage_fleet_cve(
+        &pool,
+        &actor,
+        cve,
+        FleetCveTriageRequest {
+            canonical_package_name: package.into(),
+            actions: vec![CveEnvironmentTriageAction::SchedulePatch {
+                environment_id: environment,
+            }],
+            poam: Some(fleet_poam_request(actor.user_id, &clock)),
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    let poam_id = scheduled.poam_id.unwrap();
+    let link: (Uuid, Uuid, Option<Uuid>) = sqlx::query_as(
+        "SELECT id,baseline_scan_id,baseline_generation_snapshot_id FROM poam_cve_finding_links WHERE poam_id=$1 AND system_id=$2 AND retired_at IS NULL",
+    )
+    .bind(poam_id)
+    .bind(fixture.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(link.2.is_some());
+    sqlx::query(
+        "UPDATE poam_cve_finding_links SET retired_at=now(),retired_by=$2,retirement_reason='operator_unlinked' WHERE id=$1",
+    )
+    .bind(link.0)
+    .bind(actor.user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let accepted = poam_service::triage_system_cve(
+        &pool,
+        &actor,
+        fixture.system_id,
+        cve,
+        SystemCveTriageRequest {
+            canonical_package_name: package.into(),
+            scope: SystemCveTriageScopeChoice::Host,
+            action: SystemCveTriageAction::AcceptRisk {
+                justification: "Independently accepted host risk".into(),
+                review_date: None,
+            },
+            poam: None,
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        accepted.detail.effective_source,
+        SystemCveEffectiveDispositionSource::Host
+    );
+    let before_replay: (i64, i64) = sqlx::query_as(
+        "SELECT count(*),count(*) FILTER (WHERE retired_at IS NULL) FROM poam_cve_finding_links WHERE poam_id=$1",
+    )
+    .bind(poam_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let rejected = replay_retired_cve_link(&pool, link.0, cve)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        rejected
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("poam_cve_link_replay_accepted_host_risk"),
+        "unexpected replay rejection: {rejected:?}"
+    );
+    sqlx::query("UPDATE poams SET target_date=NULL WHERE id=$1")
+        .bind(poam_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE cve_system_dispositions SET retired_at=now(),retired_by=$4,retirement_reason='operator_cleared' WHERE system_id=$1 AND canonical_cve_id=$2 AND canonical_package_name=$3 AND retired_at IS NULL",
+    )
+    .bind(fixture.system_id)
+    .bind(cve)
+    .bind(package)
+    .bind(actor.user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(
+        poam_service::system_cve_triage_detail(&pool, &actor, fixture.system_id, cve, package)
+            .await
+            .unwrap()
+            .host_disposition
+            .is_none()
+    );
+    seal_exact_cve_scan(&pool, &fixture, clock.now() + TimeDelta::minutes(1), None).await;
+    let rejected = replay_retired_cve_link(&pool, link.0, cve)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        rejected
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("poam_cve_link_replay_current_baseline")
+    );
+    let (_, newer) = external_cve_revision(
+        &pool,
+        &fixture,
+        2,
+        clock.now() + TimeDelta::minutes(2),
+        Some((cve, package, "2.0", false)),
+    )
+    .await;
+    assert!(newer.is_some());
+    let rejected = replay_retired_cve_link(&pool, link.0, cve)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        rejected
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("poam_cve_link_replay_current_baseline")
+    );
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT count(*),count(*) FILTER (WHERE retired_at IS NULL) FROM poam_cve_finding_links WHERE poam_id=$1",
+    )
+    .bind(poam_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(counts, before_replay);
+    assert_eq!(counts.1, 1, "only the peer's link stays active");
+    assert_eq!(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT baseline_scan_id FROM poam_cve_finding_links WHERE id=$1"
+        )
+        .bind(link.0)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        link.1
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn unavailable_group_blocks_new_scheduled_environment_membership(pool: PgPool) {
+    let initial = assessment_fixture(&pool).await;
+    let newcomer = assessment_fixture(&pool).await;
+    let actor = admin_actor(initial.user_id);
+    sync_user_role(&pool, actor.user_id, AuthRole::Admin)
+        .await
+        .unwrap();
+    let clock = FixedClock(Utc::now());
+    let cve = "CVE-2026-32701";
+    let package = "unavailable-owner-package";
+    let group = format!("continuity:group-{}", Uuid::new_v4().simple());
+    sqlx::query("INSERT INTO oidc_group_mappings(group_name) VALUES($1)")
+        .bind(&group)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let environment = assign_environment(
+        &pool,
+        "unavailable-owner-environment",
+        &[&initial, &newcomer],
+    )
+    .await;
+    seal_exact_cve_scan(
+        &pool,
+        &initial,
+        clock.now(),
+        Some((cve, package, "1.0", false)),
+    )
+    .await;
+    let scheduled = poam_service::triage_fleet_cve(
+        &pool,
+        &actor,
+        cve,
+        FleetCveTriageRequest {
+            canonical_package_name: package.into(),
+            actions: vec![CveEnvironmentTriageAction::SchedulePatch {
+                environment_id: environment,
+            }],
+            poam: Some(FleetCvePoamRequest {
+                assignee: PoamAssigneeRequest::OidcGroup {
+                    group_name: group.clone(),
+                },
+                ..fleet_poam_request(actor.user_id, &clock)
+            }),
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    let poam_id = scheduled.poam_id.unwrap();
+    sqlx::query("DELETE FROM oidc_group_mappings WHERE group_name=$1")
+        .bind(&group)
+        .execute(&pool)
+        .await
+        .unwrap();
+    seal_exact_cve_scan(
+        &pool,
+        &newcomer,
+        clock.now() + TimeDelta::minutes(1),
+        Some((cve, package, "1.1", false)),
+    )
+    .await;
+    poam_service::reconcile_scheduled_environment_cves_for_system(&pool, newcomer.system_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        poam_service::reconcile_scheduled_environment_cve_page(&pool, None)
+            .await
+            .unwrap(),
+        None
+    );
+    let linked: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT system_id FROM poam_cve_finding_links WHERE poam_id=$1 AND retired_at IS NULL",
+    )
+    .bind(poam_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(linked, vec![initial.system_id]);
+    assert_eq!(
+        poam_service::fleet_cve_detail(&pool, &actor, cve, package)
+            .await
+            .unwrap()
+            .rollup,
+        FleetCveTriageRollup::Outstanding
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn scheduled_environment_reconciliation_keeps_history_and_adds_only_current_subjects(
+    pool: PgPool,
+) {
+    let sledge = assessment_fixture(&pool).await;
+    let gray = assessment_fixture(&pool).await;
+    let webb = assessment_fixture(&pool).await;
+    let daly = assessment_fixture(&pool).await;
+    let inconsistent = assessment_fixture(&pool).await;
+    let actor = admin_actor(sledge.user_id);
+    sync_user_role(&pool, actor.user_id, AuthRole::Admin)
+        .await
+        .unwrap();
+    let clock = FixedClock(Utc::now());
+    let cve = "CVE-2026-32699";
+    let package = "continuity-environment-package";
+    let environment = assign_environment(
+        &pool,
+        "continuity-repair-environment",
+        &[&sledge, &gray, &webb, &daly, &inconsistent],
+    )
+    .await;
+    for fixture in [&sledge, &gray, &webb] {
+        seal_exact_cve_scan(
+            &pool,
+            fixture,
+            clock.now(),
+            Some((cve, package, "1.0", false)),
+        )
+        .await;
+    }
+    let scheduled = poam_service::triage_fleet_cve(
+        &pool,
+        &actor,
+        cve,
+        FleetCveTriageRequest {
+            canonical_package_name: package.into(),
+            actions: vec![CveEnvironmentTriageAction::SchedulePatch {
+                environment_id: environment,
+            }],
+            poam: Some(fleet_poam_request(actor.user_id, &clock)),
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    let poam_id = scheduled.poam_id.unwrap();
+    assert_eq!(scheduled.detail.exact_mutation_target_count, 3);
+    let original_links: Vec<(Uuid, Uuid, Uuid)> = sqlx::query_as(
+        "SELECT system_id,cve_finding_id,baseline_scan_id FROM poam_cve_finding_links WHERE poam_id=$1 AND retired_at IS NULL ORDER BY system_id",
+    )
+    .bind(poam_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(original_links.len(), 3);
+
+    // A current evaluation artifact is not required for the newly affected
+    // system. Its exact scan, not retained Config provenance, opens the link.
+    sqlx::query("DELETE FROM evaluation_generation_snapshots WHERE system_id=$1")
+        .bind(daly.system_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let daly_scan = seal_exact_cve_scan(
+        &pool,
+        &daly,
+        clock.now() + TimeDelta::minutes(1),
+        Some((cve, package, "2.0", false)),
+    )
+    .await
+    .unwrap();
+    seal_exact_cve_scan(&pool, &webb, clock.now() + TimeDelta::minutes(2), None).await;
+    seal_exact_cve_scan(
+        &pool,
+        &inconsistent,
+        clock.now() + TimeDelta::minutes(1),
+        Some((cve, package, "9.0", false)),
+    )
+    .await;
+    report_external_generation(&pool, &inconsistent, 2, &inconsistent.store_path, false, 1).await;
+    let current_request =
+        SystemCveInventoryPageRequest::from_params(SystemCveInventoryParams::default()).unwrap();
+    assert!(
+        fetch_system_cve_inventory_page(&pool, inconsistent.system_id, &current_request)
+            .await
+            .unwrap()
+            .read_only
+    );
+
+    let (repair_a, repair_b) = tokio::join!(
+        poam_service::reconcile_scheduled_environment_cves_for_system(&pool, daly.system_id),
+        poam_service::reconcile_scheduled_environment_cves_for_system(&pool, daly.system_id)
+    );
+    repair_a.expect("first concurrent repair must finish");
+    repair_b.expect("second concurrent repair must finish without duplicate links");
+    assert_eq!(
+        poam_service::reconcile_scheduled_environment_cve_page(&pool, None)
+            .await
+            .unwrap(),
+        None
+    );
+    let links: Vec<(Uuid, Uuid, Uuid, Option<Uuid>, String)> = sqlx::query_as(
+        "SELECT system_id,cve_finding_id,baseline_scan_id,baseline_generation_snapshot_id,baseline_observed_package_version FROM poam_cve_finding_links WHERE poam_id=$1 AND retired_at IS NULL ORDER BY system_id",
+    )
+    .bind(poam_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(links.len(), 4);
+    assert!(links.iter().all(|row| row.0 != inconsistent.system_id));
+    for (system_id, finding_id, scan_id) in &original_links {
+        let current = links.iter().find(|row| row.0 == *system_id).unwrap();
+        assert_eq!(current.1, *finding_id);
+        assert_eq!(
+            current.2, *scan_id,
+            "history must keep its original baseline"
+        );
+    }
+    let added = links.iter().find(|row| row.0 == daly.system_id).unwrap();
+    assert_eq!(added.2, daly_scan.scan_id);
+    assert_eq!(added.3, None);
+    assert_eq!(added.4, "2.0");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM poams WHERE id=$1")
+            .bind(poam_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    let detail = poam_service::detail(&pool, &actor, poam_id, &clock)
+        .await
+        .unwrap();
+    let historic = detail
+        .cve_findings
+        .iter()
+        .find(|finding| finding.system_id == webb.system_id)
+        .unwrap();
+    assert!(historic.link_active);
+    assert!(historic.current_scan_id.is_some());
+    assert!(historic.current_occurrence_derivation_path.is_none());
+    let current = poam_service::fleet_cve_detail(&pool, &actor, cve, package)
+        .await
+        .unwrap();
+    assert_eq!(current.affected_system_count, 3);
+    let persisted_state: Option<String> =
+        sqlx::query_scalar("SELECT cve_coherent_environment_disposition_state($1,$2,$3)")
+            .bind(cve)
+            .bind(package)
+            .bind(environment)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(persisted_state.as_deref(), Some("scheduled"));
+
+    let accepted = poam_service::triage_system_cve(
+        &pool,
+        &actor,
+        gray.system_id,
+        cve,
+        SystemCveTriageRequest {
+            canonical_package_name: package.into(),
+            scope: SystemCveTriageScopeChoice::Host,
+            action: SystemCveTriageAction::AcceptRisk {
+                justification: "Gray has independently approved controls".into(),
+                review_date: None,
+            },
+            poam: None,
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        accepted.detail.effective_source,
+        SystemCveEffectiveDispositionSource::Host
+    );
+    let gray_links_before: (i64, i64) = sqlx::query_as(
+        "SELECT count(*),count(*) FILTER (WHERE retired_at IS NULL) FROM poam_cve_finding_links WHERE poam_id=$1 AND system_id=$2",
+    )
+    .bind(poam_id)
+    .bind(gray.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    poam_service::reconcile_scheduled_environment_cves_for_system(&pool, gray.system_id)
+        .await
+        .unwrap();
+    poam_service::reconcile_scheduled_environment_cve_page(&pool, None)
+        .await
+        .unwrap();
+    let gray_links_after: (i64, i64) = sqlx::query_as(
+        "SELECT count(*),count(*) FILTER (WHERE retired_at IS NULL) FROM poam_cve_finding_links WHERE poam_id=$1 AND system_id=$2",
+    )
+    .bind(poam_id)
+    .bind(gray.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(gray_links_after, gray_links_before);
+    assert_eq!(
+        poam_service::system_cve_triage_detail(&pool, &actor, gray.system_id, cve, package)
+            .await
+            .unwrap()
+            .effective_source,
+        SystemCveEffectiveDispositionSource::Host
+    );
+    let all_links: (i64, i64) = sqlx::query_as(
+        "SELECT count(*),count(DISTINCT system_id) FROM poam_cve_finding_links WHERE poam_id=$1",
+    )
+    .bind(poam_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(all_links, (4, 4));
+    assert!(
+        matches!(
+            current.environments[0].disposition,
+            Some(CveEnvironmentDisposition::Scheduled { poam_id: id, .. }) if id == poam_id
+        ),
+        "scheduled environment after repair: {:?}",
+        current.environments
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn unlinked_environment_host_state_publication_precedes_cve_poam_closure(pool: PgPool) {
+    let a = assessment_fixture(&pool).await;
+    let b = assessment_fixture(&pool).await;
+    let actor = admin_actor(a.user_id);
+    sync_user_role(&pool, actor.user_id, AuthRole::Admin)
+        .await
+        .unwrap();
+    let clock = FixedClock(Utc::now());
+    let cve = "CVE-2026-32704";
+    let package = "unlinked-state-race-package";
+    let environment = assign_environment(&pool, "unlinked-state-race", &[&a, &b]).await;
+    seal_exact_cve_scan(
+        &pool,
+        &a,
+        clock.now() - TimeDelta::minutes(2),
+        Some((cve, package, "1.0", false)),
+    )
+    .await;
+    let scheduled = poam_service::triage_fleet_cve(
+        &pool,
+        &actor,
+        cve,
+        FleetCveTriageRequest {
+            canonical_package_name: package.into(),
+            actions: vec![CveEnvironmentTriageAction::SchedulePatch {
+                environment_id: environment,
+            }],
+            poam: Some(fleet_poam_request(actor.user_id, &clock)),
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    let poam_id = scheduled.poam_id.unwrap();
+    let b_scan = seal_exact_cve_scan(
+        &pool,
+        &b,
+        clock.now() - TimeDelta::minutes(1),
+        Some((cve, package, "1.0", false)),
+    )
+    .await
+    .unwrap();
+    report_external_generation(&pool, &b, 2, &b.store_path, false, 0).await;
+    let b_findings: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM poam_cve_findings WHERE system_id=$1")
+            .bind(b.system_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        b_findings, 0,
+        "B must have no finding key for the state publisher to discover"
+    );
+    seal_exact_cve_scan(&pool, &a, clock.now(), None).await;
+    let awaiting = poam_service::transition(
+        &pool,
+        &actor,
+        poam_id,
+        TransitionPoamRequest {
+            revision: 1,
+            status: PoamStatus::AwaitingVerification,
+            note: None,
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+
+    let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+    sqlx::query("UPDATE systems SET public_key=$2 WHERE id=$1")
+        .bind(b.system_id)
+        .bind(STANDARD.encode(signing_key.verifying_key().to_bytes()))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut state: SystemState = sqlx::query_as(
+        "SELECT *,NULL::text AS boot_id FROM system_states WHERE hostname=(SELECT hostname FROM systems WHERE id=$1) ORDER BY id DESC LIMIT 1",
+    )
+    .bind(b.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    state.id = None;
+    state.timestamp = None;
+    state.generation = Some(3);
+    state.generation_matches_current_store_path = Some(true);
+    let hostname = state.hostname.clone();
+    let body = serde_json::to_vec(&state).unwrap();
+    let signature = STANDARD.encode(signing_key.sign(&body).to_bytes());
+    let base = poam_http_server(pool.clone()).await;
+    let client = reqwest::Client::new();
+
+    // CONCURRENCY: Hold B's sentinel after the canonical key so ingestion
+    // waits inside its real transaction while closure queues behind its key.
+    let mut sentinel = pool.begin().await.unwrap();
+    sqlx::query("SELECT lock_poam_finding_key($1,$2)")
+        .bind(b.system_id)
+        .bind(Uuid::nil())
+        .execute(&mut *sentinel)
+        .await
+        .unwrap();
+    let gate = Arc::new(tokio::sync::Barrier::new(2));
+    let request_gate = Arc::clone(&gate);
+    let mut publication = tokio::spawn(async move {
+        request_gate.wait().await;
+        client
+            .post(format!("{base}/current-system"))
+            .header("x-key-id", hostname)
+            .header("x-signature", signature)
+            .body(body)
+            .send()
+            .await
+    });
+    gate.wait().await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let acquired: bool = sqlx::query_scalar(
+                "SELECT pg_try_advisory_xact_lock(hashtextextended($1::text,439))",
+            )
+            .bind(cve)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if !acquired {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("agent state publisher did not acquire the scheduled CVE key");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), &mut publication)
+            .await
+            .is_err(),
+        "state publication must wait for B's sentinel"
+    );
+
+    let close_pool = pool.clone();
+    let close_actor = actor.clone();
+    let close_clock = clock.clone();
+    let mut closure = tokio::spawn(async move {
+        poam_service::close(
+            &close_pool,
+            &close_actor,
+            poam_id,
+            awaiting.poam.revision,
+            &close_clock,
+        )
+        .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), &mut closure)
+            .await
+            .is_err(),
+        "closure must wait for the state publisher's scheduled CVE key"
+    );
+    sentinel.commit().await.unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(5), publication)
+        .await
+        .expect("state publication did not finish")
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let closed = tokio::time::timeout(Duration::from_secs(5), closure)
+        .await
+        .expect("closure did not finish after state publication")
+        .unwrap();
+    assert!(
+        matches!(
+            closed,
+            Err(PoamError::Precondition("closure_not_ready", _, _))
+                | Err(PoamError::Conflict("concurrent_finding_change", _))
+        ),
+        "closure must not accept stale unlinked B: {closed:?}"
+    );
+    let current: Option<Uuid> = sqlx::query_scalar(
+        "SELECT scan_id FROM view_current_exact_cve_occurrences WHERE system_id=$1 AND cve_id=$2 AND package_name=$3",
+    )
+    .bind(b.system_id)
+    .bind(cve)
+    .bind(package)
+    .fetch_optional(&pool)
+    .await
+    .unwrap();
+    assert_eq!(current, Some(b_scan.scan_id));
+    let status: String = sqlx::query_scalar("SELECT status FROM poams WHERE id=$1")
+        .bind(poam_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "awaiting_verification");
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn fleet_cve_triage_is_atomic_environment_scoped_and_semantically_idempotent(pool: PgPool) {
     let first = assessment_fixture(&pool).await;
     let second = assessment_fixture(&pool).await;
@@ -1306,7 +2785,7 @@ async fn fleet_cve_triage_is_atomic_environment_scoped_and_semantically_idempote
         .find(|finding| finding.system_id == foreign.system_id)
         .unwrap()
         .id;
-    let foreign_subject = poam_service::triage_fleet_cve(
+    let historical_extra = poam_service::triage_fleet_cve(
         &pool,
         &actor,
         cve_id,
@@ -1325,11 +2804,9 @@ async fn fleet_cve_triage_is_atomic_environment_scoped_and_semantically_idempote
         &clock,
     )
     .await
-    .unwrap_err();
-    assert!(matches!(
-        foreign_subject,
-        PoamError::ConflictDetails("cve_subjects_already_managed", _, _)
-    ));
+    .expect("extra historical membership must not force a new remediation episode");
+    assert_eq!(historical_extra.poam_id, Some(poam_id));
+    assert!(historical_extra.poam_reused);
     sqlx::query(
         "UPDATE poam_cve_finding_links SET retired_at=NOW(),retired_by=$2,retirement_reason='test_cleanup' WHERE cve_finding_id=$1 AND retired_at IS NULL",
     )
@@ -1464,7 +2941,7 @@ async fn fleet_cve_triage_is_atomic_environment_scoped_and_semantically_idempote
     .unwrap();
     assert_eq!(accepted_history_after, accepted_history);
 
-    let superset = poam_service::triage_fleet_cve(
+    let restored_schedule = poam_service::triage_fleet_cve(
         &pool,
         &actor,
         cve_id,
@@ -1483,11 +2960,9 @@ async fn fleet_cve_triage_is_atomic_environment_scoped_and_semantically_idempote
         &clock,
     )
     .await
-    .unwrap_err();
-    assert!(matches!(
-        superset,
-        PoamError::ConflictDetails("cve_subjects_already_managed", _, _)
-    ));
+    .expect("restored exact environment ownership reuses the active episode");
+    assert_eq!(restored_schedule.poam_id, Some(poam_id));
+    assert!(restored_schedule.poam_reused);
     let remaining_links: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM poam_cve_finding_links WHERE poam_id=$1 AND retired_at IS NULL",
     )
@@ -1495,7 +2970,7 @@ async fn fleet_cve_triage_is_atomic_environment_scoped_and_semantically_idempote
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(remaining_links, 2);
+    assert_eq!(remaining_links, 3);
     let verification_items: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM poam_cve_verification_items item JOIN poam_cve_findings finding ON finding.id=item.cve_finding_id WHERE finding.system_id=$1",
     )
@@ -1542,7 +3017,7 @@ async fn fleet_cve_triage_is_atomic_environment_scoped_and_semantically_idempote
         .fetch_one(&pool)
         .await
         .unwrap(),
-        2,
+        3,
         "a rejected final-subject change must roll back the whole transaction"
     );
 
@@ -1595,7 +3070,7 @@ async fn fleet_cve_triage_is_atomic_environment_scoped_and_semantically_idempote
     )
     .await
     .unwrap();
-    for fixture in [&first, &second] {
+    for fixture in [&first, &second, &third] {
         seal_exact_cve_scan(&pool, fixture, clock.now() + TimeDelta::minutes(2), None).await;
     }
     let closed = poam_service::close(&pool, &actor, poam_id, awaiting.poam.revision, &clock)
@@ -1613,7 +3088,7 @@ async fn fleet_cve_triage_is_atomic_environment_scoped_and_semantically_idempote
         0
     );
 
-    for fixture in [&first, &second] {
+    for fixture in [&first, &second, &third] {
         seal_exact_cve_scan(
             &pool,
             fixture,
@@ -1654,7 +3129,10 @@ async fn fleet_cve_triage_is_atomic_environment_scoped_and_semantically_idempote
     let completed_reference = poam_service::fleet_cve_detail(&pool, &actor, cve_id, package_name)
         .await
         .unwrap();
-    assert_eq!(completed_reference.rollup, FleetCveTriageRollup::Partial);
+    assert_eq!(
+        completed_reference.rollup,
+        FleetCveTriageRollup::Outstanding
+    );
     assert!(
         completed_reference
             .environments
@@ -1908,11 +3386,11 @@ async fn external_current_reconciliation_uses_normal_triage_and_real_poam_baseli
     .await
     .expect("external generation report should persist");
 
-    assert!(matches!(
+    let before_reconciliation =
         poam_service::system_cve_triage_detail(&pool, &actor, first.system_id, cve_id, package)
-            .await,
-        Err(PoamError::NotFound)
-    ));
+            .await
+            .expect("exact Current CVE triage must not wait for retained Config evidence");
+    assert_eq!(before_reconciliation.scope.exact_affected_system_count, 2);
     assert!(
         reconcile_external_current_generation(&pool, first.system_id)
             .await
@@ -2083,6 +3561,547 @@ async fn external_current_reconciliation_uses_normal_triage_and_real_poam_baseli
     .expect("compatible environment schedule should reuse POA&M");
     assert_eq!(reused.poam_id, Some(poam_id));
     assert!(reused.poam_reused);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn external_unretained_current_supports_inventory_host_risk_and_null_poam_baseline(
+    pool: PgPool,
+) {
+    let fixture = assessment_fixture(&pool).await;
+    let actor = admin_actor(fixture.user_id);
+    sync_user_role(&pool, actor.user_id, AuthRole::Admin)
+        .await
+        .unwrap();
+    let clock = FixedClock(Utc::now());
+    let cve = "CVE-2026-32697";
+    let package = "sledge-package";
+    let environment = assign_environment(&pool, "sledge-unretained", &[&fixture]).await;
+    let (commit_id, configuration): (i32, String) =
+        sqlx::query_as("SELECT commit_id,derivation_name FROM derivations WHERE id=$1")
+            .bind(fixture.derivation_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    // Remove only the fixture's Config artifacts. The CVE scan and observed
+    // output remain real; no retained record is substituted for them.
+    sqlx::query("DELETE FROM evaluation_generation_snapshots WHERE system_id=$1")
+        .bind(fixture.system_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "DELETE FROM evaluation_snapshot_selections WHERE commit_id=$1 AND configuration_name=$2",
+    )
+    .bind(commit_id)
+    .bind(&configuration)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM evaluation_snapshots WHERE commit_id=$1 AND configuration_name=$2")
+        .bind(commit_id)
+        .bind(&configuration)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let unavailable: Uuid = sqlx::query_scalar(
+        "INSERT INTO evaluation_snapshots(commit_id,configuration_name,lifecycle,integrity_version) VALUES($1,$2,'unavailable',0) RETURNING id",
+    )
+    .bind(commit_id)
+    .bind(&configuration)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO evaluation_snapshot_selections(commit_id,configuration_name,current_snapshot_id) VALUES($1,$2,$3)")
+        .bind(commit_id)
+        .bind(&configuration)
+        .bind(unavailable)
+        .execute(&pool)
+        .await
+        .unwrap();
+    report_external_generation(&pool, &fixture, 16, &fixture.store_path, true, 1).await;
+    let observation = seal_exact_cve_scan(
+        &pool,
+        &fixture,
+        clock.now(),
+        Some((cve, package, "1.0", false)),
+    )
+    .await
+    .unwrap();
+    let current =
+        SystemCveInventoryPageRequest::from_params(SystemCveInventoryParams::default()).unwrap();
+    let inventory = fetch_system_cve_inventory_page(&pool, fixture.system_id, &current)
+        .await
+        .unwrap();
+    assert!(!inventory.read_only);
+    assert_eq!(inventory.source.unwrap().scan_id, observation.scan_id);
+    assert_eq!(inventory.rows.len(), 1);
+    assert_eq!(inventory.rows[0].cve_id, cve);
+    let historical = SystemCveInventoryPageRequest::from_params(SystemCveInventoryParams {
+        target: Some("exact_derivation".into()),
+        target_id: Some(fixture.derivation_id.to_string()),
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(
+        fetch_system_cve_inventory_page(&pool, fixture.system_id, &historical)
+            .await
+            .unwrap()
+            .read_only
+    );
+    assert_eq!(
+        poam_service::system_cve_triage_detail(&pool, &actor, fixture.system_id, cve, package)
+            .await
+            .unwrap()
+            .scope
+            .environment_id,
+        environment
+    );
+    let accepted = poam_service::triage_system_cve(
+        &pool,
+        &actor,
+        fixture.system_id,
+        cve,
+        SystemCveTriageRequest {
+            canonical_package_name: package.into(),
+            scope: SystemCveTriageScopeChoice::Host,
+            action: SystemCveTriageAction::AcceptRisk {
+                justification: "Scoped compensating controls for this host".into(),
+                review_date: None,
+            },
+            poam: None,
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        accepted.detail.effective_source,
+        SystemCveEffectiveDispositionSource::Host
+    );
+    assert!(matches!(
+        poam_service::system_cve_triage_detail(&pool, &actor, fixture.system_id, cve, package)
+            .await
+            .unwrap()
+            .host_disposition,
+        Some(CveEnvironmentDisposition::Accepted { .. })
+    ));
+    let scheduled = poam_service::triage_system_cve(
+        &pool,
+        &actor,
+        fixture.system_id,
+        cve,
+        SystemCveTriageRequest {
+            canonical_package_name: package.into(),
+            scope: SystemCveTriageScopeChoice::Host,
+            action: SystemCveTriageAction::SchedulePatch,
+            poam: Some(fleet_poam_request(actor.user_id, &clock)),
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    let poam_id = scheduled.poam_id.unwrap();
+    let baseline: (Option<Uuid>, Uuid, i32, i32, String) = sqlx::query_as(
+        "SELECT baseline_generation_snapshot_id,baseline_scan_id,baseline_generation,baseline_scan_derivation_id,baseline_observed_package_version FROM poam_cve_finding_links WHERE poam_id=$1 AND system_id=$2 AND retired_at IS NULL",
+    )
+    .bind(poam_id)
+    .bind(fixture.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        baseline,
+        (
+            None,
+            observation.scan_id,
+            16,
+            fixture.derivation_id,
+            "1.0".into()
+        )
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM evaluation_generation_snapshots WHERE system_id=$1"
+        )
+        .bind(fixture.system_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM pending_system_deployments WHERE system_id=$1"
+        )
+        .bind(fixture.system_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+    let clean_at = clock.now() + TimeDelta::minutes(1);
+    seal_exact_cve_scan(&pool, &fixture, clean_at, None).await;
+    let detail = poam_service::detail(&pool, &actor, poam_id, &clock)
+        .await
+        .unwrap();
+    let awaiting = poam_service::transition(
+        &pool,
+        &actor,
+        poam_id,
+        TransitionPoamRequest {
+            revision: detail.poam.revision,
+            status: PoamStatus::AwaitingVerification,
+            note: None,
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    let verified = poam_service::verify(&pool, &actor, poam_id, awaiting.poam.revision, &clock)
+        .await
+        .unwrap();
+    assert_eq!(verified["outcome"], "accepted");
+    let closed = poam_service::close(
+        &pool,
+        &actor,
+        poam_id,
+        verified["revision"].as_i64().unwrap(),
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(closed.poam.status, "completed");
+    assert!(
+        matches!(
+            poam_service::reopen(&pool, &actor, poam_id, closed.poam.revision, &clock).await,
+            Err(PoamError::Conflict("cve_disposition_conflict", _))
+        ),
+        "clean Current evidence must not reopen a host-only schedule"
+    );
+    seal_exact_cve_scan(
+        &pool,
+        &fixture,
+        clean_at + TimeDelta::minutes(1),
+        Some((cve, package, "2.0", false)),
+    )
+    .await;
+    let reopened = poam_service::reopen(&pool, &actor, poam_id, closed.poam.revision, &clock)
+        .await
+        .unwrap();
+    assert_eq!(reopened.poam.status, "in_progress");
+    assert_eq!(
+        reopened.cve_findings[0].baseline_scan_id,
+        observation.scan_id
+    );
+    assert_eq!(
+        reopened.cve_findings[0].baseline_generation_snapshot_id,
+        None
+    );
+    let copied: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
+        "SELECT baseline_scan_id,baseline_generation_snapshot_id FROM poam_cve_finding_links WHERE poam_id=$1 ORDER BY linked_at,id",
+    )
+    .bind(poam_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(copied, vec![(observation.scan_id, None); 2]);
+}
+
+async fn external_cve_revision(
+    pool: &PgPool,
+    fixture: &AssessmentFixture,
+    generation: i32,
+    completed_at: DateTime<Utc>,
+    occurrence: Option<(&str, &str, &str, bool)>,
+) -> (i32, Option<CveObservationReference>) {
+    let (repository, hostname): (String, String) = sqlx::query_as(
+        "SELECT flake.repo_url,system.hostname FROM systems system JOIN flakes flake ON flake.id=system.flake_id WHERE system.id=$1",
+    )
+    .bind(fixture.system_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let hash = Uuid::new_v4().simple().to_string();
+    insert_commit(pool, &hash, &repository, Utc::now())
+        .await
+        .unwrap();
+    let commit_id: i32 = sqlx::query_scalar("SELECT id FROM commits WHERE git_commit_hash=$1")
+        .bind(&hash)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let store_path = format!("/nix/store/{hash}-continuity");
+    let write = record_successful_eval_result(
+        pool,
+        Some(commit_id),
+        &hostname,
+        "nixos",
+        None,
+        &format!("{store_path}.drv"),
+        Some(&store_path),
+        Some(true),
+        true,
+        &serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let derivation_id = match write {
+        SuccessfulEvalWrite::Inserted { derivation_id }
+        | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
+        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
+        | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => derivation_id,
+    };
+    sqlx::query("UPDATE derivations SET store_path=$1,status_id=10 WHERE id=$2")
+        .bind(&store_path)
+        .bind(derivation_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    report_external_generation(pool, fixture, generation, &store_path, true, generation).await;
+    let reference = seal_exact_cve_scan_for_derivation(
+        pool,
+        fixture.system_id,
+        derivation_id,
+        completed_at,
+        occurrence,
+    )
+    .await;
+    (derivation_id, reference)
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn external_cve_poam_preserves_baseline_across_revisions_clean_and_recurrence(pool: PgPool) {
+    let fixture = assessment_fixture(&pool).await;
+    assign_environment(&pool, "continuity-recurrence", &[&fixture]).await;
+    let actor = admin_actor(fixture.user_id);
+    sync_user_role(&pool, actor.user_id, AuthRole::Admin)
+        .await
+        .unwrap();
+    let clock = FixedClock(Utc::now());
+    let cve = "CVE-2026-32698";
+    let package = "continuity-package";
+    let first = seal_exact_cve_scan(
+        &pool,
+        &fixture,
+        clock.now(),
+        Some((cve, package, "1.0", false)),
+    )
+    .await
+    .unwrap();
+    let created = poam_service::create_cve(
+        &pool,
+        &actor,
+        CreateCvePoamRequest {
+            observation: first.clone(),
+            title: "Cross-revision remediation".into(),
+            plan: "Deploy a clean revision".into(),
+            owner: "Security".into(),
+            assignee: None,
+            target_date: None,
+            risk: PoamRisk::High,
+            default_milestones: false,
+            assignment_version_ids: vec![],
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    let poam_id = created.poam.id;
+    let finding_id = created.cve_findings[0].id;
+    let retained = created.cve_findings[0].baseline_generation_snapshot_id;
+    assert!(retained.is_some(), "retained A baseline must stay non-null");
+
+    let (b_derivation, b) = external_cve_revision(
+        &pool,
+        &fixture,
+        2,
+        clock.now() + TimeDelta::minutes(2),
+        Some((cve, package, "2.0", false)),
+    )
+    .await;
+    let b = b.unwrap();
+    let b_detail = poam_service::detail(&pool, &actor, poam_id, &clock)
+        .await
+        .unwrap();
+    let b_finding = &b_detail.cve_findings[0];
+    assert_eq!(b_finding.id, finding_id);
+    assert_eq!(b_finding.baseline_scan_id, first.scan_id);
+    assert_eq!(b_finding.baseline_generation_snapshot_id, retained);
+    assert_eq!(b_finding.baseline_observed_package_version, "1.0");
+    assert_eq!(b_finding.current_scan_id, Some(b.scan_id));
+    assert_eq!(b_finding.current_derivation_id, Some(b_derivation));
+    assert_eq!(
+        b_finding.current_observed_package_version.as_deref(),
+        Some("2.0")
+    );
+    assert_eq!(b_finding.resolution_state, "fail");
+
+    let awaiting = poam_service::transition(
+        &pool,
+        &actor,
+        poam_id,
+        TransitionPoamRequest {
+            revision: b_detail.poam.revision,
+            status: PoamStatus::AwaitingVerification,
+            note: None,
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    let affected = poam_service::verify(&pool, &actor, poam_id, awaiting.poam.revision, &clock)
+        .await
+        .unwrap();
+    assert_eq!(affected["outcome"], "rejected");
+    assert_ne!(affected["cve_items"][0]["result"], "pass");
+
+    let (clean_derivation, _) = external_cve_revision(
+        &pool,
+        &fixture,
+        3,
+        clock.now() + TimeDelta::minutes(3),
+        None,
+    )
+    .await;
+    let clean_detail = poam_service::detail(&pool, &actor, poam_id, &clock)
+        .await
+        .unwrap();
+    assert_eq!(clean_detail.poam.status, "awaiting_verification");
+    assert_eq!(clean_detail.cve_findings[0].id, finding_id);
+    assert_eq!(
+        clean_detail.cve_findings[0].current_derivation_id,
+        Some(clean_derivation)
+    );
+    assert_eq!(
+        clean_detail.cve_findings[0].current_observed_package_version,
+        None
+    );
+    assert_eq!(clean_detail.cve_findings[0].baseline_scan_id, first.scan_id);
+
+    let (_, recurrence) = external_cve_revision(
+        &pool,
+        &fixture,
+        4,
+        clock.now() + TimeDelta::minutes(4),
+        Some((cve, package, "4.0", false)),
+    )
+    .await;
+    let recurrence = recurrence.unwrap();
+    let recurring = poam_service::detail(&pool, &actor, poam_id, &clock)
+        .await
+        .unwrap();
+    assert_eq!(recurring.cve_findings[0].id, finding_id);
+    assert_eq!(
+        recurring.cve_findings[0].current_scan_id,
+        Some(recurrence.scan_id)
+    );
+    assert_eq!(recurring.cve_findings[0].baseline_scan_id, first.scan_id);
+    let blocked = poam_service::close(&pool, &actor, poam_id, recurring.poam.revision, &clock)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        blocked,
+        PoamError::Precondition("closure_not_ready", _, _)
+    ));
+
+    let (_, _) = external_cve_revision(
+        &pool,
+        &fixture,
+        5,
+        clock.now() + TimeDelta::minutes(5),
+        None,
+    )
+    .await;
+    let revision: i64 = sqlx::query_scalar("SELECT revision FROM poams WHERE id=$1")
+        .bind(poam_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let verified = poam_service::verify(&pool, &actor, poam_id, revision, &clock)
+        .await
+        .unwrap();
+    assert_eq!(verified["outcome"], "accepted");
+    assert_eq!(verified["cve_items"][0]["result"], "pass");
+    let verified_detail = poam_service::detail(&pool, &actor, poam_id, &clock)
+        .await
+        .unwrap();
+    assert_eq!(
+        verified_detail.verification_attempts[0].cve_items[0].baseline_scan_id,
+        first.scan_id
+    );
+    assert_ne!(
+        verified_detail.verification_attempts[0].cve_items[0].scan_id,
+        Some(first.scan_id)
+    );
+    let closed = poam_service::close(
+        &pool,
+        &actor,
+        poam_id,
+        verified["revision"].as_i64().unwrap(),
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(closed.poam.status, "completed");
+    let (_, recurrent_scan) = external_cve_revision(
+        &pool,
+        &fixture,
+        6,
+        clock.now() + TimeDelta::minutes(6),
+        Some((cve, package, "6.0", false)),
+    )
+    .await;
+    let recurrent_scan = recurrent_scan.unwrap();
+    let after = poam_service::detail(&pool, &actor, poam_id, &clock)
+        .await
+        .unwrap();
+    assert_eq!(after.poam.status, "completed");
+    assert_eq!(after.cve_findings[0].id, finding_id);
+    assert_eq!(after.cve_findings[0].baseline_scan_id, first.scan_id);
+    assert!(
+        after.verification_attempts.iter().any(|attempt| {
+            attempt.outcome == "accepted"
+                && attempt.cve_items.iter().any(|item| item.result == "pass")
+        }),
+        "the accepted closure evidence must survive recurrence"
+    );
+    let next_episode = poam_service::triage_system_cve(
+        &pool,
+        &actor,
+        fixture.system_id,
+        cve,
+        SystemCveTriageRequest {
+            canonical_package_name: package.into(),
+            scope: SystemCveTriageScopeChoice::Host,
+            action: SystemCveTriageAction::SchedulePatch,
+            poam: Some(fleet_poam_request(actor.user_id, &clock)),
+        },
+        &clock,
+    )
+    .await
+    .expect("a recurrent exact Current finding can begin a new episode");
+    let new_poam_id = next_episode.poam_id.expect("recurrence requires a POA&M");
+    assert_ne!(new_poam_id, poam_id);
+    assert!(!next_episode.poam_reused);
+    let (new_finding_id, new_scan_id): (Uuid, Uuid) = sqlx::query_as(
+        r#"SELECT finding.id,link.baseline_scan_id FROM poam_cve_finding_links link
+           JOIN poam_cve_findings finding ON finding.id=link.cve_finding_id
+           WHERE link.poam_id=$1 AND link.retired_at IS NULL"#,
+    )
+    .bind(new_poam_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(new_finding_id, finding_id);
+    assert_eq!(new_scan_id, recurrent_scan.scan_id);
+    assert_eq!(
+        poam_service::detail(&pool, &actor, poam_id, &clock)
+            .await
+            .unwrap()
+            .poam
+            .status,
+        "completed"
+    );
 }
 
 async fn report_external_generation(
@@ -3603,7 +5622,7 @@ async fn fleet_cve_detail_returns_typed_group_metadata_for_scheduled_reuse(pool:
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn scheduled_list_authority_requires_exact_current_poam_subject_set(pool: PgPool) {
+async fn scheduled_list_authority_covers_current_subjects_with_historical_surplus(pool: PgPool) {
     let first = assessment_fixture(&pool).await;
     let second = assessment_fixture(&pool).await;
     let new_subject = assessment_fixture(&pool).await;
@@ -3762,11 +5781,14 @@ async fn scheduled_list_authority_requires_exact_current_poam_subject_set(pool: 
         .execute(&pool)
         .await
         .unwrap();
-    assert_cve_authority_surfaces(&pool, cve_id, package_name, "outstanding").await;
+    assert_cve_authority_surfaces(&pool, cve_id, package_name, "scheduled").await;
     let stale = poam_service::fleet_cve_detail(&pool, &actor, cve_id, package_name)
         .await
         .unwrap();
-    assert!(stale.environments[0].disposition.is_none());
+    assert!(matches!(
+        stale.environments[0].disposition,
+        Some(CveEnvironmentDisposition::Scheduled { .. })
+    ));
 
     sqlx::query("UPDATE systems SET is_active=TRUE WHERE id=$1")
         .bind(second.system_id)
@@ -5447,6 +7469,181 @@ async fn fleet_cve_poam_verification_requires_all_ten_exact_subjects_to_pass(poo
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn mixed_whitelist_scan_cannot_hide_affected_cve_during_verification(pool: PgPool) {
+    let fixture = assessment_fixture(&pool).await;
+    let actor = admin_actor(fixture.user_id);
+    sync_user_role(&pool, actor.user_id, AuthRole::Admin)
+        .await
+        .unwrap();
+    let clock = FixedClock(Utc::now());
+    let cve = "CVE-2026-32704";
+    let package = "mixed-whitelist-package";
+    let baseline = seal_exact_cve_scan(
+        &pool,
+        &fixture,
+        clock.now() - TimeDelta::minutes(2),
+        Some((cve, package, "1.0", false)),
+    )
+    .await
+    .unwrap();
+    let created = poam_service::create_cve(
+        &pool,
+        &actor,
+        CreateCvePoamRequest {
+            observation: baseline.clone(),
+            title: "Remediate mixed-whitelist CVE".into(),
+            plan: "Deploy a clean package".into(),
+            owner: "Security".into(),
+            assignee: None,
+            target_date: None,
+            risk: PoamRisk::High,
+            default_milestones: false,
+            assignment_version_ids: vec![],
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    let scan_id = begin_exact_cve_scan(&pool, &fixture, 2).await;
+    let whitelisted_path = format!("/nix/store/aaa-{}-{package}.drv", Uuid::new_v4().simple());
+    let affected_path = format!("/nix/store/zzz-{}-{package}.drv", Uuid::new_v4().simple());
+    assert!(whitelisted_path < affected_path);
+    for (path, version, whitelisted) in [
+        (&whitelisted_path, "2.0", true),
+        (&affected_path, "2.1", false),
+    ] {
+        let package_derivation_id: i32 = sqlx::query_scalar(
+            r#"INSERT INTO derivations(
+                 derivation_type,derivation_name,derivation_path,pname,version,status_id,attempt_count)
+               VALUES('package',$1,$2,$3,$4,11,0) RETURNING id"#,
+        )
+        .bind(format!("{package}-{version}"))
+        .bind(path)
+        .bind(package)
+        .bind(version)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO scan_packages(scan_id,derivation_id) VALUES($1,$2)")
+            .bind(scan_id)
+            .bind(package_derivation_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"INSERT INTO cve_scan_vulnerability_observations(
+                 scan_id,canonical_cve_id,canonical_package_name,observed_package_name,
+                 observed_package_version,observed_derivation_path,is_whitelisted,
+                 whitelist_reason,detection_method)
+               VALUES($1,$2,$3,$3,$4,$5,$6,$7,'test-scanner')"#,
+        )
+        .bind(scan_id)
+        .bind(cve)
+        .bind(package)
+        .bind(version)
+        .bind(path)
+        .bind(whitelisted)
+        .bind(whitelisted.then_some("accepted by scanner policy"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        "UPDATE cve_scans SET status='completed',completed_at=$2,evidence_schema_version=1 WHERE id=$1",
+    )
+    .bind(scan_id)
+    .bind(clock.now())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let awaiting = poam_service::transition(
+        &pool,
+        &actor,
+        created.poam.id,
+        TransitionPoamRequest {
+            revision: created.poam.revision,
+            status: PoamStatus::AwaitingVerification,
+            note: None,
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    let verified = poam_service::verify(
+        &pool,
+        &actor,
+        created.poam.id,
+        awaiting.poam.revision,
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(verified["outcome"], "rejected");
+    assert_eq!(verified["cve_items"][0]["result"], "fail");
+    assert_eq!(verified["cve_items"][0]["scan_id"], scan_id.to_string());
+    let (persisted_baseline, persisted_path): (Uuid, String) = sqlx::query_as(
+        "SELECT baseline_scan_id,occurrence_derivation_path FROM poam_cve_verification_items WHERE scan_id=$1",
+    )
+    .bind(scan_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(persisted_baseline, baseline.scan_id);
+    assert_eq!(persisted_path, affected_path);
+
+    let mut forged = pool.begin().await.unwrap();
+    let attempt_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO poam_verification_attempts(
+             poam_id,attempted_by,outcome,poam_revision,attempted_at)
+           VALUES($1,$2,'rejected',$3,$4) RETURNING id"#,
+    )
+    .bind(created.poam.id)
+    .bind(fixture.user_id)
+    .bind(verified["revision"].as_i64().unwrap())
+    .bind(clock.now())
+    .fetch_one(&mut *forged)
+    .await
+    .unwrap();
+    // Copy legitimate Current and baseline evidence into an unsealed attempt.
+    // Only the claimed result and cited occurrence differ from the real item.
+    let rejected = sqlx::query(
+        r#"INSERT INTO poam_cve_verification_items(
+             attempt_id,cve_finding_id,system_id,canonical_cve_id,canonical_package_name,
+             baseline_scan_id,baseline_scan_derivation_id,baseline_scan_completed_at,
+             baseline_generation_snapshot_id,baseline_generation,baseline_target_store_path,
+             baseline_occurrence_derivation_path,baseline_observed_package_version,result,
+             scan_id,scan_derivation_id,scan_completed_at,generation_snapshot_id,generation,
+             target_store_path,occurrence_present,occurrence_derivation_path,
+             observed_package_version,detail)
+           SELECT $1,cve_finding_id,system_id,canonical_cve_id,canonical_package_name,
+                  baseline_scan_id,baseline_scan_derivation_id,baseline_scan_completed_at,
+                  baseline_generation_snapshot_id,baseline_generation,baseline_target_store_path,
+                  baseline_occurrence_derivation_path,baseline_observed_package_version,
+                  'whitelisted',scan_id,scan_derivation_id,scan_completed_at,
+                  generation_snapshot_id,generation,target_store_path,true,$2,'2.0',
+                  'forged whitelisted result'
+           FROM poam_cve_verification_items
+           WHERE attempt_id=(SELECT id FROM poam_verification_attempts
+                             WHERE poam_id=$3 AND id<>$1 ORDER BY attempted_at DESC LIMIT 1)"#,
+    )
+    .bind(attempt_id)
+    .bind(&whitelisted_path)
+    .bind(created.poam.id)
+    .execute(&mut *forged)
+    .await
+    .unwrap_err();
+    assert_eq!(
+        rejected
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("poam_cve_verification_unwhitelisted_precedence"),
+        "unexpected forged-result rejection: {rejected:?}"
+    );
+    forged.rollback().await.unwrap();
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn exact_cve_poam_rejects_stale_identity_and_closes_only_on_clean_evidence(pool: PgPool) {
     let fixture = assessment_fixture(&pool).await;
     sync_user_role(&pool, fixture.user_id, AuthRole::Admin)
@@ -5752,6 +7949,27 @@ async fn exact_cve_poam_rejects_stale_identity_and_closes_only_on_clean_evidence
     assert_eq!(reopened.poam.status, "in_progress");
     assert_eq!(reopened.poam.cve_finding_count, 1);
     assert_eq!(
+        reopened.cve_findings[0].baseline_scan_id,
+        current_reference.scan_id
+    );
+    let retained_baseline = created.cve_findings[0].baseline_generation_snapshot_id;
+    assert!(retained_baseline.is_some());
+    assert_eq!(
+        reopened.cve_findings[0].baseline_generation_snapshot_id,
+        retained_baseline
+    );
+    let copied: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
+        "SELECT baseline_scan_id,baseline_generation_snapshot_id FROM poam_cve_finding_links WHERE poam_id=$1 ORDER BY linked_at,id",
+    )
+    .bind(created.poam.id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        copied,
+        vec![(current_reference.scan_id, retained_baseline); 2]
+    );
+    assert_eq!(
         reopened
             .cve_findings
             .iter()
@@ -5775,7 +7993,7 @@ async fn exact_cve_poam_rejects_stale_identity_and_closes_only_on_clean_evidence
     )
     .await
     .unwrap();
-    let unbound = poam_service::verify(
+    let later_clean = poam_service::verify(
         &pool,
         &actor,
         created.poam.id,
@@ -5784,8 +8002,8 @@ async fn exact_cve_poam_rejects_stale_identity_and_closes_only_on_clean_evidence
     )
     .await
     .unwrap();
-    assert_eq!(unbound["outcome"], "rejected");
-    assert_eq!(unbound["cve_items"][0]["result"], "missing");
+    assert_eq!(later_clean["outcome"], "accepted");
+    assert_eq!(later_clean["cve_items"][0]["result"], "pass");
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -9292,6 +11510,10 @@ async fn poam_http_server(pool: PgPool) -> String {
         BackgroundJobRegistry::new(),
     );
     let app = Router::new()
+        .route(
+            "/current-system",
+            axum::routing::post(agent_state_handler::update),
+        )
         .route("/api/v1/cves", get(cve_handlers::list_cves))
         .route("/api/v1/cves/grouped", get(cve_handlers::list_cves_grouped))
         .route("/api/v1/cves/stats", get(cve_handlers::get_fleet_stats))

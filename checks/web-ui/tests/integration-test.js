@@ -11058,7 +11058,7 @@ const steps = [
           }
           await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
           await assertCount(page.getByText(authorityFixture.currentCveId, { exact: true }), 0, "Late A must not overwrite the observed B source");
-          await assertCount(page.getByTestId("system-cve-triage-open"), 0, "Read-only B must not gain A's triage authority");
+          await assertVisible(page.getByTestId("system-cve-triage-open"), "Reported B retains its own exact Current triage after late A");
         } finally {
           releaseA();
           await page.unroute(inventoryRoute);
@@ -11070,49 +11070,41 @@ const steps = [
       }
 
       // SC1: SQL/API-produced evidence, not an intercepted inventory response.
-      // A scan of uniquely mapped running A is readable without retained proof,
-      // but its identity never grants mutation authority. Scanned B is newer.
+      // A uniquely mapped running A and its completed schema-1 scan are exact
+      // Current CVE authority even without retained Config proof. Scanned B is newer.
       const mappedFixture = createTask326CurrentCveAuthorityFixture({ retainCurrent: false });
       try {
         const currentPath = `/api/v1/systems/${mappedFixture.systemId}/cve-inventory-page?limit=100`;
         const mapped = (await phase6Api(page, currentPath)).body;
         if (mapped.system_id !== mappedFixture.systemId
             || mapped.selection?.kind !== "current"
-            || mapped.authority !== "mapped_running"
-            || mapped.current_state !== "mapped_running_read_only_scan"
-            || mapped.exact_authority_failure !== "retained_generation_unavailable"
+            || mapped.authority !== "exact"
+            || mapped.current_state !== "exact_current_scan"
+            || mapped.exact_authority_failure != null
              || mapped.running_target?.derivation_id !== mappedFixture.currentDerivationId
              || mapped.source?.scan_id !== mappedFixture.currentScanId
              || mapped.attempt?.scan_id !== mappedFixture.currentScanId
              || mapped.attempt?.derivation_id !== mappedFixture.currentDerivationId
-            || mapped.read_only !== true
+            || mapped.read_only !== false
             || mapped.vulnerabilities?.length !== 1
             || mapped.vulnerabilities[0]?.cve_id !== mappedFixture.currentCveId
-            || mapped.vulnerabilities[0]?.remediation != null
+            || mapped.vulnerabilities[0]?.remediation == null
             || mapped.vulnerabilities.some(row => row.cve_id === mappedFixture.historicalCveId)) {
-          throw new Error(`Mapped-running read crossed its proof/source boundary: ${JSON.stringify(mapped)}`);
+          throw new Error(`Current CVE read crossed its running source boundary: ${JSON.stringify(mapped)}`);
         }
         const triagePath = `/api/v1/systems/${mappedFixture.systemId}/cves/${mappedFixture.currentCveId}/triage`;
         const triageRead = await phase6ApiResponse(page, `${triagePath}?package=current-authority-package`);
-        if (triageRead.status !== 404) {
-          throw new Error(`Unproved Current must not expose triage detail: ${triageRead.status}`);
-        }
-        const triageWrite = await phase6ApiResponse(page, triagePath, {
-          method: "POST",
-          body: JSON.stringify({ canonical_package_name: "current-authority-package", scope: "host", action: "accept_risk", justification: "Read-only evidence cannot accept risk", review_date: null, poam: null }),
-        });
-        if (triageWrite.status !== 404) {
-          throw new Error(`Unproved Current must reject direct triage writes: ${triageWrite.status}`);
+        if (triageRead.status !== 200 || triageRead.body?.canonical_cve_id !== mappedFixture.currentCveId) {
+          throw new Error(`Exact Current triage detail requires only CVE evidence: ${triageRead.status}`);
         }
 
         await page.goto(`${baseUrl}/systems/${mappedFixture.systemId}`, { timeout: LOAD_TIMEOUT });
         await page.getByRole("tab", { name: "CVEs" }).first().click();
-        await assertVisible(page.getByText(mappedFixture.currentCveId, { exact: true }), "Mapped-running source A must display its own finding");
-        await assertVisible(page.getByText(/Retained deployment proof is unavailable/i), "Read-only Current must expose the failed proof prerequisite");
-        await assertCount(page.getByTestId("system-cve-triage-open"), 0, "Mapped-running evidence cannot expose a triage write");
+        await assertVisible(page.getByText(mappedFixture.currentCveId, { exact: true }), "Exact running source A must display its own finding");
+        await assertVisible(page.getByTestId("system-cve-triage-open"), "Exact Current must expose the normal triage interaction");
         await assertCount(page.getByText(mappedFixture.historicalCveId, { exact: true }), 0, "Newer scanned B must not replace A");
-        await captureWorkflowViewportState(page, "12ha-system-detail-cve-inventory-fallbacks", "mapped-running-read-only", "desktop");
-        await captureWorkflowViewportState(page, "12ha-system-detail-cve-inventory-fallbacks", "mapped-running-read-only", "narrowDesktop");
+        await captureWorkflowViewportState(page, "12ha-system-detail-cve-inventory-fallbacks", "external-current-actionable", "desktop");
+        await captureWorkflowViewportState(page, "12ha-system-detail-cve-inventory-fallbacks", "external-current-actionable", "narrowDesktop");
 
         const failedAttemptId = crypto.randomUUID();
         runFixtureSql(`INSERT INTO cve_scans(id,derivation_id,scanner_name,status,created_at)
@@ -11208,16 +11200,16 @@ const steps = [
         removeTask326CurrentCveAuthorityFixture(mappedFixture);
       }
 
-      // The database trigger independently checks external provenance before
-      // accepting the retained row. This fixture verifies the existing exact
-      // API/UI triage pipeline after trusted retention; the isolated Rust
-      // regressions exercise the server-owned ingestion/repair function itself.
+      // Retained Config provenance is supplemental to exact Current CVE proof.
+      // Adding it after Current is actionable must not change the scan or UI.
+      // The database trigger independently checks the external retained row.
       const reconciledFixture = createTask326CurrentCveAuthorityFixture({ retainCurrent: false });
       try {
         const currentPath = `/api/v1/systems/${reconciledFixture.systemId}/cve-inventory-page?limit=100`;
-        const provisional = (await phase6Api(page, currentPath)).body;
-        if (provisional.authority !== "mapped_running" || provisional.read_only !== true) {
-          throw new Error(`The external fixture must begin read-only: ${JSON.stringify(provisional)}`);
+        const initial = (await phase6Api(page, currentPath)).body;
+        if (initial.authority !== "exact" || initial.read_only !== false
+            || initial.source?.scan_id !== reconciledFixture.currentScanId) {
+          throw new Error(`The external fixture must begin with exact Current CVE authority: ${JSON.stringify(initial)}`);
         }
         runFixtureSql(`INSERT INTO evaluation_snapshot_selections(
           commit_id,configuration_name,current_snapshot_id)
@@ -11236,6 +11228,11 @@ const steps = [
           FROM derivations derivation
           WHERE derivation.id=${reconciledFixture.currentDerivationId}
           ON CONFLICT (system_id,generation) DO NOTHING;`);
+        const origin = runFixtureSql(`SELECT binding_origin FROM evaluation_generation_snapshots
+          WHERE system_id='${reconciledFixture.systemId}'::uuid AND generation=74;`);
+        if (origin !== "external_reconciled") {
+          throw new Error(`The supplemental generation must retain external provenance: ${origin}`);
+        }
         const exact = (await phase6Api(page, currentPath)).body;
         if (exact.authority !== "exact"
             || exact.current_state !== "exact_current_scan"
@@ -11243,7 +11240,7 @@ const steps = [
             || exact.source?.scan_id !== reconciledFixture.currentScanId
             || exact.vulnerabilities?.[0]?.cve_id !== reconciledFixture.currentCveId
             || !exact.vulnerabilities[0].remediation) {
-          throw new Error(`External Current did not acquire exact context from its retained artifact: ${JSON.stringify(exact)}`);
+          throw new Error(`Supplemental Config retention changed exact Current CVE context: ${JSON.stringify(exact)}`);
         }
         const triageRead = await phase6ApiResponse(page,
           `/api/v1/systems/${reconciledFixture.systemId}/cves/${reconciledFixture.currentCveId}/triage?package=current-authority-package`);

@@ -549,7 +549,14 @@ pub async fn list(
             .push(")")
             .push(" OR ('POAM-' || lpad(p.human_number::text, 4, '0')) ILIKE ")
             .push_bind(format!("%{q}%"))
-            .push(" OR EXISTS (SELECT 1 FROM poam_cve_finding_links cve_link JOIN poam_cve_findings cve_finding ON cve_finding.id=cve_link.cve_finding_id JOIN systems cve_system ON cve_system.id=cve_finding.system_id WHERE cve_link.poam_id=p.id AND (cve_finding.canonical_cve_id ILIKE ")
+            // SECURITY: Historical links cannot search a moved host's current
+            // B hostname (or other hidden current-system facts) for an A-only
+            // actor, even when A's scheduled POA&M remains visible.
+            .push(" OR EXISTS (SELECT 1 FROM poam_cve_finding_links cve_link JOIN poam_cve_findings cve_finding ON cve_finding.id=cve_link.cve_finding_id JOIN systems cve_system ON cve_system.id=cve_finding.system_id WHERE cve_link.poam_id=p.id AND (")
+            .push_bind(is_admin)
+            .push(" OR cve_system.environment_id=ANY(")
+            .push_bind(environment_ids)
+            .push(")) AND (cve_finding.canonical_cve_id ILIKE ")
             .push_bind(format!("%{q}%"))
             .push(" OR cve_finding.canonical_package_name ILIKE ")
             .push_bind(format!("%{q}%"))
@@ -686,10 +693,21 @@ pub async fn detail(
           WHERE l.poam_id=$1 AND ($2 OR system.environment_id=ANY($3))
           UNION ALL
           SELECT 'cve'::text AS family,link.id AS link_id,link.linked_at
-          FROM poam_cve_finding_links link
-          JOIN poam_cve_findings finding ON finding.id=link.cve_finding_id
-          JOIN systems system ON system.id=finding.system_id
-          WHERE link.poam_id=$1 AND ($2 OR system.environment_id=ANY($3))
+           FROM poam_cve_finding_links link
+           JOIN poam_cve_findings finding ON finding.id=link.cve_finding_id
+           JOIN systems system ON system.id=finding.system_id
+           -- SECURITY: The active A schedule owns moved link history, not the
+           -- moved system's current B scope. Do not treat B as A context.
+           WHERE link.poam_id=$1 AND ($2 OR system.environment_id=ANY($3)
+             OR (link.retirement_reason='environment_moved'
+               AND EXISTS (
+                 SELECT 1 FROM cve_current_environment_dispositions disposition
+                 JOIN poams parent ON parent.id=disposition.poam_id
+                 WHERE disposition.poam_id=link.poam_id
+                   AND disposition.state='scheduled' AND parent.status<>'completed'
+                   AND disposition.environment_id=ANY($3)
+                   AND disposition.canonical_cve_id=link.canonical_cve_id
+                   AND disposition.canonical_package_name=link.canonical_package_name)))
         )
         SELECT family,link_id,linked_at FROM visible_findings
         WHERE ($5::timestamptz IS NULL OR (linked_at,link_id)<($5,$6))
@@ -754,18 +772,28 @@ pub async fn detail(
         .fetch_all(&mut **tx).await?;
     let cve_findings = sqlx::query_as::<_, CveFindingView>(
         r#"
-        SELECT finding.id,finding.system_id,system.hostname,system.environment_id,
+         -- No link-time hostname snapshot exists. Keep the stable system ID
+         -- and baseline audit, but do not expose the current B name or scope.
+         SELECT finding.id,finding.system_id,
+                CASE WHEN $2 OR system.environment_id=ANY($3)
+                  THEN system.hostname ELSE '' END AS hostname,
+                CASE WHEN $2 OR system.environment_id=ANY($3)
+                  THEN system.environment_id ELSE NULL END AS environment_id,
                finding.canonical_cve_id,finding.canonical_package_name,
                link.id AS link_id,link.linked_at,link.linked_by,link.retired_at,
                link.retired_by,link.retirement_reason,
                link.retired_at IS NULL AS link_active,
                link.baseline_scan_id,link.baseline_scan_completed_at,
+               link.baseline_generation_snapshot_id,
                link.baseline_generation,link.baseline_target_store_path,
                link.baseline_occurrence_derivation_path,
                link.baseline_observed_package_version,
                closure_item.scan_derivation_id AS current_derivation_id,
                 closure_item.target_store_path AS current_target_store_path,
                 closure_item.scan_id AS current_scan_id,
+                closure_item.scan_completed_at AS current_scan_completed_at,
+                closure_item.generation AS current_generation,
+                closure_item.generation_snapshot_id AS current_generation_snapshot_id,
                 closure_item.occurrence_derivation_path AS current_occurrence_derivation_path,
                 closure_item.observed_package_version AS current_observed_package_version,
                COALESCE(closure_item.result,'unknown') AS resolution_state
@@ -778,8 +806,17 @@ pub async fn detail(
         LEFT JOIN poam_cve_verification_items closure_item
           ON closure_item.attempt_id=closure_attempt.id
          AND closure_item.cve_finding_id=link.cve_finding_id
-        WHERE link.poam_id=$1 AND ($2 OR system.environment_id=ANY($3))
-          AND link.id=ANY($4)
+         WHERE link.poam_id=$1 AND link.id=ANY($4)
+           AND ($2 OR system.environment_id=ANY($3)
+             OR (link.retirement_reason='environment_moved'
+               AND EXISTS (
+                 SELECT 1 FROM cve_current_environment_dispositions disposition
+                 JOIN poams parent ON parent.id=disposition.poam_id
+                 WHERE disposition.poam_id=link.poam_id
+                   AND disposition.state='scheduled' AND parent.status<>'completed'
+                   AND disposition.environment_id=ANY($3)
+                   AND disposition.canonical_cve_id=link.canonical_cve_id
+                   AND disposition.canonical_package_name=link.canonical_package_name)))
         ORDER BY link.linked_at DESC,link.id DESC"#,
     )
     .bind(poam_id)

@@ -1629,10 +1629,26 @@ pub(crate) async fn lock_poam_findings_for_system_tx(
     if exact_cve_schema_exists {
         // CONCURRENCY: Acquire every canonical CVE key before the system
         // sentinel. Policy and exact keys follow as separate sorted levels.
+        // CONCURRENCY: A newly affected system may have no stable CVE finding
+        // yet. Its environment's active schedules must still serialize state
+        // publication with POA&M closure and membership reconciliation.
         sqlx::query(
-            r#"SELECT lock_poam_cve_key(canonical_cve_id)
-               FROM (SELECT DISTINCT canonical_cve_id FROM poam_cve_findings
-                     WHERE system_id=$1 ORDER BY canonical_cve_id) key"#,
+            r#"SELECT lock_poam_cve_key(key.canonical_cve_id)
+               FROM (
+                 SELECT DISTINCT canonical_cve_id FROM (
+                   SELECT canonical_cve_id FROM poam_cve_findings
+                   WHERE system_id=$1
+                   UNION ALL
+                   SELECT disposition.canonical_cve_id
+                   FROM systems system
+                   JOIN cve_environment_dispositions disposition
+                     ON disposition.environment_id=system.environment_id
+                    AND disposition.state='scheduled'
+                    AND disposition.retired_at IS NULL
+                   WHERE system.id=$1
+                 ) candidates
+                 ORDER BY canonical_cve_id
+               ) key"#,
         )
         .bind(system_id)
         .execute(&mut **tx)

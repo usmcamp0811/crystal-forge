@@ -78,6 +78,11 @@ pub(crate) async fn persist_reported_system_state(
     .await?;
 
     tx.commit().await?;
+    if let Some(system_id) = system_id {
+        crate::services::poam::schedule_scheduled_environment_cve_reconciliation_for_system(
+            pool, system_id,
+        );
+    }
     Ok(())
 }
 

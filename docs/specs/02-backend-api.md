@@ -905,6 +905,11 @@ evidence digest.
 Fleet triage uses exact deployed evidence. The identity is a canonical CVE ID
 plus a canonical package name. Package version is evidence context and is not
 part of the stable finding identity.
+The [CVE/POA&M continuity contract](../design/CrystalForge/cve-poam-evidence-continuity-design-spec.md#29-acceptance-criteria)
+governs Current CVE authority, baseline continuity, verification, and environment
+membership. TASK-326.2.2 is implementing this contract; this section does not
+assert that all paths are deployed or verified. Config inspection and rollback
+keep their separate retained-artifact authority.
 
 ### System CVE Inventory
 
@@ -937,28 +942,24 @@ checking its validity. It counts every derivation whose output matches that
 report in the registered flake and effective configuration; the bounded
 candidate menu does not prove uniqueness. A unique mapping selects that exact
 derivation's newest completed schema-1 scan by `completed_at DESC, id DESC`.
-`exact_current_scan` requires full retained-generation authority. A server-owned
-reconciliation can retain a uniquely mapped external/local activation without
-creating a CF deployment. It requires the latest consistent generation/output
-report, exactly one NixOS derivation in the registered flake and effective
-configuration, its selected available certified schema-1 evaluation artifact
-completed before that report, and a completed schema-1 scan of that derivation.
-The immutable retained row records `external_reconciled` provenance rather than
-claiming a CF deployment. Ingestion checks new reports; a bounded periodic
-repair checks already-reported Current generations. Both use the snapshot-writer
-lock. An unprovable report stays provisional and does not create a retained row.
-Archived commits remain eligible for provisional mapped evidence, but cannot
-establish a new external retained binding; an active behind-head commit can.
-Once reconciled, the existing exact Current triage and POA&M pipeline applies;
-origin does not restrict those actions. If retained proof fails,
-`mapped_running_read_only_scan` and authority
-`mapped_running` return the same derivation's scan, `running_target`, and the
-first failed proof prerequisite, but never exact remediation context or write
-authority. `mapped_running_no_scan` distinguishes a uniquely mapped target
-without eligible evidence. `no_running_report`, `invalid_running_report`,
-`unmapped_running`, and `ambiguous_running` return source-less `no_scan` states.
-`no_current_scan` remains the full-proof target without an eligible scan;
-`current_authority_unavailable` is a compatibility state from earlier servers.
+For CVE-domain Current authority, the latest observation must have a generation,
+a usable store path, and true generation/store agreement. The mapping must
+identify exactly one NixOS derivation in the registered flake and effective
+configuration. Its newest completed schema-1 scan is the exact source. The
+shared `view_current_cve_authority` is the target authority for inventory,
+fleet/triage, link, and verification paths. Retained evaluation-generation
+provenance is optional; a missing or unavailable Config artifact does not make
+this exact CVE source read-only. The origin of activation and distance from
+flake head do not change CVE authority. Server-owned external retention can
+still supply extra provenance; it is not a prerequisite for CVE mutation and
+must not fabricate a CF deployment or evaluation artifact.
+
+`mapped_running_read_only_scan` is a compatibility display state for a uniquely
+mapped scan that does not qualify as exact Current CVE authority; it is not a
+permanent state solely because retained proof is missing. A unique target without
+an eligible scan remains `mapped_running_no_scan` or `no_current_scan` as
+applicable. `no_running_report`, `invalid_running_report`, `unmapped_running`,
+and `ambiguous_running` remain source-less `no_scan` states.
 `system_id` is returned on paged responses and `running_target` contains only
 the unique derivation ID, registered commit hash, trusted reported generation
 when bound to the output, and report time. An absent source never claims clean;
@@ -975,13 +976,14 @@ default and can be requested explicitly with `target=current`; it has no
 `target_id`.
 Sources are never unioned. Historical findings can include ordinary system
 justification state, but never server-issued exact remediation context. The
-mapped-running read-only tier also omits that context. POA&M
-creation, patch scheduling, finding attach/link/reopen, verification, and
-closure continue to resolve retained generation, store path, verified lineage,
-certified snapshot, schema-1 scan, and immutable observation authority
-independently and fail closed for historical, mapped-running, or no-scan input.
-Inventory GET requests run in read-only repeatable-read transactions and do not
-repair retained proof, enqueue scans, run Nix, or persist deployments.
+mapped-running read-only tier also omits that context. POA&M creation, patch
+scheduling, finding attach/link/reopen, verification, and closure re-resolve
+latest-first exact Current CVE authority on the server under writer locks.
+Missing or inconsistent latest state, ambiguous or foreign mapping, missing
+completed schema-1 scan, wrong-derivation or historical evidence, and unauthorized
+scope fail closed. No source is not a clean scan. Inventory GET requests run in
+read-only repeatable-read transactions and do not repair retained proof, enqueue
+scans, run Nix, or persist deployments.
 
 The paged route accepts `limit` from 1 through 500 with a default of 100, an opaque
 `after` cursor, `q` up to 200 normalized characters, comma-separated `severity`
@@ -1040,10 +1042,12 @@ request-time actor snapshot was authorized.
 
 The create and link bodies contain an opaque `observation` with `system_id`,
 `scan_id`, `occurrence_derivation_path`, `canonical_cve_id`, and
-`canonical_package_name`. The server re-resolves this context against the latest
-completed evidence-schema-1 scan for the exact retained deployed generation.
+`canonical_package_name`. The server re-resolves this context against the newest
+completed schema-1 scan for the exact observed Current derivation.
 Clients must not construct or modify this context. Create accepts at most 100
-assignment-version references. A POA&M accepts at most 100 active findings.
+assignment-version references. Policy findings retain their 100-active-link
+limit. Exact-CVE links can exceed 100 as current environment membership changes;
+bounded read pages and verification-item batches do not truncate closure proof.
 Relationship history defaults to 100 rows, accepts a limit from 1 through 100,
 and returns no more than 1,000 current exact occurrence rows.
 
@@ -1055,14 +1059,19 @@ waiting mutation.
 Link, unlink, verify, close, reopen, update, and transition operations use the
 current POA&M `revision`. A stale revision returns `409 stale_revision`. Exact
 finding links retain an immutable server-resolved link-time baseline: scan,
-derivation, completion time, retained generation, target store path, occurrence
-derivation path, and observed package version. The API does not accept baseline
-fields from clients. Exact verification returns `pass` only when a strictly
-newer authoritative schema-1 scan for unchanged retained deployment lineage
-omits the exact CVE/package occurrence. The baseline scan and scans completed
-before it cannot pass verification. Present, whitelisted, justified, missing,
-legacy, changed-deployment, or inconsistent evidence does not pass. No newer
-evidence and changed lineage return `missing`. A rejected close records and
+derivation, completion time, observed generation, target store path, occurrence
+derivation path, observed package version, and optional retained-generation ID.
+Existing non-null retained IDs remain historical proof. The API does not accept
+baseline fields from clients. Exact verification returns `pass` only when a
+strictly newer completed schema-1 scan of the exact observed Current derivation
+omits the canonical CVE/package occurrence. The baseline scan and scans completed
+before it cannot pass verification. A changed commit, generation, derivation,
+package version, or activation origin alone does not return `missing`. Present,
+whitelisted, justified, legacy, historical, unavailable, or inconsistent evidence
+does not pass. A clean newer scan makes remediation a candidate; it does not
+close the POA&M. If both whitelisted and unwhitelisted paths for the same
+canonical pair exist in that scan, the unwhitelisted path determines the
+verification result. A rejected close records and
 returns the committed verification attempt as `412 closure_not_ready`; clients
 must continue with the returned committed revision.
 
@@ -1072,9 +1081,10 @@ detail and `cve_items` to verification attempts and verify/close results. Older
 clients must ignore these fields. New clients must default absent fields to an
 empty array while servers are upgraded. Exact finding rows include stable
 system/CVE/package identity and evidence context. Exact verification rows also
-include the observed package version, scan, deployed generation binding,
-result, and bounded diagnostic detail. Each row distinguishes the immutable
-baseline evidence from the current verification evidence. Both cited scans are
+include the observed package version, scan, observed generation and optional
+retained-generation provenance, result, and bounded diagnostic detail. Each
+row distinguishes immutable baseline evidence from current verification
+evidence. Both cited scans are
 retained for audit while their finding or verification records exist.
 
 POA&M detail returns active and retired exact finding links. Retired rows retain
@@ -1231,24 +1241,42 @@ mutation commits. `detail_scope` is `exact_mutation_subjects`. The returned
 `detail` excludes legacy and unassigned inventory rows. A client must refetch
 the fleet inventory endpoint after success before it renders the drawer again.
 Repeating an identical accepted-risk request does not retire and recreate its
-disposition history. Repeating a schedule request reuses an existing POA&M only
-when its complete active exact-finding set equals the recomputed scheduled
-subjects plus links that another action in the same request explicitly retires.
-This permits one atomic request to retain scheduled coverage in one environment
-and accept or open another environment. All CVE, package, domain, and semantic
-POA&M metadata must also match. A schedule-only subset never reuses a stale
-superset.
+disposition history. Repeating a schedule request reuses a compatible active
+POA&M when all current affected environment-owned subjects are covered.
+Historical clean or moved-out links may remain in the episode; they do not
+count as current subjects or block reuse merely because the link set is larger.
+Other actions in the same request may retire their own current ownership
+atomically. Canonical CVE, package, domain, host-override precedence, and
+semantic POA&M metadata must still match. Server-owned bounded reconciliation
+adds newly affected subjects idempotently after relevant scan, state,
+environment, and disposition changes, with periodic repair and post-lock
+rechecks. It must not create duplicate active remediation, overwrite host
+overrides, or treat missing evidence as clean.
+
+An authorized A→B environment move retires A's environment-owned active CVE
+link in the same transaction and preserves its immutable baseline as history.
+An active A schedule may temporarily reference an open POA&M with no active
+findings when its last member moved; later exact A subjects reuse that episode.
+A direct host override stays with the system. B may schedule a distinct POA&M.
+Non-admin A readers can inspect A's historical finding ID but cannot search
+for the moved host's current B hostname or inspect its current B environment.
+Reconciliation attaches at most 100 missing subjects per page and repeats until
+coverage is complete. Verification writes bounded 100-item pages within one
+transaction and never seals a partial subject set as successful closure.
 
 Closing a fleet-created POA&M retires its active SCHEDULED dispositions with
 its exact links. A later recurrence therefore reads as OPEN, not SCHEDULED by a
 completed POA&M. Reopen restores SCHEDULED only when each environment's current
-exact subject set equals its closure set and no active disposition conflicts.
+current affected owned subjects are covered by restored links and no active
+disposition conflicts. Historical closure members need not remain affected.
 Systems without an environment restore their exact links without an
 environment disposition. Unlinking an environment's final active exact link
 retires that environment's SCHEDULED disposition and does not change another
 environment's disposition. Fleet reads suppress a SCHEDULED disposition when
-its POA&M is completed or its active links no longer equal current exact
-subjects.
+its POA&M is completed or its current affected environment-owned subjects are
+not covered by active links. Extra historical links do not invalidate current
+coverage. Closure re-resolves current subjects; a completed POA&M cannot
+silently reopen on recurrence.
 
 The following conflict codes are significant:
 

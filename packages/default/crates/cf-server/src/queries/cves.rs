@@ -450,10 +450,9 @@ struct SystemCveInventoryMetadataRow {
 
 #[derive(Debug, sqlx::FromRow)]
 struct InventoryAuthorityRow {
-    failure_reason: Option<String>,
-    exact_scan_id: Option<Uuid>,
-    exact_completed_at: Option<DateTime<Utc>>,
-    exact_scanner_name: Option<String>,
+    exact_scan_id: Uuid,
+    exact_completed_at: DateTime<Utc>,
+    exact_scanner_name: String,
     exact_scanner_version: Option<String>,
 }
 
@@ -467,8 +466,6 @@ struct RunningMappingRow {
     match_count: i64,
     derivation_id: Option<i32>,
     commit_hash: Option<String>,
-    retained_derivation_id: Option<i32>,
-    retained_store_path: Option<String>,
 }
 
 // SECURITY: Select the most recent report BEFORE checking its fields. This
@@ -503,9 +500,7 @@ async fn resolve_running_inventory_target(
                   observation.store_path,observation.generation,
                   observation.generation_matches_current_store_path,
                   observation.reported_at,
-                  matches.match_count,matches.derivation_id,matches.commit_hash,
-                  retained.derivation_id AS retained_derivation_id,
-                  retained.source_store_path AS retained_store_path
+                   matches.match_count,matches.derivation_id,matches.commit_hash
            FROM observation
            CROSS JOIN LATERAL (
              SELECT COUNT(*)::bigint AS match_count,MIN(derivation.id) AS derivation_id,
@@ -516,10 +511,7 @@ async fn resolve_running_inventory_target(
              WHERE derivation.derivation_type='nixos'
                AND derivation.derivation_name=observation.configuration_name
                AND COALESCE(derivation.store_path,derivation.expected_store_path)=observation.store_path
-           ) matches
-           LEFT JOIN evaluation_generation_snapshots retained
-             ON retained.system_id=observation.id
-            AND retained.generation=observation.generation"#,
+            ) matches"#,
     )
     .bind(system_id)
     .fetch_one(&mut **transaction)
@@ -528,7 +520,11 @@ async fn resolve_running_inventory_target(
     if !row.state_present {
         return Ok((SystemCveCurrentAuthorityState::NoRunningReport, None));
     }
-    if row.store_path.is_none() || row.generation_matches_current_store_path == Some(false) {
+    if row.generation.is_none()
+        || row.store_path.is_none()
+        || row.generation_matches_current_store_path != Some(true)
+        || row.reported_at.is_none()
+    {
         return Ok((SystemCveCurrentAuthorityState::InvalidRunningReport, None));
     }
     if row.match_count == 0 {
@@ -542,59 +538,22 @@ async fn resolve_running_inventory_target(
     else {
         return Err(anyhow::anyhow!("unique running mapping omitted identity"));
     };
-    // A retained row that contradicts the independently scoped output identity
-    // is not merely missing proof. Do not show its scan as a downgraded result.
-    if row
-        .retained_derivation_id
-        .is_some_and(|id| id != derivation_id)
-        || row
-            .retained_store_path
-            .as_deref()
-            .is_some_and(|path| Some(path) != row.store_path.as_deref())
-    {
-        return Ok((SystemCveCurrentAuthorityState::InvalidRunningReport, None));
-    }
     Ok((
         SystemCveCurrentAuthorityState::MappedRunningNoScan,
         Some(SystemCveRunningTarget {
             derivation_id,
-            generation: (row.generation_matches_current_store_path == Some(true))
-                .then_some(row.generation)
-                .flatten(),
+            generation: row.generation,
             commit_hash,
             reported_at,
         }),
     ))
 }
 
-fn parse_exact_authority_failure(value: &str) -> Result<ExactCveAuthorityFailureReason> {
-    match value {
-        "missing_current_generation" => {
-            Ok(ExactCveAuthorityFailureReason::MissingCurrentGeneration)
-        }
-        "current_store_mismatch" => Ok(ExactCveAuthorityFailureReason::CurrentStoreMismatch),
-        "retained_generation_unavailable" => {
-            Ok(ExactCveAuthorityFailureReason::RetainedGenerationUnavailable)
-        }
-        "retained_store_mismatch" => Ok(ExactCveAuthorityFailureReason::RetainedStoreMismatch),
-        "lineage_unverified" => Ok(ExactCveAuthorityFailureReason::LineageUnverified),
-        "snapshot_unavailable" => Ok(ExactCveAuthorityFailureReason::SnapshotUnavailable),
-        "snapshot_unsupported" => Ok(ExactCveAuthorityFailureReason::SnapshotUnsupported),
-        "exact_derivation_unavailable" => {
-            Ok(ExactCveAuthorityFailureReason::ExactDerivationUnavailable)
-        }
-        "no_schema1_current_scan" => Ok(ExactCveAuthorityFailureReason::NoSchema1CurrentScan),
-        _ => Err(anyhow::anyhow!(
-            "exact CVE authority returned unknown failure reason {value}"
-        )),
-    }
-}
-
 /// Fetches one CVE inventory source for the latest reported running target.
 ///
 /// The function first resolves the latest reported running output to one
-/// scoped derivation. Full retained proof permits normal exact Current reads;
-/// missing proof permits only a read-only schema-1 scan of that same target.
+/// scoped derivation. Its completed schema-1 scan permits exact Current CVE
+/// reads without depending on evaluation or retained-generation artifacts.
 /// Missing, invalid, ambiguous, or unmatched observations return typed empty
 /// states. It never unions sources or infers schema-1 observations from legacy
 /// scan data.
@@ -1037,10 +996,10 @@ async fn fetch_historical_system_cve_inventory_tx(
 /// A `current` selection first checks the latest observation against every
 /// derivation in the registered flake and effective configuration. One match
 /// selects only that derivation's newest completed schema-1 scan by
-/// `completed_at DESC, id DESC`. Retained generation and immutable artifact
-/// proof still gate the fully authoritative `Exact` tier. Missing proof returns
-/// a read-only `MappedRunning` tier; missing or ambiguous mapping returns an
-/// explicit source-less state. This read does not repair retained records.
+/// `completed_at DESC, id DESC`. That scan is exact Current CVE authority,
+/// independent of retained Config or deployment provenance. Missing or
+/// ambiguous mapping returns an explicit source-less state. This read does not
+/// repair retained records or grant Config or rollback authority.
 async fn fetch_system_cve_inventory_tx(
     transaction: &mut Transaction<'_, Postgres>,
     system_id: Uuid,
@@ -1054,83 +1013,30 @@ async fn fetch_system_cve_inventory_tx(
     if running_target.is_none() {
         return empty_current_inventory(page, system_id, mapping_state, None, None, None);
     }
-    // SECURITY: This prerequisite order mirrors exact-CVE authority without
-    // changing any writer predicate. The latest state is selected first, so an
-    // older matching state cannot authorize or describe the current deployment.
-    let authority = sqlx::query_as::<_, InventoryAuthorityRow>(
-        r#"WITH latest_state AS (
-             SELECT state.store_path,state.generation,
-                    state.generation_matches_current_store_path
-             FROM systems system
-             LEFT JOIN LATERAL (
-               SELECT candidate.store_path,candidate.generation,
-                      candidate.generation_matches_current_store_path
-               FROM system_states candidate
-               WHERE candidate.hostname=system.hostname
-               ORDER BY candidate.timestamp DESC,candidate.id DESC LIMIT 1
-             ) state ON true
-             WHERE system.id=$1
-           )
-           SELECT CASE
-                    WHEN state.generation IS NULL OR state.store_path IS NULL
-                      OR btrim(state.store_path)='' THEN 'missing_current_generation'
-                    WHEN state.generation_matches_current_store_path IS NOT TRUE
-                      THEN 'current_store_mismatch'
-                    WHEN retained.id IS NULL THEN 'retained_generation_unavailable'
-                    WHEN retained.source_store_path<>state.store_path
-                      THEN 'retained_store_mismatch'
-                    WHEN retained.lineage_verified IS NOT TRUE THEN 'lineage_unverified'
-                    WHEN artifact.id IS NULL OR artifact.commit_id<>retained.commit_id
-                      OR artifact.configuration_name<>retained.configuration_name
-                      OR artifact.lifecycle<>'available' THEN 'snapshot_unavailable'
-                    WHEN artifact.integrity_version<>1 THEN 'snapshot_unsupported'
-                    WHEN derivation.id IS NULL OR derivation.commit_id<>retained.commit_id
-                      OR derivation.derivation_name<>retained.configuration_name
-                      OR derivation.derivation_type<>'nixos'
-                      OR COALESCE(derivation.store_path,derivation.expected_store_path)
-                         <>retained.source_store_path THEN 'exact_derivation_unavailable'
-                    WHEN scan.id IS NULL THEN 'no_schema1_current_scan'
-                    ELSE NULL
-                  END AS failure_reason,
-                  scan.id AS exact_scan_id,scan.completed_at AS exact_completed_at,
-                  scan.scanner_name AS exact_scanner_name,
-                  scan.scanner_version AS exact_scanner_version
-           FROM latest_state state
-           LEFT JOIN evaluation_generation_snapshots retained
-             ON retained.system_id=$1 AND retained.generation=state.generation
-           LEFT JOIN evaluation_snapshots artifact ON artifact.id=retained.snapshot_id
-           LEFT JOIN derivations derivation ON derivation.id=retained.derivation_id
-           LEFT JOIN LATERAL (
-             SELECT candidate.id,candidate.completed_at,candidate.scanner_name,
-                    candidate.scanner_version
-             FROM cve_scans candidate
-             WHERE candidate.derivation_id=derivation.id
-               AND candidate.status='completed'
-               AND candidate.completed_at IS NOT NULL
-               AND candidate.evidence_schema_version=1
-             ORDER BY candidate.completed_at DESC,candidate.id DESC LIMIT 1
-           ) scan ON true"#,
-    )
-    .bind(system_id)
-    .fetch_one(&mut **transaction)
-    .await?;
-
     let running_target = running_target
         .ok_or_else(|| anyhow::anyhow!("mapped running state omitted its derivation identity"))?;
     let attempt = newest_system_cve_attempt_tx(transaction, running_target.derivation_id).await?;
-    if authority.failure_reason.is_none() {
-        let scan_id = authority
-            .exact_scan_id
-            .ok_or_else(|| anyhow::anyhow!("exact CVE authority omitted its scan identity"))?;
+    // SECURITY: The shared CVE-only authority view selects the latest state
+    // before validating generation/store agreement and counting all scoped
+    // output candidates. A retained evaluation artifact is supplemental here.
+    let authority = sqlx::query_as::<_, InventoryAuthorityRow>(
+        r#"SELECT scan_id AS exact_scan_id,
+                  scan_completed_at AS exact_completed_at,
+                  scanner_name AS exact_scanner_name,
+                  scanner_version AS exact_scanner_version
+           FROM view_current_cve_authority
+           WHERE system_id=$1 AND derivation_id=$2"#,
+    )
+    .bind(system_id)
+    .bind(running_target.derivation_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if let Some(authority) = authority {
         let source = SystemCveInventorySource {
-            scan_id,
-            scanner_name: authority
-                .exact_scanner_name
-                .ok_or_else(|| anyhow::anyhow!("exact CVE authority omitted its scanner name"))?,
+            scan_id: authority.exact_scan_id,
+            scanner_name: authority.exact_scanner_name,
             scanner_version: authority.exact_scanner_version,
-            completed_at: authority.exact_completed_at.ok_or_else(|| {
-                anyhow::anyhow!("exact CVE authority omitted its completion time")
-            })?,
+            completed_at: authority.exact_completed_at,
         };
         return fetch_inventory_page_for_source(
             transaction,
@@ -1149,55 +1055,11 @@ async fn fetch_system_cve_inventory_tx(
         .await;
     }
 
-    let failure = authority
-        .failure_reason
-        .as_deref()
-        .map(parse_exact_authority_failure)
-        .transpose()?;
-    // SECURITY: A missing retained proof does not make another revision's scan
-    // usable. Only the uniquely mapped derivation's own schema-1 scan can be
-    // displayed, and that display never hydrates remediation context.
-    let mapped_scan = sqlx::query_as::<_, (Uuid, DateTime<Utc>, String, Option<String>)>(
-        r#"SELECT id,completed_at,scanner_name,scanner_version FROM cve_scans
-           WHERE derivation_id=$1 AND status='completed'
-             AND completed_at IS NOT NULL AND evidence_schema_version=1
-           ORDER BY completed_at DESC,id DESC LIMIT 1"#,
-    )
-    .bind(running_target.derivation_id)
-    .fetch_optional(&mut **transaction)
-    .await?;
-    if let Some((scan_id, completed_at, scanner_name, scanner_version)) = mapped_scan {
-        return fetch_inventory_page_for_source(
-            transaction,
-            system_id,
-            SystemCveInventoryAuthority::MappedRunning,
-            failure,
-            SystemCveInventorySource {
-                scan_id,
-                completed_at,
-                scanner_name,
-                scanner_version,
-            },
-            attempt,
-            Some(SystemCveCurrentAuthorityState::MappedRunningReadOnlyScan),
-            SystemCveInventorySelection::Current,
-            SystemCveEvidenceRepresentation::Schema1Observations,
-            true,
-            Some(running_target),
-            page,
-        )
-        .await;
-    }
-    let no_scan_state = if failure == Some(ExactCveAuthorityFailureReason::NoSchema1CurrentScan) {
-        SystemCveCurrentAuthorityState::NoCurrentScan
-    } else {
-        SystemCveCurrentAuthorityState::MappedRunningNoScan
-    };
     empty_current_inventory(
         page,
         system_id,
-        no_scan_state,
-        failure,
+        SystemCveCurrentAuthorityState::NoCurrentScan,
+        Some(ExactCveAuthorityFailureReason::NoSchema1CurrentScan),
         Some(running_target),
         attempt,
     )
@@ -1569,12 +1431,11 @@ fn inventory_revision(seed: &str) -> String {
     hex::encode(digest.finalize())
 }
 
-/// Fetches vulnerabilities from the latest exact scan for the deployed generation.
+/// Fetches vulnerabilities from the latest exact scan of the running output.
 ///
-/// The query returns no rows unless the system's current reported generation and
-/// store path have one verified retained snapshot with an available integrity-v1
-/// artifact. Row existence and installed versions come only from that retained
-/// derivation's latest completed evidence-schema-1 scan. One deterministic
+/// The shared Current CVE authority resolves the latest consistent observation,
+/// unique scoped NixOS derivation, and newest completed schema-1 scan. Retained
+/// evaluation-generation provenance is not required. One deterministic
 /// occurrence represents each stable CVE and canonical-package identity.
 ///
 /// # Errors
@@ -1587,47 +1448,8 @@ pub async fn fetch_exact_system_vulnerabilities(
 ) -> Result<Vec<ExactSystemVulnerabilityRow>> {
     let rows = sqlx::query_as::<_, ExactSystemVulnerabilityRow>(
         r#"WITH authoritative_scan AS (
-             SELECT system.id AS system_id,scan.id AS scan_id,
-                    scan.completed_at
-             FROM systems system
-              JOIN LATERAL (
-                 SELECT state.store_path,state.generation,
-                        state.generation_matches_current_store_path
-                FROM system_states state
-                WHERE state.hostname=system.hostname
-                ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
-              ) deployed ON deployed.store_path IS NOT NULL
-                AND deployed.generation IS NOT NULL
-                AND deployed.generation_matches_current_store_path IS TRUE
-                AND btrim(deployed.store_path)<>''
-             JOIN evaluation_generation_snapshots retained
-               ON retained.system_id=system.id
-              AND retained.generation=deployed.generation
-              AND retained.source_store_path=deployed.store_path
-              AND retained.lineage_verified
-             JOIN evaluation_snapshots artifact
-               ON artifact.id=retained.snapshot_id
-              AND artifact.commit_id=retained.commit_id
-              AND artifact.configuration_name=retained.configuration_name
-              AND artifact.lifecycle='available'
-              AND artifact.integrity_version=1
-             JOIN derivations derivation
-               ON derivation.id=retained.derivation_id
-              AND derivation.commit_id=retained.commit_id
-              AND derivation.derivation_name=retained.configuration_name
-              AND derivation.derivation_type='nixos'
-              AND COALESCE(derivation.store_path,derivation.expected_store_path)
-                  =retained.source_store_path
-             JOIN LATERAL (
-               SELECT candidate.id,candidate.completed_at
-               FROM cve_scans candidate
-               WHERE candidate.derivation_id=derivation.id
-                 AND candidate.status='completed'
-                 AND candidate.completed_at IS NOT NULL
-                 AND candidate.evidence_schema_version=1
-               ORDER BY candidate.completed_at DESC,candidate.id DESC LIMIT 1
-             ) scan ON true
-             WHERE system.id=$1
+              SELECT system_id,scan_id,scan_completed_at AS completed_at
+              FROM view_current_cve_authority WHERE system_id=$1
            ), selected_observations AS (
              SELECT DISTINCT ON (
                       observation.canonical_cve_id,
@@ -1723,36 +1545,9 @@ fn default_cve_fleet_stats() -> CveFleetStats {
 // aggregation. Mutation and disposition code does not use this read CTE.
 const FLEET_INVENTORY_LIST_CTE: &str = r#"
 WITH exact_authority_systems AS (
-  SELECT system.id AS system_id,scan.scan_id
-  FROM systems system
-  JOIN LATERAL (
-    SELECT state.store_path,state.generation,state.generation_matches_current_store_path
-    FROM system_states state WHERE state.hostname=system.hostname
-    ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
-  ) current ON current.store_path IS NOT NULL AND current.generation IS NOT NULL
-    AND current.generation_matches_current_store_path IS TRUE
-    AND btrim(current.store_path)<>''
-  JOIN evaluation_generation_snapshots retained
-    ON retained.system_id=system.id AND retained.generation=current.generation
-   AND retained.source_store_path=current.store_path AND retained.lineage_verified
-  JOIN evaluation_snapshots artifact ON artifact.id=retained.snapshot_id
-   AND artifact.commit_id=retained.commit_id
-   AND artifact.configuration_name=retained.configuration_name
-   AND artifact.lifecycle='available' AND artifact.integrity_version=1
-  JOIN derivations derivation ON derivation.id=retained.derivation_id
-   AND derivation.commit_id=retained.commit_id
-   AND derivation.derivation_name=retained.configuration_name
-   AND derivation.derivation_type='nixos'
-   AND COALESCE(derivation.store_path,derivation.expected_store_path)
-       =retained.source_store_path
-  JOIN LATERAL (
-    SELECT scan.id AS scan_id FROM cve_scans scan WHERE scan.derivation_id=derivation.id
-      AND scan.status='completed' AND scan.completed_at IS NOT NULL
-      AND scan.evidence_schema_version=1
-    ORDER BY scan.completed_at DESC,scan.id DESC LIMIT 1
-  ) scan ON true
-  WHERE system.is_active
-    AND ($1::uuid[] IS NULL OR system.environment_id=ANY($1))
+  SELECT system_id,scan_id
+  FROM view_current_cve_authority
+  WHERE $1::uuid[] IS NULL OR environment_id=ANY($1)
 ), exact_subjects AS (
   SELECT DISTINCT ON (occurrence.system_id,occurrence.cve_id,occurrence.package_name)
          occurrence.system_id,occurrence.environment_id,occurrence.environment_name,
@@ -3235,7 +3030,9 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
-    async fn current_read_maps_latest_report_to_unique_scoped_scan_without_proof(pool: PgPool) {
+    async fn current_read_maps_latest_report_to_actionable_scoped_scan_without_artifact(
+        pool: PgPool,
+    ) {
         let suffix = Uuid::new_v4().simple().to_string();
         let (system, commit_id) = inventory_test_system(&pool, &suffix).await;
         let store_path = format!("/nix/store/{suffix}-running");
@@ -3277,7 +3074,7 @@ mod tests {
             .expect("known but unscanned target should resolve");
         assert_eq!(
             before_scan.current_state,
-            Some(SystemCveCurrentAuthorityState::MappedRunningNoScan)
+            Some(SystemCveCurrentAuthorityState::NoCurrentScan)
         );
         assert_eq!(
             before_scan
@@ -3307,15 +3104,12 @@ mod tests {
         let mapped = fetch_system_cve_inventory(&pool, system.id)
             .await
             .expect("mapped scan should remain readable");
-        assert_eq!(mapped.authority, SystemCveInventoryAuthority::MappedRunning);
+        assert_eq!(mapped.authority, SystemCveInventoryAuthority::Exact);
         assert_eq!(
             mapped.current_state,
-            Some(SystemCveCurrentAuthorityState::MappedRunningReadOnlyScan)
+            Some(SystemCveCurrentAuthorityState::ExactCurrentScan)
         );
-        assert_eq!(
-            mapped.exact_authority_failure,
-            Some(ExactCveAuthorityFailureReason::RetainedGenerationUnavailable)
-        );
+        assert_eq!(mapped.exact_authority_failure, None);
         assert_eq!(
             mapped.source.as_ref().map(|source| source.scan_id),
             Some(scan_id)
@@ -3327,7 +3121,7 @@ mod tests {
                 .map(|target| target.derivation_id),
             Some(derivation_id)
         );
-        assert!(mapped.read_only);
+        assert!(!mapped.read_only);
         assert!(
             mapped.rows.is_empty(),
             "a completed empty source is not an absent source"
@@ -3376,11 +3170,8 @@ mod tests {
         .expect("bounded request should validate");
         let first_page = fetch_system_cve_inventory_page(&pool, system.id, &first_request)
             .await
-            .expect("first read-only page should load");
-        assert_eq!(
-            first_page.authority,
-            SystemCveInventoryAuthority::MappedRunning
-        );
+            .expect("first exact Current page should load");
+        assert_eq!(first_page.authority, SystemCveInventoryAuthority::Exact);
         assert_eq!(
             first_page.source.as_ref().map(|source| source.scan_id),
             Some(populated_scan_id)
@@ -3394,7 +3185,7 @@ mod tests {
         );
         assert_eq!(first_page.metadata.total_findings, 2);
         assert_eq!(first_page.rows[0].cve_id, "CVE-2099-0001");
-        assert!(first_page.read_only && first_page.has_more);
+        assert!(!first_page.read_only && first_page.has_more);
         let cursor = first_page
             .next_cursor
             .clone()
@@ -3442,10 +3233,10 @@ mod tests {
             "sc1-package-1",
         )
         .await;
-        assert!(matches!(
-            detail,
-            Err(crate::services::poam::PoamError::NotFound)
-        ));
+        assert!(
+            detail.is_ok(),
+            "exact Current triage needs no Config artifact"
+        );
         let mutation = crate::services::poam::triage_system_cve(
             &pool,
             &actor,
@@ -3463,10 +3254,7 @@ mod tests {
             &crate::services::poam::SystemClock,
         )
         .await;
-        assert!(matches!(
-            mutation,
-            Err(crate::services::poam::PoamError::NotFound)
-        ));
+        assert!(mutation.is_ok(), "exact Current risk decision must save");
 
         // A later failed scan cannot erase the earlier completed source.
         let failed_id: Uuid = sqlx::query_scalar(
@@ -4169,23 +3957,16 @@ mod tests {
         .execute(&pool)
         .await
         .expect("unretained current state should persist");
-        // Generation 8 lacks retained proof, but its reported output still
-        // uniquely maps to the exact derivation. The same-target completed
-        // scan remains readable; it must not gain remediation authority.
+        // The reported output uniquely maps to the scanned derivation. Missing
+        // retained Config proof does not downgrade exact Current CVE authority.
         let unretained = fetch_system_cve_inventory(&pool, legacy_system.id)
             .await
             .expect("unretained inventory should report an explicit state");
-        assert_eq!(
-            unretained.authority,
-            SystemCveInventoryAuthority::MappedRunning
-        );
-        assert_eq!(
-            unretained.exact_authority_failure,
-            Some(ExactCveAuthorityFailureReason::RetainedGenerationUnavailable)
-        );
+        assert_eq!(unretained.authority, SystemCveInventoryAuthority::Exact);
+        assert_eq!(unretained.exact_authority_failure, None);
         assert_eq!(
             unretained.current_state,
-            Some(SystemCveCurrentAuthorityState::MappedRunningReadOnlyScan)
+            Some(SystemCveCurrentAuthorityState::ExactCurrentScan)
         );
         assert_eq!(
             unretained.source.as_ref().map(|source| source.scan_id),
@@ -4198,7 +3979,7 @@ mod tests {
                 .map(|target| target.derivation_id),
             Some(exact_derivation.id)
         );
-        assert!(unretained.read_only);
+        assert!(!unretained.read_only);
         assert!(unretained.rows.is_empty());
 
         sqlx::query(
@@ -4288,23 +4069,17 @@ mod tests {
         let unverified = fetch_system_cve_inventory(&pool, legacy_system.id)
             .await
             .expect("unverified lineage should report an explicit state");
-        assert_eq!(
-            unverified.authority,
-            SystemCveInventoryAuthority::MappedRunning
-        );
-        assert_eq!(
-            unverified.exact_authority_failure,
-            Some(ExactCveAuthorityFailureReason::LineageUnverified)
-        );
+        assert_eq!(unverified.authority, SystemCveInventoryAuthority::Exact);
+        assert_eq!(unverified.exact_authority_failure, None);
         assert_eq!(
             unverified.current_state,
-            Some(SystemCveCurrentAuthorityState::MappedRunningReadOnlyScan)
+            Some(SystemCveCurrentAuthorityState::ExactCurrentScan)
         );
         assert_eq!(
             unverified.source.as_ref().map(|source| source.scan_id),
             Some(exact_clean_scan_id)
         );
-        assert!(unverified.read_only);
+        assert!(!unverified.read_only);
         assert!(unverified.rows.is_empty());
     }
 

@@ -2516,12 +2516,22 @@ pub async fn update_system_handler(
             Err(_) => return internal_error("Failed to load system"),
         };
         let canonical_cve_keys = match sqlx::query_scalar::<_, String>(
-            r#"SELECT DISTINCT canonical_cve_id
-               FROM poam_cve_findings
-               WHERE system_id=$1
-               ORDER BY canonical_cve_id"#,
+            r#"SELECT DISTINCT canonical_cve_id FROM (
+                 SELECT canonical_cve_id FROM poam_cve_findings
+                 WHERE system_id=$1
+                 UNION ALL
+                 SELECT disposition.canonical_cve_id
+                 FROM cve_environment_dispositions disposition
+                 WHERE disposition.state='scheduled'
+                   AND disposition.retired_at IS NULL
+                   AND (disposition.environment_id=(SELECT environment_id
+                        FROM systems WHERE id=$1)
+                     OR disposition.environment_id=(SELECT id FROM environments
+                        WHERE name=$2))
+               ) keys ORDER BY canonical_cve_id"#,
         )
         .bind(system_id)
+        .bind(environment_name)
         .fetch_all(&mut *tx)
         .await
         {
@@ -2705,6 +2715,29 @@ pub async fn update_system_handler(
             }
             return internal_error("Failed to update system");
         }
+        if let Some(former_environment_id) = current_environment_id
+            && Some(former_environment_id) != environment_id
+        {
+            // PERSISTENCE: Retire only the old environment's CVE-owned links
+            // inside the same authorized, locked move. Their immutable
+            // baselines remain history; a host-owned link stays with the host.
+            if let Err(error) = crate::services::poam::retire_moved_environment_cve_links_tx(
+                &mut tx,
+                system_id,
+                former_environment_id,
+                user_id,
+            )
+            .await
+            {
+                if retry < 2
+                    && matches!(&error, crate::services::poam::PoamError::Database(cause)
+                        if is_system_metadata_serialization_failure(cause))
+                {
+                    continue;
+                }
+                return internal_error("Failed to transfer system CVE environment ownership");
+            }
+        }
         let detail = match get_system_detail_by_id(&mut *tx, system_id).await {
             Ok(Some(row)) => {
                 detail_row_to_api_model(row, state.server_config.heartbeat_interval_secs)
@@ -2714,6 +2747,11 @@ pub async fn update_system_handler(
         };
         if tx.commit().await.is_err() {
             return internal_error("Failed to commit system update");
+        }
+        if environment_id != current_environment_id {
+            crate::services::poam::schedule_scheduled_environment_cve_reconciliation_for_system(
+                &pool, system_id,
+            );
         }
         return (StatusCode::OK, Json(detail)).into_response();
     }

@@ -761,9 +761,11 @@ pub struct CveFindingView {
     pub baseline_scan_id: Uuid,
     /// Records when the immutable baseline scan completed.
     pub baseline_scan_completed_at: DateTime<Utc>,
-    /// Gives the retained deployed generation captured at link time.
+    /// Identifies supplemental retained lineage captured at link time, if available.
+    pub baseline_generation_snapshot_id: Option<Uuid>,
+    /// Gives the observed deployed generation captured at link time.
     pub baseline_generation: i32,
-    /// Gives the retained deployed store path captured at link time.
+    /// Gives the observed deployed store path captured at link time.
     pub baseline_target_store_path: String,
     /// Gives the exact immutable package occurrence captured at link time.
     pub baseline_occurrence_derivation_path: String,
@@ -775,6 +777,12 @@ pub struct CveFindingView {
     pub current_target_store_path: Option<String>,
     /// Identifies the latest completed schema-1 scan for that derivation.
     pub current_scan_id: Option<Uuid>,
+    /// Records when the current exact scan completed, if authority is available.
+    pub current_scan_completed_at: Option<DateTime<Utc>>,
+    /// Gives the observed current generation, if authority is available.
+    pub current_generation: Option<i32>,
+    /// Identifies supplemental retained lineage for Current, if available.
+    pub current_generation_snapshot_id: Option<Uuid>,
     /// Gives the current exact occurrence path when present.
     pub current_occurrence_derivation_path: Option<String>,
     /// Gives the current observed package version when present.
@@ -876,8 +884,8 @@ pub struct CveVerificationItemView {
     pub baseline_scan_derivation_id: i32,
     /// Records when the immutable baseline scan completed.
     pub baseline_scan_completed_at: DateTime<Utc>,
-    /// Identifies the retained generation row used at link time.
-    pub baseline_generation_snapshot_id: Uuid,
+    /// Identifies supplemental verified retained lineage, when available at link time.
+    pub baseline_generation_snapshot_id: Option<Uuid>,
     /// Gives the deployed generation number used at link time.
     pub baseline_generation: i32,
     /// Gives the deployed store path used at link time.
@@ -894,7 +902,7 @@ pub struct CveVerificationItemView {
     pub scan_derivation_id: Option<i32>,
     /// Records when the authoritative scan completed.
     pub scan_completed_at: Option<DateTime<Utc>>,
-    /// Identifies the retained generation row used for current verification.
+    /// Identifies supplemental verified retained lineage, if available for Current.
     pub generation_snapshot_id: Option<Uuid>,
     /// Gives the deployed generation number used for current verification.
     pub generation: Option<i32>,

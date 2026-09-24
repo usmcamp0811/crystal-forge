@@ -1742,6 +1742,12 @@ async fn save_scan_results_for_owner(
 
     tx.commit().await?;
 
+    // CONCURRENCY: Repair only after scan sealing commits. Failure must not
+    // turn an immutable completed scan into an apparent persistence failure.
+    crate::services::poam::schedule_scheduled_environment_cve_reconciliation_for_scan(
+        pool, scan_id,
+    );
+
     Ok(())
 }
 

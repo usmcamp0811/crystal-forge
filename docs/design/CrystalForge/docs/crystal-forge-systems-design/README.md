@@ -6,6 +6,14 @@ prompt, and manual guide are handoff revision 2.
 
 ## Authority
 
+This bundle records the earlier SC1 handoff. For Current CVE action and
+cross-revision POA&M behavior, the
+[CVE/POA&M continuity design, Section 29](../../cve-poam-evidence-continuity-design-spec.md#29-acceptance-criteria)
+supersedes the retained-artifact gate below. TASK-326.2.2 is in progress;
+this bundle does not verify that work. Config and rollback retain separate
+authority. The SC1 validation blockers remain recorded in its implementation
+note.
+
 The owner's Claude design implementation is the UI source of truth. The Systems
 architecture defines data and behavior, not replacement UI. Start with the UI
 authority rule in Section 1.0, then Section 22 and `system-cves-chunk-1.md`.
@@ -17,7 +25,7 @@ and blocks its UI acceptance. It does not block independent backend work.
 
 ## Scope
 
-SC1 corrects target, scan selection and trusted reconciliation of a known
+At its pinned revision SC1 corrected target, scan selection and trusted reconciliation of a known
 external activation. Unmapped Current stays unmapped. A uniquely mapped
 running derivation can supply its schema-1 scan provisionally read-only while
 retained proof is missing. Server-owned ingestion or bounded repair may bind

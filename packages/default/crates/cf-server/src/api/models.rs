@@ -693,8 +693,8 @@ pub enum SystemCveInventoryAuthority {
     /// Uses immutable schema-1 observations for the exact selected derivation.
     #[default]
     Exact,
-    /// Displays a schema-1 scan for a uniquely mapped running derivation without
-    /// retained deployment proof. This tier cannot authorize mutations.
+    /// Displays a running scan without actionable Current CVE authority.
+    /// Compatibility clients must not treat this tier as mutation authority.
     MappedRunning,
     /// Uses a completed historical scan for an explicitly selected past target.
     Legacy,
@@ -703,6 +703,10 @@ pub enum SystemCveInventoryAuthority {
 }
 
 /// Reports the first prerequisite that prevented exact CVE authority.
+///
+/// Retained-generation and snapshot variants preserve responses from older
+/// servers. Missing Config artifact proof alone does not prevent exact Current
+/// CVE authority on this server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExactCveAuthorityFailureReason {
@@ -737,12 +741,11 @@ pub enum ExactCveAuthorityFailureReason {
 /// - [`Self::ExactCurrentScan`]: The server proved the exact authorized current
 ///   derivation and returned its newest completed schema-1 scan. The response is
 ///   mutable and can authorize triage.
-/// - [`Self::MappedRunningReadOnlyScan`]: One registered derivation matches the
-///   latest reported output and supplies schema-1 findings, but strict retained
-///   proof failed. It has a source and rows but no mutation authority.
+/// - [`Self::MappedRunningReadOnlyScan`]: A compatibility read-only state.
+///   Missing retained lineage alone does not require this state when exact
+///   observed Current CVE authority is established.
 /// - [`Self::NoCurrentScan`] and [`Self::MappedRunningNoScan`]: One scoped
-///   derivation is known but no completed schema-1 scan exists. The former has
-///   complete deployment proof; the latter does not.
+///   derivation is known but no completed schema-1 scan exists.
 /// - [`Self::NoRunningReport`], [`Self::InvalidRunningReport`],
 ///   [`Self::UnmappedRunning`], and [`Self::AmbiguousRunning`] distinguish
 ///   missing, contradictory, unmatched, and non-unique latest observations.
@@ -761,7 +764,7 @@ pub enum SystemCveCurrentAuthorityState {
     /// Returns the newest completed schema-1 scan for the exact current
     /// derivation.
     ExactCurrentScan,
-    /// Shows a uniquely mapped running derivation's scan without mutation proof.
+    /// Shows a compatibility read-only running scan without Current authority.
     MappedRunningReadOnlyScan,
     /// The mapped running derivation has no eligible completed schema-1 scan.
     MappedRunningNoScan,
@@ -780,7 +783,8 @@ pub enum SystemCveCurrentAuthorityState {
 }
 
 /// Describes a uniquely identified reported running target without granting
-/// retained deployment authority.
+/// retained deployment authority. CVE mutation still requires its completed
+/// exact schema-1 scan and the actor's normal scope authorization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemCveRunningTarget {
     /// Identifies the one derivation in the registered flake/configuration.

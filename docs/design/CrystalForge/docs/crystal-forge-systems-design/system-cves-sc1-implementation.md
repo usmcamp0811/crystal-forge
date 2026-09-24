@@ -2,6 +2,12 @@
 
 Status: in progress. This note does not assert that the authoritative browser
 checks passed. TASK-326.2.1 is not ready to merge.
+This note records the earlier SC1 implementation and host feedback, not the
+TASK-326.2.2 acceptance contract. The
+[CVE/POA&M continuity design, Section 29](../../cve-poam-evidence-continuity-design-spec.md#29-acceptance-criteria)
+supersedes SC1's permanent retained-artifact gate, unchanged-generation
+verification, and historical/current membership equality. TASK-326.2.2 is in
+progress; do not treat the older tests below as validation of that work.
 
 ## Read and write boundaries
 
@@ -15,10 +21,14 @@ attempt by creation time and scan ID. Failed, pending, and in-progress attempts
 cannot replace the selected completed source or grant remediation authority.
 The approved attempt notice requires the attempt to start after the completed
 source finished. A different scan ID alone does not prove that it is newer.
-Missing retained proof leaves the scan readable under
-`mapped_running`, but does not create remediation context or permit a write.
-The inventory GET runs in a read-only transaction. Direct triage still performs
-its own full-proof authorization check.
+In this SC1 implementation, missing retained proof left the scan readable under
+`mapped_running` without remediation context or write authority. Under the
+later continuity contract, retained proof alone is not a CVE gate. The shared
+`view_current_cve_authority` must select the latest consistent system state,
+exactly one scoped NixOS derivation, and its newest completed schema-1 scan.
+Direct triage must re-resolve that evidence under locks. An inventory GET remains
+read-only. Missing, ambiguous, historical, or schema-0-only evidence cannot
+authorize writes and cannot be reported as clean.
 
 The new `binding_origin` on immutable retained generations distinguishes an
 unknown pre-migration origin, CF-issued deployment, and reconciled external
@@ -34,9 +44,17 @@ A background repair examines up to 16 already-observed candidates each
 60 seconds; its cursor advances past unprovable or failed candidates. An
 individual failed repair is logged without blocking later systems. Repeated
 reports and repair passes do not rewrite retained bindings. A successful
-external binding enters the unchanged exact Current triage and POA&M writer
-pipeline with its real retained artifact baseline. Explicit historical targets
-still cannot use that Current authority.
+external binding entered the SC1 exact Current triage and POA&M pipeline with
+its real retained artifact baseline. Under the continuity target it supplies
+optional provenance, not required CVE proof. Exact observed Current authority
+is independent of activation origin and Config artifact availability. Existing
+non-null baselines stay
+immutable; new baselines can have a NULL retained ID with exact scan and
+occurrence proof. Verification may cross revisions using strictly newer exact
+Current scans. Current affected environment subjects must be a subset of active
+POA&M links; historical clean or moved-out links remain audit history. Bounded
+server reconciliation adds new affected subjects without overriding host
+decisions. Explicit historical targets remain read-only.
 
 The CVE target and mode are independent URL parameters. Dioxus must retain
 `cve_target` and `cve_mode` in the System Detail route declaration. The view
@@ -61,11 +79,12 @@ authoritative screenshot comparison remains blocked by TASK-440.
 | Changed interactions | An explicit generation or derivation stays selected across URL navigation. Current follows a reported running target. The host check holds an A response, records reported activation B, selects the new Current B, and confirms that late A cannot replace B. A second host check holds an unsaved triage draft through a Current continuation conflict and confirms that the approved conflict footer blocks submission without discarding fields. |
 | Hierarchy differences and additions | No new section or control was added to the package-first hierarchy. A source-less state does not claim the host is clean. The server-owned read-only reason uses the existing reference notice pattern. |
 
-The supported host 12ha regression also starts with provisional external
-evidence, installs a fixture row only after the database trigger validates
-its selected artifact and latest observation, then checks the real exact
-inventory, triage-detail API and dialog. Separate isolated Rust tests exercise
-the server-owned reconciliation rather than relying on this fixture insert.
+The SC1 host 12ha regression started with provisional external evidence and
+installed a fixture row only after its selected artifact and latest observation
+passed the database trigger. It then checked inventory, triage detail, and the
+dialog. Separate isolated SC1 Rust tests exercised external retention. This
+does not test the later unretained exact Current case or environment POA&M
+membership repair; the fixture and assertions need TASK-326.2.2 coverage.
 
 ## Verification boundary
 
