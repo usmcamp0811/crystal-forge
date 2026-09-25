@@ -25,7 +25,8 @@
 //!
 //! After bounded stale recovery, Phase 0 processes operator-queued scans before
 //! the worker loads `scan_schedule_policy`. Phase 1 processes post-build scans
-//! only when `on_build` is enabled. Phase 2 processes periodic rescans. Each
+//! for new builds only when `on_build` is enabled, but retries existing intent
+//! independently of that switch. Phase 2 processes periodic rescans. Each
 //! scan phase runs at most [`MAX_SCANS_PER_CYCLE`] scans, and each recovery
 //! phase applies its own conservative query-layer batch limit.
 
@@ -36,7 +37,9 @@ use crate::derivations::utils::{
 use crate::log::{WorkerState, WorkerStatus, get_cve_status};
 use crate::models::cache_destination::CacheDestination;
 use crate::queries::cache_destinations::get_cache_destination;
-use crate::queries::cve_scan_leases::reconcile_post_build_scan_prerequisites;
+use crate::queries::cve_scan_leases::{
+    expire_post_build_scan_obligations, reconcile_post_build_scan_prerequisites,
+};
 #[cfg(test)]
 use crate::queries::cve_scans::create_cve_scan;
 use crate::queries::cve_scans::{
@@ -386,6 +389,14 @@ async fn run_cve_prerequisite_maintenance(pool: &PgPool) {
         Err(error) => error!("Failed to reconcile CVE build prerequisites: {error:#}"),
     }
 
+    // Expire only persisted obligations, even when the executor or on_build is
+    // disabled. Do this before promotion so overdue waits cannot enter the queue.
+    match expire_post_build_scan_obligations(pool, 32).await {
+        Ok(count) if count > 0 => info!("Expired {count} post-build CVE scan obligation(s)"),
+        Ok(_) => {}
+        Err(error) => error!("Failed to expire post-build CVE obligations: {error:#}"),
+    }
+
     match promote_waiting_cve_scans(pool, 32).await {
         Ok(count) if count > 0 => info!("Advanced {count} CVE scan prerequisite wait(s)"),
         Ok(_) => {}
@@ -395,11 +406,9 @@ async fn run_cve_prerequisite_maintenance(pool: &PgPool) {
 
 /// Maximum derivations scanned per cycle phase.
 ///
-/// Processing is bounded per cycle so that a large historical backlog does not
-/// monopolise the database for an extended period. At 1 scan/cycle with a
-/// 60-second poll interval a backlog of N derivations clears in ~N minutes,
-/// which is acceptable. Raise this constant once bulk-persistence lands and
-/// the write amplification per scan is addressed.
+/// Processing is bounded per cycle because scan execution and persistence are
+/// expensive. Historical builds outside the recovery window are not backlog
+/// and must not enter this phase. Keep the bound independent of recovery age.
 const MAX_SCANS_PER_CYCLE: i64 = 1;
 
 /// Runs one bounded stale-recovery pass and three scan phases.
@@ -409,8 +418,8 @@ const MAX_SCANS_PER_CYCLE: i64 = 1;
 /// before policy loading. Explicit requests therefore run independently of
 /// `scan_schedule_policy` availability and the `on_build` setting.
 ///
-/// Phase 1 processes at most [`MAX_SCANS_PER_CYCLE`] post-build targets when
-/// `on_build` is enabled. Phase 2 processes at most
+/// Phase 1 processes at most [`MAX_SCANS_PER_CYCLE`] post-build targets; only
+/// admitted obligations can retry after `on_build` is disabled. Phase 2 processes at most
 /// [`MAX_SCANS_PER_CYCLE`] periodic rescan targets. No phase loops until its
 /// backlog is empty; later poll cycles continue each backlog.
 async fn scan_cycle(
@@ -559,20 +568,16 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
     // we skip this cycle rather than applying aggressive hardcoded defaults.
     // This prevents a database configuration failure from silently triggering
     // a full historical backfill on first deployment.
-    let policy = match get_scan_schedule_policy(pool).await {
-        Ok(p) => p,
-        Err(e) => {
-            error!("Failed to load scan schedule policy: {e} — skipping cycle");
-            return Ok(());
-        }
-    };
+    if let Err(e) = get_scan_schedule_policy(pool).await {
+        error!("Failed to load scan schedule policy: {e} — skipping cycle");
+        return Ok(());
+    }
     // --- Phase 1: post-build scans (bounded — at most MAX_SCANS_PER_CYCLE per cycle) ---
     //
-    // We intentionally do NOT loop until the queue is empty. A large historical
-    // backlog would otherwise monopolise the database for minutes. Each cycle
-    // advances the backlog by MAX_SCANS_PER_CYCLE; subsequent poll cycles
-    // continue draining it at a controlled rate.
-    if policy.on_build {
+    // We intentionally do NOT loop until the queue is empty. Only recent
+    // successful builds are eligible for recovery; the oldest derivations
+    // never become an unbounded post-build backlog.
+    {
         if !*enabled_rx.read().await {
             info!("🛑 CVE scan loop disabled — skipping post-build phase");
             return Ok(());
@@ -626,8 +631,6 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
                 error!("❌ Failed to get post-build scan targets: {e}");
             }
         }
-    } else {
-        debug!("🔍 on_build = false — skipping post-build phase");
     }
 
     // Check enabled before entering Phase 2.
@@ -2546,6 +2549,38 @@ mod tests {
         .execute(pool)
         .await
         .expect("derivation should be marked build-complete");
+        sqlx::query(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW())",
+        )
+        .bind(derivation.id)
+        .execute(pool)
+        .await
+        .expect("successful build must authorize post-build recovery");
+        let ancient = insert_derivation(
+            pool,
+            None,
+            &format!("task-396-cycle-ancient-{}", Uuid::new_v4()),
+            "nixos",
+        )
+        .await
+        .expect("ancient build fixture should be inserted");
+        sqlx::query(
+            "UPDATE derivations SET status_id = $2, completed_at = NOW() - INTERVAL '90 days', store_path = $3, derivation_path = $4 WHERE id = $1",
+        )
+        .bind(ancient.id)
+        .bind(EvaluationStatus::BuildComplete.as_id())
+        .bind(format!("{}-ancient", store_path.to_string_lossy()))
+        .bind(format!("{}-ancient.drv", derivation_path.to_string_lossy()))
+        .execute(pool)
+        .await
+        .expect("ancient build paths should be recorded");
+        sqlx::query(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW() - INTERVAL '90 days')",
+        )
+        .bind(ancient.id)
+        .execute(pool)
+        .await
+        .expect("ancient successful build should persist without scan intent");
 
         let runner = FakeRunner {
             calls: Arc::new(AtomicUsize::new(0)),
@@ -2577,6 +2612,13 @@ mod tests {
             1,
             "target should be processed exactly once"
         );
+        let ancient_scans: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM cve_scans WHERE derivation_id = $1")
+                .bind(ancient.id)
+                .fetch_one(pool)
+                .await
+                .expect("ancient scan history should load");
+        assert_eq!(ancient_scans, 0, "old unadmitted builds are not backfilled");
 
         let (status, completed_at, source_trigger): (
             Option<String>,
@@ -2643,12 +2685,17 @@ mod tests {
             "on_build=false must not process a new post-build target"
         );
 
-        let derivation_ids = vec![derivation.id, disabled_derivation.id];
+        let derivation_ids = vec![derivation.id, ancient.id, disabled_derivation.id];
         sqlx::query("DELETE FROM cve_scans WHERE derivation_id = ANY($1)")
             .bind(&derivation_ids)
             .execute(pool)
             .await
             .expect("scan-cycle scans should be deleted");
+        sqlx::query("DELETE FROM build_jobs WHERE derivation_id = ANY($1)")
+            .bind(&derivation_ids)
+            .execute(pool)
+            .await
+            .expect("scan-cycle build jobs should be deleted");
         sqlx::query("DELETE FROM derivations WHERE id = ANY($1)")
             .bind(&derivation_ids)
             .execute(pool)

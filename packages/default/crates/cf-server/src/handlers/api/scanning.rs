@@ -19,9 +19,9 @@ use crate::handlers::api::rbac::require_admin;
 use crate::queries::scanning::{
     InvalidCursorError, InvalidScanRecordCursor, ScanRecordCollection, ScanRecordDirection,
     ScanRecordRequest, ScanRecordRevision, ScanRecordSort, ScanRecordStatus, ScanSchedulePolicyRow,
-    get_scan_activity, get_scan_deployed, get_scan_queue, get_scan_queue_for_system,
-    get_scan_records, get_scan_schedule_policy, get_scan_stats, get_scan_systems,
-    set_scan_archive_state, update_scan_schedule_policy,
+    get_post_build_recovery_window, get_scan_activity, get_scan_deployed, get_scan_queue,
+    get_scan_queue_for_system, get_scan_records, get_scan_schedule_policy, get_scan_stats,
+    get_scan_systems, set_scan_archive_state, update_scan_schedule_policy_with_recovery,
 };
 
 #[derive(Debug, Deserialize, Default)]
@@ -562,8 +562,11 @@ pub async fn get_scanning_schedule(
         return forbidden_admin();
     }
 
-    match get_scan_schedule_policy(&pool).await {
-        Ok(p) => (
+    match (
+        get_scan_schedule_policy(&pool).await,
+        get_post_build_recovery_window(&pool).await,
+    ) {
+        (Ok(p), Ok(post_build_recovery_window)) => (
             StatusCode::OK,
             Json(ScanSchedulePolicyResponse {
                 on_build: p.on_build,
@@ -572,11 +575,12 @@ pub async fn get_scanning_schedule(
                 archived_interval: p.archived_interval,
                 archived_enabled: p.archived_enabled,
                 rebuild_to_scan: p.rebuild_to_scan,
+                post_build_recovery_window,
                 updated_at: p.updated_at,
             }),
         )
             .into_response(),
-        Err(e) => {
+        (Err(e), _) | (_, Err(e)) => {
             error!("scanning schedule get failed: {e:#}");
             internal_error("Failed to load scan schedule")
         }
@@ -624,6 +628,26 @@ fn validation_error(msg: String) -> (StatusCode, Json<serde_json::Value>) {
     )
 }
 
+fn valid_recovery_window(window: &str) -> bool {
+    window.len() <= 16
+        && window.len() >= 2
+        && matches!(window.as_bytes().last(), Some(b'h' | b'd'))
+        && window.as_bytes()[..window.len() - 1]
+            .iter()
+            .all(u8::is_ascii_digit)
+        && window[..window.len() - 1]
+            .parse::<u64>()
+            .is_ok_and(|count| {
+                count > 0
+                    && count
+                        <= if window.ends_with('d') {
+                            36_500
+                        } else {
+                            876_000
+                        }
+            })
+}
+
 pub async fn put_scanning_schedule(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -643,6 +667,14 @@ pub async fn put_scanning_schedule(
     if let Err(e) = validate_scan_interval(&payload.archived_interval, "archived_interval") {
         return e.into_response();
     }
+    if let Some(window) = &payload.post_build_recovery_window {
+        if !valid_recovery_window(window) {
+            return validation_error(
+                "Invalid post_build_recovery_window: expected a positive number of hours or days (at most 100 years)".to_string(),
+            )
+            .into_response();
+        }
+    }
 
     let row = ScanSchedulePolicyRow {
         on_build: payload.on_build,
@@ -654,9 +686,18 @@ pub async fn put_scanning_schedule(
         updated_at: chrono::Utc::now(),
     };
 
-    match update_scan_schedule_policy(&pool, &row).await {
-        Ok(_) => match get_scan_schedule_policy(&pool).await {
-            Ok(p) => (
+    match update_scan_schedule_policy_with_recovery(
+        &pool,
+        &row,
+        payload.post_build_recovery_window.as_deref(),
+    )
+    .await
+    {
+        Ok(_) => match (
+            get_scan_schedule_policy(&pool).await,
+            get_post_build_recovery_window(&pool).await,
+        ) {
+            (Ok(p), Ok(post_build_recovery_window)) => (
                 StatusCode::OK,
                 Json(ScanSchedulePolicyResponse {
                     on_build: p.on_build,
@@ -665,11 +706,12 @@ pub async fn put_scanning_schedule(
                     archived_interval: p.archived_interval,
                     archived_enabled: p.archived_enabled,
                     rebuild_to_scan: p.rebuild_to_scan,
+                    post_build_recovery_window,
                     updated_at: p.updated_at,
                 }),
             )
                 .into_response(),
-            Err(e) => {
+            (Err(e), _) | (_, Err(e)) => {
                 error!("scanning schedule reload failed after update: {e:#}");
                 internal_error("Failed to reload scan schedule")
             }
@@ -809,11 +851,33 @@ mod tests {
             archived_interval: "168h".to_string(),
             archived_enabled: true,
             rebuild_to_scan: false,
+            post_build_recovery_window: None,
         };
         let response = put_scanning_schedule(State(lazy_pool()), HeaderMap::new(), Json(payload))
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn recovery_window_rejects_nonpositive_and_invalid_units() {
+        for value in [
+            "0h",
+            "00d",
+            "never",
+            "1m",
+            "-1d",
+            "1 d",
+            "1234567890123456h",
+            "876001h",
+            "36501d",
+            "123456789012345d",
+        ] {
+            assert!(!valid_recovery_window(value), "{value} must be rejected");
+        }
+        for value in ["1h", "7d", "0007h", "876000h", "36500d"] {
+            assert!(valid_recovery_window(value), "{value} must be accepted");
+        }
     }
 
     #[test]

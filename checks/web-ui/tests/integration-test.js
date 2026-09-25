@@ -18025,6 +18025,102 @@ security.audit.enable = true;</fixtext>
       }
     },
   },
+  {
+    name: "16d-scanning-recovery-mock",
+    description: "Mock-only Scanning presentation of expired post-build history, retention stats, and trigger provenance (not DB eligibility/SQL)",
+    action: async (page) => {
+      const expiredId = "20000000-0000-4000-8000-000000000081";
+      const at = "2026-09-20T18:00:00Z";
+      const scan = (id, hostname, status, sourceTrigger) => ({
+        scan_id: id,
+        derivation_id: Number(id.slice(-2)),
+        hostname,
+        flake_name: "recovery-fleet",
+        commit_hash: hostname,
+        status,
+        source_trigger: sourceTrigger,
+        created_at: at,
+        scheduled_at: at,
+        started_at: null,
+        completed_at: status === "failed" ? at : null,
+        scanner_name: "vulnix",
+        scanner_version: null,
+        executor: null,
+        failure: status === "failed" ? "Post-build scan not completed. The recovery window expired before a successful scan was recorded." : null,
+        wait_reason: null,
+        build_job_id: null,
+        build_status: "success",
+        total_packages: 0,
+        total_vulnerabilities: 0,
+        critical_count: 0,
+        high_count: 0,
+        medium_count: 0,
+        low_count: 0,
+        scan_duration_ms: null,
+        attempts: 0,
+        archived_at: null,
+        cancellable: false,
+        is_current: false,
+        is_latest_per_flake: false,
+      });
+      const expired = scan(expiredId, "expired-post-build", "failed", "post_build");
+      const periodic = scan("10000000-0000-4000-8000-000000000082", "periodic-target", "pending", "periodic");
+      const manual = scan("10000000-0000-4000-8000-000000000083", "manual-target", "pending", "manual");
+      let archived = false;
+      const mutations = [];
+      const stats = () => ({ scanning: 0, queued: 2, awaiting_build: 0, awaiting_closure: 0, stale: 0, never_scanned: archived ? 3 : 2, failed: archived ? 0 : 1, coverage_percent: 50 });
+      const scansRoute = /\/api\/v1\/scanning\/scans(?:\?.*)?$/;
+      await page.route("**/api/v1/scanning/stats", (route) => route.fulfill({ json: stats() }));
+      await page.route(scansRoute, (route) => {
+        if (route.request().method() === "PATCH") {
+          const body = route.request().postDataJSON();
+          mutations.push(body);
+          if (body.archived !== true || body.scan_ids.join(",") !== expiredId) throw new Error(`Unexpected archive request: ${JSON.stringify(body)}`);
+          archived = true;
+          return route.fulfill({ json: { requested: 1, changed: 1, archived: true } });
+        }
+        if (route.request().method() !== "GET") throw new Error(`Unexpected scan mutation: ${route.request().method()}`);
+        const params = new URL(route.request().url()).searchParams;
+        const collection = params.get("collection");
+        const items = collection === "active" ? [periodic, manual]
+          : collection === "completed" ? (archived && params.get("include_archived") !== "true" ? [] : [{ ...expired, archived_at: archived ? at : null }])
+            : [];
+        return route.fulfill({ json: { items, total: collection === "completed" ? 1 : items.length, hidden_archived: collection === "completed" && archived && params.get("include_archived") !== "true" ? 1 : 0, has_more: false, next_cursor: null } });
+      });
+      await page.route("**/api/v1/scanning/systems?limit=500", (route) => route.fulfill({ json: [] }));
+      try {
+        await page.goto(`${baseUrl}/scanning`, { timeout: LOAD_TIMEOUT });
+        const card = (label) => page.locator(".scanning-stats .stat").filter({ has: page.locator(".stat-label", { hasText: label }) });
+        await assertVisible(card("Failed").getByText("1", { exact: true }), "Mock Failed count must start at one");
+        await assertVisible(card("Never scanned").getByText("2", { exact: true }), "Mock Never scanned count must start at two");
+        const active = page.locator("#scan-active-panel tbody");
+        await assertCount(active.getByText("expired-post-build", { exact: true }), 0, "Terminal expired post-build must not appear in Active");
+        for (const [hostname, trigger] of [["periodic-target", "periodic"], ["manual-target", "manual"]]) {
+          await assertVisible(active.locator("tr").filter({ hasText: hostname }).getByText(trigger, { exact: true }), `Mock ${trigger} provenance must be displayed`);
+        }
+        await page.getByRole("tab", { name: /^Completed/ }).click();
+        const completed = page.locator("#scan-completed-panel tbody");
+        const expiredRow = completed.locator("tr").filter({ hasText: "expired-post-build" });
+        await assertVisible(expiredRow.getByText("post_build", { exact: true }), "Expired post-build provenance must remain in Completed history");
+        await expiredRow.getByRole("checkbox", { name: `Select scan ${expiredId}` }).check();
+        const archivedCollection = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("collection=completed&include_archived=false"));
+        await page.getByRole("button", { name: "Archive selected" }).click();
+        await archivedCollection;
+        await assertHidden(expiredRow, "Mock archive response must remove the expired row from default Completed");
+        if (mutations.length !== 1) throw new Error(`Expected one intercepted archive request, got ${mutations.length}`);
+        // Reload forces the summary resource to consume the updated mocked server response.
+        await page.reload();
+        await assertVisible(card("Failed").getByText("0", { exact: true }), "Archived failure must leave the mock Failed card at zero");
+        await assertVisible(card("Never scanned").getByText("3", { exact: true }), "Mock Never scanned card must reflect the updated server response");
+        await page.getByRole("tab", { name: /^Completed/ }).click();
+        await assertCount(completed.getByText("expired-post-build", { exact: true }), 0, "Archived expired history must stay hidden by default");
+      } finally {
+        await page.unroute("**/api/v1/scanning/stats");
+        await page.unroute(scansRoute);
+        await page.unroute("**/api/v1/scanning/systems?limit=500");
+      }
+    },
+  },
   // ── End CVE/multi-rule policy checks ─────────────────────────────────────
   {
     name: "21-caches",

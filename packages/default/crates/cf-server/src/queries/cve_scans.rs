@@ -1,5 +1,5 @@
+use crate::derivations::Derivation;
 use crate::derivations::utils::get_store_path_from_drv;
-use crate::derivations::{Derivation, DerivationType};
 use crate::models::cve_scans::{CveScan, ScanStatus};
 use crate::queries::attention;
 use crate::vulnix::vulnix_parser::{VulnixParser, VulnixScanOutput};
@@ -392,7 +392,13 @@ pub async fn release_execution_lock_or_close(
     drop(conn);
 }
 
-/// Returns completed derivations that need an initial CVE scan.
+/// Returns recent successful builds lacking durable initial CVE evidence.
+///
+/// The successful build job completion, not the derivation or failed scan
+/// timestamp, starts the recovery window. Ancient builds without an intent do
+/// not create new work. An admitted failed attempt remains eligible inside
+/// that window even if `on_build` is later disabled; manual and periodic
+/// selection use separate queries.
 ///
 /// # Errors
 ///
@@ -405,11 +411,10 @@ pub async fn get_targets_needing_cve_scan(
 ) -> Result<Vec<Derivation>> {
     let limit = limit.unwrap_or(10);
     let completed_before = completed_before.unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC);
-    let targets = sqlx::query_as!(
-        Derivation,
+    let targets = sqlx::query_as::<_, Derivation>(
         r#"
         SELECT 
-            d.id, d.commit_id, d.derivation_type as "derivation_type: DerivationType",
+            d.id, d.commit_id, d.derivation_type,
             d.derivation_name, d.derivation_path, d.derivation_target,
             d.scheduled_at, d.completed_at, d.started_at, d.attempt_count,
             d.evaluation_duration_ms, d.error_message, d.pname, d.version,
@@ -418,16 +423,45 @@ pub async fn get_targets_needing_cve_scan(
             d.cf_agent_enabled, d.store_path
         FROM derivations d
         JOIN derivation_statuses ds ON d.status_id = ds.id
+        JOIN scan_schedule_policy policy ON policy.id = 1
         WHERE ds.name IN ('build-complete', 'complete')
             AND d.derivation_type = 'nixos'
             AND d.store_path IS NOT NULL
             AND NOT (d.id = ANY($2))
-            AND COALESCE(d.completed_at, d.scheduled_at, d.started_at) <= $3
-            -- Exclude derivations that already have a completed scan
-            AND NOT EXISTS (
-                SELECT 1 FROM cve_scans cs
-                WHERE cs.derivation_id = d.id
-                AND cs.status = 'completed'
+            AND EXISTS (
+                SELECT 1 FROM build_jobs job
+                WHERE job.derivation_id = d.id
+                  AND job.status = 'success'
+                  AND job.completed_at IS NOT NULL
+                  AND job.completed_at <= $3
+                  AND job.completed_at > NOW() - policy.post_build_recovery_window::interval
+                  AND (policy.on_build OR EXISTS (
+                      SELECT 1 FROM cve_scans intent
+                      WHERE intent.completed_build_job_id = job.id
+                        AND intent.source_trigger = 'post_build'
+                  ))
+                  AND NOT EXISTS (
+                      SELECT 1 FROM cve_scans expired
+                      WHERE expired.completed_build_job_id = job.id
+                        AND expired.source_trigger = 'post_build'
+                        AND expired.scan_metadata ->> 'terminal_reason' =
+                            'post_build_recovery_window_expired'
+                  )
+                  -- A prior build's scan cannot discharge this exact build's
+                  -- obligation even if that older execution finishes later.
+                  AND NOT EXISTS (
+                      SELECT 1 FROM cve_scans evidence
+                      WHERE evidence.derivation_id = d.id
+                        AND evidence.status = 'completed'
+                        AND (evidence.completed_build_job_id = job.id
+                            OR (evidence.source_trigger IS DISTINCT FROM 'post_build'
+                                AND evidence.completed_at >= job.completed_at))
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM build_jobs newer
+                      WHERE newer.derivation_id = d.id
+                        AND (newer.created_at, newer.id) > (job.created_at, job.id)
+                  )
             )
             -- Exclude derivations with an active (pending/in_progress) scan
             AND NOT EXISTS (
@@ -469,10 +503,10 @@ pub async fn get_targets_needing_cve_scan(
         ORDER BY d.completed_at ASC NULLS LAST
         LIMIT $1
         "#,
-        limit,
-        excluded_derivation_ids,
-        completed_before
     )
+    .bind(limit)
+    .bind(excluded_derivation_ids)
+    .bind(completed_before)
     .fetch_all(pool)
     .await?;
     Ok(targets)
@@ -488,7 +522,10 @@ pub async fn get_targets_needing_cve_scan(
 /// exists for the same derivation, this returns the existing scan's ID instead
 /// of creating a duplicate.
 ///
-/// A created claim owns terminal writes through its `execution_id`. Callers
+/// A post-build fallback claim takes the build lock before the POA&M lock and
+/// atomically binds the latest eligible successful build. An expired obligation
+/// cannot be recreated after a policy change. A created claim owns terminal
+/// writes through its `execution_id`. Callers
 /// MUST acquire its advisory lock and heartbeat the token before scanner work.
 ///
 /// # Errors
@@ -528,6 +565,12 @@ pub async fn create_cve_scan_with_trigger(
 ) -> Result<CreateCveScanOutcome> {
     let scan_id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
+    if source_trigger == ScanTrigger::PostBuild {
+        // CONCURRENCY: Build admission owns this lock before the POA&M lock.
+        // Bind the fallback claim to the same authoritative attempt that was
+        // checked for eligibility, even when a replacement is admitted.
+        crate::queries::build_jobs::lock_build_derivation(&mut tx, derivation_id).await?;
+    }
     crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
         &mut tx,
         derivation_id,
@@ -541,8 +584,8 @@ pub async fn create_cve_scan_with_trigger(
             id, derivation_id, scanner_name, scanner_version,
             status, total_packages, total_vulnerabilities,
             critical_count, high_count, medium_count, low_count,
-            attempts, scan_metadata, source_trigger
-        ) VALUES (
+            attempts, scan_metadata, source_trigger, completed_build_job_id
+        ) SELECT
             $1, $2, $3, $4,
             'in_progress', 0, 0,
             0, 0, 0, 0,
@@ -551,8 +594,31 @@ pub async fn create_cve_scan_with_trigger(
                 'execution_id', gen_random_uuid(),
                 'execution_started_at', NOW(),
                 'execution_heartbeat_at', NOW()
-            ), $5
-        )
+            ), $5, job.id
+        FROM (SELECT NULL::uuid AS id WHERE $5::text <> 'post_build'
+              UNION ALL
+              SELECT job.id FROM build_jobs job
+              JOIN scan_schedule_policy policy ON policy.id = 1
+              WHERE $5::text = 'post_build'
+                AND job.derivation_id = $2 AND job.status = 'success'
+                AND job.completed_at > NOW() - policy.post_build_recovery_window::interval
+                AND (policy.on_build OR EXISTS (
+                    SELECT 1 FROM cve_scans intent
+                    WHERE intent.completed_build_job_id = job.id
+                      AND intent.source_trigger = 'post_build'
+                ))
+                AND NOT EXISTS (
+                    SELECT 1 FROM build_jobs newer
+                    WHERE newer.derivation_id = job.derivation_id
+                      AND (newer.created_at, newer.id) > (job.created_at, job.id)
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM cve_scans expired
+                    WHERE expired.completed_build_job_id = job.id
+                      AND expired.source_trigger = 'post_build'
+                      AND expired.scan_metadata ->> 'terminal_reason' =
+                          'post_build_recovery_window_expired'
+                )) job
         ON CONFLICT (derivation_id) WHERE status IN (
             'awaiting_build', 'awaiting_closure', 'pending', 'in_progress'
         )
@@ -593,7 +659,7 @@ pub async fn create_cve_scan_with_trigger(
         .await?
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "ON CONFLICT returned 0 rows but no active scan found for derivation {}",
+                "scan claim was not eligible and no scan found for derivation {}",
                 derivation_id
             )
         })?;
@@ -2548,6 +2614,14 @@ pub async fn promote_waiting_cve_scans(pool: &PgPool, limit: i64) -> Result<i64>
         FROM cve_scans scan
         JOIN derivations derivation ON derivation.id = scan.derivation_id
         WHERE scan.status IN ('awaiting_build', 'awaiting_closure')
+          AND (scan.source_trigger IS DISTINCT FROM 'post_build' OR EXISTS (
+              SELECT 1 FROM build_jobs job
+              JOIN scan_schedule_policy policy ON policy.id = 1
+              WHERE job.id = scan.completed_build_job_id
+                AND job.derivation_id = scan.derivation_id
+                AND job.status = 'success'
+                AND job.completed_at > NOW() - policy.post_build_recovery_window::interval
+          ))
           AND (
               (scan.status = 'awaiting_build'
                AND derivation.store_path IS NOT NULL
@@ -2602,6 +2676,14 @@ pub async fn promote_waiting_cve_scans(pool: &PgPool, limit: i64) -> Result<i64>
             SET status = $2
             WHERE id = $1
               AND status IN ('awaiting_build', 'awaiting_closure')
+              AND (source_trigger IS DISTINCT FROM 'post_build' OR EXISTS (
+                  SELECT 1 FROM build_jobs job
+                  JOIN scan_schedule_policy policy ON policy.id = 1
+                  WHERE job.id = cve_scans.completed_build_job_id
+                    AND job.derivation_id = cve_scans.derivation_id
+                    AND job.status = 'success'
+                    AND job.completed_at > NOW() - policy.post_build_recovery_window::interval
+              ))
               AND (
                   ($2 = 'awaiting_closure' AND EXISTS (
                       SELECT 1 FROM derivations derivation
@@ -2716,14 +2798,16 @@ pub async fn promote_waiting_cve_scans(pool: &PgPool, limit: i64) -> Result<i64>
 ///
 /// Each candidate is claimed in its own short transaction that:
 ///
-/// 1. Acquires the established POA&M/composite derivation lock via
+/// 1. For a post-build candidate, takes the build derivation lock before the
+///    POA&M lock so replacement admission cannot overtake its claim.
+/// 2. Acquires the established POA&M/composite derivation lock via
 ///    `lock_poam_findings_for_derivation_tx` — the same lock
 ///    every other CVE scan transition (create/complete/fail/revoke) acquires
 ///    before mutating `cve_scans`, preserving the repository's writer lock
 ///    order.
-/// 2. Performs the guarded claim UPDATE for that one row.
-/// 3. Calls `persist_scan_phase_in_tx` for the newly claimed scan.
-/// 4. Commits.
+/// 3. Performs the guarded claim UPDATE for that one row.
+/// 4. Calls `persist_scan_phase_in_tx` for the newly claimed scan.
+/// 5. Commits.
 ///
 /// A claim is only appended to the returned vector after its transaction
 /// commits, so a caller never receives a claim for a scan whose composite
@@ -2771,9 +2855,9 @@ pub async fn claim_queued_cve_scans(
     }
 
     let candidate_budget = limit.saturating_mul(CLAIM_CANDIDATE_OVERSCAN);
-    let candidates: Vec<(Uuid, i32)> = sqlx::query_as(
+    let candidates: Vec<(Uuid, i32, String)> = sqlx::query_as(
         r#"
-        SELECT id, derivation_id
+        SELECT id, derivation_id, COALESCE(source_trigger, 'legacy') AS source_trigger
         FROM cve_scans
         WHERE status = 'pending'
           AND (source_trigger <> 'post_build'
@@ -2787,11 +2871,16 @@ pub async fn claim_queued_cve_scans(
     .await?;
 
     let mut claims = Vec::with_capacity(limit.min(candidates.len() as i64) as usize);
-    for (scan_id, derivation_id) in candidates {
+    for (scan_id, derivation_id, source_trigger) in candidates {
         if claims.len() as i64 >= limit {
             break;
         }
         let mut tx = pool.begin().await?;
+        // CONCURRENCY: Admission takes the build lock before changing an
+        // unattempted post-build intent. Check its latest job under that lock.
+        if source_trigger == "post_build" {
+            crate::queries::build_jobs::lock_build_derivation(&mut tx, derivation_id).await?;
+        }
         // CONCURRENCY: Acquire the derivation's POA&M/composite lock before
         // the claim mutation, matching every other CVE scan writer. This
         // also serializes against a concurrent caller that identified the
@@ -2817,6 +2906,19 @@ pub async fn claim_queued_cve_scans(
                     )
             WHERE id = $1
               AND status = 'pending'
+              AND (source_trigger IS DISTINCT FROM 'post_build' OR EXISTS (
+                  SELECT 1 FROM build_jobs job
+                  JOIN scan_schedule_policy policy ON policy.id = 1
+                  WHERE job.id = cve_scans.completed_build_job_id
+                    AND job.derivation_id = cve_scans.derivation_id
+                     AND job.status = 'success'
+                     AND job.completed_at > NOW() - policy.post_build_recovery_window::interval
+                     AND NOT EXISTS (
+                         SELECT 1 FROM build_jobs newer
+                         WHERE newer.derivation_id = job.derivation_id
+                           AND (newer.created_at, newer.id) > (job.created_at, job.id)
+                     )
+              ))
             RETURNING
                 id AS scan_id,
                 derivation_id,
@@ -3320,14 +3422,20 @@ async fn recover_stale_scans_with_options(
     Ok(revoked_ids.len() as i64 + failed_count)
 }
 
-/// Get derivations whose most recent completed CVE scan is stale according to
-/// the configured `scan_schedule_policy` intervals.
+/// Returns derivations due for a periodic CVE scan under the schedule policy.
+///
+/// A deployed derivation without a completed scan is eligible only after its
+/// latest successful build is outside the post-build recovery window. Its
+/// deployed interval starts at the latest terminal failed scan, or at that
+/// build's completion if no attempt has failed. This does not admit old
+/// unscanned recent or archived derivations.
 ///
 /// The lifecycle class (deployed / recent / archived) is derived from actual
 /// system and build state, **not** from scan age:
 ///
-/// - **deployed** — the derivation name matches an active system row
-///   (`systems.is_active = TRUE`).  Uses `deployed_interval`.
+/// - **deployed** — the derivation's store path matches the latest state of
+///   an active system with the same flake and configuration. Uses
+///   `deployed_interval`.
 /// - **recent** — the derivation was built within the last 30 days but is not
 ///   currently deployed.  Uses `recent_interval`.
 /// - **archived** — built more than 30 days ago and not deployed.  Uses
@@ -3336,9 +3444,8 @@ async fn recover_stale_scans_with_options(
 /// Each class’s interval can be set to `never` in the UI, in which case that
 /// class is never selected for rescan.
 ///
-/// Derivations with an active pending/in_progress scan or with ≥ 5 total failed
-/// scan rows are excluded to avoid double-scanning or hammering
-/// permanently-failing targets.
+/// Active scans are excluded. Five or more consecutive failures apply the
+/// existing bounded backoff; there is no permanent failure exclusion.
 ///
 /// Uses dynamic SQL (not `query!`) because interval strings are stored as text
 /// in the `scan_schedule_policy` singleton row.
@@ -3359,7 +3466,8 @@ pub async fn get_targets_needing_cve_rescan(
                 deployed_interval,
                 recent_interval,
                 archived_interval,
-                archived_enabled
+                archived_enabled,
+                post_build_recovery_window
             FROM scan_schedule_policy
             WHERE id = 1
         ),
@@ -3386,12 +3494,10 @@ pub async fn get_targets_needing_cve_rescan(
                           AND d.store_path IS NOT NULL
                           AND d.store_path = (
                               SELECT ss.store_path
-                              FROM system_states ss
-                              WHERE ss.hostname = s.hostname
-                                AND ss.store_path IS NOT NULL
-                                AND BTRIM(ss.store_path) <> ''
-                              ORDER BY ss.timestamp DESC
-                              LIMIT 1
+                               FROM system_states ss
+                               WHERE ss.hostname = s.hostname
+                               ORDER BY ss.timestamp DESC, ss.id DESC
+                               LIMIT 1
                           )
                     ) THEN 'deployed'
                     WHEN d.completed_at >= NOW() - INTERVAL '30 days' THEN 'recent'
@@ -3434,7 +3540,7 @@ pub async fn get_targets_needing_cve_rescan(
         FROM derivations d
         JOIN derivation_statuses ds ON d.status_id = ds.id
         JOIN lifecycle lc ON lc.derivation_id = d.id
-        JOIN latest_completed lcs ON lcs.derivation_id = d.id
+        LEFT JOIN latest_completed lcs ON lcs.derivation_id = d.id
         CROSS JOIN policy p
         WHERE ds.name IN ('build-complete', 'complete')
             AND d.derivation_type = 'nixos'
@@ -3480,7 +3586,34 @@ pub async fn get_targets_needing_cve_rescan(
             AND (
                 (lc.lifecycle_class = 'deployed'
                     AND p.deployed_interval != 'never'
-                    AND NOW() - lcs.completed_at > p.deployed_interval::INTERVAL)
+                    AND (
+                        (lcs.completed_at IS NOT NULL
+                            AND NOW() - lcs.completed_at > p.deployed_interval::INTERVAL)
+                        OR (
+                            lcs.derivation_id IS NULL
+                            -- Never-scanned targets need an old, authoritative
+                            -- successful build, not a recent retry timestamp.
+                            AND (SELECT job.completed_at
+                                 FROM build_jobs job
+                                 WHERE job.derivation_id = d.id
+                                   AND job.status = 'success'
+                                 ORDER BY job.created_at DESC, job.id DESC
+                                 LIMIT 1
+                            ) <= NOW() - p.post_build_recovery_window::INTERVAL
+                            AND NOW() - COALESCE(
+                                (SELECT MAX(COALESCE(cs.completed_at, cs.created_at))
+                                 FROM cve_scans cs
+                                 WHERE cs.derivation_id = d.id
+                                   AND cs.status = 'failed'),
+                                (SELECT job.completed_at
+                                 FROM build_jobs job
+                                 WHERE job.derivation_id = d.id
+                                   AND job.status = 'success'
+                                 ORDER BY job.created_at DESC, job.id DESC
+                                 LIMIT 1)
+                            ) > p.deployed_interval::INTERVAL
+                        )
+                    ))
                 OR
                 (lc.lifecycle_class = 'recent'
                     AND p.recent_interval != 'never'
@@ -3491,7 +3624,7 @@ pub async fn get_targets_needing_cve_rescan(
                     AND p.archived_interval != 'never'
                     AND NOW() - lcs.completed_at > p.archived_interval::INTERVAL)
             )
-        ORDER BY lcs.completed_at ASC
+        ORDER BY lcs.completed_at ASC NULLS FIRST
         LIMIT $1
         "#,
     )
@@ -3840,7 +3973,14 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires test database creation privileges"]
     async fn get_targets_needing_cve_scan_selects_unscanned_derivation(pool: PgPool) {
-        let (_, derivation_name) = setup_test_derivation(&pool).await;
+        let (derivation_id, derivation_name) = setup_test_derivation(&pool).await;
+        sqlx::query(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW())",
+        )
+        .bind(derivation_id)
+        .execute(&pool)
+        .await
+        .expect("successful build should be recorded");
 
         let targets = get_targets_needing_cve_scan(&pool, Some(10), &[], None)
             .await
@@ -3875,6 +4015,532 @@ mod tests {
             !targets.iter().any(|d| d.id == derivation_id),
             "derivation with in_progress scan should be excluded"
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires isolated test database creation privileges"]
+    async fn fallback_uses_build_completion_not_recent_retry_or_derivation_time(pool: PgPool) {
+        let (missing_intent_id, _) = setup_test_derivation(&pool).await;
+        sqlx::query(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW() - INTERVAL '8 days')",
+        )
+        .bind(missing_intent_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (ancient_id, _) = setup_test_derivation(&pool).await;
+        let old_job: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW() - INTERVAL '8 days') RETURNING id",
+        )
+        .bind(ancient_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let (recent_id, _) = setup_test_derivation(&pool).await;
+        let recent_job: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW() - INTERVAL '1 day') RETURNING id",
+        )
+        .bind(recent_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        for (derivation_id, job_id) in [(ancient_id, old_job), (recent_id, recent_job)] {
+            sqlx::query(
+                "INSERT INTO cve_scans (derivation_id, scanner_name, status, attempts, source_trigger, completed_build_job_id, completed_at) VALUES ($1, 'vulnix', 'failed', 1, 'post_build', $2, NOW())",
+            )
+            .bind(derivation_id)
+            .bind(job_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let targets = get_targets_needing_cve_scan(&pool, Some(10), &[], None)
+            .await
+            .unwrap();
+        assert!(!targets.iter().any(|target| target.id == ancient_id));
+        assert!(!targets.iter().any(|target| target.id == missing_intent_id));
+        assert!(targets.iter().any(|target| target.id == recent_id));
+        assert_eq!(
+            crate::queries::cve_scan_leases::expire_post_build_scan_obligations(&pool, 10)
+                .await
+                .unwrap(),
+            1
+        );
+        let reason: String = sqlx::query_scalar(
+            "SELECT scan_metadata ->> 'terminal_reason' FROM cve_scans WHERE derivation_id = $1",
+        )
+        .bind(ancient_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(reason, "post_build_recovery_window_expired");
+        let synthetic_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM cve_scans WHERE derivation_id = $1")
+                .bind(missing_intent_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(synthetic_count, 0);
+        assert_eq!(
+            crate::queries::cve_scan_leases::expire_post_build_scan_obligations(&pool, 10)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn post_build_claim_cannot_resurrect_expired_job_or_bind_replacement(pool: PgPool) {
+        let (derivation_id, _) = setup_test_derivation(&pool).await;
+        let job_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW() - INTERVAL '1 day') RETURNING id",
+        )
+        .bind(derivation_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let first = create_cve_scan_with_trigger(
+            &pool,
+            derivation_id,
+            "vulnix",
+            None,
+            ScanTrigger::PostBuild,
+        )
+        .await
+        .unwrap();
+        let CreateCveScanOutcome::Created(claim) = first else {
+            panic!("recent successful build must acquire a claim");
+        };
+        let attached: Option<Uuid> =
+            sqlx::query_scalar("SELECT completed_build_job_id FROM cve_scans WHERE id = $1")
+                .bind(claim.scan_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(attached, Some(job_id));
+
+        sqlx::query("UPDATE build_jobs SET completed_at = NOW() - INTERVAL '8 days' WHERE id = $1")
+            .bind(job_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // A live execution is not revoked just because its deadline passed.
+        assert_eq!(
+            crate::queries::cve_scan_leases::expire_post_build_scan_obligations(&pool, 10)
+                .await
+                .unwrap(),
+            0
+        );
+        sqlx::query("UPDATE cve_scans SET status = 'failed', completed_at = NOW(), scan_metadata = scan_metadata || '{\"error\":\"scanner failed\"}'::jsonb WHERE id = $1")
+            .bind(claim.scan_id).execute(&pool).await.unwrap();
+        let (a, b) = tokio::join!(
+            crate::queries::cve_scan_leases::expire_post_build_scan_obligations(&pool, 10),
+            crate::queries::cve_scan_leases::expire_post_build_scan_obligations(&pool, 10),
+        );
+        assert_eq!(a.unwrap() + b.unwrap(), 1);
+        let (reason, failure, attempt, deadline): (String, String, Option<chrono::DateTime<Utc>>, chrono::DateTime<Utc>) = sqlx::query_as(
+            "SELECT scan_metadata ->> 'terminal_reason', scan_metadata ->> 'last_failure', (scan_metadata ->> 'last_attempt_at')::timestamptz, (scan_metadata ->> 'recovery_deadline_at')::timestamptz FROM cve_scans WHERE id = $1",
+        ).bind(claim.scan_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(reason, "post_build_recovery_window_expired");
+        assert_eq!(failure, "scanner failed");
+        assert!(attempt.is_some());
+        assert!(deadline < Utc::now());
+        assert_eq!(
+            crate::queries::cve_scan_leases::expire_post_build_scan_obligations(&pool, 10)
+                .await
+                .unwrap(),
+            0
+        );
+
+        // Changing policy must not resurrect an already terminal obligation.
+        sqlx::query(
+            "UPDATE scan_schedule_policy SET post_build_recovery_window = '240h' WHERE id = 1",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(
+            !get_targets_needing_cve_scan(&pool, Some(10), &[], None)
+                .await
+                .unwrap()
+                .iter()
+                .any(|target| target.id == derivation_id)
+        );
+        assert!(matches!(
+            create_cve_scan_with_trigger(&pool, derivation_id, "vulnix", None, ScanTrigger::PostBuild).await.unwrap(),
+            CreateCveScanOutcome::Existing(id) if id == claim.scan_id
+        ));
+        let later_job: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, status) VALUES ($1, 'queued') RETURNING id",
+        )
+        .bind(derivation_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(matches!(
+            create_cve_scan_with_trigger(&pool, derivation_id, "vulnix", None, ScanTrigger::PostBuild).await.unwrap(),
+            CreateCveScanOutcome::Existing(id) if id == claim.scan_id
+        ));
+        sqlx::query("UPDATE build_jobs SET status = 'success', completed_at = NOW() WHERE id = $1")
+            .bind(later_job)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            create_cve_scan_with_trigger(
+                &pool,
+                derivation_id,
+                "vulnix",
+                None,
+                ScanTrigger::PostBuild
+            )
+            .await
+            .unwrap(),
+            CreateCveScanOutcome::Created(_)
+        ));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn expired_pending_obligation_does_not_block_later_manual_evidence(pool: PgPool) {
+        let (derivation_id, _) = setup_test_derivation(&pool).await;
+        let job_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW() - INTERVAL '8 days') RETURNING id",
+        ).bind(derivation_id).fetch_one(&pool).await.unwrap();
+        let scan_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO cve_scans (derivation_id, scanner_name, status, source_trigger, completed_build_job_id, attempts, created_at) VALUES ($1, 'vulnix', 'pending', 'post_build', $2, 0, NOW() - INTERVAL '8 days') RETURNING id",
+        ).bind(derivation_id).bind(job_id).fetch_one(&pool).await.unwrap();
+        assert!(claim_queued_cve_scans(&pool, 1).await.unwrap().is_empty());
+        assert_eq!(
+            crate::queries::cve_scan_leases::expire_post_build_scan_obligations(&pool, 10)
+                .await
+                .unwrap(),
+            1
+        );
+        let (status, attempts, reason): (String, i32, String) = sqlx::query_as(
+            "SELECT status, attempts, scan_metadata ->> 'terminal_reason' FROM cve_scans WHERE id = $1",
+        ).bind(scan_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            (status.as_str(), attempts, reason.as_str()),
+            ("failed", 0, "post_build_recovery_window_expired")
+        );
+
+        let manual =
+            create_cve_scan_with_trigger(&pool, derivation_id, "vulnix", None, ScanTrigger::Manual)
+                .await
+                .unwrap();
+        let CreateCveScanOutcome::Created(manual) = manual else {
+            panic!("expired post-build intent must not block manual work");
+        };
+        complete_cve_scan_for_execution(
+            &pool,
+            manual.scan_id,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            manual.execution_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::queries::cve_scan_leases::expire_post_build_scan_obligations(&pool, 10)
+                .await
+                .unwrap(),
+            0
+        );
+        let history: Vec<(String, String)> = sqlx::query_as(
+            "SELECT source_trigger, status FROM cve_scans WHERE derivation_id = $1 ORDER BY created_at, id",
+        ).bind(derivation_id).fetch_all(&pool).await.unwrap();
+        assert!(history.contains(&("post_build".into(), "failed".into())));
+        assert!(history.contains(&("manual".into(), "completed".into())));
+        assert!(
+            !get_targets_needing_cve_scan(&pool, Some(10), &[], None)
+                .await
+                .unwrap()
+                .iter()
+                .any(|target| target.id == derivation_id)
+        );
+
+        // A manual scan can finish after the deadline but before maintenance.
+        // Its evidence is valid; it cannot erase the missed post-build reason.
+        let (late_id, _) = setup_test_derivation(&pool).await;
+        let late_job: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW() - INTERVAL '8 days') RETURNING id",
+        )
+        .bind(late_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let late_post_build: Uuid = sqlx::query_scalar(
+            "INSERT INTO cve_scans (derivation_id, scanner_name, status, source_trigger, completed_build_job_id, attempts, completed_at) VALUES ($1, 'vulnix', 'failed', 'post_build', $2, 1, NOW() - INTERVAL '1 hour') RETURNING id",
+        )
+        .bind(late_id)
+        .bind(late_job)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let CreateCveScanOutcome::Created(late_manual) =
+            create_cve_scan_with_trigger(&pool, late_id, "vulnix", None, ScanTrigger::Manual)
+                .await
+                .unwrap()
+        else {
+            panic!("manual work must remain eligible after post-build expiry");
+        };
+        complete_cve_scan_for_execution(
+            &pool,
+            late_manual.scan_id,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            late_manual.execution_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::queries::cve_scan_leases::expire_post_build_scan_obligations(&pool, 10)
+                .await
+                .unwrap(),
+            1
+        );
+        let (reason, evidence_status): (String, String) = sqlx::query_as(
+            "SELECT old.scan_metadata ->> 'terminal_reason', current.status FROM cve_scans old JOIN cve_scans current ON current.id = $2 WHERE old.id = $1",
+        )
+        .bind(late_post_build)
+        .bind(late_manual.scan_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(reason, "post_build_recovery_window_expired");
+        assert_eq!(evidence_status, "completed");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn earlier_manual_scan_does_not_satisfy_later_build_obligation(pool: PgPool) {
+        let (derivation_id, _) = setup_test_derivation(&pool).await;
+        let CreateCveScanOutcome::Created(manual) =
+            create_cve_scan_with_trigger(&pool, derivation_id, "vulnix", None, ScanTrigger::Manual)
+                .await
+                .unwrap()
+        else {
+            panic!("manual scan must start");
+        };
+        complete_cve_scan_for_execution(
+            &pool,
+            manual.scan_id,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            manual.execution_id,
+        )
+        .await
+        .unwrap();
+        let job: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW() - INTERVAL '8 days') RETURNING id",
+        )
+        .bind(derivation_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE cve_scans SET completed_at = NOW() - INTERVAL '9 days' WHERE id = $1")
+            .bind(manual.scan_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let pending: Uuid = sqlx::query_scalar(
+            "INSERT INTO cve_scans (derivation_id, scanner_name, status, attempts, source_trigger, completed_build_job_id) VALUES ($1, 'vulnix', 'pending', 0, 'post_build', $2) RETURNING id",
+        )
+        .bind(derivation_id)
+        .bind(job)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::queries::cve_scan_leases::expire_post_build_scan_obligations(&pool, 10)
+                .await
+                .unwrap(),
+            1
+        );
+        let reason: String = sqlx::query_scalar(
+            "SELECT scan_metadata ->> 'terminal_reason' FROM cve_scans WHERE id = $1",
+        )
+        .bind(pending)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(reason, "post_build_recovery_window_expired");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn local_claim_rejects_pending_scan_for_superseded_build(pool: PgPool) {
+        let (derivation_id, _) = setup_test_derivation(&pool).await;
+        let old_job: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW()) RETURNING id",
+        )
+        .bind(derivation_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let scan: Uuid = sqlx::query_scalar(
+            "INSERT INTO cve_scans (derivation_id, scanner_name, status, attempts, source_trigger, completed_build_job_id, created_at) VALUES ($1, 'vulnix', 'pending', 0, 'post_build', $2, NOW() - INTERVAL '2 minutes') RETURNING id",
+        )
+        .bind(derivation_id)
+        .bind(old_job)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO build_jobs (derivation_id, status) VALUES ($1, 'queued')")
+            .bind(derivation_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(claim_queued_cve_scans(&pool, 1).await.unwrap().is_empty());
+        let (status, attempts): (String, i32) =
+            sqlx::query_as("SELECT status, attempts FROM cve_scans WHERE id = $1")
+                .bind(scan)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((status.as_str(), attempts), ("pending", 0));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn newer_success_recovers_after_older_in_progress_scan_finishes(pool: PgPool) {
+        let (derivation_id, _) = setup_test_derivation(&pool).await;
+        let a: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW() - INTERVAL '2 hours') RETURNING id",
+        )
+        .bind(derivation_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let CreateCveScanOutcome::Created(old_scan) = create_cve_scan_with_trigger(
+            &pool,
+            derivation_id,
+            "vulnix",
+            None,
+            ScanTrigger::PostBuild,
+        )
+        .await
+        .unwrap() else {
+            panic!("build A must start post-build work");
+        };
+        let b: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW()) RETURNING id",
+        )
+        .bind(derivation_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        // Build B was admitted while A's execution owned the active slot.
+        complete_cve_scan_for_execution(
+            &pool,
+            old_scan.scan_id,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            old_scan.execution_id,
+        )
+        .await
+        .unwrap();
+        assert!(
+            get_targets_needing_cve_scan(&pool, Some(10), &[], None)
+                .await
+                .unwrap()
+                .iter()
+                .any(|target| target.id == derivation_id)
+        );
+        let CreateCveScanOutcome::Created(replacement) = create_cve_scan_with_trigger(
+            &pool,
+            derivation_id,
+            "vulnix",
+            None,
+            ScanTrigger::PostBuild,
+        )
+        .await
+        .unwrap() else {
+            panic!("build B must get its own post-build claim");
+        };
+        let bound: Option<Uuid> =
+            sqlx::query_scalar("SELECT completed_build_job_id FROM cve_scans WHERE id = $1")
+                .bind(replacement.scan_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(bound, Some(b));
+        assert_ne!(bound, Some(a));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn disabled_on_build_preserves_admitted_failure_retry_only(pool: PgPool) {
+        let (admitted, _) = setup_test_derivation(&pool).await;
+        let (unadmitted, _) = setup_test_derivation(&pool).await;
+        let job: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW() - INTERVAL '1 day') RETURNING id",
+        ).bind(admitted).fetch_one(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO cve_scans (derivation_id, scanner_name, status, source_trigger, completed_build_job_id, attempts, completed_at, scan_metadata) VALUES ($1, 'vulnix', 'failed', 'post_build', $2, 1, NOW(), '{\"error\":\"temporary failure\"}'::jsonb)",
+        ).bind(admitted).bind(job).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW() - INTERVAL '1 day')",
+        ).bind(unadmitted).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE scan_schedule_policy SET on_build = false WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let targets = get_targets_needing_cve_scan(&pool, Some(10), &[], None)
+            .await
+            .unwrap();
+        assert!(targets.iter().any(|target| target.id == admitted));
+        assert!(!targets.iter().any(|target| target.id == unadmitted));
+        let CreateCveScanOutcome::Created(retry) =
+            create_cve_scan_with_trigger(&pool, admitted, "vulnix", None, ScanTrigger::PostBuild)
+                .await
+                .unwrap()
+        else {
+            panic!("admitted failure must retry");
+        };
+        let bound: Option<Uuid> =
+            sqlx::query_scalar("SELECT completed_build_job_id FROM cve_scans WHERE id = $1")
+                .bind(retry.scan_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(bound, Some(job));
+        assert!(create_cve_scan_with_trigger(
+            &pool, unadmitted, "vulnix", None, ScanTrigger::PostBuild,
+        ).await.is_err());
+        let synthetic: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM cve_scans WHERE derivation_id = $1")
+                .bind(unadmitted)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(synthetic, 0);
     }
 
     /// Fleet targets must track the generation each active system is actually
@@ -5296,6 +5962,13 @@ mod tests {
     #[ignore = "requires test database creation privileges"]
     async fn recover_stale_scans_unblocks_derivation(pool: PgPool) {
         let (derivation_id, _) = setup_test_derivation(&pool).await;
+        sqlx::query(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW() - INTERVAL '3 hours')",
+        )
+        .bind(derivation_id)
+        .execute(&pool)
+        .await
+        .expect("a recent successful build should authorize recovery");
 
         // Create a scan, then strip its lease metadata to model a legacy row
         // from before execution tokens existed.
@@ -5567,6 +6240,173 @@ mod tests {
         if let Err(panic) = assertions {
             std::panic::resume_unwind(panic);
         }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn old_deployed_without_success_uses_periodic_cadence_and_retains_expired_history(
+        pool: PgPool,
+    ) {
+        let fleet = setup_fleet_fixture(&pool).await;
+        let deployed_id = fleet.running_id;
+        let superseded_id = fleet.newer_id;
+        sqlx::query(
+            "UPDATE derivations SET completed_at = NOW() - INTERVAL '8 days' WHERE id = ANY($1)",
+        )
+        .bind(&fleet.derivation_ids)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW() - INTERVAL '8 days'), ($2, 'success', NOW() - INTERVAL '8 days')",
+        )
+        .bind(deployed_id)
+        .bind(superseded_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE scan_schedule_policy SET deployed_interval = '6h', recent_interval = '1h', archived_interval = '1h', archived_enabled = TRUE WHERE id = 1",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (recent_id, _) = setup_test_derivation(&pool).await;
+        let (archived_id, _) = setup_test_derivation(&pool).await;
+        sqlx::query(
+            "UPDATE derivations SET completed_at = NOW() - INTERVAL '31 days' WHERE id = $1",
+        )
+        .bind(archived_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let target_ids = || async {
+            get_targets_needing_cve_rescan(&pool, Some(100))
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|target| target.id)
+                .collect::<std::collections::HashSet<_>>()
+        };
+        assert!(target_ids().await.contains(&deployed_id));
+        assert!(!target_ids().await.contains(&superseded_id));
+        assert!(!target_ids().await.contains(&recent_id));
+        assert!(!target_ids().await.contains(&archived_id));
+        let mut empty_state_ids = Vec::new();
+        for hostname in &fleet.hosts[..2] {
+            let state_id: i32 = sqlx::query_scalar(
+                "INSERT INTO system_states (hostname, store_path, change_reason, timestamp) VALUES ($1, '', 'config_change', NOW() + INTERVAL '1 second') RETURNING id",
+            )
+            .bind(hostname)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            empty_state_ids.push(state_id);
+        }
+        assert!(
+            !target_ids().await.contains(&deployed_id),
+            "an older matching state is not current"
+        );
+        sqlx::query("DELETE FROM system_states WHERE id = ANY($1)")
+            .bind(&empty_state_ids)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let expired_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO cve_scans (derivation_id, scanner_name, status, attempts, source_trigger, completed_at, scan_metadata) VALUES ($1, 'vulnix', 'failed', 1, 'post_build', NOW(), '{\"terminal_reason\":\"post_build_recovery_window_expired\"}'::jsonb) RETURNING id",
+        )
+        .bind(deployed_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            !target_ids().await.contains(&deployed_id),
+            "terminal attempt starts a new interval"
+        );
+        sqlx::query("UPDATE cve_scans SET completed_at = NOW() - INTERVAL '7 hours' WHERE id = $1")
+            .bind(expired_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(target_ids().await.contains(&deployed_id));
+        assert!(!target_ids().await.contains(&superseded_id));
+
+        let pending_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO cve_scans (derivation_id, scanner_name, status, attempts, source_trigger) VALUES ($1, 'vulnix', 'pending', 0, 'manual') RETURNING id",
+        )
+        .bind(deployed_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!target_ids().await.contains(&deployed_id));
+        sqlx::query("DELETE FROM cve_scans WHERE id = $1")
+            .bind(pending_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let failed_periodic_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO cve_scans (derivation_id, scanner_name, status, attempts, source_trigger, completed_at) VALUES ($1, 'vulnix', 'failed', 1, 'periodic', NOW()) RETURNING id",
+        )
+        .bind(deployed_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            !target_ids().await.contains(&deployed_id),
+            "failed periodic work must wait another interval"
+        );
+        sqlx::query("UPDATE cve_scans SET completed_at = NOW() - INTERVAL '7 hours' WHERE id = $1")
+            .bind(failed_periodic_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(target_ids().await.contains(&deployed_id));
+
+        let CreateCveScanOutcome::Created(periodic) =
+            create_cve_scan_with_trigger(&pool, deployed_id, "vulnix", None, ScanTrigger::Periodic)
+                .await
+                .unwrap()
+        else {
+            panic!("deployed target should acquire periodic work");
+        };
+        complete_cve_scan_for_execution(
+            &pool,
+            periodic.scan_id,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            periodic.execution_id,
+        )
+        .await
+        .unwrap();
+        assert!(!target_ids().await.contains(&deployed_id));
+        let history: Vec<(Uuid, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT id, source_trigger, status, scan_metadata ->> 'terminal_reason' FROM cve_scans WHERE derivation_id = $1 ORDER BY created_at, id",
+        )
+        .bind(deployed_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(history.contains(&(
+            expired_id,
+            "post_build".into(),
+            "failed".into(),
+            Some("post_build_recovery_window_expired".into()),
+        )));
+        assert!(history.contains(&(
+            periodic.scan_id,
+            "periodic".into(),
+            "completed".into(),
+            None,
+        )));
     }
 
     /// A revoked row remains active while its snapshotted execution lock proves

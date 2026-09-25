@@ -13,7 +13,8 @@ use crate::models::builders::SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE;
 /// Advisory lock serializing all build-queue-position allocations.
 /// Using the ASCII encoding of 'CFBQ' as a 64-bit integer (0x43464251).
 pub const BUILD_QUEUE_ORDER_LOCK_KEY: i64 = 0x4346_4251;
-const BUILD_DERIVATION_LOCK_NAMESPACE: i32 = 0x4346_4244;
+/// Identifies the build-derivation transaction lock for admission and scan claims.
+pub(crate) const BUILD_DERIVATION_LOCK_NAMESPACE: i32 = 0x4346_4244;
 
 /// Serializes all attempt creation and terminal retry transitions for a derivation.
 ///

@@ -5,9 +5,10 @@
 
 use crate::queries::scanning::{
     ScanRecordCollection, ScanRecordDirection, ScanRecordRequest, ScanRecordRevision,
-    ScanRecordSort, ScanRecordStatus, ScanSchedulePolicyRow, get_scan_activity, get_scan_deployed,
-    get_scan_queue, get_scan_queue_for_system, get_scan_records, get_scan_schedule_policy,
-    get_scan_stats, get_scan_systems, set_scan_archive_state, update_scan_schedule_policy,
+    ScanRecordSort, ScanRecordStatus, ScanSchedulePolicyRow, get_post_build_recovery_window,
+    get_scan_activity, get_scan_deployed, get_scan_queue, get_scan_queue_for_system,
+    get_scan_records, get_scan_schedule_policy, get_scan_stats, get_scan_systems,
+    set_scan_archive_state, update_scan_schedule_policy, update_scan_schedule_policy_with_recovery,
 };
 use futures::FutureExt;
 use serial_test::serial;
@@ -48,6 +49,9 @@ async fn schedule_policy_round_trips() {
     let original = get_scan_schedule_policy(&pool)
         .await
         .expect("should read existing policy");
+    let original_window = get_post_build_recovery_window(&pool)
+        .await
+        .expect("should read existing recovery window");
 
     let updated = ScanSchedulePolicyRow {
         on_build: !original.on_build,
@@ -60,9 +64,42 @@ async fn schedule_policy_round_trips() {
     };
 
     let assertions = std::panic::AssertUnwindSafe(async {
-        update_scan_schedule_policy(&pool, &updated)
+        update_scan_schedule_policy_with_recovery(&pool, &updated, Some("7d"))
             .await
             .expect("should update policy");
+        assert_eq!(get_post_build_recovery_window(&pool).await.unwrap(), "7d");
+
+        update_scan_schedule_policy(&pool, &updated)
+            .await
+            .expect("legacy update should preserve recovery window");
+        assert_eq!(get_post_build_recovery_window(&pool).await.unwrap(), "7d");
+
+        let (new_client, old_client) = tokio::join!(
+            update_scan_schedule_policy_with_recovery(&pool, &updated, Some("48h")),
+            update_scan_schedule_policy(&pool, &updated),
+        );
+        new_client.expect("new client update should succeed");
+        old_client.expect("concurrent old client update should succeed");
+        assert_eq!(get_post_build_recovery_window(&pool).await.unwrap(), "48h");
+
+        assert!(
+            update_scan_schedule_policy_with_recovery(&pool, &updated, Some("0h"))
+                .await
+                .is_err(),
+            "database should reject a zero recovery window"
+        );
+        assert!(
+            update_scan_schedule_policy_with_recovery(&pool, &updated, Some("never"))
+                .await
+                .is_err(),
+            "database should reject non-hour/day windows"
+        );
+        assert!(
+            update_scan_schedule_policy_with_recovery(&pool, &updated, Some("36501d"))
+                .await
+                .is_err(),
+            "database should reject intervals beyond the bounded range"
+        );
 
         let read_back = get_scan_schedule_policy(&pool)
             .await
@@ -89,7 +126,8 @@ async fn schedule_policy_round_trips() {
             archived_interval = $4,
             archived_enabled = $5,
             rebuild_to_scan = $6,
-            updated_at = $7
+            updated_at = $7,
+            post_build_recovery_window = $8
         WHERE id = 1
         "#,
     )
@@ -100,6 +138,7 @@ async fn schedule_policy_round_trips() {
     .bind(original.archived_enabled)
     .bind(original.rebuild_to_scan)
     .bind(original.updated_at)
+    .bind(&original_window)
     .execute(&pool)
     .await
     .expect("should restore exact original policy");
@@ -125,6 +164,254 @@ async fn stats_aggregation_is_internally_consistent() {
     assert!(stats.never_scanned >= 0);
     assert!(stats.failed >= 0);
     assert!((0..=100).contains(&stats.coverage_percent));
+}
+
+/// Proves that the operational denominator does not consume ancient history,
+/// and that archive state affects failures but not completed scan evidence.
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+async fn scan_stats_scope_recovery_archive_and_history(pool: PgPool) {
+    sqlx::query("UPDATE scan_schedule_policy SET on_build = TRUE, deployed_interval = '1d', post_build_recovery_window = '48h' WHERE id = 1")
+        .execute(&pool)
+        .await
+        .expect("test policy should persist");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let hostname = format!("stats-{suffix}");
+    let store_path = format!("/nix/store/{suffix}-current");
+    let flake_id: i32 = sqlx::query_scalar(
+        "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+    )
+    .bind(&hostname)
+    .bind(format!("https://example.test/{hostname}.git"))
+    .fetch_one(&pool)
+    .await
+    .expect("flake should persist");
+    let commit_id: i32 = sqlx::query_scalar(
+        "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, $2, NOW()) RETURNING id",
+    )
+    .bind(flake_id)
+    .bind(&suffix)
+    .fetch_one(&pool)
+    .await
+    .expect("commit should persist");
+    let mut derivations = Vec::new();
+    for (name, path) in [
+        (hostname.clone(), store_path.clone()),
+        (
+            format!("recent-{suffix}"),
+            format!("/nix/store/{suffix}-recent"),
+        ),
+        (
+            format!("ancient-{suffix}"),
+            format!("/nix/store/{suffix}-ancient"),
+        ),
+        (
+            format!("active-{suffix}"),
+            format!("/nix/store/{suffix}-active"),
+        ),
+    ] {
+        let id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (derivation_type, derivation_name, commit_id, store_path, status_id, attempt_count) VALUES ('nixos', $1, $2, $3, (SELECT id FROM derivation_statuses WHERE name = 'build-complete' LIMIT 1), 0) RETURNING id",
+        )
+        .bind(name)
+        .bind(commit_id)
+        .bind(path)
+        .fetch_one(&pool)
+        .await
+        .expect("derivation should persist");
+        derivations.push(id);
+    }
+    let [current, recent, ancient, active] =
+        <[i32; 4]>::try_from(derivations).expect("four derivations");
+    sqlx::query("INSERT INTO systems (hostname, is_active, public_key, derivation, system_configuration_name, deployment_policy, flake_id) VALUES ($1, TRUE, 'test-key', '', $1, 'manual', $2)")
+        .bind(&hostname)
+        .bind(flake_id)
+        .execute(&pool)
+        .await
+        .expect("current system should persist");
+    sqlx::query("INSERT INTO system_states (hostname, store_path, change_reason, timestamp) VALUES ($1, $2, 'config_change', NOW())")
+        .bind(&hostname)
+        .bind(&store_path)
+        .execute(&pool)
+        .await
+        .expect("latest state should persist");
+
+    // A failed attempt does not supersede a later successful build. Only the
+    // successful job completion time supplies the recovery clock.
+    sqlx::query("INSERT INTO build_jobs (derivation_id, status, created_at, completed_at) VALUES ($1, 'failed', NOW() - INTERVAL '2 days', NOW() - INTERVAL '2 days'), ($1, 'success', NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour')")
+        .bind(recent)
+        .execute(&pool)
+        .await
+        .expect("recovered build should persist");
+    sqlx::query("INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW() - INTERVAL '30 days')")
+        .bind(ancient)
+        .execute(&pool)
+        .await
+        .expect("ancient build should persist");
+    let recent_failure: Uuid = sqlx::query_scalar("INSERT INTO cve_scans (derivation_id, scanner_name, status, completed_at) VALUES ($1, 'vulnix', 'failed', NOW()) RETURNING id")
+        .bind(recent)
+        .fetch_one(&pool)
+        .await
+        .expect("recent failure should persist");
+    sqlx::query("INSERT INTO cve_scans (derivation_id, scanner_name, status, completed_at) VALUES ($1, 'vulnix', 'failed', NOW() - INTERVAL '29 days')")
+        .bind(ancient)
+        .execute(&pool)
+        .await
+        .expect("ancient failure should remain history");
+    sqlx::query("INSERT INTO cve_scans (derivation_id, scanner_name, status) VALUES ($1, 'vulnix', 'pending')")
+        .bind(active)
+        .execute(&pool)
+        .await
+        .expect("active scan should persist");
+    let initial = get_scan_stats(&pool)
+        .await
+        .expect("initial stats should load");
+    assert_eq!(
+        (
+            initial.never_scanned,
+            initial.failed,
+            initial.coverage_percent
+        ),
+        (3, 1, 0)
+    );
+    assert_eq!(initial.queued, 1);
+
+    let evidence: Uuid = sqlx::query_scalar("INSERT INTO cve_scans (derivation_id, scanner_name, status, completed_at) VALUES ($1, 'vulnix', 'completed', NOW() - INTERVAL '2 days') RETURNING id")
+        .bind(current)
+        .fetch_one(&pool)
+        .await
+        .expect("current completed evidence should persist");
+    let actor_id: Uuid = sqlx::query_scalar("INSERT INTO users (username, first_name, last_name, email) VALUES ($1, 'Scan', 'Admin', $2) RETURNING id")
+        .bind(format!("stats-admin-{suffix}"))
+        .bind(format!("stats-admin-{suffix}@example.test"))
+        .fetch_one(&pool)
+        .await
+        .expect("archive actor should persist");
+    assert_eq!(
+        set_scan_archive_state(&pool, &[recent_failure, evidence], true, actor_id)
+            .await
+            .expect("archive should succeed"),
+        2
+    );
+    let archived = get_scan_stats(&pool)
+        .await
+        .expect("archived stats should load");
+    assert_eq!(
+        (
+            archived.never_scanned,
+            archived.failed,
+            archived.coverage_percent,
+            archived.stale
+        ),
+        (2, 0, 33, 1)
+    );
+    sqlx::query("UPDATE scan_schedule_policy SET deployed_interval = 'never' WHERE id = 1")
+        .execute(&pool)
+        .await
+        .expect("disabled deployed freshness should persist");
+    assert_eq!(get_scan_stats(&pool).await.unwrap().stale, 0);
+
+    let later_failure: Uuid = sqlx::query_scalar("INSERT INTO cve_scans (derivation_id, scanner_name, status, completed_at) VALUES ($1, 'vulnix', 'failed', NOW()) RETURNING id")
+        .bind(current)
+        .fetch_one(&pool)
+        .await
+        .expect("later failed retry should persist");
+    let retry = get_scan_stats(&pool)
+        .await
+        .expect("retry stats should load");
+    assert_eq!(
+        (retry.never_scanned, retry.failed, retry.coverage_percent),
+        (2, 1, 33)
+    );
+    sqlx::query("UPDATE build_jobs SET completed_at = NOW() - INTERVAL '3 days' WHERE derivation_id = $1 AND status = 'success'")
+        .bind(recent)
+        .execute(&pool)
+        .await
+        .expect("recovery deadline should pass");
+    let expired = get_scan_stats(&pool)
+        .await
+        .expect("expired stats should load");
+    assert_eq!(
+        (
+            expired.never_scanned,
+            expired.failed,
+            expired.coverage_percent
+        ),
+        (1, 1, 50)
+    );
+    sqlx::query("INSERT INTO cve_scans (derivation_id, scanner_name, status, source_trigger, completed_at) VALUES ($1, 'vulnix', 'completed', 'manual', NOW())")
+        .bind(current)
+        .execute(&pool)
+        .await
+        .expect("later manual scan should complete");
+    sqlx::query("UPDATE cve_scans SET completed_at = NOW() + INTERVAL '1 minute' WHERE id = $1")
+        .bind(later_failure)
+        .execute(&pool)
+        .await
+        .expect("old failed obligation should terminalize after later success");
+    assert_eq!(
+        get_scan_stats(&pool).await.unwrap().failed,
+        0,
+        "late post-build terminalization cannot supersede newer manual evidence"
+    );
+    let reused_derivation: i32 = sqlx::query_scalar(
+        "INSERT INTO derivations (derivation_type, derivation_name, commit_id, store_path, status_id, attempt_count) VALUES ('nixos', $1, $2, $3, (SELECT id FROM derivation_statuses WHERE name = 'build-complete' LIMIT 1), 0) RETURNING id",
+    )
+    .bind(format!("reused-{suffix}"))
+    .bind(commit_id)
+    .bind(format!("/nix/store/{suffix}-reused"))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let old_job: Uuid = sqlx::query_scalar(
+        "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW() - INTERVAL '1 day') RETURNING id",
+    )
+    .bind(reused_derivation)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO cve_scans (derivation_id, scanner_name, status, source_trigger, completed_build_job_id, completed_at) VALUES ($1, 'vulnix', 'completed', 'post_build', $2, NOW() - INTERVAL '1 hour')")
+        .bind(reused_derivation)
+        .bind(old_job)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW())")
+        .bind(reused_derivation)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO cve_scans (derivation_id, scanner_name, status, source_trigger, completed_at) VALUES ($1, 'vulnix', 'failed', 'post_build', NOW())")
+        .bind(reused_derivation)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let replacement = get_scan_stats(&pool).await.unwrap();
+    assert_eq!(
+        (
+            replacement.failed,
+            replacement.never_scanned,
+            replacement.coverage_percent
+        ),
+        (1, 1, 67),
+        "a new build remains operational even when its predecessor has completed evidence"
+    );
+    let history = get_scan_records(&pool, &completed_request(true, 50))
+        .await
+        .expect("history should load");
+    assert!(
+        history
+            .rows
+            .iter()
+            .any(|row| row.scan_id == evidence && row.archived_at.is_some())
+    );
+    assert!(
+        history
+            .rows
+            .iter()
+            .any(|row| row.scan_id == recent_failure && row.archived_at.is_some())
+    );
+    assert!(history.rows.iter().any(|row| row.scan_id == later_failure));
 }
 
 /// Ensures exact prerequisites use build provenance, preserve trigger

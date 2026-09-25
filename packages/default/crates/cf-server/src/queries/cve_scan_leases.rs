@@ -102,10 +102,10 @@ pub async fn record_session_cve_capabilities(
 ///
 /// IDEMPOTENCY: The active-scan partial index retains the identity and immutable
 /// trigger of existing work. Manual and fleet work is unchanged. A replacement
-/// build updates only an `awaiting_build` post-build intent's exact prerequisite
-/// job identity even when current `on_build` policy is disabled; policy controls
-/// new intent only. Only derivation IDs returned by a successful build insert
-/// may be supplied.
+/// build rebinds an unattempted `awaiting_build`, `awaiting_closure`, or
+/// `pending` post-build intent to `awaiting_build` with the new prerequisite,
+/// even when `on_build` is disabled. Policy controls new intent only. Only
+/// derivation IDs returned by a successful build insert may be supplied.
 ///
 /// # Errors
 ///
@@ -134,11 +134,11 @@ pub(crate) async fn create_post_build_scan_intents_tx(
               )
         ), rebound AS (
             UPDATE cve_scans scan
-            SET completed_build_job_id = admitted.id
+            SET completed_build_job_id = admitted.id, status = 'awaiting_build'
             FROM admitted
             WHERE scan.derivation_id = admitted.derivation_id
               AND scan.source_trigger = 'post_build'
-              AND scan.status = 'awaiting_build'
+               AND scan.status IN ('awaiting_build', 'awaiting_closure', 'pending')
               AND scan.attempts = 0
               AND scan.completed_build_job_id IS DISTINCT FROM admitted.id
             RETURNING scan.id
@@ -360,6 +360,133 @@ pub(crate) async fn reconcile_post_build_scan_prerequisites(
     Ok(reconciled)
 }
 
+/// Terminalizes persisted post-build obligations past their build-time window.
+///
+/// CONCURRENCY: Build admission and prerequisite reconciliation take the build
+/// derivation lock first. The POA&M derivation lock follows it, before the scan
+/// row is updated. A live local or remote execution is never revoked here;
+/// recovery can finish it through its existing owner/lease protocol. Failed
+/// attempts retain their original error and completion time in metadata, while
+/// the expiration marker prevents the legacy selector from recreating work.
+/// No row is synthesized for an old build that never had intent.
+///
+/// # Errors
+///
+/// Returns an error if candidate selection, locking, or persistence fails.
+pub(crate) async fn expire_post_build_scan_obligations(pool: &PgPool, limit: i64) -> Result<i64> {
+    if limit <= 0 {
+        return Ok(0);
+    }
+    let candidates: Vec<(Uuid, i32)> = sqlx::query_as(
+        r#"
+        SELECT scan.id, scan.derivation_id
+        FROM cve_scans scan
+        JOIN build_jobs job ON job.id = scan.completed_build_job_id
+                             AND job.derivation_id = scan.derivation_id
+        JOIN scan_schedule_policy policy ON policy.id = 1
+        WHERE scan.source_trigger = 'post_build'
+          AND scan.status IN ('awaiting_build', 'awaiting_closure', 'pending', 'failed')
+          AND scan.scan_metadata ->> 'terminal_reason' IS DISTINCT FROM
+              'post_build_recovery_window_expired'
+          AND job.status = 'success' AND job.completed_at IS NOT NULL
+          AND job.completed_at <= NOW() - policy.post_build_recovery_window::interval
+          AND NOT EXISTS (
+              SELECT 1 FROM build_jobs newer
+              WHERE newer.derivation_id = job.derivation_id
+                AND (newer.created_at, newer.id) > (job.created_at, job.id)
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM cve_scans evidence
+              WHERE evidence.derivation_id = scan.derivation_id
+                AND evidence.id <> scan.id
+                AND (evidence.status IN (
+                    'awaiting_build', 'awaiting_closure', 'pending', 'in_progress'
+                ) OR (evidence.status = 'completed'
+                    AND evidence.completed_at > job.completed_at
+                    AND evidence.completed_at <= job.completed_at
+                        + policy.post_build_recovery_window::interval)
+                    OR (evidence.source_trigger = 'post_build'
+                    AND (evidence.created_at, evidence.id) > (scan.created_at, scan.id)))
+          )
+        ORDER BY job.completed_at, scan.id
+        LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    let mut expired = 0;
+    for (scan_id, derivation_id) in candidates {
+        let mut tx = pool.begin().await?;
+        crate::queries::build_jobs::lock_build_derivation(&mut tx, derivation_id).await?;
+        crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+            &mut tx,
+            derivation_id,
+            &[],
+        )
+        .await?;
+        let changed = sqlx::query(
+            r#"
+            UPDATE cve_scans scan
+            SET status = 'failed', completed_at = NOW(),
+                scan_metadata = COALESCE(scan.scan_metadata, '{}'::jsonb)
+                    || jsonb_build_object(
+                        'terminal_reason', 'post_build_recovery_window_expired',
+                        'error', 'Post-build scan not completed. The recovery window expired before a successful scan was recorded.',
+                        'completed_build_at', job.completed_at,
+                        'recovery_deadline_at', job.completed_at
+                            + policy.post_build_recovery_window::interval,
+                        'last_attempt_at', scan.completed_at,
+                        'last_failure', scan.scan_metadata ->> 'error'
+                    )
+            FROM build_jobs job, scan_schedule_policy policy
+            WHERE scan.id = $1 AND scan.derivation_id = $2
+              AND scan.completed_build_job_id = job.id
+              AND job.derivation_id = scan.derivation_id
+              AND policy.id = 1 AND job.status = 'success'
+              AND job.completed_at IS NOT NULL
+              AND job.completed_at <= NOW() - policy.post_build_recovery_window::interval
+              AND scan.source_trigger = 'post_build'
+              AND scan.status IN ('awaiting_build', 'awaiting_closure', 'pending', 'failed')
+              AND scan.scan_metadata ->> 'terminal_reason' IS DISTINCT FROM
+                  'post_build_recovery_window_expired'
+              AND NOT EXISTS (
+                  SELECT 1 FROM build_jobs newer
+                  WHERE newer.derivation_id = job.derivation_id
+                    AND (newer.created_at, newer.id) > (job.created_at, job.id)
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM cve_scans other
+                  WHERE other.derivation_id = scan.derivation_id
+                    AND other.id <> scan.id
+                    AND (other.status IN (
+                        'awaiting_build', 'awaiting_closure', 'pending', 'in_progress'
+                    ) OR (other.status = 'completed'
+                        AND other.completed_at > job.completed_at
+                        AND other.completed_at <= job.completed_at
+                            + policy.post_build_recovery_window::interval)
+                        OR (other.source_trigger = 'post_build'
+                        AND (other.created_at, other.id) > (scan.created_at, scan.id)))
+              )
+            "#,
+        )
+        .bind(scan_id)
+        .bind(derivation_id)
+        .execute(&mut *tx)
+        .await?;
+        if changed.rows_affected() == 1 {
+            crate::services::composite_enforcement::persist_scan_phase_in_tx(&mut tx, scan_id)
+                .await?;
+            tx.commit().await?;
+            expired += 1;
+        } else {
+            tx.rollback().await?;
+        }
+    }
+    Ok(expired)
+}
+
 /// Confirms successful build provenance for active post-build scan intent.
 ///
 /// The helper does not mutate scan status. Newly admitted or repaired intent
@@ -485,8 +612,11 @@ pub(crate) async fn fail_post_build_scan_for_terminal_build_tx(
 /// Claims one queued scan for an authenticated scanner-capable builder.
 ///
 /// CONCURRENCY: The transaction locks the builder row first, then acquires the
-/// established POA&M derivation lock before mutating `cve_scans`. No path takes
-/// those locks in reverse order. The guarded pending-to-in-progress update and
+/// established POA&M derivation lock before mutating `cve_scans`. It tries
+/// the build derivation lock without waiting after the builder row: build
+/// completion can hold that lock while waiting for the builder row. A failed
+/// try-lock releases the builder row and defers the claim. The guarded
+/// pending-to-in-progress update and
 /// the unique active-builder index enforce one winner and one scan per builder.
 /// Build work has priority: a builder with assigned active work, or while queued
 /// build work exists, receives no background scan lease.
@@ -551,14 +681,15 @@ pub async fn claim_remote_cve_scan(
 
     // Candidate selection is unlocked. The POA&M lock must precede the guarded
     // scan-row update to preserve the global CVE writer lock order.
-    let candidate: Option<(Uuid, i32)> = sqlx::query_as(
+    let candidate: Option<(Uuid, i32, String)> = sqlx::query_as(
         r#"
         WITH builder_environments AS (
             SELECT environment_id
             FROM builder_environment_assignments
             WHERE builder_id = $1
         )
-        SELECT scan.id, scan.derivation_id
+        SELECT scan.id, scan.derivation_id,
+               COALESCE(scan.source_trigger, 'legacy') AS source_trigger
         FROM cve_scans scan
         LEFT JOIN build_jobs affinity ON affinity.id = scan.completed_build_job_id
         WHERE scan.status = 'pending'
@@ -597,10 +728,26 @@ pub async fn claim_remote_cve_scan(
     .bind(session_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((scan_id, derivation_id)) = candidate else {
+    let Some((scan_id, derivation_id, source_trigger)) = candidate else {
         tx.rollback().await?;
         return Ok(None);
     };
+
+    // CONCURRENCY: This is the build derivation lock namespace used by
+    // build_jobs::lock_build_derivation. Do not wait for it while holding the
+    // builder row, since admission can hold it while waiting for that row.
+    if source_trigger == "post_build" {
+        let build_uncontended: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1::integer, $2::integer)")
+                .bind(crate::queries::build_jobs::BUILD_DERIVATION_LOCK_NAMESPACE)
+                .bind(derivation_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if !build_uncontended {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+    }
 
     crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
         &mut tx,
@@ -638,6 +785,21 @@ pub async fn claim_remote_cve_scan(
                 || jsonb_build_object('remote_execution', true)
         FROM derivations derivation, builders builder
         WHERE scan.id = $1 AND scan.status = 'pending'
+          AND (scan.source_trigger IS DISTINCT FROM 'post_build' OR EXISTS (
+              SELECT 1 FROM build_jobs prerequisite
+              JOIN scan_schedule_policy schedule ON schedule.id = 1
+              WHERE prerequisite.id = scan.completed_build_job_id
+                AND prerequisite.derivation_id = scan.derivation_id
+                 AND prerequisite.status = 'success'
+                 AND prerequisite.completed_at > NOW()
+                     - schedule.post_build_recovery_window::interval
+                 AND NOT EXISTS (
+                     SELECT 1 FROM build_jobs newer
+                     WHERE newer.derivation_id = prerequisite.derivation_id
+                       AND (newer.created_at, newer.id) >
+                           (prerequisite.created_at, prerequisite.id)
+                 )
+          ))
           AND derivation.id = scan.derivation_id
           AND builder.id = $3
           AND builder.enabled AND builder.registered AND builder.status = 'active'
@@ -1526,6 +1688,213 @@ mod tests {
     };
     use crate::queries::derivations::insert_derivation;
     use cf_protocol::builder::CvePackageEvidence;
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn pending_intent_rebinds_to_replacement_before_old_completion(pool: PgPool) {
+        let derivation = insert_derivation(&pool, None, "replacement-intent", "nixos")
+            .await
+            .unwrap();
+        let old_job: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW()) RETURNING id",
+        )
+        .bind(derivation.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let scan: Uuid = sqlx::query_scalar(
+            "INSERT INTO cve_scans (derivation_id, scanner_name, status, attempts, source_trigger, completed_build_job_id) VALUES ($1, 'vulnix', 'pending', 0, 'post_build', $2) RETURNING id",
+        )
+        .bind(derivation.id)
+        .bind(old_job)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        crate::queries::build_jobs::lock_build_derivation(&mut tx, derivation.id)
+            .await
+            .unwrap();
+        let replacement: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, status) VALUES ($1, 'queued') RETURNING id",
+        )
+        .bind(derivation.id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        assert_eq!(
+            create_post_build_scan_intents_tx(&mut tx, &[derivation.id])
+                .await
+                .unwrap(),
+            1
+        );
+        tx.commit().await.unwrap();
+        let (status, prerequisite, attempts): (String, Option<Uuid>, i32) = sqlx::query_as(
+            "SELECT status, completed_build_job_id, attempts FROM cve_scans WHERE id = $1",
+        )
+        .bind(scan)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (status.as_str(), prerequisite, attempts),
+            ("awaiting_build", Some(replacement), 0)
+        );
+        assert!(
+            !attach_completed_build_to_post_build_scan_tx(
+                &mut pool.begin().await.unwrap(),
+                old_job
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            crate::queries::cve_scans::promote_waiting_cve_scans(&pool, 1)
+                .await
+                .unwrap(),
+            0
+        );
+        sqlx::query("UPDATE build_jobs SET status = 'success', completed_at = NOW() WHERE id = $1")
+            .bind(replacement)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (status, prerequisite): (String, Option<Uuid>) =
+            sqlx::query_as("SELECT status, completed_build_job_id FROM cve_scans WHERE id = $1")
+                .bind(scan)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            (status.as_str(), prerequisite),
+            ("awaiting_build", Some(replacement))
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn awaiting_closure_intent_rebinds_to_replacement_build(pool: PgPool) {
+        let derivation = insert_derivation(&pool, None, "closure-replacement", "nixos")
+            .await
+            .unwrap();
+        let old_job: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW()) RETURNING id",
+        )
+        .bind(derivation.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let scan: Uuid = sqlx::query_scalar(
+            "INSERT INTO cve_scans (derivation_id, scanner_name, status, attempts, source_trigger, completed_build_job_id) VALUES ($1, 'vulnix', 'awaiting_closure', 0, 'post_build', $2) RETURNING id",
+        )
+        .bind(derivation.id)
+        .bind(old_job)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        crate::queries::build_jobs::lock_build_derivation(&mut tx, derivation.id)
+            .await
+            .unwrap();
+        let replacement: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, status) VALUES ($1, 'queued') RETURNING id",
+        )
+        .bind(derivation.id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        assert_eq!(
+            create_post_build_scan_intents_tx(&mut tx, &[derivation.id])
+                .await
+                .unwrap(),
+            1
+        );
+        tx.commit().await.unwrap();
+        let actual: (String, Option<Uuid>, i32) = sqlx::query_as(
+            "SELECT status, completed_build_job_id, attempts FROM cve_scans WHERE id = $1",
+        )
+        .bind(scan)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(actual, ("awaiting_build".into(), Some(replacement), 0));
+        assert_eq!(
+            crate::queries::cve_scans::promote_waiting_cve_scans(&pool, 1)
+                .await
+                .unwrap(),
+            0,
+            "old closure cannot promote while the replacement build is queued"
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn remote_claim_rejects_superseded_pending_build(pool: PgPool) {
+        let request = CreateBuilderRequest {
+            name: "superseded-scan-builder".into(),
+            host: None,
+            arch: "x86_64-linux".into(),
+            public_key: None,
+            max_cpu_cores: None,
+            max_memory_mb: None,
+            max_concurrent_jobs: Some(1),
+            enabled: Some(true),
+            environment_ids: vec![],
+        };
+        let (builder, _) = create_builder(&pool, &request).await.unwrap();
+        let session = Uuid::new_v4();
+        establish_builder_session(&pool, &builder.id, &session, 60, "scan test")
+            .await
+            .unwrap();
+        record_session_cve_capabilities(
+            &pool,
+            builder.id,
+            session,
+            cf_protocol::builder::BuilderCapabilities::current_cve_scanner("vulnix test".into()),
+        )
+        .await
+        .unwrap();
+        let derivation = insert_derivation(&pool, None, "superseded-scan", "nixos")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE derivations SET derivation_path = '/nix/store/superseded.drv', store_path = '/nix/store/superseded' WHERE id = $1")
+            .bind(derivation.id).execute(&pool).await.unwrap();
+        let old_job: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, builder_id, builder_session_id, status, completed_at) VALUES ($1, $2, $3, 'success', NOW()) RETURNING id",
+        ).bind(derivation.id).bind(builder.id).bind(session).fetch_one(&pool).await.unwrap();
+        let scan: Uuid = sqlx::query_scalar(
+            "INSERT INTO cve_scans (derivation_id, scanner_name, status, attempts, source_trigger, completed_build_job_id) VALUES ($1, 'vulnix', 'pending', 0, 'post_build', $2) RETURNING id",
+        ).bind(derivation.id).bind(old_job).fetch_one(&pool).await.unwrap();
+        let mut admission = pool.begin().await.unwrap();
+        crate::queries::build_jobs::lock_build_derivation(&mut admission, derivation.id)
+            .await
+            .unwrap();
+        assert!(
+            claim_remote_cve_scan(&pool, builder.id, session, Some(old_job))
+                .await
+                .unwrap()
+                .is_none(),
+            "a remote claimant must release its builder row instead of waiting for admission"
+        );
+        admission.rollback().await.unwrap();
+        sqlx::query("INSERT INTO build_jobs (derivation_id, status) VALUES ($1, 'queued')")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            claim_remote_cve_scan(&pool, builder.id, session, Some(old_job))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let (status, attempts): (String, i32) =
+            sqlx::query_as("SELECT status, attempts FROM cve_scans WHERE id = $1")
+                .bind(scan)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((status.as_str(), attempts), ("pending", 0));
+    }
 
     #[test]
     fn semantic_validation_rejects_unknown_references_and_non_finite_cvss() {

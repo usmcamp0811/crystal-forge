@@ -887,6 +887,53 @@ GET /api/v1/admin/audit?start_date=2024-01-01&end_date=2024-01-31&actor=john
 
 ## CVE Scan Operations
 
+### Post-build recovery and scanning statistics
+
+Post-build scanning is an event-driven obligation with a bounded recovery
+window. A successful exact NixOS build starts the clock at
+`build_jobs.completed_at`. `scan_schedule_policy.post_build_recovery_window`
+defaults to `168h` (7 days). The schedule GET returns this positive hour/day
+interval; the admin schedule PUT accepts it optionally. Omitting the field
+preserves its stored value atomically, including for older clients and the
+current Scanning Schedule dialog. The database and API reject zero, malformed,
+or over-100-year values so worker interval casts stay valid. The dialog does
+not expose this field.
+
+The build transaction persists post-build intent. Worker maintenance repairs
+unfinished intent after restarts. A legacy build with no intent is eligible for
+fallback discovery only when its authoritative successful build completed
+inside the recovery window. Missing build completion time fails closed.
+Backoff can retry a failed post-build scan only before the deadline. Maintenance
+marks an unresolved persisted obligation `failed` at the deadline, once, with
+`scan_metadata.terminal_reason = post_build_recovery_window_expired`, build
+completion/deadline and previous attempt diagnostics. It does not synthesize
+terminal rows for ancient builds without persisted intent. A live scan keeps
+its execution ownership until its existing lease/recovery protocol settles.
+Scheduled scanning is an independent freshness mechanism; a missed post-build
+obligation is never retried automatically through the post-build path after
+expiration, but periodic and explicit exact scans may still produce later
+evidence. A still-deployed, never-successfully-scanned derivation with an old
+successful build can enter the deployed periodic cadence when due; ancient
+superseded never-scanned builds do not enter this path. Expiration does not
+imply the derivation is secure or scanned.
+
+The operational Scanning cards have these populations:
+
+- **Failed** counts derivations in the operational population whose latest
+  lifecycle is a visible, unarchived failed scan. Archiving hides that row
+  from the attention count; the scan, diagnostics and evidence remain in
+  history. An ancient superseded failure outside the operational population
+  does not add to this count.
+- **Never scanned** counts operational derivations without a successfully
+  completed scan. A failed attempt does not count as completed evidence.
+- **Coverage** divides operational derivations with at least one successfully
+  completed scan by the operational derivation count. It does not count failed
+  attempts as coverage. The operational population is the union of exact
+  currently deployed derivations on active systems, successful builds still
+  inside post-build recovery, and derivations with active scan obligations.
+  Ancient superseded derivations without any such obligation stay in history,
+  not in this denominator. Archiving never removes completed evidence.
+
 ### Scan Diagnostics
 
 | Method | Endpoint | Role | Description |

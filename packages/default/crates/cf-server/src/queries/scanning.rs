@@ -20,16 +20,20 @@ pub struct ScanSchedulePolicyRow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanStatsRow {
     pub scanning: i64,
-    /// Derivations waiting for a scan through either the persisted operator
-    /// queue or the worker's dynamic post-build and stale-rescan selectors.
+    /// Counts persisted runnable scans that await a worker claim.
     pub queued: i64,
     /// Scans waiting for their exact derivation to finish building.
     pub awaiting_build: i64,
     /// Scans waiting for an exact closure to become available from cache.
     pub awaiting_closure: i64,
+    /// Counts operational derivations with completed evidence past the
+    /// deployed freshness interval; `never` disables this count.
     pub stale: i64,
+    /// Counts operational derivations without completed scan evidence.
     pub never_scanned: i64,
+    /// Counts latest unarchived failed scans in the operational population.
     pub failed: i64,
+    /// Reports completed-evidence coverage of the operational population.
     pub coverage_percent: i64,
 }
 
@@ -357,9 +361,42 @@ pub async fn get_scan_schedule_policy(pool: &PgPool) -> Result<ScanSchedulePolic
     })
 }
 
+/// Returns the persisted limit for recovering scans after a successful build.
+///
+/// # Errors
+///
+/// Returns a database error when the policy row cannot be read.
+pub async fn get_post_build_recovery_window(pool: &PgPool) -> Result<String> {
+    Ok(sqlx::query_scalar(
+        "SELECT post_build_recovery_window FROM scan_schedule_policy WHERE id = 1",
+    )
+    .fetch_one(pool)
+    .await?)
+}
+
+/// Updates the existing policy fields while preserving the stored recovery window.
+///
+/// # Errors
+/// Returns a database error when the singleton row cannot be updated.
 pub async fn update_scan_schedule_policy(
     pool: &PgPool,
     policy: &ScanSchedulePolicyRow,
+) -> Result<()> {
+    update_scan_schedule_policy_with_recovery(pool, policy, None).await
+}
+
+/// Updates the singleton policy without replacing the recovery window when omitted.
+///
+/// The `COALESCE` expression reads the stored value in the same row update. A
+/// concurrent writer cannot lose a recovery-window change through an old PUT.
+///
+/// # Errors
+/// Returns a database error when the row update fails, including a violated
+/// recovery-window constraint.
+pub async fn update_scan_schedule_policy_with_recovery(
+    pool: &PgPool,
+    policy: &ScanSchedulePolicyRow,
+    post_build_recovery_window: Option<&str>,
 ) -> Result<()> {
     sqlx::query(
         r#"
@@ -370,6 +407,7 @@ pub async fn update_scan_schedule_policy(
             archived_interval = $4,
             archived_enabled = $5,
             rebuild_to_scan = $6,
+            post_build_recovery_window = COALESCE($7, post_build_recovery_window),
             updated_at = NOW()
         WHERE id = 1
         "#,
@@ -380,44 +418,102 @@ pub async fn update_scan_schedule_policy(
     .bind(&policy.archived_interval)
     .bind(policy.archived_enabled)
     .bind(policy.rebuild_to_scan)
+    .bind(post_build_recovery_window)
     .execute(pool)
     .await?;
     Ok(())
 }
 
+/// Returns operational scan counts without removing historical scan evidence.
+///
+/// Current deployments, recoverable successful builds, and active scan requests
+/// form the coverage population. A terminal failure is actionable only while
+/// its derivation remains in that population and its latest scan is unarchived.
+///
+/// # Errors
+///
+/// Returns a database error if scan policy or scan history cannot be read.
 pub async fn get_scan_stats(pool: &PgPool) -> Result<ScanStatsRow> {
     let row = sqlx::query(
         r#"
         WITH policy AS (
-            SELECT
-                GREATEST(
-                    1,
-                    COALESCE(NULLIF(regexp_replace(deployed_interval, '[^0-9]', '', 'g'), '')::INT, 24)
-                ) AS deployed_hours
+            SELECT CASE WHEN deployed_interval = 'never' THEN NULL::interval
+                        ELSE deployed_interval::interval END AS deployed_window,
+                   post_build_recovery_window::interval AS recovery_window,
+                   on_build
             FROM scan_schedule_policy
             WHERE id = 1
         ),
+        current_deployed AS (
+            SELECT DISTINCT derivation.id AS derivation_id
+            FROM systems system
+            JOIN LATERAL (
+                SELECT state.store_path
+                FROM system_states state
+                WHERE state.hostname = system.hostname
+                ORDER BY state.timestamp DESC NULLS LAST, state.id DESC
+                LIMIT 1
+            ) current_state ON TRUE
+            JOIN commits commit ON commit.flake_id = system.flake_id
+            JOIN derivations derivation ON derivation.commit_id = commit.id
+                AND derivation.derivation_type = 'nixos'
+                AND derivation.derivation_name = COALESCE(
+                    NULLIF(BTRIM(system.system_configuration_name), ''), system.hostname
+                )
+                AND NULLIF(BTRIM(derivation.store_path), '') = current_state.store_path
+            WHERE system.is_active
+        ),
+        recoverable_builds AS (
+            SELECT DISTINCT job.derivation_id
+            FROM build_jobs job
+            JOIN derivations derivation ON derivation.id = job.derivation_id
+            CROSS JOIN policy
+            WHERE policy.on_build
+              AND derivation.derivation_type = 'nixos'
+              AND job.status = 'success'
+              AND job.completed_at IS NOT NULL
+              AND job.completed_at > NOW() - policy.recovery_window
+              AND NOT EXISTS (
+                  SELECT 1 FROM build_jobs newer
+                  WHERE newer.derivation_id = job.derivation_id
+                    AND (newer.created_at, newer.id) > (job.created_at, job.id)
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM cve_scans evidence
+                  WHERE evidence.derivation_id = job.derivation_id
+                    AND evidence.status = 'completed'
+                    AND evidence.completed_at IS NOT NULL
+                    AND (evidence.completed_build_job_id = job.id
+                        OR (evidence.source_trigger IS DISTINCT FROM 'post_build'
+                            AND evidence.completed_at >= job.completed_at))
+              )
+        ),
+        operational AS (
+            SELECT derivation_id FROM current_deployed
+            UNION
+            SELECT derivation_id FROM recoverable_builds
+            UNION
+            SELECT scan.derivation_id FROM cve_scans scan
+            JOIN derivations derivation ON derivation.id = scan.derivation_id
+            WHERE derivation.derivation_type = 'nixos'
+              AND scan.status IN ('awaiting_build', 'awaiting_closure', 'pending', 'in_progress')
+        ),
         latest_lifecycle AS (
-            SELECT DISTINCT ON (d.id)
-                d.id AS derivation_id,
-                cs.status,
-                cs.scheduled_at,
-                cs.created_at,
-                cs.completed_at
-            FROM derivations d
-            LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
-            WHERE d.derivation_type = 'nixos'
-            ORDER BY d.id, COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) DESC NULLS LAST
+            SELECT DISTINCT ON (scan.derivation_id)
+                scan.derivation_id, scan.status, archive.scan_id AS archived_scan_id
+            FROM cve_scans scan
+            JOIN operational scope ON scope.derivation_id = scan.derivation_id
+            LEFT JOIN cve_scan_archives archive ON archive.scan_id = scan.id
+            -- A late maintenance terminalization must not make an old intent
+            -- supersede a newer manual or periodic scan's actual lifecycle.
+            ORDER BY scan.derivation_id, scan.created_at DESC, scan.id DESC
         ),
         latest_completed AS (
-            SELECT DISTINCT ON (d.id)
-                d.id AS derivation_id,
-                cs.completed_at
-            FROM derivations d
-            LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
-            WHERE d.derivation_type = 'nixos'
-              AND cs.completed_at IS NOT NULL
-            ORDER BY d.id, cs.completed_at DESC
+            SELECT scan.derivation_id, MAX(scan.completed_at) AS completed_at
+            FROM cve_scans scan
+            JOIN operational scope ON scope.derivation_id = scan.derivation_id
+            WHERE scan.status = 'completed' AND scan.completed_at IS NOT NULL
+            GROUP BY scan.derivation_id
         )
         SELECT
             (
@@ -428,18 +524,19 @@ pub async fn get_scan_stats(pool: &PgPool) -> Result<ScanStatsRow> {
             (SELECT COUNT(*) FROM cve_scans WHERE status = 'pending')::BIGINT AS queued,
             (SELECT COUNT(*) FROM cve_scans WHERE status = 'awaiting_build')::BIGINT AS awaiting_build,
             (SELECT COUNT(*) FROM cve_scans WHERE status = 'awaiting_closure')::BIGINT AS awaiting_closure,
-            COUNT(*) FILTER (WHERE ll.status = 'failed')::BIGINT AS failed,
+            COUNT(*) FILTER (WHERE ll.status = 'failed' AND ll.archived_scan_id IS NULL)::BIGINT AS failed,
             COUNT(*) FILTER (WHERE lc.completed_at IS NULL)::BIGINT AS never_scanned,
             COUNT(*) FILTER (
                 WHERE lc.completed_at IS NOT NULL
-                AND lc.completed_at < NOW() - (SELECT deployed_hours * INTERVAL '1 hour' FROM policy)
+                AND lc.completed_at < NOW() - (SELECT deployed_window FROM policy)
             )::BIGINT AS stale,
             CASE
                 WHEN COUNT(*) = 0 THEN 0
                 ELSE ROUND((COUNT(*) FILTER (WHERE lc.completed_at IS NOT NULL)::numeric / COUNT(*)::numeric) * 100)
             END::BIGINT AS coverage_percent
-        FROM latest_lifecycle ll
-        LEFT JOIN latest_completed lc ON lc.derivation_id = ll.derivation_id
+        FROM operational scope
+        LEFT JOIN latest_lifecycle ll ON ll.derivation_id = scope.derivation_id
+        LEFT JOIN latest_completed lc ON lc.derivation_id = scope.derivation_id
         "#,
     )
     .fetch_one(pool)

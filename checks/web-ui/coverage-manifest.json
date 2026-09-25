@@ -21,7 +21,8 @@
       "29n-compliance-evidence-control-rail-alignment": { "category": "mock" },
       "13j-task440-flake-states-panes-navigation": { "category": "mock" },
       "14d-task440-cross-surface-auth-navigation": { "category": "mock" },
-      "16-cves": { "category": "mock" }
+      "16-cves": { "category": "mock" },
+      "16d-scanning-recovery-mock": { "category": "mock" }
     },
     "visualThemes": [
       "dark",
@@ -1876,6 +1877,17 @@
         "ci_fast",
         "full"
       ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "16d-scanning-recovery-mock",
+      "description": "Mock-only Scanning expired post-build Completed history, archive/card response, and periodic/manual provenance; does not prove DB eligibility or SQL",
+      "route": "/scanning",
+      "designRef": "docs/design/CrystalForge/components/ScanningView.jsx",
+      "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
       "mockedData": true,

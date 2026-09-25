@@ -286,6 +286,7 @@ pub struct CveScanFreshnessRow {
     pub total_cves: i64,
 }
 
+/// Reports the persisted scan schedule, including post-build recovery policy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanSchedulePolicyResponse {
     pub on_build: bool,
@@ -294,9 +295,12 @@ pub struct ScanSchedulePolicyResponse {
     pub archived_interval: String,
     pub archived_enabled: bool,
     pub rebuild_to_scan: bool,
+    /// Positive hours or days during which a completed build can be recovered.
+    pub post_build_recovery_window: String,
     pub updated_at: DateTime<Utc>,
 }
 
+/// Changes scan cadence without resetting an omitted recovery-window setting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateScanSchedulePolicyRequest {
     pub on_build: bool,
@@ -305,6 +309,8 @@ pub struct UpdateScanSchedulePolicyRequest {
     pub archived_interval: String,
     pub archived_enabled: bool,
     pub rebuild_to_scan: bool,
+    /// Omission keeps the persisted recovery window, including on older clients.
+    pub post_build_recovery_window: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

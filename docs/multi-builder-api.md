@@ -748,6 +748,20 @@ unavailable. The maintenance does not change manual, fleet, or periodic scans.
 It does not consult the current `on_build` policy when it repairs existing
 intent; the policy still controls creation of new post-build intent.
 
+Post-build scanning is an event-driven obligation with a bounded recovery
+window. Scheduled scanning is an independent freshness mechanism. The policy
+field `post_build_recovery_window` defaults to `168h`, counted from the
+authoritative successful `build_jobs.completed_at`, not a later scan attempt or
+server restart. The server retries unfinished exact post-build work only inside
+this window. At expiration it terminalizes persisted unresolved post-build
+intent once with `scan_metadata.terminal_reason =
+post_build_recovery_window_expired`; it does not manufacture expired scans for
+pre-contract historical builds without intent. A missed post-build obligation
+is never retried automatically through the post-build path after the window,
+but a periodic scan or explicit exact scan can produce later evidence. Existing
+execution tokens, lease fencing, and builder session requirements still govern
+work in progress; expiration does not revoke an active execution.
+
 #### POST /api/v1/builders/:id/cve-scans/claim
 
 Claim one schema-1 CVE scan through the authenticated builder session. Builders
