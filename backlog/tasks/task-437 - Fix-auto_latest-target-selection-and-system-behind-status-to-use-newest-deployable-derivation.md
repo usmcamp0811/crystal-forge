@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-25 17:10'
-updated_date: '2026-09-25 17:09'
+updated_date: '2026-09-25 19:02'
 labels:
   - deployment
   - bug
@@ -123,6 +123,9 @@ None external. Requires repo-managed isolated local dev Postgres for SQLx prepar
 - [ ] #17 docs/onboarding-guide.md auto_latest wording corrected to 'automatically deploy the newest successfully deployable derivation'; behind-state semantics documented.
 - [ ] #18 SQLx offline metadata updated if query shapes change; cargo sqlx prepare check passes.
 - [ ] #19 nix develop -c cargo test --manifest-path packages/default/Cargo.toml passes; web-ui tests pass where affected; required Nix targets (nix build .#packages.x86_64-linux.web-ui --no-link, .#checks.x86_64-linux.web-ui --no-link) pass.
+- [ ] #20 Canonical deployable artifact in auto-latest manual exact-commit resolution deployment-status and final authorization also requires derivation.error_message IS NULL and a completed cache_push_jobs row whose store_path exactly equals the nonblank derivation store_path; mismatched or missing cache outputs cannot mask an older eligible artifact.
+- [ ] #21 When a newer selected derivation shares the current desired store path but not the pending commit derivation or retained artifact identity auto_latest runs all runtime gates and exact final authorization then supersedes the stale pending identity; the next pass is a true no-op with stable desired_target_set_at.
+- [ ] #22 Isolated regressions prove matching/null/mismatched cache output and derivation-error transitions plus same-path identity rebind blocked runtime gate report_only FAIL non-blocking and delivery/history provenance; migrations remain forward only.
 <!-- AC:END -->
 
 ## Definition of Done
@@ -146,4 +149,6 @@ None external. Requires repo-managed isolated local dev Postgres for SQLx prepar
 
 <!-- SECTION:NOTES:BEGIN -->
 Owner explicitly authorized carrying this already-tracked deployment bug into active TASK-326.2.2 in its existing worktree and MR !329 immediately after separate scanning checkpoint 75985c8162d0b74e49d8e89edb25abeaeb2acf2f. Do not start a competing worktree/implementation for TASK-437. The deployment correction will be a separate focused commit in TASK-326.2.2; this record remains To Do until owner determines how to reconcile its lifecycle after MR merge. No owner persistent database is a test target.
+
+Owner 2026-09-25 clarification supersedes prior TASK-437 seven-field contract: include error_message NULL and exact completed cache_push_jobs.store_path = derivations.store_path across selector/manual/view/final authorization; do not weaken final authorization. Same store path with different selected immutable commit/derivation identity must run normal gates and rebind pending identity, while same path AND identity is idempotent with unchanged desired_target_set_at. Active implementation remains TASK-326.2.2/MR !329, separate deployment checkpoint from scanning 75985c81; this TASK-437 record stays To Do pending owner lifecycle reconciliation after merge.
 <!-- SECTION:NOTES:END -->
