@@ -13,7 +13,7 @@ use crystal_forge::auth::session::{
 };
 use crystal_forge::compliance::canonical::semantic_digest;
 use crystal_forge::compliance::resolver::{
-    EffectivePolicySet, ResolutionOutcome, resolve_system_effective_policies,
+    AssignmentMode, EffectivePolicySet, ResolutionOutcome, resolve_system_effective_policies,
 };
 use crystal_forge::handlers::agent::state as agent_state_handler;
 use crystal_forge::handlers::agent_request::CFState;
@@ -10825,6 +10825,17 @@ async fn legacy_complete_digest_remains_valid_for_poam_creation_and_verification
     let mut passing = pool.begin().await.unwrap();
     persist_assessment(&mut passing, &fixture, EnforcementOutcome::Pass).await;
     passing.commit().await.unwrap();
+    // This fixture simulates one pre-canonical group for the new PASS. The
+    // production lifecycle retains the earlier legacy FAIL across a digest
+    // change; discard that synthetic row before rewriting the new fixture.
+    sqlx::query(
+        "DELETE FROM composite_policy_assessments WHERE system_id=$1 AND effective_set_digest=$2",
+    )
+    .bind(fixture.system_id)
+    .bind(&fixture.resolved.effective_set_digest)
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query(
         "UPDATE composite_policy_assessments SET effective_set_digest=$1 WHERE system_id=$2",
     )
@@ -10973,6 +10984,389 @@ async fn report_only_transition_invalidates_legacy_poam_assessment(pool: PgPool)
         result,
         Err(PoamError::Precondition("stale_finding", _, _))
     ));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn report_only_composite_fail_creates_links_and_verifies_with_waiver(pool: PgPool) {
+    let mut primary = assessment_fixture(&pool).await;
+    let mut secondary = assessment_fixture_for_policy(&pool, &primary).await;
+    let policy_id = primary.resolved.policies[0].policy_lineage_id;
+    let primary_assignment =
+        assign_policy_through_bundle(&pool, primary.system_id, policy_id, primary.version_id).await;
+    let bundle_id: Uuid =
+        sqlx::query_scalar("SELECT bundle_id FROM compliance_bundle_assignments WHERE id=$1")
+            .bind(primary_assignment)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let bundle_version_id: Uuid = sqlx::query_scalar(
+        "SELECT bundle_version_id FROM compliance_bundle_assignments WHERE id=$1",
+    )
+    .bind(primary_assignment)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let secondary_assignment: Uuid = sqlx::query_scalar(
+        "INSERT INTO compliance_bundle_assignments(bundle_id,bundle_version_id,system_id,scope_type,active,enforcement_mode,assignment_overlay_digest) VALUES($1,$2,$3,'system',true,'report_only','poam-mode-transition') RETURNING id",
+    ).bind(bundle_id).bind(bundle_version_id).bind(secondary.system_id).fetch_one(&pool).await.unwrap();
+    let secondary_version: Uuid = sqlx::query_scalar(
+        "INSERT INTO compliance_bundle_assignment_versions(assignment_id,version_number,bundle_version_id,enforcement_mode,assignment_overlay_digest) VALUES($1,1,$2,'report_only','poam-mode-transition') RETURNING id",
+    ).bind(secondary_assignment).bind(bundle_version_id).fetch_one(&pool).await.unwrap();
+    sqlx::query("UPDATE compliance_bundle_assignments SET current_version_id=$1 WHERE id=$2")
+        .bind(secondary_version)
+        .bind(secondary_assignment)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (fixture, assignment_id) in [(&primary, Some(primary_assignment)), (&secondary, None)] {
+        sqlx::query("DELETE FROM system_policies WHERE system_id=$1 AND policy_id=$2")
+            .bind(fixture.system_id)
+            .bind(policy_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let Some(assignment_id) = assignment_id else {
+            continue;
+        };
+        let (bundle_version_id, old_version_id): (Uuid, Uuid) = sqlx::query_as(
+            "SELECT bundle_version_id,current_version_id FROM compliance_bundle_assignments WHERE id=$1",
+        )
+        .bind(assignment_id).fetch_one(&pool).await.unwrap();
+        let next_version_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_bundle_assignment_versions(assignment_id,version_number,bundle_version_id,enforcement_mode,assignment_overlay_digest) VALUES($1,2,$2,'report_only','poam-mode-transition') RETURNING id",
+        ).bind(assignment_id).bind(bundle_version_id).fetch_one(&pool).await.unwrap();
+        sqlx::query("UPDATE compliance_bundle_assignments SET current_version_id=$1,enforcement_mode='report_only' WHERE id=$2 AND current_version_id=$3")
+            .bind(next_version_id).bind(assignment_id).bind(old_version_id).execute(&pool).await.unwrap();
+    }
+    for fixture in [&mut primary, &mut secondary] {
+        fixture.resolved = match resolve_system_effective_policies(&pool, fixture.system_id)
+            .await
+            .unwrap()
+        {
+            ResolutionOutcome::Resolved(resolved) => resolved,
+            ResolutionOutcome::Conflict(conflicts) => panic!("unexpected conflict: {conflicts:?}"),
+        };
+        assert_eq!(
+            fixture.resolved.policies[0].effective_mode,
+            AssignmentMode::ReportOnly
+        );
+        let mut tx = pool.begin().await.unwrap();
+        persist_assessment(&mut tx, fixture, EnforcementOutcome::Fail).await;
+        tx.commit().await.unwrap();
+        let assessment: (Uuid, Uuid, String, String) = sqlx::query_as(
+            "SELECT policy_version_id,policy_lineage_id,target_store_path,overall_outcome FROM composite_policy_assessments WHERE system_id=$1",
+        )
+        .bind(fixture.system_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            assessment,
+            (
+                fixture.version_id,
+                policy_id,
+                fixture.store_path.clone(),
+                "fail".into()
+            )
+        );
+    }
+    let actor = admin_actor(primary.user_id);
+    let clock = FixedClock(Utc::now());
+    let first_finding = finding_id(&pool, &primary).await;
+    let second_finding = finding_id(&pool, &secondary).await;
+    let created =
+        create_service_poam(&pool, &primary, &actor, &clock, "Report-only remediation").await;
+    assert_eq!(created.findings[0].id, first_finding);
+    let linked = poam_service::link_finding(
+        &pool,
+        &actor,
+        created.poam.id,
+        AddFindingRequest {
+            revision: created.poam.revision,
+            assessment_id: Some(current_assessment_id(&pool, &secondary).await),
+            finding_id: None,
+            observation: None,
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(linked.findings.len(), 2);
+    assert!(
+        linked
+            .findings
+            .iter()
+            .any(|finding| finding.id == second_finding)
+    );
+    let awaiting = awaiting_verification(&pool, &actor, linked, &clock).await;
+    let rejected = poam_service::verify(
+        &pool,
+        &actor,
+        awaiting.poam.id,
+        awaiting.poam.revision,
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(rejected["outcome"], "rejected");
+    assert!(
+        rejected["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["result"] == "fail")
+    );
+
+    let mut waiver_ids = Vec::new();
+    for (fixture, finding) in [(&primary, first_finding), (&secondary, second_finding)] {
+        let waiver = poam_service::create_waiver(
+            &pool,
+            &actor,
+            CreateWaiverRequest {
+                finding_id: finding,
+                assessment_id: Some(current_assessment_id(&pool, fixture).await),
+                observation: None,
+                justification: "Accepted report-only remediation risk".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let id = Uuid::parse_str(waiver["waiver_id"].as_str().unwrap()).unwrap();
+        poam_service::decide_waiver(
+            &pool,
+            &actor,
+            id,
+            WaiverDecisionRequest {
+                status: WaiverDecision::Accepted,
+                expires_at: None,
+            },
+            &clock,
+        )
+        .await
+        .unwrap();
+        waiver_ids.push(id);
+    }
+    let accepted = poam_service::verify(
+        &pool,
+        &actor,
+        awaiting.poam.id,
+        rejected["revision"].as_i64().unwrap(),
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(accepted["outcome"], "accepted");
+    assert!(
+        accepted["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["result"] == "waiver")
+    );
+    let history = poam_service::detail(&pool, &actor, awaiting.poam.id, &clock)
+        .await
+        .unwrap();
+    assert_eq!(history.verification_attempts.len(), 2);
+    assert!(
+        history
+            .verification_attempts
+            .iter()
+            .any(|attempt| attempt.outcome == "rejected")
+    );
+    assert!(
+        history
+            .verification_attempts
+            .iter()
+            .any(|attempt| attempt.outcome == "accepted")
+    );
+    for (fixture, waiver_id) in [(&primary, waiver_ids[0]), (&secondary, waiver_ids[1])] {
+        let persisted: (String, Uuid) = sqlx::query_as(
+            "SELECT assessment.overall_outcome, waiver.finding_id FROM composite_policy_assessments assessment JOIN finding_waivers waiver ON waiver.assessment_id=assessment.id WHERE waiver.id=$1",
+        ).bind(waiver_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(persisted, ("fail".into(), finding_id(&pool, fixture).await));
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn enforce_to_report_only_keeps_poam_waiver_and_assessment_history(pool: PgPool) {
+    let mut fixture = assessment_fixture(&pool).await;
+    let policy_id = fixture.resolved.policies[0].policy_lineage_id;
+    let assignment_id =
+        assign_policy_through_bundle(&pool, fixture.system_id, policy_id, fixture.version_id).await;
+    sqlx::query("DELETE FROM system_policies WHERE system_id=$1 AND policy_id=$2")
+        .bind(fixture.system_id)
+        .bind(policy_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    fixture.resolved = match resolve_system_effective_policies(&pool, fixture.system_id)
+        .await
+        .unwrap()
+    {
+        ResolutionOutcome::Resolved(resolved) => resolved,
+        ResolutionOutcome::Conflict(conflicts) => panic!("unexpected conflict: {conflicts:?}"),
+    };
+    let mut tx = pool.begin().await.unwrap();
+    persist_assessment(&mut tx, &fixture, EnforcementOutcome::Fail).await;
+    tx.commit().await.unwrap();
+    let assessment_id = current_assessment_id(&pool, &fixture).await;
+    let stable_finding = finding_id(&pool, &fixture).await;
+    let actor = admin_actor(fixture.user_id);
+    let clock = FixedClock(Utc::now());
+    let created = create_service_poam(
+        &pool,
+        &fixture,
+        &actor,
+        &clock,
+        "Mode transition remediation",
+    )
+    .await;
+    let awaiting = awaiting_verification(&pool, &actor, created, &clock).await;
+    let rejected = poam_service::verify(
+        &pool,
+        &actor,
+        awaiting.poam.id,
+        awaiting.poam.revision,
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(rejected["items"][0]["result"], "fail");
+    let waiver = poam_service::create_waiver(
+        &pool,
+        &actor,
+        CreateWaiverRequest {
+            finding_id: stable_finding,
+            assessment_id: Some(assessment_id),
+            observation: None,
+            justification: "Mode transition risk acceptance".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let waiver_id = Uuid::parse_str(waiver["waiver_id"].as_str().unwrap()).unwrap();
+    poam_service::decide_waiver(
+        &pool,
+        &actor,
+        waiver_id,
+        WaiverDecisionRequest {
+            status: WaiverDecision::Accepted,
+            expires_at: None,
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+
+    let (bundle_version_id, old_version_id): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT bundle_version_id,current_version_id FROM compliance_bundle_assignments WHERE id=$1",
+    ).bind(assignment_id).fetch_one(&pool).await.unwrap();
+    let next_version_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO compliance_bundle_assignment_versions(assignment_id,version_number,bundle_version_id,enforcement_mode,assignment_overlay_digest) VALUES($1,2,$2,'report_only','poam-mode-transition') RETURNING id",
+    ).bind(assignment_id).bind(bundle_version_id).fetch_one(&pool).await.unwrap();
+    sqlx::query("UPDATE compliance_bundle_assignments SET current_version_id=$1,enforcement_mode='report_only' WHERE id=$2 AND current_version_id=$3")
+        .bind(next_version_id).bind(assignment_id).bind(old_version_id).execute(&pool).await.unwrap();
+    fixture.resolved = match resolve_system_effective_policies(&pool, fixture.system_id)
+        .await
+        .unwrap()
+    {
+        ResolutionOutcome::Resolved(resolved) => resolved,
+        ResolutionOutcome::Conflict(conflicts) => panic!("unexpected conflict: {conflicts:?}"),
+    };
+    assert_eq!(
+        fixture.resolved.policies[0].effective_mode,
+        AssignmentMode::ReportOnly
+    );
+    let mut tx = pool.begin().await.unwrap();
+    persist_assessment(&mut tx, &fixture, EnforcementOutcome::Fail).await;
+    tx.commit().await.unwrap();
+    assert_eq!(finding_id(&pool, &fixture).await, stable_finding);
+    let report_assessment_id = current_assessment_id(&pool, &fixture).await;
+    assert_ne!(report_assessment_id, assessment_id);
+    let after_switch = poam_service::verify(
+        &pool,
+        &actor,
+        awaiting.poam.id,
+        rejected["revision"].as_i64().unwrap(),
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(after_switch["outcome"], "rejected");
+    assert_eq!(after_switch["items"][0]["result"], "fail");
+    poam_service::decide_waiver(
+        &pool,
+        &actor,
+        waiver_id,
+        WaiverDecisionRequest {
+            status: WaiverDecision::Revoked,
+            expires_at: None,
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    let new_waiver = poam_service::create_waiver(
+        &pool,
+        &actor,
+        CreateWaiverRequest {
+            finding_id: stable_finding,
+            assessment_id: Some(report_assessment_id),
+            observation: None,
+            justification: "Current report-only risk acceptance".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let new_waiver_id = Uuid::parse_str(new_waiver["waiver_id"].as_str().unwrap()).unwrap();
+    poam_service::decide_waiver(
+        &pool,
+        &actor,
+        new_waiver_id,
+        WaiverDecisionRequest {
+            status: WaiverDecision::Accepted,
+            expires_at: None,
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    let accepted = poam_service::verify(
+        &pool,
+        &actor,
+        awaiting.poam.id,
+        after_switch["revision"].as_i64().unwrap(),
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(accepted["outcome"], "accepted");
+    assert_eq!(accepted["items"][0]["result"], "waiver");
+    assert_eq!(accepted["items"][0]["waiver_id"], new_waiver_id.to_string());
+    let history = poam_service::detail(&pool, &actor, awaiting.poam.id, &clock)
+        .await
+        .unwrap();
+    assert_eq!(history.findings[0].id, stable_finding);
+    assert_eq!(history.verification_attempts.len(), 3);
+    let old_waiver: (Uuid, Uuid) =
+        sqlx::query_as("SELECT finding_id,assessment_id FROM finding_waivers WHERE id=$1")
+            .bind(waiver_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(old_waiver, (stable_finding, assessment_id));
+    let persisted: (String, Uuid) = sqlx::query_as(
+        "SELECT overall_outcome,policy_version_id FROM composite_policy_assessments WHERE id=$1",
+    )
+    .bind(assessment_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(persisted, ("fail".into(), fixture.version_id));
+    let current_outcome: String =
+        sqlx::query_scalar("SELECT overall_outcome FROM composite_policy_assessments WHERE id=$1")
+            .bind(report_assessment_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(current_outcome, "fail");
 }
 
 #[sqlx::test(migrations = "./migrations")]

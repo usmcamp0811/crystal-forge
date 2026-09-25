@@ -34,8 +34,8 @@ use crate::queries::compliance::{
 };
 use crate::queries::poam::{self, insert_activity_and_audit};
 use crate::services::composite_enforcement::{
-    PersistedAssessmentIdentity, PersistedRuleIdentity, enforce_composite_authorization_digest,
-    policy_contexts, select_compatible_assessment_set,
+    PersistedAssessmentIdentity, PersistedRuleIdentity,
+    assessment_matches_current_assignment_epoch_in_tx, select_current_remediation_assessments,
 };
 
 /// Provides the current time used by POA&M lifecycle decisions.
@@ -919,7 +919,6 @@ async fn validate_current_assessment_tx(
             None,
         ));
     }
-    let policies = policy_contexts(&resolved)?;
     let assessments = sqlx::query_as::<_, PersistedAssessmentIdentity>(
         r#"SELECT id,policy_lineage_id,policy_version_id,effective_set_digest,
                   effective_config_digest,effective_config
@@ -945,13 +944,34 @@ async fn validate_current_assessment_tx(
     .bind(&assessment_ids)
     .fetch_all(&mut **tx)
     .await?;
-    let compatible = select_compatible_assessment_set(
-        &policies,
-        &enforce_composite_authorization_digest(&resolved),
-        &assessments,
-        &rules,
-    );
-    if !compatible.is_some_and(|set| set.ids().contains(&context.assessment_id)) {
+    let compatible =
+        select_current_remediation_assessments(&resolved, policy, &assessments, &rules)?;
+    let epochs_match = if let Some(ids) = compatible.as_ref() {
+        let mut valid = ids.contains(&context.assessment_id);
+        for id in ids {
+            let selected_policy = assessments
+                .iter()
+                .find(|row| row.id == *id)
+                .and_then(|row| {
+                    resolved
+                        .policies
+                        .iter()
+                        .find(|p| p.policy_lineage_id == row.policy_lineage_id)
+                });
+            let Some(selected_policy) = selected_policy else {
+                valid = false;
+                break;
+            };
+            if !assessment_matches_current_assignment_epoch_in_tx(tx, selected_policy, *id).await? {
+                valid = false;
+                break;
+            }
+        }
+        valid
+    } else {
+        false
+    };
+    if !epochs_match {
         return Err(PoamError::Precondition(
             "stale_finding",
             "Assessment was superseded by a newer authoritative observation".into(),
@@ -7740,9 +7760,7 @@ async fn current_verification_items_tx(
                 && observation.policy_lineage_id == *lineage_id
                 && observation.policy_version_id == policy.policy_version_id
         });
-        let composite_authorization_digest = enforce_composite_authorization_digest(resolved);
         let compatible_ids = if policy.policy_type == "composite" {
-            let policies = policy_contexts(resolved)?;
             let mut seen_targets = BTreeSet::new();
             let mut compatible = None;
             for candidate in observations
@@ -7765,14 +7783,42 @@ async fn current_verification_items_tx(
                     })
                     .map(AssessmentObservation::identity)
                     .collect::<Vec<_>>();
-                if let Some(selected) = select_compatible_assessment_set(
-                    &policies,
-                    &composite_authorization_digest,
+                if let Some(selected) = select_current_remediation_assessments(
+                    resolved,
+                    policy,
                     &identities,
                     &assessment_rules,
-                ) {
-                    compatible = Some(selected.ids().to_vec());
-                    break;
+                )? {
+                    let mut epochs_match = true;
+                    for id in &selected {
+                        let selected_policy = identities
+                            .iter()
+                            .find(|identity| identity.id == *id)
+                            .and_then(|identity| {
+                                resolved
+                                    .policies
+                                    .iter()
+                                    .find(|p| p.policy_lineage_id == identity.policy_lineage_id)
+                            });
+                        let Some(selected_policy) = selected_policy else {
+                            epochs_match = false;
+                            break;
+                        };
+                        if !assessment_matches_current_assignment_epoch_in_tx(
+                            tx,
+                            selected_policy,
+                            *id,
+                        )
+                        .await?
+                        {
+                            epochs_match = false;
+                            break;
+                        }
+                    }
+                    if epochs_match {
+                        compatible = Some(selected);
+                        break;
+                    }
                 }
             }
             compatible

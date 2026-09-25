@@ -1754,9 +1754,12 @@ fn system_not_queued_reason(
     None
 }
 
-/// Phase 1: persist an evaluated system's derivation without inserting a
-/// build job.  The build job is created later by `activate_evaluated_system_build`,
-/// after the GC root has been established.
+/// Persists an evaluated system's derivation before build activation.
+///
+/// Phase 1 does not insert a build job. `activate_evaluated_system_build`
+/// creates that job after the GC root exists. Evaluation persists exact
+/// composite assessments for both `report_only` and `enforce`; only enforced
+/// results participate in deployment gating.
 ///
 /// Returns [`SystemPersistenceOutcome`] which tells the caller whether build
 /// activation is needed, or if the system was recorded without a build, or
@@ -1911,13 +1914,12 @@ pub async fn persist_evaluated_system(
             policy_check,
         )
         .await?;
-        let has_composite = resolved.policies.iter().any(|policy| {
-            policy.policy_type == "composite"
-                && matches!(
-                    policy.effective_mode,
-                    crate::compliance::resolver::AssignmentMode::Enforce
-                )
-        });
+        // Assessment is evidence, not a deployment decision. Report-only
+        // composites need the same exact-target result as enforced composites.
+        let has_composite = resolved
+            .policies
+            .iter()
+            .any(|policy| policy.policy_type == "composite");
         if has_composite {
             let target_store_path = result.expected_store_path.as_deref().context(
                 "Composite assessment requires the evaluator's exact expected store path",

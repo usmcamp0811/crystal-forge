@@ -1,9 +1,10 @@
-//! Evaluates and persists multi-phase composite policy enforcement.
+//! Evaluates and persists multi-phase composite policy assessments.
 //!
 //! Evaluation, scan, and deployment outcomes are tied to an exact system
-//! target and effective policy set. Authorization updates assessment aggregates
-//! and any guarded target state in one transaction so callers cannot consume
-//! stale passing evidence.
+//! target and effective policy set. Both assignment modes persist assessments;
+//! only enforced policies authorize a deployment. Authorization updates
+//! enforced assessment aggregates and guarded target state in one transaction
+//! so callers cannot consume stale passing evidence.
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -13,7 +14,8 @@ use uuid::Uuid;
 
 use crate::compliance::canonical::semantic_digest;
 use crate::compliance::resolver::{
-    AssignmentMode, EffectivePolicySet, ResolutionOutcome, resolve_system_effective_policies_in_tx,
+    AssignmentMode, EffectivePolicy, EffectivePolicySet, ResolutionOutcome,
+    resolve_system_effective_policies_in_tx,
 };
 use crate::models::deployment_policies::{
     CompositePolicyConfig, CompositeRuleKind, CompositeRuleOutcome, CveBlockSeverity,
@@ -69,7 +71,7 @@ struct LatestScan {
     composite_phase_order: i64,
 }
 
-/// Holds one enforced composite policy's current authorization identity.
+/// Holds one composite policy's exact version, configuration, and ordered rules.
 #[derive(Debug)]
 pub(crate) struct PolicyContext {
     /// Identifies the stable policy lineage.
@@ -113,7 +115,7 @@ pub(crate) struct PersistedRuleIdentity {
     pub(crate) phase: String,
     /// Specifies the normalized rule outcome.
     pub(crate) outcome: String,
-    /// Indicates whether the persisted outcome blocks deployment.
+    /// Indicates a failing rule; deployment uses only enforced assessments.
     pub(crate) blocking: bool,
 }
 
@@ -689,20 +691,156 @@ pub(crate) fn policy_contexts(resolved: &EffectivePolicySet) -> Result<Vec<Polic
             policy.policy_type == "composite"
                 && matches!(policy.effective_mode, AssignmentMode::Enforce)
         })
-        .map(|policy| {
-            let config = deserialize_policy_type_config("composite", &policy.effective_config)
-                .map_err(anyhow::Error::msg)?
-                .context("Composite validator returned no config")?;
-            let config_json = serde_json::to_value(&config)?;
-            Ok(PolicyContext {
-                lineage_id: policy.policy_lineage_id,
-                version_id: policy.policy_version_id,
-                config_digest: composite_config_digest(&config),
-                config,
-                config_json,
-            })
-        })
+        .map(composite_policy_context)
         .collect()
+}
+
+fn composite_policy_context(policy: &EffectivePolicy) -> Result<PolicyContext> {
+    let config = deserialize_policy_type_config("composite", &policy.effective_config)
+        .map_err(anyhow::Error::msg)?
+        .context("Composite validator returned no config")?;
+    let config_json = serde_json::to_value(&config)?;
+    Ok(PolicyContext {
+        lineage_id: policy.policy_lineage_id,
+        version_id: policy.policy_version_id,
+        config_digest: composite_config_digest(&config),
+        config,
+        config_json,
+    })
+}
+
+/// Returns the assessment identity for one report-only composite policy.
+///
+/// The prefix keeps report-only evidence out of the enforced legacy digest
+/// fallback. Changing enforcement mode cannot reuse the other mode's row as
+/// deployment authorization. Policy version and effective configuration, not
+/// the catalog bundle pointer, identify this exact assessment.
+pub(crate) fn report_only_composite_assessment_digest(policy: &EffectivePolicy) -> String {
+    format!(
+        "report-only:{}",
+        semantic_digest(&serde_json::json!({
+            "policy_version_id": policy.policy_version_id,
+            "effective_config": policy.effective_config,
+            "effective_mode": "report_only",
+        }))
+    )
+}
+
+/// Selects only the exact report-only assessment group, never legacy enforce evidence.
+pub(crate) fn select_report_only_assessment_set(
+    policy: &PolicyContext,
+    digest: &str,
+    assessments: &[PersistedAssessmentIdentity],
+    rules: &[PersistedRuleIdentity],
+) -> Option<Vec<Uuid>> {
+    let group = assessments
+        .iter()
+        .filter(|assessment| assessment.effective_set_digest == digest)
+        .collect::<Vec<_>>();
+    assessment_group_matches(std::slice::from_ref(policy), &group, rules)
+}
+
+/// Selects current exact composite evidence for remediation, not deployment.
+///
+/// Report-only evidence must match its own mode-bound digest. Enforced evidence
+/// retains the existing canonical and structurally exact legacy compatibility.
+///
+/// # Errors
+///
+/// Returns an error if the current composite configuration is invalid.
+pub(crate) fn select_current_remediation_assessments(
+    resolved: &EffectivePolicySet,
+    policy: &EffectivePolicy,
+    assessments: &[PersistedAssessmentIdentity],
+    rules: &[PersistedRuleIdentity],
+) -> Result<Option<Vec<Uuid>>> {
+    if policy.policy_type != "composite" {
+        return Ok(None);
+    }
+    match policy.effective_mode {
+        AssignmentMode::ReportOnly => {
+            let context = composite_policy_context(policy)?;
+            let digest = report_only_composite_assessment_digest(policy);
+            Ok(select_report_only_assessment_set(
+                &context,
+                &digest,
+                assessments,
+                rules,
+            ))
+        }
+        AssignmentMode::Enforce => {
+            let contexts = policy_contexts(resolved)?;
+            Ok(select_compatible_assessment_set(
+                &contexts,
+                &enforce_composite_authorization_digest(resolved),
+                assessments,
+                rules,
+            )
+            .map(|set| set.ids().to_vec()))
+        }
+    }
+}
+
+/// Checks whether an assessment was created under every current authoritative
+/// assignment snapshot contributing to a policy. Call this after structural
+/// selection, inside the same transaction used to resolve the policy and read
+/// the assessment. A missing or replaced snapshot fails closed; direct legacy
+/// policies have no assignment epoch to check. Scan and aggregate updates do
+/// not refresh the assessment's creation time.
+///
+/// # Errors
+///
+/// Returns an error if the assessment or assignment epochs cannot be read.
+pub(crate) async fn assessment_matches_current_assignment_epoch_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    policy: &EffectivePolicy,
+    assessment_id: Uuid,
+) -> Result<bool> {
+    let assignment_ids = policy
+        .provenance
+        .iter()
+        .filter(|source| source.authoritative)
+        .filter_map(|source| source.assignment_id)
+        .collect::<BTreeSet<_>>();
+    let assignment_ids = assignment_ids.into_iter().collect::<Vec<_>>();
+    let assessment_created_at: Option<DateTime<Utc>> = sqlx::query_scalar(
+        r#"
+        SELECT assessment.created_at
+        FROM composite_policy_assessments assessment
+        WHERE assessment.id = $1
+          AND assessment.policy_version_id = $2
+          AND assessment.policy_lineage_id = $3
+        "#,
+    )
+    .bind(assessment_id)
+    .bind(policy.policy_version_id)
+    .bind(policy.policy_lineage_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(assessment_created_at) = assessment_created_at else {
+        return Ok(false);
+    };
+    // CONCURRENCY: Keep the authoritative snapshot pointers stable until the
+    // authorization transaction commits; mode changes update these rows.
+    let snapshots: Vec<(Uuid, DateTime<Utc>)> = sqlx::query_as(
+        r#"
+        SELECT assignment.id, snapshot.created_at
+        FROM compliance_bundle_assignments assignment
+        JOIN compliance_bundle_assignment_versions snapshot
+          ON snapshot.id = assignment.current_version_id
+         AND snapshot.assignment_id = assignment.id
+        WHERE assignment.id = ANY($1) AND assignment.active
+        ORDER BY assignment.id
+        FOR SHARE OF assignment
+        "#,
+    )
+    .bind(&assignment_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(snapshots.len() == assignment_ids.len()
+        && snapshots
+            .iter()
+            .all(|(_, created_at)| assessment_created_at >= *created_at))
 }
 
 fn valid_semantic_digest(digest: &str) -> bool {
@@ -806,8 +944,14 @@ pub(crate) fn select_compatible_assessment_set(
 /// report-only and non-composite assignments cannot stale enforced assessment
 /// evidence.
 pub(crate) fn enforce_composite_authorization_digest(resolved: &EffectivePolicySet) -> String {
-    let mut policies = resolved
-        .policies
+    enforce_composite_digest_for_policies(&resolved.policies)
+}
+
+/// Returns the enforced-composite assessment identity for a resolved policy set.
+///
+/// Report-only policies never participate in deployment authorization.
+pub(crate) fn enforce_composite_digest_for_policies(policies: &[EffectivePolicy]) -> String {
+    let mut policies = policies
         .iter()
         .filter(|policy| {
             policy.policy_type == "composite"
@@ -1282,6 +1426,8 @@ async fn recompute_aggregates(
 /// Persists the complete ordered assessment and evaluation-phase outcomes in
 /// the caller's evaluation transaction. Assessment creation is intentionally
 /// private to validated lifecycle hooks and final authorization never creates it.
+/// Both enforce and report-only policies receive exact assessments. Only the
+/// enforced group participates in deployment authorization.
 ///
 /// # Errors
 ///
@@ -1295,31 +1441,55 @@ pub async fn persist_evaluation_assessments_in_tx(
     policy_results: &serde_json::Value,
     resolved: &EffectivePolicySet,
 ) -> Result<()> {
-    let policies = policy_contexts(resolved)?;
+    let enforced_policies = policy_contexts(resolved)?;
     let authorization_digest = enforce_composite_authorization_digest(resolved);
+    let mut groups = vec![(authorization_digest, enforced_policies)];
+    for policy in resolved.policies.iter().filter(|policy| {
+        policy.policy_type == "composite"
+            && matches!(policy.effective_mode, AssignmentMode::ReportOnly)
+    }) {
+        groups.push((
+            report_only_composite_assessment_digest(policy),
+            vec![composite_policy_context(policy)?],
+        ));
+    }
     // CONCURRENCY: Assessment triggers acquire per-finding keys. Acquire the
     // system sentinel first so trigger locks preserve the global lock order.
     lock_poam_system_key_tx(tx, system_id).await?;
+    // Preserve assessments under other mode/configuration digests when an
+    // assignment changes. Reset only the groups being freshly evaluated so
+    // deployment-phase results from an earlier evaluation cannot be reused.
+    let current_digests = groups
+        .iter()
+        .map(|(digest, _)| digest.clone())
+        .collect::<Vec<_>>();
     sqlx::query(
-        "DELETE FROM composite_policy_assessments WHERE system_id = $1 AND derivation_id = $2",
+        "DELETE FROM composite_policy_assessments WHERE system_id = $1 AND derivation_id = $2 AND effective_set_digest = ANY($3)",
     )
     .bind(system_id)
     .bind(derivation_id)
+    .bind(&current_digests)
     .execute(&mut **tx)
     .await?;
-    let assessments = upsert_assessments_with_placeholders(
-        tx,
-        system_id,
-        derivation_id,
-        target_store_path,
-        &authorization_digest,
-        &policies,
-    )
-    .await?;
+    let mut assessments = Vec::new();
+    for (digest, policies) in &groups {
+        assessments.extend(
+            upsert_assessments_with_placeholders(
+                tx,
+                system_id,
+                derivation_id,
+                target_store_path,
+                digest,
+                policies,
+            )
+            .await?,
+        );
+    }
     let mut rows = Vec::new();
     for (assessment_id, version_id) in &assessments {
-        let policy = policies
+        let policy = groups
             .iter()
+            .flat_map(|(_, policies)| policies)
             .find(|policy| policy.version_id == *version_id)
             .context("assessment policy context disappeared")?;
         for outcome in evaluation_outcomes(*version_id, &policy.config, policy_results) {
@@ -1338,8 +1508,9 @@ pub async fn persist_evaluation_assessments_in_tx(
     if let Some(scan) = latest_scan.as_ref() {
         let mut scan_rows = Vec::new();
         for (assessment_id, version_id) in &assessments {
-            let policy = policies
+            let policy = groups
                 .iter()
+                .flat_map(|(_, policies)| policies)
                 .find(|policy| policy.version_id == *version_id)
                 .context("assessment policy context disappeared")?;
             for (ordinal, rule) in policy.config.rules.iter().enumerate() {
@@ -2098,6 +2269,20 @@ async fn authorize_target_at(
                 .iter()
                 .find(|policy| policy.version_id == assessment.policy_version_id)
                 .context("Assessment references a non-effective policy version")?;
+            let effective_policy = resolved
+                .policies
+                .iter()
+                .find(|candidate| candidate.policy_version_id == policy.version_id)
+                .context("Enforced assessment has no resolved policy")?;
+            if !assessment_matches_current_assignment_epoch_in_tx(
+                &mut tx,
+                effective_policy,
+                *assessment_id,
+            )
+            .await?
+            {
+                bail!("Exact current composite assessment predates its assignment snapshot");
+            }
             configs_by_assessment.insert(*assessment_id, &policy.config);
         }
     }

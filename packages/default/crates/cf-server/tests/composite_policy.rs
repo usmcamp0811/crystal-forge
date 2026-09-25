@@ -7,7 +7,7 @@ use crystal_forge::compliance::interchange::{
     CANONICALIZATION_VERSION, DIGEST_ALGORITHM, InterchangeLimits,
 };
 use crystal_forge::compliance::resolver::{
-    EffectivePolicySet, ResolutionOutcome, resolve_system_effective_policies,
+    AssignmentMode, EffectivePolicySet, ResolutionOutcome, resolve_system_effective_policies,
 };
 use crystal_forge::compliance::xccdf::export_models::{XccdfBundleExport, XccdfPolicyExport};
 use crystal_forge::compliance::xccdf::importer::validate_cf_native_document;
@@ -18,6 +18,7 @@ use crystal_forge::models::deployment_policies::{
     DeploymentPolicy, EnforcementOutcome, EnforcementPhase, PolicyCheckResult,
     UpdateDeploymentPolicyRequest, composite_rule_result_key, policy_results_json,
 };
+use crystal_forge::queries::compliance::{get_system_evidence, list_system_bundles};
 use crystal_forge::queries::cve_scans::{
     CreateCveScanOutcome, CveScanExecutionClaim, acknowledge_revoked_cve_scan_execution,
     claim_queued_cve_scans, complete_cve_scan_for_execution, create_cve_scan,
@@ -44,6 +45,7 @@ use crystal_forge::services::composite_enforcement::{
     initialize_eval_passed_attempt, persist_eval_passed_for_system_in_tx,
     persist_evaluation_assessments_in_tx,
 };
+use crystal_forge::services::poam::{self as poam_service, PoamActor, SystemClock};
 use sqlx::PgPool;
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -1398,6 +1400,842 @@ async fn assign_existing_policy_through_bundle(
         .await
         .unwrap();
     assignment_id
+}
+
+async fn switch_assignment_mode(pool: &PgPool, assignment_id: Uuid, mode: &str) {
+    let (bundle_version_id, previous_id, version_number): (Uuid, Uuid, i64) = sqlx::query_as(
+        r#"SELECT assignment.bundle_version_id, assignment.current_version_id,
+                  snapshot.version_number
+           FROM compliance_bundle_assignments assignment
+           JOIN compliance_bundle_assignment_versions snapshot
+             ON snapshot.id = assignment.current_version_id
+           WHERE assignment.id = $1"#,
+    )
+    .bind(assignment_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let snapshot_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO compliance_bundle_assignment_versions
+             (assignment_id, previous_version_id, version_number, bundle_version_id,
+              enforcement_mode, assignment_overlay_digest)
+           VALUES ($1, $2, $3, $4, $5, 'mode-transition') RETURNING id"#,
+    )
+    .bind(assignment_id)
+    .bind(previous_id)
+    .bind(version_number + 1)
+    .bind(bundle_version_id)
+    .bind(mode)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE compliance_bundle_assignments SET current_version_id = $1, enforcement_mode = $2 WHERE id = $3",
+    )
+    .bind(snapshot_id)
+    .bind(mode)
+    .bind(assignment_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn resolve_assessment_context(pool: &PgPool, context: &mut AssessmentContext) {
+    context.resolved = match resolve_system_effective_policies(pool, context.system_id)
+        .await
+        .unwrap()
+    {
+        ResolutionOutcome::Resolved(resolved) => resolved,
+        ResolutionOutcome::Conflict(conflicts) => panic!("unexpected conflict: {conflicts:?}"),
+    };
+}
+
+fn evaluation_scan_config() -> CompositePolicyConfig {
+    let mut config = phase_config();
+    config.rules.pop();
+    config
+}
+
+async fn report_only_context(pool: &PgPool) -> (AssessmentContext, Uuid) {
+    let mut context = assessment_context_with_config(pool, evaluation_scan_config()).await;
+    let assignment_id =
+        assign_existing_policy_through_bundle(pool, context.system_id, context.version_id).await;
+    let policy_id: Uuid =
+        sqlx::query_scalar("SELECT policy_id FROM deployment_policy_versions WHERE id = $1")
+            .bind(context.version_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    sqlx::query("DELETE FROM system_policies WHERE system_id = $1 AND policy_id = $2")
+        .bind(context.system_id)
+        .bind(policy_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    switch_assignment_mode(pool, assignment_id, "report_only").await;
+    resolve_assessment_context(pool, &mut context).await;
+    assert_eq!(context.resolved.policies.len(), 1);
+    assert_eq!(
+        context.resolved.policies[0].effective_mode,
+        AssignmentMode::ReportOnly
+    );
+    (context, assignment_id)
+}
+
+async fn persist_report_only_evaluation(
+    pool: &PgPool,
+    context: &AssessmentContext,
+    outcome: EnforcementOutcome,
+) {
+    let mut tx = pool.begin().await.unwrap();
+    persist_evaluation_assessments_in_tx(
+        &mut tx,
+        context.system_id,
+        context.derivation_id,
+        &context.store_path,
+        &policy_results(context.version_id, &evaluation_scan_config(), outcome),
+        &context.resolved,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
+
+async fn environment_for_composite(pool: &PgPool, context: &AssessmentContext) -> Uuid {
+    let environment_id: Uuid =
+        sqlx::query_scalar("INSERT INTO environments(name) VALUES($1) RETURNING id")
+            .bind(format!("composite-env-{}", Uuid::new_v4()))
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE systems SET environment_id = $1 WHERE id = $2")
+        .bind(environment_id)
+        .bind(context.system_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    let hostname: String = sqlx::query_scalar("SELECT hostname FROM systems WHERE id = $1")
+        .bind(context.system_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO system_states(hostname,change_reason,store_path) VALUES($1,'startup',$2)",
+    )
+    .bind(hostname)
+    .bind(&context.store_path)
+    .execute(pool)
+    .await
+    .unwrap();
+    environment_id
+}
+
+async fn assign_composite_environment(
+    pool: &PgPool,
+    bundle_id: Uuid,
+    bundle_version_id: Uuid,
+    environment_id: Uuid,
+    mode: &str,
+) {
+    let assignment_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO compliance_bundle_assignments (bundle_id,bundle_version_id,environment_id,scope_type,active,enforcement_mode,assignment_overlay_digest) VALUES ($1,$2,$3,'environment',true,$4,'environment-composite') RETURNING id",
+    )
+    .bind(bundle_id)
+    .bind(bundle_version_id)
+    .bind(environment_id)
+    .bind(mode)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let snapshot_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO compliance_bundle_assignment_versions (assignment_id,version_number,bundle_version_id,enforcement_mode,assignment_overlay_digest) VALUES ($1,1,$2,$3,'environment-composite') RETURNING id",
+    )
+    .bind(assignment_id)
+    .bind(bundle_version_id)
+    .bind(mode)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE compliance_bundle_assignments SET current_version_id = $1 WHERE id = $2")
+        .bind(snapshot_id)
+        .bind(assignment_id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn assert_composite_poam_eligible(pool: &PgPool, assessment_id: Uuid) {
+    let user = insert_user(
+        pool,
+        &format!("composite-env-{}@example.invalid", Uuid::new_v4()),
+        Some("Composite environment operator"),
+    )
+    .await
+    .unwrap();
+    poam_service::compatible_for_assessment(
+        pool,
+        &PoamActor {
+            user_id: user.id,
+            identifier: user.id.to_string(),
+            is_admin: true,
+            can_mutate: true,
+            environment_ids: vec![],
+            request_origin: None,
+        },
+        assessment_id,
+        None,
+        None,
+        None,
+        &SystemClock,
+    )
+    .await
+    .expect("current failing assessment must be eligible for POA&M reuse");
+}
+
+#[sqlx::test]
+async fn equal_bundle_version_environment_modes_preserve_fail_findings_but_only_enforce_blocks(
+    pool: PgPool,
+) {
+    let (mut dev, original_assignment) = report_only_context(&pool).await;
+    let mut prod = assessment_context_with_config(&pool, evaluation_scan_config()).await;
+    let dev_env = environment_for_composite(&pool, &dev).await;
+    let prod_env = environment_for_composite(&pool, &prod).await;
+    let (bundle_id, bundle_version_id): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT bundle_id,bundle_version_id FROM compliance_bundle_assignments WHERE id = $1",
+    )
+    .bind(original_assignment)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE compliance_bundle_assignments SET scope_type='environment',system_id=NULL,environment_id=$1 WHERE id=$2")
+        .bind(dev_env)
+        .bind(original_assignment)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let prod_policy_id: Uuid =
+        sqlx::query_scalar("SELECT policy_id FROM deployment_policy_versions WHERE id=$1")
+            .bind(prod.version_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query("DELETE FROM system_policies WHERE system_id=$1 AND policy_id=$2")
+        .bind(prod.system_id)
+        .bind(prod_policy_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assign_composite_environment(&pool, bundle_id, bundle_version_id, prod_env, "enforce").await;
+    resolve_assessment_context(&pool, &mut dev).await;
+    resolve_assessment_context(&pool, &mut prod).await;
+    for (context, mode) in [
+        (&dev, AssignmentMode::ReportOnly),
+        (&prod, AssignmentMode::Enforce),
+    ] {
+        assert_eq!(context.resolved.policies.len(), 1);
+        assert_eq!(
+            context.resolved.policies[0].policy_version_id,
+            dev.version_id
+        );
+        assert_eq!(context.resolved.policies[0].effective_mode, mode);
+        let mut tx = pool.begin().await.unwrap();
+        persist_evaluation_assessments_in_tx(
+            &mut tx,
+            context.system_id,
+            context.derivation_id,
+            &context.store_path,
+            &policy_results(
+                dev.version_id,
+                &evaluation_scan_config(),
+                EnforcementOutcome::Fail,
+            ),
+            &context.resolved,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let scan_id = completed_scan(&pool, context, 0).await;
+        let (assessment_id, version_id, target, outcome): (Uuid, Uuid, String, String) = sqlx::query_as(
+            "SELECT id,policy_version_id,target_store_path,overall_outcome FROM composite_policy_assessments WHERE system_id=$1",
+        ).bind(context.system_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            (version_id, target, outcome),
+            (dev.version_id, context.store_path.clone(), "fail".into())
+        );
+        let finding_id: Uuid = sqlx::query_scalar(
+            "SELECT f.id FROM poam_findings f JOIN composite_policy_assessments a ON a.system_id=f.system_id AND a.policy_lineage_id=f.policy_lineage_id WHERE a.id=$1",
+        ).bind(assessment_id).fetch_one(&pool).await.unwrap();
+        assert_ne!(finding_id, Uuid::nil());
+        let evidence = get_system_evidence(&pool, bundle_id, context.system_id, None)
+            .await
+            .unwrap()
+            .expect("assigned bundle evidence");
+        assert_eq!(evidence.bundle_version_id, Some(bundle_version_id));
+        let control = evidence
+            .controls
+            .iter()
+            .find(|control| control.composite_result.is_some())
+            .expect("persisted composite result visible on the assigned bundle");
+        assert!(matches!(
+            control.status,
+            crystal_forge::api::models::ComplianceControlStatus::Fail
+        ));
+        assert_eq!(control.finding_id, Some(finding_id));
+        assert_eq!(
+            control.composite_result.as_ref().unwrap().assessment_id,
+            Some(assessment_id)
+        );
+        let system_rollups = list_system_bundles(&pool, context.system_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(system_rollups.bundles.len(), 1);
+        assert_eq!(system_rollups.bundles[0].1.fail, 1);
+        let rules: Vec<(String, String, Option<Uuid>)> = sqlx::query_as(
+            "SELECT phase,outcome,source_scan_id FROM composite_policy_rule_results WHERE assessment_id=$1 ORDER BY ordinal",
+        ).bind(assessment_id).fetch_all(&pool).await.unwrap();
+        assert_eq!(
+            rules,
+            [
+                ("evaluation".into(), "fail".into(), None),
+                ("scan".into(), "pass".into(), Some(scan_id))
+            ]
+        );
+        let authorization = authorize_deployment_at(
+            &pool,
+            context.system_id,
+            context.derivation_id,
+            &context.store_path,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            authorization.outcome,
+            if mode == AssignmentMode::Enforce {
+                EnforcementOutcome::Fail
+            } else {
+                EnforcementOutcome::Pass
+            }
+        );
+        assert_eq!(
+            authorization.assessments,
+            if mode == AssignmentMode::Enforce {
+                vec![assessment_id]
+            } else {
+                vec![]
+            }
+        );
+        assert_composite_poam_eligible(&pool, assessment_id).await;
+    }
+}
+
+#[sqlx::test]
+async fn distinct_bundle_versions_environment_modes_use_only_their_exact_composite_policy(
+    pool: PgPool,
+) {
+    let (mut dev, original_assignment) = report_only_context(&pool).await;
+    let mut prod_config = evaluation_scan_config();
+    prod_config.rules[1].rule = serde_json::from_value(serde_json::json!({
+        "kind": "cve_block", "config": {"severity": "high", "max_allowed": 1}
+    }))
+    .unwrap();
+    let mut prod = assessment_context_with_config(&pool, prod_config.clone()).await;
+    let dev_env = environment_for_composite(&pool, &dev).await;
+    let prod_env = environment_for_composite(&pool, &prod).await;
+    let (bundle_id, v1): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT bundle_id,bundle_version_id FROM compliance_bundle_assignments WHERE id=$1",
+    )
+    .bind(original_assignment)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE compliance_bundle_assignments SET scope_type='environment',system_id=NULL,environment_id=$1 WHERE id=$2")
+        .bind(dev_env).bind(original_assignment).execute(&pool).await.unwrap();
+    let extra_assignment =
+        assign_existing_policy_through_bundle(&pool, prod.system_id, prod.version_id).await;
+    sqlx::query("UPDATE compliance_bundle_assignments SET active=false WHERE id=$1")
+        .bind(extra_assignment)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let prod_policy_id: Uuid =
+        sqlx::query_scalar("SELECT policy_id FROM deployment_policy_versions WHERE id=$1")
+            .bind(prod.version_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query("DELETE FROM system_policies WHERE system_id=$1 AND policy_id=$2")
+        .bind(prod.system_id)
+        .bind(prod_policy_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let v2: Uuid = sqlx::query_scalar(
+        "INSERT INTO compliance_bundle_versions(bundle_id,version,publication_state,name,framework,layer,owner,semantic_digest) VALUES($1,'2.0','draft','composite v2','test','fleet','test','v2-digest') RETURNING id",
+    ).bind(bundle_id).fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO compliance_bundle_version_policies(bundle_version_id,policy_version_id,policy_order) VALUES($1,$2,0)")
+        .bind(v2).bind(prod.version_id).execute(&pool).await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("UPDATE compliance_bundle_versions SET publication_state='accepted',trust_state='trusted',semantic_digest=$2 WHERE id=$1")
+        .bind(v2).bind(format!("distinct-composite-{v2}")).execute(&mut *tx).await.unwrap();
+    sqlx::query("UPDATE compliance_bundles SET current_published_version_id=$1 WHERE id=$2")
+        .bind(v2)
+        .bind(bundle_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    sqlx::query("UPDATE compliance_bundle_assignments SET active=false WHERE id=$1")
+        .bind(original_assignment)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assign_composite_environment(&pool, bundle_id, v2, dev_env, "report_only").await;
+    assign_composite_environment(&pool, bundle_id, v1, prod_env, "enforce").await;
+    let dev_policy_version = dev.version_id;
+    let prod_policy_version = prod.version_id;
+    for (context, version, policy_version, config, mode) in [
+        (
+            &mut dev,
+            v2,
+            prod_policy_version,
+            prod_config.clone(),
+            AssignmentMode::ReportOnly,
+        ),
+        (
+            &mut prod,
+            v1,
+            dev_policy_version,
+            evaluation_scan_config(),
+            AssignmentMode::Enforce,
+        ),
+    ] {
+        resolve_assessment_context(&pool, context).await;
+        assert_eq!(context.resolved.policies.len(), 1);
+        assert_eq!(
+            context.resolved.policies[0].policy_version_id,
+            policy_version
+        );
+        assert_eq!(context.resolved.policies[0].effective_mode, mode);
+        assert_eq!(
+            context.resolved.policies[0].effective_config,
+            serde_json::to_value(&config).unwrap()
+        );
+        let assigned: (Uuid, String) = sqlx::query_as(
+            "SELECT av.bundle_version_id,av.enforcement_mode FROM compliance_bundle_assignments a JOIN compliance_bundle_assignment_versions av ON av.id=a.current_version_id WHERE a.environment_id=(SELECT environment_id FROM systems WHERE id=$1) AND a.bundle_id=$2 AND a.active",
+        ).bind(context.system_id).bind(bundle_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(assigned, (version, mode.as_str().into()));
+        let mut tx = pool.begin().await.unwrap();
+        persist_evaluation_assessments_in_tx(
+            &mut tx,
+            context.system_id,
+            context.derivation_id,
+            &context.store_path,
+            &policy_results(policy_version, &config, EnforcementOutcome::Fail),
+            &context.resolved,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let scan_id = completed_scan(&pool, context, 0).await;
+        let (assessment_id, persisted_version, target, outcome): (Uuid, Uuid, String, String) = sqlx::query_as(
+            "SELECT id,policy_version_id,target_store_path,overall_outcome FROM composite_policy_assessments WHERE system_id=$1",
+        ).bind(context.system_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            (persisted_version, target, outcome),
+            (policy_version, context.store_path.clone(), "fail".into())
+        );
+        let finding_id: Uuid = sqlx::query_scalar(
+            "SELECT f.id FROM poam_findings f JOIN composite_policy_assessments a ON a.system_id=f.system_id AND a.policy_lineage_id=f.policy_lineage_id WHERE a.id=$1",
+        ).bind(assessment_id).fetch_one(&pool).await.unwrap();
+        assert_ne!(finding_id, Uuid::nil());
+        let rules: Vec<(String, String, Option<Uuid>)> = sqlx::query_as(
+            "SELECT phase,outcome,source_scan_id FROM composite_policy_rule_results WHERE assessment_id=$1 ORDER BY ordinal",
+        ).bind(assessment_id).fetch_all(&pool).await.unwrap();
+        assert_eq!(
+            rules,
+            [
+                ("evaluation".into(), "fail".into(), None),
+                ("scan".into(), "pass".into(), Some(scan_id)),
+            ]
+        );
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM composite_policy_assessments WHERE system_id=$1 AND policy_version_id<>$2")
+            .bind(context.system_id).bind(policy_version).fetch_one(&pool).await.unwrap(), 0);
+        let authorization = authorize_deployment_at(
+            &pool,
+            context.system_id,
+            context.derivation_id,
+            &context.store_path,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            authorization.outcome,
+            if mode == AssignmentMode::Enforce {
+                EnforcementOutcome::Fail
+            } else {
+                EnforcementOutcome::Pass
+            }
+        );
+        assert_eq!(
+            authorization.assessments,
+            if mode == AssignmentMode::Enforce {
+                vec![assessment_id]
+            } else {
+                vec![]
+            }
+        );
+        assert_composite_poam_eligible(&pool, assessment_id).await;
+    }
+}
+
+#[sqlx::test]
+async fn report_only_composite_persists_exact_fail_and_pass_without_blocking_target(pool: PgPool) {
+    let (context, _) = report_only_context(&pool).await;
+    for (evaluation, expected) in [
+        (EnforcementOutcome::Fail, "fail"),
+        (EnforcementOutcome::Pass, "pass"),
+    ] {
+        persist_report_only_evaluation(&pool, &context, evaluation).await;
+        let scan_id = completed_scan(&pool, &context, 0).await;
+        let (assessment_id, version_id, target, overall): (Uuid, Uuid, String, String) =
+            sqlx::query_as(
+                "SELECT id, policy_version_id, target_store_path, overall_outcome FROM composite_policy_assessments WHERE system_id = $1",
+            )
+            .bind(context.system_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(version_id, context.version_id);
+        assert_eq!(target, context.store_path);
+        assert_eq!(overall, expected);
+        let rows: Vec<(String, String, Option<Uuid>)> = sqlx::query_as(
+            "SELECT phase, outcome, source_scan_id FROM composite_policy_rule_results WHERE assessment_id = $1 ORDER BY ordinal",
+        )
+        .bind(assessment_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("evaluation".into(), expected.into(), None),
+                ("scan".into(), "pass".into(), Some(scan_id))
+            ]
+        );
+        let authorization = authorize_deployment_at(
+            &pool,
+            context.system_id,
+            context.derivation_id,
+            &context.store_path,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(authorization.outcome, EnforcementOutcome::Pass);
+        assert!(authorization.assessments.is_empty());
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT overall_outcome FROM composite_policy_assessments WHERE id = $1"
+            )
+            .bind(assessment_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            expected
+        );
+    }
+}
+
+#[sqlx::test]
+async fn report_only_mode_switch_preserves_finding_but_requires_fresh_enforce_evidence(
+    pool: PgPool,
+) {
+    let (mut context, assignment_id) = report_only_context(&pool).await;
+    persist_report_only_evaluation(&pool, &context, EnforcementOutcome::Fail).await;
+    completed_scan(&pool, &context, 0).await;
+    let before: (Uuid, Uuid, String) = sqlx::query_as(
+        "SELECT id, policy_lineage_id, overall_outcome FROM composite_policy_assessments WHERE system_id = $1",
+    )
+    .bind(context.system_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(before.2, "fail");
+    let finding_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM poam_findings WHERE system_id = $1 AND policy_lineage_id = $2",
+    )
+    .bind(context.system_id)
+    .bind(before.1)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    switch_assignment_mode(&pool, assignment_id, "enforce").await;
+    resolve_assessment_context(&pool, &mut context).await;
+    assert_eq!(
+        context.resolved.policies[0].effective_mode,
+        AssignmentMode::Enforce
+    );
+    let stale = authorize_deployment_at(
+        &pool,
+        context.system_id,
+        context.derivation_id,
+        &context.store_path,
+        Utc::now(),
+    )
+    .await;
+    assert!(
+        stale.is_err(),
+        "report-only evidence cannot authorize a new enforce mode"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM poam_findings WHERE system_id = $1 AND policy_lineage_id = $2"
+        )
+        .bind(context.system_id)
+        .bind(before.1)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        finding_id
+    );
+
+    persist_report_only_evaluation(&pool, &context, EnforcementOutcome::Pass).await;
+    let enforce = authorize_deployment_at(
+        &pool,
+        context.system_id,
+        context.derivation_id,
+        &context.store_path,
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(enforce.outcome, EnforcementOutcome::Pass);
+    assert_eq!(enforce.assessments.len(), 1);
+    switch_assignment_mode(&pool, assignment_id, "report_only").await;
+    resolve_assessment_context(&pool, &mut context).await;
+    let report = authorize_deployment_at(
+        &pool,
+        context.system_id,
+        context.derivation_id,
+        &context.store_path,
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.outcome, EnforcementOutcome::Pass);
+    assert!(report.assessments.is_empty());
+    assert_eq!(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM poam_findings WHERE system_id = $1 AND policy_lineage_id = $2"
+        )
+        .bind(context.system_id)
+        .bind(before.1)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        finding_id
+    );
+}
+
+#[sqlx::test]
+async fn mode_roundtrip_cannot_reauthorize_historical_pass_without_fresh_evaluation(pool: PgPool) {
+    let (mut context, assignment_id) = report_only_context(&pool).await;
+    switch_assignment_mode(&pool, assignment_id, "enforce").await;
+    resolve_assessment_context(&pool, &mut context).await;
+    persist_report_only_evaluation(&pool, &context, EnforcementOutcome::Pass).await;
+    completed_scan(&pool, &context, 0).await;
+    let original: (Uuid, DateTime<Utc>) = sqlx::query_as(
+        "SELECT id, created_at FROM composite_policy_assessments WHERE system_id = $1",
+    )
+    .bind(context.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        authorize_deployment_at(
+            &pool,
+            context.system_id,
+            context.derivation_id,
+            &context.store_path,
+            Utc::now(),
+        )
+        .await
+        .unwrap()
+        .assessments,
+        vec![original.0]
+    );
+
+    switch_assignment_mode(&pool, assignment_id, "report_only").await;
+    resolve_assessment_context(&pool, &mut context).await;
+    persist_report_only_evaluation(&pool, &context, EnforcementOutcome::Fail).await;
+    switch_assignment_mode(&pool, assignment_id, "enforce").await;
+    resolve_assessment_context(&pool, &mut context).await;
+    let snapshot_created_at: DateTime<Utc> = sqlx::query_scalar(
+        "SELECT snapshot.created_at FROM compliance_bundle_assignments assignment JOIN compliance_bundle_assignment_versions snapshot ON snapshot.id = assignment.current_version_id WHERE assignment.id = $1",
+    )
+    .bind(assignment_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(original.1 < snapshot_created_at);
+    let bundle_id: Uuid =
+        sqlx::query_scalar("SELECT bundle_id FROM compliance_bundle_assignments WHERE id = $1")
+            .bind(assignment_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let stale_evidence = get_system_evidence(&pool, bundle_id, context.system_id, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        stale_evidence
+            .controls
+            .iter()
+            .all(|control| control.composite_result.is_none())
+    );
+    let stale_rollup = list_system_bundles(&pool, context.system_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stale_rollup.bundles[0].1.pass, 0);
+    assert_eq!(stale_rollup.bundles[0].1.not_checked, 1);
+    let stale = authorize_deployment_at(
+        &pool,
+        context.system_id,
+        context.derivation_id,
+        &context.store_path,
+        Utc::now(),
+    )
+    .await;
+    assert!(
+        stale.is_err(),
+        "historical Pass cannot authorize a returned mode"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, DateTime<Utc>>(
+            "SELECT created_at FROM composite_policy_assessments WHERE id = $1"
+        )
+        .bind(original.0)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        original.1,
+        "authorization and scan updates must not renew assessment creation"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM composite_policy_assessments WHERE system_id = $1"
+        )
+        .bind(context.system_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        2,
+        "both mode histories remain available"
+    );
+
+    persist_report_only_evaluation(&pool, &context, EnforcementOutcome::Fail).await;
+    let fresh = authorize_deployment_at(
+        &pool,
+        context.system_id,
+        context.derivation_id,
+        &context.store_path,
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fresh.outcome, EnforcementOutcome::Fail);
+    assert_ne!(fresh.assessments, vec![original.0]);
+    persist_report_only_evaluation(&pool, &context, EnforcementOutcome::Pass).await;
+    let refreshed = authorize_deployment_at(
+        &pool,
+        context.system_id,
+        context.derivation_id,
+        &context.store_path,
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(refreshed.outcome, EnforcementOutcome::Pass);
+    assert_eq!(refreshed.assessments.len(), 1);
+    assert_ne!(refreshed.assessments[0], original.0);
+}
+
+#[sqlx::test]
+async fn mixed_enforce_and_report_only_composites_keep_separate_assessments_and_gate_only_enforce(
+    pool: PgPool,
+) {
+    let (mut context, _) = report_only_context(&pool).await;
+    let enforce_version = add_phase_policy(&pool, context.system_id).await;
+    resolve_assessment_context(&pool, &mut context).await;
+    assert_eq!(context.resolved.policies.len(), 2);
+    assert_eq!(
+        context
+            .resolved
+            .policies
+            .iter()
+            .find(|policy| policy.policy_version_id == context.version_id)
+            .unwrap()
+            .effective_mode,
+        AssignmentMode::ReportOnly
+    );
+    let mut results = policy_results(
+        context.version_id,
+        &evaluation_scan_config(),
+        EnforcementOutcome::Fail,
+    );
+    results["assigned"][enforce_version.to_string()] =
+        policy_results(enforce_version, &phase_config(), EnforcementOutcome::Pass)["assigned"]
+            [enforce_version.to_string()]
+        .clone();
+    let mut tx = pool.begin().await.unwrap();
+    persist_evaluation_assessments_in_tx(
+        &mut tx,
+        context.system_id,
+        context.derivation_id,
+        &context.store_path,
+        &results,
+        &context.resolved,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    completed_scan(&pool, &context, 0).await;
+    let authorization = authorize_deployment_at(
+        &pool,
+        context.system_id,
+        context.derivation_id,
+        &context.store_path,
+        Utc.with_ymd_and_hms(2026, 8, 24, 12, 0, 0).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(authorization.outcome, EnforcementOutcome::Pass);
+    assert_eq!(authorization.assessments.len(), 1);
+    let assessments: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
+        "SELECT id, policy_version_id, overall_outcome FROM composite_policy_assessments WHERE system_id = $1 ORDER BY policy_version_id",
+    )
+    .bind(context.system_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(assessments.len(), 2);
+    assert_eq!(
+        assessments
+            .iter()
+            .find(|row| row.1 == context.version_id)
+            .unwrap()
+            .2,
+        "fail"
+    );
+    let enforce = assessments
+        .iter()
+        .find(|row| row.1 == enforce_version)
+        .unwrap();
+    assert_eq!(enforce.2, "pass");
+    assert_eq!(authorization.assessments, vec![enforce.0]);
 }
 
 async fn add_report_only_non_composite_assignment(pool: &PgPool, system_id: Uuid) {

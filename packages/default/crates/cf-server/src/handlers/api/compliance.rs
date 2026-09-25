@@ -3543,6 +3543,9 @@ pub async fn get_system_effective_policies(
                 &system,
                 &set.policies,
                 &set.effective_set_digest,
+                &crate::services::composite_enforcement::enforce_composite_authorization_digest(
+                    &set,
+                ),
                 assignment_status,
             )
             .await

@@ -191,6 +191,18 @@ inactive assignment history is not authority. With `?version_id=<uuid>`, the
 request inspects precisely that version only when the system's effective
 assignment targets it. It does not substitute the global catalog version.
 
+`report_only` changes deployment enforcement, not compliance evidence or
+remediation. A composite policy in either mode produces an exact-target
+assessment and ordered rule results. A failing report-only assessment remains
+FAIL and can support the same stable finding, waiver, POA&M creation/linking,
+and verification as an enforced FAIL. Deployment authorization selects only
+enforced composite assessments. A POA&M does not turn FAIL into PASS. Changing
+assignment mode does not replace the stable finding or erase POA&M history;
+current actions require an assessment for the effective mode and exact target.
+An older assessment does not become current again if the assignment mode
+changes back; currentness also requires evidence created under the active
+assignment snapshot.
+
 `GET /compliance/bundles/:id/systems` without `version_id` remains a
 single-version convenience alias for the bundle's current published (or draft)
 version. It does not combine systems pinned to other versions. The exact
