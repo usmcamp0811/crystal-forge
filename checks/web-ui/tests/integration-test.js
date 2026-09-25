@@ -19481,7 +19481,7 @@ security.audit.enable = true;</fixtext>
             fontWeight: computed.fontWeight, boxSizing: computed.boxSizing };
         };
         return { policyId: button.getAttribute("data-policy-id"), selected: button.getAttribute("aria-current"), row: styles(button), ordinal: styles(ordinal),
-          name: styles(name), status: styles(dot) };
+          name: styles(name), status: styles(dot), focusShadow: getComputedStyle(button).boxShadow };
       }));
       const assertAligned = (snapshot, label) => {
         const nameX = snapshot.map((entry) => entry.name.x);
@@ -19509,6 +19509,10 @@ security.audit.enable = true;</fixtext>
       console.log(`COMPLIANCE_CONTROL_RAIL_BEFORE ${JSON.stringify(before)}`);
       await captureWorkflowViewportState(page, "29n-compliance-evidence-control-rail-alignment", "selected-control-01", "narrowDesktop");
       assertAligned(before, "initial selected control");
+      await rowFor(policyIds[2]).focus();
+      const focused = await collectGeometry();
+      assertSameRowGeometry(before[2], focused[2], "keyboard focus on control 03");
+      await rowFor(policyIds[0]).click();
       const selectionStates = [before];
       for (let index = 1; index < policyIds.length; index += 1) {
         await rowFor(policyIds[index]).click();
