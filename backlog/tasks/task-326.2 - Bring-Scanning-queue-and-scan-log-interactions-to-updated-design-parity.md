@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@Matt Camp'
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-23 13:53'
+updated_date: '2026-09-25 14:45'
 labels:
   - scanning
   - web-ui
@@ -313,6 +313,8 @@ P0 migration-0275 repair committed and pushed as `130c472c1a34a6c8c6b95190c8672e
 2026-09-23 authoritative browser command was attempted: `CF_UI_TEST_STEPS='12ha-system-detail-cve-inventory-fallbacks,28-system-hardening-tab' nix build --impure 'path:.#checks.x86_64-linux.web-ui' --no-link -L`. It did not reach either requested workflow because shared `crystal-forge-design-targets` failed at TASK-440's unchanged Config Explorer locator `.cfgx`.getByText('TARGET', { exact: true }) in all four dark/light wide/narrow captures (50/54 targets rendered). The same known external blocker remains; do not claim browser workflows passed. Final diff check remains clean.
 
 2026-09-23 committed and pushed System Detail revision-default work as `58006084` (`TASK-326.2: Default revision scope from candidates`) to MR !329. The worktree is clean and local/remote branch heads match. Required VM browser workflows remain blocked by the documented TASK-440 shared design-target failure; task remains In Progress.
+
+Owner-approved TASK-326.2.2 post-build recovery rule (2026-09-25): Post-build scanning is an event-driven obligation with a bounded recovery window (default 168h from successful build_jobs.completed_at). Scheduled scanning is an independent freshness mechanism. A missed persisted post-build obligation becomes terminal after that window and is never automatically retried through post-build; periodic and explicit exact scans may still produce later evidence. Ancient pre-contract successful builds without intent must not generate synthetic terminal rows. Operational Failed excludes archived terminal failures and out-of-scope ancient superseded targets; Never scanned and Coverage use currently deployed, recent recoverable builds and active scan obligations with completed evidence only. In same TASK-326.2.2 worktree/MR !329; no SC2 or owner database writes.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
