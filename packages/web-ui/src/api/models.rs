@@ -2754,10 +2754,19 @@ pub struct SystemComplianceBundlesResponse {
     pub bundles: Vec<SystemComplianceBundle>,
 }
 
+/// Gives one bundle lineage and the server-resolved assignment for this system.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemComplianceBundle {
+    /// Contains catalog metadata, not the selected assignment revision.
     pub bundle: ComplianceBundleSummary,
+    /// Contains this system's effective policy outcomes.
     pub rollup: ComplianceSystemRollup,
+    /// Identifies the selected immutable assignment's bundle version, when supplied.
+    #[serde(default)]
+    pub assigned_bundle_version_id: Option<Uuid>,
+    /// Gives the selected assignment's enforce or report-only mode, when supplied.
+    #[serde(default)]
+    pub assignment_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

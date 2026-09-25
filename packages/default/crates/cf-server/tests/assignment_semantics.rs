@@ -14,8 +14,12 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crystal_forge::compliance::resolver::{
+    AssignmentMode, ResolutionOutcome, resolve_system_effective_policies,
+};
 use crystal_forge::queries::compliance::{
-    determine_assignment_status_for_system, list_bundle_systems_for_version,
+    determine_assignment_status_for_system, get_system_evidence, list_bundle_systems,
+    list_bundle_systems_for_version, list_bundles, list_system_bundles,
     load_assignment_metadata_for_systems,
 };
 
@@ -518,19 +522,37 @@ async fn create_environment_assignment(
     bundle_version_id: Uuid,
     environment_id: Uuid,
 ) {
+    create_environment_assignment_with_mode(
+        pool,
+        bundle_id,
+        bundle_version_id,
+        environment_id,
+        "enforce",
+    )
+    .await;
+}
+
+async fn create_environment_assignment_with_mode(
+    pool: &PgPool,
+    bundle_id: Uuid,
+    bundle_version_id: Uuid,
+    environment_id: Uuid,
+    mode: &str,
+) -> (Uuid, Uuid) {
     // Create the assignment lineage row
     let assignment_id = Uuid::new_v4();
     sqlx::query(
         r#"INSERT INTO compliance_bundle_assignments
-           (id, bundle_id, bundle_version_id, environment_id, scope_type, active,
-            assignment_overlay_digest, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, 'environment', true, 'test-digest',
-                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
+            (id, bundle_id, bundle_version_id, environment_id, scope_type, active,
+             enforcement_mode, assignment_overlay_digest, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, 'environment', true, $5, 'test-digest',
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"#,
     )
     .bind(assignment_id)
     .bind(bundle_id)
     .bind(bundle_version_id)
     .bind(environment_id)
+    .bind(mode)
     .execute(pool)
     .await
     .expect("create environment assignment");
@@ -541,11 +563,12 @@ async fn create_environment_assignment(
         r#"INSERT INTO compliance_bundle_assignment_versions
            (id, assignment_id, version_number, bundle_version_id, enforcement_mode,
             assignment_overlay_digest, created_at)
-           VALUES ($1, $2, 1, $3, 'enforce', 'test-digest', CURRENT_TIMESTAMP)"#,
+             VALUES ($1, $2, 1, $3, $4, 'test-digest', CURRENT_TIMESTAMP)"#,
     )
     .bind(version_id)
     .bind(assignment_id)
     .bind(bundle_version_id)
+    .bind(mode)
     .execute(pool)
     .await
     .expect("create assignment version");
@@ -557,6 +580,318 @@ async fn create_environment_assignment(
         .execute(pool)
         .await
         .expect("set current_version_id");
+    (assignment_id, version_id)
+}
+
+async fn accepted_cve_policy(pool: &PgPool, name: &str, strict: bool) -> (Uuid, Uuid) {
+    let policy_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO deployment_policies (name, policy_type, config, enabled) \
+         VALUES ($1, 'require_cve_check', $2, true) RETURNING id",
+    )
+    .bind(name)
+    .bind(serde_json::json!({ "strict": strict, "max_critical": "none" }))
+    .fetch_one(pool)
+    .await
+    .expect("create policy lineage");
+    let version_id: Uuid = sqlx::query_scalar(
+        "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+    )
+    .bind(policy_id)
+    .fetch_one(pool)
+    .await
+    .expect("read policy draft version");
+    let mut tx = pool.begin().await.expect("start policy publication");
+    sqlx::query("UPDATE deployment_policies SET current_draft_version_id = NULL WHERE id = $1")
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .expect("clear policy draft");
+    sqlx::query(
+        "UPDATE deployment_policy_versions SET publication_state = 'accepted', \
+         trust_state = 'trusted', implementation_state = 'native', \
+         published_at = CURRENT_TIMESTAMP WHERE id = $1",
+    )
+    .bind(version_id)
+    .execute(&mut *tx)
+    .await
+    .expect("accept trusted policy");
+    sqlx::query("UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2")
+        .bind(version_id)
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .expect("publish policy");
+    tx.commit().await.expect("commit policy publication");
+    (policy_id, version_id)
+}
+
+async fn accept_bundle_with_member(
+    pool: &PgPool,
+    bundle_id: Uuid,
+    bundle_version_id: Uuid,
+    policy_version_id: Uuid,
+) {
+    sqlx::query(
+        "INSERT INTO compliance_bundle_version_policies \
+         (bundle_version_id, policy_version_id, policy_order) VALUES ($1, $2, 0)",
+    )
+    .bind(bundle_version_id)
+    .bind(policy_version_id)
+    .execute(pool)
+    .await
+    .expect("add selected policy member");
+    let mut tx = pool.begin().await.expect("start bundle publication");
+    sqlx::query("UPDATE compliance_bundles SET current_draft_version_id = NULL WHERE id = $1")
+        .bind(bundle_id)
+        .execute(&mut *tx)
+        .await
+        .expect("clear bundle draft");
+    sqlx::query(
+        "UPDATE compliance_bundle_versions SET publication_state = 'accepted', \
+         trust_state = 'trusted', semantic_digest = 'test-digest', \
+         published_at = CURRENT_TIMESTAMP WHERE id = $1",
+    )
+    .bind(bundle_version_id)
+    .execute(&mut *tx)
+    .await
+    .expect("accept trusted bundle version");
+    sqlx::query("UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2")
+        .bind(bundle_version_id)
+        .bind(bundle_id)
+        .execute(&mut *tx)
+        .await
+        .expect("select catalog version");
+    tx.commit().await.expect("commit bundle publication");
+}
+
+#[sqlx::test]
+async fn environment_assignments_keep_distinct_versions_modes_and_overlays(pool: PgPool) {
+    let bundle_id = create_bundle(&pool, "shared-assignment-versions", "NIST CSF").await;
+    let v1 = create_bundle_version(&pool, bundle_id, "v1", "draft", "ATA baseline").await;
+    let v2 = create_bundle_version(&pool, bundle_id, "v2", "draft", "LAN baseline").await;
+    let (policy_a, policy_v1) = accepted_cve_policy(&pool, "ATA-only-CVE", false).await;
+    let (policy_b, policy_v2) = accepted_cve_policy(&pool, "LAN-only-CVE", true).await;
+    accept_bundle_with_member(&pool, bundle_id, v1, policy_v1).await;
+    accept_bundle_with_member(&pool, bundle_id, v2, policy_v2).await;
+
+    let ata = create_environment(&pool, "ATA").await;
+    let lan = create_environment(&pool, "LAN").await;
+    let unassigned = create_environment(&pool, "NO-ASSIGNMENT").await;
+    let (ata_lineage, ata_snapshot) =
+        create_environment_assignment_with_mode(&pool, bundle_id, v1, ata, "report_only").await;
+    let (lan_lineage, lan_snapshot) =
+        create_environment_assignment_with_mode(&pool, bundle_id, v2, lan, "enforce").await;
+    let duplicate = sqlx::query(
+        "INSERT INTO compliance_bundle_assignments \
+         (bundle_id, bundle_version_id, environment_id, scope_type, \
+          assignment_overlay_digest) VALUES ($1, $2, $3, 'environment', 'test-digest')",
+    )
+    .bind(bundle_id)
+    .bind(v2)
+    .bind(ata)
+    .execute(&pool)
+    .await
+    .expect_err("one active lineage per bundle and environment");
+    assert_eq!(
+        duplicate
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23505")
+    );
+    for (lineage, snapshot, policy_version, strict) in [
+        (ata_lineage, ata_snapshot, policy_v1, true),
+        (lan_lineage, lan_snapshot, policy_v2, false),
+    ] {
+        sqlx::query(
+            "INSERT INTO compliance_assignment_value_overrides \
+             (assignment_id, assignment_version_id, policy_version_id, value_path, value) \
+             VALUES ($1, $2, $3, 'strict', $4)",
+        )
+        .bind(lineage)
+        .bind(snapshot)
+        .bind(policy_version)
+        .bind(serde_json::json!(strict))
+        .execute(&pool)
+        .await
+        .expect("record immutable assignment overlay");
+    }
+    let host_a = create_system(&pool, "host-a", Some(ata)).await;
+    let host_b = create_system(&pool, "host-b", Some(lan)).await;
+    let host_none = create_system(&pool, "host-none", Some(unassigned)).await;
+
+    for (system_id, expected_version, mode, policy_id, strict) in [
+        (host_a, v1, AssignmentMode::ReportOnly, policy_a, true),
+        (host_b, v2, AssignmentMode::Enforce, policy_b, false),
+    ] {
+        let system = list_system_bundles(&pool, system_id)
+            .await
+            .expect("read System Compliance")
+            .expect("system exists");
+        assert_eq!(system.bundles.len(), 1);
+        assert_eq!(system.bundles[0].0.id, bundle_id);
+        let assigned = &system.assignment_versions[&bundle_id];
+        assert_eq!(assigned.id, expected_version);
+        assert_eq!(assigned.enforcement_mode, mode.as_str());
+        assert_eq!(
+            system.bundles[0].1.report_only,
+            i64::from(mode == AssignmentMode::ReportOnly)
+        );
+        let outcome = resolve_system_effective_policies(&pool, system_id)
+            .await
+            .expect("resolve exact assigned policies");
+        let ResolutionOutcome::Resolved(effective) = outcome else {
+            panic!("valid independent assignment must resolve: {outcome:?}");
+        };
+        assert_eq!(effective.policies.len(), 1);
+        assert_eq!(effective.policies[0].policy_lineage_id, policy_id);
+        assert_eq!(effective.policies[0].effective_mode, mode);
+        assert_eq!(effective.policies[0].effective_config["strict"], strict);
+        let evidence = get_system_evidence(&pool, bundle_id, system_id, None)
+            .await
+            .expect("read unversioned system evidence")
+            .expect("assigned bundle must have evidence");
+        assert_eq!(evidence.bundle_version_id, Some(expected_version));
+        assert_eq!(evidence.controls.len(), 1);
+        assert_eq!(evidence.controls[0].policy_id, policy_id);
+    }
+    assert!(
+        list_system_bundles(&pool, host_none)
+            .await
+            .unwrap()
+            .unwrap()
+            .bundles
+            .is_empty()
+    );
+    assert!(
+        get_system_evidence(&pool, bundle_id, host_none, None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    for (version, included, excluded) in [(v1, host_a, host_b), (v2, host_b, host_a)] {
+        let exact = list_bundle_systems_for_version(&pool, bundle_id, version)
+            .await
+            .expect("read exact version systems")
+            .expect("bundle/version exists");
+        assert_eq!(exact.systems.len(), 1);
+        assert_eq!(exact.systems[0].system_id, included);
+        assert!(exact.systems.iter().all(|row| row.system_id != excluded));
+        assert!(
+            get_system_evidence(&pool, bundle_id, excluded, Some(version))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    let current = list_bundle_systems(&pool, bundle_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.bundle_version_id, Some(v2));
+    assert_eq!(current.systems.len(), 1);
+    assert_eq!(current.systems[0].system_id, host_b);
+    let catalog = list_bundles(&pool).await.unwrap();
+    assert_eq!(
+        catalog
+            .iter()
+            .find(|bundle| bundle.id == bundle_id)
+            .unwrap()
+            .applicable_system_count,
+        1
+    );
+
+    set_current_published(&pool, bundle_id, v1).await;
+    assert_eq!(
+        list_system_bundles(&pool, host_b)
+            .await
+            .unwrap()
+            .unwrap()
+            .assignment_versions[&bundle_id]
+            .id,
+        v2
+    );
+    assert_eq!(
+        get_system_evidence(&pool, bundle_id, host_b, None)
+            .await
+            .unwrap()
+            .unwrap()
+            .bundle_version_id,
+        Some(v2)
+    );
+    for (lineage, snapshot, version) in [
+        (ata_lineage, ata_snapshot, v1),
+        (lan_lineage, lan_snapshot, v2),
+    ] {
+        let saved: (Uuid, Uuid) = sqlx::query_as(
+            "SELECT a.current_version_id, av.bundle_version_id \
+             FROM compliance_bundle_assignments a \
+             JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id \
+             WHERE a.id = $1",
+        )
+        .bind(lineage)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            saved,
+            (snapshot, version),
+            "catalog selection must not retarget assignments"
+        );
+    }
+    let current_v1 = list_bundle_systems(&pool, bundle_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current_v1.bundle_version_id, Some(v1));
+    assert_eq!(current_v1.systems.len(), 1);
+    assert_eq!(current_v1.systems[0].system_id, host_a);
+    set_current_published(&pool, bundle_id, v2).await;
+
+    // An explicit system assignment wins over ATA's v1 scope. The v2 drawer
+    // must include host-a only after that explicit assignment is active.
+    create_system_assignment(&pool, bundle_id, v2, host_a).await;
+    let overridden = list_system_bundles(&pool, host_a).await.unwrap().unwrap();
+    assert_eq!(overridden.assignment_versions[&bundle_id].id, v2);
+    assert_eq!(
+        get_system_evidence(&pool, bundle_id, host_a, None)
+            .await
+            .unwrap()
+            .unwrap()
+            .bundle_version_id,
+        Some(v2)
+    );
+    let v1_systems = list_bundle_systems_for_version(&pool, bundle_id, v1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(v1_systems.systems.iter().all(|row| row.system_id != host_a));
+    let v2_systems = list_bundle_systems_for_version(&pool, bundle_id, v2)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(v2_systems.systems.len(), 2);
+
+    sqlx::query("UPDATE compliance_bundle_assignments SET active = false WHERE id = $1")
+        .bind(lan_lineage)
+        .execute(&pool)
+        .await
+        .expect("retire LAN assignment");
+    assert!(
+        list_system_bundles(&pool, host_b)
+            .await
+            .unwrap()
+            .unwrap()
+            .bundles
+            .is_empty()
+    );
+    assert!(
+        get_system_evidence(&pool, bundle_id, host_b, None)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[sqlx::test]

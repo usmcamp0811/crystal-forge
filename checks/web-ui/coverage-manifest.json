@@ -17,6 +17,7 @@
       "12m-task440-config-explorer-keyboard-wide": { "category": "mock" },
       "12n-task440-config-narrow-keyboard": { "category": "mock" },
       "12ha-system-detail-cve-inventory-fallbacks": { "category": "fixture" },
+      "12hb-system-detail-assignment-versions": { "category": "mock" },
       "13j-task440-flake-states-panes-navigation": { "category": "mock" },
       "14d-task440-cross-surface-auth-navigation": { "category": "mock" },
       "16-cves": { "category": "mock" }
@@ -1075,6 +1076,20 @@
     {
       "name": "12ha-system-detail-cve-inventory-fallbacks",
       "description": "System detail incrementally loads bounded CVE pages and proves Current uses only the running derivation's exact scan",
+      "route": "/systems/:id",
+      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "12hb-system-detail-assignment-versions",
+      "description": "System Detail shows each host's assigned bundle revision and enforcement mode instead of the catalog version",
       "route": "/systems/:id",
       "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
       "profiles": [

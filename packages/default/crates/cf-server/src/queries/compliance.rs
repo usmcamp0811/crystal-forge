@@ -2082,6 +2082,31 @@ pub async fn delete_bundle(pool: &PgPool, bundle_id: Uuid) -> Result<BundleDelet
     Ok(BundleDeleteOutcome::Deleted)
 }
 
+/// Lists systems for the bundle lineage's current/default immutable revision.
+///
+/// The response has one `bundle_version_id`. Use
+/// [`list_bundle_systems_for_version`] to inspect assignments to another exact
+/// version. This alias never mixes assigned versions. Without a selected
+/// default revision it returns an empty collection, not lineage-wide data.
+///
+/// # Errors
+///
+/// Returns a database error when the bundle or exact-version read fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// use crystal_forge::queries::compliance::list_bundle_systems;
+/// # async fn example(pool: &sqlx::PgPool, bundle_id: uuid::Uuid) -> anyhow::Result<()> {
+/// let current = list_bundle_systems(pool, bundle_id).await?;
+/// if let Some(current) = current {
+///     let selected_version = current.bundle_version_id;
+///     let assigned_count = current.systems.len();
+///     let _ = (selected_version, assigned_count);
+/// }
+/// # Ok(())
+/// # }
+/// ```
 pub async fn list_bundle_systems(
     pool: &PgPool,
     bundle_id: Uuid,
@@ -2098,20 +2123,14 @@ pub async fn list_bundle_systems(
     {
         return list_bundle_systems_for_version(pool, bundle_id, version_id).await;
     }
-    let policies = list_bundle_policies(pool, bundle_id).await?;
-    let systems = list_applicable_system_rows(pool, bundle_id).await?;
-
-    let mut rollups = Vec::with_capacity(systems.len());
-    for system in systems {
-        rollups.push(system_rollup_with_evidence(pool, system, &policies).await?);
-    }
-    let totals = totals_for_rollups(&rollups);
-
+    // COMPATIBILITY: This alias describes one default immutable revision, not
+    // a union of every active versioned assignment. Without a default it must
+    // not silently substitute mutable lineage membership or mix versions.
     Ok(Some(ComplianceBundleSystemsResponse {
         bundle_id: bundle.id,
         bundle_version_id: None,
-        systems: rollups,
-        totals,
+        systems: Vec::new(),
+        totals: totals_for_rollups(&[]),
     }))
 }
 
@@ -2120,14 +2139,16 @@ async fn list_explicit_bundle_version_system_rows(
     bundle_id: Uuid,
     bundle_version_id: Uuid,
 ) -> Result<Vec<SystemRow>> {
-    // INVARIANT: The immutable current version must belong to the same
-    // assignment lineage. Do not trust a cross-lineage current-version pointer.
+    // INVARIANT: The immutable current version belongs to the assignment
+    // lineage. An active system assignment wins over any environment
+    // assignment for the same bundle, even when its version does not match
+    // the caller's explicit version filter.
     Ok(sqlx::query_as::<_, SystemRow>(
         r#"
         SELECT DISTINCT v.id, v.hostname, v.environment, v.health_status,
                v.critical_cve_count, v.high_cve_count
-        FROM view_system_list v
-        LEFT JOIN environments e ON e.name = v.environment
+         FROM view_system_list v
+         LEFT JOIN environments e ON e.name = v.environment
         JOIN compliance_bundle_assignments a
           ON a.bundle_id = $1 AND a.active
         JOIN compliance_bundle_assignment_versions av
@@ -2136,7 +2157,14 @@ async fn list_explicit_bundle_version_system_rows(
          AND av.bundle_version_id = $2
          AND (
              (a.scope_type = 'system' AND a.system_id = v.id)
-             OR (a.scope_type = 'environment' AND a.environment_id = e.id)
+              OR (a.scope_type = 'environment' AND a.environment_id = e.id
+                  AND NOT EXISTS (
+                      SELECT 1 FROM compliance_bundle_assignments system_assignment
+                      WHERE system_assignment.bundle_id = a.bundle_id
+                        AND system_assignment.scope_type = 'system'
+                        AND system_assignment.system_id = v.id
+                        AND system_assignment.active
+                  ))
          )
         JOIN compliance_bundles b ON b.id = a.bundle_id AND b.id = $1
         ORDER BY v.hostname ASC
@@ -2390,25 +2418,67 @@ pub async fn list_bundle_systems_for_version(
     }))
 }
 
-/// Get all compliance bundles applicable to a specific system with their rollups.
-/// Returns only bundles where the system is in scope (matches environment filter).
-///
-/// This function uses set-based queries to avoid N+1 patterns:
-/// 1. Fetch system once
-/// 2. Fetch all bundles once
-/// 3. Fetch all applicable bundle IDs in one query (using environment filter)
-/// 4. Fetch policies for all applicable bundles in one query
-/// 5. Compute rollups in memory using deterministic logic
-///
-/// All-or-nothing behavior: Database or infrastructure failures fail the entire
-/// request. Individual bundle rollup computation uses pure deterministic logic
-/// with no fallible operations.
-///
-/// Returns None if the system does not exist (caller should return 404).
+/// Holds assigned bundle rollups and their exact system-owned versions.
 pub struct SystemBundleRollups {
+    /// Contains each assigned bundle lineage with its resolved policy rollup.
     pub bundles: Vec<(ComplianceBundleSummary, ComplianceSystemRollup)>,
+    /// Maps each assigned bundle lineage to the version and mode governing this system.
+    pub assignment_versions: HashMap<Uuid, AssignedBundleVersion>,
+    /// Contains the effective legacy direct-policy rollup outside bundles.
     pub direct_rollup: ComplianceSystemRollup,
+    /// Contains the deduplicated effective policy rollup across all sources.
     pub overall_rollup: ComplianceSystemRollup,
+}
+
+/// Identifies the immutable current assignment snapshot governing one bundle.
+#[derive(Debug, Clone)]
+pub struct AssignedBundleVersion {
+    /// Identifies the selected immutable bundle version, not the catalog default.
+    pub id: Uuid,
+    /// Gives the selected bundle version's display label.
+    pub version: String,
+    /// Gives the selected assignment snapshot's enforce or report-only mode.
+    pub enforcement_mode: String,
+}
+
+async fn load_system_assigned_bundles(
+    pool: &PgPool,
+    system_id: Uuid,
+) -> Result<HashMap<Uuid, AssignedBundleVersion>> {
+    // INVARIANT: System scope wins for one bundle, while distinct environments
+    // may retain different versions of the same bundle. Only the active
+    // lineage's own current immutable snapshot supplies version and mode.
+    let rows: Vec<(Uuid, Uuid, String, String)> = sqlx::query_as(
+        r#"SELECT DISTINCT ON (a.bundle_id)
+                   a.bundle_id, av.bundle_version_id, bv.version, av.enforcement_mode
+            FROM systems s
+            JOIN compliance_bundle_assignments a ON a.active
+              AND ((a.scope_type = 'system' AND a.system_id = s.id)
+                OR (a.scope_type = 'environment' AND a.environment_id = s.environment_id))
+            JOIN compliance_bundle_assignment_versions av
+              ON av.id = a.current_version_id AND av.assignment_id = a.id
+            JOIN compliance_bundle_versions bv
+              ON bv.id = av.bundle_version_id AND bv.bundle_id = a.bundle_id
+            WHERE s.id = $1
+            ORDER BY a.bundle_id,
+              CASE a.scope_type WHEN 'system' THEN 0 ELSE 1 END, a.id"#,
+    )
+    .bind(system_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(bundle_id, id, version, enforcement_mode)| {
+            (
+                bundle_id,
+                AssignedBundleVersion {
+                    id,
+                    version,
+                    enforcement_mode,
+                },
+            )
+        })
+        .collect())
 }
 
 fn partition_effective_policies_by_bundle(
@@ -2445,6 +2515,32 @@ fn partition_effective_policies_by_bundle(
     (by_bundle, direct)
 }
 
+/// Returns the active bundles and effective policy rollups for one system.
+///
+/// A system assignment takes precedence over its environment assignment for
+/// the same bundle. Its current immutable assignment snapshot determines the
+/// version and mode; catalog draft/published pointers do not authorize or
+/// retarget it. Returns `None` when the system does not exist.
+///
+/// # Errors
+///
+/// Returns a database error if a source read or rollup fails. No partial
+/// bundle list is returned on failure.
+///
+/// # Examples
+///
+/// ```no_run
+/// use crystal_forge::queries::compliance::list_system_bundles;
+/// # async fn example(pool: &sqlx::PgPool, system: uuid::Uuid) -> anyhow::Result<()> {
+/// if let Some(result) = list_system_bundles(pool, system).await? {
+///     for (bundle, _) in &result.bundles {
+///         let assigned = &result.assignment_versions[&bundle.id];
+///         let _ = (assigned.id, &assigned.enforcement_mode);
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
 pub async fn list_system_bundles(
     pool: &PgPool,
     system_id: Uuid,
@@ -2474,74 +2570,29 @@ pub async fn list_system_bundles(
     // Get all bundles (one query)
     let all_bundles = list_bundles(pool).await?;
 
-    // Determine which bundles apply to this system using set-based query
-    // This replaces N individual applicability checks
-    let applicable_bundle_ids_vec: Vec<Uuid> = if all_bundles.is_empty() {
-        Vec::new()
-    } else {
-        sqlx::query_scalar::<_, Uuid>(
-            r#"
-        SELECT DISTINCT b.id
-        FROM compliance_bundles b
-        LEFT JOIN environments e ON e.name = $2
-        WHERE b.id = ANY($1)
-          AND EXISTS (
-              SELECT 1
-              FROM compliance_bundle_assignments a
-              JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
-              WHERE a.bundle_id = b.id
-                AND av.bundle_version_id = COALESCE(b.current_published_version_id, b.current_draft_version_id)
-                AND a.active
-                AND (
-                    (a.scope_type = 'system' AND a.system_id = $3)
-                    OR (a.scope_type = 'environment' AND a.environment_id = e.id)
-                )
-          )
-        "#,
-        )
-        .bind(all_bundles.iter().map(|b| b.id).collect::<Vec<_>>())
-        .bind(&system.environment)
-        .bind(system.id)
-        .fetch_all(pool)
-        .await?
-    };
-
-    // Convert to HashSet for O(1) membership checks
-    let applicable_bundle_ids: std::collections::HashSet<Uuid> =
-        applicable_bundle_ids_vec.into_iter().collect();
-
-    // Fetch all policies for all applicable bundles in one query
-    // This replaces N individual policy fetches
-    let all_policies = if applicable_bundle_ids.is_empty() {
-        Vec::new()
-    } else {
-        sqlx::query_as::<_, PolicyRow>(
-            r#"
-        SELECT dp.id, cbp.bundle_id, dp.name, dp.description, dp.policy_type, dp.config, dp.enabled
-        FROM compliance_bundle_policies cbp
-        JOIN deployment_policies dp ON dp.id = cbp.policy_id
-        WHERE cbp.bundle_id = ANY($1)
-        ORDER BY cbp.bundle_id, dp.name ASC
-        "#,
-        )
-        .bind(applicable_bundle_ids.iter().copied().collect::<Vec<_>>())
-        .fetch_all(pool)
-        .await?
-    };
-
-    // Group policies by bundle_id for O(1) lookup
-    let mut policies_by_bundle: std::collections::HashMap<Uuid, Vec<PolicyRow>> =
-        std::collections::HashMap::new();
-    for policy in all_policies {
-        policies_by_bundle
-            .entry(policy.bundle_id)
-            .or_insert_with(Vec::new)
-            .push(policy);
-    }
+    let assignment_versions = load_system_assigned_bundles(pool, system_id).await?;
+    let version_ids = assignment_versions
+        .values()
+        .map(|assigned| assigned.id)
+        .collect::<Vec<_>>();
+    // Even a conflicting effective set reports the member count of this
+    // system's assigned version, never mutable lineage/catalog membership.
+    let policy_counts: HashMap<Uuid, i64> = sqlx::query_as::<_, (Uuid, i64)>(
+        r#"SELECT bv.bundle_id, COUNT(*)
+           FROM compliance_bundle_version_policies member
+           JOIN compliance_bundle_versions bv ON bv.id = member.bundle_version_id
+           WHERE member.bundle_version_id = ANY($1) AND member.selected
+           GROUP BY bv.bundle_id"#,
+    )
+    .bind(&version_ids)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect();
 
     let visible_bundles: Vec<ComplianceBundleSummary> = all_bundles
         .into_iter()
-        .filter(|bundle| applicable_bundle_ids.contains(&bundle.id))
+        .filter(|bundle| assignment_versions.contains_key(&bundle.id))
         .collect();
 
     let outcome = resolve_system_effective_policies(pool, system_id).await?;
@@ -2556,9 +2607,7 @@ pub async fn list_system_bundles(
         let bundles = visible_bundles
             .into_iter()
             .map(|bundle| {
-                let total = policies_by_bundle
-                    .get(&bundle.id)
-                    .map_or(0, |policies| policies.len() as i64);
+                let total = policy_counts.get(&bundle.id).copied().unwrap_or(0);
                 (
                     bundle,
                     unresolved_system_rollup(system.clone(), total, &state, None),
@@ -2567,6 +2616,7 @@ pub async fn list_system_bundles(
             .collect();
         return Ok(Some(SystemBundleRollups {
             bundles,
+            assignment_versions,
             direct_rollup: unresolved_system_rollup(system.clone(), 0, &state, None),
             overall_rollup: unresolved_system_rollup(system, 0, &state, None),
         }));
@@ -2653,6 +2703,7 @@ pub async fn list_system_bundles(
 
     Ok(Some(SystemBundleRollups {
         bundles,
+        assignment_versions,
         direct_rollup,
         overall_rollup,
     }))
@@ -2695,59 +2746,87 @@ pub(crate) fn assemble_system_compliance_bundles(
     result
 }
 
+/// Returns evidence for a system's effective assigned bundle version.
+///
+/// Without `bundle_version_id`, the system or environment assignment's
+/// immutable current snapshot selects the exact version. With an explicit
+/// version ID, inspection remains bound to that version. The catalog pointer
+/// never supplies missing assignment authority. Returns `None` for missing
+/// bundles, unassigned systems, and versions not applicable to the system.
+///
+/// This read can materialize stable POA&M finding identities for the returned
+/// policy controls. It does not change assignments or assessment results.
+///
+/// # Errors
+///
+/// Returns a database or effective-evidence resolution error. It does not
+/// return a partial control set on failure.
+///
+/// # Examples
+///
+/// ```no_run
+/// use crystal_forge::queries::compliance::get_system_evidence;
+/// # async fn example(pool: &sqlx::PgPool, bundle: uuid::Uuid, system: uuid::Uuid) -> anyhow::Result<()> {
+/// let evidence = get_system_evidence(pool, bundle, system, None).await?;
+/// if let Some(evidence) = evidence {
+///     assert!(evidence.bundle_version_id.is_some());
+/// }
+/// # Ok(())
+/// # }
+/// ```
 pub async fn get_system_evidence(
     pool: &PgPool,
     bundle_id: Uuid,
     system_id: Uuid,
     bundle_version_id: Option<Uuid>,
 ) -> Result<Option<ComplianceEvidenceResponse>> {
-    let Some(bundle) = find_bundle(pool, bundle_id).await? else {
+    let Some(_bundle) = find_bundle(pool, bundle_id).await? else {
         return Ok(None);
     };
 
-    // Use the same environment predicate as list_applicable_system_rows so that
-    // requesting evidence for a system outside the bundle's environment scope
-    // returns None (→ 404) rather than fabricated out-of-scope compliance data.
-    let system = match bundle_version_id {
-        Some(version_id) => list_explicit_bundle_version_system_rows(pool, bundle_id, version_id)
-            .await?
-            .into_iter()
-            .find(|row| row.id == system_id),
-        None => find_applicable_system_row(pool, bundle_id, system_id).await?,
+    // Unversioned evidence follows the effective system/environment assignment.
+    // Explicit inspection remains bound to exactly the requested version. Never
+    // infer either from a mutable catalog published/draft pointer.
+    let selected_version_id = match bundle_version_id {
+        Some(version_id) => version_id,
+        None => {
+            let assigned = load_system_assigned_bundles(pool, system_id).await?;
+            let Some(version) = assigned.get(&bundle_id) else {
+                return Ok(None);
+            };
+            version.id
+        }
     };
-
+    let system = list_explicit_bundle_version_system_rows(pool, bundle_id, selected_version_id)
+        .await?
+        .into_iter()
+        .find(|row| row.id == system_id);
     let Some(system) = system else {
         return Ok(None);
     };
 
-    let mut policies = match bundle_version_id {
-        Some(version_id) => {
-            let version: Option<(Uuid, String)> = sqlx::query_as(
-                "SELECT bundle_id, framework FROM compliance_bundle_versions WHERE id = $1",
-            )
-            .bind(version_id)
+    let version: Option<(Uuid, String)> =
+        sqlx::query_as("SELECT bundle_id, framework FROM compliance_bundle_versions WHERE id = $1")
+            .bind(selected_version_id)
             .fetch_optional(pool)
             .await?;
-            if version.as_ref().map(|(id, _)| *id) != Some(bundle_id) {
-                return Ok(None);
-            }
-            sqlx::query_as::<_, PolicyRow>(
-                r#"SELECT pv.policy_id AS id, pv.id AS version_id, $2 AS bundle_id, pv.name, pv.description,
-                           pv.policy_type, pv.config, pv.compliance_metadata,
-                          (dp.enabled AND pv.publication_state IN ('accepted', 'deprecated')) AS enabled
-                   FROM compliance_bundle_version_policies cbvp
-                   JOIN deployment_policy_versions pv ON pv.id = cbvp.policy_version_id
-                   JOIN deployment_policies dp ON dp.id = pv.policy_id
-                   WHERE cbvp.bundle_version_id = $1
-                   ORDER BY cbvp.policy_order"#,
-            )
-            .bind(version_id)
-            .bind(bundle_id)
-            .fetch_all(pool)
-            .await?
-        }
-        None => list_bundle_policies(pool, bundle_id).await?,
-    };
+    if version.as_ref().map(|(id, _)| *id) != Some(bundle_id) {
+        return Ok(None);
+    }
+    let mut policies = sqlx::query_as::<_, PolicyRow>(
+        r#"SELECT pv.policy_id AS id, pv.id AS version_id, $2 AS bundle_id, pv.name, pv.description,
+                   pv.policy_type, pv.config, pv.compliance_metadata,
+                   (dp.enabled AND pv.publication_state IN ('accepted', 'deprecated')) AS enabled
+            FROM compliance_bundle_version_policies cbvp
+            JOIN deployment_policy_versions pv ON pv.id = cbvp.policy_version_id
+            JOIN deployment_policies dp ON dp.id = pv.policy_id
+            WHERE cbvp.bundle_version_id = $1 AND cbvp.selected
+            ORDER BY cbvp.policy_order"#,
+    )
+    .bind(selected_version_id)
+    .bind(bundle_id)
+    .fetch_all(pool)
+    .await?;
     let mut resolution_state: Option<String> = None;
     let mut current_effective_set_digest: Option<String> = None;
     let mut current_assessment_digest: Option<String> = None;
@@ -2766,8 +2845,7 @@ pub async fn get_system_evidence(
                 policy.provenance.iter().any(|entry| {
                     entry.authoritative
                         && entry.bundle_id == Some(bundle_id)
-                        && bundle_version_id
-                            .is_none_or(|requested| entry.bundle_version_id == Some(requested))
+                        && entry.bundle_version_id == Some(selected_version_id)
                 })
             })
             .cloned()
@@ -2785,10 +2863,10 @@ pub async fn get_system_evidence(
                 ),
             );
             policies = materialize_effective_policies(pool, &requested_policies).await?;
-        } else if bundle_version_id.is_some() {
+        } else {
             resolution_state = Some("not_applicable".to_string());
         }
-    } else if bundle_version_id.is_some() {
+    } else {
         resolution_state = Some("conflict".to_string());
     }
     let policy_lineage_ids = policies.iter().map(|policy| policy.id).collect::<Vec<_>>();
@@ -2910,116 +2988,13 @@ pub async fn get_system_evidence(
 
     Ok(Some(ComplianceEvidenceResponse {
         bundle_id,
-        bundle_version_id,
-        framework: match bundle_version_id {
-            Some(version_id) => {
-                sqlx::query_scalar("SELECT framework FROM compliance_bundle_versions WHERE id = $1")
-                    .bind(version_id)
-                    .fetch_optional(pool)
-                    .await?
-            }
-            None => Some(bundle.framework),
-        },
+        bundle_version_id: Some(selected_version_id),
+        framework: version.map(|(_, framework)| framework),
         system_id,
         hostname: system.hostname,
         controls,
         resolution_state,
     }))
-}
-
-/// Fetch a single system row only if it is within the bundle's environment scope.
-/// Uses the identical predicate as [`list_applicable_system_rows`] so the two
-/// functions can never diverge in which systems they consider applicable.
-async fn find_applicable_system_row(
-    pool: &PgPool,
-    bundle_id: Uuid,
-    system_id: Uuid,
-) -> Result<Option<SystemRow>> {
-    Ok(sqlx::query_as::<_, SystemRow>(
-        r#"
-        SELECT
-            v.id,
-            v.hostname,
-            v.environment,
-            v.health_status,
-            v.critical_cve_count,
-            v.high_cve_count
-        FROM view_system_list v
-        JOIN compliance_bundle_versions bv
-          ON bv.id = COALESCE(
-              (SELECT current_published_version_id FROM compliance_bundles WHERE id = $1),
-              (SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1)
-          )
-        LEFT JOIN environments e ON e.name = v.environment
-        WHERE v.id = $2
-          AND EXISTS (
-              SELECT 1
-              FROM compliance_bundle_assignments a
-              JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
-              WHERE a.bundle_id = $1
-                AND av.bundle_version_id = bv.id
-                AND a.active
-                AND (
-                    (a.scope_type = 'system' AND a.system_id = v.id)
-                    OR (a.scope_type = 'environment' AND a.environment_id = e.id)
-                )
-          )
-        "#,
-    )
-    .bind(bundle_id)
-    .bind(system_id)
-    .fetch_optional(pool)
-    .await?)
-}
-
-async fn list_bundle_policies(pool: &PgPool, bundle_id: Uuid) -> Result<Vec<PolicyRow>> {
-    Ok(sqlx::query_as::<_, PolicyRow>(
-        r#"
-        SELECT dp.id, dp.name, dp.description, dp.policy_type, dp.config, dp.enabled
-        FROM compliance_bundle_policies cbp
-        JOIN deployment_policies dp ON dp.id = cbp.policy_id
-        WHERE cbp.bundle_id = $1
-        ORDER BY dp.name ASC
-        "#,
-    )
-    .bind(bundle_id)
-    .fetch_all(pool)
-    .await?)
-}
-
-async fn list_applicable_system_rows(pool: &PgPool, bundle_id: Uuid) -> Result<Vec<SystemRow>> {
-    Ok(sqlx::query_as::<_, SystemRow>(
-        r#"
-        SELECT
-            v.id,
-            v.hostname,
-            v.environment,
-            v.health_status,
-            v.critical_cve_count,
-            v.high_cve_count
-        FROM view_system_list v
-        JOIN compliance_bundles b ON b.id = $1
-        JOIN compliance_bundle_versions bv
-          ON bv.id = COALESCE(b.current_published_version_id, b.current_draft_version_id)
-        LEFT JOIN environments e ON e.name = v.environment
-        WHERE EXISTS (
-            SELECT 1
-            FROM compliance_bundle_assignments a
-            JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
-            WHERE a.bundle_id = b.id
-              AND av.bundle_version_id = bv.id
-              AND a.active
-              AND (
-                  (a.scope_type = 'system' AND a.system_id = v.id)
-                  OR (a.scope_type = 'environment' AND a.environment_id = e.id)
-              )
-        )
-        ORDER BY v.hostname ASC
-        "#,
-    )
-    .bind(bundle_id)
-    .fetch_all(pool)
-    .await?)
 }
 
 /// Determine assignment status for a system assigned to a bundle version.
@@ -3440,22 +3415,6 @@ pub(crate) fn system_rollup(
         })
         .collect::<Vec<_>>();
     rollup_from_statuses(system, &statuses, 0, assignment_status)
-}
-
-async fn system_rollup_with_evidence(
-    pool: &PgPool,
-    system: SystemRow,
-    policies: &[PolicyRow],
-) -> Result<ComplianceSystemRollup> {
-    let mut statuses = Vec::with_capacity(policies.len());
-    for policy in policies.iter().cloned() {
-        statuses.push(
-            resolve_control_evidence(pool, &system, policy)
-                .await?
-                .status,
-        );
-    }
-    Ok(rollup_from_statuses(system, &statuses, 0, None))
 }
 
 fn rollup_from_statuses(

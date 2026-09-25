@@ -2925,6 +2925,7 @@ async function routeSystemsWarningData(page, options = {}) {
         body: JSON.stringify({
           ...detail,
           id: requestedId,
+          hostname: options.getHostname?.(requestedId) ?? detail.hostname,
           public_key_fingerprint: publicKeyFingerprint,
         }),
       });
@@ -11291,6 +11292,76 @@ const steps = [
         await triage.getByRole("button", { name: "Close triage editor" }).click();
       } finally {
         removeTask326CurrentCveAuthorityFixture(reconciledFixture);
+      }
+    },
+  },
+  {
+    name: "12hb-system-detail-assignment-versions",
+    description: "System Detail shows each host's assigned bundle revision and enforcement mode instead of the catalog version",
+    action: async (page) => {
+      await suppressOnboardingCoach(page);
+      await routeSystemsWarningData(page, { getHostname: (id) => id.endsWith("a1") ? "host-a" : "host-b" });
+      await page.route("**/api/v1/poams/rollups/systems*", async (route) => {
+        const ids = new URL(route.request().url()).searchParams.get("ids")?.split(",") || [];
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(ids.map((id) => ({
+          scope_id: id, total: 0, active: 0, overdue: 0, awaiting_verification: 0,
+          completed: 0, open_findings: 0, on_poam_findings: 0, no_poam_findings: 0,
+        }))) });
+      });
+      await page.route("**/api/v1/poams?*", async (route) => route.fulfill({
+        status: 200, contentType: "application/json",
+        body: JSON.stringify({ items: [], limit: 100, offset: 0, has_more: false, next_offset: null }),
+      }));
+      const hosts = [
+        { id: "00000000-0000-0000-0000-0000000000a1", version: "v1", mode: "report_only", label: "Report only" },
+        { id: "00000000-0000-0000-0000-0000000000a2", version: "v2", mode: "enforce", label: "Enforce" },
+      ];
+      const bundleId = "00000000-0000-0000-0000-0000000000b1";
+      const versions = Object.fromEntries(hosts.map((host, index) => [
+        host.version,
+        "00000000-0000-0000-0000-0000000000" + (index + 41),
+      ]));
+      const bundle = {
+        id: bundleId, name: "Demo Bundle", framework: "NIST CSF", version: "catalog-lineage",
+        description: null, layer: "fleet", owner: "Platform Security", last_review: null,
+        policy_ids: [], required_envs: [], control_count: 1, environment_count: 2,
+        policy_count: 1, requirement_count: 0, active_assignment_count: 2,
+        current_draft_version_id: null, current_published_version_id: versions.v2,
+        current_draft_version: null, current_published_version: "v2", applicable_system_count: 1,
+        aggregate_score: null,
+        versions: hosts.map((host) => ({
+          id: versions[host.version], bundle_id: bundleId, version: host.version,
+          publication_state: "accepted", trust_state: "trusted", semantic_digest: "test-digest",
+          created_at: "2026-09-24T12:00:00Z", published_at: "2026-09-24T12:00:00Z",
+          derived_from_version_id: null, control_count: 1, is_current_published: host.version === "v2",
+          is_current_draft: false,
+        })),
+      };
+      for (const host of hosts) {
+        await page.route(`**/api/v1/systems/${host.id}/compliance`, async (route) => {
+          const rollup = {
+            system_id: host.id, hostname: `host-${host.version}`, environment: host.version === "v1" ? "ATA" : "LAN",
+            applies: true, total: 1, evaluated_total: 0, pass: 0, warn: 0, fail: 0, waiver: 0,
+            not_checked: 1, not_applicable: 0, error: 0,
+            report_only: host.mode === "report_only" ? 1 : 0, score: 0,
+            resolution_state: "resolved", assignment_status: host.version === "v1" ? "pinned" : "current",
+            assignment_reason: null, assignment_approved_by: null,
+          };
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+            system_id: host.id,
+            bundles: [{ bundle, rollup, assigned_bundle_version_id: versions[host.version], assignment_mode: host.mode }],
+            direct_rollup: rollup, overall_rollup: rollup,
+          }) });
+        });
+      }
+      for (const host of hosts) {
+        await page.goto(`${baseUrl}/systems/${host.id}?tab=compliance`, { timeout: LOAD_TIMEOUT });
+        await page.getByRole("tab", { name: "Compliance" }).first().click();
+        await assertVisible(page.getByText("Demo Bundle", { exact: true }), "Assigned bundle lineage must be visible in System Compliance");
+        await assertVisible(page.getByText(host.version, { exact: true }), `System Compliance must show assigned ${host.version}`);
+        await assertVisible(page.getByText(host.label, { exact: true }), `System Compliance must show ${host.mode} mode`);
+        await assertCount(page.getByText("catalog-lineage", { exact: true }), 0, "Catalog lineage version must not replace assigned revision");
+        await captureWorkflowViewportState(page, "12hb-system-detail-assignment-versions", `assigned-${host.version}`, "desktop");
       }
     },
   },

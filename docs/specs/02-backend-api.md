@@ -172,6 +172,33 @@ concurrent revocation prevents the move. Unknown and unauthorized environments
 use the same not-found behavior for scoped callers. The success body is built
 from the transaction's updated row before commit.
 
+### Compliance bundle assignment scope
+
+`GET /systems/:id/compliance` returns each bundle lineage that has an active
+system or environment assignment for the system. Its per-bundle
+`assigned_bundle_version_id` and `assignment_mode` identify the governing
+immutable assignment snapshot. A system assignment takes precedence over an
+environment assignment for the same bundle. The catalog's
+`current_published_version_id` and `current_draft_version_id` do not control
+system applicability or retarget an existing assignment. The bundle summary's
+catalog version and current-version counts remain catalog metadata; they are
+not the system's assigned version.
+
+`GET /compliance/bundles/:id/systems/:system_id/evidence` without `version_id`
+uses that system's effective active assignment version and its exact policy
+membership and overlays. Without an active assignment, it returns not-found;
+inactive assignment history is not authority. With `?version_id=<uuid>`, the
+request inspects precisely that version only when the system's effective
+assignment targets it. It does not substitute the global catalog version.
+
+`GET /compliance/bundles/:id/systems` without `version_id` remains a
+single-version convenience alias for the bundle's current published (or draft)
+version. It does not combine systems pinned to other versions. The exact
+`?version_id=<uuid>` form lists only systems whose effective assignment targets
+that version. The catalog `applicable_system_count` keeps its current-version
+unit, consistent with the unversioned bundle-systems alias. A lineage-wide
+assigned-system count would need a separately named contract.
+
 ### Query Parameters
 
 ```bash

@@ -2976,10 +2976,19 @@ pub struct SystemComplianceBundlesResponse {
     pub overall_rollup: ComplianceSystemRollup,
 }
 
+/// Gives one bundle lineage and its system-specific effective assignment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemComplianceBundle {
+    /// Contains catalog metadata; its global pointers are not assignment authority.
     pub bundle: ComplianceBundleSummary,
+    /// Contains the effective policy results for this system and bundle.
     pub rollup: ComplianceSystemRollup,
+    /// Identifies the active system/environment assignment's immutable bundle version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_bundle_version_id: Option<uuid::Uuid>,
+    /// Gives the selected assignment snapshot's `enforce` or `report_only` mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignment_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

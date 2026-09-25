@@ -434,10 +434,19 @@ pub async fn get_system_compliance_bundles(
 
     match list_system_bundles(&pool, system_id).await {
         Ok(Some(bundle_rollups)) => {
+            let assignment_versions = bundle_rollups.assignment_versions;
             let bundles = bundle_rollups
                 .bundles
                 .into_iter()
-                .map(|(bundle, rollup)| SystemComplianceBundle { bundle, rollup })
+                .map(|(bundle, rollup)| {
+                    let assigned = assignment_versions.get(&bundle.id);
+                    SystemComplianceBundle {
+                        bundle,
+                        rollup,
+                        assigned_bundle_version_id: assigned.map(|version| version.id),
+                        assignment_mode: assigned.map(|version| version.enforcement_mode.clone()),
+                    }
+                })
                 .collect();
 
             (

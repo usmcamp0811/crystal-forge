@@ -3355,7 +3355,14 @@ fn ComplianceTab(system: SystemDetail, viewer: bool, initial_poam: String) -> El
                         let bundle_id = bd.bundle.id;
                         let bundle_name = bd.bundle.name.clone();
                         let framework = bd.bundle.framework.clone();
-                        let version = bd.bundle.version.clone();
+                        // The catalog version is not the system's assigned version.
+                        // Only the server-issued assignment ID may label this card.
+                        let version = bd
+                            .assigned_bundle_version_id
+                            .and_then(|id| bd.bundle.versions.iter().find(|item| item.id == id))
+                            .map(|item| item.version.clone())
+                            .unwrap_or_else(|| "Assigned revision unavailable".to_string());
+                        let assignment_mode = bd.assignment_mode.as_deref();
                         let owner = bd.bundle.owner.clone();
                         let total = bd.rollup.total;
                         let pass = bd.rollup.pass;
@@ -3376,6 +3383,13 @@ fn ComplianceTab(system: SystemDetail, viewer: bool, initial_poam: String) -> El
                                             span { style: "font-size:15px;font-weight:650;", "{bundle_name}" }
                                             span { class: "chip chip-info", style: "font-size:10px;", "{framework}" }
                                             span { class: "chip chip-unknown", style: "font-size:10px;", "{version}" }
+                                            if let Some(mode) = assignment_mode {
+                                                span { class: "chip chip-neutral", style: "font-size:10px;",
+                                                    if mode == "report_only" { "Report only" }
+                                                    else if mode == "enforce" { "Enforce" }
+                                                    else { "Assignment mode unavailable" }
+                                                }
+                                            }
                                             if fail == 0 {
                                                 span {
                                                     class: "chip chip-healthy",
