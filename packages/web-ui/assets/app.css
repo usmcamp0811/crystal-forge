@@ -7531,6 +7531,59 @@ html[data-theme="light"] .scanning-detail-callout-danger strong { color:#b91c1c;
 .sys-table-dense tbody td { font-variant-numeric: tabular-nums; }
 .sys-table-dense td, .sys-table-dense th { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .compliance-evidence-layout { display: grid; grid-template-columns: minmax(0,260px) minmax(0,1fr); flex: 1; min-height: 0; overflow: hidden; }
+.compliance-evidence-control {
+  appearance: none;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) 8px;
+  align-items: center;
+  column-gap: 8px;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 10px 14px;
+  border: 0;
+  border-left: 3px solid transparent;
+  border-bottom: 1px solid var(--cf-divider);
+  border-radius: 0;
+  background: transparent;
+  color: var(--cf-text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.compliance-evidence-control[aria-current="true"] {
+  border-left-color: var(--cf-brand-purple);
+  background: color-mix(in oklab, var(--cf-brand-purple) 8%, transparent);
+}
+.compliance-evidence-control-ordinal {
+  min-width: 0;
+  color: var(--cf-text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+}
+.compliance-evidence-control-name {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--cf-text-primary);
+  font-size: 12px;
+  font-weight: 400;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.compliance-evidence-control[aria-current="true"] .compliance-evidence-control-name {
+  font-weight: 600;
+}
+.compliance-evidence-control-status {
+  display: block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--status-color);
+}
 .compliance-drawer-expanded { width: min(1280px, 100vw) !important; }
 .composite-outcome-help { max-width: 620px; margin: 3px 0 0; color: var(--cf-text-muted); font-size: 10.5px; line-height: 1.4; }
 .composite-rule-outcome { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--cf-divider); border-radius: 8px; background: var(--cf-subtle-bg); }

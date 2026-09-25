@@ -918,6 +918,8 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                                 div {
                                     button {
                                         class: "focus-ring",
+                                        "data-testid": "evidence-policy-group-toggle",
+                                        "data-group-key": "{key}",
                                         style: "all:unset;cursor:pointer;display:flex;align-items:center;gap:6px;width:100%;box-sizing:border-box;padding:9px 14px 5px;font-size:9.5px;text-transform:uppercase;letter-spacing:0.06em;font-weight:700;color:var(--cf-text-muted);",
                                         onclick: move |_| {
                                             let mut next = collapsed.read().clone();
@@ -944,23 +946,20 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                                                 let is_sel = index == *active_idx.read();
                                                 let dot_color = control_status_color(&control.status);
                                                 let policy_name = control.policy_name.clone();
-                                                rsx! {
-                                                    button {
-                                                        class: "focus-ring",
-                                                        style: if is_sel { "all:unset;cursor:pointer;display:block;padding:10px 14px;width:100%;box-sizing:border-box;border-left:3px solid var(--cf-brand-purple);background:color-mix(in oklab,var(--cf-brand-purple) 8%,transparent);border-bottom:1px solid var(--cf-divider);" } else { "all:unset;cursor:pointer;display:block;padding:10px 14px;width:100%;box-sizing:border-box;border-left:3px solid transparent;background:transparent;border-bottom:1px solid var(--cf-divider);" },
-                                                        "data-testid": "evidence-policy-target",
-                                                        "data-policy-id": "{control.policy_id}",
-                                                        aria_current: if is_sel { "true" } else { "false" },
+                                                    rsx! {
+                                                        button {
+                                                            class: "focus-ring compliance-evidence-control",
+                                                            "data-testid": "evidence-policy-target",
+                                                            "data-policy-id": "{control.policy_id}",
+                                                            aria_current: if is_sel { "true" } else { "false" },
                                                         onclick: move |_| {
                                                             active_idx.set(index);
                                                             props.on_active_policy.call(control.policy_id);
                                                         },
-                                                        div { style: "display:flex;justify-content:space-between;align-items:center;gap:8px;",
-                                                            span { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);", "{index+1:02}" }
-                                                            span { style: "width:8px;height:8px;border-radius:50%;background:{dot_color};" }
+                                                            span { "data-testid": "evidence-policy-ordinal", class: "mono compliance-evidence-control-ordinal", "{index+1:02}" }
+                                                            span { "data-testid": "evidence-policy-name", class: "compliance-evidence-control-name", "{policy_name}" }
+                                                            span { "data-testid": "evidence-policy-status-dot", class: "compliance-evidence-control-status", style: "--status-color:{dot_color};" }
                                                         }
-                                                        div { style: if is_sel { "font-size:12px;color:var(--cf-text-primary);margin-top:4px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" } else { "font-size:12px;color:var(--cf-text-primary);margin-top:4px;font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" }, "{policy_name}" }
-                                                    }
                                                 }
                                             }
                                         }

@@ -19401,6 +19401,174 @@ security.audit.enable = true;</fixtext>
     },
   },
   {
+    name: "29n-compliance-evidence-control-rail-alignment",
+    description: "Compliance evidence control names and ordinals retain fixed horizontal geometry across selection, filtering and CAT group changes",
+    action: async (page) => {
+      await routeStandaloneUiBootstrap(page, "Admin");
+      const bundleId = "29000000-0000-4000-8000-000000000001";
+      const versionId = "29000000-0000-4000-8000-000000000002";
+      const systemId = "29000000-0000-4000-8000-000000000003";
+      const policyIds = [
+        "29000000-0000-4000-8000-000000000011",
+        "29000000-0000-4000-8000-000000000012",
+        "29000000-0000-4000-8000-000000000013",
+      ];
+      const names = ["demo-apps-installed", "test rollout", "require_ssh_key_auth"];
+      const bundle = {
+        id: bundleId, name: "Evidence rail fixture", framework: "DISA STIG", version: "2.0",
+        description: "Control navigation geometry fixture", layer: "fleet", owner: "Platform Security",
+        last_review: null, policy_ids: policyIds, required_envs: [], control_count: 3,
+        environment_count: 1, active_assignment_count: 1, current_draft_version_id: null,
+        current_published_version_id: versionId, current_draft_version: null,
+        current_published_version: "2.0", applicable_system_count: 1, aggregate_score: 33,
+        versions: [{ id: versionId, bundle_id: bundleId, version: "2.0", publication_state: "accepted",
+          trust_state: "trusted", semantic_digest: "alignment-fixture", created_at: "2026-09-25T00:00:00Z",
+          published_at: "2026-09-25T00:00:00Z", derived_from_version_id: null, control_count: 3,
+          is_current_published: true, is_current_draft: false }],
+      };
+      const controls = names.map((policyName, index) => ({
+        policy_id: policyIds[index], policy_name: policyName,
+        status: ["fail", "warn", "pass"][index],
+        severity: ["high", "medium", "low"][index],
+        summary: `${policyName} evidence`, evidence_items: [], framework_mapping: "",
+        control_family: null, finding_id: null, finding_observation: null,
+      }));
+      const totals = { system_count: 1, fully_compliant_count: 0, pass: 1, warn: 1, fail: 1,
+        waiver: 0, total_controls: 3, evaluated_controls: 3, not_checked: 0,
+        not_applicable: 0, error: 0, overall_score: 33 };
+      const systemRollup = { system_id: systemId, hostname: "alignment-host", environment: "Dev",
+        applies: true, total: 3, evaluated_total: 3, pass: 1, warn: 1, fail: 1, waiver: 0,
+        not_checked: 0, not_applicable: 0, error: 0, report_only: 0, score: 33,
+        resolution_state: "resolved", assignment_status: "current" };
+
+      await page.route("**/api/v1/compliance/bundles", async (route) => route.fulfill({
+        status: 200, contentType: "application/json", body: JSON.stringify([bundle]),
+      }));
+      await page.route(`**/api/v1/compliance/bundles/${bundleId}/systems?*`, async (route) => route.fulfill({
+        status: 200, contentType: "application/json",
+        body: JSON.stringify({ bundle_id: bundleId, bundle_version_id: versionId, systems: [systemRollup], totals }),
+      }));
+      await page.route(`**/api/v1/compliance/bundles/${bundleId}/systems/${systemId}/evidence?*`, async (route) => route.fulfill({
+        status: 200, contentType: "application/json",
+        body: JSON.stringify({ bundle_id: bundleId, bundle_version_id: versionId, framework: "DISA STIG",
+          system_id: systemId, hostname: "alignment-host", controls, resolution_state: "resolved" }),
+      }));
+      await page.route(`**/api/v1/systems/${systemId}/compliance-assignments`, async (route) => route.fulfill({
+        status: 200, contentType: "application/json", body: JSON.stringify({ assignments: [] }),
+      }));
+      await page.route("**/api/v1/poams/rollups/bundles*", async (route) => route.fulfill({
+        status: 200, contentType: "application/json", body: "[]",
+      }));
+
+      await page.setViewportSize({ width: 960, height: 768 });
+      await page.goto(`${baseUrl}/compliance?bundle=${bundleId}&version=${versionId}&system=${systemId}&policy=${policyIds[0]}&view=evidence`, { timeout: LOAD_TIMEOUT });
+      const dialog = page.locator("#compliance-evidence-dialog");
+      await dialog.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await dialog.evaluate((element) => Promise.all(element.getAnimations().map((animation) => animation.finished)));
+      const rowFor = (policyId) => dialog.locator(`nav button[data-testid="evidence-policy-target"][data-policy-id="${policyId}"]`);
+      const rows = dialog.locator('nav button[data-testid="evidence-policy-target"]');
+      const collectGeometry = async () => rows.evaluateAll((buttons) => buttons.map((button) => {
+        const name = button.querySelector('[data-testid="evidence-policy-name"]');
+        const ordinal = button.querySelector('[data-testid="evidence-policy-ordinal"]');
+        const dot = button.querySelector('[data-testid="evidence-policy-status-dot"]');
+        const styles = (node) => {
+          const computed = getComputedStyle(node);
+          const rect = node.getBoundingClientRect();
+          return { x: rect.x, width: rect.width, height: rect.height, display: computed.display,
+            gridTemplateColumns: computed.gridTemplateColumns, flexDirection: computed.flexDirection,
+            textAlign: computed.textAlign, justifyContent: computed.justifyContent,
+            alignItems: computed.alignItems, padding: computed.padding, margin: computed.margin,
+            fontWeight: computed.fontWeight, boxSizing: computed.boxSizing };
+        };
+        return { policyId: button.getAttribute("data-policy-id"), selected: button.getAttribute("aria-current"), row: styles(button), ordinal: styles(ordinal),
+          name: styles(name), status: styles(dot) };
+      }));
+      const assertAligned = (snapshot, label) => {
+        const nameX = snapshot.map((entry) => entry.name.x);
+        const ordinalX = snapshot.map((entry) => entry.ordinal.x);
+        const statusX = snapshot.map((entry) => entry.status.x);
+        for (const [column, positions] of [["name", nameX], ["ordinal", ordinalX], ["status", statusX]]) {
+          if (Math.max(...positions) - Math.min(...positions) > 1) {
+            throw new Error(`${label}: ${column} column is not aligned at a stable x coordinate: ${positions}`);
+          }
+        }
+      };
+      const assertSameRowGeometry = (left, right, label) => {
+        for (const key of ["x", "width", "height", "display", "gridTemplateColumns", "textAlign", "justifyContent", "alignItems", "padding", "margin", "boxSizing"]) {
+          if (left.row[key] !== right.row[key]) {
+            throw new Error(`${label}: row geometry property ${key} changed (${left.row[key]} -> ${right.row[key]})`);
+          }
+        }
+        for (const key of ["x", "width", "textAlign", "padding", "margin"]) {
+          if (left.name[key] !== right.name[key] || left.ordinal[key] !== right.ordinal[key] || left.status[key] !== right.status[key]) {
+            throw new Error(`${label}: fixed column geometry ${key} changed`);
+          }
+        }
+      };
+      const before = await collectGeometry();
+      console.log(`COMPLIANCE_CONTROL_RAIL_BEFORE ${JSON.stringify(before)}`);
+      await captureWorkflowViewportState(page, "29n-compliance-evidence-control-rail-alignment", "selected-control-01", "narrowDesktop");
+      assertAligned(before, "initial selected control");
+      const selectionStates = [before];
+      for (let index = 1; index < policyIds.length; index += 1) {
+        await rowFor(policyIds[index]).click();
+        const snapshot = await collectGeometry();
+        assertAligned(snapshot, `selected control ${index + 1}`);
+        assertSameRowGeometry(before[0], snapshot[index], `select control ${index + 1}`);
+        selectionStates.push(snapshot);
+      }
+      for (let index = policyIds.length - 2; index >= 0; index -= 1) {
+        await rowFor(policyIds[index]).click();
+        const snapshot = await collectGeometry();
+        assertAligned(snapshot, `navigate back to control ${index + 1}`);
+        assertSameRowGeometry(before[0], snapshot[index], `navigate back to control ${index + 1}`);
+        selectionStates.push(snapshot);
+      }
+      const filter = dialog.getByPlaceholder("Filter controls…");
+      await fillDioxusInput(filter, "test rollout");
+      await rowFor(policyIds[1]).waitFor({ state: "visible" });
+      selectionStates.push(await collectGeometry());
+      await fillDioxusInput(filter, "");
+      selectionStates.push(await collectGeometry());
+      const catI = dialog.getByRole("button", { name: /CAT I/ }).first();
+      const groupBefore = await catI.evaluate((button) => {
+        const style = getComputedStyle(button);
+        const rect = button.getBoundingClientRect();
+        return { x: rect.x, width: rect.width, height: rect.height, display: style.display,
+          textAlign: style.textAlign, justifyContent: style.justifyContent, alignItems: style.alignItems,
+          padding: style.padding, margin: style.margin };
+      });
+      await catI.focus();
+      const groupFocused = await catI.evaluate((button) => {
+        const style = getComputedStyle(button);
+        const rect = button.getBoundingClientRect();
+        return { x: rect.x, width: rect.width, height: rect.height, display: style.display,
+          textAlign: style.textAlign, justifyContent: style.justifyContent, alignItems: style.alignItems,
+          padding: style.padding, margin: style.margin };
+      });
+      if (JSON.stringify(groupFocused) !== JSON.stringify(groupBefore)) {
+        throw new Error(`CAT group focus changed geometry: before=${JSON.stringify(groupBefore)} focused=${JSON.stringify(groupFocused)}`);
+      }
+      await catI.click();
+      selectionStates.push(await collectGeometry());
+      await catI.click();
+      await rowFor(policyIds[0]).waitFor({ state: "visible" });
+      const after = await collectGeometry();
+      selectionStates.push(after);
+      for (const [index, snapshot] of selectionStates.entries()) {
+        assertAligned(snapshot, `rerender state ${index}`);
+      }
+      for (const snapshot of selectionStates) {
+        for (const entry of snapshot) {
+          const original = before.find((candidate) => candidate.policyId === entry.policyId);
+          if (!original) throw new Error(`Unexpected evidence control in rerender state: ${entry.policyId}`);
+          assertSameRowGeometry(original, entry, `control ${entry.policyId} across select/filter/group states`);
+        }
+      }
+      await captureWorkflowViewportState(page, "29n-compliance-evidence-control-rail-alignment", "after-navigation-filter-and-cat-toggle", "narrowDesktop");
+    },
+  },
+  {
     name: "29b-compliance-evidence-drawer",
     description: "Compliance evidence renders real persisted mixed composite outcomes with normalized missing rules",
     action: async (page) => {
