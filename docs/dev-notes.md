@@ -259,6 +259,15 @@ HAVING MAX(timestamp) < NOW() - INTERVAL '2 hours';
 
 # Systems Status Logic - Developer Documentation
 
+> **Historical notes:** The status rules below describe the older evaluation
+> pipeline, not the current deployment-status contract. Migrations 0287–0291
+> compare the observed running store path with the newest eligible,
+> exactly cache-published NixOS artifact for the registered flake and effective
+> system configuration. A dry-run result or newer raw commit alone cannot make
+> a running system `behind`. See
+> [System Deployment Status View](views/view_system_deployment_status.md) for
+> the current status definitions and SQL view.
+
 ## Status Determination Logic
 
 The `view_systems_status_table` determines system status by comparing the most recent **deployable configuration** against the latest available commit.

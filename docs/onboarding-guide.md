@@ -219,7 +219,7 @@ The form shows progressive field callouts and a **Required Policies** section wi
 - **Name**: A short identifier (e.g., `production`, `staging`, `dev`)
 - **Deployment Policy**:
   - `manual`: Admin must approve each deployment
-  - `auto_latest`: Automatically deploy the latest evaluated commit
+  - `auto_latest`: Automatically deploy the newest successfully deployable derivation for this system configuration; pending or failed newer commits do not replace it
   - `pinned`: Deploy a specific commit/derivation
 - **Deployment Strategy**:
   - `immediate_persist`: Activate and set as boot default (recommended)
@@ -653,7 +653,7 @@ If you don't have an Ed25519 key pair for this system yet, click **Generate Key 
 Systems inherit the deployment policy from their environment, but you can override it per system:
 
 - **manual**: An admin must explicitly approve deployments (safest for production)
-- **auto_latest**: Automatically deploy the latest evaluated commit on the tracked branch
+- **auto_latest**: Automatically deploy the newest eligible cached derivation for this system configuration across commits of its registered flake. Newer failed or pending commits do not make the deployed system behind; a newer deployable derivation does.
 - **pinned**: Deploy a specific commit/derivation (useful for canary deployments)
 
 ![System Created](./screenshots/06f4-onboarding-systems-create.png)

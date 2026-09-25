@@ -1983,7 +1983,7 @@ async fn authorize_target_at(
     now: DateTime<Utc>,
     action: AuthorizationAction<'_>,
 ) -> Result<TargetDeliveryAuthorization> {
-    let constrained_derivation_id = match &action {
+    let mut constrained_derivation_id = match &action {
         AuthorizationAction::SetDesired {
             expected_derivation_id,
             ..
@@ -2027,6 +2027,28 @@ async fn authorize_target_at(
                 },
             });
         }
+    }
+
+    // CONCURRENCY: Lock the delivery row after the system row and before
+    // selecting evidence. Never authorize one same-path derivation while
+    // claiming a pending row bound to another derivation.
+    let claimed_pending = if let AuthorizationAction::ClaimDelivery { expected_target } = action {
+        sqlx::query_as::<_, (Uuid, Option<i32>, Option<i32>)>(
+            "SELECT id, requested_commit_id, requested_derivation_id
+             FROM pending_system_deployments
+             WHERE system_id = $1 AND target_store_path = $2
+               AND status = 'pending' AND expires_at > NOW()
+             ORDER BY issued_at DESC, id DESC LIMIT 1 FOR UPDATE",
+        )
+        .bind(system_id)
+        .bind(expected_target)
+        .fetch_optional(&mut *tx)
+        .await?
+    } else {
+        None
+    };
+    if let Some((_, _, Some(derivation_id))) = claimed_pending {
+        constrained_derivation_id = Some(derivation_id);
     }
 
     let exact_target = sqlx::query_as::<_, (i32, String, i32, String)>(
@@ -2080,10 +2102,14 @@ async fn authorize_target_at(
         Some(exact_target) => exact_target,
         None if policies.is_empty()
             && target.starts_with("/nix/store/")
+            && constrained_derivation_id.is_none()
             && !matches!(
                 action,
                 AuthorizationAction::Check {
                     expected_derivation_id: Some(_)
+                } | AuthorizationAction::SetDesired {
+                    expected_derivation_id: Some(_),
+                    ..
                 }
             ) =>
         {
@@ -2179,6 +2205,11 @@ async fn authorize_target_at(
             bail!("Composite authorization could not resolve exact system target {target:?}")
         }
     };
+    if let Some((_, pending_commit, _)) = claimed_pending {
+        if pending_commit.is_some() && pending_commit != Some(exact_target.2) {
+            bail!("Pending deployment commit does not match its authorized derivation");
+        }
+    }
     if let AuthorizationAction::Check {
         expected_derivation_id: Some(expected_derivation_id),
     } = action
@@ -2403,6 +2434,50 @@ async fn authorize_target_at(
                 if evaluation_snapshot_id.is_some() && bound_snapshot_id != evaluation_snapshot_id {
                     bail!("Retained deployment artifact does not match the exact target lineage");
                 }
+                // CONCURRENCY: Delivery claims the newest live row for this path.
+                // An older matching row cannot make a newer stale row a no-op.
+                let latest_pending = sqlx::query_as::<_, (Uuid, Option<i32>, Option<i32>, Option<Uuid>)>(
+                     "SELECT id, requested_commit_id, requested_derivation_id, evaluation_snapshot_id
+                      FROM pending_system_deployments
+                      WHERE system_id = $1 AND target_store_path = $2
+                        AND status = 'pending' AND expires_at > NOW()
+                      ORDER BY issued_at DESC, id DESC LIMIT 1 FOR UPDATE",
+                 )
+                 .bind(system_id)
+                 .bind(&exact_target.1)
+                 .fetch_optional(&mut *tx)
+                 .await?;
+                let matching_id = latest_pending.and_then(|(id, commit, derivation, snapshot)| {
+                    (commit == Some(exact_target.2)
+                        && derivation == Some(exact_target.0)
+                        && snapshot == bound_snapshot_id)
+                        .then_some(id)
+                });
+                // Keep at most the claimable B row, even on a no-op. The
+                // system lock serializes this cleanup with delivery claims.
+                if exact_target.0 != -1 {
+                    sqlx::query(
+                        "UPDATE pending_system_deployments
+                          SET status = 'superseded', completed_at = NOW()
+                          WHERE system_id = $1 AND target_store_path = $2
+                            AND status = 'pending' AND expires_at > NOW()
+                            AND id IS DISTINCT FROM $3",
+                    )
+                    .bind(system_id)
+                    .bind(&exact_target.1)
+                    .bind(matching_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                if current_desired.as_deref() == Some(exact_target.1.as_str())
+                    && matching_id.is_some()
+                {
+                    tx.commit().await?;
+                    return Ok(TargetDeliveryAuthorization {
+                        target: None,
+                        authorization,
+                    });
+                }
                 sqlx::query(
                     "UPDATE systems SET desired_target = $1, desired_target_set_at = NOW(), updated_at = NOW() WHERE id = $2",
                 )
@@ -2410,27 +2485,6 @@ async fn authorize_target_at(
                 .bind(system_id)
                 .execute(&mut *tx)
                 .await?;
-                // IDENTITY: Equal store paths can come from different commits.
-                // End incompatible pending work before the generic target helper
-                // performs its path-based deduplication.
-                if exact_target.0 != -1 {
-                    sqlx::query(
-                        "UPDATE pending_system_deployments
-                         SET status = 'superseded', completed_at = NOW()
-                         WHERE system_id = $1 AND target_store_path = $2 AND status = 'pending'
-                           AND (requested_commit_id IS DISTINCT FROM $3
-                             OR requested_derivation_id IS DISTINCT FROM $5
-                             OR ($4::uuid IS NOT NULL
-                                AND evaluation_snapshot_id IS DISTINCT FROM $4))",
-                    )
-                    .bind(system_id)
-                    .bind(&exact_target.1)
-                    .bind(exact_target.2)
-                    .bind(bound_snapshot_id)
-                    .bind(exact_target.0)
-                    .execute(&mut *tx)
-                    .await?;
-                }
                 let deployment_id = set_pending_deployment_target_tx(
                     &mut tx,
                     system_id,
@@ -2508,10 +2562,16 @@ async fn authorize_target_at(
                       AND pending.expires_at > NOW()
                       AND system.id = pending.system_id
                       AND system.desired_target = $2
+                      AND ($3::uuid IS NULL OR pending.id = $3)
+                      AND ($4::integer IS NULL OR pending.requested_derivation_id = $4)
+                      AND ($5::integer IS NULL OR pending.requested_commit_id = $5)
                     "#,
                 )
                 .bind(system_id)
                 .bind(expected_target)
+                .bind(claimed_pending.map(|row| row.0))
+                .bind(constrained_derivation_id)
+                .bind(claimed_pending.and_then(|row| row.1))
                 .execute(&mut *tx)
                 .await?;
                 if claimed.rows_affected() > 0 {
@@ -2574,6 +2634,39 @@ pub async fn authorize_and_set_system_target(
             source,
             evaluation_snapshot_id: None,
             expected_derivation_id: None,
+        },
+    )
+    .await?
+    .authorization)
+}
+
+/// Authorizes and issues the selected NixOS derivation for auto-latest.
+///
+/// Equal store paths do not identify the commit or assessment lineage. The
+/// selected derivation must still satisfy final deployability and composite
+/// authorization. An exact live pending identity is left unchanged, including
+/// its issue time and delivery state; a different identity supersedes it.
+///
+/// # Errors
+///
+/// Returns an error if the selected derivation is no longer deployable or
+/// PostgreSQL cannot complete the serializable authorization transaction.
+pub async fn authorize_and_set_system_target_for_derivation(
+    pool: &PgPool,
+    system_id: Uuid,
+    target: &str,
+    source: &str,
+    derivation_id: i32,
+) -> Result<CompositeAuthorization> {
+    Ok(authorize_target_at(
+        pool,
+        system_id,
+        target,
+        Utc::now(),
+        AuthorizationAction::SetDesired {
+            source,
+            evaluation_snapshot_id: None,
+            expected_derivation_id: Some(derivation_id),
         },
     )
     .await?

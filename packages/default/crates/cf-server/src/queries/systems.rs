@@ -8,6 +8,15 @@ use sqlx::{Executor, PgPool, Postgres};
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
+// INVARIANT: Manual resolution and auto-latest use the same artifact predicate:
+// registered flake, NixOS type, exact effective configuration, nonblank store
+// path, enabled agent and met policy requirements, no derivation error, and a
+// completed cache push of the exact same path. The final authorization uses
+// these same artifact requirements before applying runtime policy gates.
+// Manual resolution pins a requested unarchived source commit. Auto-latest
+// ranks existing built artifacts across all flake commits; archiving a commit's
+// source does not remove its cached output. Runtime gates apply after selection.
+// Neither path requires a stored derivation_target.
 const RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL: &str = r#"
 SELECT d.store_path AS store_path
 FROM systems s
@@ -17,16 +26,18 @@ WHERE s.id = $1
   AND LOWER(c.git_commit_hash) = LOWER($2)
   AND c.source_archived = false
   AND d.derivation_type = 'nixos'
-  AND d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)
+  AND d.derivation_name = COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
   AND d.store_path IS NOT NULL
   AND BTRIM(d.store_path) <> ''
   AND d.cf_agent_enabled IS TRUE
   AND d.policy_requirements_met IS TRUE
+  AND d.error_message IS NULL
   AND EXISTS (
       SELECT 1
       FROM cache_push_jobs cpj
       WHERE cpj.derivation_id = d.id
         AND cpj.status = 'completed'
+        AND cpj.store_path = d.store_path
   )
 ORDER BY d.id DESC
 LIMIT 1
@@ -42,6 +53,7 @@ SELECT
         FROM cache_push_jobs cpj
         WHERE cpj.derivation_id = d.id
           AND cpj.status = 'completed'
+          AND cpj.store_path = d.store_path
     ) AS has_completed_cache_push,
     EXISTS (
         SELECT 1
@@ -69,7 +81,7 @@ WHERE s.id = $1
   AND LOWER(c.git_commit_hash) = LOWER($2)
   AND c.source_archived = false
   AND d.derivation_type = 'nixos'
-  AND d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)
+  AND d.derivation_name = COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
 ORDER BY d.id DESC
 LIMIT 1
 "#;
@@ -3598,7 +3610,7 @@ mod tests {
         );
         assert!(RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("d.derivation_type = 'nixos'"));
         assert!(RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains(
-            "d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)"
+            "d.derivation_name = COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)"
         ));
         assert!(
             RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("LOWER(c.git_commit_hash) = LOWER($2)")
@@ -3613,6 +3625,8 @@ mod tests {
             "manual/pinned deployment target resolution must not select a \
              derivation whose assigned policies failed"
         );
+        assert!(RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("d.error_message IS NULL"));
+        assert!(RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL.contains("cpj.store_path = d.store_path"));
     }
 
     #[test]
