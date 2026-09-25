@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-25 17:10'
-updated_date: '2026-08-25 17:10'
+updated_date: '2026-09-25 17:09'
 labels:
   - deployment
   - bug
@@ -141,3 +141,9 @@ None external. Requires repo-managed isolated local dev Postgres for SQLx prepar
 - [ ] #12 SQLx offline metadata is updated if query changes require it.
 - [ ] #13 Documentation is updated where semantics changed or were previously ambiguous.
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Owner explicitly authorized carrying this already-tracked deployment bug into active TASK-326.2.2 in its existing worktree and MR !329 immediately after separate scanning checkpoint 75985c8162d0b74e49d8e89edb25abeaeb2acf2f. Do not start a competing worktree/implementation for TASK-437. The deployment correction will be a separate focused commit in TASK-326.2.2; this record remains To Do until owner determines how to reconcile its lifecycle after MR merge. No owner persistent database is a test target.
+<!-- SECTION:NOTES:END -->
