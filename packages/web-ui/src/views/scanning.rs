@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
+use dioxus_router::Navigator;
 use uuid::Uuid;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, closure::Closure};
@@ -26,6 +27,7 @@ use crate::components::dialog_focus::{
 };
 use crate::components::icon::{Icon, IconName};
 use crate::hooks::{InfiniteScroll, use_infinite_scroll};
+use crate::routes::Route;
 
 /// Bounds one Completed page request.
 ///
@@ -69,7 +71,6 @@ const ARCHIVE_BATCH_MAX: usize = 100;
 enum CompletedSelectionGesture {
     ShiftRange,
     ModifierToggle,
-    Checkbox { checked: bool },
 }
 
 fn completed_range_selection(
@@ -102,14 +103,6 @@ fn completed_range_selection(
             if !next.remove(&clicked) {
                 next.insert(clicked);
             }
-            (next, Some(clicked))
-        }
-        CompletedSelectionGesture::Checkbox { checked: true } => {
-            next.insert(clicked);
-            (next, Some(clicked))
-        }
-        CompletedSelectionGesture::Checkbox { checked: false } => {
-            next.remove(&clicked);
             (next, Some(clicked))
         }
     }
@@ -538,6 +531,7 @@ struct ActiveFilterSignals {
 /// Groups the row-level interaction signals shared by every record panel.
 #[derive(Clone, Copy)]
 struct RecordRowContext {
+    navigator: Navigator,
     retry_pending: Signal<HashSet<i32>>,
     feedback: Signal<Option<ScanActionFeedback>>,
     refresh: Signal<u64>,
@@ -1118,6 +1112,7 @@ pub fn ScanningView() -> Element {
     let system_archive_states = use_signal(HashMap::<Uuid, bool>::new);
 
     let rows_context = RecordRowContext {
+        navigator: use_navigator(),
         retry_pending: exact_retry_pending,
         feedback: action_feedback,
         refresh,
@@ -1809,24 +1804,10 @@ fn completed_panel(
                 Icon { name: IconName::Archive, size: 12 }
                 " Archived [{archived_count}]"
             }
-        }
-
-        div { class: "scanning-history-actions",
-            span { "{selected.len()} selected" }
-            span { class: "ms-hint", title: "Ctrl/Cmd-click toggles one scan · Shift-click selects the inclusive loaded range", "⌘/⇧-click to select" }
-            button {
-                class: "btn btn-ghost xs focus-ring",
-                disabled: archive_ids.is_empty() || archive_pending() || archive_over_batch,
-                title: if archive_over_batch { "Select 100 or fewer scans; one archive request carries at most 100 exact scan identities" } else { "Archive the selected exact scans" },
-                onclick: move |_| apply_archive(archive_ids.clone(), true, selected_rows, selection_anchor, archive_pending, rows.feedback, rows.refresh),
-                "Archive selected"
-            }
-            button {
-                class: "btn btn-ghost xs focus-ring",
-                disabled: restore_ids.is_empty() || archive_pending() || restore_over_batch,
-                title: if restore_over_batch { "Select 100 or fewer scans; one restore request carries at most 100 exact scan identities" } else { "Restore the selected exact scans" },
-                onclick: move |_| apply_archive(restore_ids.clone(), false, selected_rows, selection_anchor, archive_pending, rows.feedback, rows.refresh),
-                "Restore selected"
+            if !records.is_empty() {
+                span { class: "ms-hint", title: "Ctrl/Cmd-click toggles a scan · Shift-click selects a range",
+                    kbd { "⌘" } "/" kbd { "⇧" } "-click to select"
+                }
             }
             if hidden_archived > 0 { span { class: "scanning-hidden-count", "{hidden_archived} archived scans hidden by retention view" } }
         }
@@ -1853,7 +1834,6 @@ fn completed_panel(
             div { class: "scanning-table-wrap",
                 table { class: "sys-table scanning-table",
                     thead { tr {
-                        th { span { class: "sr-only", "Select" } }
                         { completed_sort_header("Configuration", ScanRecordSortParam::Configuration, filters) }
                         { completed_sort_header("Revision", ScanRecordSortParam::Revision, filters) }
                         { completed_sort_header("Status", ScanRecordSortParam::Status, filters) }
@@ -1912,6 +1892,38 @@ fn completed_panel(
                     "data-sentinel": scroll.sentinel_id(),
                     aria_hidden: "true",
                     onmounted: move |_| scroll.check_and_register(),
+                }
+            }
+        }
+
+        if !selected.is_empty() {
+            div { class: "bulk-bar", role: "toolbar", aria_label: "Bulk scan actions",
+                span { class: "bulk-count", strong { "{selected.len()}" } " selected" }
+                span { class: "bulk-sep" }
+                button {
+                    class: "btn btn-ghost xs focus-ring",
+                    disabled: archive_ids.is_empty() || archive_pending() || archive_over_batch,
+                    title: if archive_over_batch { "Select 100 or fewer scans; one archive request carries at most 100 exact scan identities" } else { "Archive the selected exact scans" },
+                    onclick: move |_| apply_archive(archive_ids.clone(), true, selected_rows, selection_anchor, archive_pending, rows.feedback, rows.refresh),
+                    Icon { name: IconName::Archive, size: 12 }
+                    " Archive selected"
+                }
+                button {
+                    class: "btn btn-ghost xs focus-ring",
+                    disabled: restore_ids.is_empty() || archive_pending() || restore_over_batch,
+                    title: if restore_over_batch { "Select 100 or fewer scans; one restore request carries at most 100 exact scan identities" } else { "Restore the selected exact scans" },
+                    onclick: move |_| apply_archive(restore_ids.clone(), false, selected_rows, selection_anchor, archive_pending, rows.feedback, rows.refresh),
+                    Icon { name: IconName::Archive, size: 12 }
+                    " Restore selected"
+                }
+                button {
+                    class: "btn btn-ghost xs focus-ring",
+                    aria_label: "Clear selection",
+                    onclick: move |_| {
+                        selected_rows.write().clear();
+                        selection_anchor.set(None);
+                    },
+                    "Clear"
                 }
             }
         }
@@ -2135,8 +2147,9 @@ fn active_sort_header(
 /// Renders one scan lifecycle row.
 ///
 /// `selection` is `Some` only for collections that support archive and restore
-/// actions. Active rows have no selection column because nonterminal scans are
-/// neither archivable nor cancellable.
+/// actions. Completed rows use modifier-click selection without a visible
+/// checkbox; Active rows do not support row selection because nonterminal scans
+/// are neither archivable nor cancellable.
 fn record_row(
     row: ScanningScanRecordResponse,
     selection_state: Option<Signal<HashSet<Uuid>>>,
@@ -2146,6 +2159,7 @@ fn record_row(
     let retry_pending = context.retry_pending;
     let feedback = context.feedback;
     let refresh = context.refresh;
+    let navigator = context.navigator;
     let selected_scan = context.selected_scan;
     let detail_state = context.detail_state;
     let detail_generation = context.detail_generation;
@@ -2154,7 +2168,6 @@ fn record_row(
         selection_state.is_some_and(|selected_rows| selected_rows.read().contains(&row.scan_id));
     let has_completed_selection = completed_selection.is_some();
     let completed_selection_for_click = completed_selection.clone();
-    let completed_selection_for_checkbox = completed_selection.clone();
     let row_class = format!(
         "scanning-record{}{}{}",
         if selection_state.is_some() {
@@ -2173,8 +2186,12 @@ fn record_row(
         scan_id: row.scan_id,
         label: format!("{} · {}", row.hostname, commit_label(&row.commit_hash)),
     };
+    let selection_for_row_click = selection.clone();
     let prerequisite_build_failure = is_prerequisite_build_failure(&row);
     let can_retry = row.status == "failed" && !prerequisite_build_failure;
+    let can_rescan = row.status == "completed";
+    let can_retry_or_rescan = can_retry || can_rescan;
+    let has_high_or_critical_findings = row.critical_count > 0 || row.high_count > 0;
     let relation = revision_class(&row);
     let relation_label = match relation {
         "deployed" => "Deployed",
@@ -2218,32 +2235,16 @@ fn record_row(
                         selected_rows.set(next);
                         selection.anchor.set(next_anchor);
                     }
-                }
-            },
-            if let Some(mut selected_rows) = selection_state {
-                td {
-                    input {
-                        r#type: "checkbox",
-                        aria_label: format!("Select scan {}", row.scan_id),
-                        checked: selected,
-                        onclick: move |event| event.stop_propagation(),
-                        onchange: move |event| {
-                            event.stop_propagation();
-                            if let Some(mut selection) = completed_selection_for_checkbox.clone() {
-                                let (next, next_anchor) = completed_range_selection(
-                                    &selected_rows.read(),
-                                    (selection.anchor)(),
-                                    row.scan_id,
-                                    selection.ordered_ids.as_slice(),
-                                    CompletedSelectionGesture::Checkbox { checked: event.checked() },
-                                );
-                                selected_rows.set(next);
-                                selection.anchor.set(next_anchor);
-                            }
-                        }
+                    else {
+                        load_scan_detail(
+                            selection_for_row_click.clone(),
+                            selected_scan,
+                            detail_state,
+                            detail_generation,
+                        );
                     }
                 }
-            }
+            },
             td { div { class: "scanning-config-name", "{row.hostname}" } div { class: "scanning-history-flake", "{configuration_meta}" } }
             td { span { class: if relation == "deployed" { "chip chip-healthy" } else if relation == "recent" { "chip chip-info" } else { "chip chip-unknown" }, "{relation_label}" } }
             td {
@@ -2256,8 +2257,44 @@ fn record_row(
             td { class: "scanning-last-scan", title: "{record_time(&row).to_rfc3339()}", "{relative_time(record_time(&row))}" }
             td { if let Some(trigger) = row.source_trigger.as_deref() { span { class: "chip chip-unknown scanning-trigger", "{trigger}" } } else { span { class: "scanning-unavailable", "Not recorded" } } }
             td { div { class: "row-actions scanning-row-actions",
-                if can_retry { button { class: "btn btn-ghost xs focus-ring", disabled: retry_pending.read().contains(&row.derivation_id), onclick: { let label = format!("{} {}", row.hostname, commit_label(&row.commit_hash)); move |event| { event.stop_propagation(); retry_exact_scan(row.derivation_id, label.clone(), retry_pending, feedback, refresh); } }, Icon { name: IconName::Sync, size: 11 } " Retry exact" } }
-                button { class: "btn-icon focus-ring", aria_label: format!("Open details for scan {}", row.scan_id), title: "Open exact scan details", onclick: move |event| { event.stop_propagation(); load_scan_detail(selection.clone(), selected_scan, detail_state, detail_generation); }, Icon { name: IconName::Terminal, size: 14 } }
+                button {
+                    class: "btn-icon focus-ring",
+                    aria_label: format!("Open details for scan {}", row.scan_id),
+                    title: "View scan log",
+                    onclick: move |event| {
+                        event.stop_propagation();
+                        load_scan_detail(selection.clone(), selected_scan, detail_state, detail_generation);
+                    },
+                    Icon { name: IconName::Terminal, size: 14 }
+                }
+                if can_retry_or_rescan {
+                    button {
+                        class: "btn-icon focus-ring",
+                        aria_label: if can_retry { format!("Retry exact scan {}", row.scan_id) } else { format!("Rescan scan {}", row.scan_id) },
+                        title: if can_retry { "Retry exact" } else { "Rescan now" },
+                        disabled: retry_pending.read().contains(&row.derivation_id),
+                        onclick: {
+                            let label = format!("{} {}", row.hostname, commit_label(&row.commit_hash));
+                            move |event| {
+                                event.stop_propagation();
+                                retry_exact_scan(row.derivation_id, label.clone(), retry_pending, feedback, refresh);
+                            }
+                        },
+                        Icon { name: IconName::Sync, size: 14 }
+                    }
+                }
+                if has_high_or_critical_findings {
+                    button {
+                        class: "btn-icon focus-ring",
+                        aria_label: format!("View CVEs for scan {}", row.scan_id),
+                        title: "View CVEs",
+                        onclick: move |event| {
+                            event.stop_propagation();
+                            navigator.push(Route::CvesView { query: String::new() });
+                        },
+                        Icon { name: IconName::ArrowRight, size: 14 }
+                    }
+                }
             } }
         }
     }
@@ -3247,20 +3284,6 @@ mod tests {
         assert_eq!(selected.len(), 101);
         assert_eq!(selected, selection(&ordered));
         assert_eq!(anchor, Some(ordered[0]));
-    }
-
-    #[test]
-    fn completed_checkbox_applies_exact_checked_state_and_sets_anchor() {
-        let ordered = ids(3);
-        let (selected, anchor) = completed_range_selection(
-            &selection(&ordered),
-            Some(ordered[0]),
-            ordered[1],
-            &ordered,
-            CompletedSelectionGesture::Checkbox { checked: false },
-        );
-        assert_eq!(selected, selection(&[ordered[0], ordered[2]]));
-        assert_eq!(anchor, Some(ordered[1]));
     }
 
     fn row(

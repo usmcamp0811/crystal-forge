@@ -17937,7 +17937,7 @@ security.audit.enable = true;</fixtext>
         await scrollCompletedToTop();
 
         for (const scanId of [ids.newest, ids.superseded, ids.failed, ids.oldFailure, ids.failedBuild, ids.cancelledBuild]) {
-          await page.getByRole("checkbox", { name: `Select scan ${scanId}` }).check();
+          await page.getByTestId(`scanning-record-${scanId}`).click({ modifiers: ["Control"] });
         }
         const completedReload = page.waitForResponse((response) => response.url().includes("collection=completed&include_archived=false") && response.request().method() === "GET");
         await page.getByRole("button", { name: "Archive selected" }).click();
@@ -17960,7 +17960,7 @@ security.audit.enable = true;</fixtext>
         await waitForCompletedRows(50);
         await assertCompletedPrefix("The archived Completed view", { includeArchived: true });
         await assertCount(page.locator("#scan-completed-panel tbody tr.archived .scanning-archived-label"), 7, "Archived rows must remain visually marked");
-        await page.getByRole("checkbox", { name: `Select scan ${ids.retained}` }).check();
+        await page.getByTestId(`scanning-record-${ids.retained}`).click({ modifiers: ["Control"] });
         const restoreReload = page.waitForResponse((response) => response.url().includes("collection=completed&include_archived=true") && response.request().method() === "GET");
         const restoreCountReload = page.waitForResponse((response) => response.url().includes("collection=completed&include_archived=false") && response.request().method() === "GET");
         await page.getByRole("button", { name: "Restore selected" }).click();
@@ -17988,6 +17988,24 @@ security.audit.enable = true;</fixtext>
         await defaultRangeReload;
         await waitForCompletedRows(50);
         await assertCompletedPrefix("Default Completed rows before range selection");
+        const completedTable = page.locator("#scan-completed-panel table.sys-table");
+        await assertCount(
+          completedTable.locator("input[type='checkbox']"),
+          0,
+          "Completed table must not render row-selection checkboxes",
+        );
+        const completedColumnNames = (await completedTable.locator("thead th").allTextContents())
+          .map((label) => label.replace(/\s+/g, " ").trim());
+        const expectedCompletedColumns = [
+          "Configuration", "Revision", "Status", "Findings", "Last scan", "Trigger", "Actions",
+        ];
+        if (completedColumnNames.join("|") !== expectedCompletedColumns.join("|")) {
+          throw new Error(`Completed columns must match the approved design: ${JSON.stringify(completedColumnNames)}`);
+        }
+        await assertHidden(page.locator("#scan-completed-panel .bulk-bar"), "The bulk action bar must stay hidden without a selection");
+        await page.getByTestId(`scanning-record-${ids.rangeOne}`).click();
+        await assertVisible(page.getByRole("heading", { name: "Scan details" }), "A plain Completed row click should open scan details");
+        await page.getByRole("button", { name: "Close exact scan detail" }).click();
         const rangeIdSet = new Set([ids.rangeOne, ids.rangeTwo, ids.rangeThree, ids.rangeFour]);
         const rangeIds = visibleTerminalRows().filter((row) => rangeIdSet.has(row.scan_id)).map((row) => row.scan_id);
         if (rangeIds.length !== 4 || new Set(rangeIds).size !== 4 ||
@@ -17997,20 +18015,16 @@ security.audit.enable = true;</fixtext>
         const ctrlToggleRow = page.getByTestId(`scanning-record-${rangeIds[1]}`);
         await ctrlToggleRow.click({ modifiers: ["Control"] });
         await assertVisible(page.getByText("1 selected", { exact: true }), "Ctrl-click should toggle one exact row on");
+        await assertVisible(page.locator("#scan-completed-panel .bulk-bar"), "The bulk action bar should appear for a non-empty selection");
         await ctrlToggleRow.click({ modifiers: ["Control"] });
-        await assertVisible(page.getByText("0 selected", { exact: true }), "Ctrl-clicking the selected row should toggle only it off");
-        await assertDisabled(page.getByRole("button", { name: "Archive selected" }), "An empty selection must disable Archive selected");
-        await page.getByRole("checkbox", { name: `Select scan ${rangeIds[0]}` }).check();
+        await assertHidden(page.locator("#scan-completed-panel .bulk-bar"), "The bulk action bar should disappear when selection is empty");
         const firstRangeRow = page.getByTestId(`scanning-record-${rangeIds[0]}`);
-        const firstSelection = await firstRangeRow.getByRole("checkbox").isChecked();
-        if (!firstSelection) throw new Error("Checkbox anchor must select the first exact scan");
+        await firstRangeRow.click({ modifiers: ["Control"] });
+        await assertVisible(page.getByText("1 selected", { exact: true }), "Ctrl-click should anchor and select the first exact scan");
         await page.getByTestId(`scanning-record-${rangeIds[3]}`).click({ modifiers: ["Shift"] });
         await assertVisible(page.getByText("4 selected", { exact: true }), "Shift-click should select the four-row inclusive range");
         for (const scanId of rangeIds) {
           const selectedRow = page.getByTestId(`scanning-record-${scanId}`);
-          if (!(await page.getByRole("checkbox", { name: `Select scan ${scanId}` }).isChecked())) {
-            throw new Error(`Shift range did not check exact scan ${scanId}`);
-          }
           if (!(await selectedRow.evaluate((element) => element.classList.contains("row-checked")))) {
             throw new Error(`Shift range did not apply the selected-row treatment to ${scanId}`);
           }
@@ -18046,7 +18060,7 @@ security.audit.enable = true;</fixtext>
         for (const scanId of rangeIds) {
           await assertVisible(page.getByTestId(`scanning-record-${scanId}`), `Archived range scan ${scanId} must be visible for restore`);
         }
-        await page.getByRole("checkbox", { name: `Select scan ${rangeIds[0]}` }).check();
+        await page.getByTestId(`scanning-record-${rangeIds[0]}`).click({ modifiers: ["Control"] });
         await page.getByTestId(`scanning-record-${rangeIds[3]}`).click({ modifiers: ["Shift"] });
         await assertVisible(page.getByText("4 selected", { exact: true }), "Shift-click should select the archived restore range");
         const restoreCountBeforeRange = archiveRequests.length;
@@ -18206,7 +18220,7 @@ security.audit.enable = true;</fixtext>
         const completed = page.locator("#scan-completed-panel tbody");
         const expiredRow = completed.locator("tr").filter({ hasText: "expired-post-build" });
         await assertVisible(expiredRow.getByText("post_build", { exact: true }), "Expired post-build provenance must remain in Completed history");
-        await expiredRow.getByRole("checkbox", { name: `Select scan ${expiredId}` }).check();
+        await expiredRow.click({ modifiers: ["Control"] });
         const archivedCollection = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("collection=completed&include_archived=false"));
         await page.getByRole("button", { name: "Archive selected" }).click();
         await archivedCollection;
