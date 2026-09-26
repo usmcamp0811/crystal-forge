@@ -46,8 +46,8 @@ use crate::queries::commits::{
     reset_stuck_commit_evaluations,
 };
 use crate::queries::deployment_policies::{
-    get_deployment_policies_by_versions, list_enabled_deployment_policies,
-    list_enabled_policies_for_flake, list_policy_rows_by_configuration_for_flake,
+    get_deployment_policies_by_versions, list_enabled_policies_for_flake,
+    list_policy_rows_by_configuration_for_flake,
 };
 use crate::queries::derivations::{
     cleanup_partial_derivations, reset_stuck_builds, set_closure_counts,
@@ -1235,22 +1235,6 @@ pub(crate) async fn load_policies_by_configuration_for_eval_test(
     flake_id: i32,
 ) -> anyhow::Result<PoliciesByConfiguration> {
     load_policies_by_configuration_for_eval(pool, flake_id).await
-}
-
-/// Load enabled `require_cve_check` policies from the database.
-/// Called by the deployment manager to evaluate post-build CVE gates.
-pub async fn load_cve_policies(pool: &PgPool) -> Vec<DeploymentPolicy> {
-    match list_enabled_deployment_policies(pool).await {
-        Ok(records) => records
-            .iter()
-            .filter_map(parse_deployment_policy_record)
-            .filter(|p| matches!(p, DeploymentPolicy::RequireCveCheck { .. }))
-            .collect(),
-        Err(err) => {
-            error!("Failed to load CVE deployment policies from DB: {:#}", err);
-            vec![]
-        }
-    }
 }
 
 /// Spawn all server background tasks and register controllable jobs in the

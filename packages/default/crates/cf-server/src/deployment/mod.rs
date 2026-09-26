@@ -10,16 +10,16 @@ use crate::compliance::resolver::{
 };
 use crate::config::CrystalForgeConfig;
 use crate::models::deployment_policies::{
-    ApprovalConfig, CanaryConfig, CveThresholdConfig, DeploymentPolicyRecord, TimeWindowConfig,
+    ApprovalConfig, CanaryConfig, CveCheckConfig, CveThresholdConfig, DeploymentPolicyRecord,
+    TimeWindowConfig,
 };
 use crate::models::systems::DeploymentPolicy;
 use crate::queries::deployment::get_systems_with_auto_latest_policy;
 use crate::queries::deployment_policies::get_deployment_policies_by_versions;
 use crate::queries::derivations::get_latest_deployable_targets_for_flake_hosts;
-use crate::server::load_cve_policies;
 use crate::services::approval_policy::{self, DeploymentContext};
 use crate::services::canary_rollout::{self, RolloutContext};
-use crate::services::cve_policy_gate::check_cve_policies;
+use crate::services::cve_policy_gate::{CveGateResult, check_cve_policies};
 use crate::services::cve_threshold_policy;
 use crate::services::time_window_policy;
 use anyhow::{Context, Result};
@@ -111,6 +111,32 @@ fn map_cve_threshold_decision(
         AdvancedGateDecision::Warn(result.warnings.join("; "))
     } else {
         AdvancedGateDecision::Allow
+    }
+}
+
+/// Maps one `require_cve_check` evaluation onto an advanced-gate decision.
+///
+/// The caller must invoke [`check_cve_policies`] with exactly one config drawn
+/// from the system's resolved effective policy set. A non-blocking violation
+/// (strict = false, or `when_no_scan = skip`) surfaces as a warning rather than
+/// silently passing, so operators can see it without it affecting delivery.
+fn map_cve_check_decision(result: CveGateResult) -> AdvancedGateDecision {
+    if !result.deployment_allowed {
+        let reason = result
+            .block_reason
+            .unwrap_or_else(|| "require_cve_check policy blocked deployment".to_string());
+        return AdvancedGateDecision::Block(reason);
+    }
+    let warnings: Vec<String> = result
+        .outcomes
+        .iter()
+        .filter(|outcome| !outcome.passed)
+        .filter_map(|outcome| outcome.reason.clone())
+        .collect();
+    if warnings.is_empty() {
+        AdvancedGateDecision::Allow
+    } else {
+        AdvancedGateDecision::Warn(warnings.join("; "))
     }
 }
 
@@ -370,7 +396,6 @@ impl DeploymentPolicyManager {
             .into_iter()
             .filter(|version_id| !policies_by_id.contains_key(version_id))
             .collect::<HashSet<_>>();
-        let cve_policies = load_cve_policies(&self.pool).await;
 
         let mut updated_count = 0;
 
@@ -484,35 +509,6 @@ impl DeploymentPolicyManager {
                         system.hostname, store_path, reason
                     );
                     continue;
-                }
-            }
-
-            // Preserve legacy CVE gate behavior for require_cve_check policies.
-            if !cve_policies.is_empty() {
-                match check_cve_policies(
-                    &self.pool,
-                    latest_target_for_host.derivation_id,
-                    &cve_policies,
-                )
-                .await
-                {
-                    Ok(gate) if !gate.deployment_allowed => {
-                        warn!(
-                            "🛑 Legacy CVE gate blocked deployment for {} -> {}: {}",
-                            system.hostname,
-                            store_path,
-                            gate.block_reason.as_deref().unwrap_or("policy violation")
-                        );
-                        continue;
-                    }
-                    Ok(_) => {}
-                    Err(err) => {
-                        warn!(
-                            "Legacy CVE gate evaluation failed for {} -> {}: {:#}; skipping deployment update",
-                            system.hostname, store_path, err
-                        );
-                        continue;
-                    }
                 }
             }
 
@@ -734,6 +730,54 @@ impl DeploymentPolicyManager {
                         }
                     }
                 }
+                "require_cve_check" => {
+                    let config =
+                        match serde_json::from_value::<CveCheckConfig>(effective_config.clone()) {
+                            Ok(config) => config,
+                            Err(err) => {
+                                return AdvancedGateDecision::Block(format!(
+                                    "Invalid require_cve_check policy config for policy {}: {}",
+                                    policy.id, err
+                                ));
+                            }
+                        };
+                    // SECURITY: `effective_policies_by_system` already dropped
+                    // every report_only policy before this loop ran (see the
+                    // filter above), so a require_cve_check reaching this arm
+                    // is always an effective Enforce assignment. Evaluate only
+                    // this system's resolved policy, never the fleet-global
+                    // enabled set, and scope it to the selected artifact.
+                    let policies = vec![
+                        crate::models::deployment_policies::DeploymentPolicy::RequireCveCheck {
+                            config,
+                        },
+                    ];
+                    match check_cve_policies(&self.pool, target.derivation_id, &policies).await {
+                        Ok(gate) => {
+                            let decision = map_cve_check_decision(gate);
+                            if let AdvancedGateDecision::Block(ref reason) = decision {
+                                warn!(
+                                    hostname = %system.hostname,
+                                    policy_lineage_id = %policy.id,
+                                    policy_version_id = %policy_id,
+                                    effective_mode = ?effective_policy.effective_mode,
+                                    derivation_id = target.derivation_id,
+                                    reason = %reason,
+                                    "🛑 require_cve_check (enforce) blocked auto_latest deployment"
+                                );
+                            }
+                            if !matches!(decision, AdvancedGateDecision::Allow) {
+                                return decision;
+                            }
+                        }
+                        Err(err) => {
+                            return AdvancedGateDecision::Block(format!(
+                                "require_cve_check policy evaluation failed: {}",
+                                err
+                            ));
+                        }
+                    }
+                }
                 // Composite policies are authorized once for the complete set
                 // in the atomic desired-target update below.
                 "composite" => {}
@@ -777,6 +821,947 @@ pub async fn spawn_deployment_policy_manager(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
+
+    // ── Shared fixtures for require_cve_check regressions ───────────────────
+    //
+    // TASK-437 correction: require_cve_check must be evaluated only through a
+    // system's resolved effective policy set, never through a fleet-global
+    // `enabled = true` query. Only an effective Enforce assignment may block
+    // `auto_latest` delivery; report_only always advances while still
+    // producing a FAIL compliance outcome elsewhere in the compliance
+    // pipeline. These helpers build one deployable artifact and publish a
+    // `require_cve_check` policy through a compliance bundle, matching the
+    // real sledge shape from the owner's report.
+
+    /// Creates one flake, one commit, and one eligible cache-published NixOS
+    /// derivation. Returns `(flake_id, derivation_id, store_path,
+    /// configuration_name)`. Systems that share `configuration_name` all
+    /// resolve to this same artifact.
+    async fn cve_gate_artifact(pool: &PgPool, suffix: &str) -> (i32, i32, String, String) {
+        let config_name = format!("cve-gate-config-{suffix}");
+        let flake_id: i32 =
+            sqlx::query_scalar("INSERT INTO flakes (name, repo_url) VALUES ($1, $2) RETURNING id")
+                .bind(format!("cve-gate-{suffix}"))
+                .bind(format!("https://example.invalid/{suffix}"))
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        let commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) \
+             VALUES ($1, $2, '2026-01-01') RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(format!("commit-{suffix}"))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let store_path = format!("/nix/store/{suffix}-nixos-system-cve-gate");
+        let derivation_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (commit_id, derivation_type, derivation_name, status_id, \
+             attempt_count, store_path, cf_agent_enabled, policy_requirements_met) \
+             VALUES ($1, 'nixos', $2, 11, 0, $3, true, true) RETURNING id",
+        )
+        .bind(commit_id)
+        .bind(&config_name)
+        .bind(&store_path)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO cache_push_jobs (derivation_id, status, store_path) \
+             VALUES ($1, 'completed', $2)",
+        )
+        .bind(derivation_id)
+        .bind(&store_path)
+        .execute(pool)
+        .await
+        .unwrap();
+        (flake_id, derivation_id, store_path, config_name)
+    }
+
+    /// Inserts one completed schema-1-shaped CVE scan for a derivation.
+    async fn cve_gate_scan(pool: &PgPool, derivation_id: i32, critical: i32, high: i32) {
+        sqlx::query(
+            "INSERT INTO cve_scans (derivation_id, scanner_name, status, critical_count, \
+             high_count, medium_count, low_count, completed_at) \
+             VALUES ($1, 'vulnix', 'completed', $2, $3, 0, 0, NOW())",
+        )
+        .bind(derivation_id)
+        .bind(critical)
+        .bind(high)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Creates one `auto_latest` system, optionally inside `environment_id`.
+    async fn cve_gate_system(
+        pool: &PgPool,
+        hostname: &str,
+        flake_id: i32,
+        configuration_name: &str,
+        environment_id: Option<Uuid>,
+    ) -> Uuid {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        use ed25519_dalek::SigningKey;
+        sqlx::query_scalar(
+            "INSERT INTO systems (hostname, public_key, derivation, flake_id, \
+             system_configuration_name, deployment_policy, environment_id) \
+             VALUES ($1, $2, 'test-derivation', $3, $4, 'auto_latest', $5) RETURNING id",
+        )
+        .bind(hostname)
+        .bind(
+            STANDARD.encode(
+                SigningKey::generate(&mut rand::thread_rng())
+                    .verifying_key()
+                    .to_bytes(),
+            ),
+        )
+        .bind(flake_id)
+        .bind(configuration_name)
+        .bind(environment_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Publishes a `require_cve_check` deployment policy version: accepted,
+    /// trusted, and the lineage's published pointer. Returns `(policy_id,
+    /// policy_version_id)`.
+    async fn publish_cve_check_policy(
+        pool: &PgPool,
+        suffix: &str,
+        config: &CveCheckConfig,
+    ) -> (Uuid, Uuid) {
+        let policy_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policies (name, policy_type, config, enabled) \
+             VALUES ($1, 'require_cve_check', $2, true) RETURNING id",
+        )
+        .bind(format!("test rollout {suffix}"))
+        .bind(serde_json::to_value(config).unwrap())
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let version_id: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+        )
+        .bind(policy_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("UPDATE deployment_policies SET current_draft_version_id = NULL WHERE id = $1")
+            .bind(policy_id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE deployment_policy_versions SET publication_state = 'accepted', \
+             trust_state = 'trusted' WHERE id = $1",
+        )
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2",
+        )
+        .bind(version_id)
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        (policy_id, version_id)
+    }
+
+    /// Publishes a bundle containing exactly one policy version: accepted and
+    /// trusted. Returns `(bundle_id, bundle_version_id)`.
+    async fn publish_cve_gate_bundle(
+        pool: &PgPool,
+        suffix: &str,
+        policy_version_id: Uuid,
+    ) -> (Uuid, Uuid) {
+        let bundle_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO compliance_bundles (name, framework, version, layer) \
+             VALUES ($1, 'test', '1.0', 'fleet') RETURNING id",
+        )
+        .bind(format!("cve-gate-bundle-{suffix}"))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let bundle_version_id: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1",
+        )
+        .bind(bundle_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO compliance_bundle_version_policies \
+             (bundle_version_id, policy_version_id, policy_order) VALUES ($1, $2, 0)",
+        )
+        .bind(bundle_version_id)
+        .bind(policy_version_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("UPDATE compliance_bundles SET current_draft_version_id = NULL WHERE id = $1")
+            .bind(bundle_id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE compliance_bundle_versions SET publication_state = 'accepted', \
+             trust_state = 'trusted', semantic_digest = $1 WHERE id = $2",
+        )
+        .bind(format!("cve-gate-{bundle_version_id}"))
+        .bind(bundle_version_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2",
+        )
+        .bind(bundle_version_id)
+        .bind(bundle_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        (bundle_id, bundle_version_id)
+    }
+
+    /// Assigns a published bundle to one system (`system_id = Some(..)`) or
+    /// one environment (`environment_id = Some(..)`) with `mode` (`"enforce"`
+    /// or `"report_only"`). Returns `(assignment_id, assignment_version_id)`.
+    async fn assign_cve_gate_bundle(
+        pool: &PgPool,
+        bundle_id: Uuid,
+        bundle_version_id: Uuid,
+        environment_id: Option<Uuid>,
+        system_id: Option<Uuid>,
+        mode: &str,
+    ) -> (Uuid, Uuid) {
+        let scope_type = if system_id.is_some() {
+            "system"
+        } else {
+            "environment"
+        };
+        let assignment_id: Uuid = sqlx::query_scalar(
+            r#"INSERT INTO compliance_bundle_assignments
+                 (bundle_id, bundle_version_id, scope_type, environment_id, system_id,
+                  active, enforcement_mode, assignment_overlay_digest)
+               VALUES ($1, $2, $3, $4, $5, true, $6, 'cve-gate-overlay') RETURNING id"#,
+        )
+        .bind(bundle_id)
+        .bind(bundle_version_id)
+        .bind(scope_type)
+        .bind(environment_id)
+        .bind(system_id)
+        .bind(mode)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let assignment_version_id: Uuid = sqlx::query_scalar(
+            r#"INSERT INTO compliance_bundle_assignment_versions
+                 (assignment_id, version_number, bundle_version_id, enforcement_mode,
+                  assignment_overlay_digest)
+               VALUES ($1, 1, $2, $3, 'cve-gate-overlay') RETURNING id"#,
+        )
+        .bind(assignment_id)
+        .bind(bundle_version_id)
+        .bind(mode)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE compliance_bundle_assignments SET current_version_id = $1 WHERE id = $2",
+        )
+        .bind(assignment_version_id)
+        .bind(assignment_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        (assignment_id, assignment_version_id)
+    }
+
+    /// Overrides one top-level `require_cve_check` config field within an
+    /// assignment version. The resolver only allows a small, explicit set of
+    /// fields for this policy type and requires the path to already exist.
+    async fn override_cve_gate_field(
+        pool: &PgPool,
+        assignment_id: Uuid,
+        assignment_version_id: Uuid,
+        policy_version_id: Uuid,
+        value_path: &str,
+        value: serde_json::Value,
+    ) {
+        sqlx::query(
+            "INSERT INTO compliance_assignment_value_overrides \
+             (assignment_id, assignment_version_id, policy_version_id, value_path, value) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(assignment_id)
+        .bind(assignment_version_id)
+        .bind(policy_version_id)
+        .bind(value_path)
+        .bind(value)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Reads back a system's `desired_target`/`desired_target_set_at` and any
+    /// live pending deployment target.
+    async fn cve_gate_system_state(
+        pool: &PgPool,
+        system_id: Uuid,
+    ) -> (
+        Option<String>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<String>,
+    ) {
+        sqlx::query_as(
+            "SELECT desired_target, desired_target_set_at, \
+             (SELECT target_store_path FROM pending_system_deployments \
+              WHERE system_id = $1 AND status = 'pending') FROM systems WHERE id = $1",
+        )
+        .bind(system_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    // A: A globally `enabled = true` require_cve_check policy that is not
+    // assigned to any bundle, environment, or system must never gate this
+    // system's deployment. `enabled` names a usable lineage, not fleet-global
+    // applicability.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires a verified disposable DATABASE_URL"]
+    async fn cve_gate_enabled_but_unassigned_policy_does_not_block(pool: PgPool) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (flake_id, derivation_id, store_path, config_name) =
+            cve_gate_artifact(&pool, &suffix).await;
+        cve_gate_scan(&pool, derivation_id, 5, 0).await;
+        publish_cve_check_policy(
+            &pool,
+            &suffix,
+            &CveCheckConfig {
+                max_critical: 0,
+                strict: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let system_id = cve_gate_system(
+            &pool,
+            &format!("host-{suffix}"),
+            flake_id,
+            &config_name,
+            None,
+        )
+        .await;
+
+        let manager = DeploymentPolicyManager::new(CrystalForgeConfig::default(), pool.clone());
+        let stats = manager.update_auto_latest_policies().await.unwrap();
+        assert_eq!((stats.systems_checked, stats.systems_updated), (1, 1));
+
+        let (desired, set_at, _pending) = cve_gate_system_state(&pool, system_id).await;
+        assert_eq!(desired.as_deref(), Some(store_path.as_str()));
+        assert!(set_at.is_some());
+    }
+
+    // B: An effective report_only require_cve_check with a failing scan
+    // (248 > 50) must not block; desired_target and a pending
+    // auto_desired_target row must both advance.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires a verified disposable DATABASE_URL"]
+    async fn cve_gate_report_only_fail_does_not_block(pool: PgPool) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (flake_id, derivation_id, store_path, config_name) =
+            cve_gate_artifact(&pool, &suffix).await;
+        cve_gate_scan(&pool, derivation_id, 248, 1274).await;
+        let (_policy_id, version_id) = publish_cve_check_policy(
+            &pool,
+            &suffix,
+            &CveCheckConfig {
+                max_critical: 50,
+                strict: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let (bundle_id, bundle_version_id) =
+            publish_cve_gate_bundle(&pool, &suffix, version_id).await;
+        let system_id = cve_gate_system(
+            &pool,
+            &format!("host-{suffix}"),
+            flake_id,
+            &config_name,
+            None,
+        )
+        .await;
+        assign_cve_gate_bundle(
+            &pool,
+            bundle_id,
+            bundle_version_id,
+            None,
+            Some(system_id),
+            "report_only",
+        )
+        .await;
+
+        let manager = DeploymentPolicyManager::new(CrystalForgeConfig::default(), pool.clone());
+        let stats = manager.update_auto_latest_policies().await.unwrap();
+        assert_eq!((stats.systems_checked, stats.systems_updated), (1, 1));
+
+        let (desired, set_at, pending) = cve_gate_system_state(&pool, system_id).await;
+        assert_eq!(desired.as_deref(), Some(store_path.as_str()));
+        assert!(set_at.is_some());
+        assert_eq!(pending.as_deref(), Some(store_path.as_str()));
+    }
+
+    // C: The identical policy and scan under an effective enforce assignment
+    // must block; desired_target must not advance.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires a verified disposable DATABASE_URL"]
+    async fn cve_gate_enforce_fail_blocks(pool: PgPool) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (flake_id, derivation_id, _store_path, config_name) =
+            cve_gate_artifact(&pool, &suffix).await;
+        cve_gate_scan(&pool, derivation_id, 248, 1274).await;
+        let (_policy_id, version_id) = publish_cve_check_policy(
+            &pool,
+            &suffix,
+            &CveCheckConfig {
+                max_critical: 50,
+                strict: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let (bundle_id, bundle_version_id) =
+            publish_cve_gate_bundle(&pool, &suffix, version_id).await;
+        let system_id = cve_gate_system(
+            &pool,
+            &format!("host-{suffix}"),
+            flake_id,
+            &config_name,
+            None,
+        )
+        .await;
+        assign_cve_gate_bundle(
+            &pool,
+            bundle_id,
+            bundle_version_id,
+            None,
+            Some(system_id),
+            "enforce",
+        )
+        .await;
+
+        let manager = DeploymentPolicyManager::new(CrystalForgeConfig::default(), pool.clone());
+        let stats = manager.update_auto_latest_policies().await.unwrap();
+        assert_eq!((stats.systems_checked, stats.systems_updated), (1, 0));
+
+        let (desired, set_at, pending) = cve_gate_system_state(&pool, system_id).await;
+        assert_eq!(desired, None);
+        assert_eq!(set_at, None);
+        assert_eq!(pending, None);
+    }
+
+    // D: The same policy lineage/version assigned to two environments with
+    // different modes must produce different outcomes for their systems.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires a verified disposable DATABASE_URL"]
+    async fn cve_gate_same_lineage_different_environment_modes(pool: PgPool) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (flake_id, derivation_id, store_path, config_name) =
+            cve_gate_artifact(&pool, &suffix).await;
+        cve_gate_scan(&pool, derivation_id, 248, 1274).await;
+        let (_policy_id, version_id) = publish_cve_check_policy(
+            &pool,
+            &suffix,
+            &CveCheckConfig {
+                max_critical: 50,
+                strict: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let (bundle_id, bundle_version_id) =
+            publish_cve_gate_bundle(&pool, &suffix, version_id).await;
+
+        let dev_env: Uuid =
+            sqlx::query_scalar("INSERT INTO environments (name) VALUES ($1) RETURNING id")
+                .bind(format!("dev-{suffix}"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let prod_env: Uuid =
+            sqlx::query_scalar("INSERT INTO environments (name) VALUES ($1) RETURNING id")
+                .bind(format!("prod-{suffix}"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assign_cve_gate_bundle(
+            &pool,
+            bundle_id,
+            bundle_version_id,
+            Some(dev_env),
+            None,
+            "report_only",
+        )
+        .await;
+        assign_cve_gate_bundle(
+            &pool,
+            bundle_id,
+            bundle_version_id,
+            Some(prod_env),
+            None,
+            "enforce",
+        )
+        .await;
+
+        let dev_system = cve_gate_system(
+            &pool,
+            &format!("dev-host-{suffix}"),
+            flake_id,
+            &config_name,
+            Some(dev_env),
+        )
+        .await;
+        let prod_system = cve_gate_system(
+            &pool,
+            &format!("prod-host-{suffix}"),
+            flake_id,
+            &config_name,
+            Some(prod_env),
+        )
+        .await;
+
+        let manager = DeploymentPolicyManager::new(CrystalForgeConfig::default(), pool.clone());
+        let stats = manager.update_auto_latest_policies().await.unwrap();
+        assert_eq!((stats.systems_checked, stats.systems_updated), (2, 1));
+
+        let (dev_desired, ..) = cve_gate_system_state(&pool, dev_system).await;
+        assert_eq!(
+            dev_desired.as_deref(),
+            Some(store_path.as_str()),
+            "dev (report_only) must deploy"
+        );
+        let (prod_desired, prod_set_at, prod_pending) =
+            cve_gate_system_state(&pool, prod_system).await;
+        assert_eq!(prod_desired, None, "prod (enforce) must block");
+        assert_eq!(prod_set_at, None);
+        assert_eq!(prod_pending, None);
+    }
+
+    // E: An assignment-level effective_config override changes the threshold
+    // actually enforced, independent of the published policy's own config.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires a verified disposable DATABASE_URL"]
+    async fn cve_gate_per_environment_effective_config_override(pool: PgPool) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (flake_id, derivation_id, store_path, config_name) =
+            cve_gate_artifact(&pool, &suffix).await;
+        cve_gate_scan(&pool, derivation_id, 248, 0).await;
+        let (_policy_id, version_id) = publish_cve_check_policy(
+            &pool,
+            &suffix,
+            &CveCheckConfig {
+                max_critical: 50,
+                strict: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let (bundle_id, bundle_version_id) =
+            publish_cve_gate_bundle(&pool, &suffix, version_id).await;
+
+        let env_a: Uuid =
+            sqlx::query_scalar("INSERT INTO environments (name) VALUES ($1) RETURNING id")
+                .bind(format!("env-a-{suffix}"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let env_b: Uuid =
+            sqlx::query_scalar("INSERT INTO environments (name) VALUES ($1) RETURNING id")
+                .bind(format!("env-b-{suffix}"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let (assignment_a, assignment_version_a) = assign_cve_gate_bundle(
+            &pool,
+            bundle_id,
+            bundle_version_id,
+            Some(env_a),
+            None,
+            "enforce",
+        )
+        .await;
+        override_cve_gate_field(
+            &pool,
+            assignment_a,
+            assignment_version_a,
+            version_id,
+            "max_critical",
+            serde_json::json!(300),
+        )
+        .await;
+        assign_cve_gate_bundle(
+            &pool,
+            bundle_id,
+            bundle_version_id,
+            Some(env_b),
+            None,
+            "enforce",
+        )
+        .await;
+
+        let system_a = cve_gate_system(
+            &pool,
+            &format!("host-a-{suffix}"),
+            flake_id,
+            &config_name,
+            Some(env_a),
+        )
+        .await;
+        let system_b = cve_gate_system(
+            &pool,
+            &format!("host-b-{suffix}"),
+            flake_id,
+            &config_name,
+            Some(env_b),
+        )
+        .await;
+
+        let manager = DeploymentPolicyManager::new(CrystalForgeConfig::default(), pool.clone());
+        let stats = manager.update_auto_latest_policies().await.unwrap();
+        assert_eq!((stats.systems_checked, stats.systems_updated), (2, 1));
+
+        let (a_desired, ..) = cve_gate_system_state(&pool, system_a).await;
+        assert_eq!(
+            a_desired.as_deref(),
+            Some(store_path.as_str()),
+            "override max_critical=300 must allow"
+        );
+        let (b_desired, ..) = cve_gate_system_state(&pool, system_b).await;
+        assert_eq!(
+            b_desired, None,
+            "unmodified max_critical=50 must still block"
+        );
+    }
+
+    // F: when_no_scan=block only blocks under an effective enforce
+    // assignment; report_only never blocks regardless of outcome.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires a verified disposable DATABASE_URL"]
+    async fn cve_gate_when_no_scan_block_only_blocks_under_enforce(pool: PgPool) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (flake_id, _derivation_id, store_path, config_name) =
+            cve_gate_artifact(&pool, &suffix).await;
+        // Deliberately no cve_scans row for this derivation.
+        let (_policy_id, version_id) = publish_cve_check_policy(
+            &pool,
+            &suffix,
+            &CveCheckConfig {
+                strict: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let (bundle_id, bundle_version_id) =
+            publish_cve_gate_bundle(&pool, &suffix, version_id).await;
+
+        let report_system = cve_gate_system(
+            &pool,
+            &format!("report-{suffix}"),
+            flake_id,
+            &config_name,
+            None,
+        )
+        .await;
+        assign_cve_gate_bundle(
+            &pool,
+            bundle_id,
+            bundle_version_id,
+            None,
+            Some(report_system),
+            "report_only",
+        )
+        .await;
+
+        let manager = DeploymentPolicyManager::new(CrystalForgeConfig::default(), pool.clone());
+        let stats = manager.update_auto_latest_policies().await.unwrap();
+        assert_eq!((stats.systems_checked, stats.systems_updated), (1, 1));
+        let (desired, ..) = cve_gate_system_state(&pool, report_system).await;
+        assert_eq!(
+            desired.as_deref(),
+            Some(store_path.as_str()),
+            "report_only when_no_scan=block must not block"
+        );
+
+        let enforce_system = cve_gate_system(
+            &pool,
+            &format!("enforce-{suffix}"),
+            flake_id,
+            &config_name,
+            None,
+        )
+        .await;
+        assign_cve_gate_bundle(
+            &pool,
+            bundle_id,
+            bundle_version_id,
+            None,
+            Some(enforce_system),
+            "enforce",
+        )
+        .await;
+        let stats = manager.update_auto_latest_policies().await.unwrap();
+        assert_eq!(stats.systems_checked, 2);
+        let (enforce_desired, ..) = cve_gate_system_state(&pool, enforce_system).await;
+        assert_eq!(
+            enforce_desired, None,
+            "enforce when_no_scan=block must block"
+        );
+    }
+
+    // G: A non-strict violation under an effective enforce assignment warns
+    // but does not block; desired_target still advances.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires a verified disposable DATABASE_URL"]
+    async fn cve_gate_enforce_non_strict_warns_and_advances(pool: PgPool) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (flake_id, derivation_id, store_path, config_name) =
+            cve_gate_artifact(&pool, &suffix).await;
+        cve_gate_scan(&pool, derivation_id, 248, 0).await;
+        let (_policy_id, version_id) = publish_cve_check_policy(
+            &pool,
+            &suffix,
+            &CveCheckConfig {
+                max_critical: 50,
+                strict: false,
+                ..Default::default()
+            },
+        )
+        .await;
+        let (bundle_id, bundle_version_id) =
+            publish_cve_gate_bundle(&pool, &suffix, version_id).await;
+        let system_id = cve_gate_system(
+            &pool,
+            &format!("host-{suffix}"),
+            flake_id,
+            &config_name,
+            None,
+        )
+        .await;
+        assign_cve_gate_bundle(
+            &pool,
+            bundle_id,
+            bundle_version_id,
+            None,
+            Some(system_id),
+            "enforce",
+        )
+        .await;
+
+        let manager = DeploymentPolicyManager::new(CrystalForgeConfig::default(), pool.clone());
+        let stats = manager.update_auto_latest_policies().await.unwrap();
+        assert_eq!((stats.systems_checked, stats.systems_updated), (1, 1));
+        let (desired, ..) = cve_gate_system_state(&pool, system_id).await;
+        assert_eq!(
+            desired.as_deref(),
+            Some(store_path.as_str()),
+            "non-strict violation must warn, not block"
+        );
+    }
+
+    // H: A system-scope assignment of the same policy lineage/version
+    // overrides an environment-scope default of the same lineage/version.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires a verified disposable DATABASE_URL"]
+    async fn cve_gate_system_assignment_overrides_environment_default(pool: PgPool) {
+        use crate::compliance::resolver::resolve_system_effective_policies;
+
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (flake_id, derivation_id, store_path, config_name) =
+            cve_gate_artifact(&pool, &suffix).await;
+        cve_gate_scan(&pool, derivation_id, 248, 0).await;
+        let (_policy_id, version_id) = publish_cve_check_policy(
+            &pool,
+            &suffix,
+            &CveCheckConfig {
+                max_critical: 50,
+                strict: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let (bundle_id, bundle_version_id) =
+            publish_cve_gate_bundle(&pool, &suffix, version_id).await;
+
+        let environment_id: Uuid =
+            sqlx::query_scalar("INSERT INTO environments (name) VALUES ($1) RETURNING id")
+                .bind(format!("env-{suffix}"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        // Environment default: enforce (would block, 248 > 50).
+        assign_cve_gate_bundle(
+            &pool,
+            bundle_id,
+            bundle_version_id,
+            Some(environment_id),
+            None,
+            "enforce",
+        )
+        .await;
+        let system_id = cve_gate_system(
+            &pool,
+            &format!("host-{suffix}"),
+            flake_id,
+            &config_name,
+            Some(environment_id),
+        )
+        .await;
+        // System-level assignment of the SAME bundle/policy version:
+        // report_only. System specificity outranks environment specificity
+        // for the same policy lineage/version (see
+        // `compliance::resolver::merge_effective_policy_candidate`).
+        assign_cve_gate_bundle(
+            &pool,
+            bundle_id,
+            bundle_version_id,
+            None,
+            Some(system_id),
+            "report_only",
+        )
+        .await;
+
+        let resolved = match resolve_system_effective_policies(&pool, system_id)
+            .await
+            .unwrap()
+        {
+            ResolutionOutcome::Resolved(set) => set,
+            ResolutionOutcome::Conflict(conflicts) => {
+                panic!("expected resolved set: {conflicts:?}")
+            }
+        };
+        assert_eq!(resolved.policies.len(), 1);
+        assert_eq!(
+            resolved.policies[0].effective_mode,
+            AssignmentMode::ReportOnly,
+            "system assignment must win over the environment default"
+        );
+
+        let manager = DeploymentPolicyManager::new(CrystalForgeConfig::default(), pool.clone());
+        let stats = manager.update_auto_latest_policies().await.unwrap();
+        assert_eq!((stats.systems_checked, stats.systems_updated), (1, 1));
+        let (desired, ..) = cve_gate_system_state(&pool, system_id).await;
+        assert_eq!(desired.as_deref(), Some(store_path.as_str()));
+    }
+
+    // Real sledge acceptance case (owner report): the exact same effective
+    // assignment allows delivery under report_only while a FAIL compliance
+    // outcome still exists, then blocks it once switched to enforce.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires a verified disposable DATABASE_URL"]
+    async fn cve_gate_sledge_shaped_report_only_then_enforce(pool: PgPool) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (flake_id, derivation_id, store_path, config_name) =
+            cve_gate_artifact(&pool, &suffix).await;
+        cve_gate_scan(&pool, derivation_id, 248, 1274).await;
+        let (_policy_id, version_id) = publish_cve_check_policy(
+            &pool,
+            &suffix,
+            &CveCheckConfig {
+                max_critical: 50,
+                strict: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let (bundle_id, bundle_version_id) =
+            publish_cve_gate_bundle(&pool, &suffix, version_id).await;
+        let system_id = cve_gate_system(
+            &pool,
+            &format!("sledge-{suffix}"),
+            flake_id,
+            &config_name,
+            None,
+        )
+        .await;
+        let (assignment_id, _assignment_version_id) = assign_cve_gate_bundle(
+            &pool,
+            bundle_id,
+            bundle_version_id,
+            None,
+            Some(system_id),
+            "report_only",
+        )
+        .await;
+
+        let manager = DeploymentPolicyManager::new(CrystalForgeConfig::default(), pool.clone());
+        let stats = manager.update_auto_latest_policies().await.unwrap();
+        assert_eq!((stats.systems_checked, stats.systems_updated), (1, 1));
+        let (desired, set_at, pending) = cve_gate_system_state(&pool, system_id).await;
+        assert_eq!(desired.as_deref(), Some(store_path.as_str()));
+        assert!(set_at.is_some());
+        assert_eq!(pending.as_deref(), Some(store_path.as_str()));
+
+        // Switch the exact same assignment to enforce with a new immutable
+        // version, then clear the delivered target so the next pass proves
+        // whether it advances again.
+        sqlx::query(
+            "UPDATE systems SET desired_target = NULL, desired_target_set_at = NULL WHERE id = $1",
+        )
+        .bind(system_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE pending_system_deployments SET status = 'superseded', completed_at = NOW() \
+             WHERE system_id = $1 AND status = 'pending'",
+        )
+        .bind(system_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let enforced_version_id: Uuid = sqlx::query_scalar(
+            r#"INSERT INTO compliance_bundle_assignment_versions
+                 (assignment_id, version_number, bundle_version_id, enforcement_mode,
+                  assignment_overlay_digest)
+               VALUES ($1, 2, $2, 'enforce', 'cve-gate-overlay') RETURNING id"#,
+        )
+        .bind(assignment_id)
+        .bind(bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE compliance_bundle_assignments SET current_version_id = $1 WHERE id = $2",
+        )
+        .bind(enforced_version_id)
+        .bind(assignment_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let stats = manager.update_auto_latest_policies().await.unwrap();
+        assert_eq!((stats.systems_checked, stats.systems_updated), (1, 0));
+        let (desired, set_at, pending) = cve_gate_system_state(&pool, system_id).await;
+        assert_eq!(
+            desired, None,
+            "enforce must block delivery of the failing target"
+        );
+        assert_eq!(set_at, None);
+        assert_eq!(pending, None);
+    }
 
     // SQLx creates and drops databases; run only against the disposable test cluster.
     #[sqlx::test(migrations = "./migrations")]
@@ -2251,7 +3236,62 @@ mod tests {
     }
 
     #[test]
-    fn auto_latest_uses_batch_policy_and_global_cve_queries() {
+    fn cve_check_violation_maps_to_block() {
+        use crate::models::deployment_policies::CveCheckOutcome;
+        let decision = map_cve_check_decision(CveGateResult {
+            outcomes: vec![CveCheckOutcome {
+                policy_description: "require_cve_check(max_critical=50)".into(),
+                passed: false,
+                blocking: true,
+                reason: Some("248 critical CVE(s) found (max allowed: 50)".into()),
+            }],
+            deployment_allowed: false,
+            block_reason: Some("248 critical CVE(s) found (max allowed: 50)".into()),
+        });
+        match decision {
+            AdvancedGateDecision::Block(reason) => assert!(reason.contains("248")),
+            _ => panic!("expected block decision"),
+        }
+    }
+
+    #[test]
+    fn cve_check_non_blocking_violation_maps_to_warn() {
+        use crate::models::deployment_policies::CveCheckOutcome;
+        let decision = map_cve_check_decision(CveGateResult {
+            outcomes: vec![CveCheckOutcome {
+                policy_description: "require_cve_check(max_critical=0)".into(),
+                passed: false,
+                blocking: false,
+                reason: Some("3 critical CVE(s) found (max allowed: 0)".into()),
+            }],
+            deployment_allowed: true,
+            block_reason: None,
+        });
+        match decision {
+            AdvancedGateDecision::Warn(reason) => assert!(reason.contains("critical")),
+            _ => panic!("expected warn decision, non-strict violations must not block"),
+        }
+    }
+
+    #[test]
+    fn cve_check_pass_maps_to_allow() {
+        let decision = map_cve_check_decision(CveGateResult {
+            outcomes: vec![],
+            deployment_allowed: true,
+            block_reason: None,
+        });
+        assert!(matches!(decision, AdvancedGateDecision::Allow));
+    }
+
+    /// Guards the TASK-437 correction: `require_cve_check` must be evaluated
+    /// only through each system's resolved effective policy set (one
+    /// `"require_cve_check"` match arm inside `evaluate_advanced_policy_gates`),
+    /// never through a retired fleet-global `load_cve_policies` query. A
+    /// globally `enabled` policy lineage is not automatically applicable to
+    /// every system; applicability comes only from the effective assignment
+    /// resolver.
+    #[test]
+    fn auto_latest_evaluates_require_cve_check_through_effective_policy_batch() {
         let source = include_str!("mod.rs");
         let production_source = source
             .split("#[cfg(test)]")
@@ -2264,10 +3304,16 @@ mod tests {
             1
         );
         assert_eq!(
+            production_source.matches("load_cve_policies").count(),
+            0,
+            "the fleet-global require_cve_check loader must not be used by auto_latest"
+        );
+        assert_eq!(
             production_source
-                .matches("load_cve_policies(&self.pool).await")
+                .matches("\"require_cve_check\" =>")
                 .count(),
-            1
+            1,
+            "require_cve_check must be evaluated exactly once, from the effective policy match"
         );
     }
 }
