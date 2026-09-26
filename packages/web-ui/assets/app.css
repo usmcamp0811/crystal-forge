@@ -7374,6 +7374,9 @@ tr.attention-flash {
 .scanning-table-wrap { width: 100%; overflow-x: auto; }
 .scanning-table { min-width: 1040px; }
 .scanning-table tbody tr { cursor: default; }
+.scanning-record[tabindex="0"] { cursor: pointer; }
+.scanning-record[tabindex="0"]:focus-visible { outline: 2px solid var(--cf-brand-purple); outline-offset: -2px; }
+.scanning-card.has-bulk-bar { overflow: visible; }
 .scanning-record.archived { opacity: .68; background: color-mix(in oklab, var(--cf-text-muted) 5%, var(--cf-card-bg)); }
 .scanning-record.archived:hover { opacity: .84; }
 .scanning-table th .th-sort { all: unset; display: inline-flex; align-items: center; gap: 4px; cursor: pointer; color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit; border-radius: 4px; }
@@ -7449,14 +7452,12 @@ tr.attention-flash {
 .scanning-log-head h2 { margin: 0; font-size: 17px; }
 .scanning-log-head p { margin: 4px 0; color: var(--cf-text-secondary); font-size: 12px; }
 .scanning-log-head code { color: var(--cf-text-muted); font-size: 10px; overflow-wrap: anywhere; }
+.scanning-log-identity { min-width: 0; }
+.scanning-log-identity h2 { display: flex; align-items: center; gap: 7px; overflow-wrap: anywhere; }
+.scanning-log-scan-id { display: inline-block; margin-top: 1px; }
 .scanning-log-body { flex: 1; min-height: 0; overflow: auto; padding: 14px 16px 20px; }
 .scanning-log-summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; color: var(--cf-text-muted); font-size: 11px; }
 .scanning-detail-summary { border: 1px solid var(--cf-card-border); border-radius: 9px; background: var(--cf-subtle-bg); overflow: hidden; }
-.scanning-detail-config { display:flex; align-items:center; gap:10px; padding:12px 16px; border-bottom:1px solid var(--cf-divider); background:color-mix(in oklab, var(--cf-card-bg) 82%, var(--cf-subtle-bg)); }
-.scanning-detail-config-icon { width:32px; height:32px; display:grid; place-items:center; flex:0 0 auto; border:1px solid color-mix(in oklab, #60a5fa 35%, var(--cf-card-border)); border-radius:8px; color:#60a5fa; background:color-mix(in oklab, #60a5fa 8%, transparent); }
-.scanning-detail-config-copy { min-width:0; display:flex; flex-direction:column; gap:3px; }
-.scanning-detail-config-copy strong { color:var(--cf-text-primary); font-size:14px; overflow-wrap:anywhere; }
-.scanning-detail-config-copy span { color:var(--cf-text-muted); font-size:10.5px; overflow-wrap:anywhere; }
 .scanning-detail-status-strip { padding:9px 16px; border-bottom:1px solid var(--cf-divider); display:flex; align-items:center; flex-wrap:wrap; gap:7px; color:var(--cf-text-muted); font-size:11px; }
 .scanning-trigger-chip { font-size:10px; }
 .scanning-detail-elapsed { color:var(--cf-text-secondary); }

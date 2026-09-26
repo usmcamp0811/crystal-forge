@@ -628,7 +628,9 @@ struct ScanActionFeedback {
 #[derive(Clone, PartialEq, Eq)]
 struct ScanDetailSelection {
     scan_id: Uuid,
-    label: String,
+    hostname: String,
+    flake_name: Option<String>,
+    commit_hash: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -952,7 +954,9 @@ fn open_newest_failed_scan(
                 Some(row) => load_scan_detail(
                     ScanDetailSelection {
                         scan_id: row.scan_id,
-                        label: format!("{} · {}", row.hostname, commit_label(&row.commit_hash)),
+                        hostname: row.hostname.clone(),
+                        flake_name: row.flake_name.clone(),
+                        commit_hash: row.commit_hash.clone(),
                     },
                     selected,
                     state,
@@ -1524,7 +1528,7 @@ pub fn ScanningView() -> Element {
                 }
             }
 
-            section { class: "card scanning-card", aria_label: "CVE scans",
+            section { class: if selected_rows.read().is_empty() { "card scanning-card" } else { "card scanning-card has-bulk-bar" }, aria_label: "CVE scans",
                 div { class: "sd-tabs scanning-tabs", role: "tablist", aria_label: "Scan views",
                     onkeydown: move |event| {
                         let next = match event.key() {
@@ -1756,18 +1760,41 @@ fn completed_panel(
     let continuation_error = state.continuation_error.clone();
     let narrowed = request.has_narrowing_filter();
     let selected = selected_rows();
-    let archive_ids = records
+    let mut selected_scan_ids = records
         .iter()
-        .filter(|row| selected.contains(&row.scan_id) && row.archived_at.is_none())
+        .filter(|row| selected.contains(&row.scan_id))
         .map(|row| row.scan_id)
         .collect::<Vec<_>>();
-    let restore_ids = records
-        .iter()
-        .filter(|row| selected.contains(&row.scan_id) && row.archived_at.is_some())
-        .map(|row| row.scan_id)
+    let visible_selected_ids = selected_scan_ids.iter().copied().collect::<HashSet<_>>();
+    let mut selected_ids_without_loaded_rows = selected
+        .difference(&visible_selected_ids)
+        .copied()
         .collect::<Vec<_>>();
-    let archive_over_batch = archive_ids.len() > ARCHIVE_BATCH_MAX;
-    let restore_over_batch = restore_ids.len() > ARCHIVE_BATCH_MAX;
+    selected_ids_without_loaded_rows.sort_unstable();
+    selected_scan_ids.extend(selected_ids_without_loaded_rows);
+    let all_selected_archived = !selected.is_empty()
+        && selected.iter().all(|scan_id| {
+            records
+                .iter()
+                .find(|row| row.scan_id == *scan_id)
+                .is_some_and(|row| row.archived_at.is_some())
+        });
+    let action_archived = !all_selected_archived;
+    let archive_over_batch = selected.len() > ARCHIVE_BATCH_MAX;
+    let action_label = if action_archived {
+        "Archive"
+    } else {
+        "Restore"
+    };
+    let batch_title = if archive_over_batch {
+        format!(
+            "Select 100 or fewer scans; one request carries at most {ARCHIVE_BATCH_MAX} exact scan identities"
+        )
+    } else if action_archived {
+        "Archive the selected exact scans".to_string()
+    } else {
+        "Restore the selected exact scans".to_string()
+    };
     let request_for_button = request.clone();
     let request_for_error = request.clone();
 
@@ -1902,19 +1929,12 @@ fn completed_panel(
                 span { class: "bulk-sep" }
                 button {
                     class: "btn btn-ghost xs focus-ring",
-                    disabled: archive_ids.is_empty() || archive_pending() || archive_over_batch,
-                    title: if archive_over_batch { "Select 100 or fewer scans; one archive request carries at most 100 exact scan identities" } else { "Archive the selected exact scans" },
-                    onclick: move |_| apply_archive(archive_ids.clone(), true, selected_rows, selection_anchor, archive_pending, rows.feedback, rows.refresh),
+                    disabled: selected_scan_ids.is_empty() || archive_pending() || archive_over_batch,
+                    aria_label: format!("{action_label} {}", selected.len()),
+                    title: batch_title,
+                    onclick: move |_| apply_archive(selected_scan_ids.clone(), action_archived, selected_rows, selection_anchor, archive_pending, rows.feedback, rows.refresh),
                     Icon { name: IconName::Archive, size: 12 }
-                    " Archive selected"
-                }
-                button {
-                    class: "btn btn-ghost xs focus-ring",
-                    disabled: restore_ids.is_empty() || archive_pending() || restore_over_batch,
-                    title: if restore_over_batch { "Select 100 or fewer scans; one restore request carries at most 100 exact scan identities" } else { "Restore the selected exact scans" },
-                    onclick: move |_| apply_archive(restore_ids.clone(), false, selected_rows, selection_anchor, archive_pending, rows.feedback, rows.refresh),
-                    Icon { name: IconName::Archive, size: 12 }
-                    " Restore selected"
+                    " {action_label} {selected.len()}"
                 }
                 button {
                     class: "btn btn-ghost xs focus-ring",
@@ -2148,8 +2168,9 @@ fn active_sort_header(
 ///
 /// `selection` is `Some` only for collections that support archive and restore
 /// actions. Completed rows use modifier-click selection without a visible
-/// checkbox; Active rows do not support row selection because nonterminal scans
-/// are neither archivable nor cancellable.
+/// checkbox. Plain clicks open the exact scan detail in both collections.
+/// Active rows ignore modifier selection because nonterminal scans are neither
+/// archivable nor cancellable.
 fn record_row(
     row: ScanningScanRecordResponse,
     selection_state: Option<Signal<HashSet<Uuid>>>,
@@ -2184,9 +2205,12 @@ fn record_row(
     );
     let selection = ScanDetailSelection {
         scan_id: row.scan_id,
-        label: format!("{} · {}", row.hostname, commit_label(&row.commit_hash)),
+        hostname: row.hostname.clone(),
+        flake_name: row.flake_name.clone(),
+        commit_hash: row.commit_hash.clone(),
     };
     let selection_for_row_click = selection.clone();
+    let selection_for_row_keydown = selection.clone();
     let prerequisite_build_failure = is_prerequisite_build_failure(&row);
     let can_retry = row.status == "failed" && !prerequisite_build_failure;
     let can_rescan = row.status == "completed";
@@ -2207,6 +2231,7 @@ fn record_row(
             key: "{row.scan_id}",
             "data-testid": "scanning-record-{row.scan_id}",
             class: row_class,
+            tabindex: "0",
             onmousedown: move |event| {
                 if has_completed_selection && event.modifiers().shift() {
                     event.prevent_default();
@@ -2234,8 +2259,7 @@ fn record_row(
                         );
                         selected_rows.set(next);
                         selection.anchor.set(next_anchor);
-                    }
-                    else {
+                    } else {
                         load_scan_detail(
                             selection_for_row_click.clone(),
                             selected_scan,
@@ -2243,6 +2267,25 @@ fn record_row(
                             detail_generation,
                         );
                     }
+                } else {
+                    load_scan_detail(
+                        selection_for_row_click.clone(),
+                        selected_scan,
+                        detail_state,
+                        detail_generation,
+                    );
+                }
+            },
+            onkeydown: move |event| {
+                if event.key() == Key::Enter || event.key() == Key::Character(" ".to_string()) {
+                    event.prevent_default();
+                    event.stop_propagation();
+                    load_scan_detail(
+                        selection_for_row_keydown.clone(),
+                        selected_scan,
+                        detail_state,
+                        detail_generation,
+                    );
                 }
             },
             td { div { class: "scanning-config-name", "{row.hostname}" } div { class: "scanning-history-flake", "{configuration_meta}" } }
@@ -2265,6 +2308,7 @@ fn record_row(
                         event.stop_propagation();
                         load_scan_detail(selection.clone(), selected_scan, detail_state, detail_generation);
                     },
+                    onkeydown: move |event| event.stop_propagation(),
                     Icon { name: IconName::Terminal, size: 14 }
                 }
                 if can_retry_or_rescan {
@@ -2273,6 +2317,7 @@ fn record_row(
                         aria_label: if can_retry { format!("Retry exact scan {}", row.scan_id) } else { format!("Rescan scan {}", row.scan_id) },
                         title: if can_retry { "Retry exact" } else { "Rescan now" },
                         disabled: retry_pending.read().contains(&row.derivation_id),
+                        onkeydown: move |event| event.stop_propagation(),
                         onclick: {
                             let label = format!("{} {}", row.hostname, commit_label(&row.commit_hash));
                             move |event| {
@@ -2288,6 +2333,7 @@ fn record_row(
                         class: "btn-icon focus-ring",
                         aria_label: format!("View CVEs for scan {}", row.scan_id),
                         title: "View CVEs",
+                        onkeydown: move |event| event.stop_propagation(),
                         onclick: move |event| {
                             event.stop_propagation();
                             navigator.push(Route::CvesView { query: String::new() });
@@ -2416,18 +2462,43 @@ fn systems_panel(
                         let archive_state = system_archive_visibility(&archive_states.read(), system_id);
                         let history = histories.read().get(&(system_id, archive_state)).cloned();
                         let history_error = errors.read().get(&(system_id, archive_state)).cloned();
+                        let history_header = history
+                            .as_ref()
+                            .map(|_| format!("{} configs for this system · newest first", system.total_configs))
+                            .unwrap_or_else(|| {
+                                if loading_system() == Some((system_id, archive_state)) {
+                                    "Loading exact configurations…".to_string()
+                                } else {
+                                    "Exact revision history".to_string()
+                                }
+                            });
                         rsx! {
                             tr { key: "system-{system_id}", class: if open { "scanning-system-row expanded" } else { "scanning-system-row" },
                                 td { button { class: "scanning-system-toggle focus-ring", aria_expanded: open, onclick: move |_| toggle_system_history(system_id, expanded), Icon { name: if open { IconName::ChevronDown } else { IconName::ChevronRight }, size: 12 } span { class: "scanning-config-name", "{system.hostname}" } } }
                                 td { if let Some(name) = system.environment.clone() { if let Some(color) = env_colors.get(&name.to_ascii_lowercase()) { EnvBadge { name, fg: color.clone(), bg: format!("color-mix(in oklab, {color} 14%, var(--cf-card-bg))"), border: color.clone() } } else { EnvBadge { name } } } else { span { class: "scanning-unavailable", "Unassigned" } } }
                                 td { div { class: "scanning-system-counts", span { "{system.scanned} scanned" } if system.stale > 0 { span { class: "stale", "{system.stale} stale" } } if system.needs_build > 0 { span { class: "needs", "{system.needs_build} needs build" } } if system.unscanned > 0 { span { "{system.unscanned} never scanned" } } } }
                                 td { { findings(system.current_crit as i32, system.current_high as i32, 0, 0, true) } }
-                                td { if let Some(derivation_id) = system.current_derivation_id { button { class: "btn btn-ghost xs focus-ring", disabled: retry_pending.read().contains(&derivation_id), title: "Check the exact currently deployed derivation now", onclick: { let label = format!("{} deployed revision", system.hostname); move |_| retry_exact_scan(derivation_id, label.clone(), retry_pending, feedback, refresh) }, Icon { name: IconName::Sync, size: 11 } " Check now" } } }
+                                 td { if let Some(derivation_id) = system.current_derivation_id {
+                                     button {
+                                         class: "btn-icon focus-ring",
+                                         aria_label: format!("Rescan current for {}", system.hostname),
+                                         title: "Rescan current",
+                                         disabled: retry_pending.read().contains(&derivation_id),
+                                         onclick: {
+                                             let label = format!("{} deployed revision", system.hostname);
+                                             move |event| {
+                                                 event.stop_propagation();
+                                                 retry_exact_scan(derivation_id, label.clone(), retry_pending, feedback, refresh);
+                                             }
+                                         },
+                                         Icon { name: IconName::Sync, size: 14 }
+                                     }
+                                 } }
                             }
                             if open { tr { class: "scan-sys-expand-row", td { colspan: 5,
                                 div { class: "scan-sys-expand",
                                     div { class: "scan-sys-expand-head",
-                                        span { "Exact revision history · newest first" }
+                                        span { "{history_header}" }
                                         label { class: "scanning-include-archived", input { r#type: "checkbox", checked: archive_state, onchange: move |event| {
                                             let include_archived = event.checked();
                                             set_system_archive_visibility(&mut archive_states.write(), system_id, include_archived);
@@ -2535,17 +2606,44 @@ fn system_history_table(
                         },
                     };
                     let meta = status_meta(&row.status);
-                    let selection = ScanDetailSelection { scan_id: row.scan_id, label: format!("{} · {}", row.hostname, commit_label(&row.commit_hash)) };
+                    let scan_id = row.scan_id;
+                    let selection = ScanDetailSelection {
+                        scan_id,
+                        hostname: row.hostname.clone(),
+                        flake_name: row.flake_name.clone(),
+                        commit_hash: row.commit_hash.clone(),
+                    };
+                    let selection_for_click = selection.clone();
+                    let selection_for_keydown = selection.clone();
+                    let selection_for_action = selection.clone();
                     let revision = row.commit_hash.as_deref().unwrap_or("Revision unavailable");
                     rsx! { tr { key: "history-{row.scan_id}", class: if row.archived_at.is_some() { "scanning-record archived" } else { "scanning-record" },
+                        tabindex: "0",
+                        onclick: move |_| load_scan_detail(selection_for_click.clone(), selected_scan, detail_state, detail_generation),
+                        onkeydown: move |event| {
+                            if event.key() == Key::Enter || event.key() == Key::Character(" ".to_string()) {
+                                event.prevent_default();
+                                event.stop_propagation();
+                                load_scan_detail(selection_for_keydown.clone(), selected_scan, detail_state, detail_generation);
+                            }
+                        },
                         td { div { class: "scanning-full-revision mono", "{revision}" } }
                         td { span { class: if relation == "Deployed" { "chip chip-healthy" } else { "chip chip-unknown" }, "{relation}" } }
                         td { span { class: "chip {meta.class}", "{meta.label}" } if let Some(reason) = row.wait_reason.as_deref() { div { class: "scanning-wait", "Awaiting: {reason}" } } if let Some(failure) = row.failure.as_deref() { div { class: "scanning-row-failure", title: "{failure}", "{bounded_failure_preview(failure)}" } } if row.archived_at.is_some() { div { class: "scanning-archived-label", Icon { name: IconName::Archive, size: 9 } " Archived" } } }
                         td { { findings(row.critical_count, row.high_count, row.medium_count, row.low_count, row.status == "completed") } }
                         td { class: "scanning-last-scan", title: "{record_time(&row).to_rfc3339()}", "{relative_time(record_time(&row))}" }
                         td { div { class: "row-actions scanning-row-actions",
-                            if row.status == "failed" && !is_prerequisite_build_failure(&row) { button { class: "btn btn-ghost xs focus-ring", disabled: retry_pending.read().contains(&row.derivation_id), onclick: { let label = format!("{} {}", row.hostname, commit_label(&row.commit_hash)); move |_| retry_exact_scan(row.derivation_id, label.clone(), retry_pending, feedback, refresh) }, "Retry exact" } }
-                            button { class: "btn-icon focus-ring", aria_label: format!("Open details for scan {}", row.scan_id), onclick: move |_| load_scan_detail(selection.clone(), selected_scan, detail_state, detail_generation), Icon { name: IconName::Terminal, size: 13 } }
+                            button {
+                                class: "btn-icon focus-ring",
+                                aria_label: format!("Open details for scan {}", row.scan_id),
+                                title: "Open scan log",
+                                onclick: move |event| {
+                                    event.stop_propagation();
+                                    load_scan_detail(selection_for_action.clone(), selected_scan, detail_state, detail_generation);
+                                },
+                                onkeydown: move |event| event.stop_propagation(),
+                                Icon { name: IconName::Terminal, size: 14 }
+                            }
                         } }
                     } }
                 },
@@ -2561,7 +2659,23 @@ fn system_history_table(
                         td { span { class: "scanning-unavailable", "Not available" } }
                         td { class: "scanning-last-scan", "Never" }
                         td { div { class: "row-actions scanning-row-actions",
-                            if row.rescan_eligible { button { class: "btn btn-ghost xs focus-ring", disabled: retry_pending.read().contains(&row.derivation_id), onclick: { let label = format!("{} {}", row.hostname, commit_label(&row.commit_hash)); move |_| retry_exact_scan(row.derivation_id, label.clone(), retry_pending, feedback, refresh) }, "Check now" } }
+                            if row.rescan_eligible {
+                                button {
+                                    class: "btn-icon focus-ring",
+                                    aria_label: format!("Rescan this config {}", row.derivation_id),
+                                    title: "Rescan this config",
+                                    disabled: retry_pending.read().contains(&row.derivation_id),
+                                    onkeydown: move |event| event.stop_propagation(),
+                                    onclick: {
+                                        let label = format!("{} {}", row.hostname, commit_label(&row.commit_hash));
+                                        move |event| {
+                                            event.stop_propagation();
+                                            retry_exact_scan(row.derivation_id, label.clone(), retry_pending, feedback, refresh);
+                                        }
+                                    },
+                                    Icon { name: IconName::Sync, size: 13 }
+                                }
+                            }
                         } }
                     } }
                 },
@@ -2662,7 +2776,7 @@ fn ScanDetailDrawer(
                 DialogInitialFocus { dialog_id: "scan-diagnostics-dialog".to_string() }
                 DialogFocusSentinel { dialog_id: "scan-diagnostics-dialog".to_string(), boundary: DialogFocusBoundary::Last }
                 div { class: "scanning-log-head",
-                    div { h2 { id: "scan-log-title", Icon { name: IconName::Shield, size: 14 } " Scan details" } p { "{selection.label}" } code { "{selection.scan_id}" } }
+                    { detail_identity(&selection) }
                     div { class: "row-actions",
                         button { class: "btn-icon focus-ring", aria_label: "Refresh exact scan detail", onclick: { let refresh_selection = selection.clone(); move |_| load_scan_detail(refresh_selection.clone(), selected, state, generation) }, Icon { name: IconName::Sync, size: 14 } }
                         button { class: "btn-icon focus-ring", aria_label: "Close exact scan detail", onclick: move |_| close_scan_detail(selected, generation), Icon { name: IconName::X, size: 15 } }
@@ -2672,7 +2786,6 @@ fn ScanDetailDrawer(
                     ScanDetailState::Loading => rsx! { div { class: "scanning-log-body", div { class: "q-empty", role: "status", "Loading exact scan detail…" } } },
                     ScanDetailState::Error(error) => rsx! { div { class: "scanning-log-body", { load_error_state("Exact scan detail could not be loaded", error, { let retry_selection = selection.clone(); move || load_scan_detail(retry_selection.clone(), selected, state, generation) }) } } },
                     ScanDetailState::Loaded(detail) => rsx! {
-                        { detail_identity(detail) }
                         { detail_status_strip(detail, now()) }
                         { detail_callout(detail, selected, generation, retry_pending, feedback, refresh) }
                         div { class: "sd-tabs scanning-detail-tabs", role: "tablist", aria_label: "Scan detail sections",
@@ -2706,6 +2819,7 @@ fn ScanDetailDrawer(
                             if detail.events.is_empty() { div { class: "q-empty", h3 { "No persisted diagnostic events" } p { "No log output is fabricated for this lifecycle." } } }
                             else { div { class: "sd-log-stream build-log-stream scanning-log-stream", for (index, event) in detail.events.iter().enumerate() {
                                 div { id: "scan-event-{event.id}", key: "{event.id}", class: diagnostic_line_class(event.level.as_str(), matches.get(match_position()).copied() == Some(index) && !search().trim().is_empty()),
+                                    "data-testid": "scan-event-{event.id}",
                                     span { class: "sd-log-t", title: "{event.occurred_at.to_rfc3339()}", "{diagnostic_time(event.occurred_at)}" }
                                     span { class: "sd-log-lvl", "{event.level.to_ascii_uppercase()}" }
                                     span { class: "sd-log-m", span { class: "scanning-log-source", "{event.source}/{event.event_type} · execution {event.execution_id} · attempt {event.attempt_number} · " } { highlighted_diagnostic_message(&event.message, &search()) } }
@@ -2726,18 +2840,18 @@ fn ScanDetailDrawer(
     }
 }
 
-fn detail_identity(detail: &ScanningScanDetailResponse) -> Element {
-    let flake = detail.flake_name.as_deref().unwrap_or("Not recorded");
-    let revision = detail.commit_hash.as_deref().unwrap_or("Not recorded");
-    let short_revision = revision.chars().take(12).collect::<String>();
+fn detail_identity(selection: &ScanDetailSelection) -> Element {
+    let flake = selection
+        .flake_name
+        .as_deref()
+        .unwrap_or("Flake unavailable");
+    let revision = commit_label(&selection.commit_hash);
     rsx! {
-        div { class: "scanning-detail-config",
-            div { class: "scanning-detail-config-icon", Icon { name: IconName::Shield, size: 17 } }
-            div { class: "scanning-detail-config-copy",
-                strong { "{detail.hostname}" }
-                span { class: "mono", "{flake} · {short_revision}" }
+        div { class: "scanning-log-identity",
+            h2 { id: "scan-log-title", Icon { name: IconName::Shield, size: 14 } " {selection.hostname}" }
+            p { class: "mono", "{flake} · {revision}" }
+            code { class: "scanning-log-scan-id", title: "Exact scan UUID", "Scan ID {selection.scan_id}" }
             }
-        }
     }
 }
 
@@ -2937,13 +3051,12 @@ fn highlighted_diagnostic_message(message: &str, query: &str) -> Element {
 }
 
 fn detail_elapsed_seconds(detail: &ScanningScanDetailResponse, now: DateTime<Utc>) -> Option<i64> {
-    if detail.status == "in_progress" {
-        detail
-            .started_at
-            .map(|started_at| now.signed_duration_since(started_at).num_seconds().max(0))
-    } else {
-        detail.scan_duration_ms.map(|ms| i64::from(ms) / 1_000)
+    if detail.status != "in_progress" {
+        return None;
     }
+    detail
+        .started_at
+        .map(|started_at| now.signed_duration_since(started_at).num_seconds().max(0))
 }
 
 fn diagnostic_matches(detail: &ScanningScanDetailResponse, query: &str) -> Vec<usize> {
@@ -3557,7 +3670,9 @@ mod tests {
         let scan_id = Uuid::new_v4();
         let selection = ScanDetailSelection {
             scan_id,
-            label: "scan".to_string(),
+            hostname: "scan".to_string(),
+            flake_name: Some("flake".to_string()),
+            commit_hash: Some("revision".to_string()),
         };
         assert!(!scan_detail_request_is_current(
             ScanDetailRequest {
@@ -3635,6 +3750,14 @@ mod tests {
         let now = Utc::now();
         running.started_at = Some(now - Duration::seconds(75));
         assert_eq!(detail_elapsed_seconds(&running, now), Some(75));
+
+        running.status = "pending".to_string();
+        running.scan_duration_ms = Some(42_000);
+        assert_eq!(
+            detail_elapsed_seconds(&running, now),
+            None,
+            "queued rows must not present a prior or fabricated duration as running time"
+        );
     }
 
     #[test]

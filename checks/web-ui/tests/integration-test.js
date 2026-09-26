@@ -17337,6 +17337,7 @@ security.audit.enable = true;</fixtext>
         rangeTwo: "20000000-0000-4000-8000-000000000009",
         rangeThree: "20000000-0000-4000-8000-000000000010",
         rangeFour: "20000000-0000-4000-8000-000000000011",
+        systemFailed: "20000000-0000-4000-8000-000000000012",
       };
       const timestamp = (hour) => `2026-09-20T${String(hour).padStart(2, "0")}:00:00Z`;
       // Terminal fixtures are ordered by minutes before a fixed newest moment.
@@ -17355,7 +17356,9 @@ security.audit.enable = true;</fixtext>
         source_trigger: "manual",
         created_at: at,
         scheduled_at: at,
-        started_at: status === "in_progress" ? new Date(Date.now() - 305_000).toISOString() : at,
+        started_at: status === "in_progress"
+          ? new Date(Date.now() - 305_000).toISOString()
+          : ["completed", "failed"].includes(status) && extra.attempts !== 0 ? at : null,
         completed_at: ["completed", "failed"].includes(status) ? at : null,
         scanner_name: "vulnix",
         scanner_version: "1.12.4",
@@ -17399,6 +17402,7 @@ security.audit.enable = true;</fixtext>
         record(ids.rangeTwo, 302, "range-two", "range-fleet", "range-revision-2", "completed", terminalAt(10)),
         record(ids.rangeThree, 303, "range-three", "range-fleet", "range-revision-3", "completed", terminalAt(11)),
         record(ids.rangeFour, 304, "range-four", "range-fleet", "range-revision-4", "completed", terminalAt(12)),
+        record(ids.systemFailed, 401, "prod-server-01", "core-fleet", "dddd-system-failure", "failed", terminalAt(13)),
       ];
       const BULK_TERMINAL_ROWS = 700;
       // Index 400 names the configuration searched for while it sits far
@@ -17423,13 +17427,14 @@ security.audit.enable = true;</fixtext>
       const collectionRequests = [];
       const retryRequests = [];
       const archiveRequests = [];
+      const scanDetailRequests = [];
       let scheduleRequest = null;
       const scansRoute = /\/api\/v1\/scanning\/scans(?:\?.*)?$/;
       const scanDetailRoute = /\/api\/v1\/scanning\/scans\/([0-9a-f-]+)$/;
       const exactRetryRoute = /\/api\/v1\/cves\/rescan\/(\d+)$/;
       const withArchiveState = (row) => ({ ...row, archived_at: archivedIds.has(row.scan_id) ? timestamp(16) : null });
       const historyRows = (requestedSystemId) => (requestedSystemId === systemId
-        ? terminalRows.filter((row) => [201, 202].includes(row.derivation_id))
+        ? terminalRows.filter((row) => [201, 202, 401].includes(row.derivation_id))
         : []);
       const revisionClass = (row) => (row.is_current ? "deployed" : row.is_latest_per_flake ? "recent" : "superseded");
       const matchesScanFilters = (row, filters) => {
@@ -17490,15 +17495,18 @@ security.audit.enable = true;</fixtext>
       await page.route("**/api/v1/scanning/stats", async (route) => route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ scanning: 1, queued: 1, awaiting_build: 1, awaiting_closure: 1, stale: 2, never_scanned: 2, failed: 4, coverage_percent: 86 }),
+        body: JSON.stringify({ scanning: 1, queued: 1, awaiting_build: 1, awaiting_closure: 1, stale: 2, never_scanned: 2, failed: 5, coverage_percent: 86 }),
       }));
       await page.route(scansRoute, async (route) => {
         const request = route.request();
         if (request.method() === "PATCH") {
           const body = request.postDataJSON();
           archiveRequests.push(body);
+          const changed = body.scan_ids.filter((scanId) => body.archived
+            ? !archivedIds.has(scanId)
+            : archivedIds.has(scanId)).length;
           for (const scanId of body.scan_ids) body.archived ? archivedIds.add(scanId) : archivedIds.delete(scanId);
-          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ requested: body.scan_ids.length, changed: body.scan_ids.length, archived: body.archived }) });
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ requested: body.scan_ids.length, changed, archived: body.archived }) });
           return;
         }
         const url = new URL(request.url());
@@ -17644,16 +17652,20 @@ security.audit.enable = true;</fixtext>
         const scanId = route.request().url().match(scanDetailRoute)?.[1];
         const row = [...activeRows, ...terminalRows].find((candidate) => candidate.scan_id === scanId);
         if (!row) throw new Error(`Unexpected scan detail identity ${scanId}`);
+        scanDetailRequests.push(scanId);
+        const events = ["pending", "awaiting_build", "awaiting_closure"].includes(row.status) || row.attempts === 0
+          ? []
+          : [
+            { id: 1, execution_id: "cccccccc-cccc-4ccc-8ccc-ccccccccccc1", attempt_number: 1, occurred_at: timestamp(13), level: "warning", source: "vulnix", event_type: "output", message: "Authorization: Bearer [REDACTED] bounded diagnostic", truncated: true },
+            { id: 2, execution_id: "cccccccc-cccc-4ccc-8ccc-ccccccccccc1", attempt_number: 1, occurred_at: timestamp(14), level: "info", source: "worker", event_type: "complete", message: "ordered terminal diagnostic", truncated: false },
+          ];
         await route.fulfill({
           status: 200,
           contentType: "application/json",
           body: JSON.stringify({
             ...row,
             archived_at: archivedIds.has(row.scan_id) ? timestamp(16) : null,
-            events: [
-              { id: 1, execution_id: "cccccccc-cccc-4ccc-8ccc-ccccccccccc1", attempt_number: 1, occurred_at: timestamp(13), level: "warning", source: "vulnix", event_type: "output", message: "Authorization: Bearer [REDACTED] bounded diagnostic", truncated: true },
-              { id: 2, execution_id: "cccccccc-cccc-4ccc-8ccc-ccccccccccc1", attempt_number: 1, occurred_at: timestamp(14), level: "info", source: "worker", event_type: "complete", message: "ordered terminal diagnostic", truncated: false },
-            ],
+            events,
             truncated: true,
           }),
         });
@@ -17667,7 +17679,7 @@ security.audit.enable = true;</fixtext>
         status: 200,
         contentType: "application/json",
         body: JSON.stringify([
-          { system_id: systemId, hostname: "prod-server-01", environment: "production", total_configs: 5, scanned: 2, stale: 1, needs_build: 1, unscanned: 2, current_crit: 1, current_high: 2, current_derivation_id: 201 },
+          { system_id: systemId, hostname: "prod-server-01", environment: "production", total_configs: 6, scanned: 2, stale: 1, needs_build: 1, unscanned: 2, current_crit: 1, current_high: 2, current_derivation_id: 201 },
           { system_id: buildRequiredSystemId, hostname: "build-required-01", environment: "staging", total_configs: 1, scanned: 0, stale: 0, needs_build: 1, unscanned: 1, current_crit: 0, current_high: 0, current_derivation_id: null },
         ]),
       }));
@@ -17676,6 +17688,8 @@ security.audit.enable = true;</fixtext>
         contentType: "application/json",
         body: JSON.stringify([
           { derivation_id: 201, rescan_eligible: true, scan_id: ids.newest, hostname: "prod-server-01", flake_name: "core-fleet", commit_hash: "zzzz-current", status: "completed", completed_at: timestamp(15), scheduled_at: timestamp(15), critical_count: 1, high_count: 2, medium_count: 1, freshness: "deployed", is_current: true, is_latest_per_flake: true, source_trigger: "manual" },
+          { derivation_id: 202, rescan_eligible: true, scan_id: ids.superseded, hostname: "prod-server-01", flake_name: "core-fleet", commit_hash: "aaaa-old", status: "completed", completed_at: terminalAt(5), scheduled_at: terminalAt(5), critical_count: 0, high_count: 0, medium_count: 0, freshness: "superseded", is_current: false, is_latest_per_flake: false, source_trigger: "manual" },
+          { derivation_id: 401, rescan_eligible: true, scan_id: ids.systemFailed, hostname: "prod-server-01", flake_name: "core-fleet", commit_hash: "dddd-system-failure", status: "failed", completed_at: terminalAt(13), scheduled_at: terminalAt(13), critical_count: 0, high_count: 0, medium_count: 0, freshness: "archived", is_current: false, is_latest_per_flake: false, source_trigger: "manual" },
           { derivation_id: 301, rescan_eligible: true, scan_id: null, hostname: "prod-server-01", flake_name: "core-fleet", commit_hash: "cccc-no-scan", status: "never_scanned", completed_at: null, scheduled_at: null, critical_count: 0, high_count: 0, medium_count: 0, freshness: "recent", is_current: false, is_latest_per_flake: true, source_trigger: null },
           { derivation_id: 302, rescan_eligible: false, scan_id: null, hostname: "prod-server-01", flake_name: "core-fleet", commit_hash: "bbbb-needs-build", status: "never_scanned", completed_at: null, scheduled_at: null, critical_count: 0, high_count: 0, medium_count: 0, freshness: "recent", is_current: false, is_latest_per_flake: false, source_trigger: null },
           { derivation_id: 303, rescan_eligible: true, scan_id: null, hostname: "prod-server-01", flake_name: "core-fleet", commit_hash: "aaaa-superseded", status: "never_scanned", completed_at: null, scheduled_at: null, critical_count: 0, high_count: 0, medium_count: 0, freshness: "archived", is_current: false, is_latest_per_flake: false, source_trigger: null },
@@ -17728,9 +17742,36 @@ security.audit.enable = true;</fixtext>
           throw new Error(`Configuration sorting was not deterministic: ${sortedActive.join(",")}`);
         }
 
+        const queuedRow = page.getByTestId(`scanning-record-${ids.pending}`);
+        const queuedDetailRequestCount = scanDetailRequests.length;
+        await queuedRow.click();
+        let detail = page.locator("#scan-diagnostics-dialog");
+        await assertVisible(detail.getByRole("heading", { name: "gamma-queued", exact: true }), "Plain-clicking an Active queued row should open its exact scan drawer");
+        await assertVisible(detail.getByText("lab-fleet · cccc-queued", { exact: true }), "Queued drawer should show flake and revision below its host title");
+        await assertVisible(detail.locator(".scanning-detail-status-strip").getByText("Queued", { exact: true }), "Queued scan should not be presented as running");
+        await assertVisible(detail.locator(".scanning-detail-status-strip .scanning-trigger-chip").getByText("manual", { exact: true }), "Queued drawer should retain its trigger");
+        const queuedTimestamp = await detail.locator(".scanning-detail-status-strip time").getAttribute("datetime");
+        if (Date.parse(queuedTimestamp) !== Date.parse(timestamp(6))) throw new Error(`Queued lifecycle timestamp was not preserved: ${queuedTimestamp}`);
+        await assertCount(detail.locator(".scanning-detail-status-strip .scanning-detail-elapsed"), 0, "Queued scans must not look like Vulnix is already running");
+        await assertVisible(detail.getByText("No persisted diagnostic events", { exact: true }), "Queued scans without events should show a truthful empty log");
+        if (scanDetailRequests.length !== queuedDetailRequestCount + 1 || scanDetailRequests.at(-1) !== ids.pending) {
+          throw new Error(`Plain Active row click must request only its exact scan detail: ${JSON.stringify(scanDetailRequests)}`);
+        }
+        await detail.getByRole("button", { name: "Close exact scan detail" }).click();
+        await assertFocused(queuedRow, "Closing the queued drawer should restore focus to its row");
+
+        const queuedActionRequestCount = scanDetailRequests.length;
+        await queuedRow.getByRole("button", { name: `Open details for scan ${ids.pending}` }).click();
+        detail = page.locator("#scan-diagnostics-dialog");
+        await assertVisible(detail.getByText(`Scan ID ${ids.pending}`, { exact: true }), "The terminal action should open the same exact queued scan");
+        if (scanDetailRequests.length !== queuedActionRequestCount + 1 || scanDetailRequests.at(-1) !== ids.pending) {
+          throw new Error(`The terminal action also triggered an unintended row action: ${JSON.stringify(scanDetailRequests)}`);
+        }
+        await detail.getByRole("button", { name: "Close exact scan detail" }).click();
+
         await page.getByRole("button", { name: "Open the newest failed scan" }).click();
-        let detail = page.getByRole("dialog", { name: "Scan details" });
-        await assertVisible(detail.locator(".scanning-log-head").getByText("omega-new-failure · ffff-failed", { exact: true }), "Failed stat should open the newest failure");
+        await assertVisible(detail.getByRole("heading", { name: "omega-new-failure", exact: true }), "Failed stat should open the newest failure with host as the drawer title");
+        await assertVisible(detail.getByText("failure-fleet · ffff-failed", { exact: true }), "Failed drawer should retain flake and revision context");
         await assertVisible(detail.getByRole("alert"), "Expected prominent failed-scan callout");
         await assertVisible(detail.getByRole("button", { name: "Retry scan" }), "Expected real failed-scan retry action");
         const exactBuildId = `30000000-0000-4000-8000-${String(203).padStart(12, "0")}`;
@@ -17767,28 +17808,41 @@ security.audit.enable = true;</fixtext>
 
         await activeTab.click();
         const waitingRow = page.locator("#scan-active-panel tbody tr").filter({ hasText: "alpha-build-wait" });
-        const waitingDetailButton = waitingRow.getByRole("button", { name: `Open details for scan ${ids.build}` });
-        await waitingDetailButton.click();
-        detail = page.getByRole("dialog", { name: "Scan details" });
+        await waitingRow.click();
+        detail = page.locator("#scan-diagnostics-dialog");
+        await assertVisible(detail.getByRole("heading", { name: "alpha-build-wait", exact: true }), "Plain Active waiting-row click should open its exact drawer");
         await assertVisible(detail.getByText("Waiting on the build", { exact: true }), "Expected typed build-prerequisite callout");
         await assertVisible(detail.getByText(/starts automatically after the associated build succeeds/), "Expected truthful automatic progression guidance");
         await assertFocused(detail.getByRole("button", { name: "Refresh exact scan detail" }), "Scan detail initial focus did not land on the first enabled control");
         await captureWorkflowViewportState(page, "16c-scanning-view", "awaiting-build", "desktop");
         await detail.press("Escape");
         await assertHidden(detail, "Escape should close scan detail");
-        await assertFocused(waitingDetailButton, "Scan detail did not restore focus to its opener");
+        await assertFocused(waitingRow, "Scan detail did not restore focus to the Active row that opened it");
 
         const closureRow = page.locator("#scan-active-panel tbody tr").filter({ hasText: "beta-closure-wait" });
-        await closureRow.getByRole("button", { name: `Open details for scan ${ids.closure}` }).click();
-        detail = page.getByRole("dialog", { name: "Scan details" });
+        await closureRow.click();
+        detail = page.locator("#scan-diagnostics-dialog");
+        await assertVisible(detail.getByRole("heading", { name: "beta-closure-wait", exact: true }), "Plain Active closure-wait row click should open its exact drawer");
         await assertVisible(detail.getByText("Waiting for a reachable closure", { exact: true }), "Expected typed closure-prerequisite callout");
         await detail.getByRole("button", { name: "Close exact scan detail" }).click();
 
         const runningRow = page.locator("#scan-active-panel tbody tr").filter({ hasText: "zeta-running" });
-        await runningRow.getByRole("button", { name: `Open details for scan ${ids.running}` }).click();
-        detail = page.getByRole("dialog", { name: "Scan details" });
+        await runningRow.click();
+        detail = page.locator("#scan-diagnostics-dialog");
+        await assertVisible(detail.getByRole("heading", { name: "zeta-running", exact: true }), "Plain Active running-row click should open that host's drawer");
+        await assertVisible(detail.getByText("edge-fleet · ffff-running", { exact: true }), "Running drawer should preserve flake and revision hierarchy");
+        await assertVisible(detail.getByText(`Scan ID ${ids.running}`, { exact: true }), "Running drawer should retain exact scan identity");
+        await assertVisible(detail.locator(".scanning-detail-status-strip").getByText("Scanning", { exact: true }), "Running scan must show its authoritative status");
         await assertAttribute(detail.getByRole("tab", { name: "Log" }), "aria-selected", "true", "Log must be the default drawer tab");
         if (!(await detail.evaluate((dialog) => dialog.contains(document.activeElement)))) throw new Error("Scan detail drawer did not receive initial focus");
+        await assertVisible(detail.getByText("2 events", { exact: true }), "Running drawer should count only persisted fixture events");
+        const runningEvent = detail.getByTestId("scan-event-2");
+        await assertVisible(runningEvent, "Running drawer should render the persisted diagnostic event row");
+        const runningEventText = await runningEvent.textContent() || "";
+        if (!runningEventText.includes("ordered terminal diagnostic")) {
+          throw new Error(`Running drawer must show the persisted event message: ${runningEventText}`);
+        }
+        await captureWorkflowViewportState(page, "16c-scanning-view", "active-running-drawer", "desktop");
         const logTab = detail.getByRole("tab", { name: "Log" });
         await logTab.focus();
         await logTab.press("End");
@@ -17824,7 +17878,7 @@ security.audit.enable = true;</fixtext>
           const terminalBuildRow = page.locator("#scan-completed-panel tbody tr").filter({ hasText: hostname });
           await assertCount(terminalBuildRow.getByRole("button", { name: "Retry exact" }), 0, `${hostname} must not offer a misleading scan retry`);
           await terminalBuildRow.getByRole("button", { name: `Open details for scan ${scanId}` }).click();
-          detail = page.getByRole("dialog", { name: "Scan details" });
+          detail = page.locator("#scan-diagnostics-dialog");
           await assertVisible(detail.getByRole("alert").getByText(expectedTitle, { exact: true }), `Expected ${hostname} prerequisite callout`);
           await assertVisible(detail.getByRole("link", { name: "View build" }), `Expected ${hostname} primary build action`);
           await assertCount(detail.getByRole("button", { name: "Retry scan" }), 0, `${hostname} detail must not offer scan retry`);
@@ -17839,8 +17893,10 @@ security.audit.enable = true;</fixtext>
         await assertHidden(page.getByText("alpha-current", { exact: true }), "Superseded filter should exclude newest flake revision");
         await revisionFilter.selectOption("all");
         const completedRow = page.locator("#scan-completed-panel tbody tr").filter({ hasText: "alpha-current" });
-        await completedRow.getByRole("button", { name: `Open details for scan ${ids.newest}` }).click();
-        detail = page.getByRole("dialog", { name: "Scan details" });
+        await assertVisible(completedRow.getByRole("button", { name: `View CVEs for scan ${ids.newest}` }), "Critical/high findings should retain the CVE navigation action");
+        await completedRow.click();
+        detail = page.locator("#scan-diagnostics-dialog");
+        await assertVisible(detail.getByRole("heading", { name: "alpha-current", exact: true }), "Plain Completed row click should open its exact scan drawer");
         await detail.getByRole("tab", { name: "Details" }).click();
         await assertVisible(detail.getByText("4 vulnerabilities across 120 packages"), "Expected operator findings summary");
         await captureWorkflowViewportState(page, "16c-scanning-view", "completed-detail", "desktop");
@@ -17878,6 +17934,21 @@ security.audit.enable = true;</fixtext>
           const container = document.querySelector(".content");
           if (container) container.scrollTop = 0;
         });
+        const bulkBar = page.locator("#scan-completed-panel .bulk-bar");
+        const assertBulkAction = async (kind, count, message) => {
+          await assertVisible(bulkBar.getByRole("button", { name: `${kind} ${count}` }), message);
+          await assertCount(
+            bulkBar.getByRole("button", { name: /^(Archive|Restore) \d+$/ }),
+            1,
+            "BulkBar must expose exactly one contextual archive/restore action",
+          );
+          const opposite = kind === "Archive" ? "Restore" : "Archive";
+          await assertCount(
+            bulkBar.getByRole("button", { name: new RegExp(`^${opposite} \\d+$`) }),
+            0,
+            "BulkBar must not show the inapplicable opposite action",
+          );
+        };
 
         await scrollCompletedToTop();
         await waitForCompletedRows(50);
@@ -18001,7 +18072,8 @@ security.audit.enable = true;</fixtext>
           await page.getByTestId(`scanning-record-${scanId}`).click({ modifiers: ["Control"] });
         }
         const completedReload = page.waitForResponse((response) => response.url().includes("collection=completed&include_archived=false") && response.request().method() === "GET");
-        await page.getByRole("button", { name: "Archive selected" }).click();
+        await assertBulkAction("Archive", 6, "Six selected scans should show one Archive 6 action");
+        await page.getByRole("button", { name: "Archive 6" }).click();
         await completedReload;
         await waitForCompletedRows(50);
         for (const hostname of ["alpha-current", "alpha-old", "omega-new-failure", "omega-old-failure", "delta-build-failed", "epsilon-build-cancelled"]) {
@@ -18022,9 +18094,10 @@ security.audit.enable = true;</fixtext>
         await assertCompletedPrefix("The archived Completed view", { includeArchived: true });
         await assertCount(page.locator("#scan-completed-panel tbody tr.archived .scanning-archived-label"), 7, "Archived rows must remain visually marked");
         await page.getByTestId(`scanning-record-${ids.retained}`).click({ modifiers: ["Control"] });
+        await assertBulkAction("Restore", 1, "An all-archived selection should show only Restore 1");
         const restoreReload = page.waitForResponse((response) => response.url().includes("collection=completed&include_archived=true") && response.request().method() === "GET");
         const restoreCountReload = page.waitForResponse((response) => response.url().includes("collection=completed&include_archived=false") && response.request().method() === "GET");
-        await page.getByRole("button", { name: "Restore selected" }).click();
+        await page.getByRole("button", { name: "Restore 1" }).click();
         await Promise.all([restoreReload, restoreCountReload]);
         await assertVisible(page.getByRole("button", { name: "Archived [6]" }), "Restoring must reduce the archived count");
         await waitForCompletedRows(50);
@@ -18032,8 +18105,31 @@ security.audit.enable = true;</fixtext>
         if (!archiveRequests.some((request) => request.archived === true && request.scan_ids.length === 6) || !archiveRequests.some((request) => request.archived === false && request.scan_ids.includes(ids.retained))) {
           throw new Error(`Archive/restore selection requests were incomplete: ${JSON.stringify(archiveRequests)}`);
         }
+        await page.getByTestId(`scanning-record-${ids.retained}`).click({ modifiers: ["Control"] });
+        await page.getByTestId(`scanning-record-${ids.newest}`).click({ modifiers: ["Control"] });
+        await assertBulkAction("Archive", 2, "A mixed archived/unarchived selection should show one Archive 2 action");
+        const mixedArchiveCount = archiveRequests.length;
+        const mixedArchiveResponse = page.waitForResponse((response) => response.request().method() === "PATCH" && response.url().match(scansRoute));
+        const mixedArchiveReload = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("collection=completed&include_archived=true"));
+        await page.getByRole("button", { name: "Archive 2" }).click();
+        const [mixedArchiveResult] = await Promise.all([mixedArchiveResponse, mixedArchiveReload]);
+        if (!mixedArchiveResult.ok()) throw new Error(`Mixed archive request failed: ${mixedArchiveResult.status()}`);
+        const mixedArchiveRequest = archiveRequests.slice(mixedArchiveCount);
+        if (mixedArchiveRequest.length !== 1 || mixedArchiveRequest[0].archived !== true ||
+            mixedArchiveRequest[0].scan_ids.length !== 2 ||
+            new Set(mixedArchiveRequest[0].scan_ids).size !== 2 ||
+            !mixedArchiveRequest[0].scan_ids.includes(ids.retained) ||
+            !mixedArchiveRequest[0].scan_ids.includes(ids.newest)) {
+          throw new Error(`Mixed archive must carry both exact IDs once: ${JSON.stringify(mixedArchiveRequest)}`);
+        }
+        const mixedArchiveBody = await mixedArchiveResult.json();
+        if (mixedArchiveBody.requested !== 2 || mixedArchiveBody.changed !== 1) {
+          throw new Error(`Mixed archive should request both IDs and change only the unarchived one: ${JSON.stringify(mixedArchiveBody)}`);
+        }
+        await assertVisible(page.getByRole("button", { name: "Archived [7]" }), "Idempotent mixed archive should keep the total archived count truthful");
+        await assertCount(bulkBar, 0, "Successful archive must clear the selection and hide BulkBar");
         const continuationAfterArchive = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("after="));
-        await page.getByTestId("scanning-completed-load-more").click();
+        await page.getByTestId("scanning-completed-load-more").evaluate((button) => button.click());
         await continuationAfterArchive;
         await waitForCompletedRows(100);
         await assertCompletedPrefix("Continuation after archive and restore", { includeArchived: true });
@@ -18063,9 +18159,9 @@ security.audit.enable = true;</fixtext>
         if (completedColumnNames.join("|") !== expectedCompletedColumns.join("|")) {
           throw new Error(`Completed columns must match the approved design: ${JSON.stringify(completedColumnNames)}`);
         }
-        await assertHidden(page.locator("#scan-completed-panel .bulk-bar"), "The bulk action bar must stay hidden without a selection");
+        await assertCount(bulkBar, 0, "The bulk action bar must not exist without a selection");
         await page.getByTestId(`scanning-record-${ids.rangeOne}`).click();
-        await assertVisible(page.getByRole("heading", { name: "Scan details" }), "A plain Completed row click should open scan details");
+        await assertVisible(page.getByRole("heading", { name: "range-one", exact: true }), "A plain Completed row click should open the exact config as the drawer title");
         await page.getByRole("button", { name: "Close exact scan detail" }).click();
         const rangeIdSet = new Set([ids.rangeOne, ids.rangeTwo, ids.rangeThree, ids.rangeFour]);
         const rangeIds = visibleTerminalRows().filter((row) => rangeIdSet.has(row.scan_id)).map((row) => row.scan_id);
@@ -18076,14 +18172,15 @@ security.audit.enable = true;</fixtext>
         const ctrlToggleRow = page.getByTestId(`scanning-record-${rangeIds[1]}`);
         await ctrlToggleRow.click({ modifiers: ["Control"] });
         await assertVisible(page.getByText("1 selected", { exact: true }), "Ctrl-click should toggle one exact row on");
-        await assertVisible(page.locator("#scan-completed-panel .bulk-bar"), "The bulk action bar should appear for a non-empty selection");
+        await assertBulkAction("Archive", 1, "One unarchived selection should show only Archive 1");
         await ctrlToggleRow.click({ modifiers: ["Control"] });
-        await assertHidden(page.locator("#scan-completed-panel .bulk-bar"), "The bulk action bar should disappear when selection is empty");
+        await assertCount(bulkBar, 0, "The bulk action bar should disappear when selection is empty");
         const firstRangeRow = page.getByTestId(`scanning-record-${rangeIds[0]}`);
         await firstRangeRow.click({ modifiers: ["Control"] });
         await assertVisible(page.getByText("1 selected", { exact: true }), "Ctrl-click should anchor and select the first exact scan");
         await page.getByTestId(`scanning-record-${rangeIds[3]}`).click({ modifiers: ["Shift"] });
         await assertVisible(page.getByText("4 selected", { exact: true }), "Shift-click should select the four-row inclusive range");
+        await assertBulkAction("Archive", 4, "Four unarchived selections should show only Archive 4");
         for (const scanId of rangeIds) {
           const selectedRow = page.getByTestId(`scanning-record-${scanId}`);
           if (!(await selectedRow.evaluate((element) => element.classList.contains("row-checked")))) {
@@ -18092,14 +18189,57 @@ security.audit.enable = true;</fixtext>
         }
         const selectedBrowserText = await page.evaluate(() => window.getSelection()?.toString() || "");
         if (selectedBrowserText !== "") throw new Error(`Shift range highlighted page text: ${JSON.stringify(selectedBrowserText)}`);
+        const stickyBulkBar = await page.evaluate(async () => {
+          const content = document.querySelector(".content");
+          const bar = document.querySelector("#scan-completed-panel .bulk-bar");
+          if (!content || !bar) return null;
+          const scrollBehavior = content.style.scrollBehavior;
+          content.style.scrollBehavior = "auto";
+          content.scrollTop = content.scrollHeight;
+          await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const contentRect = content.getBoundingClientRect();
+          const barRect = bar.getBoundingClientRect();
+          const contentPaddingBottom = Number.parseFloat(getComputedStyle(content).paddingBottom) || 0;
+          content.style.scrollBehavior = scrollBehavior;
+          return {
+            position: getComputedStyle(bar).position,
+            left: barRect.left,
+            right: barRect.right,
+            bottom: barRect.bottom,
+            contentLeft: contentRect.left,
+            contentRight: contentRect.right,
+            contentBottom: contentRect.bottom,
+            contentPaddingBottom,
+          };
+        });
+        if (!stickyBulkBar || stickyBulkBar.position !== "sticky" ||
+            Math.abs((stickyBulkBar.left + stickyBulkBar.right) / 2 - (stickyBulkBar.contentLeft + stickyBulkBar.contentRight) / 2) > 3 ||
+            Math.abs(stickyBulkBar.bottom - (stickyBulkBar.contentBottom - stickyBulkBar.contentPaddingBottom - 16)) > 4) {
+          throw new Error(`Selected BulkBar must be centered and sticky while Completed is scrolled: ${JSON.stringify(stickyBulkBar)}`);
+        }
         await captureWorkflowViewportState(page, "16c-scanning-view", "completed-range-selected", "desktop");
+        await captureWorkflowViewportState(page, "16c-scanning-view", "completed-bulkbar-sticky", "desktop");
+        await scrollCompletedToTop();
+        await page.getByRole("button", { name: "Clear selection" }).click();
+        await assertCount(bulkBar, 0, "Clear should hide BulkBar immediately");
+        for (const scanId of rangeIds) {
+          if (await page.getByTestId(`scanning-record-${scanId}`).evaluate((element) => element.classList.contains("row-checked"))) {
+            throw new Error(`Clear left scan ${scanId} selected`);
+          }
+        }
+        await page.getByTestId(`scanning-record-${rangeIds[3]}`).click({ modifiers: ["Shift"] });
+        await assertVisible(page.getByText("1 selected", { exact: true }), "Clear must reset the range anchor");
+        await page.getByRole("button", { name: "Clear selection" }).click();
+        await page.getByTestId(`scanning-record-${rangeIds[0]}`).click({ modifiers: ["Control"] });
+        await page.getByTestId(`scanning-record-${rangeIds[3]}`).click({ modifiers: ["Shift"] });
+        await assertVisible(page.getByText("4 selected", { exact: true }), "Range selection should still work after Clear");
 
         const archiveCountBeforeRange = archiveRequests.length;
         const rangeArchiveResponse = page.waitForResponse((response) =>
           response.request().method() === "PATCH" && response.url().match(scansRoute));
         const rangeArchiveReload = page.waitForResponse((response) =>
           response.request().method() === "GET" && response.url().includes("collection=completed&include_archived=false"));
-        await page.getByRole("button", { name: "Archive selected" }).click();
+        await page.getByRole("button", { name: "Archive 4" }).click();
         const [rangeArchiveResult] = await Promise.all([rangeArchiveResponse, rangeArchiveReload]);
         if (!rangeArchiveResult.ok()) throw new Error(`Range archive failed: ${rangeArchiveResult.status()}`);
         const rangeArchiveRequest = archiveRequests.slice(archiveCountBeforeRange);
@@ -18129,7 +18269,8 @@ security.audit.enable = true;</fixtext>
           response.request().method() === "PATCH" && response.url().match(scansRoute));
         const rangeRestoreReload = page.waitForResponse((response) =>
           response.request().method() === "GET" && response.url().includes("collection=completed&include_archived=true"));
-        await page.getByRole("button", { name: "Restore selected" }).click();
+        await assertBulkAction("Restore", 4, "All archived range rows should show Restore 4");
+        await page.getByRole("button", { name: "Restore 4" }).click();
         const [rangeRestoreResult] = await Promise.all([rangeRestoreResponse, rangeRestoreReload]);
         if (!rangeRestoreResult.ok()) throw new Error(`Range restore failed: ${rangeRestoreResult.status()}`);
         const rangeRestoreRequest = archiveRequests.slice(restoreCountBeforeRange);
@@ -18146,16 +18287,116 @@ security.audit.enable = true;</fixtext>
           await assertCount(row.locator(".scanning-archived-label"), 0, `Restored scan ${scanId} must no longer show archived`);
         }
 
+        const secondOversizePage = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("after="));
+        await page.getByTestId("scanning-completed-load-more").evaluate((button) => button.click());
+        await secondOversizePage;
+        await waitForCompletedRows(100);
+        const thirdPageResponse = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("after="));
+        await page.getByTestId("scanning-completed-load-more").evaluate((button) => button.click());
+        await thirdPageResponse;
+        await waitForCompletedRows(150);
+        const firstLoadedScan = page.getByTestId((await page.locator("#scan-completed-panel tbody tr[data-testid^='scanning-record-']").first().getAttribute("data-testid")));
+        const oneHundredFirstScan = page.getByTestId((await page.locator("#scan-completed-panel tbody tr[data-testid^='scanning-record-']").nth(100).getAttribute("data-testid")));
+        await firstLoadedScan.click({ modifiers: ["Control"] });
+        await oneHundredFirstScan.click({ modifiers: ["Shift"] });
+        await assertVisible(page.getByText("101 selected", { exact: true }), "A loaded range over the request limit must remain selected");
+        const oversizedArchive = page.getByRole("button", { name: "Archive 101" });
+        await assertDisabled(oversizedArchive, "An archive request over 100 exact scan IDs must be disabled");
+        if (!(await oversizedArchive.getAttribute("title")).includes("100 or fewer")) {
+          throw new Error("Oversized selection must explain the 100-ID request limit");
+        }
+        await page.getByRole("button", { name: "Clear selection" }).click();
+        await assertCount(bulkBar, 0, "Clearing an oversized selection should remove BulkBar without truncating the selection first");
+
         await page.getByRole("tab", { name: /^By system/ }).click();
         const buildRequiredRow = page.locator("#scan-systems-panel tbody tr").filter({ hasText: "build-required-01" });
         await assertVisible(buildRequiredRow.getByText("1 needs build", { exact: true }), "Expected by-system needs-build aggregate");
-        await page.getByRole("button", { name: /prod-server-01/ }).click();
+        const prodSystemToggle = page.locator("#scan-systems-panel .scanning-system-toggle").filter({ hasText: "prod-server-01" });
+        const currentRescan = page.getByRole("button", { name: "Rescan current for prod-server-01" });
+        await assertAttribute(currentRescan, "title", "Rescan current", "Current system action should use the approved icon action title");
+        await assertAttribute(currentRescan, "class", "btn-icon focus-ring", "Current system rescan should be icon-only");
+        const rescanCurrentResponse = page.waitForResponse((response) => response.request().method() === "POST" && response.url().endsWith("/api/v1/cves/rescan/201"));
+        await currentRescan.click();
+        await rescanCurrentResponse;
+        await assertAttribute(prodSystemToggle, "aria-expanded", "false", "Current rescan must not expand the system row");
+        await prodSystemToggle.click();
         const noScanRow = page.locator(".scanning-history-table tbody tr").filter({ hasText: "cccc-no-scan" });
         const needsBuildRow = page.locator(".scanning-history-table tbody tr").filter({ hasText: "bbbb-needs-build" });
         const supersededRow = page.locator(".scanning-history-table tbody tr").filter({ hasText: "aaaa-superseded" });
+        const systemHistoryHeader = page.locator(".scan-sys-expand-head");
+        await assertVisible(systemHistoryHeader.getByText("6 configs for this system · newest first", { exact: true }), "Expanded header should show the exact config count and newest-first order");
+        await assertCount(systemHistoryHeader.getByRole("button", { name: /Rescan all/i }), 0, "By-system must not invent an unsupported Rescan all operation");
+        const archivedHistoryResponse = page.waitForResponse((response) =>
+          response.request().method() === "GET" && response.url().match(scansRoute) &&
+          response.url().includes("collection=history") && response.url().includes("include_archived=true"));
+        await page.getByRole("checkbox", { name: "Include archived" }).check();
+        await archivedHistoryResponse;
         await assertVisible(noScanRow.getByText("Never scanned", { exact: true }), "Expected truthful no-scan revision row");
         await assertVisible(needsBuildRow.getByText("Needs build", { exact: true }), "Expected truthful needs-build revision row");
         await assertVisible(supersededRow.getByText("Superseded config", { exact: true }), "Expected superseded revision relation");
+        await assertAttribute(noScanRow.getByRole("button", { name: "Rescan this config 301" }), "title", "Rescan this config", "Directly eligible no-scan revisions should use the sync icon action");
+        await assertCount(noScanRow.getByText("Check now", { exact: true }), 0, "No-scan history must not show textual Check now");
+        await assertCount(needsBuildRow.getByRole("button", { name: /Build & scan/i }), 0, "Needs-build history must not claim an unsupported build action");
+        await assertCount(needsBuildRow.getByRole("button", { name: /Rescan this config/i }), 0, "An unbuilt revision must not offer a scan-only action");
+
+        const exactHistoryRow = page.locator(".scanning-history-table tbody tr").filter({ hasText: "zzzz-current" });
+        if (await exactHistoryRow.count() !== 1) {
+          throw new Error(`Expected one current exact history row; found ${JSON.stringify(await page.locator(".scanning-history-table tbody tr").allTextContents())}`);
+        }
+        const exactHistoryOpenCount = scanDetailRequests.length;
+        await exactHistoryRow.click();
+        detail = page.locator("#scan-diagnostics-dialog");
+        await assertVisible(detail.getByText(`Scan ID ${ids.newest}`, { exact: true }), "Plain-clicking an exact By-system history row should open that scan");
+        if (scanDetailRequests.length !== exactHistoryOpenCount + 1 || scanDetailRequests.at(-1) !== ids.newest) {
+          throw new Error(`By-system plain click opened a non-exact scan: ${JSON.stringify(scanDetailRequests)}`);
+        }
+        await detail.getByRole("button", { name: "Close exact scan detail" }).click();
+        await assertFocused(exactHistoryRow, "Closing an exact history drawer should restore focus to its row");
+        const exactActionOpenCount = scanDetailRequests.length;
+        await exactHistoryRow.getByRole("button", { name: `Open details for scan ${ids.newest}` }).click();
+        detail = page.locator("#scan-diagnostics-dialog");
+        await assertVisible(detail.getByText(`Scan ID ${ids.newest}`, { exact: true }), "Terminal icon should open the same exact scan as its row");
+        if (scanDetailRequests.length !== exactActionOpenCount + 1 || scanDetailRequests.at(-1) !== ids.newest) {
+          throw new Error(`Terminal action propagated to another row action: ${JSON.stringify(scanDetailRequests)}`);
+        }
+        await detail.getByRole("button", { name: "Close exact scan detail" }).click();
+
+        const failedSystemRow = page.locator(".scanning-history-table tbody tr").filter({ hasText: "dddd-system-failure" });
+        await assertCount(failedSystemRow.getByRole("button", { name: /Retry exact/i }), 0, "Failed By-system history rows must not duplicate Retry exact outside the drawer");
+        const failedHistoryOpenCount = scanDetailRequests.length;
+        await failedSystemRow.click();
+        detail = page.locator("#scan-diagnostics-dialog");
+        await assertVisible(detail.getByRole("heading", { name: "prod-server-01", exact: true }), "Failed By-system row should open its exact drawer");
+        await assertVisible(detail.getByRole("alert").getByText("failure for dddd-system-failure", { exact: true }), "Failed drawer should retain exact failure context");
+        await assertVisible(detail.getByRole("button", { name: "Retry scan" }), "Authorized retry remains available in the exact failure drawer");
+        if (scanDetailRequests.length !== failedHistoryOpenCount + 1 || scanDetailRequests.at(-1) !== ids.systemFailed) {
+          throw new Error(`Failed By-system row click did not open its exact scan: ${JSON.stringify(scanDetailRequests)}`);
+        }
+        await detail.getByRole("button", { name: "Close exact scan detail" }).click();
+        await assertAttribute(prodSystemToggle, "aria-expanded", "true", "Nested scan detail actions must not collapse By-system history");
+        const failedActionOpenCount = scanDetailRequests.length;
+        await failedSystemRow.getByRole("button", { name: `Open details for scan ${ids.systemFailed}` }).click();
+        detail = page.locator("#scan-diagnostics-dialog");
+        await assertVisible(detail.getByText(`Scan ID ${ids.systemFailed}`, { exact: true }), "Failed-row terminal icon should reopen the same exact scan");
+        if (scanDetailRequests.length !== failedActionOpenCount + 1 || scanDetailRequests.at(-1) !== ids.systemFailed) {
+          throw new Error(`Failed-row terminal icon propagated to a second action: ${JSON.stringify(scanDetailRequests)}`);
+        }
+        await detail.getByRole("button", { name: "Close exact scan detail" }).click();
+
+        const noScanRequestCount = retryRequests.length;
+        const eligibleRescanResponse = page.waitForResponse((response) => response.request().method() === "POST" && response.url().endsWith("/api/v1/cves/rescan/301"));
+        await noScanRow.getByRole("button", { name: "Rescan this config 301" }).click();
+        await eligibleRescanResponse;
+        if (retryRequests.length !== noScanRequestCount + 1 || retryRequests.at(-1) !== 301) {
+          throw new Error(`Directly eligible revision did not enqueue its exact scan: ${JSON.stringify(retryRequests)}`);
+        }
+        await assertHidden(page.locator("#scan-diagnostics-dialog"), "An unscanned revision must not open a fabricated scan drawer");
+
+        const defaultHistoryResponse = page.waitForResponse((response) =>
+          response.request().method() === "GET" && response.url().match(scansRoute) &&
+          response.url().includes("collection=history") && response.url().includes("include_archived=false"));
+        await page.getByRole("checkbox", { name: "Include archived" }).uncheck();
+        await defaultHistoryResponse;
         if (!collectionRequests.some((request) => request.collection === "history" && request.systemId === systemId)) throw new Error("By-system expansion did not request scoped history collection");
         const prodArchived = page.getByRole("checkbox", { name: "Include archived" });
         if (await prodArchived.isChecked()) throw new Error("Completed archived state leaked into By-system history");
@@ -18173,9 +18414,9 @@ security.audit.enable = true;</fixtext>
         const buildRequiredArchived = page.getByRole("checkbox", { name: "Include archived" });
         if (await buildRequiredArchived.isChecked()) throw new Error("One system's archived state leaked into another system");
         await page.getByRole("tab", { name: /^Completed/ }).click();
-        await assertAttribute(page.getByRole("button", { name: "Archived [6]" }), "aria-pressed", "true", "By-system archived state must not change Completed");
+        await assertAttribute(page.getByRole("button", { name: "Archived [7]" }), "aria-pressed", "true", "By-system archived state must not change Completed");
         await page.getByRole("tab", { name: /^By system/ }).click();
-        await page.getByRole("button", { name: /prod-server-01/ }).click();
+        await prodSystemToggle.click();
 
         await page.getByRole("button", { name: "Schedule" }).click();
         const scheduleDialog = page.getByRole("dialog", { name: "Scan schedule" });
@@ -18283,7 +18524,7 @@ security.audit.enable = true;</fixtext>
         await assertVisible(expiredRow.getByText("post_build", { exact: true }), "Expired post-build provenance must remain in Completed history");
         await expiredRow.click({ modifiers: ["Control"] });
         const archivedCollection = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("collection=completed&include_archived=false"));
-        await page.getByRole("button", { name: "Archive selected" }).click();
+        await page.getByRole("button", { name: "Archive 1" }).click();
         await archivedCollection;
         await assertHidden(expiredRow, "Mock archive response must remove the expired row from default Completed");
         if (mutations.length !== 1) throw new Error(`Expected one intercepted archive request, got ${mutations.length}`);
@@ -23451,8 +23692,21 @@ function runStaticHarnessContracts() {
     'collection === "history"',
     "awaiting_build",
     "awaiting_closure",
-    'name: "Archive selected"',
-    'name: "Restore selected"',
+    'name: "Archive 4"',
+    'name: "Restore 4"',
+    '"No persisted diagnostic events"',
+    '"Rescan current"',
+    '"Rescan this config"',
+    "Plain-clicking an Active queued row",
+    "Plain Active running-row click",
+    "Plain-clicking an exact By-system history row",
+    "Mixed archive must carry both exact IDs once",
+    "Selected BulkBar must be centered and sticky",
+    "Clear must reset the range anchor",
+    "must not claim an unsupported build action",
+    "A plain Completed row click should open the exact config",
+    "View CVEs for scan",
+    "active-running-drawer",
     'name: "Search authorized diagnostic content"',
     'name: "Rescan all"',
   ]) {
