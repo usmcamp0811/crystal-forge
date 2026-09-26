@@ -4310,10 +4310,15 @@ impl From<crate::models::user_notifications::UserNotificationCategory> for Notif
     }
 }
 
+/// Represents a user-visible notification with its persisted source identity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserNotificationDto {
     pub id: Uuid,
     pub category: NotificationCategory,
+    /// Identifies the notification source domain used to resolve a deep link.
+    pub source_type: String,
+    /// Preserves the source identity attached to the notification event.
+    pub source_id: String,
     pub title: String,
     pub summary: String,
     pub route: String,
@@ -4326,6 +4331,8 @@ impl From<crate::models::user_notifications::UserNotification> for UserNotificat
         Self {
             id: value.id,
             category: value.category.into(),
+            source_type: value.source_type,
+            source_id: value.source_id,
             title: value.title,
             summary: value.summary,
             route: value.route,
@@ -4543,6 +4550,28 @@ pub struct ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_notification_dto_preserves_persisted_source_identity() {
+        let notification = crate::models::user_notifications::UserNotification {
+            id: Uuid::from_u128(1),
+            user_id: Uuid::from_u128(2),
+            category: crate::models::user_notifications::UserNotificationCategory::CriticalCves,
+            source_occurrence_id: Some(Uuid::from_u128(3)),
+            source_type: "cves".to_string(),
+            source_id: "CVE-2025-12345".to_string(),
+            title: "New critical CVE".to_string(),
+            summary: "A critical CVE was reported.".to_string(),
+            route: "/cves".to_string(),
+            created_at: Utc::now(),
+            read_at: None,
+            dismissed_at: None,
+        };
+
+        let response = UserNotificationDto::from(notification);
+        assert_eq!(response.source_type, "cves");
+        assert_eq!(response.source_id, "CVE-2025-12345");
+    }
 
     #[test]
     fn system_cve_inventory_page_serializes_pagination_contract() {

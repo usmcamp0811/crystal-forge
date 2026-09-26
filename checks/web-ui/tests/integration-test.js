@@ -12962,11 +12962,36 @@ const steps = [
           }),
         });
       });
+      let focusedCveFixtureMode = "single";
       await page.route(/\/api\/v1\/cves(?:\?.*)?$/, async (route) => {
+        const url = new URL(route.request().url());
+        const search = url.searchParams.get("search");
+        let rows = [cveRowFixture, inventoryOnlyRowFixture];
+        if (search?.startsWith("CVE-")) {
+          if (focusedCveFixtureMode === "stale") {
+            rows = [{
+              ...cveRowFixture,
+              cve_id: search,
+              affected_count: 1,
+              exact_affected_count: 0,
+              current_affected_count: 0,
+              historical_inventory_count: 1,
+            }];
+          } else if (search !== "CVE-2024-1234") {
+            rows = [];
+          } else if (focusedCveFixtureMode === "multiple") {
+            rows = [
+              cveRowFixture,
+              { ...cveRowFixture, package_name: "glibc", current_affected_count: 2 },
+            ];
+          } else {
+            rows = [cveRowFixture];
+          }
+        }
         await route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: JSON.stringify([cveRowFixture, inventoryOnlyRowFixture]),
+          body: JSON.stringify(rows),
         });
       });
       const cveCsv = [
@@ -13862,6 +13887,42 @@ const steps = [
       if (drawerGeometry.left < 0 || drawerGeometry.right > drawerGeometry.viewportWidth + 1 || drawerGeometry.scrollWidth > drawerGeometry.clientWidth) {
         throw new Error(`CVE detail drawer overflows the viewport: ${JSON.stringify(drawerGeometry)}`);
       }
+
+      await page.goto(`${baseUrl}/cves?focus_cve=CVE-2024-1234`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.getByTestId("cve-notification-focus"), "A valid CVE notification URL should show focused CVE state");
+      await assertVisible(page.getByTestId("cve-fleet-drawer"), "One current package match should open its exact fleet drawer");
+      await assertAttribute(
+        page.getByTestId("cve-fleet-drawer"),
+        "aria-label",
+        "CVE-2024-1234 openssl fleet inventory",
+        "The focused drawer must use the unique exact package match",
+      );
+      await captureWorkflowViewportState(page, "16-cves", "notification-focus-single-package", "desktop");
+      await page.getByRole("button", { name: "Close fleet inventory" }).click();
+      await page.waitForFunction(
+        () => new URLSearchParams(window.location.search).get("focus_cve") === "CVE-2024-1234",
+      );
+      await assertVisible(page.getByTestId("cve-notification-focus"), "Closing the package drawer must preserve the notification CVE focus");
+      await assertHidden(page.getByTestId("cve-fleet-drawer"), "The package drawer should close without clearing the focused CVE list");
+
+      focusedCveFixtureMode = "multiple";
+      await page.goto(`${baseUrl}/cves?focus_cve=CVE-2024-1234`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.getByTestId("cve-notification-focus"), "Multiple matches should remain in focused CVE state");
+      await assertHidden(page.getByTestId("cve-fleet-drawer"), "Multiple current packages must not choose a package drawer");
+      await assertVisible(page.getByText("openssl", { exact: true }), "Focused list should retain the first matching package");
+      await assertVisible(page.getByText("glibc", { exact: true }), "Focused list should retain the second matching package");
+      await captureWorkflowViewportState(page, "16-cves", "notification-focus-multiple-packages", "desktop");
+
+      focusedCveFixtureMode = "stale";
+      await page.goto(`${baseUrl}/cves?focus_cve=CVE-2024-9999`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.getByTestId("cve-notification-focus"), "A stale CVE should retain its focused URL state");
+      await assertVisible(page.getByText("No current package findings match CVE-2024-9999."), "A stale focused CVE should show an explicit empty result");
+      await assertHidden(page.getByTestId("cve-fleet-drawer"), "A stale CVE must not open a package drawer");
+      await captureWorkflowViewportState(page, "16-cves", "notification-focus-stale-cve", "desktop");
+
+      await page.goto(`${baseUrl}/cves?focus_cve=not-a-cve`, { timeout: LOAD_TIMEOUT });
+      await assertHidden(page.getByTestId("cve-notification-focus"), "Invalid focused CVE values must be ignored");
+      await assertHidden(page.getByTestId("cve-fleet-drawer"), "Invalid focused CVE values must not open a package drawer");
 
       // Unroute after test.
       await page.unroute("**/api/v1/cves/stats*");

@@ -5732,10 +5732,17 @@ pub enum NotificationCategory {
     HeartbeatLost,
 }
 
+/// Represents a user-visible notification with its persisted source identity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserNotificationDto {
     pub id: Uuid,
     pub category: NotificationCategory,
+    /// Identifies the server-owned notification source domain.
+    #[serde(default)]
+    pub source_type: String,
+    /// Preserves the opaque source identity for validated navigation.
+    #[serde(default)]
+    pub source_id: String,
     pub title: String,
     pub summary: String,
     pub route: String,
