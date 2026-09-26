@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-#[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
 
 use chrono::{DateTime, Utc};
@@ -56,6 +55,65 @@ const SYSTEM_LIMIT: i64 = 500;
 
 /// Bounds one archive or restore request to the server's exact-identity limit.
 const ARCHIVE_BATCH_MAX: usize = 100;
+
+/// Applies one Completed-row selection gesture against the currently loaded
+/// display order.
+///
+/// Shift selection adds the inclusive range to existing selections and keeps
+/// the original anchor. If the anchor is absent or no longer loaded, Shift
+/// selects only the clicked row and makes that row the new anchor. Ctrl/Cmd
+/// toggles only the clicked identity; a checkbox applies its new checked state.
+/// Both single-row gestures set the clicked row as anchor. This helper never
+/// considers rows outside `ordered_ids`, including unloaded keyset pages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompletedSelectionGesture {
+    ShiftRange,
+    ModifierToggle,
+    Checkbox { checked: bool },
+}
+
+fn completed_range_selection(
+    selected: &HashSet<Uuid>,
+    anchor: Option<Uuid>,
+    clicked: Uuid,
+    ordered_ids: &[Uuid],
+    gesture: CompletedSelectionGesture,
+) -> (HashSet<Uuid>, Option<Uuid>) {
+    let mut next = selected.clone();
+    let Some(clicked_index) = ordered_ids.iter().position(|id| *id == clicked) else {
+        return (next, anchor.filter(|id| ordered_ids.contains(id)));
+    };
+
+    match gesture {
+        CompletedSelectionGesture::ShiftRange => {
+            if let Some(anchor) = anchor
+                && let Some(anchor_index) = ordered_ids.iter().position(|id| *id == anchor)
+            {
+                let start = anchor_index.min(clicked_index);
+                let end = anchor_index.max(clicked_index);
+                next.extend(ordered_ids[start..=end].iter().copied());
+                (next, Some(anchor))
+            } else {
+                next.insert(clicked);
+                (next, Some(clicked))
+            }
+        }
+        CompletedSelectionGesture::ModifierToggle => {
+            if !next.remove(&clicked) {
+                next.insert(clicked);
+            }
+            (next, Some(clicked))
+        }
+        CompletedSelectionGesture::Checkbox { checked: true } => {
+            next.insert(clicked);
+            (next, Some(clicked))
+        }
+        CompletedSelectionGesture::Checkbox { checked: false } => {
+            next.remove(&clicked);
+            (next, Some(clicked))
+        }
+    }
+}
 
 const DETAIL_POLL_MS: u32 = 3_000;
 const LIVE_REFRESH_MS: u32 = 15_000;
@@ -486,6 +544,15 @@ struct RecordRowContext {
     selected_scan: Signal<Option<ScanDetailSelection>>,
     detail_state: Signal<ScanDetailState>,
     detail_generation: Signal<u64>,
+}
+
+/// Carries the Completed collection's loaded-order range selection into each
+/// rendered row. The order is copied from the loaded keyset pages; it never
+/// requests or infers identities from pages that are not loaded.
+#[derive(Clone)]
+struct CompletedRowSelection {
+    anchor: Signal<Option<Uuid>>,
+    ordered_ids: Rc<Vec<Uuid>>,
 }
 
 /// Builds the bounded Active collection query.
@@ -1033,6 +1100,7 @@ pub fn ScanningView() -> Element {
     let mut archived_count = use_signal(|| 0_i64);
     let failed_lookup_pending = use_signal(|| false);
     let mut selected_rows = use_signal(HashSet::<Uuid>::new);
+    let mut completed_selection_anchor = use_signal(|| Option::<Uuid>::None);
     let archive_pending = use_signal(|| false);
     let exact_retry_pending = use_signal(HashSet::<i32>::new);
     let mut action_feedback = use_signal(|| Option::<ScanActionFeedback>::None);
@@ -1194,6 +1262,7 @@ pub fn ScanningView() -> Element {
     use_effect(move || {
         let _ = tab();
         selected_rows.write().clear();
+        completed_selection_anchor.set(None);
     });
 
     // Completed selection belongs to one exact server request identity. Clear
@@ -1202,6 +1271,26 @@ pub fn ScanningView() -> Element {
     use_effect(move || {
         let _ = completed_request();
         selected_rows.write().clear();
+        completed_selection_anchor.set(None);
+    });
+
+    // A Completed anchor is meaningful only while that exact scan remains in
+    // the loaded display order. Head refreshes can replace or update loaded
+    // records without changing the request identity, so drop a stale anchor
+    // when its row disappears. Existing selected IDs remain untouched until
+    // the normal request/archive reset invalidates them.
+    use_effect(move || {
+        let anchor = completed_selection_anchor();
+        if let Some(anchor) = anchor {
+            let anchor_is_loaded = completed_pagination
+                .read()
+                .rows()
+                .iter()
+                .any(|row| row.scan_id == anchor);
+            if !anchor_is_loaded {
+                completed_selection_anchor.set(None);
+            }
+        }
     });
 
     // Debounce the server search so each keystroke does not restart Completed
@@ -1482,6 +1571,7 @@ pub fn ScanningView() -> Element {
                                 archived_count(),
                                 completed_filters,
                                 selected_rows,
+                                completed_selection_anchor,
                                 archive_pending,
                                 rows_context,
                                 completed_scroll,
@@ -1644,6 +1734,7 @@ fn completed_panel(
     archived_count: i64,
     filters: CompletedFilterSignals,
     mut selected_rows: Signal<HashSet<Uuid>>,
+    mut selection_anchor: Signal<Option<Uuid>>,
     archive_pending: Signal<bool>,
     rows: RecordRowContext,
     scroll: InfiniteScroll,
@@ -1656,6 +1747,12 @@ fn completed_panel(
     let mut head = head;
     let state = pagination.read().clone();
     let records = state.rows().to_vec();
+    let ordered_ids = Rc::new(
+        records
+            .iter()
+            .map(|record| record.scan_id)
+            .collect::<Vec<_>>(),
+    );
     let loaded = records.len();
     let available = state.visible_total();
     let hidden_archived = state.hidden_archived();
@@ -1704,7 +1801,11 @@ fn completed_panel(
                 aria_pressed: include_archived(),
                 disabled: archived_count == 0 && !include_archived(),
                 title: if include_archived() { "Hide archived scans" } else if archived_count == 0 { "No archived scans match this view" } else { "Show archived scans hidden by this view" },
-                onclick: move |_| { include_archived.toggle(); selected_rows.write().clear(); },
+                onclick: move |_| {
+                    include_archived.toggle();
+                    selected_rows.write().clear();
+                    selection_anchor.set(None);
+                },
                 Icon { name: IconName::Archive, size: 12 }
                 " Archived [{archived_count}]"
             }
@@ -1712,18 +1813,19 @@ fn completed_panel(
 
         div { class: "scanning-history-actions",
             span { "{selected.len()} selected" }
+            span { class: "ms-hint", title: "Ctrl/Cmd-click toggles one scan · Shift-click selects the inclusive loaded range", "⌘/⇧-click to select" }
             button {
                 class: "btn btn-ghost xs focus-ring",
                 disabled: archive_ids.is_empty() || archive_pending() || archive_over_batch,
                 title: if archive_over_batch { "Select 100 or fewer scans; one archive request carries at most 100 exact scan identities" } else { "Archive the selected exact scans" },
-                onclick: move |_| apply_archive(archive_ids.clone(), true, selected_rows, archive_pending, rows.feedback, rows.refresh),
+                onclick: move |_| apply_archive(archive_ids.clone(), true, selected_rows, selection_anchor, archive_pending, rows.feedback, rows.refresh),
                 "Archive selected"
             }
             button {
                 class: "btn btn-ghost xs focus-ring",
                 disabled: restore_ids.is_empty() || archive_pending() || restore_over_batch,
                 title: if restore_over_batch { "Select 100 or fewer scans; one restore request carries at most 100 exact scan identities" } else { "Restore the selected exact scans" },
-                onclick: move |_| apply_archive(restore_ids.clone(), false, selected_rows, archive_pending, rows.feedback, rows.refresh),
+                onclick: move |_| apply_archive(restore_ids.clone(), false, selected_rows, selection_anchor, archive_pending, rows.feedback, rows.refresh),
                 "Restore selected"
             }
             if hidden_archived > 0 { span { class: "scanning-hidden-count", "{hidden_archived} archived scans hidden by retention view" } }
@@ -1760,7 +1862,17 @@ fn completed_panel(
                         th { "Trigger" }
                         th { class: "scanning-actions-heading", span { class: "sr-only", "Actions" } }
                     } }
-                    tbody { for row in records { { record_row(row, Some(selected_rows), rows) } } }
+                    tbody { for row in records {
+                        { record_row(
+                            row,
+                            Some(selected_rows),
+                            Some(CompletedRowSelection {
+                                anchor: selection_anchor,
+                                ordered_ids: ordered_ids.clone(),
+                            }),
+                            rows,
+                        ) }
+                    } }
                 }
             }
             if let Some(message) = continuation_error {
@@ -1891,7 +2003,7 @@ fn active_panel(
                         th { "Trigger" }
                         th { class: "scanning-actions-heading", span { class: "sr-only", "Actions" } }
                     } }
-                    tbody { for row in visible { { record_row(row, None, rows) } } }
+                    tbody { for row in visible { { record_row(row, None, None, rows) } } }
                 }
             }
         }
@@ -2028,6 +2140,7 @@ fn active_sort_header(
 fn record_row(
     row: ScanningScanRecordResponse,
     selection_state: Option<Signal<HashSet<Uuid>>>,
+    completed_selection: Option<CompletedRowSelection>,
     context: RecordRowContext,
 ) -> Element {
     let retry_pending = context.retry_pending;
@@ -2039,6 +2152,23 @@ fn record_row(
     let meta = status_meta(&row.status);
     let selected =
         selection_state.is_some_and(|selected_rows| selected_rows.read().contains(&row.scan_id));
+    let has_completed_selection = completed_selection.is_some();
+    let completed_selection_for_click = completed_selection.clone();
+    let completed_selection_for_checkbox = completed_selection.clone();
+    let row_class = format!(
+        "scanning-record{}{}{}",
+        if selection_state.is_some() {
+            " selectable"
+        } else {
+            ""
+        },
+        if selected { " row-checked" } else { "" },
+        if row.archived_at.is_some() {
+            " archived"
+        } else {
+            ""
+        },
+    );
     let selection = ScanDetailSelection {
         scan_id: row.scan_id,
         label: format!("{} · {}", row.hostname, commit_label(&row.commit_hash)),
@@ -2056,8 +2186,64 @@ fn record_row(
         None => commit_label(&row.commit_hash),
     };
     rsx! {
-        tr { key: "{row.scan_id}", class: if row.archived_at.is_some() { "scanning-record archived" } else { "scanning-record" },
-            if let Some(mut selected_rows) = selection_state { td { input { r#type: "checkbox", aria_label: format!("Select scan {}", row.scan_id), checked: selected, onchange: move |event| { if event.checked() { selected_rows.write().insert(row.scan_id); } else { selected_rows.write().remove(&row.scan_id); } } } } }
+        tr {
+            key: "{row.scan_id}",
+            "data-testid": "scanning-record-{row.scan_id}",
+            class: row_class,
+            onmousedown: move |event| {
+                if has_completed_selection && event.modifiers().shift() {
+                    event.prevent_default();
+                    event.stop_propagation();
+                }
+            },
+            onclick: move |event| {
+                let shift = event.modifiers().shift();
+                let toggle = event.modifiers().ctrl() || event.modifiers().meta();
+                if let (Some(mut selected_rows), Some(mut selection)) = (selection_state, completed_selection_for_click.clone()) {
+                    if shift || toggle {
+                        event.prevent_default();
+                        event.stop_propagation();
+                        let gesture = if shift {
+                            CompletedSelectionGesture::ShiftRange
+                        } else {
+                            CompletedSelectionGesture::ModifierToggle
+                        };
+                        let (next, next_anchor) = completed_range_selection(
+                            &selected_rows.read(),
+                            (selection.anchor)(),
+                            row.scan_id,
+                            selection.ordered_ids.as_slice(),
+                            gesture,
+                        );
+                        selected_rows.set(next);
+                        selection.anchor.set(next_anchor);
+                    }
+                }
+            },
+            if let Some(mut selected_rows) = selection_state {
+                td {
+                    input {
+                        r#type: "checkbox",
+                        aria_label: format!("Select scan {}", row.scan_id),
+                        checked: selected,
+                        onclick: move |event| event.stop_propagation(),
+                        onchange: move |event| {
+                            event.stop_propagation();
+                            if let Some(mut selection) = completed_selection_for_checkbox.clone() {
+                                let (next, next_anchor) = completed_range_selection(
+                                    &selected_rows.read(),
+                                    (selection.anchor)(),
+                                    row.scan_id,
+                                    selection.ordered_ids.as_slice(),
+                                    CompletedSelectionGesture::Checkbox { checked: event.checked() },
+                                );
+                                selected_rows.set(next);
+                                selection.anchor.set(next_anchor);
+                            }
+                        }
+                    }
+                }
+            }
             td { div { class: "scanning-config-name", "{row.hostname}" } div { class: "scanning-history-flake", "{configuration_meta}" } }
             td { span { class: if relation == "deployed" { "chip chip-healthy" } else if relation == "recent" { "chip chip-info" } else { "chip chip-unknown" }, "{relation_label}" } }
             td {
@@ -2070,8 +2256,8 @@ fn record_row(
             td { class: "scanning-last-scan", title: "{record_time(&row).to_rfc3339()}", "{relative_time(record_time(&row))}" }
             td { if let Some(trigger) = row.source_trigger.as_deref() { span { class: "chip chip-unknown scanning-trigger", "{trigger}" } } else { span { class: "scanning-unavailable", "Not recorded" } } }
             td { div { class: "row-actions scanning-row-actions",
-                if can_retry { button { class: "btn btn-ghost xs focus-ring", disabled: retry_pending.read().contains(&row.derivation_id), onclick: { let label = format!("{} {}", row.hostname, commit_label(&row.commit_hash)); move |_| retry_exact_scan(row.derivation_id, label.clone(), retry_pending, feedback, refresh) }, Icon { name: IconName::Sync, size: 11 } " Retry exact" } }
-                button { class: "btn-icon focus-ring", aria_label: format!("Open details for scan {}", row.scan_id), title: "Open exact scan details", onclick: move |_| load_scan_detail(selection.clone(), selected_scan, detail_state, detail_generation), Icon { name: IconName::Terminal, size: 14 } }
+                if can_retry { button { class: "btn btn-ghost xs focus-ring", disabled: retry_pending.read().contains(&row.derivation_id), onclick: { let label = format!("{} {}", row.hostname, commit_label(&row.commit_hash)); move |event| { event.stop_propagation(); retry_exact_scan(row.derivation_id, label.clone(), retry_pending, feedback, refresh); } }, Icon { name: IconName::Sync, size: 11 } " Retry exact" } }
+                button { class: "btn-icon focus-ring", aria_label: format!("Open details for scan {}", row.scan_id), title: "Open exact scan details", onclick: move |event| { event.stop_propagation(); load_scan_detail(selection.clone(), selected_scan, detail_state, detail_generation); }, Icon { name: IconName::Terminal, size: 14 } }
             } }
         }
     }
@@ -2094,6 +2280,7 @@ fn apply_archive(
     scan_ids: Vec<Uuid>,
     archived: bool,
     mut selected: Signal<HashSet<Uuid>>,
+    mut selection_anchor: Signal<Option<Uuid>>,
     mut pending: Signal<bool>,
     mut feedback: Signal<Option<ScanActionFeedback>>,
     mut refresh: Signal<u64>,
@@ -2115,6 +2302,7 @@ fn apply_archive(
                     success: true,
                 }));
                 selected.write().clear();
+                selection_anchor.set(None);
                 refresh.set(refresh().wrapping_add(1));
             }
             Err(error) => feedback.set(Some(ScanActionFeedback {
@@ -2930,6 +3118,150 @@ mod tests {
 
     use super::*;
     use crate::api::models::ScanningScanDiagnosticEventResponse;
+
+    fn ids(count: usize) -> Vec<Uuid> {
+        (1..=count)
+            .map(|value| Uuid::from_u128(value as u128))
+            .collect()
+    }
+
+    fn selection(values: &[Uuid]) -> HashSet<Uuid> {
+        values.iter().copied().collect()
+    }
+
+    #[test]
+    fn completed_shift_selects_forward_inclusive_loaded_range() {
+        let ordered = ids(4);
+        let (selected, anchor) = completed_range_selection(
+            &HashSet::new(),
+            Some(ordered[1]),
+            ordered[3],
+            &ordered,
+            CompletedSelectionGesture::ShiftRange,
+        );
+        assert_eq!(selected, selection(&ordered[1..=3]));
+        assert_eq!(anchor, Some(ordered[1]));
+    }
+
+    #[test]
+    fn completed_shift_selects_reverse_inclusive_loaded_range() {
+        let ordered = ids(4);
+        let (selected, anchor) = completed_range_selection(
+            &HashSet::new(),
+            Some(ordered[3]),
+            ordered[1],
+            &ordered,
+            CompletedSelectionGesture::ShiftRange,
+        );
+        assert_eq!(selected, selection(&ordered[1..=3]));
+        assert_eq!(anchor, Some(ordered[3]));
+    }
+
+    #[test]
+    fn completed_shift_without_anchor_selects_clicked_and_sets_anchor() {
+        let ordered = ids(4);
+        let clicked = ordered[2];
+        let (selected, anchor) = completed_range_selection(
+            &HashSet::new(),
+            None,
+            clicked,
+            &ordered,
+            CompletedSelectionGesture::ShiftRange,
+        );
+        assert_eq!(selected, selection(&[clicked]));
+        assert_eq!(anchor, Some(clicked));
+    }
+
+    #[test]
+    fn completed_shift_with_stale_anchor_falls_back_to_clicked_row() {
+        let ordered = ids(4);
+        let stale_anchor = Uuid::from_u128(99);
+        let clicked = ordered[2];
+        let (selected, anchor) = completed_range_selection(
+            &HashSet::new(),
+            Some(stale_anchor),
+            clicked,
+            &ordered,
+            CompletedSelectionGesture::ShiftRange,
+        );
+        assert_eq!(selected, selection(&[clicked]));
+        assert_eq!(anchor, Some(clicked));
+    }
+
+    #[test]
+    fn completed_modifier_toggle_deselects_only_clicked_row() {
+        let ordered = ids(4);
+        let (selected, anchor) = completed_range_selection(
+            &selection(&[ordered[0], ordered[1], ordered[2]]),
+            Some(ordered[0]),
+            ordered[1],
+            &ordered,
+            CompletedSelectionGesture::ModifierToggle,
+        );
+        assert_eq!(selected, selection(&[ordered[0], ordered[2]]));
+        assert_eq!(anchor, Some(ordered[1]));
+    }
+
+    #[test]
+    fn completed_modifier_toggle_selects_unselected_row_and_anchors_it() {
+        let ordered = ids(4);
+        let (selected, anchor) = completed_range_selection(
+            &selection(&[ordered[0]]),
+            Some(ordered[0]),
+            ordered[2],
+            &ordered,
+            CompletedSelectionGesture::ModifierToggle,
+        );
+        assert_eq!(selected, selection(&[ordered[0], ordered[2]]));
+        assert_eq!(anchor, Some(ordered[2]));
+    }
+
+    #[test]
+    fn completed_shift_adds_range_without_clearing_outside_selection() {
+        let ordered = ids(5);
+        let outside = Uuid::from_u128(99);
+        let (selected, anchor) = completed_range_selection(
+            &selection(&[outside]),
+            Some(ordered[1]),
+            ordered[3],
+            &ordered,
+            CompletedSelectionGesture::ShiftRange,
+        );
+        assert_eq!(
+            selected,
+            selection(&[outside, ordered[1], ordered[2], ordered[3]])
+        );
+        assert_eq!(anchor, Some(ordered[1]));
+    }
+
+    #[test]
+    fn completed_shift_range_is_not_truncated_to_archive_batch_limit() {
+        let ordered = ids(101);
+        let (selected, anchor) = completed_range_selection(
+            &HashSet::new(),
+            Some(ordered[0]),
+            ordered[100],
+            &ordered,
+            CompletedSelectionGesture::ShiftRange,
+        );
+        assert_eq!(selected.len(), 101);
+        assert_eq!(selected, selection(&ordered));
+        assert_eq!(anchor, Some(ordered[0]));
+    }
+
+    #[test]
+    fn completed_checkbox_applies_exact_checked_state_and_sets_anchor() {
+        let ordered = ids(3);
+        let (selected, anchor) = completed_range_selection(
+            &selection(&ordered),
+            Some(ordered[0]),
+            ordered[1],
+            &ordered,
+            CompletedSelectionGesture::Checkbox { checked: false },
+        );
+        assert_eq!(selected, selection(&[ordered[0], ordered[2]]));
+        assert_eq!(anchor, Some(ordered[1]));
+    }
 
     fn row(
         hostname: &str,

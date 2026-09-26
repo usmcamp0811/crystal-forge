@@ -17272,6 +17272,10 @@ security.audit.enable = true;</fixtext>
         retained: "20000000-0000-4000-8000-000000000005",
         gray: "20000000-0000-4000-8000-000000000006",
         liveArrival: "20000000-0000-4000-8000-000000000007",
+        rangeOne: "20000000-0000-4000-8000-000000000008",
+        rangeTwo: "20000000-0000-4000-8000-000000000009",
+        rangeThree: "20000000-0000-4000-8000-000000000010",
+        rangeFour: "20000000-0000-4000-8000-000000000011",
       };
       const timestamp = (hour) => `2026-09-20T${String(hour).padStart(2, "0")}:00:00Z`;
       // Terminal fixtures are ordered by minutes before a fixed newest moment.
@@ -17328,6 +17332,12 @@ security.audit.enable = true;</fixtext>
         record(ids.oldFailure, 204, "omega-old-failure", "failure-fleet", "eeee-failed", "failed", terminalAt(6), { failure: `bounded failure ${"detail ".repeat(30)}` }),
         record(ids.failedBuild, 105, "delta-build-failed", "failed-build-fleet", "dddd-build-failed", "failed", terminalAt(7), { source_trigger: "post_build", attempts: 0, build_status: "failed", failure: "The associated build failed before vulnix started." }),
         record(ids.cancelledBuild, 106, "epsilon-build-cancelled", "cancelled-build-fleet", "eeee-build-cancelled", "failed", terminalAt(8), { source_trigger: "post_build", attempts: 0, build_status: "cancelled", failure: "The associated build was cancelled before vulnix started." }),
+        // Consecutive deterministic rows make the range restore assertion
+        // independent of older archived rows elsewhere in display order.
+        record(ids.rangeOne, 301, "range-one", "range-fleet", "range-revision-1", "completed", terminalAt(9)),
+        record(ids.rangeTwo, 302, "range-two", "range-fleet", "range-revision-2", "completed", terminalAt(10)),
+        record(ids.rangeThree, 303, "range-three", "range-fleet", "range-revision-3", "completed", terminalAt(11)),
+        record(ids.rangeFour, 304, "range-four", "range-fleet", "range-revision-4", "completed", terminalAt(12)),
       ];
       const BULK_TERMINAL_ROWS = 700;
       // Index 400 names the configuration searched for while it sits far
@@ -17626,7 +17636,7 @@ security.audit.enable = true;</fixtext>
         await page.goto(`${baseUrl}/scanning`, { timeout: LOAD_TIMEOUT });
         await assertVisible(page.getByRole("heading", { name: "Scanning" }), "Expected Scanning heading");
         for (const tab of ["Active", "Completed", "By system"]) await assertVisible(page.getByRole("tab", { name: new RegExp(`^${tab}`) }), `Expected ${tab} tab`);
-        await assertVisible(page.getByText("1 pending · 1 awaiting build · 1 awaiting closure"), "Expected prerequisite wait totals");
+        await assertVisible(page.getByText("1 queued · 1 awaiting build · 1 awaiting closure"), "Expected prerequisite wait totals");
         await assertVisible(page.getByText("Awaiting: Build output is not available."), "Expected build wait reason");
         await assertVisible(page.getByText("Awaiting: A completed cache closure is not available."), "Expected closure wait reason");
         await assertCount(page.getByRole("button", { name: /Cancel scan/i }), 0, "Scanning must not expose cancellation");
@@ -17966,6 +17976,100 @@ security.audit.enable = true;</fixtext>
         await continuationAfterArchive;
         await waitForCompletedRows(100);
         await assertCompletedPrefix("Continuation after archive and restore", { includeArchived: true });
+
+        // Ctrl/Cmd-click and Shift-click use only the currently loaded
+        // Completed rows. The archive/restore endpoints must receive the
+        // exact four scan UUIDs in that visible order, with no duplicate IDs,
+        // while Shift-drag selection must not select browser page text.
+        await scrollCompletedToTop();
+        const defaultRangeReload = page.waitForResponse((response) =>
+          response.request().method() === "GET" && response.url().includes("collection=completed&include_archived=false"));
+        await archivedToggle.click();
+        await defaultRangeReload;
+        await waitForCompletedRows(50);
+        await assertCompletedPrefix("Default Completed rows before range selection");
+        const rangeIdSet = new Set([ids.rangeOne, ids.rangeTwo, ids.rangeThree, ids.rangeFour]);
+        const rangeIds = visibleTerminalRows().filter((row) => rangeIdSet.has(row.scan_id)).map((row) => row.scan_id);
+        if (rangeIds.length !== 4 || new Set(rangeIds).size !== 4 ||
+            rangeIds.join(",") !== [ids.rangeOne, ids.rangeTwo, ids.rangeThree, ids.rangeFour].join(",")) {
+          throw new Error(`Expected four ordered, unique, loaded scans for range selection: ${JSON.stringify(rangeIds)}`);
+        }
+        const ctrlToggleRow = page.getByTestId(`scanning-record-${rangeIds[1]}`);
+        await ctrlToggleRow.click({ modifiers: ["Control"] });
+        await assertVisible(page.getByText("1 selected", { exact: true }), "Ctrl-click should toggle one exact row on");
+        await ctrlToggleRow.click({ modifiers: ["Control"] });
+        await assertVisible(page.getByText("0 selected", { exact: true }), "Ctrl-clicking the selected row should toggle only it off");
+        await assertDisabled(page.getByRole("button", { name: "Archive selected" }), "An empty selection must disable Archive selected");
+        await page.getByRole("checkbox", { name: `Select scan ${rangeIds[0]}` }).check();
+        const firstRangeRow = page.getByTestId(`scanning-record-${rangeIds[0]}`);
+        const firstSelection = await firstRangeRow.getByRole("checkbox").isChecked();
+        if (!firstSelection) throw new Error("Checkbox anchor must select the first exact scan");
+        await page.getByTestId(`scanning-record-${rangeIds[3]}`).click({ modifiers: ["Shift"] });
+        await assertVisible(page.getByText("4 selected", { exact: true }), "Shift-click should select the four-row inclusive range");
+        for (const scanId of rangeIds) {
+          const selectedRow = page.getByTestId(`scanning-record-${scanId}`);
+          if (!(await page.getByRole("checkbox", { name: `Select scan ${scanId}` }).isChecked())) {
+            throw new Error(`Shift range did not check exact scan ${scanId}`);
+          }
+          if (!(await selectedRow.evaluate((element) => element.classList.contains("row-checked")))) {
+            throw new Error(`Shift range did not apply the selected-row treatment to ${scanId}`);
+          }
+        }
+        const selectedBrowserText = await page.evaluate(() => window.getSelection()?.toString() || "");
+        if (selectedBrowserText !== "") throw new Error(`Shift range highlighted page text: ${JSON.stringify(selectedBrowserText)}`);
+        await captureWorkflowViewportState(page, "16c-scanning-view", "completed-range-selected", "desktop");
+
+        const archiveCountBeforeRange = archiveRequests.length;
+        const rangeArchiveResponse = page.waitForResponse((response) =>
+          response.request().method() === "PATCH" && response.url().match(scansRoute));
+        const rangeArchiveReload = page.waitForResponse((response) =>
+          response.request().method() === "GET" && response.url().includes("collection=completed&include_archived=false"));
+        await page.getByRole("button", { name: "Archive selected" }).click();
+        const [rangeArchiveResult] = await Promise.all([rangeArchiveResponse, rangeArchiveReload]);
+        if (!rangeArchiveResult.ok()) throw new Error(`Range archive failed: ${rangeArchiveResult.status()}`);
+        const rangeArchiveRequest = archiveRequests.slice(archiveCountBeforeRange);
+        if (rangeArchiveRequest.length !== 1 || rangeArchiveRequest[0].archived !== true ||
+            rangeArchiveRequest[0].scan_ids.length !== 4 ||
+            new Set(rangeArchiveRequest[0].scan_ids).size !== 4 ||
+            rangeArchiveRequest[0].scan_ids.join(",") !== rangeIds.join(",")) {
+          throw new Error(`Range archive must carry those four exact IDs once: ${JSON.stringify(rangeArchiveRequest)}`);
+        }
+        for (const scanId of rangeIds) {
+          await assertHidden(page.getByTestId(`scanning-record-${scanId}`), `Archived range scan ${scanId} must leave default Completed`);
+        }
+
+        const archivedRangeReload = page.waitForResponse((response) =>
+          response.request().method() === "GET" && response.url().includes("collection=completed&include_archived=true"));
+        await archivedToggle.click();
+        await archivedRangeReload;
+        await waitForCompletedRows(50);
+        for (const scanId of rangeIds) {
+          await assertVisible(page.getByTestId(`scanning-record-${scanId}`), `Archived range scan ${scanId} must be visible for restore`);
+        }
+        await page.getByRole("checkbox", { name: `Select scan ${rangeIds[0]}` }).check();
+        await page.getByTestId(`scanning-record-${rangeIds[3]}`).click({ modifiers: ["Shift"] });
+        await assertVisible(page.getByText("4 selected", { exact: true }), "Shift-click should select the archived restore range");
+        const restoreCountBeforeRange = archiveRequests.length;
+        const rangeRestoreResponse = page.waitForResponse((response) =>
+          response.request().method() === "PATCH" && response.url().match(scansRoute));
+        const rangeRestoreReload = page.waitForResponse((response) =>
+          response.request().method() === "GET" && response.url().includes("collection=completed&include_archived=true"));
+        await page.getByRole("button", { name: "Restore selected" }).click();
+        const [rangeRestoreResult] = await Promise.all([rangeRestoreResponse, rangeRestoreReload]);
+        if (!rangeRestoreResult.ok()) throw new Error(`Range restore failed: ${rangeRestoreResult.status()}`);
+        const rangeRestoreRequest = archiveRequests.slice(restoreCountBeforeRange);
+        if (rangeRestoreRequest.length !== 1 || rangeRestoreRequest[0].archived !== false ||
+            rangeRestoreRequest[0].scan_ids.length !== 4 ||
+            new Set(rangeRestoreRequest[0].scan_ids).size !== 4 ||
+            rangeRestoreRequest[0].scan_ids.join(",") !== rangeIds.join(",")) {
+          throw new Error(`Range restore must carry those four exact IDs once: ${JSON.stringify(rangeRestoreRequest)}`);
+        }
+        await waitForCompletedRows(50);
+        for (const scanId of rangeIds) {
+          const row = page.getByTestId(`scanning-record-${scanId}`);
+          await assertVisible(row, `Restored range scan ${scanId} remains visible`);
+          await assertCount(row.locator(".scanning-archived-label"), 0, `Restored scan ${scanId} must no longer show archived`);
+        }
 
         await page.getByRole("tab", { name: /^By system/ }).click();
         const buildRequiredRow = page.locator("#scan-systems-panel tbody tr").filter({ hasText: "build-required-01" });
