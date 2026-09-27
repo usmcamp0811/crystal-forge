@@ -1867,7 +1867,7 @@ function ComplianceTab({ sys, onNavigate }) {
         </div>
       </div>
 
-      {window.SystemPoamSection && <SystemPoamSection sys={sys} onNavigate={onNavigate}/>}
+      {window.SystemPoamSection && <SystemPoamSection sys={sys}/>}
 
       {applicable.map(({ bundle, rollup }) => {
         const compliant = rollup.fail === 0;

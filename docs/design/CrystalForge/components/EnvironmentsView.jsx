@@ -81,7 +81,7 @@ function isProductionEnv(envName) {
 }
 window.isProductionEnv = isProductionEnv;
 
-function EnvironmentsView({ defaultView, onOpenCache, onOpenSystem, onOpenBundle, onOpenFlake, focusEnv, onClearFocusEnv }) {
+function EnvironmentsView({ defaultView, onOpenCache, onOpenSystem, onOpenBundle, onOpenFlake, focusEnv, onClearFocusEnv, onNavigate }) {
   const [query, setQuery] = React.useState("");
   const [viewMode, setViewMode] = React.useState(defaultView || "cards");
   React.useEffect(() => { if (defaultView) setViewMode(defaultView); }, [defaultView]);
@@ -197,7 +197,7 @@ function EnvironmentsView({ defaultView, onOpenCache, onOpenSystem, onOpenBundle
         <window.AtoPackageModal initialEnv={atoEnv} onClose={() => setAtoEnv(null)}/>
       )}
       {viewEnv && (
-        <EnvPanel env={viewEnv} onClose={() => setViewEnv(null)} onExportAto={() => setAtoEnv(viewEnv.name)} onEdit={() => { setEditEnv(viewEnv); }} onOpenCache={onOpenCache} onOpenSystem={onOpenSystem} onOpenBundle={onOpenBundle} onOpenFlake={onOpenFlake} />
+        <EnvPanel env={viewEnv} onClose={() => setViewEnv(null)} onExportAto={() => setAtoEnv(viewEnv.name)} onEdit={() => { setEditEnv(viewEnv); }} onOpenCache={onOpenCache} onOpenSystem={onOpenSystem} onOpenBundle={onOpenBundle} onOpenFlake={onOpenFlake}  onNavigate={onNavigate}/>
       )}
       {(editEnv || addOpen) && (
         <EnvFormModal
@@ -367,7 +367,7 @@ function EnvCard({ env, onEdit, flash }) {
 }
 
 // Side panel — environment reference peek, with Edit handing off to the form modal
-function EnvPanel({ env, onClose, onEdit, onExportAto, onOpenCache, onOpenSystem, onOpenBundle, onOpenFlake }) {
+function EnvPanel({ env, onClose, onEdit, onExportAto, onOpenCache, onOpenSystem, onOpenBundle, onOpenFlake, onNavigate }) {
   const total = env.stats.total || 1;
   const sys = SYSTEMS.filter(s => s.environment === env.name);
   return (
@@ -452,6 +452,11 @@ function EnvPanel({ env, onClose, onEdit, onExportAto, onOpenCache, onOpenSystem
                   })()}
                   {(env.gatePolicyIds || []).length > 0 && <span className="chip chip-unknown">{env.gatePolicyIds.length} gate{env.gatePolicyIds.length === 1 ? "" : "s"}</span>}
                   {!env.complianceBundleId && (env.gatePolicyIds || []).length === 0 && <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>none</span>}
+                  {onNavigate && (
+                    <span className="chip chip-info sd-commit-sha-link" title={`Open ${env.name} in the POA&M register`} onClick={() => onNavigate("poams", { scope:{ type:"env", id:env.name, label:env.name } })}>
+                      <Icon name="activity" size={9}/> POA&M
+                    </span>
+                  )}
                 </div>
               </dd>
               <dt>Role assignments</dt>

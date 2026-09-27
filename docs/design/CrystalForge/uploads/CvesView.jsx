@@ -7,13 +7,10 @@ function CvesView({ onOpenSystem, focus, onClearFocus }) {
   const [acceptFilter, setAcceptFilter] = React.useState("all");
   const [pkgFilter, setPkgFilter] = React.useState("all");
   const [sort, setSort] = React.useState("severity");
-  const [groupMode, setGroupModeState] = React.useState(() => { try { return localStorage.getItem("cf.cves.group") || "package"; } catch { return "package"; } }); // 'package' | 'env' | 'system' | 'flat'
-  const setGroupMode = (m) => { setGroupModeState(m); try { localStorage.setItem("cf.cves.group", m); } catch {} };
-  const [envFilter, setEnvFilter] = React.useState("all");
+  const [groupMode, setGroupMode] = React.useState("package"); // 'package' | 'flat'
   const [expandedPkg, setExpandedPkg] = React.useState(null);
   const [selectedCve, setSelectedCve] = React.useState(null);
-  useAttentionFlash("cves", (CVE_STATS.critical || 0) > 0);
-  const seenNew = useCveSeenSet();
+  const flashCrit = useAttentionFlash("cves", (CVE_STATS.critical || 0) > 0);
   React.useEffect(() => {
     if (!focus) return;
     const c = CVES.find(x => x.id === focus.id) || CVES.find(x => x.pkg === focus.pkg);
@@ -31,7 +28,6 @@ function CvesView({ onOpenSystem, focus, onClearFocus }) {
     if (fixFilter === "exploited" && !c.exploited) return false;
     if (acceptFilter !== "all" && c.acceptance !== acceptFilter) return false;
     if (pkgFilter !== "all" && c.pkg !== pkgFilter) return false;
-    if (envFilter !== "all" && !c.affected.some(id => (SYSTEMS.find(s => s.id === id) || {}).environment === envFilter)) return false;
     if (query) {
       const q = query.toLowerCase();
       if (!c.id.toLowerCase().includes(q) &&
@@ -56,12 +52,12 @@ function CvesView({ onOpenSystem, focus, onClearFocus }) {
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn btn-ghost focus-ring"><Icon name="sync" size={14} /> Rescan fleet</button>
-          <CveExportMenuButton list={filtered} scope={envFilter !== "all" ? envFilter : null} />
+          <button className="btn btn-ghost focus-ring"><Icon name="download" size={14} /> Export report</button>
         </div>
       </div>
 
       <div className="stat-strip">
-        <div className="stat">
+        <div className={`stat${flashCrit ? " attention-flash" : ""}`}>
           <span className="stat-accent" style={{ "--stat-color": "#f87171" }} />
           <div className="stat-label">Critical</div>
           <div className="stat-value" style={{ color: "#f87171" }}>{CVE_STATS.critical}</div>
@@ -151,20 +147,10 @@ function CvesView({ onOpenSystem, focus, onClearFocus }) {
             </button>
           }
         </div>
-        <select className="input filter-select focus-ring" style={{ width: "auto" }} value={envFilter} onChange={(e) => setEnvFilter(e.target.value)}>
-          <option value="all">All environments</option>
-          {ENVIRONMENTS.map((e) => <option key={e.name} value={e.name}>{e.name}</option>)}
-        </select>
         <span className="filter-count" style={{ marginLeft: "auto", marginRight: 0 }}>Group</span>
         <div className="seg">
-          {[
-          { v: "package", l: "Package" },
-          { v: "env", l: "Environment" },
-          { v: "system", l: "Env › System" },
-          { v: "flat", l: "None" }].
-          map((o) =>
-          <button key={o.v} className={groupMode === o.v ? "active" : ""} onClick={() => setGroupMode(o.v)}>{o.l}</button>
-          )}
+          <button className={groupMode === "package" ? "active" : ""} onClick={() => setGroupMode("package")}>By package</button>
+          <button className={groupMode === "flat" ? "active" : ""} onClick={() => setGroupMode("flat")}>Flat list</button>
         </div>
         <span className="filter-count" style={{ marginLeft: 0, marginRight: 0 }}>Sort</span>
         <div className="seg">
@@ -184,11 +170,8 @@ function CvesView({ onOpenSystem, focus, onClearFocus }) {
         cves={filtered}
         expanded={expandedPkg}
         onToggle={(p) => setExpandedPkg(expandedPkg === p ? null : p)}
-        onSelectCve={setSelectedCve}
-        seenNew={seenNew} /> :
-      groupMode === "env" || groupMode === "system" ?
-      <CveEnvGroups cves={filtered} nested={groupMode === "system"} envFilter={envFilter}
-        onSelectCve={setSelectedCve} onOpenSystem={onOpenSystem} seenNew={seenNew} /> :
+        onSelectCve={setSelectedCve} /> :
+
 
       <div className="card" style={{ overflow: "hidden" }}>
         <table className="sys-table">
@@ -207,7 +190,7 @@ function CvesView({ onOpenSystem, focus, onClearFocus }) {
             </tr>
           </thead>
           <tbody>
-            {filtered.map((cve) => <CveRow key={cve.id} cve={cve} seenNew={seenNew} onOpen={() => setSelectedCve(cve)} />)}
+            {filtered.map((cve) => <CveRow key={cve.id} cve={cve} onOpen={() => setSelectedCve(cve)} />)}
             {filtered.length === 0 &&
             <tr><td colSpan={10} style={{ padding: 24, textAlign: "center", color: "var(--cf-text-muted)", fontSize: 13 }}>No CVEs match the current filters.</td></tr>
             }
@@ -325,158 +308,10 @@ function CveTriageBar() {
 
 }
 
-// Environment / system grouping. A CVE lands in every env (and host) it was found on,
-// so group counts can sum past the filtered total — that's the point: per-env exposure.
-const CVE_SEV_W = { critical: 1000, high: 100, medium: 10, low: 1 };
-function cveTally(list) {
-  const t = { critical: 0, high: 0, medium: 0, low: 0, fixable: 0, outstanding: 0, exploited: 0, score: 0 };
-  list.forEach((c) => {
-    t[c.severity] += 1; t.score += CVE_SEV_W[c.severity];
-    if (c.fix === "available") t.fixable += 1;
-    if (c.acceptance === "outstanding") t.outstanding += 1;
-    if (c.exploited) t.exploited += 1;
-  });
-  return t;
-}
-function CveSevChips({ t }) {
-  return (
-    <div style={{ display: "flex", gap: 5, flexWrap: "wrap", justifyContent: "flex-end" }}>
-      {t.exploited > 0 && <span className="chip chip-critical" style={{ fontSize: 10 }}>{t.exploited} exploited</span>}
-      {t.critical > 0 && <span className="chip chip-critical" style={{ fontSize: 10 }}>{t.critical} crit</span>}
-      {t.high > 0 && <span className="chip chip-warning" style={{ fontSize: 10 }}>{t.high} high</span>}
-      {t.medium > 0 && <span className="chip chip-info" style={{ fontSize: 10 }}>{t.medium} med</span>}
-      {t.low > 0 && <span className="chip chip-unknown" style={{ fontSize: 10 }}>{t.low} low</span>}
-    </div>);
-}
-function CveTable({ cves, seenNew, onSelectCve, limit, onMore }) {
-  const shown = limit ? cves.slice(0, limit) : cves;
-  return (
-    <>
-      <table className="sys-table" style={{ fontSize: 12 }}>
-        <thead>
-          <tr><th>CVE</th><th>Severity</th><th>CVSS</th><th>Package</th><th>Title</th><th>Affected</th><th>Fix</th><th>Triage</th><th>Age</th><th style={{ textAlign: "right" }}> </th></tr>
-        </thead>
-        <tbody>{shown.map((cve) => <CveRow key={cve.id} cve={cve} seenNew={seenNew} onOpen={() => onSelectCve(cve)} />)}</tbody>
-      </table>
-      {cves.length > shown.length &&
-      <button type="button" className="pv-more pv-more-row focus-ring" onClick={onMore}>
-          Show {Math.min(25, cves.length - shown.length)} more · {cves.length - shown.length} hidden
-        </button>}
-    </>);
-}
-function CveEnvGroups({ cves, nested, envFilter, onSelectCve, onOpenSystem, seenNew }) {
-  const [collapsed, setCollapsed] = React.useState({});
-  const [limits, setLimits] = React.useState({});
-  const sysById = React.useMemo(() => new Map(SYSTEMS.map((s) => [s.id, s])), []);
-  const scanByHost = React.useMemo(() => new Map((typeof SCAN_HISTORY !== "undefined" ? SCAN_HISTORY : []).map((s) => [s.hostname, s])), []);
-  const envs = React.useMemo(() => {
-    const m = new Map();
-    cves.forEach((c) => c.affected.forEach((id) => {
-      const sys = sysById.get(id);
-      if (!sys || (envFilter !== "all" && sys.environment !== envFilter)) return;
-      if (!m.has(sys.environment)) m.set(sys.environment, { cves: new Set(), hosts: new Map() });
-      const e = m.get(sys.environment);
-      e.cves.add(c);
-      if (!e.hosts.has(sys.id)) e.hosts.set(sys.id, { sys, cves: [] });
-      e.hosts.get(sys.id).cves.push(c);
-    }));
-    return [...m.entries()].map(([env, e]) => {
-      const list = cves.filter((c) => e.cves.has(c));
-      const hosts = [...e.hosts.values()].map((h) => ({ ...h, t: cveTally(h.cves) })).sort((a, b) => b.t.score - a.t.score);
-      const total = SYSTEMS.filter((s) => s.environment === env).length;
-      return { env, list, hosts, total, t: cveTally(list) };
-    }).sort((a, b) => b.t.score - a.t.score);
-  }, [cves, envFilter]);
+// dead old stub from prior version below, will be removed by next edit chain
+function _removeMe() {}
 
-  if (envs.length === 0) return <div className="empty" style={{ margin: 0 }}><h3>No CVEs match</h3><div>Try clearing a filter.</div></div>;
-
-  const isOpen = (k, dflt) => collapsed[k] != null ? !collapsed[k] : dflt;
-  const toggle = (k, dflt) => setCollapsed((c) => ({ ...c, [k]: isOpen(k, dflt) }));
-  const lim = (k) => limits[k] || 10;
-  const more = (k) => setLimits((l) => ({ ...l, [k]: lim(k) + 25 }));
-
-  return (
-    <div className="card" style={{ overflow: "hidden" }}>
-      <div className="pv-groups">
-        {envs.map((g, i) => {
-          const k = `env:${g.env}`, dflt = i < 3 || envs.length <= 4, open = isOpen(k, dflt);
-          const envColor = ENV_STYLE[g.env] && ENV_STYLE[g.env].fg || "#9ca3af";
-          const clean = g.total - g.hosts.length;
-          return (
-            <section key={k} className="pv-group">
-              <div className="pv-group-head">
-                <button type="button" className="pv-group-toggle focus-ring" aria-expanded={open} onClick={() => toggle(k, dflt)}>
-                  <Icon name={open ? "chevron-down" : "chevron-right"} size={13} style={{ color: "var(--cf-text-muted)" }} />
-                  <span className="pv-dot" style={{ background: envColor }} />
-                  <span className="pv-group-name">{g.env}</span>
-                  <span className="pv-group-n">{g.list.length} CVE{g.list.length === 1 ? "" : "s"} · {g.hosts.length} of {g.total} host{g.total === 1 ? "" : "s"}</span>
-                  <span style={{ fontSize: 11, color: "var(--cf-text-muted)" }}>{g.t.fixable} patchable · {g.t.outstanding} outstanding</span>
-                </button>
-                <CveSevChips t={g.t} />
-              </div>
-              {open && !nested && <CveTable cves={g.list} seenNew={seenNew} onSelectCve={onSelectCve} limit={lim(k)} onMore={() => more(k)} />}
-              {open && nested &&
-              <div className="cve-host-groups">
-                  {g.hosts.map((h, j) => {
-                  const hk = `sys:${h.sys.id}`, hd = j < 2, hOpen = isOpen(hk, hd);
-                  const sc = scanByHost.get(h.sys.hostname);
-                  return (
-                    <div key={hk} className="cve-host-group">
-                        <div className="cve-host-head">
-                          <button type="button" className="pv-group-toggle focus-ring" aria-expanded={hOpen} onClick={() => toggle(hk, hd)}>
-                            <Icon name={hOpen ? "chevron-down" : "chevron-right"} size={12} style={{ color: "var(--cf-text-muted)" }} />
-                            <span className="status-dot" style={{ "--status-color": h.sys.statusColor }} />
-                            <span className="mono" style={{ fontSize: 12.5, fontWeight: 600 }}>{h.sys.hostname}</span>
-                            <span className="mono cve-host-flake" style={{ fontSize: 11, color: "var(--cf-text-muted)" }}>{h.sys.flake}</span>
-                            <span className="pv-group-n">{h.cves.length} CVE{h.cves.length === 1 ? "" : "s"}</span>
-                          </button>
-                          {sc &&
-                        <span className="cve-host-fresh" title={`Scan freshness · ${sc.scanned} fresh · ${sc.stale} stale · ${sc.needsBuild} need build · ${sc.unscanned} never scanned`}>
-                              <span className="cve-host-bar">
-                                <span style={{ flex: sc.scanned, background: "#34d399" }} />
-                                <span style={{ flex: sc.stale, background: "#fbbf24" }} />
-                                <span style={{ flex: sc.needsBuild, background: "#f59e0b" }} />
-                                <span style={{ flex: sc.unscanned, background: "#4b5563" }} />
-                              </span>
-                              <span className="mono">{sc.scanned}/{sc.totalConfigs} scanned</span>
-                            </span>}
-                          <CveSevChips t={h.t} />
-                          <button className="btn-icon focus-ring" title={`Open ${h.sys.hostname}`} onClick={() => onOpenSystem?.(h.sys)}><Icon name="arrow-right" size={13} /></button>
-                        </div>
-                        {hOpen && <CveTable cves={h.cves} seenNew={seenNew} onSelectCve={onSelectCve} limit={lim(hk)} onMore={() => more(hk)} />}
-                      </div>);
-                })}
-                  {clean > 0 && <div className="cve-host-clean"><Icon name="check" size={11} /> {clean} other host{clean === 1 ? "" : "s"} in {g.env} with no matching CVEs</div>}
-                </div>}
-            </section>);
-        })}
-      </div>
-    </div>);
-}
-
-// CVEs newly reported (ageDays <= 1) stay flagged until the user actually opens their
-// package group and looks at them — that's the dismissal, not a timer.
-function cveSeenIds() {
-  try { return new Set(JSON.parse(localStorage.getItem("cf.cves.seenNew") || "[]")); } catch { return new Set(); }
-}
-function cveMarkSeen(ids) {
-  if (!ids.length) return;
-  const s = cveSeenIds();
-  ids.forEach(id => s.add(id));
-  try { localStorage.setItem("cf.cves.seenNew", JSON.stringify([...s])); } catch {}
-  window.dispatchEvent(new CustomEvent("cf-cve-seen-change"));
-}
-function useCveSeenSet() {
-  const [v, setV] = React.useState(0);
-  React.useEffect(() => {
-    const h = () => setV(n => n + 1);
-    window.addEventListener("cf-cve-seen-change", h);
-    return () => window.removeEventListener("cf-cve-seen-change", h);
-  }, []);
-  return React.useMemo(cveSeenIds, [v]);
-}
-
-function CvePackageGroups({ cves, expanded, onToggle, onSelectCve, seenNew }) {
+function CvePackageGroups({ cves, expanded, onToggle, onSelectCve }) {
   // Group CVEs by package
   const groups = React.useMemo(() => {
     const m = new Map();
@@ -499,10 +334,9 @@ function CvePackageGroups({ cves, expanded, onToggle, onSelectCve, seenNew }) {
         if (c.cvss > maxCvss) maxCvss = c.cvss;
       });
       const score = list.reduce((a, c) => a + sevWeight[c.severity], 0);
-      const isNew = list.some(c => c.ageDays <= 1 && !seenNew.has(c.id));
-      return { pkg, list, counts, systemsCount: systems.size, fixable, outstanding, exploited, maxCvss, score, isNew };
-    }).sort((a, b) => (b.isNew - a.isNew) || (b.score - a.score));
-  }, [cves, seenNew]);
+      return { pkg, list, counts, systemsCount: systems.size, fixable, outstanding, exploited, maxCvss, score };
+    }).sort((a, b) => b.score - a.score);
+  }, [cves]);
 
   if (groups.length === 0) {
     return <div className="empty" style={{ margin: 0 }}><h3>No CVEs match</h3><div>Try clearing a filter.</div></div>;
@@ -514,22 +348,21 @@ function CvePackageGroups({ cves, expanded, onToggle, onSelectCve, seenNew }) {
       <CvePackageGroup
         key={g.pkg}
         group={g}
-        isExpanded={expanded === g.pkg || (expanded == null && g.isNew)}
-        onToggle={() => { onToggle(g.pkg); if (g.isNew) cveMarkSeen(g.list.filter(c => c.ageDays <= 1).map(c => c.id)); }}
-        onSelectCve={onSelectCve}
-        seenNew={seenNew} />
+        isExpanded={expanded === g.pkg}
+        onToggle={() => onToggle(g.pkg)}
+        onSelectCve={onSelectCve} />
 
       )}
     </div>);
 
 }
 
-function CvePackageGroup({ group, isExpanded, onToggle, onSelectCve, seenNew }) {
+function CvePackageGroup({ group, isExpanded, onToggle, onSelectCve }) {
   const sevColor = group.counts.critical > 0 ? "#f87171" :
   group.counts.high > 0 ? "#fbbf24" :
   group.counts.medium > 0 ? "#60a5fa" : "#9ca3af";
   return (
-    <div className={`card${group.isNew ? " cve-pkg-new" : ""}`} style={{ overflow: "hidden" }}>
+    <div className="card" style={{ overflow: "hidden" }}>
       <button className="focus-ring" onClick={onToggle}
       style={{
         all: "unset", display: "grid",
@@ -546,7 +379,6 @@ function CvePackageGroup({ group, isExpanded, onToggle, onSelectCve, seenNew }) 
         <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <span className="mono" style={{ fontSize: 14, fontWeight: 700 }}>{group.pkg}</span>
-            {group.isNew && <span className="chip cve-new-chip" style={{ fontSize: 10 }}>new</span>}
             <span style={{ fontSize: 12, color: "var(--cf-text-muted)" }}>{group.list.length} CVE{group.list.length === 1 ? "" : "s"}</span>
             {group.exploited > 0 && <span className="chip chip-critical" style={{ fontSize: 10 }}>{group.exploited} exploited</span>}
           </div>
@@ -587,7 +419,7 @@ function CvePackageGroup({ group, isExpanded, onToggle, onSelectCve, seenNew }) 
               </tr>
             </thead>
             <tbody>
-              {group.list.map((cve) => <CveRow key={cve.id} cve={cve} seenNew={seenNew} onOpen={() => onSelectCve(cve)} />)}
+              {group.list.map((cve) => <CveRow key={cve.id} cve={cve} onOpen={() => onSelectCve(cve)} />)}
             </tbody>
           </table>
         </div>
@@ -596,16 +428,14 @@ function CvePackageGroup({ group, isExpanded, onToggle, onSelectCve, seenNew }) 
 
 }
 
-function CveRow({ cve, onOpen, seenNew }) {
+function CveRow({ cve, onOpen }) {
   const sevCls = { critical: "chip-critical", high: "chip-warning", medium: "chip-info", low: "chip-unknown" }[cve.severity];
   const sevColor = { critical: "#f87171", high: "#fbbf24", medium: "#60a5fa", low: "#9ca3af" }[cve.severity];
-  const isNew = cve.ageDays <= 1 && !(seenNew && seenNew.has(cve.id));
   return (
-    <tr style={{ cursor: "pointer" }} className={isNew ? "cve-row-new" : ""} onClick={() => { if (isNew) cveMarkSeen([cve.id]); onOpen(); }}>
+    <tr style={{ cursor: "pointer" }} onClick={onOpen}>
       <td>
         <div className="mono" style={{ fontWeight: 600, fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
           {cve.id}
-          {isNew && <span className="chip cve-new-chip" style={{ fontSize: 10 }}>new</span>}
           {cve.exploited && <span className="chip chip-critical" style={{ fontSize: 10 }} title="Actively exploited in the wild">exploited</span>}
         </div>
       </td>
@@ -1278,105 +1108,6 @@ function CveTriageModal({ cve, affectedSystems, envSystems, initial, onClose, on
           </button>
         </div>
       </div>
-    </div>
-  );
-}
-
-/* ── Export: same four formats as the POA&M register. OSCAL here is an
-   assessment-results document: one observation per CVE, one finding per affected
-   host, with the per-environment disposition carried as props. */
-function cveExportName(scope, ext) {
-  return `cves-${new Date().toISOString().slice(0,10)}${scope ? "-" + String(scope).replace(/\W+/g, "-") : ""}.${ext}`;
-}
-function cveDisposition(c, env) {
-  const d = c.dispositions && c.dispositions[env];
-  if (d) return d.state === "accepted" ? "risk accepted" : "patch scheduled" + (d.poamId ? " (" + d.poamId + ")" : "");
-  if (!c.dispositions && c.acceptance && c.acceptance !== "outstanding" && (!c.scopeEnvs || c.scopeEnvs.includes(env))) return c.acceptance;
-  return "outstanding";
-}
-function cveCsvRows(list, scope) {
-  const rows = [["CVE","Severity","CVSS","Vector","Package","Introduced in","Fixed in","Exploited","Title","Environment","Systems","Disposition","Justification / plan","Discovered","Age (days)","Advisory"]];
-  list.forEach(c => {
-    const sys = SYSTEMS.filter(s => c.affected.includes(s.id) && (!scope || s.environment === scope));
-    const envs = [...new Set(sys.map(s => s.environment))];
-    (envs.length ? envs : [""]).forEach(env => {
-      const d = c.dispositions && c.dispositions[env];
-      rows.push([c.id, c.severity, c.cvss.toFixed(1), c.vector || "", c.pkg, c.introducedIn || "", c.fix === "available" ? c.fixedIn || "available" : "none",
-        c.exploited ? "yes" : "no", c.title, env, sys.filter(s => s.environment === env).map(s => s.hostname).join("; "),
-        env ? cveDisposition(c, env) : "outstanding", d ? (d.justification || d.plan || "") : (c.justification || ""),
-        c.discoveredAt || "", c.ageDays, c.advisoryUrl || ""]);
-    });
-  });
-  return rows;
-}
-function cveBuildOscal(list, scope) {
-  const now = new Date().toISOString();
-  const observations = [], findings = [];
-  list.forEach(c => {
-    const ob = rrUuid("cve-obs::" + c.id);
-    observations.push({ uuid: ob, title: c.id, description: c.title, methods: ["TEST"], types: ["finding"], collected: now,
-      props: [{ name:"vulnerability-id", value:c.id }, { name:"package", value:c.pkg }, { name:"cvss-score", value:c.cvss.toFixed(1) },
-        { name:"cvss-vector", value:c.vector || "none" }, { name:"severity", value:c.severity }, { name:"fixed-in", value:c.fix === "available" ? c.fixedIn || "available" : "none" },
-        ...(c.exploited ? [{ name:"known-exploited", value:"true" }] : [])],
-      links: c.advisoryUrl ? [{ href:c.advisoryUrl, rel:"reference" }] : [] });
-    SYSTEMS.filter(s => c.affected.includes(s.id) && (!scope || s.environment === scope)).forEach(s => {
-      findings.push({ uuid: rrUuid("cve-finding::" + c.id + "::" + s.id), title: `${c.id} on ${s.hostname}`, description: c.title,
-        props: [{ name:"host", value:s.hostname }, { name:"environment", value:s.environment }, { name:"disposition", value:cveDisposition(c, s.environment) }],
-        target: { type:"objective-id", "target-id": c.id, status: { state: cveDisposition(c, s.environment) === "risk accepted" ? "satisfied" : "not-satisfied" } },
-        "related-observations": [{ "observation-uuid": ob }] });
-    });
-  });
-  return { "assessment-results": {
-    uuid: rrUuid("cve::export::" + now),
-    metadata: { title: `Vulnerability assessment results${scope ? " — " + scope : ""}`, "last-modified": now, version: now.slice(0,10), "oscal-version": "1.1.2" },
-    "import-ap": { href: "#crystal-forge-scan-policy" },
-    results: [{ uuid: rrUuid("cve-result::" + now), title: "Fleet vulnerability scan", start: now, observations, findings }],
-  } };
-}
-function cveRunExport(fmt, list, scope) {
-  if (fmt === "csv" || fmt === "excel") {
-    const rows = cveCsvRows(list, scope);
-    if (fmt === "csv") return rrDownload(cveExportName(scope, "csv"), rows.map(r => r.map(v => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",")).join("\n"), "text/csv");
-    const esc = (v) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    const body = rows.map((r, i) => `<tr>${r.map(v => `<${i ? "td" : "th"}>${esc(v)}</${i ? "td" : "th"}>`).join("")}</tr>`).join("");
-    return rrDownload(cveExportName(scope, "xls"), `<html><head><meta charset="utf-8"><!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>CVEs</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]--></head><body><table border="1">${body}</table></body></html>`, "application/vnd.ms-excel");
-  }
-  const doc = cveBuildOscal(list, scope);
-  if (fmt === "oscal-json") return rrDownload(cveExportName(scope, "oscal.json"), JSON.stringify(doc, null, 2), "application/json");
-  rrDownload(cveExportName(scope, "oscal.xml"), `<?xml version="1.0" encoding="UTF-8"?>\n<oscal-ar xmlns="https://crystalforge.dev/ns/oscal">\n${rrOscalToXml(doc["assessment-results"], "assessment-results", 1)}</oscal-ar>\n`, "application/xml");
-}
-const CVE_EXPORT_FORMATS = [
-  ["oscal-json", "OSCAL JSON", "Standard machine-readable assessment results"],
-  ["excel",      "Excel",      "Spreadsheet for review and external workflows"],
-  ["csv",        "CSV",        "Flat data for import into other tools"],
-  ["oscal-xml",  "OSCAL XML",  "Standards-compatible XML"],
-];
-function CveExportMenuButton({ list, scope }) {
-  const [open, setOpen] = React.useState(false);
-  const ref = React.useRef(null);
-  React.useEffect(() => {
-    if (!open) return;
-    const off = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
-    const esc = (e) => { if (e.key === "Escape") setOpen(false); };
-    document.addEventListener("mousedown", off); document.addEventListener("keydown", esc);
-    return () => { document.removeEventListener("mousedown", off); document.removeEventListener("keydown", esc); };
-  }, [open]);
-  return (
-    <div className="rr-export" ref={ref}>
-      <button type="button" className="btn btn-ghost focus-ring" aria-expanded={open} onClick={() => setOpen(o => !o)}>
-        <Icon name="download" size={14}/> Export {list.length} <Icon name="chevron-down" size={11}/>
-      </button>
-      {open && (
-        <div className="rr-export-pop card" role="menu" aria-label="Export CVEs">
-          <div className="rr-export-title">Export CVEs{scope ? " · " + scope : ""}</div>
-          {CVE_EXPORT_FORMATS.map(([k, l, sub]) => (
-            <button key={k} type="button" role="menuitem" className="rr-export-item focus-ring" onClick={() => { cveRunExport(k, list, scope); setOpen(false); }}>
-              <span className="rr-export-item-l">{l}</span>
-              <span className="rr-export-item-sub">{sub}</span>
-            </button>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

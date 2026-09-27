@@ -767,7 +767,7 @@ function PoamTable({ list, onOpen, emptyNote }) {
 }
 
 /* ── System compliance tab section ────────────────────────────────────────── */
-function SystemPoamSection({ sys }) {
+function SystemPoamSection({ sys, onNavigate }) {
   usePoamStore();
   const [filter, setFilter] = React.useState("open");
   const all = poamsForSystem(sys.id);
@@ -780,6 +780,11 @@ function SystemPoamSection({ sys }) {
         <Icon name="activity" size={14} style={{ color:"var(--cf-brand-purple)" }}/>
         <span style={{ fontSize:14, fontWeight:650 }}>POA&M</span>
         <span style={{ fontSize:11.5, color:"var(--cf-text-muted)" }}>Remediation plans for this host's open deficiencies</span>
+        {onNavigate && (
+          <button className="btn btn-ghost focus-ring xs" onClick={() => onNavigate("poams", { scope:{ type:"system", id:sys.id, label:sys.hostname } })}>
+            <Icon name="arrow-right" size={11}/> View in POA&M register
+          </button>
+        )}
         <div className="seg" style={{ marginLeft:"auto" }}>
           {[{ v:"open", l:`Open · ${c.open}` }, { v:"overdue", l:`Overdue · ${c.overdue}` }, { v:"closed", l:`Closed · ${c.completed}` }, { v:"all", l:"All" }].map(o => (
             <button key={o.v} className={filter===o.v?"active":""} onClick={()=>setFilter(o.v)}>{o.l}</button>
@@ -796,7 +801,7 @@ function SystemPoamSection({ sys }) {
 }
 
 /* ── Bundle roll-up card ──────────────────────────────────────────────────── */
-function BundlePoamRollup({ bundle, failCount, onOpenList }) {
+function BundlePoamRollup({ bundle, failCount, onOpenList, onNavigate }) {
   usePoamStore();
   const list = poamsForBundle(bundle);
   const c = poamCounts(list);
@@ -826,6 +831,11 @@ function BundlePoamRollup({ bundle, failCount, onOpenList }) {
         <button className="btn btn-ghost focus-ring xs" onClick={onOpenList}>
           <Icon name="arrow-right" size={11}/> {list.length} POA&M item{list.length===1?"":"s"}
         </button>
+        {onNavigate && (
+          <button className="btn btn-ghost focus-ring xs" onClick={() => onNavigate("poams", { scope:{ type:"bundle", id:bundle.id, label:bundle.name } })}>
+            <Icon name="arrow-right" size={11}/> Open in register
+          </button>
+        )}
       </div>
     </div>
   );
