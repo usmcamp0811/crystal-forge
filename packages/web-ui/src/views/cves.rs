@@ -140,12 +140,17 @@ fn is_canonical_cve_id(value: &str) -> bool {
         && sequence.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-fn unique_current_package_for_cve(cve_id: &str, items: &[CveListItem]) -> Option<String> {
+// Notification focus can resolve evidence in any inventory section, but a
+// metadata-only CVE cannot identify a package drawer or an affected inventory row.
+fn has_retained_package_evidence(item: &CveListItem) -> bool {
+    let (current, scheduled, historical) = item.inventory_counts();
+    current > 0 || scheduled > 0 || historical > 0
+}
+
+fn unique_retained_package_for_cve(cve_id: &str, items: &[CveListItem]) -> Option<String> {
     let mut packages = items
         .iter()
-        .filter(|item| {
-            item.cve_id == cve_id && item.current_affected_count.is_some_and(|count| count > 0)
-        })
+        .filter(|item| item.cve_id == cve_id && has_retained_package_evidence(item))
         .filter_map(|item| item.package_name.as_deref())
         .collect::<Vec<_>>();
     packages.sort_unstable();
@@ -479,7 +484,7 @@ pub fn CvesView(query: String) -> Element {
         }
         match cve_list.read().as_ref() {
             Some(Ok(items)) => {
-                if let Some(package) = unique_current_package_for_cve(&focused, items) {
+                if let Some(package) = unique_retained_package_for_cve(&focused, items) {
                     selected_cve.set(Some(ExactCveSelection {
                         cve_id: focused,
                         package,
@@ -503,7 +508,7 @@ pub fn CvesView(query: String) -> Element {
                 .filter(|item| {
                     focused_cve.as_ref().is_none_or(|focused| {
                         item.cve_id == *focused
-                            && item.current_affected_count.is_some_and(|count| count > 0)
+                            && has_retained_package_evidence(item)
                             && item.package_name.is_some()
                     })
                 })
@@ -877,21 +882,6 @@ pub fn CvesView(query: String) -> Element {
                 }
             }
 
-            if let Some(focused) = focused_cve.as_ref() {
-                div { class: "sd-callout sd-callout-info", role: "status", "data-testid": "cve-notification-focus",
-                    "Focused CVE from notification: " code { "{focused}" }
-                    button {
-                        class: "btn btn-ghost xs focus-ring",
-                        onclick: move |_| {
-                            focus_cve.set(None);
-                            focus_resolution_complete.set(false);
-                            search_query.set(String::new());
-                        },
-                        "Clear focus"
-                    }
-                }
-            }
-
             // CVE List
             if view_mode() == "grouped" {
                 CvePackageGroupsView {
@@ -942,11 +932,7 @@ pub fn CvesView(query: String) -> Element {
                                             td {
                                                 colspan: "10",
                                                 style: "padding: 24px; text-align: center; color: var(--cf-text-muted); font-size: 13px;",
-                                                if let Some(focused) = focused_cve.as_ref() {
-                                                    "No current package findings match {focused}."
-                                                } else {
-                                                    "No CVEs match the current filters."
-                                                }
+                                                "No CVEs match the current filters."
                                             }
                                         }
                                     } else {
@@ -2313,9 +2299,9 @@ fn FleetCveTriageDialog(
 mod tests {
     use super::{
         FleetDetailState, ToastLifecycle, environment_triage_eligible, fleet_error_state,
-        fleet_fix_label, fleet_triage_draft, inventory_section_label, is_canonical_cve_id,
-        request_token_is_current, systems_in_inventory_section, triage_status_presentation,
-        unique_current_package_for_cve,
+        fleet_fix_label, fleet_triage_draft, has_retained_package_evidence,
+        inventory_section_label, is_canonical_cve_id, request_token_is_current,
+        systems_in_inventory_section, triage_status_presentation, unique_retained_package_for_cve,
     };
     use crate::api::models::{CveListItem, FleetCveInventorySection, SystemCveInventoryAuthority};
     use crate::components::cve::triage::{
@@ -2374,7 +2360,7 @@ mod tests {
     }
 
     #[test]
-    fn notification_focus_opens_only_one_current_package_match() {
+    fn notification_focus_resolves_unique_packages_across_inventory_sections() {
         let items = vec![
             cve_item("CVE-2025-1234", Some("openssl"), Some(2)),
             cve_item("CVE-2025-1234", Some("openssl"), Some(1)),
@@ -2382,23 +2368,55 @@ mod tests {
             cve_item("CVE-2025-9999", Some("glibc"), Some(4)),
         ];
         assert_eq!(
-            unique_current_package_for_cve("CVE-2025-1234", &items),
+            unique_retained_package_for_cve("CVE-2025-1234", &items),
             Some("openssl".to_string())
         );
-        let multiple = vec![
-            cve_item("CVE-2025-1234", Some("openssl"), Some(1)),
-            cve_item("CVE-2025-1234", Some("glibc"), Some(1)),
-        ];
+        let mut scheduled_package = cve_item("CVE-2025-1234", Some("openssl"), Some(0));
+        scheduled_package.scheduled_deployment_target_count = Some(1);
+        let mut historical_package = cve_item("CVE-2025-1234", Some("glibc"), Some(0));
+        historical_package.scheduled_deployment_target_count = Some(0);
+        historical_package.historical_inventory_count = Some(1);
+        let multiple = vec![scheduled_package, historical_package];
         assert_eq!(
-            unique_current_package_for_cve("CVE-2025-1234", &multiple),
-            None
+            unique_retained_package_for_cve("CVE-2025-1234", &multiple),
+            None,
+            "Distinct scheduled and historical packages must remain a flat list"
+        );
+        let mut scheduled = cve_item("CVE-2025-1234", Some("openssl"), Some(0));
+        scheduled.scheduled_deployment_target_count = Some(2);
+        let mut historical = cve_item("CVE-2025-1234", Some("openssl"), Some(0));
+        historical.scheduled_deployment_target_count = Some(0);
+        historical.historical_inventory_count = Some(1);
+        assert_eq!(
+            unique_retained_package_for_cve("CVE-2025-1234", &[scheduled]),
+            Some("openssl".to_string()),
+            "A unique scheduled-target package must resolve without current exposure"
+        );
+        assert_eq!(
+            unique_retained_package_for_cve("CVE-2025-1234", &[historical]),
+            Some("openssl".to_string()),
+            "A unique historical package must remain discoverable"
         );
         let stale = vec![cve_item("CVE-2025-1234", Some("openssl"), Some(0))];
         assert_eq!(
-            unique_current_package_for_cve("CVE-2025-1234", &stale),
+            unique_retained_package_for_cve("CVE-2025-1234", &stale),
             None
         );
-        assert_eq!(unique_current_package_for_cve("CVE-2025-4321", &[]), None);
+        assert_eq!(unique_retained_package_for_cve("CVE-2025-4321", &[]), None);
+    }
+
+    #[test]
+    fn notification_focus_ignores_metadata_rows_without_package_evidence() {
+        let mut metadata_only = cve_item("CVE-2025-1234", None, Some(0));
+        metadata_only.scheduled_deployment_target_count = Some(0);
+        metadata_only.historical_inventory_count = Some(0);
+
+        assert!(!has_retained_package_evidence(&metadata_only));
+        assert_eq!(
+            unique_retained_package_for_cve("CVE-2025-1234", &[metadata_only]),
+            None,
+            "Metadata without package-level inventory must not fabricate a drawer target"
+        );
     }
 
     fn environment(

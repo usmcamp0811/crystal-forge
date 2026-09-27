@@ -7840,6 +7840,7 @@ const steps = [
         page.locator("[data-testid='topbar-notifications-badge']"),
         "Expected notifications unread badge to clear after mark-all-read",
       );
+
     },
   },
   {
@@ -12968,22 +12969,40 @@ const steps = [
         const search = url.searchParams.get("search");
         let rows = [cveRowFixture, inventoryOnlyRowFixture];
         if (search?.startsWith("CVE-")) {
-          if (focusedCveFixtureMode === "stale") {
-            rows = [{
-              ...cveRowFixture,
-              cve_id: search,
-              affected_count: 1,
-              exact_affected_count: 0,
-              current_affected_count: 0,
-              historical_inventory_count: 1,
-            }];
-          } else if (search !== "CVE-2024-1234") {
+          if (search !== "CVE-2024-1234" || focusedCveFixtureMode === "stale") {
             rows = [];
           } else if (focusedCveFixtureMode === "multiple") {
             rows = [
               cveRowFixture,
               { ...cveRowFixture, package_name: "glibc", current_affected_count: 2 },
             ];
+          } else if (focusedCveFixtureMode === "scheduled") {
+            rows = [{
+              ...cveRowFixture,
+              affected_count: 2,
+              current_affected_count: 0,
+              scheduled_deployment_target_count: 2,
+              historical_inventory_count: 0,
+            }];
+          } else if (focusedCveFixtureMode === "historical") {
+            rows = [{
+              ...cveRowFixture,
+              affected_count: 0,
+              current_affected_count: 0,
+              scheduled_deployment_target_count: 0,
+              historical_inventory_count: 1,
+            }];
+          } else if (focusedCveFixtureMode === "metadata-only") {
+            rows = [{
+              ...cveRowFixture,
+              package_name: null,
+              affected_count: 0,
+              exact_affected_count: 0,
+              legacy_affected_count: 0,
+              current_affected_count: 0,
+              scheduled_deployment_target_count: 0,
+              historical_inventory_count: 0,
+            }];
           } else {
             rows = [cveRowFixture];
           }
@@ -13889,7 +13908,7 @@ const steps = [
       }
 
       await page.goto(`${baseUrl}/cves?focus_cve=CVE-2024-1234`, { timeout: LOAD_TIMEOUT });
-      await assertVisible(page.getByTestId("cve-notification-focus"), "A valid CVE notification URL should show focused CVE state");
+      await assertCount(page.getByTestId("cve-notification-focus"), 0, "CVE focus must not add an unapproved notification banner");
       await assertVisible(page.getByTestId("cve-fleet-drawer"), "One current package match should open its exact fleet drawer");
       await assertAttribute(
         page.getByTestId("cve-fleet-drawer"),
@@ -13902,26 +13921,66 @@ const steps = [
       await page.waitForFunction(
         () => new URLSearchParams(window.location.search).get("focus_cve") === "CVE-2024-1234",
       );
-      await assertVisible(page.getByTestId("cve-notification-focus"), "Closing the package drawer must preserve the notification CVE focus");
+      await assertValue(page.getByPlaceholder("Search CVE / package / title…"), "CVE-2024-1234", "Closing the package drawer must preserve the focused CVE filter");
       await assertHidden(page.getByTestId("cve-fleet-drawer"), "The package drawer should close without clearing the focused CVE list");
 
       focusedCveFixtureMode = "multiple";
       await page.goto(`${baseUrl}/cves?focus_cve=CVE-2024-1234`, { timeout: LOAD_TIMEOUT });
-      await assertVisible(page.getByTestId("cve-notification-focus"), "Multiple matches should remain in focused CVE state");
+      await assertCount(page.getByTestId("cve-notification-focus"), 0, "Multiple package focus must not invent a notification banner");
       await assertHidden(page.getByTestId("cve-fleet-drawer"), "Multiple current packages must not choose a package drawer");
       await assertVisible(page.getByText("openssl", { exact: true }), "Focused list should retain the first matching package");
       await assertVisible(page.getByText("glibc", { exact: true }), "Focused list should retain the second matching package");
       await captureWorkflowViewportState(page, "16-cves", "notification-focus-multiple-packages", "desktop");
 
+      focusedCveFixtureMode = "scheduled";
+      const scheduledOnlyDetail = JSON.parse(JSON.stringify(fleetDetail));
+      scheduledOnlyDetail.affected_system_count = 2;
+      scheduledOnlyDetail.exact_affected_system_count = 2;
+      scheduledOnlyDetail.exact_mutation_target_count = 0;
+      scheduledOnlyDetail.current_affected_system_count = 0;
+      scheduledOnlyDetail.scheduled_deployment_target_count = 2;
+      scheduledOnlyDetail.historical_inventory_system_count = 0;
+      scheduledOnlyDetail.environments = scheduledOnlyDetail.environments.filter((environment) =>
+        environment.environment_name === "Rollout target");
+      fleetDetailAfterMutation = scheduledOnlyDetail;
+      await page.goto(`${baseUrl}/cves?focus_cve=CVE-2024-1234`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.getByTestId("cve-fleet-drawer"), "A unique scheduled-target package must remain discoverable");
+      await assertVisible(page.getByTestId("cve-fleet-scheduled-configuration"), "Scheduled-only focus must disclose target exposure");
+      await assertVisible(page.getByText("rollout-web-01", { exact: true }), "Scheduled-only focus must open the exact package drawer");
+      await assertDisabled(page.getByTestId("cve-triage-open"), "Scheduled deployment evidence must remain read-only");
+      await captureWorkflowViewportState(page, "16-cves", "notification-focus-scheduled-package", "desktop");
+      await page.getByRole("button", { name: "Close fleet inventory" }).click();
+      await assertHidden(page.getByTestId("cve-fleet-drawer"), "Scheduled package detail should close without clearing URL focus");
+
+      focusedCveFixtureMode = "historical";
+      fleetDetailAfterMutation = legacyOnlyDetail;
+      await page.goto(`${baseUrl}/cves?focus_cve=CVE-2024-1234`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.getByTestId("cve-fleet-drawer"), "A unique historical package must remain discoverable");
+      await assertVisible(page.getByTestId("cve-fleet-historical-evidence"), "Historical-only focus must disclose retained evidence");
+      await assertVisible(page.getByText("archive-web-01", { exact: true }), "Historical-only focus must open the exact package drawer");
+      await assertDisabled(page.getByTestId("cve-triage-open"), "Historical evidence must remain read-only");
+      await captureWorkflowViewportState(page, "16-cves", "notification-focus-historical-package", "desktop");
+      await page.getByRole("button", { name: "Close fleet inventory" }).click();
+      await assertHidden(page.getByTestId("cve-fleet-drawer"), "Historical package detail should close without clearing URL focus");
+
+      focusedCveFixtureMode = "metadata-only";
+      fleetDetailAfterMutation = null;
+      await page.goto(`${baseUrl}/cves?focus_cve=CVE-2024-1234`, { timeout: LOAD_TIMEOUT });
+      await assertCount(page.getByTestId("cve-fleet-drawer"), 0, "Metadata without package evidence must not fabricate a package drawer");
+      await assertVisible(page.getByText("No CVEs match the current filters."), "Metadata-only focus must use the existing empty-list state");
+      await assertCount(page.getByTestId("cve-notification-focus"), 0, "Metadata-only focus must not invent presentation copy");
+      await captureWorkflowViewportState(page, "16-cves", "notification-focus-metadata-only", "desktop");
+
       focusedCveFixtureMode = "stale";
       await page.goto(`${baseUrl}/cves?focus_cve=CVE-2024-9999`, { timeout: LOAD_TIMEOUT });
-      await assertVisible(page.getByTestId("cve-notification-focus"), "A stale CVE should retain its focused URL state");
-      await assertVisible(page.getByText("No current package findings match CVE-2024-9999."), "A stale focused CVE should show an explicit empty result");
+      await assertValue(page.getByPlaceholder("Search CVE / package / title…"), "CVE-2024-9999", "A stale CVE should retain its focused URL-backed filter");
+      await assertVisible(page.getByText("No CVEs match the current filters."), "A stale focused CVE should use the existing empty-list state");
+      await assertCount(page.getByTestId("cve-notification-focus"), 0, "A stale focus must not display an invented notification banner");
       await assertHidden(page.getByTestId("cve-fleet-drawer"), "A stale CVE must not open a package drawer");
       await captureWorkflowViewportState(page, "16-cves", "notification-focus-stale-cve", "desktop");
 
       await page.goto(`${baseUrl}/cves?focus_cve=not-a-cve`, { timeout: LOAD_TIMEOUT });
-      await assertHidden(page.getByTestId("cve-notification-focus"), "Invalid focused CVE values must be ignored");
+      await assertCount(page.getByTestId("cve-notification-focus"), 0, "Invalid focused CVE values must not display notification copy");
       await assertHidden(page.getByTestId("cve-fleet-drawer"), "Invalid focused CVE values must not open a package drawer");
 
       // Unroute after test.
@@ -13934,6 +13993,32 @@ const steps = [
       await page.unroute(/\/api\/v1\/cves(?:\?.*)?$/);
       await page.unroute(/\/api\/v1\/cves\/export(?:\?.*)?$/);
       await page.unroute("**/api/v1/cves/rescan-fleet");
+
+      const cveNotificationId = "77777777-7777-4777-8777-777777777779";
+      const cveNotificationRequests = await mockAccountNotifications(page, {
+        id: cveNotificationId,
+        category: "critical_cves",
+        source_type: "cves",
+        source_id: "CVE-2024-1234",
+        title: "New critical CVE",
+        summary: "A critical CVE attention episode opened.",
+        route: "/cves",
+      });
+      const notificationsBell = page.locator("[data-testid='topbar-notifications-button']");
+      await assertVisible(notificationsBell, "Expected the shared notification bell before CVE navigation");
+      await notificationsBell.click();
+      const notificationsPanel = page.locator("[data-testid='topbar-notifications-panel']");
+      const cveNotificationRow = notificationsPanel.locator(`[data-testid="topbar-notification-item-${cveNotificationId}"]`);
+      await assertVisible(cveNotificationRow, "Expected the critical-CVE notification for focus navigation");
+      const cveNotificationRead = page.waitForResponse((response) =>
+        response.url().endsWith(`/api/v1/user/notifications/${cveNotificationId}/read`));
+      await cveNotificationRow.click();
+      if ((await cveNotificationRead).status() !== 204 || cveNotificationRequests.read.length !== 1) {
+        throw new Error("Critical-CVE notification activation must preserve the existing mark-read request");
+      }
+      await page.waitForURL((url) =>
+        url.pathname === "/cves" && url.searchParams.get("focus_cve") === "CVE-2024-1234",
+      { timeout: LOAD_TIMEOUT });
 
       // Regression guard for the route-leak fix above: routeStandaloneUiBootstrap()
       // must not run unconditionally in this step. Its broad
