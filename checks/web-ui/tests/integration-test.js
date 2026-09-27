@@ -17468,14 +17468,14 @@ security.audit.enable = true;</fixtext>
       });
       const activeRows = [
         record(ids.running, 101, "zeta-running", "edge-fleet", "ffff-running", "in_progress", timestamp(9), { is_latest_per_flake: true }),
-        record(ids.build, 102, "alpha-build-wait", "core-fleet", "aaaa-build", "awaiting_build", timestamp(8), { wait_reason: "Build output is not available." }),
+        record(ids.build, 102, "alpha-build-wait", "core-fleet", "aaaa-build", "awaiting_build", timestamp(8), { scheduled_at: null, wait_reason: "Build output is not available." }),
         record(ids.closure, 103, "beta-closure-wait", "core-fleet", "bbbb-closure", "awaiting_closure", timestamp(7), { wait_reason: "A completed cache closure is not available." }),
-        record(ids.pending, 104, "gamma-queued", "lab-fleet", "cccc-queued", "pending", timestamp(6)),
+        record(ids.pending, 104, "gamma-queued", "lab-fleet", "cccc-queued", "pending", timestamp(6), { created_at: timestamp(1), scheduled_at: timestamp(10) }),
       ];
       const namedTerminalRows = [
         record(ids.failed, 203, "omega-new-failure", "failure-fleet", "ffff-failed", "failed", terminalAt(1)),
         record(ids.gray, 206, "gray", "core-fleet", "gray-recent-revision", "completed", terminalAt(2), { is_latest_per_flake: true }),
-        record(ids.newest, 201, "alpha-current", "core-fleet", "zzzz-current", "completed", terminalAt(3), { is_current: true }),
+        record(ids.newest, 201, "alpha-current", "core-fleet", "zzzz-current", "completed", terminalAt(3), { is_current: true, scheduled_at: terminalAt(30) }),
         record(ids.retained, 205, "retained-archive", "archive-fleet", "dddd-archive", "completed", terminalAt(4)),
         record(ids.superseded, 202, "alpha-old", "core-fleet", "aaaa-old", "completed", terminalAt(5)),
         record(ids.oldFailure, 204, "omega-old-failure", "failure-fleet", "eeee-failed", "failed", terminalAt(6), { failure: `bounded failure ${"detail ".repeat(30)}` }),
@@ -17801,6 +17801,30 @@ security.audit.enable = true;</fixtext>
         await assertVisible(page.getByText("Awaiting: A completed cache closure is not available."), "Expected closure wait reason");
         await assertCount(page.getByRole("button", { name: /Cancel scan/i }), 0, "Scanning must not expose cancellation");
         await assertCount(page.getByRole("button", { name: "Rescan all" }), 0, "Scanning must not expose obsolete fleet rescan");
+        const activeTable = page.locator("#scan-active-panel table.sys-table");
+        const activeColumnNames = (await activeTable.locator("thead th").allTextContents())
+          .map((label) => label.replace(/\s+/g, " ").trim());
+        const expectedActiveColumns = [
+          "Configuration", "Revision", "Status", "Findings", "Queued", "Trigger", "Actions",
+        ];
+        if (activeColumnNames.join("|") !== expectedActiveColumns.join("|")) {
+          throw new Error(`Active columns must label the timestamp as Queued: ${JSON.stringify(activeColumnNames)}`);
+        }
+        await assertVisible(page.getByRole("button", { name: "Sort by Queued" }), "Active queue time must remain sortable by its displayed label");
+        await page.waitForFunction(() => document.querySelectorAll("#scan-active-panel tbody tr").length === 4);
+        const initialActiveOrder = await activeTable.locator("tbody .scanning-config-name").allTextContents();
+        if (initialActiveOrder.join(",") !== "gamma-queued,zeta-running,alpha-build-wait,beta-closure-wait") {
+          throw new Error(`Active queue sorting must use scheduled_at with created_at fallback: ${initialActiveOrder.join(",")}`);
+        }
+        const scheduledQueuedTitle = await page.getByTestId(`scanning-record-${ids.pending}`).locator(".scanning-last-scan").getAttribute("title");
+        if (Date.parse(scheduledQueuedTitle) !== Date.parse(timestamp(10))) {
+          throw new Error(`The Queued timestamp must prefer scheduled_at over created_at: ${scheduledQueuedTitle}`);
+        }
+        const unscheduledQueuedTitle = await page.getByTestId(`scanning-record-${ids.build}`).locator(".scanning-last-scan").getAttribute("title");
+        if (Date.parse(unscheduledQueuedTitle) !== Date.parse(timestamp(8))) {
+          throw new Error(`An Active row without scheduled_at must display created_at: ${unscheduledQueuedTitle}`);
+        }
+        await captureWorkflowViewportState(page, "16c-scanning-view", "active-queued-timestamp", "desktop");
 
         const activeTab = page.getByRole("tab", { name: /^Active/ });
         await activeTab.focus();
@@ -17836,7 +17860,7 @@ security.audit.enable = true;</fixtext>
         await assertVisible(detail.locator(".scanning-detail-status-strip").getByText("Queued", { exact: true }), "Queued scan should not be presented as running");
         await assertVisible(detail.locator(".scanning-detail-status-strip .scanning-trigger-chip").getByText("manual", { exact: true }), "Queued drawer should retain its trigger");
         const queuedTimestamp = await detail.locator(".scanning-detail-status-strip time").getAttribute("datetime");
-        if (Date.parse(queuedTimestamp) !== Date.parse(timestamp(6))) throw new Error(`Queued lifecycle timestamp was not preserved: ${queuedTimestamp}`);
+        if (Date.parse(queuedTimestamp) !== Date.parse(timestamp(10))) throw new Error(`Queued lifecycle timestamp was not preserved: ${queuedTimestamp}`);
         await assertCount(detail.locator(".scanning-detail-status-strip .scanning-detail-elapsed"), 0, "Queued scans must not look like Vulnix is already running");
         await assertVisible(detail.getByText("No persisted diagnostic events", { exact: true }), "Queued scans without events should show a truthful empty log");
         if (scanDetailRequests.length !== queuedDetailRequestCount + 1 || scanDetailRequests.at(-1) !== ids.pending) {
@@ -17979,6 +18003,10 @@ security.audit.enable = true;</fixtext>
         await revisionFilter.selectOption("all");
         const completedRow = page.locator("#scan-completed-panel tbody tr").filter({ hasText: "alpha-current" });
         await assertVisible(completedRow.getByRole("button", { name: `View CVEs for scan ${ids.newest}` }), "Critical/high findings should retain the CVE navigation action");
+        const completedLastScanTitle = await page.getByTestId(`scanning-record-${ids.newest}`).locator(".scanning-last-scan").getAttribute("title");
+        if (Date.parse(completedLastScanTitle) !== Date.parse(terminalAt(3))) {
+          throw new Error(`Completed Last scan must continue to use completion time: ${completedLastScanTitle}`);
+        }
         await completedRow.click();
         detail = page.locator("#scan-diagnostics-dialog");
         await assertVisible(detail.getByRole("heading", { name: "alpha-current", exact: true }), "Plain Completed row click should open its exact scan drawer");

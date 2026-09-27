@@ -797,6 +797,14 @@ fn record_time(row: &ScanningScanRecordResponse) -> DateTime<Utc> {
         .unwrap_or(row.created_at)
 }
 
+/// Returns the Active queue timestamp, falling back to lifecycle creation.
+///
+/// Active rows show when the scan was scheduled to enter the queue, not when
+/// scanner execution started or when a terminal result was recorded.
+fn active_queued_time(row: &ScanningScanRecordResponse) -> DateTime<Utc> {
+    row.scheduled_at.unwrap_or(row.created_at)
+}
+
 fn severity_counts(row: &ScanningScanRecordResponse) -> (i32, i32, i32, i32) {
     (
         row.critical_count,
@@ -883,7 +891,7 @@ fn filter_and_sort_active_records(
                 .cmp(right.commit_hash.as_deref().unwrap_or_default()),
             ScanSort::Status => status_rank(&left.status).cmp(&status_rank(&right.status)),
             ScanSort::Severity => severity_counts(left).cmp(&severity_counts(right)),
-            ScanSort::Timestamp => record_time(left).cmp(&record_time(right)),
+            ScanSort::Timestamp => active_queued_time(left).cmp(&active_queued_time(right)),
         };
         let order = if descending { order.reverse() } else { order };
         order
@@ -2031,7 +2039,7 @@ fn active_panel(
                         { active_sort_header("Revision", ScanSort::Revision, filters, capped) }
                         { active_sort_header("Status", ScanSort::Status, filters, capped) }
                         { active_sort_header("Findings", ScanSort::Severity, filters, capped) }
-                        { active_sort_header("Last scan", ScanSort::Timestamp, filters, capped) }
+                        { active_sort_header("Queued", ScanSort::Timestamp, filters, capped) }
                         th { "Trigger" }
                         th { class: "scanning-actions-heading", span { class: "sr-only", "Actions" } }
                     } }
@@ -2203,6 +2211,11 @@ fn record_row(
             ""
         },
     );
+    let timestamp = if has_completed_selection {
+        record_time(&row)
+    } else {
+        active_queued_time(&row)
+    };
     let selection = ScanDetailSelection {
         scan_id: row.scan_id,
         hostname: row.hostname.clone(),
@@ -2297,7 +2310,7 @@ fn record_row(
                 if row.archived_at.is_some() { div { class: "scanning-archived-label", Icon { name: IconName::Archive, size: 9 } " Archived" } }
             }
             td { { findings(row.critical_count, row.high_count, row.medium_count, row.low_count, row.status == "completed") } }
-            td { class: "scanning-last-scan", title: "{record_time(&row).to_rfc3339()}", "{relative_time(record_time(&row))}" }
+            td { class: "scanning-last-scan", title: "{timestamp.to_rfc3339()}", "{relative_time(timestamp)}" }
             td { if let Some(trigger) = row.source_trigger.as_deref() { span { class: "chip chip-unknown scanning-trigger", "{trigger}" } } else { span { class: "scanning-unavailable", "Not recorded" } } }
             td { div { class: "row-actions scanning-row-actions",
                 button {
@@ -3438,6 +3451,68 @@ mod tests {
             archived_at: None,
             cancellable: false,
         }
+    }
+
+    #[test]
+    fn active_queue_timestamp_uses_schedule_then_creation_across_statuses() {
+        let base = Utc::now();
+        let mut in_progress = row("in-progress", "in_progress", 1, 0);
+        in_progress.created_at = base + Duration::seconds(2);
+        in_progress.scheduled_at = Some(base + Duration::seconds(20));
+        in_progress.started_at = Some(base + Duration::days(1));
+
+        let mut pending = row("pending", "pending", 1, 0);
+        pending.created_at = base + Duration::seconds(3);
+        pending.scheduled_at = Some(base + Duration::seconds(10));
+
+        let mut awaiting_build = row("awaiting-build", "awaiting_build", 1, 0);
+        awaiting_build.created_at = base + Duration::seconds(15);
+        awaiting_build.scheduled_at = None;
+
+        let mut awaiting_closure = row("awaiting-closure", "awaiting_closure", 1, 0);
+        awaiting_closure.created_at = base + Duration::seconds(4);
+        awaiting_closure.scheduled_at = Some(base + Duration::seconds(5));
+
+        let rows = vec![in_progress, pending, awaiting_build, awaiting_closure];
+        let ordered = filter_and_sort_active_records(
+            &rows,
+            "",
+            "all",
+            "all",
+            false,
+            ScanSort::Timestamp,
+            true,
+        );
+
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|row| row.hostname.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "in-progress",
+                "awaiting-build",
+                "pending",
+                "awaiting-closure"
+            ],
+            "Active timestamp ordering must prefer scheduled_at and use created_at when no schedule exists"
+        );
+        assert_eq!(
+            active_queued_time(&rows[0]),
+            base + Duration::seconds(20),
+            "A running scan's queue timestamp must not use started_at"
+        );
+        assert_eq!(
+            active_queued_time(&rows[2]),
+            base + Duration::seconds(15),
+            "An unscheduled active row must fall back to created_at"
+        );
+
+        let mut completed = row("completed", "completed", 1, 0);
+        completed.created_at = base;
+        completed.scheduled_at = Some(base + Duration::seconds(10));
+        completed.completed_at = Some(base + Duration::seconds(30));
+        assert_eq!(record_time(&completed), base + Duration::seconds(30));
     }
 
     fn detail(
