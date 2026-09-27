@@ -777,7 +777,7 @@ fn EvaluationsPage() -> Element {
                                 // is opened (persists server-side — TASK-385 follow-up).
                                 evals_ack_sent.set(false);
                             },
-                            "History"
+                            "Completed"
                             span { class: "sd-tab-badge", "{history_count}" }
                         }
                         div { class: "q-tabbar-actions",
@@ -808,7 +808,7 @@ fn EvaluationsPage() -> Element {
                             Icon { name: IconName::Search, size: 13 }
                             input {
                                 class: "q-search-input",
-                                placeholder: if active_tab() == EvaluationsTab::ActiveQueue { "Search queue…" } else { "Search history…" },
+                                placeholder: if active_tab() == EvaluationsTab::ActiveQueue { "Search queue…" } else { "Search completed…" },
                                 value: "{search_query}",
                                 oninput: move |event| search_query.set(event.value()),
                             }

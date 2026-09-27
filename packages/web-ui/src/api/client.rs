@@ -579,6 +579,78 @@ fn cve_filter_query_parts(filters: &CveFilters) -> Vec<String> {
     parts
 }
 
+fn cve_inventory_url(query: &CveInventoryQuery, members: bool) -> String {
+    let endpoint = if members { "members" } else { "groups" };
+    let mut parts = vec![
+        format!("group_by={}", query.group_by),
+        format!("offset={}", query.offset),
+        format!("limit={}", query.limit),
+    ];
+    if let Some(id) = query.environment_id {
+        parts.push(format!("environment_id={id}"));
+    }
+    if let Some(id) = query.group_id {
+        parts.push(format!("group_id={id}"));
+    }
+    parts.extend(cve_filter_query_parts(&CveFilters {
+        sort: None,
+        limit: None,
+        ..query.filters.clone()
+    }));
+    format!(
+        "{}/cves/inventory/{endpoint}?{}",
+        base_url(),
+        parts.join("&")
+    )
+}
+
+/// Fetches one server-ordered scoped aggregate page without inferring missing groups.
+///
+/// # Errors
+/// Returns transport, authorization, validation, or decoding errors unchanged.
+pub async fn fetch_cve_inventory_groups(
+    query: &CveInventoryQuery,
+) -> Result<CveInventoryGroupPage, ApiClientError> {
+    fetch_json(&cve_inventory_url(query, false)).await
+}
+
+/// Fetches one exact group's bounded membership page, including historical evidence.
+///
+/// # Errors
+/// Returns transport, authorization, validation, or decoding errors unchanged.
+pub async fn fetch_cve_inventory_members(
+    query: &CveInventoryQuery,
+) -> Result<CveInventoryMemberPage, ApiClientError> {
+    fetch_json(&cve_inventory_url(query, true)).await
+}
+
+/// Fetches one server-filtered CVE/package pair page for the authorized scope.
+/// The server applies the environment and CVE filters before paging.
+///
+/// # Errors
+/// Returns transport, authorization, validation, or decoding errors unchanged.
+pub async fn fetch_cve_inventory_pairs(
+    query: &CveInventoryQuery,
+) -> Result<CveInventoryPairPage, ApiClientError> {
+    let mut parts = vec![
+        format!("offset={}", query.offset),
+        format!("limit={}", query.limit),
+    ];
+    if let Some(id) = query.environment_id {
+        parts.push(format!("environment_id={id}"));
+    }
+    parts.extend(cve_filter_query_parts(&CveFilters {
+        limit: None,
+        ..query.filters.clone()
+    }));
+    fetch_json(&format!(
+        "{}/cves/inventory/pairs?{}",
+        base_url(),
+        parts.join("&")
+    ))
+    .await
+}
+
 /// Fetch CVE list with filters.
 pub async fn fetch_cves(filters: &CveFilters) -> Result<Vec<CveListItem>, ApiClientError> {
     let parts = cve_filter_query_parts(filters);

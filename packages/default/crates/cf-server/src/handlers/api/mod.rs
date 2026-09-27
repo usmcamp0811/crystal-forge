@@ -10,6 +10,7 @@ pub mod caches;
 pub mod commits;
 pub mod compliance;
 pub mod config_health;
+pub mod acceptance_register;
 pub mod cves;
 pub mod dashboard;
 pub mod deployment_policies;

@@ -9,19 +9,16 @@ use uuid::Uuid;
 use wasm_bindgen::{JsCast, closure::Closure};
 
 use crate::api::client::{
-    ApiClientError, fetch_environments, fetch_scanning_scan_detail, fetch_scanning_scan_records,
+    ApiClientError, fetch_scanning_scan_detail, fetch_scanning_scan_records,
     fetch_scanning_scan_records_with_timeout, fetch_scanning_schedule, fetch_scanning_stats,
-    fetch_scanning_system_scans, fetch_scanning_systems, trigger_cve_derivation_rescan,
-    update_scanning_archive_state, update_scanning_schedule,
+    trigger_cve_derivation_rescan, update_scanning_archive_state, update_scanning_schedule,
 };
 use crate::api::models::{
     ScanRecordCollectionParam, ScanRecordDirectionParam, ScanRecordRevisionParam,
     ScanRecordSortParam, ScanRecordStatusParam, ScanSchedulePolicyResponse,
-    ScanningQueueItemResponse, ScanningScanDetailResponse, ScanningScanRecordQuery,
-    ScanningScanRecordResponse, ScanningScanRecordsResponse, ScanningSystemsItemResponse,
-    UpdateScanSchedulePolicyRequest,
+    ScanningScanDetailResponse, ScanningScanRecordQuery, ScanningScanRecordResponse,
+    ScanningScanRecordsResponse, UpdateScanSchedulePolicyRequest,
 };
-use crate::components::chips::EnvBadge;
 use crate::components::dialog_focus::{
     DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel, DialogInitialFocus,
 };
@@ -43,18 +40,6 @@ const COMPLETED_PAGE_LIMIT: u16 = 50;
 /// reports more matching rows than are loaded.
 const ACTIVE_PAGE_LIMIT: u16 = 200;
 
-/// Bounds one per-system history request.
-///
-/// The history collection mixes nonterminal and terminal rows and has the same
-/// cursor restriction as [`ACTIVE_PAGE_LIMIT`].
-const SYSTEM_HISTORY_LIMIT: u16 = 200;
-
-/// Bounds the per-system derivation projection request.
-const SYSTEM_DERIVATION_LIMIT: i64 = 500;
-
-/// Bounds the fleet system projection request.
-const SYSTEM_LIMIT: i64 = 500;
-
 /// Bounds one archive or restore request to the server's exact-identity limit.
 const ARCHIVE_BATCH_MAX: usize = 100;
 
@@ -64,9 +49,8 @@ const ARCHIVE_BATCH_MAX: usize = 100;
 /// Shift selection adds the inclusive range to existing selections and keeps
 /// the original anchor. If the anchor is absent or no longer loaded, Shift
 /// selects only the clicked row and makes that row the new anchor. Ctrl/Cmd
-/// toggles only the clicked identity; a checkbox applies its new checked state.
-/// Both single-row gestures set the clicked row as anchor. This helper never
-/// considers rows outside `ordered_ids`, including unloaded keyset pages.
+/// toggles only the clicked identity and sets it as the anchor. This helper
+/// never considers rows outside `ordered_ids`, including unloaded keyset pages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CompletedSelectionGesture {
     ShiftRange,
@@ -122,13 +106,11 @@ const SEARCH_DEBOUNCE_MS: u32 = 250;
 // build-time failure rather than a silently truncated collection.
 const _: () = assert!(COMPLETED_PAGE_LIMIT >= 1 && COMPLETED_PAGE_LIMIT <= 500);
 const _: () = assert!(ACTIVE_PAGE_LIMIT >= 1 && ACTIVE_PAGE_LIMIT <= 500);
-const _: () = assert!(SYSTEM_HISTORY_LIMIT >= 1 && SYSTEM_HISTORY_LIMIT <= 500);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ScanTab {
     Active,
     Completed,
-    Systems,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -572,23 +554,6 @@ fn active_records_query() -> ScanningScanRecordQuery {
     }
 }
 
-/// Builds the bounded per-system history query for one active system.
-fn system_history_query(system_id: Uuid, include_archived: bool) -> ScanningScanRecordQuery {
-    ScanningScanRecordQuery {
-        collection: ScanRecordCollectionParam::History,
-        include_archived,
-        system_id: Some(system_id),
-        limit: SYSTEM_HISTORY_LIMIT,
-        search: None,
-        status: ScanRecordStatusParam::All,
-        revision: ScanRecordRevisionParam::All,
-        latest_only: false,
-        sort: ScanRecordSortParam::Timestamp,
-        direction: ScanRecordDirectionParam::Desc,
-        after: None,
-    }
-}
-
 /// Builds the server query that resolves the newest failed terminal scan.
 ///
 /// The failed summary action uses this query instead of searching loaded rows,
@@ -646,18 +611,6 @@ enum ScanDetailState {
     Error(String),
 }
 
-#[derive(Clone, PartialEq)]
-struct SystemHistoryData {
-    scans: ScanningScanRecordsResponse,
-    derivations: Vec<ScanningQueueItemResponse>,
-}
-
-#[derive(Clone, PartialEq)]
-enum SystemHistoryEntry {
-    Scan(ScanningScanRecordResponse),
-    NoScan(ScanningQueueItemResponse),
-}
-
 /// Counts the matching rows one collection response shows.
 ///
 /// The server's `total` counts matching rows before archive filtering, so the
@@ -665,50 +618,6 @@ enum SystemHistoryEntry {
 /// contains.
 fn visible_record_total(response: &ScanningScanRecordsResponse) -> i64 {
     response.total.saturating_sub(response.hidden_archived)
-}
-
-fn system_archive_visibility(states: &HashMap<Uuid, bool>, system_id: Uuid) -> bool {
-    states.get(&system_id).copied().unwrap_or(false)
-}
-
-fn set_system_archive_visibility(
-    states: &mut HashMap<Uuid, bool>,
-    system_id: Uuid,
-    include_archived: bool,
-) {
-    if include_archived {
-        states.insert(system_id, true);
-    } else {
-        states.remove(&system_id);
-    }
-}
-
-fn system_history_entries(data: SystemHistoryData) -> Vec<SystemHistoryEntry> {
-    let mut entries = data
-        .scans
-        .items
-        .into_iter()
-        .map(SystemHistoryEntry::Scan)
-        .collect::<Vec<_>>();
-    entries.extend(
-        data.derivations
-            .into_iter()
-            .filter(|row| row.scan_id.is_none())
-            .map(SystemHistoryEntry::NoScan),
-    );
-    entries.sort_by(|left, right| match (left, right) {
-        (SystemHistoryEntry::Scan(left), SystemHistoryEntry::Scan(right)) => record_time(right)
-            .cmp(&record_time(left))
-            .then_with(|| left.scan_id.cmp(&right.scan_id)),
-        (SystemHistoryEntry::Scan(_), SystemHistoryEntry::NoScan(_)) => std::cmp::Ordering::Less,
-        (SystemHistoryEntry::NoScan(_), SystemHistoryEntry::Scan(_)) => std::cmp::Ordering::Greater,
-        (SystemHistoryEntry::NoScan(left), SystemHistoryEntry::NoScan(right)) => right
-            .is_current
-            .cmp(&left.is_current)
-            .then_with(|| right.is_latest_per_flake.cmp(&left.is_latest_per_flake))
-            .then_with(|| right.derivation_id.cmp(&left.derivation_id)),
-    });
-    entries
 }
 
 fn status_meta(status: &str) -> StatusMeta {
@@ -791,18 +700,25 @@ fn status_rank(status: &str) -> u8 {
     }
 }
 
-fn record_time(row: &ScanningScanRecordResponse) -> DateTime<Utc> {
-    row.completed_at
-        .or(row.scheduled_at)
-        .unwrap_or(row.created_at)
-}
-
 /// Returns the Active queue timestamp, falling back to lifecycle creation.
 ///
 /// Active rows show when the scan was scheduled to enter the queue, not when
 /// scanner execution started or when a terminal result was recorded.
 fn active_queued_time(row: &ScanningScanRecordResponse) -> DateTime<Utc> {
     row.scheduled_at.unwrap_or(row.created_at)
+}
+
+/// Returns only the completed scan time for terminal rows; an absent value
+/// remains unavailable rather than becoming a queue or creation timestamp.
+fn displayed_record_time(
+    row: &ScanningScanRecordResponse,
+    completed: bool,
+) -> Option<DateTime<Utc>> {
+    if completed {
+        row.completed_at
+    } else {
+        Some(active_queued_time(row))
+    }
 }
 
 fn severity_counts(row: &ScanningScanRecordResponse) -> (i32, i32, i32, i32) {
@@ -1073,8 +989,8 @@ fn retry_exact_scan(
 /// request-bound keyset cursors. Its search, status, revision, latest-revision,
 /// ordering, and archive controls are request parameters, so their result
 /// counts describe the whole matching collection instead of the loaded rows.
-/// Active and per-system history load one explicitly bounded page each because
-/// the server rejects continuation cursors for those collections.
+/// Active loads one explicitly bounded page because the server rejects
+/// continuation cursors for nonterminal collections.
 #[component]
 pub fn ScanningView() -> Element {
     let mut tab = use_signal(|| ScanTab::Active);
@@ -1115,14 +1031,6 @@ pub fn ScanningView() -> Element {
     let selected_scan = use_signal(|| Option::<ScanDetailSelection>::None);
     let detail_state = use_signal(|| ScanDetailState::Loading);
     let detail_generation = use_signal(|| 0_u64);
-    let system_query = use_signal(String::new);
-    let system_environment = use_signal(|| "all".to_string());
-    let expanded_system = use_signal(|| Option::<Uuid>::None);
-    let mut system_histories = use_signal(HashMap::<(Uuid, bool), SystemHistoryData>::new);
-    let mut system_errors = use_signal(HashMap::<(Uuid, bool), String>::new);
-    let loading_system = use_signal(|| Option::<(Uuid, bool)>::None);
-    let system_archive_states = use_signal(HashMap::<Uuid, bool>::new);
-
     let rows_context = RecordRowContext {
         navigator: use_navigator(),
         retry_pending: exact_retry_pending,
@@ -1240,11 +1148,6 @@ pub fn ScanningView() -> Element {
             Some(fetch_scanning_scan_records(&request.archived_count_query()).await)
         }
     });
-    let mut systems = use_resource(move || {
-        let _ = refresh();
-        async { fetch_scanning_systems(Some(SYSTEM_LIMIT)).await }
-    });
-    let environments = use_resource(|| async { fetch_environments().await });
     let mut schedule = use_resource(move || {
         let _ = schedule_refresh();
         async { fetch_scanning_schedule().await }
@@ -1371,24 +1274,6 @@ pub fn ScanningView() -> Element {
         });
     });
 
-    use_effect(move || {
-        let _ = refresh();
-        system_histories.write().clear();
-        system_errors.write().clear();
-        if tab() == ScanTab::Systems
-            && let Some(system_id) = expanded_system()
-        {
-            let archived = system_archive_visibility(&system_archive_states.peek(), system_id);
-            reload_system_history(
-                system_id,
-                system_histories,
-                system_errors,
-                loading_system,
-                archived,
-            );
-        }
-    });
-
     let active_value = resource_value(&active);
     let completed_value = completed_request();
     let completed_loading = completed_head.read().is_none();
@@ -1432,33 +1317,11 @@ pub fn ScanningView() -> Element {
         completed_scroll.recheck(requested.min(loaded));
     });
 
-    let systems_value = systems
-        .read()
-        .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .cloned()
-        .unwrap_or_default();
     let schedule_value: Option<ScanSchedulePolicyResponse> = schedule
         .read()
         .as_ref()
         .and_then(|result| result.as_ref().ok())
         .cloned();
-    let env_colors = environments
-        .read()
-        .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .map(|items| {
-            items
-                .iter()
-                .map(|environment| {
-                    (
-                        environment.name.to_ascii_lowercase(),
-                        environment.color_hex.clone(),
-                    )
-                })
-                .collect::<HashMap<_, _>>()
-        })
-        .unwrap_or_default();
     let schedule_for_button = schedule_value.clone();
 
     rsx! {
@@ -1540,10 +1403,9 @@ pub fn ScanningView() -> Element {
                 div { class: "sd-tabs scanning-tabs", role: "tablist", aria_label: "Scan views",
                     onkeydown: move |event| {
                         let next = match event.key() {
-                            Key::ArrowRight => match tab() { ScanTab::Active => ScanTab::Completed, ScanTab::Completed => ScanTab::Systems, ScanTab::Systems => ScanTab::Active },
-                            Key::ArrowLeft => match tab() { ScanTab::Active => ScanTab::Systems, ScanTab::Completed => ScanTab::Active, ScanTab::Systems => ScanTab::Completed },
+                            Key::ArrowRight | Key::ArrowLeft => match tab() { ScanTab::Active => ScanTab::Completed, ScanTab::Completed => ScanTab::Active },
                             Key::Home => ScanTab::Active,
-                            Key::End => ScanTab::Systems,
+                            Key::End => ScanTab::Completed,
                             _ => return,
                         };
                         event.prevent_default();
@@ -1552,7 +1414,6 @@ pub fn ScanningView() -> Element {
                     },
                     { scan_tab_button(tab, ScanTab::Active, "Active", active_value.total, "scan-active-panel") }
                     { scan_tab_button(tab, ScanTab::Completed, "Completed", completed_pagination.read().visible_total(), "scan-completed-panel") }
-                    { scan_tab_button(tab, ScanTab::Systems, "By system", systems_value.len() as i64, "scan-systems-panel") }
                 }
                 match tab() {
                     ScanTab::Active => rsx! {
@@ -1582,25 +1443,6 @@ pub fn ScanningView() -> Element {
                                 archive_pending,
                                 rows_context,
                                 completed_scroll,
-                            ) }
-                        }
-                    },
-                    ScanTab::Systems => rsx! {
-                        div { id: "scan-systems-panel", role: "tabpanel", aria_labelledby: "scan-systems-tab",
-                            { systems_panel(
-                                systems_value.clone(),
-                                systems.read().is_none(),
-                                systems.read().as_ref().and_then(|result| result.as_ref().err()).map(ToString::to_string),
-                                env_colors.clone(),
-                                system_query,
-                                system_environment,
-                                expanded_system,
-                                system_histories,
-                                system_errors,
-                                loading_system,
-                                system_archive_states,
-                                rows_context,
-                                move || systems.restart(),
                             ) }
                         }
                     },
@@ -1694,7 +1536,6 @@ fn scan_tab_id(tab: ScanTab) -> &'static str {
     match tab {
         ScanTab::Active => "scan-active-tab",
         ScanTab::Completed => "scan-completed-tab",
-        ScanTab::Systems => "scan-systems-tab",
     }
 }
 
@@ -1873,7 +1714,7 @@ fn completed_panel(
                         { completed_sort_header("Revision", ScanRecordSortParam::Revision, filters) }
                         { completed_sort_header("Status", ScanRecordSortParam::Status, filters) }
                         { completed_sort_header("Findings", ScanRecordSortParam::Severity, filters) }
-                        { completed_sort_header("Last scan", ScanRecordSortParam::Timestamp, filters) }
+                        { completed_sort_header("Scanned", ScanRecordSortParam::Timestamp, filters) }
                         th { "Trigger" }
                         th { class: "scanning-actions-heading", span { class: "sr-only", "Actions" } }
                     } }
@@ -2211,11 +2052,7 @@ fn record_row(
             ""
         },
     );
-    let timestamp = if has_completed_selection {
-        record_time(&row)
-    } else {
-        active_queued_time(&row)
-    };
+    let timestamp = displayed_record_time(&row, has_completed_selection);
     let selection = ScanDetailSelection {
         scan_id: row.scan_id,
         hostname: row.hostname.clone(),
@@ -2310,7 +2147,13 @@ fn record_row(
                 if row.archived_at.is_some() { div { class: "scanning-archived-label", Icon { name: IconName::Archive, size: 9 } " Archived" } }
             }
             td { { findings(row.critical_count, row.high_count, row.medium_count, row.low_count, row.status == "completed") } }
-            td { class: "scanning-last-scan", title: "{timestamp.to_rfc3339()}", "{relative_time(timestamp)}" }
+            td { class: "scanning-last-scan",
+                if let Some(timestamp) = timestamp {
+                    time { datetime: "{timestamp.to_rfc3339()}", title: "{timestamp.to_rfc3339()}", "{relative_time(timestamp)}" }
+                } else {
+                    span { class: "scanning-unavailable", "Unavailable" }
+                }
+            }
             td { if let Some(trigger) = row.source_trigger.as_deref() { span { class: "chip chip-unknown scanning-trigger", "{trigger}" } } else { span { class: "scanning-unavailable", "Not recorded" } } }
             td { div { class: "row-actions scanning-row-actions",
                 button {
@@ -2366,8 +2209,7 @@ fn record_row(
 /// widen the action.
 ///
 /// On success the shared refresh counter advances. That restarts the Completed
-/// head request and clears cached per-system history, which resets every
-/// accumulated page for the affected scopes and reloads authoritative archive
+/// head request, resets accumulated pages, and reloads authoritative archive
 /// counts. Archiving hides retained evidence; it never deletes a scan.
 ///
 /// The server rejects a request with more than [`ARCHIVE_BATCH_MAX`] scan IDs,
@@ -2408,294 +2250,6 @@ fn apply_archive(
         }
         pending.set(false);
     });
-}
-
-#[allow(clippy::too_many_arguments)]
-fn systems_panel(
-    rows: Vec<ScanningSystemsItemResponse>,
-    loading: bool,
-    error: Option<String>,
-    env_colors: HashMap<String, String>,
-    mut query: Signal<String>,
-    mut environment: Signal<String>,
-    expanded: Signal<Option<Uuid>>,
-    histories: Signal<HashMap<(Uuid, bool), SystemHistoryData>>,
-    errors: Signal<HashMap<(Uuid, bool), String>>,
-    loading_system: Signal<Option<(Uuid, bool)>>,
-    mut archive_states: Signal<HashMap<Uuid, bool>>,
-    context: RecordRowContext,
-    retry: impl FnMut() + 'static,
-) -> Element {
-    let mut retry = retry;
-    let retry_pending = context.retry_pending;
-    let feedback = context.feedback;
-    let refresh = context.refresh;
-    let search = query().trim().to_ascii_lowercase();
-    let selected_environment = environment();
-    let mut environment_names = rows
-        .iter()
-        .filter_map(|row| row.environment.clone())
-        .collect::<Vec<_>>();
-    environment_names.sort();
-    environment_names.dedup();
-    let mut visible = rows
-        .iter()
-        .filter(|row| {
-            (search.is_empty() || row.hostname.to_ascii_lowercase().contains(&search))
-                && (selected_environment == "all"
-                    || row.environment.as_deref() == Some(selected_environment.as_str()))
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    visible.sort_by(|left, right| {
-        left.hostname
-            .to_ascii_lowercase()
-            .cmp(&right.hostname.to_ascii_lowercase())
-            .then_with(|| left.system_id.cmp(&right.system_id))
-    });
-    let visible_count = format!("{} visible · {} loaded", visible.len(), rows.len());
-
-    rsx! {
-        div { class: "scan-toolbar",
-            div { class: "q-search scanning-search", Icon { name: IconName::Search, size: 13 } input { class: "q-search-input", aria_label: "Search systems", placeholder: "Search systems…", value: query(), oninput: move |event| query.set(event.value()) } }
-            select { class: "input filter-select focus-ring", aria_label: "Filter systems by environment", value: environment(), oninput: move |event| environment.set(event.value()), option { value: "all", "All environments" } for value in environment_names { option { value: "{value}", "{value}" } } }
-            span { class: "filter-count", "{visible_count}" }
-            button { class: "btn btn-ghost xs focus-ring", disabled: query().is_empty() && environment() == "all", onclick: move |_| { query.set(String::new()); environment.set("all".to_string()); }, "Reset" }
-        }
-        if let Some(error) = error { { load_error_state("Systems could not be loaded", &error, move || retry()) } }
-        else if loading { div { class: "q-empty", role: "status", "Loading system scan history…" } }
-        else if visible.is_empty() { div { class: "q-empty", h3 { if rows.is_empty() { "No system revision history" } else { "No systems match these filters" } } } }
-        else { div { class: "scanning-table-wrap",
-            table { class: "sys-table scanning-table scanning-systems-table",
-                thead { tr { th { "System" } th { "Environment" } th { "Revision coverage" } th { "Current findings" } th { span { class: "sr-only", "Actions" } } } }
-                tbody { for system in visible {
-                    {
-                        let system_id = system.system_id;
-                        let open = expanded() == Some(system_id);
-                        let archive_state = system_archive_visibility(&archive_states.read(), system_id);
-                        let history = histories.read().get(&(system_id, archive_state)).cloned();
-                        let history_error = errors.read().get(&(system_id, archive_state)).cloned();
-                        let history_header = history
-                            .as_ref()
-                            .map(|_| format!("{} configs for this system · newest first", system.total_configs))
-                            .unwrap_or_else(|| {
-                                if loading_system() == Some((system_id, archive_state)) {
-                                    "Loading exact configurations…".to_string()
-                                } else {
-                                    "Exact revision history".to_string()
-                                }
-                            });
-                        rsx! {
-                            tr { key: "system-{system_id}", class: if open { "scanning-system-row expanded" } else { "scanning-system-row" },
-                                td { button { class: "scanning-system-toggle focus-ring", aria_expanded: open, onclick: move |_| toggle_system_history(system_id, expanded), Icon { name: if open { IconName::ChevronDown } else { IconName::ChevronRight }, size: 12 } span { class: "scanning-config-name", "{system.hostname}" } } }
-                                td { if let Some(name) = system.environment.clone() { if let Some(color) = env_colors.get(&name.to_ascii_lowercase()) { EnvBadge { name, fg: color.clone(), bg: format!("color-mix(in oklab, {color} 14%, var(--cf-card-bg))"), border: color.clone() } } else { EnvBadge { name } } } else { span { class: "scanning-unavailable", "Unassigned" } } }
-                                td { div { class: "scanning-system-counts", span { "{system.scanned} scanned" } if system.stale > 0 { span { class: "stale", "{system.stale} stale" } } if system.needs_build > 0 { span { class: "needs", "{system.needs_build} needs build" } } if system.unscanned > 0 { span { "{system.unscanned} never scanned" } } } }
-                                td { { findings(system.current_crit as i32, system.current_high as i32, 0, 0, true) } }
-                                 td { if let Some(derivation_id) = system.current_derivation_id {
-                                     button {
-                                         class: "btn-icon focus-ring",
-                                         aria_label: format!("Rescan current for {}", system.hostname),
-                                         title: "Rescan current",
-                                         disabled: retry_pending.read().contains(&derivation_id),
-                                         onclick: {
-                                             let label = format!("{} deployed revision", system.hostname);
-                                             move |event| {
-                                                 event.stop_propagation();
-                                                 retry_exact_scan(derivation_id, label.clone(), retry_pending, feedback, refresh);
-                                             }
-                                         },
-                                         Icon { name: IconName::Sync, size: 14 }
-                                     }
-                                 } }
-                            }
-                            if open { tr { class: "scan-sys-expand-row", td { colspan: 5,
-                                div { class: "scan-sys-expand",
-                                    div { class: "scan-sys-expand-head",
-                                        span { "{history_header}" }
-                                        label { class: "scanning-include-archived", input { r#type: "checkbox", checked: archive_state, onchange: move |event| {
-                                            let include_archived = event.checked();
-                                            set_system_archive_visibility(&mut archive_states.write(), system_id, include_archived);
-                                            reload_system_history(system_id, histories, errors, loading_system, include_archived);
-                                        } } " Include archived" }
-                                    }
-                                    if let Some(error) = history_error { { load_error_state("Revision history could not be loaded", &error, move || reload_system_history(system_id, histories, errors, loading_system, archive_state)) } }
-                                    else if loading_system() == Some((system_id, archive_state)) { div { class: "q-empty scanning-system-state", role: "status", "Loading exact history…" } }
-                                    else if let Some(history) = history {
-                                        if history.scans.items.is_empty() && history.derivations.iter().all(|row| row.scan_id.is_some()) { div { class: "q-empty scanning-system-state", if history.scans.hidden_archived > 0 { "{history.scans.hidden_archived} archived scan(s) are hidden by the retention view." } else { "No exact scans or unscanned revisions are recorded for this system." } } }
-                                        else { { system_history_table(&system, history, context) } }
-                                    }
-                                }
-                            } } }
-                        }
-                    }
-                } }
-            }
-        } }
-    }
-}
-
-fn toggle_system_history(system_id: Uuid, mut expanded: Signal<Option<Uuid>>) {
-    if expanded() == Some(system_id) {
-        expanded.set(None);
-    } else {
-        expanded.set(Some(system_id));
-    }
-}
-
-/// Loads one system's bounded exact revision history.
-///
-/// The server rejects continuation cursors for the history collection, so this
-/// request is one explicitly bounded page. [`system_history_table`] discloses
-/// the bound whenever the server reports more retained scans than the page
-/// holds.
-fn reload_system_history(
-    system_id: Uuid,
-    mut histories: Signal<HashMap<(Uuid, bool), SystemHistoryData>>,
-    mut errors: Signal<HashMap<(Uuid, bool), String>>,
-    mut loading: Signal<Option<(Uuid, bool)>>,
-    include_archived: bool,
-) {
-    let key = (system_id, include_archived);
-    loading.set(Some(key));
-    errors.write().remove(&key);
-    spawn(async move {
-        let scans =
-            fetch_scanning_scan_records(&system_history_query(system_id, include_archived)).await;
-        let derivations =
-            fetch_scanning_system_scans(&system_id, Some(SYSTEM_DERIVATION_LIMIT)).await;
-        match (scans, derivations) {
-            (Ok(scans), Ok(derivations)) => {
-                histories
-                    .write()
-                    .insert(key, SystemHistoryData { scans, derivations });
-            }
-            (Err(error), _) | (_, Err(error)) => {
-                errors.write().insert(key, error.to_string());
-            }
-        }
-        if loading() == Some(key) {
-            loading.set(None);
-        }
-    });
-}
-
-fn system_history_table(
-    system: &ScanningSystemsItemResponse,
-    history: SystemHistoryData,
-    context: RecordRowContext,
-) -> Element {
-    let retry_pending = context.retry_pending;
-    let feedback = context.feedback;
-    let refresh = context.refresh;
-    let selected_scan = context.selected_scan;
-    let detail_state = context.detail_state;
-    let detail_generation = context.detail_generation;
-    let hidden_archived = history.scans.hidden_archived;
-    let loaded_scans = history.scans.items.len();
-    let available_scans = visible_record_total(&history.scans);
-    let bounded = available_scans > loaded_scans as i64;
-    let revision_relations = history
-        .derivations
-        .iter()
-        .map(|row| (row.derivation_id, (row.is_current, row.is_latest_per_flake)))
-        .collect::<HashMap<_, _>>();
-    let rows = system_history_entries(history);
-    rsx! {
-        if hidden_archived > 0 { div { class: "scanning-hidden-count", "{hidden_archived} archived scan(s) hidden" } }
-        if bounded { div { class: "scanning-hidden-count", "Showing the newest {loaded_scans} of {available_scans} retained scans for this system" } }
-        div { class: "scan-sys-expand-table-wrap", table { class: "scanning-history-table",
-            thead { tr { th { "Revision" } th { "Relation" } th { "Status" } th { "Findings" } th { "Timestamp" } th { span { class: "sr-only", "Actions" } } } }
-            tbody { for entry in rows {
-                match entry {
-                SystemHistoryEntry::Scan(row) => {
-                    let relation = match (row.is_current, row.is_latest_per_flake) {
-                        (true, _) => "Deployed",
-                        (false, true) => "Recent",
-                        _ if system.current_derivation_id == Some(row.derivation_id) => "Deployed",
-                        _ => match revision_relations.get(&row.derivation_id).copied() {
-                            Some((true, _)) => "Deployed",
-                            Some((false, true)) => "Recent",
-                            _ => "Superseded config",
-                        },
-                    };
-                    let meta = status_meta(&row.status);
-                    let scan_id = row.scan_id;
-                    let selection = ScanDetailSelection {
-                        scan_id,
-                        hostname: row.hostname.clone(),
-                        flake_name: row.flake_name.clone(),
-                        commit_hash: row.commit_hash.clone(),
-                    };
-                    let selection_for_click = selection.clone();
-                    let selection_for_keydown = selection.clone();
-                    let selection_for_action = selection.clone();
-                    let revision = row.commit_hash.as_deref().unwrap_or("Revision unavailable");
-                    rsx! { tr { key: "history-{row.scan_id}", class: if row.archived_at.is_some() { "scanning-record archived" } else { "scanning-record" },
-                        tabindex: "0",
-                        onclick: move |_| load_scan_detail(selection_for_click.clone(), selected_scan, detail_state, detail_generation),
-                        onkeydown: move |event| {
-                            if event.key() == Key::Enter || event.key() == Key::Character(" ".to_string()) {
-                                event.prevent_default();
-                                event.stop_propagation();
-                                load_scan_detail(selection_for_keydown.clone(), selected_scan, detail_state, detail_generation);
-                            }
-                        },
-                        td { div { class: "scanning-full-revision mono", "{revision}" } }
-                        td { span { class: if relation == "Deployed" { "chip chip-healthy" } else { "chip chip-unknown" }, "{relation}" } }
-                        td { span { class: "chip {meta.class}", "{meta.label}" } if let Some(reason) = row.wait_reason.as_deref() { div { class: "scanning-wait", "Awaiting: {reason}" } } if let Some(failure) = row.failure.as_deref() { div { class: "scanning-row-failure", title: "{failure}", "{bounded_failure_preview(failure)}" } } if row.archived_at.is_some() { div { class: "scanning-archived-label", Icon { name: IconName::Archive, size: 9 } " Archived" } } }
-                        td { { findings(row.critical_count, row.high_count, row.medium_count, row.low_count, row.status == "completed") } }
-                        td { class: "scanning-last-scan", title: "{record_time(&row).to_rfc3339()}", "{relative_time(record_time(&row))}" }
-                        td { div { class: "row-actions scanning-row-actions",
-                            button {
-                                class: "btn-icon focus-ring",
-                                aria_label: format!("Open details for scan {}", row.scan_id),
-                                title: "Open scan log",
-                                onclick: move |event| {
-                                    event.stop_propagation();
-                                    load_scan_detail(selection_for_action.clone(), selected_scan, detail_state, detail_generation);
-                                },
-                                onkeydown: move |event| event.stop_propagation(),
-                                Icon { name: IconName::Terminal, size: 14 }
-                            }
-                        } }
-                    } }
-                },
-                SystemHistoryEntry::NoScan(row) => {
-                    let relation = if row.is_current { "Deployed" } else if row.is_latest_per_flake { "Recent" } else { "Superseded config" };
-                    let status = if row.rescan_eligible { "never_scanned" } else { "needs_build" };
-                    let meta = status_meta(status);
-                    let revision = row.commit_hash.as_deref().unwrap_or("Revision unavailable");
-                    rsx! { tr { key: "unscanned-{row.derivation_id}", class: "scanning-record",
-                        td { div { class: "scanning-full-revision mono", "{revision}" } div { class: "scanning-record-id mono", "drv {row.derivation_id} · no scan" } }
-                        td { span { class: if relation == "Deployed" { "chip chip-healthy" } else { "chip chip-unknown" }, "{relation}" } }
-                        td { span { class: "chip {meta.class}", "{meta.label}" } }
-                        td { span { class: "scanning-unavailable", "Not available" } }
-                        td { class: "scanning-last-scan", "Never" }
-                        td { div { class: "row-actions scanning-row-actions",
-                            if row.rescan_eligible {
-                                button {
-                                    class: "btn-icon focus-ring",
-                                    aria_label: format!("Rescan this config {}", row.derivation_id),
-                                    title: "Rescan this config",
-                                    disabled: retry_pending.read().contains(&row.derivation_id),
-                                    onkeydown: move |event| event.stop_propagation(),
-                                    onclick: {
-                                        let label = format!("{} {}", row.hostname, commit_label(&row.commit_hash));
-                                        move |event| {
-                                            event.stop_propagation();
-                                            retry_exact_scan(row.derivation_id, label.clone(), retry_pending, feedback, refresh);
-                                        }
-                                    },
-                                    Icon { name: IconName::Sync, size: 13 }
-                                }
-                            }
-                        } }
-                    } }
-                },
-                }
-            } }
-        } }
-    }
 }
 
 #[component]
@@ -3264,13 +2818,6 @@ fn commit_label(commit_hash: &Option<String>) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-fn coverage_width(count: i64, total: i64) -> String {
-    if total <= 0 {
-        return "0%".to_string();
-    }
-    format!("{:.2}%", (count.max(0) as f64 / total as f64) * 100.0)
-}
-
 fn stat_card(label: &str, value: &str, meta: Option<&str>, color: &str) -> Element {
     rsx! { div { class: "stat", span { class: "stat-accent", style: "--stat-color:{color};" } div { class: "stat-label", "{label}" } div { class: "stat-value", style: "color:{color};", "{value}" } if let Some(meta) = meta { div { class: "stat-meta", "{meta}" } } } }
 }
@@ -3512,7 +3059,23 @@ mod tests {
         completed.created_at = base;
         completed.scheduled_at = Some(base + Duration::seconds(10));
         completed.completed_at = Some(base + Duration::seconds(30));
-        assert_eq!(record_time(&completed), base + Duration::seconds(30));
+        assert_eq!(
+            displayed_record_time(&completed, true),
+            Some(base + Duration::seconds(30))
+        );
+    }
+
+    #[test]
+    fn completed_scanned_time_never_falls_back_to_queue_or_creation() {
+        let mut completed = row("atlas", "completed", 1, 0);
+        assert!(displayed_record_time(&completed, true).is_some());
+        completed.completed_at = None;
+        assert_eq!(displayed_record_time(&completed, true), None);
+        assert!(completed.scheduled_at.is_some());
+        assert_eq!(
+            displayed_record_time(&completed, false),
+            completed.scheduled_at
+        );
     }
 
     fn detail(
@@ -3578,27 +3141,6 @@ mod tests {
             latest_only: false,
             sort: ScanRecordSortParam::Timestamp,
             direction: ScanRecordDirectionParam::Desc,
-        }
-    }
-
-    fn unscanned_derivation(rescan_eligible: bool) -> ScanningQueueItemResponse {
-        ScanningQueueItemResponse {
-            derivation_id: 42,
-            rescan_eligible,
-            scan_id: None,
-            hostname: "atlas".to_string(),
-            flake_name: Some("infra".to_string()),
-            commit_hash: Some("full-unscanned-revision".to_string()),
-            status: "never_scanned".to_string(),
-            completed_at: None,
-            scheduled_at: None,
-            critical_count: 0,
-            high_count: 0,
-            medium_count: 0,
-            freshness: "archived".to_string(),
-            is_current: true,
-            is_latest_per_flake: true,
-            source_trigger: None,
         }
     }
 
@@ -3782,35 +3324,6 @@ mod tests {
             state.hidden_archived(),
             state.rows().len() as i64,
             "the archived count must come from the server, not the loaded rows",
-        );
-    }
-
-    #[test]
-    fn by_system_archive_visibility_is_independent_per_system() {
-        let alpha = Uuid::from_u128(1);
-        let beta = Uuid::from_u128(2);
-        let mut states = HashMap::new();
-
-        set_system_archive_visibility(&mut states, alpha, true);
-        assert!(system_archive_visibility(&states, alpha));
-        assert!(!system_archive_visibility(&states, beta));
-
-        set_system_archive_visibility(&mut states, beta, true);
-        set_system_archive_visibility(&mut states, alpha, false);
-        assert!(!system_archive_visibility(&states, alpha));
-        assert!(system_archive_visibility(&states, beta));
-    }
-
-    #[test]
-    fn system_history_includes_unscanned_derivations_without_scan_identity() {
-        let entry = system_history_entries(SystemHistoryData {
-            scans: page(Vec::new(), 0, 0, None),
-            derivations: vec![unscanned_derivation(false)],
-        })
-        .pop()
-        .expect("the no-scan derivation should remain visible");
-        assert!(
-            matches!(entry, SystemHistoryEntry::NoScan(row) if row.scan_id.is_none() && !row.rescan_eligible)
         );
     }
 
@@ -4230,20 +3743,12 @@ mod tests {
     }
 
     #[test]
-    fn nonterminal_collections_request_bounded_pages_without_cursors() {
+    fn active_requests_bounded_pages_without_cursors() {
         let active = active_records_query();
         assert_eq!(active.collection.as_param(), "active");
         assert!(!active.collection.supports_cursor());
         assert_eq!(active.limit, ACTIVE_PAGE_LIMIT);
         assert!(active.after.is_none());
-
-        let system_id = Uuid::from_u128(7);
-        let history = system_history_query(system_id, true);
-        assert_eq!(history.collection.as_param(), "history");
-        assert!(!history.collection.supports_cursor());
-        assert_eq!(history.system_id, Some(system_id));
-        assert_eq!(history.limit, SYSTEM_HISTORY_LIMIT);
-        assert!(history.after.is_none());
     }
 
     #[test]

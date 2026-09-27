@@ -1787,6 +1787,22 @@ pub async fn list(
     })
 }
 
+/// Lists authenticated POA&Ms with batched register context for the selected page.
+///
+/// # Errors
+///
+/// Returns the same validation, visibility, and database errors as [`list`],
+/// or a database error when the page context cannot be loaded.
+pub async fn list_register(
+    pool: &PgPool,
+    actor: &PoamActor,
+    query: &PoamListQuery,
+    clock: &dyn PoamClock,
+) -> Result<Page<PoamRegisterSummary>, PoamError> {
+    let page = list(pool, actor, query, clock).await?;
+    Ok(poam::register_page(pool, page, actor.is_admin, &actor.environment_ids).await?)
+}
+
 async fn canonical_context_match_ids(
     pool: &PgPool,
     query: &PoamListQuery,

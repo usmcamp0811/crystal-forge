@@ -13,8 +13,8 @@ use crate::models::poam::{
     ActivityView, AssignmentReferenceView, CompatibleFinding, CveFindingView,
     CveVerificationItemView, DashboardSummary, FindingRequirementView, FindingView, HistoryCursor,
     MilestoneView, Page, PoamAssigneeCatalog, PoamAssigneeGroup, PoamAssigneePerson, PoamDetail,
-    PoamListQuery, PoamSummary, Rollup, VerificationAttemptView, VerificationItemView,
-    WaiverListQuery, WaiverView,
+    PoamListQuery, PoamRegisterSummary, PoamSummary, Rollup, VerificationAttemptView,
+    VerificationItemView, WaiverListQuery, WaiverView,
 };
 
 const SUMMARY_COLUMNS: &str = r#"
@@ -612,6 +612,343 @@ pub async fn list(
         has_more,
         next_offset: has_more.then_some(offset + limit),
     })
+}
+
+#[derive(sqlx::FromRow)]
+struct RegisterContext {
+    poam_id: Uuid,
+    environment_ids: Vec<Uuid>,
+    system_ids: Vec<Uuid>,
+    bundle_ids: Vec<Uuid>,
+    bundle_version_ids: Vec<Uuid>,
+    assignment_version_ids: Vec<Uuid>,
+    first_requirement: Option<String>,
+    first_cve: Option<String>,
+    milestone_count: i64,
+    completed_milestone_count: i64,
+    last_activity_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Hydrates one already-authorized list page in a single bounded SQL query.
+///
+/// The visibility predicate is repeated at the query boundary so a changed
+/// actor scope cannot expose context from a POA&M that is no longer visible.
+/// Retired moved-host links never supply current system/environment names.
+///
+/// # Errors
+///
+/// Returns a database error if the register context cannot be loaded.
+pub async fn register_page(
+    pool: &PgPool,
+    page: Page<PoamSummary>,
+    is_admin: bool,
+    environment_ids: &[Uuid],
+) -> Result<Page<PoamRegisterSummary>> {
+    let ids = page.items.iter().map(|item| item.id).collect::<Vec<_>>();
+    if ids.is_empty() {
+        return Ok(Page {
+            items: Vec::new(),
+            limit: page.limit,
+            offset: page.offset,
+            has_more: page.has_more,
+            next_offset: page.next_offset,
+        });
+    }
+    let contexts = sqlx::query_as::<_, RegisterContext>(r#"
+        SELECT p.id AS poam_id,
+          ARRAY(SELECT DISTINCT s.environment_id FROM poam_context_systems c
+            JOIN systems s ON s.id=c.system_id
+            WHERE c.poam_id=p.id AND s.environment_id IS NOT NULL
+              AND ($2 OR s.environment_id=ANY($3))
+            UNION SELECT d.environment_id FROM cve_current_environment_dispositions d
+            WHERE d.poam_id=p.id AND d.state='scheduled' AND p.status<>'completed'
+              AND ($2 OR d.environment_id=ANY($3))) AS environment_ids,
+          ARRAY(SELECT DISTINCT c.system_id FROM poam_context_systems c
+            JOIN systems s ON s.id=c.system_id WHERE c.poam_id=p.id
+              AND ($2 OR s.environment_id=ANY($3))) AS system_ids,
+          ARRAY(SELECT DISTINCT a.bundle_id FROM poam_assignment_references r
+            JOIN compliance_bundle_assignments a ON a.id=r.assignment_id
+            LEFT JOIN systems s ON s.id=a.system_id
+            WHERE r.poam_id=p.id AND ($2 OR COALESCE(a.environment_id,s.environment_id)=ANY($3))
+            UNION SELECT bv.bundle_id FROM poam_current_finding_links link
+            JOIN poam_findings finding ON finding.id=link.finding_id
+            JOIN systems s ON s.id=finding.system_id
+            JOIN compliance_bundle_assignments a ON a.active AND
+              (a.system_id=s.id OR a.environment_id=s.environment_id)
+            JOIN compliance_bundle_assignment_versions av ON av.id=a.current_version_id
+            JOIN compliance_bundle_versions bv ON bv.id=av.bundle_version_id
+            WHERE link.poam_id=p.id AND ($2 OR s.environment_id=ANY($3)) AND
+              (EXISTS (SELECT 1 FROM compliance_assignment_additions addition
+                JOIN deployment_policy_versions pv ON pv.id=addition.policy_version_id
+                WHERE addition.assignment_version_id=av.id
+                  AND pv.policy_id=finding.policy_lineage_id)
+               OR EXISTS (SELECT 1 FROM compliance_bundle_version_policies membership
+                JOIN deployment_policy_versions pv ON pv.id=membership.policy_version_id
+                WHERE membership.bundle_version_id=av.bundle_version_id
+                  AND membership.selected AND pv.policy_id=finding.policy_lineage_id
+                  AND NOT EXISTS (SELECT 1 FROM compliance_assignment_exclusions exclusion
+                    WHERE exclusion.assignment_version_id=av.id
+                      AND exclusion.policy_version_id=membership.policy_version_id)))
+            UNION SELECT unnest(item.bundle_ids) FROM poam_verification_items item
+            JOIN systems s ON s.id=item.system_id
+            WHERE item.attempt_id=p.closure_attempt_id
+              AND ($2 OR s.environment_id=ANY($3))) AS bundle_ids,
+          ARRAY(SELECT DISTINCT v.bundle_version_id FROM poam_assignment_references r
+            JOIN compliance_bundle_assignment_versions v ON v.id=r.assignment_version_id
+            JOIN compliance_bundle_assignments a ON a.id=r.assignment_id
+            LEFT JOIN systems s ON s.id=a.system_id
+            WHERE r.poam_id=p.id AND ($2 OR COALESCE(a.environment_id,s.environment_id)=ANY($3))) AS bundle_version_ids,
+          ARRAY(SELECT r.assignment_version_id FROM poam_assignment_references r
+            JOIN compliance_bundle_assignments a ON a.id=r.assignment_id
+            LEFT JOIN systems s ON s.id=a.system_id
+            WHERE r.poam_id=p.id AND ($2 OR COALESCE(a.environment_id,s.environment_id)=ANY($3))
+            ORDER BY r.assignment_version_id) AS assignment_version_ids,
+          (SELECT source.external_id FROM (
+            SELECT requirement.external_id FROM poam_verification_items item
+            JOIN systems s ON s.id=item.system_id
+            JOIN compliance_requirement_versions requirement ON requirement.id=ANY(item.requirement_version_ids)
+            WHERE item.attempt_id=p.closure_attempt_id AND ($2 OR s.environment_id=ANY($3))
+            UNION
+            SELECT requirement.external_id FROM poam_current_finding_links link
+            JOIN poam_findings f ON f.id=link.finding_id
+            JOIN systems s ON s.id=f.system_id
+            JOIN composite_policy_assessments assessment ON assessment.system_id=f.system_id
+              AND assessment.policy_lineage_id=f.policy_lineage_id
+            JOIN policy_requirement_mappings mapping ON mapping.policy_version_id=assessment.policy_version_id
+            JOIN compliance_requirement_versions requirement ON requirement.id=mapping.requirement_version_id
+            WHERE p.status<>'completed' AND link.poam_id=p.id AND ($2 OR s.environment_id=ANY($3))
+          ) source ORDER BY source.external_id LIMIT 1) AS first_requirement,
+          COALESCE((SELECT f.canonical_cve_id FROM poam_current_cve_finding_links link
+            JOIN poam_cve_findings f ON f.id=link.cve_finding_id
+            JOIN systems s ON s.id=f.system_id
+            WHERE link.poam_id=p.id AND ($2 OR s.environment_id=ANY($3))
+            ORDER BY f.canonical_cve_id,f.id LIMIT 1),
+            (SELECT d.canonical_cve_id FROM cve_current_environment_dispositions d
+             WHERE d.poam_id=p.id AND d.state='scheduled' AND p.status<>'completed'
+               AND ($2 OR d.environment_id=ANY($3))
+             ORDER BY d.canonical_cve_id LIMIT 1)) AS first_cve,
+          (SELECT count(*) FROM poam_milestones m WHERE m.poam_id=p.id) AS milestone_count,
+          (SELECT count(*) FROM poam_milestones m WHERE m.poam_id=p.id AND m.completed_at IS NOT NULL) AS completed_milestone_count,
+          (SELECT max(activity.created_at) FROM poam_activity activity
+            WHERE activity.poam_id=p.id AND ($2 OR
+              (activity.payload->>'finding_id' IS NULL AND activity.payload->>'cve_finding_id' IS NULL
+               AND activity.payload#>>'{finding,finding_id}' IS NULL
+               AND activity.payload#>>'{finding,cve_finding_id}' IS NULL
+               AND activity.payload->'items' IS NULL AND activity.payload->'cve_items' IS NULL))) AS last_activity_at
+        FROM poams p WHERE p.id=ANY($1) AND ($2 OR poam_visible_to_environments(p.id,$3))"#)
+        .bind(&ids).bind(is_admin).bind(environment_ids).fetch_all(pool).await?;
+    let contexts = contexts
+        .into_iter()
+        .map(|row| (row.poam_id, row))
+        .collect::<std::collections::HashMap<_, _>>();
+    // CONCURRENCY: The list and context reads use separate snapshots. If scope
+    // changes between them, fail the whole page instead of retaining an offset
+    // that could skip a visible plan or returning its stale summary.
+    anyhow::ensure!(
+        contexts.len() == ids.len(),
+        "register scope changed while loading the page; retry"
+    );
+    let items = page
+        .items
+        .into_iter()
+        .map(|summary| {
+            let row = &contexts[&summary.id];
+            PoamRegisterSummary {
+                summary,
+                environment_ids: row.environment_ids.clone(),
+                system_ids: row.system_ids.clone(),
+                bundle_ids: row.bundle_ids.clone(),
+                bundle_version_ids: row.bundle_version_ids.clone(),
+                assignment_version_ids: row.assignment_version_ids.clone(),
+                first_requirement: row.first_requirement.clone(),
+                first_cve: row.first_cve.clone(),
+                milestone_count: row.milestone_count,
+                completed_milestone_count: row.completed_milestone_count,
+                last_activity_at: row.last_activity_at,
+            }
+        })
+        .collect();
+    Ok(Page {
+        items,
+        limit: page.limit,
+        offset: page.offset,
+        has_more: page.has_more,
+        next_offset: page.next_offset,
+    })
+}
+
+#[cfg(test)]
+mod register_tests {
+    use super::*;
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires the verified isolated PG35457 test cluster"]
+    async fn register_scopes_and_pages_past_one_hundred(pool: PgPool) {
+        let user: Uuid = sqlx::query_scalar(
+            "INSERT INTO users(username,first_name,last_name,email) VALUES($1,'Register','Reader',$2) RETURNING id",
+        )
+        .bind(format!("register-{}", Uuid::new_v4()))
+        .bind(format!("register-{}@example.invalid", Uuid::new_v4()))
+        .fetch_one(&pool).await.unwrap();
+        let a: Uuid = sqlx::query_scalar("INSERT INTO environments(name) VALUES($1) RETURNING id")
+            .bind(format!("register-a-{}", Uuid::new_v4()))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let b: Uuid = sqlx::query_scalar("INSERT INTO environments(name) VALUES($1) RETURNING id")
+            .bind(format!("register-b-{}", Uuid::new_v4()))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let policy: Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policies(name,policy_type,config,enabled) VALUES($1,'custom_check','{}',false) RETURNING id",
+        )
+        .bind(format!("register-policy-{}", Uuid::new_v4()))
+        .fetch_one(&pool).await.unwrap();
+        let mut visible_ids = Vec::new();
+        let mut hidden_id = Uuid::nil();
+        for n in 0..106 {
+            let environment = if n == 105 { b } else { a };
+            let host = format!("register-{n}-{}", Uuid::new_v4());
+            let system: Uuid = sqlx::query_scalar(
+                "INSERT INTO systems(hostname,public_key,derivation,environment_id) VALUES($1,$2,$2,$3) RETURNING id",
+            ).bind(&host).bind(format!("test-key-{host}"))
+                .bind(environment).fetch_one(&pool).await.unwrap();
+            let finding: Uuid = sqlx::query_scalar(
+                "INSERT INTO poam_findings(system_id,policy_lineage_id) VALUES($1,$2) RETURNING id",
+            )
+            .bind(system)
+            .bind(policy)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let mut tx = pool.begin().await.unwrap();
+            let id: Uuid = sqlx::query_scalar(
+                "INSERT INTO poams(title,risk,created_by) VALUES($1,'high',$2) RETURNING id",
+            )
+            .bind(format!("Register {n}"))
+            .bind(user)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO poam_finding_links(poam_id,finding_id,linked_by) VALUES($1,$2,$3)",
+            )
+            .bind(id)
+            .bind(finding)
+            .bind(user)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            if n == 104 {
+                sqlx::query("INSERT INTO poam_milestones(poam_id,ordinal,title,target_date,created_by,updated_by) VALUES($1,0,'Validate',CURRENT_DATE,$2,$2)")
+                    .bind(id).bind(user).execute(&mut *tx).await.unwrap();
+                sqlx::query("INSERT INTO poam_activity(poam_id,actor_user_id,kind,payload) VALUES($1,$2,'created','{}')")
+                    .bind(id).bind(user).execute(&mut *tx).await.unwrap();
+            }
+            tx.commit().await.unwrap();
+            if n == 105 {
+                hidden_id = id;
+            } else {
+                visible_ids.push((id, system));
+            }
+        }
+        let query = PoamListQuery {
+            limit: Some(100),
+            ..Default::default()
+        };
+        let first = list(&pool, &query, chrono::Utc::now().date_naive(), false, &[a])
+            .await
+            .unwrap();
+        assert_eq!(first.items.len(), 100);
+        assert!(first.has_more);
+        let first = register_page(&pool, first, false, &[a]).await.unwrap();
+        assert_eq!(first.items.len(), 100);
+        assert!(
+            first
+                .items
+                .iter()
+                .all(|item| item.environment_ids == vec![a]
+                    && item.system_ids.len() == 1
+                    && item.bundle_version_ids.is_empty()
+                    && item.assignment_version_ids.is_empty()
+                    && item.first_cve.is_none())
+        );
+        let milestone = first
+            .items
+            .iter()
+            .find(|item| item.summary.id == visible_ids[104].0)
+            .unwrap();
+        assert_eq!(milestone.milestone_count, 1);
+        assert_eq!(milestone.completed_milestone_count, 0);
+        assert!(milestone.last_activity_at.is_some());
+        let second = list(
+            &pool,
+            &PoamListQuery {
+                offset: Some(100),
+                ..query
+            },
+            chrono::Utc::now().date_naive(),
+            false,
+            &[a],
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.items.len(), 5);
+        assert!(!second.has_more);
+        let second = register_page(&pool, second, false, &[a]).await.unwrap();
+        assert_eq!(second.items.len(), 5);
+        assert!(second.items.iter().all(|item| {
+            visible_ids
+                .iter()
+                .any(|(id, system)| *id == item.summary.id && item.system_ids == vec![*system])
+        }));
+        let admin = list(
+            &pool,
+            &PoamListQuery {
+                limit: Some(100),
+                offset: Some(100),
+                ..Default::default()
+            },
+            chrono::Utc::now().date_naive(),
+            true,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(admin.items.len(), 6);
+        let hidden = list(
+            &pool,
+            &PoamListQuery {
+                q: Some("Register 105".into()),
+                ..Default::default()
+            },
+            chrono::Utc::now().date_naive(),
+            false,
+            &[a],
+        )
+        .await
+        .unwrap();
+        assert!(hidden.items.is_empty());
+        let admin = register_page(&pool, admin, true, &[]).await.unwrap();
+        assert_eq!(admin.items.len(), 6);
+        let hidden_admin = list(
+            &pool,
+            &PoamListQuery {
+                q: Some("Register 105".into()),
+                ..Default::default()
+            },
+            chrono::Utc::now().date_naive(),
+            true,
+            &[],
+        )
+        .await
+        .unwrap();
+        let hidden_admin = register_page(&pool, hidden_admin, true, &[]).await.unwrap();
+        assert_eq!(hidden_admin.items.len(), 1);
+        assert_eq!(hidden_admin.items[0].summary.id, hidden_id);
+        assert_eq!(hidden_admin.items[0].environment_ids, vec![b]);
+    }
 }
 
 /// Loads display metadata for immutable requirement versions in one batch.

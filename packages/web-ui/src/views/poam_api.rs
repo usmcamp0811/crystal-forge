@@ -758,6 +758,37 @@ pub struct PoamSummary {
     pub closure_attempt_id: Option<Uuid>,
 }
 
+/// Adds visible, page-scoped register context to a POA&M summary.
+///
+/// Scope IDs come from the authenticated server projection. They are not
+/// catalog-wide memberships or a complete count of all accessible records.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PoamRegisterSummary {
+    /// Contains the existing lifecycle summary.
+    #[serde(flatten)]
+    pub summary: PoamSummary,
+    /// Identifies visible current environments or schedules.
+    pub environment_ids: Vec<Uuid>,
+    /// Identifies visible current systems or assignment contexts.
+    pub system_ids: Vec<Uuid>,
+    /// Identifies explicitly linked bundle lineages.
+    pub bundle_ids: Vec<Uuid>,
+    /// Identifies explicitly linked bundle versions.
+    pub bundle_version_ids: Vec<Uuid>,
+    /// Identifies immutable assignment versions.
+    pub assignment_version_ids: Vec<Uuid>,
+    /// Contains the first visible policy requirement, if available.
+    pub first_requirement: Option<String>,
+    /// Contains the first visible linked CVE, if available.
+    pub first_cve: Option<String>,
+    /// Counts attached milestones.
+    pub milestone_count: i64,
+    /// Counts completed milestones.
+    pub completed_milestone_count: i64,
+    /// Contains the latest scope-neutral activity time, if available.
+    pub last_activity_at: Option<DateTime<Utc>>,
+}
+
 /// Identifies one immutable occurrence in current exact-CVE scan evidence.
 ///
 /// The client treats this server-issued value as opaque mutation context.
@@ -1707,6 +1738,124 @@ pub async fn list_poams(query: &PoamListQuery) -> Result<Page<PoamSummary>, Poam
     let page: Page<PoamSummary> =
         request("GET", &with_query("/poams", query)?, None::<&()>).await?;
     page.validate(requested_offset)?;
+    Ok(page)
+}
+
+/// Fetches one validated page with the server's register projection.
+///
+/// # Errors
+///
+/// Returns [`PoamApiError`] on request, decoding, or pagination failure.
+pub async fn list_poam_register(
+    query: &PoamListQuery,
+) -> Result<Page<PoamRegisterSummary>, PoamApiError> {
+    let requested_offset = query.offset.unwrap_or(0);
+    let page: Page<PoamRegisterSummary> =
+        request("GET", &with_query("/poams", query)?, None::<&()>).await?;
+    page.validate(requested_offset)?;
+    Ok(page)
+}
+
+/// Identifies which existing service owns a register acceptance decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcceptanceSource {
+    /// A policy finding waiver.
+    PolicyWaiver,
+    /// A direct host CVE disposition.
+    CveHost,
+    /// An environment CVE disposition.
+    CveEnvironment,
+}
+
+/// Describes one source-owned risk decision without granting mutation authority.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AcceptanceEntry {
+    /// Names the owning decision family.
+    pub source: AcceptanceSource,
+    /// Exact UUID of the source decision row.
+    pub source_id: Uuid,
+    /// Source waiver's status-change timestamp; CVE row UUIDs version decisions.
+    pub waiver_updated_at: Option<DateTime<Utc>>,
+    /// Source-specific stored status, not inferred technical evidence.
+    pub status: String,
+    /// Stable finding identity for policy waivers.
+    pub finding_id: Option<Uuid>,
+    /// Exact host identity for a host decision or policy waiver.
+    pub system_id: Option<Uuid>,
+    /// Original environment identity for an environment decision.
+    pub environment_id: Option<Uuid>,
+    /// Policy lineage identity for a policy waiver.
+    pub policy_lineage_id: Option<Uuid>,
+    /// Exact policy version covered by a waiver.
+    pub policy_version_id: Option<Uuid>,
+    /// Canonical CVE ID for a CVE decision.
+    pub canonical_cve_id: Option<String>,
+    /// Canonical package identity for a CVE decision.
+    pub canonical_package_name: Option<String>,
+    /// Original decision justification.
+    pub justification: String,
+    /// Persisted CVE review date, if present.
+    pub review_date: Option<NaiveDate>,
+    /// Policy-waiver authorization expiry, not its review deadline.
+    pub expires_at: Option<DateTime<Utc>>,
+    /// User who accepted the decision, if accepted.
+    pub accepted_by: Option<Uuid>,
+    /// Original acceptance time, if accepted.
+    pub accepted_at: Option<DateTime<Utc>>,
+    /// Retirement time for a historical CVE decision.
+    pub retired_at: Option<DateTime<Utc>>,
+    /// User who retired a CVE decision.
+    pub retired_by: Option<Uuid>,
+    /// Persisted reason for a retired CVE decision.
+    pub retirement_reason: Option<String>,
+    /// Source decision creation or acceptance time.
+    pub recorded_at: DateTime<Utc>,
+}
+
+/// Contains an authorized page of source-owned decisions and its full total.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AcceptancePage {
+    /// Entries in stable, newest-first server order.
+    pub items: Vec<AcceptanceEntry>,
+    /// Complete filtered count before server pagination.
+    pub total: i64,
+    /// Maximum entries returned for this request.
+    pub limit: i64,
+    /// Zero-based offset of this page.
+    pub offset: i64,
+    /// Whether the scoped result has a following page.
+    pub has_more: bool,
+}
+
+/// Fetches one authenticated register page without mutating decisions.
+///
+/// # Errors
+///
+/// Returns a request, permission, decoding, or inconsistent-page error.
+pub async fn list_acceptances(
+    offset: i64,
+    environment_id: Option<Uuid>,
+) -> Result<AcceptancePage, PoamApiError> {
+    let mut url = format!(
+        "{}/acceptances?status=accepted&limit=100&offset={offset}",
+        base_url()
+    );
+    if let Some(id) = environment_id {
+        url.push_str(&format!("&environment_id={id}"));
+    }
+    let page: AcceptancePage = request("GET", &url, None::<&()>).await?;
+    if page.limit != 100
+        || page.offset != offset
+        || page.total < 0
+        || page.items.len() > 100
+        || page.total < offset + page.items.len() as i64
+        || page.has_more != (offset + (page.items.len() as i64) < page.total)
+    {
+        return Err(PoamApiError::Deserialize(
+            "Invalid acceptance pagination".into(),
+        ));
+    }
     Ok(page)
 }
 

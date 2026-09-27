@@ -1102,6 +1102,136 @@ pub struct CveFilters {
     pub limit: Option<i64>,            // Max results (default 500, max 1000)
 }
 
+/// Selects a paged, read-only CVE inventory projection. Filters apply to
+/// CVE/package identities before group counts and membership pagination.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CveInventoryProjectionParams {
+    /// Groups by `environment` or `host`; not used by the pairs endpoint.
+    #[serde(default)]
+    pub group_by: String,
+    /// Narrows the result to one authorized environment; absence means all visible environments.
+    pub environment_id: Option<Uuid>,
+    /// Filters by normalized severity.
+    pub severity: Option<String>,
+    /// Filters by available, pending, or exploited fix status.
+    pub fix_status: Option<String>,
+    /// Filters by the scoped pair's triage status.
+    pub triage_status: Option<String>,
+    /// Matches a package substring.
+    pub package: Option<String>,
+    /// Matches a CVE ID, package, or title substring.
+    pub search: Option<String>,
+    /// Orders pair pages by severity (default), cvss, age, or affected.
+    pub sort: Option<String>,
+    /// Zero-based offset into ordered groups or ordered membership rows.
+    pub offset: Option<i64>,
+    /// Number of groups or membership rows to return (default 100, maximum 200).
+    pub limit: Option<i64>,
+    /// Exact group ID for membership requests; omit for the unassigned environment.
+    pub group_id: Option<Uuid>,
+}
+
+/// Reports one complete scoped group aggregate, independent of page size.
+/// Finding counts do not establish scan coverage or that other hosts are clean.
+/// No authoritative scoped scan-coverage summary is included in this response.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct CveInventoryGroup {
+    /// Stable environment or system identity; `None` denotes unassigned hosts.
+    pub group_id: Option<Uuid>,
+    /// Human-readable environment name or hostname.
+    pub name: String,
+    /// Number of distinct CVE/package identities after filters.
+    pub cve_package_count: i64,
+    /// Number of distinct CVE identifiers after filters.
+    pub cve_count: i64,
+    /// Distinct filtered CVE/package pairs with CRITICAL severity.
+    pub critical_pair_count: i64,
+    /// Distinct filtered CVE/package pairs with HIGH severity.
+    pub high_pair_count: i64,
+    /// Distinct filtered CVE/package pairs with MEDIUM severity.
+    pub medium_pair_count: i64,
+    /// Distinct filtered CVE/package pairs with LOW severity.
+    pub low_pair_count: i64,
+    /// Distinct filtered CVE/package pairs with unknown severity.
+    pub unknown_pair_count: i64,
+    /// Distinct filtered CVE/package pairs whose advisory is marked exploited.
+    pub exploited_pair_count: i64,
+    /// Distinct filtered CVE/package pairs with a known fixed version.
+    pub patchable_pair_count: i64,
+    /// Number of distinct hosts with a finding in any inventory section.
+    pub host_count: i64,
+    /// All authorized active hosts assigned to this environment, including
+    /// hosts without any finding. `None` for host groups. This is not scan
+    /// coverage and must not be used to label hosts as clean or scanned.
+    pub total_active_hosts: Option<i64>,
+    /// Hosts with a current finding (not a count of clean or scanned hosts).
+    pub current_host_count: i64,
+    /// Hosts with an active scheduled-target finding.
+    pub scheduled_host_count: i64,
+    /// Hosts with a historical-only finding.
+    pub historical_host_count: i64,
+    /// Registered host flake name; only populated for host groups.
+    pub flake_name: Option<String>,
+    /// Existing deployment status; only populated for host groups.
+    pub deployment_status: Option<String>,
+}
+
+/// Returns a bounded page of groups and the complete scoped group count.
+#[derive(Debug, Serialize)]
+pub struct CveInventoryGroupPage {
+    /// Group rows ordered by name and exact ID.
+    pub items: Vec<CveInventoryGroup>,
+    /// Total groups matching the filters, before pagination.
+    pub total: i64,
+    /// Next offset, or `None` after the last group.
+    pub next_offset: Option<i64>,
+}
+
+/// Reports one exact host/CVE/package/section membership, not a clean claim.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct CveInventoryMember {
+    /// Canonical CVE ID.
+    pub cve_id: String,
+    /// Canonical package name, if the retained inventory identified one.
+    pub package_name: Option<String>,
+    /// Stable system identity.
+    pub system_id: Uuid,
+    /// Exact environment identity, if assigned.
+    pub environment_id: Option<Uuid>,
+    /// Current hostname.
+    pub hostname: String,
+    /// One of current, scheduled_deployment_target, or historical.
+    pub inventory_section: String,
+    /// Package version selected by the existing inventory read.
+    pub installed_version: String,
+    /// Existing deployment status for the host.
+    pub deployment_status: Option<String>,
+    /// Registered flake name for the host.
+    pub flake_name: Option<String>,
+}
+
+/// Returns a bounded membership page and its complete scoped row count.
+#[derive(Debug, Serialize)]
+pub struct CveInventoryMemberPage {
+    /// Exact memberships ordered by CVE, package, system and section.
+    pub items: Vec<CveInventoryMember>,
+    /// Total membership rows after filters, before pagination.
+    pub total: i64,
+    /// Next offset, or `None` after the last membership.
+    pub next_offset: Option<i64>,
+}
+
+/// Returns scoped CVE/package pairs without truncating the filtered total.
+#[derive(Debug, Serialize)]
+pub struct CveInventoryPairPage {
+    /// Pair rows with the same schema as the existing CVE list.
+    pub items: Vec<CveListItem>,
+    /// Distinct filtered CVE/package pairs before pagination.
+    pub total: i64,
+    /// Next offset, or `None` after the final pair.
+    pub next_offset: Option<i64>,
+}
+
 /// CVE list item for table views.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct CveListItem {

@@ -584,6 +584,39 @@ pub struct PoamSummary {
     pub closure_attempt_id: Option<Uuid>,
 }
 
+/// Adds page-scoped register context to an existing POA&M summary.
+///
+/// Memberships reflect visible current contexts and immutable assignment
+/// references, not the current catalog version or retired moved-host links.
+#[derive(Debug, Serialize)]
+pub struct PoamRegisterSummary {
+    /// Retains the existing list summary contract.
+    #[serde(flatten)]
+    pub summary: PoamSummary,
+    /// Lists visible environments that own current contexts or schedules.
+    pub environment_ids: Vec<Uuid>,
+    /// Lists visible systems in current finding or assignment context.
+    pub system_ids: Vec<Uuid>,
+    /// Lists explicitly linked bundle lineages.
+    pub bundle_ids: Vec<Uuid>,
+    /// Lists explicitly linked immutable bundle versions.
+    pub bundle_version_ids: Vec<Uuid>,
+    /// Lists exact immutable assignment versions, never catalog current versions.
+    pub assignment_version_ids: Vec<Uuid>,
+    /// Gives the first visible observed or closure policy requirement, if any.
+    /// An observation mapping is not proof that it remains current.
+    pub first_requirement: Option<String>,
+    /// Gives the first visible linked canonical CVE identifier, if any.
+    pub first_cve: Option<String>,
+    /// Counts all milestones attached to this visible POA&M.
+    pub milestone_count: i64,
+    /// Counts completed milestones.
+    pub completed_milestone_count: i64,
+    /// Records the latest scope-neutral activity time for non-admin readers.
+    /// Finding-specific activity is omitted rather than exposing hidden context.
+    pub last_activity_at: Option<DateTime<Utc>>,
+}
+
 /// Reports active and historical POA&M links for an exact CVE occurrence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CvePoamRelationship {

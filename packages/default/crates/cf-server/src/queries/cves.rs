@@ -5,17 +5,19 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use sqlx::{FromRow, PgPool, Postgres, Row, Transaction};
 use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
 
 use crate::api::models::{
-    CveAffectedSystemDetail, CveDetail, CveFilters, CveFleetStats, CveJustification,
-    CveJustificationInput, CveListItem, CvePackageGroup, ExactCveAuthorityFailureReason,
-    FleetCveInventorySection, SystemCveCurrentAuthorityState, SystemCveEvidenceRepresentation,
-    SystemCveInventoryAttempt, SystemCveInventoryAuthority, SystemCveInventoryCandidate,
-    SystemCveInventoryMetadata, SystemCveInventoryParams, SystemCveInventorySelection,
-    SystemCveInventorySeverityCounts, SystemCveInventorySource, SystemCveRunningTarget,
+    CveAffectedSystemDetail, CveDetail, CveFilters, CveFleetStats, CveInventoryGroup,
+    CveInventoryGroupPage, CveInventoryMember, CveInventoryMemberPage, CveInventoryPairPage,
+    CveInventoryProjectionParams, CveJustification, CveJustificationInput, CveListItem,
+    CvePackageGroup, ExactCveAuthorityFailureReason, FleetCveInventorySection,
+    SystemCveCurrentAuthorityState, SystemCveEvidenceRepresentation, SystemCveInventoryAttempt,
+    SystemCveInventoryAuthority, SystemCveInventoryCandidate, SystemCveInventoryMetadata,
+    SystemCveInventoryParams, SystemCveInventorySelection, SystemCveInventorySeverityCounts,
+    SystemCveInventorySource, SystemCveRunningTarget,
 };
 use crate::auth::extractors::AuthenticatedUser;
 
@@ -1668,6 +1670,321 @@ WITH exact_authority_systems AS (
 )
 "#;
 
+// SECURITY: Filter the already scoped CVE/package list before joining back to
+// scoped subject rows. A page limit here would silently omit host memberships.
+const FLEET_INVENTORY_PROJECTION_CTE: &str = r#"
+, filtered_pairs AS (
+  SELECT item.*
+  FROM inventory_list item
+  WHERE ($3::text IS NULL OR UPPER(item.severity)=$3)
+    AND ($4::text IS NULL
+      OR ($4='available' AND item.fix_status='fix_available')
+      OR ($4='pending' AND item.fix_status='open')
+      OR ($4='exploited' AND item.exploited))
+    AND ($5::text IS NULL OR LOWER(item.triage_status)=LOWER($5))
+    AND ($6::text IS NULL OR item.package_name ILIKE $6)
+    AND ($7::text IS NULL OR item.cve_id ILIKE $7
+      OR item.package_name ILIKE $7 OR item.title ILIKE $7)
+), visible_members AS (
+  SELECT subject.*,system.hostname,flake.name AS flake_name,
+         status.deployment_status
+  FROM inventory_subjects subject
+  JOIN filtered_pairs pair ON pair.cve_id=subject.cve_id
+    AND pair.package_name IS NOT DISTINCT FROM subject.package_name
+  JOIN systems system ON system.id=subject.system_id AND system.is_active
+  LEFT JOIN flakes flake ON flake.id=system.flake_id
+  LEFT JOIN view_system_deployment_status status ON status.hostname=system.hostname
+  WHERE ($2::uuid IS NULL OR subject.environment_id=$2)
+)
+"#;
+
+fn projection_cte() -> String {
+    // SECURITY: Intersect the optional environment filter with the authorized
+    // scope *inside* each inventory authority, before pair status aggregation.
+    // An unauthorized ID becomes an empty scope, never an all-scope NULL.
+    FLEET_INVENTORY_LIST_CTE.replace(
+        "$1",
+        "(CASE WHEN $2::uuid IS NULL THEN $1::uuid[] \
+         WHEN $1::uuid[] IS NULL OR $2=ANY($1) THEN ARRAY[$2]::uuid[] \
+         ELSE ARRAY[]::uuid[] END)",
+    )
+}
+
+fn projection_page(params: &CveInventoryProjectionParams) -> Result<(i64, i64)> {
+    let offset = params.offset.unwrap_or(0);
+    let limit = params.limit.unwrap_or(100);
+    anyhow::ensure!(
+        (0..=i64::MAX - 200).contains(&offset) && (1..=200).contains(&limit),
+        "offset must be nonnegative and limit must be 1..200"
+    );
+    Ok((offset, limit))
+}
+
+fn projection_query<'a>(
+    sql: &'a str,
+    scope: &'a CveReadScope,
+    params: &'a CveInventoryProjectionParams,
+) -> sqlx::query::Query<'a, Postgres, sqlx::postgres::PgArguments> {
+    sqlx::query(sql)
+        .bind(scope.environment_ids())
+        .bind(params.environment_id)
+        .bind(params.severity.as_ref().map(|s| s.to_uppercase()))
+        .bind(params.fix_status.as_deref())
+        .bind(params.triage_status.as_deref())
+        .bind(params.package.as_ref().map(|s| format!("%{s}%")))
+        .bind(params.search.as_ref().map(|s| format!("%{s}%")))
+}
+
+/// Returns a page of environment or host aggregates over the complete filtered
+/// scoped inventory. Severity, exploited and patchable counts each count one
+/// exact CVE/package pair per group, even across overlapping inventory sections.
+/// `total_active_hosts` includes active hosts without findings for environments
+/// only. It does not establish scan coverage or clean hosts.
+///
+/// # Errors
+///
+/// Returns a validation or database error when the page cannot be loaded.
+pub async fn fetch_cve_inventory_groups(
+    pool: &PgPool,
+    scope: &CveReadScope,
+    params: &CveInventoryProjectionParams,
+) -> Result<CveInventoryGroupPage> {
+    let (offset, limit) = projection_page(params)?;
+    anyhow::ensure!(
+        matches!(params.group_by.as_str(), "environment" | "host"),
+        "group_by must be environment or host"
+    );
+    let sql = format!(
+        "{}{FLEET_INVENTORY_PROJECTION_CTE}{}",
+        projection_cte(),
+        r#", grouped AS (
+          SELECT CASE WHEN $8='host' THEN member.system_id ELSE member.environment_id END AS group_id,
+                  CASE WHEN $8='host' THEN member.hostname
+                       ELSE COALESCE(environment.name,'Unassigned') END AS name,
+                  count(DISTINCT (pair.cve_id,pair.package_name))::bigint AS cve_package_count,
+                  count(DISTINCT pair.cve_id)::bigint AS cve_count,
+                  count(DISTINCT (pair.cve_id,pair.package_name)) FILTER (WHERE UPPER(pair.severity)='CRITICAL')::bigint AS critical_pair_count,
+                  count(DISTINCT (pair.cve_id,pair.package_name)) FILTER (WHERE UPPER(pair.severity)='HIGH')::bigint AS high_pair_count,
+                  count(DISTINCT (pair.cve_id,pair.package_name)) FILTER (WHERE UPPER(pair.severity)='MEDIUM')::bigint AS medium_pair_count,
+                  count(DISTINCT (pair.cve_id,pair.package_name)) FILTER (WHERE UPPER(pair.severity)='LOW')::bigint AS low_pair_count,
+                  count(DISTINCT (pair.cve_id,pair.package_name)) FILTER (WHERE UPPER(pair.severity) NOT IN ('CRITICAL','HIGH','MEDIUM','LOW'))::bigint AS unknown_pair_count,
+                  count(DISTINCT (pair.cve_id,pair.package_name)) FILTER (WHERE pair.exploited)::bigint AS exploited_pair_count,
+                  count(DISTINCT (pair.cve_id,pair.package_name)) FILTER (WHERE pair.fix_status='fix_available')::bigint AS patchable_pair_count,
+                 count(DISTINCT member.system_id)::bigint AS host_count,
+                 count(DISTINCT member.system_id) FILTER (WHERE member.inventory_section='current')::bigint AS current_host_count,
+                 count(DISTINCT member.system_id) FILTER (WHERE member.inventory_section='scheduled_deployment_target')::bigint AS scheduled_host_count,
+                 count(DISTINCT member.system_id) FILTER (WHERE member.inventory_section='historical')::bigint AS historical_host_count,
+                 CASE WHEN $8='host' THEN max(member.flake_name) END AS flake_name,
+                 CASE WHEN $8='host' THEN max(member.deployment_status) END AS deployment_status
+          FROM visible_members member
+          JOIN filtered_pairs pair ON pair.cve_id=member.cve_id
+            AND pair.package_name IS NOT DISTINCT FROM member.package_name
+          LEFT JOIN environments environment ON environment.id=member.environment_id
+          GROUP BY CASE WHEN $8='host' THEN member.system_id ELSE member.environment_id END,
+                   CASE WHEN $8='host' THEN member.hostname ELSE COALESCE(environment.name,'Unassigned') END
+        )
+        SELECT group_id,name,cve_package_count,cve_count,
+               critical_pair_count,high_pair_count,medium_pair_count,low_pair_count,
+               unknown_pair_count,exploited_pair_count,patchable_pair_count,
+               host_count,current_host_count,scheduled_host_count,historical_host_count,
+               CASE WHEN $8='environment' THEN (
+                 SELECT count(*)::bigint FROM systems active_host
+                 WHERE active_host.is_active
+                   AND active_host.environment_id IS NOT DISTINCT FROM grouped.group_id
+                   AND ($1::uuid[] IS NULL OR active_host.environment_id=ANY($1))
+                   AND ($2::uuid IS NULL OR active_host.environment_id=$2)
+               ) END AS total_active_hosts,
+               flake_name,deployment_status
+        FROM grouped ORDER BY name COLLATE "C",group_id NULLS FIRST
+        OFFSET $9 LIMIT $10"#
+    );
+    let count_sql = format!(
+        "{}{FLEET_INVENTORY_PROJECTION_CTE}{}",
+        projection_cte(),
+        r#"SELECT count(DISTINCT CASE WHEN $8='host' THEN system_id ELSE environment_id END)::bigint
+           + CASE WHEN $8='environment' AND COALESCE(bool_or(environment_id IS NULL),false) THEN 1 ELSE 0 END
+           FROM visible_members"#
+    );
+    // A transaction keeps the total and page on the same PostgreSQL snapshot.
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    let total: i64 = projection_query(&count_sql, scope, params)
+        .bind(&params.group_by)
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get(0)?;
+    let rows = projection_query(&sql, scope, params)
+        .bind(&params.group_by)
+        .bind(offset)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    let items = rows
+        .iter()
+        .map(CveInventoryGroup::from_row)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let next_offset =
+        (offset + (items.len() as i64) < total).then_some(offset + items.len() as i64);
+    Ok(CveInventoryGroupPage {
+        items,
+        total,
+        next_offset,
+    })
+}
+
+/// Returns paged exact host/CVE/package memberships in one query per page.
+/// `group_id=None` selects unassigned environment hosts, never all groups.
+/// Historical memberships are read-only; no row asserts a clean scan.
+///
+/// # Errors
+///
+/// Returns a validation or database error when the page cannot be loaded.
+pub async fn fetch_cve_inventory_members(
+    pool: &PgPool,
+    scope: &CveReadScope,
+    params: &CveInventoryProjectionParams,
+) -> Result<CveInventoryMemberPage> {
+    let (offset, limit) = projection_page(params)?;
+    anyhow::ensure!(
+        matches!(params.group_by.as_str(), "environment" | "host"),
+        "group_by must be environment or host"
+    );
+    anyhow::ensure!(
+        params.group_by != "host" || params.group_id.is_some(),
+        "host membership requires group_id"
+    );
+    let sql = format!(
+        "{}{FLEET_INVENTORY_PROJECTION_CTE}{}",
+        projection_cte(),
+        r#", selected AS (
+          SELECT member.* FROM visible_members member
+          WHERE CASE WHEN $8='host' THEN member.system_id=$9
+                     ELSE member.environment_id IS NOT DISTINCT FROM $9 END
+        )
+        SELECT cve_id,package_name,system_id,environment_id,hostname,
+               inventory_section,installed_version,deployment_status,flake_name
+        FROM selected
+        ORDER BY cve_id COLLATE "C",package_name COLLATE "C",system_id,
+                 inventory_section COLLATE "C"
+        OFFSET $10 LIMIT $11"#
+    );
+    // A separate count is needed for an offset past the end of the result.
+    let count_sql = format!(
+        "{}{FLEET_INVENTORY_PROJECTION_CTE}{}",
+        projection_cte(),
+        r#"SELECT count(*)::bigint FROM visible_members member
+           WHERE CASE WHEN $8='host' THEN member.system_id=$9
+                      ELSE member.environment_id IS NOT DISTINCT FROM $9 END"#
+    );
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    let total: i64 = projection_query(&count_sql, scope, params)
+        .bind(&params.group_by)
+        .bind(params.group_id)
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get(0)?;
+    let rows = projection_query(&sql, scope, params)
+        .bind(&params.group_by)
+        .bind(params.group_id)
+        .bind(offset)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    let items = rows
+        .iter()
+        .map(CveInventoryMember::from_row)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let next_offset =
+        (offset + (items.len() as i64) < total).then_some(offset + items.len() as i64);
+    Ok(CveInventoryMemberPage {
+        items,
+        total,
+        next_offset,
+    })
+}
+
+/// Returns a bounded CVE/package page and an untruncated filtered total.
+/// Scope and the optional environment filter apply before pair aggregation.
+/// The stable order matches [`fetch_cve_list`]. Separate page requests may
+/// observe different snapshots if inventory changes between requests.
+///
+/// # Errors
+///
+/// Returns an error for invalid paging or a failed database read.
+pub async fn fetch_cve_inventory_pairs(
+    pool: &PgPool,
+    scope: &CveReadScope,
+    params: &CveInventoryProjectionParams,
+) -> Result<CveInventoryPairPage> {
+    let (offset, limit) = projection_page(params)?;
+    let cte = format!("{}{FLEET_INVENTORY_PROJECTION_CTE}", projection_cte());
+    let count_sql = format!("{cte} SELECT count(*)::bigint FROM filtered_pairs");
+    let page_sql = format!(
+        "{cte}{}",
+        r#"SELECT cve_id,cvss_v3_score::real AS cvss_v3_score,
+                  UPPER(COALESCE(severity,'UNKNOWN')) AS severity,
+                  COALESCE(title,'') AS title,cvss_vector,published_date,
+                  COALESCE(exploited,false) AS exploited,package_name,
+                  installed_version,fixed_version,
+                  COALESCE(fix_status,'open') AS fix_status,
+                  COALESCE(affected_count,0)::bigint AS affected_count,
+                  exact_affected_count,legacy_affected_count,current_affected_count,
+                  scheduled_deployment_target_count,historical_inventory_count,
+                  affected_environments,first_seen,last_seen,
+                  COALESCE(age_days,0)::int AS age_days,
+                  LOWER(COALESCE(triage_status,'outstanding')) AS triage_status
+           FROM filtered_pairs
+           ORDER BY
+             CASE WHEN $8='severity' THEN CASE UPPER(severity)
+               WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2
+               WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 4 ELSE 5 END END ASC NULLS LAST,
+             CASE WHEN $8='severity' THEN cvss_v3_score END DESC NULLS LAST,
+             CASE WHEN $8='cvss' THEN cvss_v3_score END DESC NULLS LAST,
+             CASE WHEN $8='age' THEN age_days END ASC NULLS LAST,
+             CASE WHEN $8='affected' THEN affected_count END DESC NULLS LAST,
+             cve_id COLLATE "C" ASC,package_name COLLATE "C" ASC
+           OFFSET $9 LIMIT $10"#
+    );
+    // Both statements must see the same scoped inventory snapshot, including
+    // an empty page requested past the end of the filtered pair set.
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    let total: i64 = projection_query(&count_sql, scope, params)
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get(0)?;
+    let items = sqlx::query_as::<_, CveListItem>(&page_sql)
+        .bind(scope.environment_ids())
+        .bind(params.environment_id)
+        .bind(params.severity.as_ref().map(|s| s.to_uppercase()))
+        .bind(params.fix_status.as_deref())
+        .bind(params.triage_status.as_deref())
+        .bind(params.package.as_ref().map(|s| format!("%{s}%")))
+        .bind(params.search.as_ref().map(|s| format!("%{s}%")))
+        .bind(params.sort.as_deref().unwrap_or("severity"))
+        .bind(offset)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    let next_offset =
+        (offset + (items.len() as i64) < total).then_some(offset + items.len() as i64);
+    Ok(CveInventoryPairPage {
+        items,
+        total,
+        next_offset,
+    })
+}
+
 #[derive(sqlx::FromRow)]
 struct CvePackageStatsRow {
     package_name: String,
@@ -2624,6 +2941,34 @@ mod tests {
     use crate::queries::systems::insert_system;
 
     use super::*;
+
+    #[test]
+    fn projection_page_bounds_and_scope_intersection() {
+        let mut params = CveInventoryProjectionParams {
+            group_by: "environment".into(),
+            environment_id: None,
+            severity: None,
+            fix_status: None,
+            triage_status: None,
+            package: None,
+            search: None,
+            sort: None,
+            offset: None,
+            limit: None,
+            group_id: None,
+        };
+        assert_eq!(projection_page(&params).unwrap(), (0, 100));
+        params.limit = Some(201);
+        assert!(projection_page(&params).is_err());
+        params.limit = Some(200);
+        params.offset = Some(-1);
+        assert!(projection_page(&params).is_err());
+        params.offset = Some(201);
+        assert_eq!(projection_page(&params).unwrap(), (201, 200));
+        let sql = projection_cte();
+        assert!(sql.contains("ELSE ARRAY[]::uuid[] END"));
+        assert!(!sql.contains("environment_id=ANY($1)"));
+    }
 
     #[test]
     fn fleet_inventory_bound_counts_distinct_systems_not_section_rows() {

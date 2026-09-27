@@ -412,6 +412,125 @@ pub struct CveFilters {
     pub limit: Option<i64>,
 }
 
+/// Selects a server-scoped, filtered page of environment or host CVE inventory.
+/// A missing group ID selects unassigned hosts only for environment members.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CveInventoryQuery {
+    /// `environment` or `host`.
+    pub group_by: String,
+    /// Restricts the query to one authorized environment when present.
+    pub environment_id: Option<Uuid>,
+    /// Exact group identity for membership requests.
+    pub group_id: Option<Uuid>,
+    /// Applies CVE/package filters before grouping and pagination.
+    pub filters: CveFilters,
+    /// Zero-based server page offset.
+    pub offset: i64,
+    /// Requested page size (1 through 200).
+    pub limit: i64,
+}
+
+/// One complete finding aggregate for a scoped environment or host.
+/// Pair counts are distinct CVE/package identities; hosts without findings
+/// are not necessarily clean or scanned.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveInventoryGroup {
+    /// Environment or system ID; absent for unassigned hosts.
+    pub group_id: Option<Uuid>,
+    /// Environment name or hostname.
+    pub name: String,
+    /// Distinct CVE/package pairs after filters.
+    pub cve_package_count: i64,
+    /// Distinct CVE IDs after filters.
+    pub cve_count: i64,
+    /// Distinct critical CVE/package pairs after filters.
+    pub critical_pair_count: i64,
+    /// Distinct high CVE/package pairs after filters.
+    pub high_pair_count: i64,
+    /// Distinct medium CVE/package pairs after filters.
+    pub medium_pair_count: i64,
+    /// Distinct low CVE/package pairs after filters.
+    pub low_pair_count: i64,
+    /// Distinct unknown-severity CVE/package pairs after filters.
+    pub unknown_pair_count: i64,
+    /// Distinct CVE/package pairs marked exploited after filters.
+    pub exploited_pair_count: i64,
+    /// Distinct CVE/package pairs with an available fix after filters.
+    pub patchable_pair_count: i64,
+    /// Distinct hosts with findings in any section.
+    pub host_count: i64,
+    /// Authorized active hosts assigned to the environment, including hosts
+    /// without findings. `None` for a host group. Not scan coverage.
+    pub total_active_hosts: Option<i64>,
+    /// Distinct hosts with current exposure.
+    pub current_host_count: i64,
+    /// Distinct hosts with scheduled-target exposure.
+    pub scheduled_host_count: i64,
+    /// Distinct hosts with historical-only evidence.
+    pub historical_host_count: i64,
+    /// Registered flake name for host groups only.
+    pub flake_name: Option<String>,
+    /// Deployment state for host groups only.
+    pub deployment_status: Option<String>,
+}
+
+/// Server-ordered page of scoped CVE finding aggregates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveInventoryGroupPage {
+    /// Groups in name and ID order.
+    pub items: Vec<CveInventoryGroup>,
+    /// Complete matching group count, not the loaded page count.
+    pub total: i64,
+    /// Continuation offset, absent at the end.
+    pub next_offset: Option<i64>,
+}
+
+/// One host/CVE/package/section membership; never a clean-host assertion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveInventoryMember {
+    /// Canonical CVE identity.
+    pub cve_id: String,
+    /// Retained package identity, if known.
+    pub package_name: Option<String>,
+    /// Stable system identity.
+    pub system_id: Uuid,
+    /// Assigned environment identity, if present.
+    pub environment_id: Option<Uuid>,
+    /// Current hostname.
+    pub hostname: String,
+    /// `current`, `scheduled_deployment_target`, or `historical`.
+    pub inventory_section: String,
+    /// Version from the selected inventory source.
+    pub installed_version: String,
+    /// Existing deployment status.
+    pub deployment_status: Option<String>,
+    /// Registered flake name.
+    pub flake_name: Option<String>,
+}
+
+/// Server-ordered page of exact memberships within one group.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveInventoryMemberPage {
+    /// Exact member rows in CVE, package, system, and section order.
+    pub items: Vec<CveInventoryMember>,
+    /// Complete matching membership count.
+    pub total: i64,
+    /// Continuation offset, absent at the end.
+    pub next_offset: Option<i64>,
+}
+
+/// Returns server-filtered CVE/package pairs in a bounded, scoped page.
+/// A page is not evidence that the entire filtered collection was loaded.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveInventoryPairPage {
+    /// Pairs with the same identity and metadata as the CVE list.
+    pub items: Vec<CveListItem>,
+    /// Complete filtered pair count before pagination.
+    pub total: i64,
+    /// Next offset, absent after the final pair.
+    pub next_offset: Option<i64>,
+}
+
 /// CVE list item for table views.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CveListItem {

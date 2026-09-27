@@ -3,12 +3,18 @@
 //! Complete refactor matching design reference with:
 //! - Statistics strip
 //! - Advanced filtering
-//! - Dual view modes (flat/grouped)
+//! - Paged flat and grouped inventory modes
 //! - CVE detail drawer
 //! - Triage workflow
 
+use chrono::{DateTime, Duration, Utc};
 use dioxus::prelude::*;
-use std::{cell::Cell, rc::Rc};
+use gloo_storage::{LocalStorage, Storage};
+use std::{
+    cell::Cell,
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, closure::Closure};
@@ -17,9 +23,11 @@ use crate::alerts::{NAV_BADGES, acknowledge_with_cursor_and_ids, should_flash};
 
 use crate::api::client;
 use crate::api::models::{
-    CveAffectedSystemDetail, CveFilters, CveFleetStats, CveListItem, CvePackageGroup,
+    CveAffectedSystemDetail, CveFilters, CveFleetStats, CveInventoryGroup, CveInventoryMember,
+    CveInventoryPairPage, CveInventoryQuery, CveListItem, CvePackageGroup, EnvironmentSummary,
     FleetCveInventorySection, SystemCveInventoryAuthority,
 };
+use crate::components::chips::EnvBadge;
 use crate::components::cve::triage::{
     CveTriageDraft, EnvironmentTriageChoice, catalog_contains_assignee, fixed_version_label,
 };
@@ -38,6 +46,75 @@ use crate::views::poam_api::{self, PoamApiError};
 struct ExactCveSelection {
     cve_id: String,
     package: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CveSeenState {
+    user_id: String,
+    pairs: BTreeSet<(String, String)>,
+}
+
+fn seen_storage_key(user_id: &str) -> String {
+    format!("cf.cves.seen.v1.{user_id}")
+}
+
+fn authenticated_user_id(auth: &Option<crate::api::models::AuthContext>) -> Option<String> {
+    auth.as_ref()
+        .filter(|context| context.is_authenticated)
+        .and_then(|context| context.user.as_ref())
+        .map(|user| user.id.clone())
+        .filter(|id| !id.is_empty())
+}
+
+fn seen_for_user<'a>(
+    state: Option<&'a CveSeenState>,
+    user_id: Option<&str>,
+) -> Option<&'a CveSeenState> {
+    state.filter(|seen| user_id.is_some_and(|id| !id.is_empty() && seen.user_id == id))
+}
+
+fn recently_observed_unseen(
+    item: &CveListItem,
+    now: DateTime<Utc>,
+    seen: Option<&CveSeenState>,
+) -> bool {
+    let (Some(package), Some(last_seen), Some(seen)) =
+        (item.package_name.as_ref(), item.last_seen, seen)
+    else {
+        return false;
+    };
+    let elapsed = now.signed_duration_since(last_seen);
+    elapsed >= Duration::zero()
+        && elapsed < Duration::hours(24)
+        && !seen.pairs.contains(&(item.cve_id.clone(), package.clone()))
+}
+
+fn persist_seen_pairs(
+    mut state: Signal<Option<CveSeenState>>,
+    user_id: Option<&str>,
+    selections: &[ExactCveSelection],
+) {
+    if selections.is_empty() {
+        return;
+    }
+    let Some(user_id) = user_id.filter(|id| !id.is_empty()) else {
+        return;
+    };
+    let Some(mut current) = seen_for_user(state.peek().as_ref(), Some(user_id)).cloned() else {
+        return;
+    };
+    let key = seen_storage_key(user_id);
+    if let Ok(stored) = LocalStorage::get::<BTreeSet<(String, String)>>(&key) {
+        current.pairs.extend(stored);
+    }
+    for selection in selections {
+        current
+            .pairs
+            .insert((selection.cve_id.clone(), selection.package.clone()));
+    }
+    if LocalStorage::set(&key, &current.pairs).is_ok() {
+        state.set(Some(current));
+    }
 }
 
 fn triage_status_presentation(status: &str) -> (&'static str, &'static str, &'static str) {
@@ -158,6 +235,60 @@ fn unique_retained_package_for_cve(cve_id: &str, items: &[CveListItem]) -> Optio
     (packages.len() == 1).then(|| packages[0].to_string())
 }
 
+fn complete_focus_package(page: &CveInventoryPairPage, focused: &str) -> Option<String> {
+    (page.next_offset.is_none() && page.total == page.items.len() as i64)
+        .then(|| unique_retained_package_for_cve(focused, &page.items))
+        .flatten()
+}
+
+async fn resolve_focused_package(
+    mut query: CveInventoryQuery,
+    focused: &str,
+) -> Result<Option<String>, client::ApiClientError> {
+    let mut total = None;
+    let mut single_page_package = None;
+    let mut pages = 0;
+    loop {
+        if pages == 50 {
+            return Err(client::ApiClientError::Deserialize(
+                "Focused CVE exceeds the bounded discovery window".into(),
+            ));
+        }
+        pages += 1;
+        let page = client::fetch_cve_inventory_pairs(&query).await?;
+        if total.is_some_and(|previous| previous != page.total)
+            || page.items.is_empty() && page.next_offset.is_some()
+        {
+            return Err(client::ApiClientError::Deserialize(
+                "Focused CVE pages changed during loading".into(),
+            ));
+        }
+        total = Some(page.total);
+        if pages == 1 {
+            single_page_package = complete_focus_package(&page, focused);
+        }
+        let Some(next) = page.next_offset else { break };
+        if next <= query.offset
+            || next != query.offset + page.items.len() as i64
+            || next > page.total
+        {
+            return Err(client::ApiClientError::Deserialize(
+                "Invalid focused CVE continuation".into(),
+            ));
+        }
+        // Offset pages do not share a snapshot. Read all pages for discovery,
+        // but never auto-open from a collection that could shift between pages.
+        query.offset = next;
+    }
+    // Offset pages do not share a snapshot. A multi-page search remains a
+    // paged focused list, even if its loaded rows contain just one package.
+    Ok(if pages == 1 {
+        single_page_package
+    } else {
+        None
+    })
+}
+
 fn query_param(name: &str) -> Option<String> {
     let window = web_sys::window()?;
     let search = window.location().search().ok()?;
@@ -225,6 +356,7 @@ fn sync_cve_url_query(
     focus_cve: Option<&str>,
     sort: &str,
     view: &str,
+    environment_id: Option<crate::api::models::Uuid>,
     selection: Option<&ExactCveSelection>,
     push_history: bool,
 ) {
@@ -264,6 +396,9 @@ fn sync_cve_url_query(
     if view != "grouped" {
         push(&mut parts, "view", view);
     }
+    if let Some(id) = environment_id {
+        push(&mut parts, "environment_id", &id.to_string());
+    }
     if let Some(selection) = selection {
         push(&mut parts, "cve", &selection.cve_id);
         push(&mut parts, "cve_package", &selection.package);
@@ -299,6 +434,7 @@ fn sync_cve_url_state(
     focus_cve: Option<String>,
     sort: String,
     view: String,
+    environment_id: Option<crate::api::models::Uuid>,
     selection: Option<&ExactCveSelection>,
     push_history: bool,
 ) {
@@ -311,6 +447,7 @@ fn sync_cve_url_state(
         focus_cve.as_deref(),
         &sort,
         &view,
+        environment_id,
         selection,
         push_history,
     );
@@ -326,6 +463,7 @@ pub fn CvesView(query: String) -> Element {
     let _ = query;
     let app_state = use_context::<Signal<AppState>>();
     let is_admin_user = auth::is_admin(&app_state.read().auth);
+    let active_user = authenticated_user_id(&app_state.read().auth);
     let initial_severity = query_param("severity");
     let initial_fix = query_param("fix_status").or_else(|| query_param("fix"));
     let initial_triage = query_param("triage_status").or_else(|| query_param("triage"));
@@ -344,6 +482,7 @@ pub fn CvesView(query: String) -> Element {
         }
     });
     let initial_selection = selection_from_query();
+    let initial_environment = query_param("environment_id").and_then(|id| id.parse().ok());
 
     // Filter state
     let mut severity_filter = use_signal(move || initial_severity.clone());
@@ -352,11 +491,41 @@ pub fn CvesView(query: String) -> Element {
     let mut package_filter = use_signal(move || initial_package.clone());
     let mut search_query = use_signal(move || initial_search.clone());
     let mut focus_cve = use_signal(move || initial_focus_cve.clone());
-    let mut focus_resolution_complete = use_signal(|| false);
+    let mut focus_resolved_query = use_signal(|| None::<CveInventoryQuery>);
     let mut sort_by = use_signal(move || initial_sort.clone());
     let mut view_mode = use_signal(move || initial_view.clone()); // "flat" or "grouped"
+    let mut environment_filter = use_signal(move || initial_environment);
     let mut selected_cve = use_signal(move || initial_selection.clone());
+    let mut seen_state = use_signal(|| None::<CveSeenState>);
+    let mut seen_clock = use_signal(Utc::now);
+    use_effect(move || {
+        spawn(async move {
+            loop {
+                gloo_timers::future::TimeoutFuture::new(60_000).await;
+                seen_clock.set(Utc::now());
+            }
+        });
+    });
     let mut selection_hydrated = use_signal(|| false);
+    use_effect(move || {
+        let user = authenticated_user_id(&app_state.read().auth);
+        let Some(user_id) = user else {
+            if seen_state.peek().is_some() {
+                seen_state.set(None);
+            }
+            return;
+        };
+        if seen_state
+            .peek()
+            .as_ref()
+            .is_some_and(|seen| seen.user_id == user_id)
+        {
+            return;
+        }
+        let pairs = LocalStorage::get(&seen_storage_key(&user_id)).unwrap_or_default();
+        seen_state.set(Some(CveSeenState { user_id, pairs }));
+    });
+    let current_seen = seen_for_user(seen_state.read().as_ref(), active_user.as_deref()).cloned();
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None);
     // CONCURRENCY: Publishing or dismissing feedback advances the lifecycle.
     // A success timer can clear only the publication that created the timer.
@@ -399,6 +568,7 @@ pub fn CvesView(query: String) -> Element {
             focus_cve().as_deref(),
             &sort,
             &view,
+            environment_filter(),
             selection.as_ref(),
             false,
         );
@@ -409,12 +579,24 @@ pub fn CvesView(query: String) -> Element {
         let popstate_listener = use_hook(|| {
             let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
                 selected_cve.set(selection_from_query());
+                severity_filter.set(query_param("severity"));
+                fix_status_filter.set(query_param("fix_status").or_else(|| query_param("fix")));
+                triage_status_filter
+                    .set(query_param("triage_status").or_else(|| query_param("triage")));
+                package_filter.set(query_param("package"));
+                environment_filter
+                    .set(query_param("environment_id").and_then(|id| id.parse().ok()));
+                sort_by.set(query_param("sort").unwrap_or_else(|| "severity".into()));
+                view_mode.set(query_param("view").unwrap_or_else(|| "grouped".into()));
+                search_query.set(query_param("search").unwrap_or_default());
                 let focused = focused_cve_from_query();
                 focus_cve.set(focused.clone());
-                focus_resolution_complete.set(false);
+                focus_resolved_query.set(None);
                 if let Some(focused) = focused {
                     search_query.set(focused);
-                    view_mode.set("flat".to_string());
+                    if query_param("view").is_none() {
+                        view_mode.set("flat".to_string());
+                    }
                 }
             });
             if let Some(window) = web_sys::window() {
@@ -456,68 +638,110 @@ pub fn CvesView(query: String) -> Element {
 
     let package_names =
         use_resource(move || async move { client::fetch_cve_package_names().await });
+    let environments = use_resource(|| async move { client::fetch_environments().await });
 
-    let cve_list = use_resource(move || {
-        let filters = CveFilters {
-            severity: severity_filter(),
-            fix_status: fix_status_filter(),
-            triage_status: triage_status_filter(),
-            package: package_filter(),
-            search: if search_query().is_empty() {
-                None
-            } else {
-                Some(search_query())
+    let pair_metadata = use_resource(move || {
+        let query = CveInventoryQuery {
+            group_by: "environment".into(),
+            environment_id: environment_filter(),
+            group_id: None,
+            filters: CveFilters {
+                severity: severity_filter(),
+                fix_status: fix_status_filter(),
+                triage_status: triage_status_filter(),
+                package: package_filter(),
+                search: (!search_query().is_empty()).then(|| search_query()),
+                sort: Some(sort_by()),
+                limit: None,
             },
-            sort: Some(sort_by()),
-            limit: Some(1000),
+            offset: 0,
+            limit: 200,
         };
+        async move {
+            (
+                query.clone(),
+                client::fetch_cve_inventory_pairs(&query).await,
+            )
+        }
+    });
 
-        async move { client::fetch_cves(&filters).await }
+    let focus_result = use_resource(move || {
+        let focused = focus_cve();
+        let query = CveInventoryQuery {
+            group_by: "environment".into(),
+            environment_id: environment_filter(),
+            group_id: None,
+            filters: CveFilters {
+                severity: severity_filter(),
+                fix_status: fix_status_filter(),
+                triage_status: triage_status_filter(),
+                package: package_filter(),
+                search: focused.clone(),
+                sort: Some(sort_by()),
+                limit: None,
+            },
+            offset: 0,
+            limit: 200,
+        };
+        async move {
+            let result = if let Some(focused) = &focused {
+                Some(resolve_focused_package(query.clone(), focused).await)
+            } else {
+                None
+            };
+            (query, focused, result)
+        }
     });
 
     use_effect(move || {
         let Some(focused) = focus_cve() else {
             return;
         };
-        if focus_resolution_complete() {
+        let focus_read = focus_result.read();
+        let Some((query, result_focus, Some(result))) = focus_read.as_ref() else {
+            return;
+        };
+        if result_focus.as_ref() != Some(&focused)
+            || query.environment_id != environment_filter()
+            || query.filters.severity != severity_filter()
+            || query.filters.fix_status != fix_status_filter()
+            || query.filters.triage_status != triage_status_filter()
+            || query.filters.package != package_filter()
+            || query.filters.sort != Some(sort_by())
+            || focus_resolved_query().as_ref() == Some(query)
+        {
             return;
         }
-        match cve_list.read().as_ref() {
-            Some(Ok(items)) => {
-                if let Some(package) = unique_retained_package_for_cve(&focused, items) {
-                    selected_cve.set(Some(ExactCveSelection {
-                        cve_id: focused,
-                        package,
-                    }));
-                }
-                focus_resolution_complete.set(true);
+        if let Ok(Some(package)) = result {
+            if selected_cve().is_none() {
+                selected_cve.set(Some(ExactCveSelection {
+                    cve_id: focused,
+                    package: package.clone(),
+                }));
             }
-            Some(Err(_)) => focus_resolution_complete.set(true),
-            None => {}
         }
+        focus_resolved_query.set(Some(query.clone()));
     });
 
-    let focused_cve = focus_cve();
-    let focused_items = cve_list
-        .read()
-        .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .map(|items| {
-            items
-                .iter()
-                .filter(|item| {
-                    focused_cve.as_ref().is_none_or(|focused| {
-                        item.cve_id == *focused
-                            && has_retained_package_evidence(item)
-                            && item.package_name.is_some()
-                    })
-                })
-                .cloned()
-                .collect::<Vec<_>>()
-        });
+    let current_pair_filters = CveFilters {
+        severity: severity_filter(),
+        fix_status: fix_status_filter(),
+        triage_status: triage_status_filter(),
+        package: package_filter(),
+        search: (!search_query().is_empty()).then(|| search_query()),
+        sort: Some(sort_by()),
+        limit: None,
+    };
+    let scoped_metadata = pair_metadata.read().as_ref().and_then(|(request, result)| {
+        (request.environment_id == environment_filter() && request.filters == current_pair_filters)
+            .then(|| result.clone())
+    });
 
     use_effect(move || {
-        if let (Some(Ok(_s)), Some(Ok(_items))) = (stats.read().as_ref(), cve_list.read().as_ref())
+        if let (Some(Ok(_s)), Some((request, Ok(_)))) =
+            (stats.read().as_ref(), pair_metadata.read().as_ref())
+            && request.environment_id == environment_filter()
+            && request.filters == current_pair_filters
         {
             let Some(cursor) = NAV_BADGES.read_unchecked().observed_at.clone() else {
                 return;
@@ -536,6 +760,9 @@ pub fn CvesView(query: String) -> Element {
                 class: "page-head",
                 div {
                     h1 { class: "page-title", "CVEs" }
+                    if environment_filter().is_some() {
+                        p { class: "page-subtitle", "The summary cards remain fleet-wide; the environment selector scopes finding groups and pair pages only." }
+                    }
                     if let Some(Ok(s)) = stats.read().as_ref() {
                         { let (current, scheduled_configuration, historical) = s.inventory_counts(); rsx! {
                         p {
@@ -594,7 +821,8 @@ pub fn CvesView(query: String) -> Element {
                     }
                     button {
                         class: "btn btn-ghost focus-ring",
-                        title: "Export current filters with distinct affected, current, scheduled deployment target, and historical inventory counts",
+                        title: if environment_filter().is_some() { "Environment-scoped CSV export is unavailable" } else { "Export fleet-wide CVE filters" },
+                        disabled: environment_filter().is_some(),
                         onclick: move |_| {
                             let mut toast_message = toast_message;
                             let mut toast_lifecycle = toast_lifecycle;
@@ -735,7 +963,7 @@ pub fn CvesView(query: String) -> Element {
                         oninput: move |evt| {
                             search_query.set(evt.value());
                             focus_cve.set(None);
-                            focus_resolution_complete.set(false);
+                            focus_resolved_query.set(None);
                         },
                     }
                 }
@@ -843,6 +1071,21 @@ pub fn CvesView(query: String) -> Element {
                     }
                 }
 
+                div {
+                    select {
+                        class: "input focus-ring",
+                        aria_label: "Environment",
+                        value: "{environment_filter().map(|id| id.to_string()).unwrap_or_default()}",
+                        onchange: move |evt| environment_filter.set(evt.value().parse().ok()),
+                        option { value: "", "All environments" }
+                        if let Some(Ok(items)) = environments.read().as_ref() {
+                            for env in items {
+                                option { key: "{env.id}", value: "{env.id}", "{env.name}" }
+                            }
+                        }
+                    }
+                }
+
                 // Group label + toggle
                 span {
                     class: "filter-count",
@@ -854,118 +1097,136 @@ pub fn CvesView(query: String) -> Element {
                     button {
                         class: if view_mode() == "grouped" { "active" } else { "" },
                         onclick: move |_| view_mode.set("grouped".to_string()),
-                        "By package"
+                        "Package"
+                    }
+                    button {
+                        class: if view_mode() == "environment" { "active" } else { "" },
+                        onclick: move |_| view_mode.set("environment".to_string()),
+                        "Environment"
+                    }
+                    button {
+                        class: if view_mode() == "host" { "active" } else { "" },
+                        onclick: move |_| view_mode.set("host".to_string()),
+                        "Env › System"
                     }
                     button {
                         class: if view_mode() == "flat" { "active" } else { "" },
                         onclick: move |_| view_mode.set("flat".to_string()),
-                        "Flat list"
+                        "None"
                     }
                 }
 
-                // Sort label + toggle
-                span {
-                    class: "filter-count",
-                    style: "margin-left: 0; margin-right: 0;",
-                    "Sort"
-                }
-                div {
-                    class: "seg",
-                    for sort in [("severity", "Severity"), ("cvss", "CVSS"), ("age", "Newest"), ("affected", "Most affected") ] {
-                        button {
-                            class: if sort_by() == sort.0 { "active" } else { "" },
-                            title: if sort.0 == "affected" { "Sort by distinct current or scheduled configuration affected systems" } else { sort.1 },
-                            onclick: move |_| sort_by.set(sort.0.to_string()),
-                            "{sort.1}"
+                if matches!(view_mode().as_str(), "grouped" | "flat") {
+                    span {
+                        class: "filter-count",
+                        style: "margin-left: 0; margin-right: 0;",
+                        "Sort"
+                    }
+                    div {
+                        class: "seg",
+                        for sort in [("severity", "Severity"), ("cvss", "CVSS"), ("age", "Newest"), ("affected", "Most affected") ] {
+                            button {
+                                class: if sort_by() == sort.0 { "active" } else { "" },
+                                title: if sort.0 == "affected" { "Sort by distinct current or scheduled configuration affected systems" } else { sort.1 },
+                                onclick: move |_| sort_by.set(sort.0.to_string()),
+                                "{sort.1}"
+                            }
                         }
                     }
                 }
             }
 
             // CVE List
-            if view_mode() == "grouped" {
-                CvePackageGroupsView {
-                    key: "{severity_filter().as_deref().unwrap_or(\"all\")}|{fix_status_filter().as_deref().unwrap_or(\"all\")}|{triage_status_filter().as_deref().unwrap_or(\"all\")}|{package_filter().as_deref().unwrap_or(\"all\")}|{search_query()}|{sort_by()}|{view_mode()}",
-                    on_open_cve: move |selection: ExactCveSelection| {
+            if active_user.is_some() {
+                p { class: "page-subtitle", "New means a package finding was observed in the last 24 hours and is not yet seen in this browser. Seen state is local to this device, not server-synced." }
+            }
+            if let Some(Err(error)) = environments.read().as_ref() {
+                div { class: "page-subtitle", "Environment choices unavailable: {error}" }
+            }
+            if matches!(view_mode().as_str(), "environment" | "host") {
+                div {
+                    key: "{severity_filter():?}|{fix_status_filter():?}|{triage_status_filter():?}|{package_filter():?}|{search_query()}|{view_mode()}|{environment_filter():?}",
+                    style: "display: flex; flex-direction: column; gap: 10px;",
+                    p { class: "page-subtitle", "Group chips count distinct filtered CVE/package pairs. Scan coverage and group-level new counts are unavailable. Member severity and new markers appear only when matching pair metadata is loaded; Details opens the authorized fleet-wide CVE/package drawer." }
+                    if let Some(Err(error)) = &scoped_metadata {
+                        p { class: "page-subtitle", "Pair metadata unavailable: {error}" }
+                    }
+                    CveInventoryGroupsView {
+                    query: CveInventoryQuery {
+                        group_by: "environment".into(),
+                        environment_id: environment_filter(),
+                        group_id: None,
+                        filters: CveFilters {
+                            severity: severity_filter(), fix_status: fix_status_filter(),
+                            triage_status: triage_status_filter(), package: package_filter(),
+                            search: (!search_query().is_empty()).then(|| search_query()),
+                            sort: None, limit: None,
+                        },
+                        offset: 0, limit: 50,
+                    },
+                    nested_hosts: view_mode() == "host",
+                    environments: environments.read().as_ref().and_then(|result| result.as_ref().ok()).cloned().unwrap_or_default(),
+                    pairs: scoped_metadata.as_ref().and_then(|result| result.as_ref().ok()).map(|page| page.items.clone()).unwrap_or_default(),
+                    seen: current_seen.clone(),
+                    now: seen_clock(),
+                    on_open_cve: {
+                        move |selection: ExactCveSelection| {
+                        let user_id = authenticated_user_id(&app_state.read().auth);
+                        persist_seen_pairs(seen_state, user_id.as_deref(), &[selection.clone()]);
                         sync_cve_url_state(
                             severity_filter(), fix_status_filter(), triage_status_filter(),
                             package_filter(), search_query(), focus_cve(), sort_by(), view_mode(),
-                            Some(&selection), true,
+                            environment_filter(), Some(&selection), true,
                         );
                         selected_cve.set(Some(selection));
-                    },
-                    filters: CveFilters {
-                        severity: severity_filter(),
-                        fix_status: fix_status_filter(),
-                        triage_status: triage_status_filter(),
-                        package: package_filter(),
-                        search: if search_query().is_empty() { None } else { Some(search_query()) },
-                        sort: Some(sort_by()),
-                        limit: Some(100),
+                        }
+                    }
                     }
                 }
             } else {
                 div {
-                    class: "card",
-                    style: "overflow: hidden;",
-                    match &*cve_list.read_unchecked() {
-                        Some(Ok(_)) => rsx! {
-                            table {
-                                class: "sys-table",
-                                thead {
-                                    tr {
-                                        th { "CVE" }
-                                        th { "Severity" }
-                                        th { "CVSS" }
-                                        th { "Package" }
-                                        th { "Title" }
-                                        th { title: "Distinct systems in current or scheduled configuration exposure", "Affected" }
-                                        th { "Fix" }
-                                        th { "Triage" }
-                                        th { "Age" }
-                                        th { style: "text-align: right;", " " }
-                                    }
-                                }
-                                tbody {
-                                    if focused_items.as_ref().is_some_and(Vec::is_empty) {
-                                        tr {
-                                            td {
-                                                colspan: "10",
-                                                style: "padding: 24px; text-align: center; color: var(--cf-text-muted); font-size: 13px;",
-                                                "No CVEs match the current filters."
-                                            }
-                                        }
-                                    } else {
-                                        for cve in focused_items.as_deref().unwrap_or_default() {
-                                            CveRow {
-                                                cve: cve.clone(),
-                                                total_systems: stats.read().as_ref().and_then(|r| r.as_ref().ok()).map(|s| s.systems_affected).unwrap_or(0),
-                                                on_open: move |selection: ExactCveSelection| {
-                                                    sync_cve_url_state(
-                                                        severity_filter(), fix_status_filter(), triage_status_filter(),
-                                                        package_filter(), search_query(), focus_cve(), sort_by(), view_mode(),
-                                                        Some(&selection), true,
-                                                    );
-                                                    selected_cve.set(Some(selection));
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                    key: "{severity_filter():?}|{fix_status_filter():?}|{triage_status_filter():?}|{package_filter():?}|{search_query()}|{sort_by()}|{view_mode()}|{environment_filter():?}|{active_user:?}",
+                    style: "display: flex; flex-direction: column; gap: 10px;",
+                    if focus_cve().is_some() {
+                        p { class: "page-subtitle", "Focused findings are paged. Automatic drawer selection requires the complete focused result in one server snapshot; a multi-page result stays a list." }
+                    }
+                    if let Some((_, _, Some(Err(error)))) = focus_result.read().as_ref() {
+                        p { class: "page-subtitle", "Focused CVE resolution unavailable: {error}" }
+                    }
+                    CvePairsView {
+                    query: CveInventoryQuery {
+                        group_by: "environment".into(), environment_id: environment_filter(), group_id: None,
+                        filters: CveFilters {
+                            severity: severity_filter(), fix_status: fix_status_filter(),
+                            triage_status: triage_status_filter(), package: package_filter(),
+                            search: (!search_query().is_empty()).then(|| search_query()),
+                            sort: Some(sort_by()), limit: None,
                         },
-                        Some(Err(err)) => rsx! {
-                            div {
-                                style: "padding: 24px; text-align: center; color: var(--cf-text-muted); font-size: 13px;",
-                                "Error loading CVEs: {err}"
-                            }
-                        },
-                        None => rsx! {
-                            div {
-                                style: "padding: 24px; text-align: center; color: var(--cf-text-muted); font-size: 13px;",
-                                "Loading CVEs..."
-                            }
-                        },
+                        offset: 0, limit: 200,
+                    },
+                    grouped: view_mode() == "grouped",
+                    focused: focus_cve(),
+                    user_id: active_user.clone(),
+                    seen_state,
+                    now: seen_clock(),
+                    on_mark_seen: {
+                        move |selections: Vec<ExactCveSelection>| {
+                            let user_id = authenticated_user_id(&app_state.read().auth);
+                            persist_seen_pairs(seen_state, user_id.as_deref(), &selections);
+                        }
+                    },
+                    on_open_cve: {
+                        move |selection: ExactCveSelection| {
+                        let user_id = authenticated_user_id(&app_state.read().auth);
+                        persist_seen_pairs(seen_state, user_id.as_deref(), &[selection.clone()]);
+                        sync_cve_url_state(
+                            severity_filter(), fix_status_filter(), triage_status_filter(),
+                            package_filter(), search_query(), focus_cve(), sort_by(), view_mode(), environment_filter(),
+                            Some(&selection), true,
+                        );
+                        selected_cve.set(Some(selection));
+                        }
+                    }
                     }
                 }
             }
@@ -978,9 +1239,10 @@ pub fn CvesView(query: String) -> Element {
                     on_close: move |_| {
                         sync_cve_url_state(
                             severity_filter(), fix_status_filter(), triage_status_filter(),
-                            package_filter(), search_query(), focus_cve(), sort_by(), view_mode(), None, true,
+                            package_filter(), search_query(), focus_cve(), sort_by(), view_mode(), environment_filter(), None, true,
                         );
                         selected_cve.set(None);
+                        focus_resolved_query.set(focus_result.read().as_ref().map(|(query, _, _)| query.clone()));
                     }
                 }
             }
@@ -1003,10 +1265,275 @@ pub fn CvesView(query: String) -> Element {
 // Flat List Components
 // ─────────────────────────────────────────────────────────────────────────────
 
+fn loaded_package_groups(items: &[CveListItem]) -> BTreeMap<String, Vec<CveListItem>> {
+    let mut groups = BTreeMap::<String, Vec<CveListItem>>::new();
+    for item in items {
+        groups
+            .entry(
+                item.package_name
+                    .clone()
+                    .unwrap_or_else(|| "Unknown package".into()),
+            )
+            .or_default()
+            .push(item.clone());
+    }
+    groups
+}
+
+fn severity_weight(severity: &str) -> u8 {
+    match severity.to_ascii_uppercase().as_str() {
+        "CRITICAL" => 4,
+        "HIGH" => 3,
+        "MEDIUM" => 2,
+        "LOW" => 1,
+        _ => 0,
+    }
+}
+
+fn ordered_package_groups(
+    items: &[CveListItem],
+    now: DateTime<Utc>,
+    seen: Option<&CveSeenState>,
+) -> Vec<(String, Vec<CveListItem>)> {
+    let mut groups = loaded_package_groups(items).into_iter().collect::<Vec<_>>();
+    groups.sort_by(|(left_name, left), (right_name, right)| {
+        let rank = |rows: &[CveListItem]| {
+            (
+                rows.iter()
+                    .any(|item| recently_observed_unseen(item, now, seen)),
+                rows.iter()
+                    .map(|item| severity_weight(&item.severity))
+                    .max()
+                    .unwrap_or(0),
+            )
+        };
+        rank(right)
+            .cmp(&rank(left))
+            .then_with(|| left_name.cmp(right_name))
+    });
+    groups
+}
+
+fn unseen_new_pairs(
+    items: &[CveListItem],
+    now: DateTime<Utc>,
+    seen: Option<&CveSeenState>,
+) -> Vec<ExactCveSelection> {
+    items
+        .iter()
+        .filter(|item| recently_observed_unseen(item, now, seen))
+        .filter_map(|item| {
+            item.package_name.as_ref().map(|name| ExactCveSelection {
+                cve_id: item.cve_id.clone(),
+                package: name.clone(),
+            })
+        })
+        .collect()
+}
+
+fn pair_metadata_for_member<'a>(
+    member: &CveInventoryMember,
+    pairs: &'a [CveListItem],
+) -> Option<&'a CveListItem> {
+    pairs
+        .iter()
+        .find(|pair| pair.cve_id == member.cve_id && pair.package_name == member.package_name)
+}
+
+fn deployment_dot(status: Option<&str>) -> Option<(&'static str, &'static str)> {
+    match status? {
+        "up_to_date" => Some(("#34d399", "up to date")),
+        "behind" => Some(("#fbbf24", "behind")),
+        "ahead" => Some(("#60a5fa", "ahead")),
+        "no_deployment" => Some(("#9ca3af", "not deployed")),
+        "unknown" => Some(("#9ca3af", "unknown")),
+        _ => None,
+    }
+}
+
+fn initially_expanded(group_by: &str, offset: i64, index: usize) -> bool {
+    offset == 0 && index < if group_by == "host" { 2 } else { 3 }
+}
+
+#[component]
+fn CvePairsView(
+    query: CveInventoryQuery,
+    grouped: bool,
+    focused: Option<String>,
+    user_id: Option<String>,
+    seen_state: Signal<Option<CveSeenState>>,
+    now: DateTime<Utc>,
+    on_mark_seen: EventHandler<Vec<ExactCveSelection>>,
+    on_open_cve: EventHandler<ExactCveSelection>,
+) -> Element {
+    let mut offset = use_signal(|| 0_i64);
+    let mut loaded = use_signal(Vec::<CveListItem>::new);
+    let mut next = use_signal(|| None::<i64>);
+    let mut total = use_signal(|| 0_i64);
+    let mut applied = use_signal(|| None::<i64>);
+    let mut expanded_packages = use_signal(BTreeMap::<String, bool>::new);
+    let mut default_package = use_signal(|| None::<String>);
+    let mut default_applied = use_signal(|| false);
+    let resource_query = query.clone();
+    let page = use_resource(move || {
+        let mut request = resource_query.clone();
+        request.offset = offset();
+        async move {
+            (
+                request.offset,
+                client::fetch_cve_inventory_pairs(&request).await,
+            )
+        }
+    });
+    use_effect(move || {
+        if let Some((response_offset, Ok(response))) = page.read().as_ref()
+            && *response_offset == offset()
+            && applied() != Some(offset())
+        {
+            loaded.write().extend(response.items.iter().cloned());
+            next.set(response.next_offset.filter(|value| *value > offset()));
+            total.set(response.total);
+            applied.set(Some(offset()));
+        }
+    });
+    let visible = loaded()
+        .into_iter()
+        .filter(|item| {
+            focused.as_ref().is_none_or(|id| {
+                item.cve_id == *id
+                    && item.package_name.is_some()
+                    && has_retained_package_evidence(item)
+            })
+        })
+        .collect::<Vec<_>>();
+    let seen = seen_for_user(seen_state.read().as_ref(), user_id.as_deref()).cloned();
+    let ordered = ordered_package_groups(&visible, now, seen.as_ref())
+        .into_iter()
+        .map(|(package, cves)| {
+            let is_new = cves
+                .iter()
+                .any(|item| recently_observed_unseen(item, now, seen.as_ref()));
+            let expanded = expanded_packages()
+                .get(&package)
+                .copied()
+                .unwrap_or(default_package().as_ref() == Some(&package));
+            let count = cves.len();
+            let newly_observed = unseen_new_pairs(&cves, now, seen.as_ref());
+            (package, cves, is_new, expanded, count, newly_observed)
+        })
+        .collect::<Vec<_>>();
+    let effect_user = user_id.clone();
+    use_effect(move || {
+        if !grouped || default_applied() || applied().is_none() {
+            return;
+        }
+        let current_seen = seen_state.read();
+        let Some(seen) = seen_for_user(current_seen.as_ref(), effect_user.as_deref()) else {
+            return;
+        };
+        let rows = loaded();
+        let ordered = ordered_package_groups(&rows, now, Some(seen));
+        if let Some((package, _)) = ordered.into_iter().find(|(_, pairs)| {
+            pairs
+                .iter()
+                .any(|item| recently_observed_unseen(item, now, Some(seen)))
+        }) {
+            default_package.set(Some(package));
+            default_applied.set(true);
+        }
+    });
+    rsx! {
+        if let Some((response_offset, Err(error))) = page.read().as_ref()
+            && *response_offset == offset() {
+            div { class: "empty", "Unable to load CVE pairs: {error}" }
+        }
+        if loaded().is_empty() && page.read().is_none() {
+            div { class: "empty", "Loading CVE pairs..." }
+        } else if focused.is_none() && loaded().is_empty() && applied() == Some(offset()) {
+            div { class: "empty", "No CVEs match the current filters." }
+        }
+        if focused.is_some() && visible.is_empty() && applied().is_some() {
+            div {
+                class: "empty",
+                if next().is_some() {
+                    "No retained package finding for this CVE in loaded pages. More pairs remain."
+                } else {
+                    "No retained package finding matches this focused CVE."
+                }
+            }
+        }
+        if applied().is_some() {
+            p { class: "page-subtitle", "{loaded().len()} of {total()} filtered CVE/package pairs loaded. Pair counts use the selected environment." }
+        }
+        if grouped {
+            p { class: "page-subtitle", "Package groups show loaded pairs only. Pages do not share a snapshot, so group totals are unavailable." }
+            for (package, cves, is_new, is_expanded, count, newly_observed) in ordered {
+                div {
+                    class: "card",
+                    key: "{package}",
+                    style: if is_new { "overflow: hidden; border-left: 3px solid var(--cf-brand-purple); background: color-mix(in oklab, var(--cf-brand-purple) 5%, var(--cf-card-bg));" } else { "overflow: hidden;" },
+                    button {
+                        class: "focus-ring",
+                        style: "all: unset; box-sizing: border-box; padding: 14px 18px; cursor: pointer; width: 100%; display: flex; gap: 10px; align-items: center; text-align: left;",
+                        aria_expanded: "{is_expanded}",
+                        onclick: {
+                            let package = package.clone();
+                            let newly_observed = newly_observed.clone();
+                            move |_| {
+                                let is_expanded = expanded_packages().get(&package).copied()
+                                    .unwrap_or(default_package().as_ref() == Some(&package));
+                                expanded_packages.write().insert(package.clone(), !is_expanded);
+                                if !is_expanded {
+                                    on_mark_seen.call(newly_observed.clone());
+                                }
+                            }
+                        },
+                        span { style: "font-weight: 700; flex: 1;", "{package}" }
+                        if is_new {
+                            span { class: "chip chip-info", "new" }
+                        }
+                        span { style: "font-size: 12px; color: var(--cf-text-muted);", "{count} pairs loaded" }
+                    }
+                    if is_expanded {
+                        table { class: "sys-table",
+                            thead { tr { th { "CVE" } th { "Severity" } th { "CVSS" } th { "Title" } th { "Affected" } th { "Fix" } th { "Triage" } th { "Age" } } }
+                            tbody {
+                                for cve in cves {
+                                    CveRowInGroup { key: "{cve.cve_id}|{cve.package_name:?}", is_new: recently_observed_unseen(&cve, now, seen.as_ref()), cve, total_systems: 0, on_open: on_open_cve }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            div { class: "card", style: "overflow-x: auto;",
+                table { class: "sys-table",
+                    thead { tr { th { "CVE" } th { "Severity" } th { "CVSS" } th { "Package" } th { "Title" } th { "Affected" } th { "Fix" } th { "Triage" } th { "Age" } th { " " } } }
+                    tbody {
+                        for cve in visible {
+                            CveRow { key: "{cve.cve_id}|{cve.package_name:?}", is_new: recently_observed_unseen(&cve, now, seen.as_ref()), cve, total_systems: 0, on_open: on_open_cve }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(more) = next() {
+            button {
+                class: "btn btn-ghost focus-ring",
+                disabled: applied() != Some(offset()),
+                onclick: move |_| offset.set(more),
+                "Show more pairs ({loaded().len()} of {total()})"
+            }
+        }
+    }
+}
+
 #[component]
 fn CveRow(
     cve: CveListItem,
     total_systems: i64,
+    is_new: bool,
     on_open: EventHandler<ExactCveSelection>,
 ) -> Element {
     let (current_affected, scheduled_configuration, historical) = cve.inventory_counts();
@@ -1034,7 +1561,7 @@ fn CveRow(
 
     rsx! {
         tr {
-            style: "cursor: pointer;",
+            style: if is_new { "cursor: pointer; background: color-mix(in oklab, var(--cf-brand-purple) 8%, transparent);" } else { "cursor: pointer;" },
             "data-testid": "cve-row",
             onclick: move |_| {
                 if let Some(selection) = selection_for_row.clone() {
@@ -1048,6 +1575,7 @@ fn CveRow(
                     class: "mono",
                     style: "font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 8px;",
                     "{cve.cve_id}"
+                    if is_new { span { class: "chip chip-info", "new" } }
                     if cve.exploited {
                         span {
                             class: "chip chip-critical",
@@ -1134,9 +1662,11 @@ fn CveRow(
                         style: if cve.affected_count > 0 { "font-size: 12px; font-weight: 600; color: var(--cf-text-primary);" } else { "font-size: 12px; font-weight: 600; color: var(--cf-text-muted);" },
                         "{cve.affected_count}"
                     }
-                    span {
-                        style: "font-size: 11px; color: var(--cf-text-muted);",
-                        "/ {total_systems}"
+                    if total_systems > 0 {
+                        span {
+                            style: "font-size: 11px; color: var(--cf-text-muted);",
+                            "/ {total_systems}"
+                        }
                     }
                 }
             }
@@ -1245,6 +1775,294 @@ fn CveRow(
 // ─────────────────────────────────────────────────────────────────────────────
 // Grouped View Components
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[component]
+fn CveInventoryGroupsView(
+    query: CveInventoryQuery,
+    nested_hosts: bool,
+    environments: Vec<EnvironmentSummary>,
+    pairs: Vec<CveListItem>,
+    seen: Option<CveSeenState>,
+    now: DateTime<Utc>,
+    on_open_cve: EventHandler<ExactCveSelection>,
+) -> Element {
+    let mut offset = use_signal(|| 0_i64);
+    let mut loaded = use_signal(Vec::<CveInventoryGroup>::new);
+    let mut next = use_signal(|| None::<i64>);
+    let mut total = use_signal(|| 0_i64);
+    let mut applied = use_signal(|| None::<i64>);
+    let resource_query = query.clone();
+    let page = use_resource(move || {
+        let mut request = resource_query.clone();
+        request.offset = offset();
+        async move {
+            (
+                request.offset,
+                client::fetch_cve_inventory_groups(&request).await,
+            )
+        }
+    });
+    use_effect(move || {
+        if let Some((response_offset, Ok(response))) = page.read().as_ref()
+            && *response_offset == offset()
+            && applied() != Some(offset())
+        {
+            loaded.write().extend(response.items.iter().cloned());
+            next.set(response.next_offset.filter(|value| *value > offset()));
+            total.set(response.total);
+            applied.set(Some(offset()));
+        }
+    });
+
+    rsx! {
+        if let Some((_, Err(error))) = page.read().as_ref() {
+            div { class: "empty", "Unable to load CVE groups: {error}" }
+        }
+        if loaded().is_empty() && page.read().is_none() {
+            div { class: "empty", "Loading CVE groups..." }
+        } else if loaded().is_empty() && page.read().as_ref().is_some_and(|(_, result)| result.is_ok()) {
+            div { class: "empty", "No matching finding groups. Scan coverage unavailable." }
+        }
+        for (index, group) in loaded().into_iter().enumerate() {
+            CveInventoryGroupCard {
+                key: "{query.group_by}|{group.group_id:?}",
+                group,
+                query: query.clone(),
+                nested_hosts,
+                initial_expanded: initially_expanded(&query.group_by, offset(), index),
+                environments: environments.clone(),
+                pairs: pairs.clone(),
+                seen: seen.clone(),
+                now,
+                on_open_cve,
+            }
+        }
+        if let Some(more) = next() {
+            button {
+                class: "btn btn-ghost focus-ring",
+                disabled: applied() != Some(offset()),
+                onclick: move |_| offset.set(more),
+                "Show more groups ({loaded().len()} of {total()})"
+            }
+        }
+    }
+}
+
+#[component]
+fn CveInventoryGroupCard(
+    group: CveInventoryGroup,
+    query: CveInventoryQuery,
+    nested_hosts: bool,
+    initial_expanded: bool,
+    environments: Vec<EnvironmentSummary>,
+    pairs: Vec<CveListItem>,
+    seen: Option<CveSeenState>,
+    now: DateTime<Utc>,
+    on_open_cve: EventHandler<ExactCveSelection>,
+) -> Element {
+    let mut expanded = use_signal(move || initial_expanded);
+    let group_id = group.group_id;
+    let is_host = query.group_by == "host";
+    let color = (!is_host)
+        .then(|| {
+            environments
+                .iter()
+                .find(|env| Some(env.id) == group_id)
+                .map(|env| env.color_hex.clone())
+        })
+        .flatten();
+    let deployment = deployment_dot(group.deployment_status.as_deref());
+    rsx! {
+        div { class: "card", style: "overflow: hidden;",
+            div { style: "display: flex; align-items: center; gap: 8px;",
+                button {
+                    class: "focus-ring",
+                    style: "all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 14px; flex: 1; padding: 14px 18px; cursor: pointer; min-width: 0;",
+                    aria_expanded: "{expanded()}",
+                    onclick: move |_| expanded.set(!expanded()),
+                    span { style: "color: var(--cf-text-muted);", if expanded() { "▾" } else { "›" } }
+                    if is_host {
+                        if let Some((dot_color, label)) = deployment {
+                            span { class: "status-dot", style: "--status-color: {dot_color};", title: "Deployment: {label}" }
+                        }
+                        span { style: "flex: 1; font-weight: 700; text-align: left;", "{group.name}" }
+                    } else {
+                        EnvBadge {
+                            name: group.name.clone(),
+                            fg: color.clone(),
+                            bg: color.as_ref().map(|value| format!("color-mix(in oklab, {value} 14%, var(--cf-card-bg))")),
+                            border: color.clone(),
+                        }
+                        span { style: "flex: 1;" }
+                    }
+                    span { class: "mono", "{group.cve_count} distinct CVEs" }
+                }
+                if is_host {
+                    if let Some(id) = group_id {
+                        Link {
+                            class: "btn btn-ghost focus-ring",
+                            to: Route::SystemDetailView { id: id.to_string(), tab: "cves".into(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new(), cve_target: String::new(), cve_mode: String::new() },
+                            "Open"
+                        }
+                    }
+                }
+            }
+            div { style: "padding: 0 18px 12px; font-size: 12px; color: var(--cf-text-secondary); display: flex; align-items: center; gap: 8px; flex-wrap: wrap;",
+                span { "{group.cve_package_count} CVE/package pairs" }
+                if !is_host {
+                    span {
+                        "{group.host_count} hosts with findings"
+                        if let Some(total) = group.total_active_hosts { " of {total} active hosts" }
+                    }
+                }
+                span { "{group.current_host_count} current · {group.scheduled_host_count} scheduled · {group.historical_host_count} historical" }
+                span { "{group.patchable_pair_count} patchable pairs" }
+                if let Some(flake) = &group.flake_name { span { "Flake: {flake}" } }
+                if is_host {
+                    if let Some((_, label)) = deployment { span { "Deployment: {label}" } }
+                    else { span { "Deployment unavailable" } }
+                }
+                span { "Scan coverage unavailable" }
+            }
+            div { style: "padding: 0 18px 12px; display: flex; align-items: center; gap: 5px; flex-wrap: wrap;",
+                if group.critical_pair_count > 0 { span { class: "chip chip-critical", "{group.critical_pair_count} critical pairs" } }
+                if group.high_pair_count > 0 { span { class: "chip chip-warning", "{group.high_pair_count} high pairs" } }
+                if group.medium_pair_count > 0 { span { class: "chip chip-info", "{group.medium_pair_count} medium pairs" } }
+                if group.low_pair_count > 0 { span { class: "chip chip-unknown", "{group.low_pair_count} low pairs" } }
+                if group.unknown_pair_count > 0 { span { class: "chip chip-unknown", "{group.unknown_pair_count} unknown severity pairs" } }
+                if group.exploited_pair_count > 0 { span { class: "chip chip-critical", "{group.exploited_pair_count} exploited pairs" } }
+            }
+            if expanded() {
+                if nested_hosts && group_id.is_some() {
+                    CveInventoryGroupsView {
+                        key: "hosts-{group_id:?}",
+                        query: CveInventoryQuery {
+                            group_by: "host".into(), environment_id: group_id,
+                            group_id: None, ..query.clone()
+                        },
+                        nested_hosts: false,
+                        environments: environments.clone(),
+                        pairs: pairs.clone(),
+                        seen: seen.clone(),
+                        now,
+                        on_open_cve,
+                    }
+                } else {
+                    CveInventoryMembersView {
+                        key: "members-{group_id:?}",
+                        query: CveInventoryQuery { group_id, ..query.clone() },
+                        pairs: pairs.clone(),
+                        seen: seen.clone(),
+                        now,
+                        on_open_cve,
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn CveInventoryMembersView(
+    query: CveInventoryQuery,
+    pairs: Vec<CveListItem>,
+    seen: Option<CveSeenState>,
+    now: DateTime<Utc>,
+    on_open_cve: EventHandler<ExactCveSelection>,
+) -> Element {
+    let mut offset = use_signal(|| 0_i64);
+    let mut loaded = use_signal(Vec::<CveInventoryMember>::new);
+    let mut next = use_signal(|| None::<i64>);
+    let mut total = use_signal(|| 0_i64);
+    let mut applied = use_signal(|| None::<i64>);
+    let page = use_resource(move || {
+        let mut request = query.clone();
+        request.offset = offset();
+        async move {
+            (
+                request.offset,
+                client::fetch_cve_inventory_members(&request).await,
+            )
+        }
+    });
+    use_effect(move || {
+        if let Some((response_offset, Ok(response))) = page.read().as_ref()
+            && *response_offset == offset()
+            && applied() != Some(offset())
+        {
+            loaded.write().extend(response.items.iter().cloned());
+            next.set(response.next_offset.filter(|value| *value > offset()));
+            total.set(response.total);
+            applied.set(Some(offset()));
+        }
+    });
+    rsx! {
+        if let Some((_, Err(error))) = page.read().as_ref() {
+            div { class: "empty", "Unable to load group members: {error}" }
+        }
+        if loaded().is_empty() && page.read().is_none() {
+            div { class: "empty", "Loading group members..." }
+        }
+        div { style: "overflow-x: auto;",
+            table { class: "sys-table",
+                thead { tr { th { "CVE" } th { "Severity" } th { "Package" } th { "System" } th { "Evidence" } th { "Version" } th { " " } } }
+                tbody {
+                    for member in loaded() {
+                        tr {
+                            key: "{member.cve_id}|{member.package_name:?}|{member.system_id}|{member.inventory_section}",
+                            style: if pair_metadata_for_member(&member, &pairs).is_some_and(|pair| recently_observed_unseen(pair, now, seen.as_ref())) { "background: color-mix(in oklab, var(--cf-brand-purple) 8%, transparent);" } else { "" },
+                            td { class: "mono",
+                                "{member.cve_id}"
+                                if pair_metadata_for_member(&member, &pairs).is_some_and(|pair| recently_observed_unseen(pair, now, seen.as_ref())) {
+                                    span { class: "chip chip-info", "new" }
+                                }
+                            }
+                            td {
+                                if let Some(pair) = pair_metadata_for_member(&member, &pairs) {
+                                    span { class: "chip", title: "{pair.title}", "{pair.severity}" }
+                                    if pair.exploited { span { class: "chip chip-critical", "Exploited" } }
+                                } else {
+                                    span { title: "Pair metadata is not in the loaded scoped page", "Unavailable" }
+                                }
+                            }
+                            td { class: "mono", {member.package_name.as_deref().unwrap_or("Unknown package")} }
+                            td { "{member.hostname}" }
+                            td {
+                                {match member.inventory_section.as_str() {
+                                    "current" => "Current",
+                                    "scheduled_deployment_target" => "Scheduled configuration",
+                                    "historical" => "Historical evidence",
+                                    _ => "Unknown evidence",
+                                }}
+                            }
+                            td { class: "mono", "{member.installed_version}" }
+                            td {
+                                if let Some(package) = &member.package_name {
+                                    button {
+                                        class: "btn btn-ghost focus-ring",
+                                        onclick: {
+                                            let selection = ExactCveSelection { cve_id: member.cve_id.clone(), package: package.clone() };
+                                            move |_| on_open_cve.call(selection.clone())
+                                        },
+                                        "Details"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(more) = next() {
+            button {
+                class: "btn btn-ghost focus-ring",
+                disabled: applied() != Some(offset()),
+                onclick: move |_| offset.set(more),
+                "Show more findings ({loaded().len()} of {total()})"
+            }
+        }
+    }
+}
 
 #[component]
 fn CvePackageGroupsView(
@@ -1492,6 +2310,7 @@ fn CvePackageGroupCard(
 fn CveRowInGroup(
     cve: CveListItem,
     total_systems: i64,
+    #[props(default)] is_new: bool,
     on_open: EventHandler<ExactCveSelection>,
 ) -> Element {
     let (current_affected, scheduled_configuration, historical) = cve.inventory_counts();
@@ -1516,7 +2335,7 @@ fn CveRowInGroup(
 
     rsx! {
         tr {
-            style: "cursor: pointer;",
+            style: if is_new { "cursor: pointer; background: color-mix(in oklab, var(--cf-brand-purple) 8%, transparent);" } else { "cursor: pointer;" },
             "data-testid": "cve-row",
             onclick: move |_| {
                 if let Some(selection) = selection_for_row.clone() {
@@ -1530,6 +2349,7 @@ fn CveRowInGroup(
                     class: "mono",
                     style: "font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 8px;",
                     "{cve.cve_id}"
+                    if is_new { span { class: "chip chip-info", "new" } }
                     if cve.exploited {
                         span {
                             class: "chip chip-critical",
@@ -1609,9 +2429,11 @@ fn CveRowInGroup(
                         style: if cve.affected_count > 0 { "font-size: 12px; font-weight: 600; color: var(--cf-text-primary);" } else { "font-size: 12px; font-weight: 600; color: var(--cf-text-muted);" },
                         "{cve.affected_count}"
                     }
-                    span {
-                        style: "font-size: 11px; color: var(--cf-text-muted);",
-                        "/ {total_systems}"
+                    if total_systems > 0 {
+                        span {
+                            style: "font-size: 11px; color: var(--cf-text-muted);",
+                            "/ {total_systems}"
+                        }
                     }
                 }
             }
@@ -2298,19 +3120,259 @@ fn FleetCveTriageDialog(
 #[cfg(test)]
 mod tests {
     use super::{
-        FleetDetailState, ToastLifecycle, environment_triage_eligible, fleet_error_state,
-        fleet_fix_label, fleet_triage_draft, has_retained_package_evidence,
-        inventory_section_label, is_canonical_cve_id, request_token_is_current,
-        systems_in_inventory_section, triage_status_presentation, unique_retained_package_for_cve,
+        CveSeenState, FleetDetailState, ToastLifecycle, authenticated_user_id,
+        complete_focus_package, deployment_dot, environment_triage_eligible, fleet_error_state,
+        fleet_fix_label, fleet_triage_draft, has_retained_package_evidence, initially_expanded,
+        inventory_section_label, is_canonical_cve_id, loaded_package_groups,
+        ordered_package_groups, pair_metadata_for_member, recently_observed_unseen,
+        request_token_is_current, seen_for_user, seen_storage_key, systems_in_inventory_section,
+        triage_status_presentation, unique_retained_package_for_cve, unseen_new_pairs,
     };
-    use crate::api::models::{CveListItem, FleetCveInventorySection, SystemCveInventoryAuthority};
+    use crate::api::models::{
+        AuthContext, AuthMode, AuthUser, CveInventoryMember, CveInventoryPairPage, CveListItem,
+        FleetCveInventorySection, SystemCveInventoryAuthority,
+    };
     use crate::components::cve::triage::{
         CveTriageDraft, EnvironmentTriageChoice, EnvironmentTriageDraft,
     };
     use crate::views::poam_api::{
         self, CveEnvironmentTriageAction, PoamApiError, PoamRisk, PoamServerError,
     };
+    use chrono::{Duration, TimeZone, Utc};
+    use std::collections::BTreeSet;
     use uuid::Uuid;
+
+    #[test]
+    fn seen_storage_requires_authenticated_nonempty_user_id() {
+        let user = AuthUser {
+            id: "user-a".into(),
+            email: "a@example.test".into(),
+            display_name: None,
+        };
+        let mut context = AuthContext {
+            is_authenticated: false,
+            user: Some(user),
+            roles: vec![],
+            auth_mode: AuthMode::Local,
+        };
+        assert_eq!(authenticated_user_id(&Some(context.clone())), None);
+        context.is_authenticated = true;
+        assert_eq!(
+            authenticated_user_id(&Some(context.clone())),
+            Some("user-a".into())
+        );
+        context.user.as_mut().unwrap().id.clear();
+        assert_eq!(authenticated_user_id(&Some(context)), None);
+        assert_eq!(authenticated_user_id(&None), None);
+    }
+
+    #[test]
+    fn new_marker_uses_exact_observation_and_authenticated_user_namespace() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 9, 26, 12, 0, 0)
+            .single()
+            .unwrap();
+        let mut row = cve_item("CVE-2025-1234", Some("openssl"), Some(1));
+        row.age_days = 900;
+        row.last_seen = Some(now - Duration::hours(24) + Duration::milliseconds(1));
+        let mut a = CveSeenState {
+            user_id: "user-a".into(),
+            pairs: BTreeSet::new(),
+        };
+        let b = CveSeenState {
+            user_id: "user-b".into(),
+            pairs: BTreeSet::new(),
+        };
+        assert_ne!(seen_storage_key("user-a"), seen_storage_key("user-b"));
+        assert!(recently_observed_unseen(
+            &row,
+            now,
+            seen_for_user(Some(&a), Some("user-a"))
+        ));
+        a.pairs.insert((row.cve_id.clone(), "openssl".into()));
+        let serialized = serde_json::to_string(&a.pairs).unwrap();
+        let restored = CveSeenState {
+            user_id: "user-a".into(),
+            pairs: serde_json::from_str(&serialized).unwrap(),
+        };
+        assert_eq!(seen_for_user(Some(&restored), Some("user-a")), Some(&a));
+        assert!(!recently_observed_unseen(
+            &row,
+            now,
+            seen_for_user(Some(&a), Some("user-a"))
+        ));
+        assert!(recently_observed_unseen(
+            &row,
+            now,
+            seen_for_user(Some(&b), Some("user-b"))
+        ));
+        assert!(seen_for_user(Some(&a), Some("user-b")).is_none());
+        assert!(seen_for_user(Some(&a), None).is_none());
+        assert!(!recently_observed_unseen(&row, now, None));
+        row.last_seen = Some(now - Duration::hours(24));
+        assert!(!recently_observed_unseen(&row, now, Some(&b)));
+        row.last_seen = Some(now + Duration::milliseconds(1));
+        assert!(!recently_observed_unseen(&row, now, Some(&b)));
+        row.last_seen = None;
+        assert!(!recently_observed_unseen(&row, now, Some(&b)));
+    }
+
+    #[test]
+    fn package_order_prefers_unseen_new_then_highest_severity() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 9, 26, 12, 0, 0)
+            .single()
+            .unwrap();
+        let seen = CveSeenState {
+            user_id: "user-a".into(),
+            pairs: BTreeSet::new(),
+        };
+        let mut old_critical = cve_item("CVE-2025-0001", Some("old"), Some(1));
+        old_critical.last_seen = Some(now - Duration::hours(25));
+        let mut fresh_high = cve_item("CVE-2025-0002", Some("high"), Some(1));
+        fresh_high.severity = "high".into();
+        fresh_high.last_seen = Some(now - Duration::hours(1));
+        let mut fresh_low = cve_item("CVE-2025-0003", Some("low"), Some(1));
+        fresh_low.severity = "low".into();
+        fresh_low.last_seen = Some(now - Duration::hours(1));
+        let groups =
+            ordered_package_groups(&[old_critical, fresh_low, fresh_high], now, Some(&seen));
+        assert_eq!(
+            groups
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["high", "low", "old"]
+        );
+        assert_eq!(unseen_new_pairs(&groups[0].1, now, Some(&seen)).len(), 1);
+        assert!(unseen_new_pairs(&groups[2].1, now, Some(&seen)).is_empty());
+        assert!(unseen_new_pairs(&groups[0].1, now, None).is_empty());
+    }
+
+    #[test]
+    fn package_groups_only_count_loaded_pairs_and_metadata_matches_exact_identity() {
+        let items = vec![
+            cve_item("CVE-2025-1234", Some("openssl"), Some(1)),
+            cve_item("CVE-2025-5678", Some("openssl"), Some(1)),
+            cve_item("CVE-2025-1234", Some("glibc"), Some(1)),
+        ];
+        let groups = loaded_package_groups(&items);
+        assert_eq!(groups["openssl"].len(), 2);
+        assert_eq!(groups["glibc"].len(), 1);
+        let member = CveInventoryMember {
+            cve_id: "CVE-2025-1234".into(),
+            package_name: Some("openssl".into()),
+            system_id: Uuid::new_v4(),
+            environment_id: None,
+            hostname: "host".into(),
+            inventory_section: "historical".into(),
+            installed_version: "1".into(),
+            deployment_status: None,
+            flake_name: None,
+        };
+        assert_eq!(
+            pair_metadata_for_member(&member, &items)
+                .unwrap()
+                .package_name
+                .as_deref(),
+            Some("openssl")
+        );
+        let other = CveInventoryMember {
+            package_name: Some("unloaded".into()),
+            ..member
+        };
+        assert!(pair_metadata_for_member(&other, &items).is_none());
+    }
+
+    #[test]
+    fn focus_never_opens_from_a_partial_or_ambiguous_pair_page() {
+        let row = cve_item("CVE-2025-1234", Some("openssl"), Some(1));
+        let mut page = CveInventoryPairPage {
+            items: vec![row.clone()],
+            total: 2,
+            next_offset: Some(1),
+        };
+        assert_eq!(complete_focus_package(&page, "CVE-2025-1234"), None);
+        page.total = 1;
+        page.next_offset = None;
+        assert_eq!(
+            complete_focus_package(&page, "CVE-2025-1234"),
+            Some("openssl".into())
+        );
+        page.items
+            .push(cve_item("CVE-2025-1234", Some("glibc"), Some(1)));
+        page.total = 2;
+        assert_eq!(complete_focus_package(&page, "CVE-2025-1234"), None);
+        page.items = vec![row];
+        page.total = 2;
+        assert_eq!(complete_focus_package(&page, "CVE-2025-1234"), None);
+    }
+
+    #[test]
+    fn projection_pages_keep_group_counts_and_exact_member_grain() {
+        use crate::api::models::{CveInventoryGroupPage, CveInventoryMemberPage};
+        let environment = Uuid::new_v4();
+        let system = Uuid::new_v4();
+        let groups: CveInventoryGroupPage = serde_json::from_value(serde_json::json!({
+            "items": [{"group_id": environment, "name": "Production",
+                "cve_package_count": 2, "cve_count": 1,
+                "critical_pair_count": 1, "high_pair_count": 1,
+                "medium_pair_count": 0, "low_pair_count": 0,
+                "unknown_pair_count": 0, "exploited_pair_count": 1,
+                "patchable_pair_count": 1, "host_count": 1, "total_active_hosts": 4,
+                "current_host_count": 1, "scheduled_host_count": 1,
+                "historical_host_count": 0, "flake_name": null, "deployment_status": null}],
+            "total": 3, "next_offset": 1
+        }))
+        .unwrap();
+        assert_eq!(groups.items[0].cve_count, 1);
+        assert_eq!(groups.items[0].cve_package_count, 2);
+        assert_eq!(groups.items[0].host_count, 1);
+        assert_eq!(groups.items[0].total_active_hosts, Some(4));
+        assert_eq!(
+            groups.items[0].critical_pair_count + groups.items[0].high_pair_count,
+            2
+        );
+        assert_eq!(groups.items[0].exploited_pair_count, 1);
+        assert_eq!(groups.items[0].patchable_pair_count, 1);
+        assert_eq!(groups.total, 3);
+        assert_eq!(groups.next_offset, Some(1));
+        let members: CveInventoryMemberPage = serde_json::from_value(serde_json::json!({
+            "items": [
+                {"cve_id": "CVE-2025-1234", "package_name": "openssl", "system_id": system,
+                 "environment_id": environment, "hostname": "host-a", "inventory_section": "current",
+                 "installed_version": "1", "deployment_status": "behind", "flake_name": "fleet"},
+                {"cve_id": "CVE-2025-1234", "package_name": "openssl", "system_id": system,
+                 "environment_id": environment, "hostname": "host-a", "inventory_section": "scheduled_deployment_target",
+                 "installed_version": "2", "deployment_status": "behind", "flake_name": "fleet"}
+            ], "total": 3, "next_offset": 2
+        })).unwrap();
+        assert_eq!(members.items.len(), 2);
+        assert_eq!(members.items[0].system_id, members.items[1].system_id);
+        assert_ne!(
+            members.items[0].inventory_section,
+            members.items[1].inventory_section
+        );
+        assert_eq!(members.total, 3);
+        assert_eq!(members.next_offset, Some(2));
+    }
+
+    #[test]
+    fn group_defaults_and_deployment_dot_do_not_infer_scan_health() {
+        assert!(initially_expanded("environment", 0, 2));
+        assert!(!initially_expanded("environment", 0, 3));
+        assert!(initially_expanded("host", 0, 1));
+        assert!(!initially_expanded("host", 0, 2));
+        assert!(!initially_expanded("host", 50, 0));
+        assert_eq!(deployment_dot(Some("up_to_date")).unwrap().1, "up to date");
+        assert_eq!(deployment_dot(Some("behind")).unwrap().1, "behind");
+        assert_eq!(
+            deployment_dot(Some("no_deployment")).unwrap().1,
+            "not deployed"
+        );
+        assert!(deployment_dot(Some("unexpected")).is_none());
+        assert!(deployment_dot(None).is_none());
+    }
 
     fn cve_item(cve_id: &str, package: Option<&str>, current_count: Option<i64>) -> CveListItem {
         CveListItem {

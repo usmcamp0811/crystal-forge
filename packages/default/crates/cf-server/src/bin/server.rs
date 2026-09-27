@@ -21,8 +21,8 @@ use crystal_forge::{
         agent::{deployment_failed, deployment_started, heartbeat, state},
         agent_request::CFState,
         api::{
-            admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
-            builders, caches, commits, compliance, config_health, cves, dashboard,
+            acceptance_register, admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status,
+            auth_whoami, builders, caches, commits, compliance, config_health, cves, dashboard,
             deployment_policies, deployments, environments, flakes, framework_requirements,
             hardening, navigation, nixos_options, poam, scanning, setup_wizard, systems,
             user_notifications, user_preferences, user_sessions,
@@ -337,6 +337,7 @@ async fn main() -> anyhow::Result<()> {
             get(poam::list_waivers).post(poam::create_waiver),
         )
         .route("/api/v1/finding-waivers/:id", get(poam::get_waiver))
+        .route("/api/v1/acceptances", get(acceptance_register::list))
         .route(
             "/api/v1/finding-waivers/:id/status",
             post(poam::decide_waiver),
@@ -414,6 +415,18 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/v1/cves", get(cves::list_cves))
         .route("/api/v1/cves/grouped", get(cves::list_cves_grouped))
+        .route(
+            "/api/v1/cves/inventory/groups",
+            get(cves::list_inventory_groups),
+        )
+        .route(
+            "/api/v1/cves/inventory/members",
+            get(cves::list_inventory_members),
+        )
+        .route(
+            "/api/v1/cves/inventory/pairs",
+            get(cves::list_inventory_pairs),
+        )
         .route("/api/v1/cves/stats", get(cves::get_fleet_stats))
         .route("/api/v1/cves/packages", get(cves::list_package_names))
         .route(

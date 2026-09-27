@@ -991,6 +991,38 @@ evidence digest.
 Fleet triage uses exact deployed evidence. The identity is a canonical CVE ID
 plus a canonical package name. Package version is evidence context and is not
 part of the stable finding identity.
+
+The authenticated fleet inventory read also provides bounded register pages:
+
+| Method | Endpoint | Role | Description |
+|--------|----------|------|-------------|
+| GET | `/cves/inventory/pairs` | Viewer+ | Filtered CVE/package rows with `total` and `next_offset` |
+| GET | `/cves/inventory/groups` | Viewer+ | Environment or host aggregates with stable IDs and complete scoped counts |
+| GET | `/cves/inventory/members` | Viewer+ | Exact CVE/package/system/section membership for one group |
+
+These routes apply the caller's environment scope and optional exact
+`environment_id` before grouping or paging. An unauthorized environment yields
+no rows; it never removes the scope restriction. Pair pages accept the existing
+severity, fix, triage, package, search, and sort filters. Group and member
+pages accept the same filters except sort and require
+`group_by=environment|host`. Members require `group_id` for host groups;
+an omitted environment group ID selects unassigned hosts, not all groups.
+`offset` starts at zero; `limit` defaults to 100 and cannot exceed 200.
+`next_offset` is absent after the final page. Each response counts its complete
+authorized filtered set before the limit. Offset pages are separate database
+snapshots; clients must not assert unique notification targets based on a
+multi-page read when membership can change between pages.
+
+Group counts deduplicate CVE/package identities within each group. The same
+pair can appear in several environments and does not become several global
+findings. Severity, exploited, and patchable facets count distinct pairs;
+Current, scheduled-target, and Historical host counts identify separate
+inventory relations. `total_active_hosts` is the authorized environment host
+population, not a scanned or clean-host count. These endpoints do not report
+scan coverage or grant mutation authority. Historical evidence and a missing
+scan are not Current exposure. Existing exact drawer and triage routes remain
+the only way to read and mutate server-resolved CVE decisions.
+
 The [CVE/POA&M continuity contract](../design/CrystalForge/cve-poam-evidence-continuity-design-spec.md#29-acceptance-criteria)
 governs Current CVE authority, baseline continuity, verification, and environment
 membership. TASK-326.2.2 is implementing this contract; this section does not
@@ -1108,6 +1140,8 @@ value.
 
 | Method | Endpoint | Role | Description |
 |--------|----------|------|-------------|
+| GET | `/poams` | Viewer+ | One visibility-filtered page of plan summaries with batched register scope and progress metadata |
+| GET | `/acceptances` | Viewer+ | Source-owned policy waiver and CVE disposition decisions, scoped and paged before presentation |
 | POST | `/poams/cves` | Operator+ | Create a POA&M from one server-issued exact occurrence |
 | GET | `/poams/relationships/cves?system_id=:id` | Viewer+ | Return bounded current exact occurrences and POA&M relationships |
 | POST | `/poams/:id/cve-findings` | Operator+ | Link one current exact occurrence |
@@ -1115,6 +1149,46 @@ value.
 | POST | `/poams/:id/verify` | Operator+ | Seal exact current verification evidence |
 | POST | `/poams/:id/close` | Operator+ | Verify and close atomically |
 | POST | `/poams/:id/reopen` | Operator+ | Restore the exact closure finding set |
+
+The register response retains list pagination (`limit`, `offset`, `has_more`,
+`next_offset`) and includes exact environment, system, bundle lineage, bundle
+version and assignment-version IDs, first requirement/CVE, milestone totals,
+and last activity for each visible plan. It does not turn a POA&M into a risk
+acceptance. CVE-only plans can have no policy finding, and version IDs must not
+be replaced by a bundle's catalog-current pointer. The register currently
+does not return whole-collection work-queue facets or risk-acceptance records;
+clients must label counts computed from loaded pages as partial.
+The first CVE comes from a visible current finding, or from the caller's
+scheduled environment disposition if its last current member has moved out.
+For a non-admin reader, the last-activity timestamp excludes finding-specific
+events that are not known to be in scope. If authorization changes between
+the list and its context read, the server rejects the entire page instead of
+returning a shortened page with an unsafe continuation offset; retry the read.
+
+The approved [register acceptance-action contract](../design/CrystalForge/cve-poam-evidence-continuity-design-spec.md#32-unified-risk-acceptance-register-actions)
+does not make this POA&M list an acceptance reader. Policy waivers and CVE
+accepted dispositions keep their own stable source identities, source-specific
+version checks, authorization rules, audit history, and lifecycle. The GET
+`/acceptances` projection tags each entry as `policy_waiver`, `cve_host`, or
+`cve_environment` and returns its exact source UUID. CVE decision UUIDs are
+immutable version identities; `waiver_updated_at` is the waiver status-change
+version to pair with its UUID for later optimistic checks. It accepts `source`,
+`status`, `environment_id`, `limit` (1–100, default 25), and nonnegative `offset`.
+It returns `items`, complete scoped `total`, `limit`, `offset`, and `has_more`.
+Admin can read policy waivers; Viewer and Operator can read CVE decisions only
+in currently assigned environments. Host decisions retain `system_id`; the
+host's current environment is used for read visibility, not presented as its
+original historical scope. Retired CVE decisions keep their `retired_at` and
+`retirement_reason` and must not be presented as current accepted authority.
+Waivers have no invented review date; CVE decisions have no invented
+authorization expiry. This endpoint grants no mutation permission.
+
+Renew uses a new review date from the
+server clock and a deadline 90 days later; it does not edit original approval.
+Convert must atomically create or compatibly reuse a source-family plan,
+replace only the selected effective decision, and record the relationship.
+No separate waiver-to-plan frontend write sequence is authorized. Do not claim
+these commands are available until their source-specific endpoints exist.
 
 All routes require an authenticated session. Mutation routes require matching
 CSRF cookie and header values. Operator and Admin roles can mutate. Viewer can

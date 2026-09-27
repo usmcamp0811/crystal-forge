@@ -476,34 +476,37 @@ pub fn ComplianceView(
         })
         .unwrap_or_else(|| "unnamed benchmark".to_string());
 
-    let mut on_select_bundle = move |bundle_id: uuid::Uuid| {
-        selected_bundle_id.set(Some(bundle_id));
-        coverage_expanded.set(false);
-        drawer_view.set(BundleDrawerView::Overview);
-        evidence.set(None);
-        evidence_route_system.set(None);
-        evidence_assignments.set(Vec::new());
-        evidence_assignments_error.set(None);
-        evidence_error.set(None);
-        // Bump evidence_gen so any in-flight evidence fetch for the old bundle
-        // is invalidated even though we already cleared `evidence`.
-        let eg = *evidence_gen.read() + 1;
-        evidence_gen.set(eg);
-        sys_filter.set("all".to_string());
-        let version_id = bundles
-            .read()
-            .iter()
-            .find(|bundle| bundle.id == bundle_id)
-            .and_then(|bundle| {
-                bundle
-                    .current_published_version_id
-                    .or(bundle.current_draft_version_id)
+    let mut on_select_bundle =
+        move |bundle_id: uuid::Uuid, selected_version: Option<uuid::Uuid>| {
+            selected_bundle_id.set(Some(bundle_id));
+            coverage_expanded.set(false);
+            drawer_view.set(BundleDrawerView::Overview);
+            evidence.set(None);
+            evidence_route_system.set(None);
+            evidence_assignments.set(Vec::new());
+            evidence_assignments_error.set(None);
+            evidence_error.set(None);
+            // Bump evidence_gen so any in-flight evidence fetch for the old bundle
+            // is invalidated even though we already cleared `evidence`.
+            let eg = *evidence_gen.read() + 1;
+            evidence_gen.set(eg);
+            sys_filter.set("all".to_string());
+            let version_id = selected_version.or_else(|| {
+                bundles
+                    .read()
+                    .iter()
+                    .find(|bundle| bundle.id == bundle_id)
+                    .and_then(|bundle| {
+                        bundle
+                            .current_published_version_id
+                            .or(bundle.current_draft_version_id)
+                    })
             });
-        selected_bundle_version_id.set(version_id);
-        start_systems_fetch(bundle_id, version_id);
-        bundle_poams.set(Vec::new());
-        bundle_poams_error.set(None);
-    };
+            selected_bundle_version_id.set(version_id);
+            start_systems_fetch(bundle_id, version_id);
+            bundle_poams.set(Vec::new());
+            bundle_poams_error.set(None);
+        };
 
     use_effect(move || {
         let bundle_id = *selected_bundle_id.read();
@@ -922,14 +925,18 @@ pub fn ComplianceView(
                 BundleCatalog {
                     bundles: bundles.read().clone(),
                     selected_id: *selected_bundle_id.read(),
-                    on_select: move |bundle_id| { on_select_bundle(bundle_id); drawer_view.set(BundleDrawerView::Overview); drawer_open.set(true); },
+                    on_select: move |bundle_id| { on_select_bundle(bundle_id, None); drawer_view.set(BundleDrawerView::Overview); drawer_open.set(true); },
                     selected_version_id: *selected_bundle_version_id.read(),
                     poam_rollups: bundle_rollups.read().clone(),
                     poam_rollups_loading: *bundle_rollups_loading.read(),
                     on_select_version: move |version_id| {
-                        selected_bundle_version_id.set(Some(version_id));
-                        drawer_open.set(true);
-                        if let Some(bundle_id) = *selected_bundle_id.read() { start_systems_fetch(bundle_id, Some(version_id)); }
+                        let bundle_id = bundles.read().iter().find(|bundle| bundle.versions.iter().any(|revision| revision.id == version_id)).map(|bundle| bundle.id);
+                        if let Some(bundle_id) = bundle_id {
+                            // A catalog revision opens its own immutable version, not
+                            // the lineage's current published/draft pointer.
+                            on_select_bundle(bundle_id, Some(version_id));
+                            drawer_open.set(true);
+                        }
                     },
                 }
                 if *drawer_open.read() && policy_drawer.read().is_none() {
@@ -993,6 +1000,9 @@ pub fn ComplianceView(
                                             rollup: rollup.clone(),
                                             on_open_list: move |filter| poam_filter.set(filter),
                                         }
+                                        if !bundle.id.is_nil() {
+                                            Link { class: "btn btn-ghost xs focus-ring", to: Route::PoamsView { query: format!("dim=bundle&bundle={}", bundle.id) }, Icon { name: IconName::ArrowRight, size: 11 } " View in POA&M register" }
+                                        }
                                         div { class: "seg poam-filter", "data-testid": "bundle-poam-filters",
                                             for option in [PoamFilter::Open, PoamFilter::Overdue, PoamFilter::Awaiting, PoamFilter::Closed, PoamFilter::All] {
                                                 {
@@ -1041,6 +1051,9 @@ pub fn ComplianceView(
                                             drawer_view.set(BundleDrawerView::Poam);
                                             refresh_bundle_poams(bundle.id);
                                         },
+                                    }
+                                    if !bundle.id.is_nil() {
+                                        Link { class: "btn btn-ghost xs focus-ring", style: "margin:8px 18px;", to: Route::PoamsView { query: format!("dim=bundle&bundle={}", bundle.id) }, Icon { name: IconName::ArrowRight, size: 11 } " View in POA&M register" }
                                     }
                                 } else if let Some(error) = bundle_rollups_error.read().as_ref() {
                                     div { class: "sd-callout sd-callout-danger", style: "margin:12px 18px;", "Could not load authoritative POA&M roll-up: {error}" }

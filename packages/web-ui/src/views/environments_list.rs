@@ -823,6 +823,15 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
             }
 
             div { class: "panel-body",
+                if !env.id.is_nil() {
+                    Link {
+                        class: "btn btn-ghost xs focus-ring",
+                        to: Route::PoamsView { query: format!("dim=environment&environment={}", env.id) },
+                        title: "Open {env.name} in the POA&M register",
+                        Icon { name: IconName::ArrowRight, size: 11 }
+                        " View in POA&M register"
+                    }
+                }
                 if display_policy.is_some()
                     || display_auto_sync.is_some()
                     || display_requires_approval.is_some()

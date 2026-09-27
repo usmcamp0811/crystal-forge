@@ -12667,37 +12667,13 @@ const steps = [
         historical_inventory_count: 1,
         triage_status: "inventory_only",
       };
-      // Grouped (default) view fetches /cves/grouped — mock the package rollup so
-      // the default grouped surface renders real-shaped data (not a fallback).
-      const groupedCveRequests = [];
-      await page.route(/\/api\/v1\/cves\/grouped(?:\?.*)?$/, async (route) => {
-        groupedCveRequests.push(new URL(route.request().url()));
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify([
-            {
-              package_name: "openssl",
-              cve_count: 2,
-              critical_count: 2,
-              high_count: 0,
-              medium_count: 0,
-              low_count: 0,
-              environments_count: 2,
-              total_affected_systems: 4,
-              current_affected_systems: 3,
-              scheduled_deployment_target_systems: 2,
-              historical_inventory_systems: 1,
-              fixable_count: 2,
-              outstanding_count: 1,
-              exploited_count: 2,
-              max_cvss: 9.8,
-              severity_score: 1000,
-              cves: [cveRowFixture, inventoryOnlyRowFixture],
-            },
-          ]),
-        });
-      });
+      const environmentIds = {
+        development: "00000000-0000-0000-0000-0000000000e1",
+        production: "00000000-0000-0000-0000-0000000000e2",
+        lab: "00000000-0000-0000-0000-0000000000e3",
+        archive: "00000000-0000-0000-0000-0000000000e4",
+        rollout: "00000000-0000-0000-0000-0000000000e6",
+      };
       const fleetDetail = {
         cve: {
           cve_id: "CVE-2024-1234",
@@ -12891,6 +12867,169 @@ const steps = [
           },
         ],
       };
+      await page.route("**/api/v1/environments", async (route) => route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(fleetDetail.environments.map((environment) => ({
+          id: environment.environment_id,
+          name: environment.environment_name,
+          color_hex: "#60a5fa",
+          is_active: true,
+          system_count: environment.affected_system_count,
+        }))),
+      }));
+      const inventoryRequests = { pairs: [], groups: [], members: [] };
+      let focusedCveFixtureMode = "single";
+      let largePairFixture = false;
+      const baseMembers = fleetDetail.environments.flatMap((environment) =>
+        environment.systems.map((system) => ({
+          cve_id: "CVE-2024-1234",
+          package_name: "openssl",
+          system_id: system.system_id,
+          environment_id: environment.environment_id,
+          hostname: system.hostname,
+          inventory_section: system.inventory_section,
+          installed_version: system.current_package_version,
+          deployment_status: "deployed",
+          flake_name: system.flake_name,
+        })));
+      const inventoryPage = (items, url, defaultLimit) => {
+        const offset = Number(url.searchParams.get("offset") ?? 0);
+        const limit = Number(url.searchParams.get("limit") ?? defaultLimit);
+        if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 200) {
+          throw new Error(`Invalid CVE inventory pagination: ${url}`);
+        }
+        return {
+          items: items.slice(offset, offset + limit),
+          total: items.length,
+          next_offset: offset + limit < items.length ? offset + limit : null,
+        };
+      };
+      const inventoryRows = (url) => {
+        const search = url.searchParams.get("search")?.toLowerCase();
+        const focused = search?.startsWith("cve-");
+        let rows = [cveRowFixture, inventoryOnlyRowFixture];
+        let members = [
+          ...baseMembers,
+          ...baseMembers.filter((member) => [environmentIds.rollout, environmentIds.archive].includes(member.environment_id) ||
+            (member.environment_id === environmentIds.production && member.inventory_section === "scheduled_deployment_target"))
+            .map((member) => ({ ...member, cve_id: inventoryOnlyRowFixture.cve_id })),
+        ];
+        if (focused) {
+          if (search !== "cve-2024-1234" || focusedCveFixtureMode === "stale") {
+            rows = [];
+            members = [];
+          } else if (focusedCveFixtureMode === "multiple") {
+            rows = [cveRowFixture, { ...cveRowFixture, package_name: "glibc", current_affected_count: 2 }];
+            members = [...baseMembers, ...baseMembers.filter((member) => member.inventory_section === "current")
+              .map((member) => ({ ...member, package_name: "glibc" }))];
+          } else if (focusedCveFixtureMode === "scheduled" || focusedCveFixtureMode === "historical") {
+            const scheduled = focusedCveFixtureMode === "scheduled";
+            rows = [{ ...cveRowFixture, affected_count: scheduled ? 2 : 0, current_affected_count: 0,
+              scheduled_deployment_target_count: scheduled ? 2 : 0, historical_inventory_count: scheduled ? 0 : 1 }];
+            members = baseMembers.filter((member) => member.inventory_section ===
+              (scheduled ? "scheduled_deployment_target" : "historical"));
+          } else if (focusedCveFixtureMode === "metadata-only") {
+            rows = [{ ...cveRowFixture, package_name: null, affected_count: 0, exact_affected_count: 0,
+              legacy_affected_count: 0, current_affected_count: 0, scheduled_deployment_target_count: 0,
+              historical_inventory_count: 0 }];
+            members = [];
+          } else {
+            rows = [cveRowFixture];
+            members = baseMembers;
+          }
+        }
+        const environmentId = url.searchParams.get("environment_id");
+        if (environmentId) {
+          members = members.filter((member) => member.environment_id === environmentId);
+          rows = rows.filter((row) => members.some((member) =>
+            member.cve_id === row.cve_id && member.package_name === row.package_name)).map((row) => {
+            const found = members.filter((member) => member.cve_id === row.cve_id && member.package_name === row.package_name);
+            const hosts = (section) => new Set(found.filter((member) => member.inventory_section === section)
+              .map((member) => member.system_id));
+            const current = hosts("current");
+            const scheduled = hosts("scheduled_deployment_target");
+            return {
+              ...row,
+              affected_count: new Set([...current, ...scheduled]).size,
+              exact_affected_count: new Set([...current, ...scheduled]).size,
+              legacy_affected_count: hosts("historical").size,
+              current_affected_count: current.size,
+              scheduled_deployment_target_count: scheduled.size,
+              historical_inventory_count: hosts("historical").size,
+              affected_environments: [fleetDetail.environments.find((env) => env.environment_id === environmentId).environment_name],
+            };
+          });
+        }
+        rows = rows.filter((row) =>
+          (!search || focused || [row.cve_id, row.package_name, row.title].some((value) => value?.toLowerCase().includes(search))) &&
+          (!url.searchParams.has("severity") || row.severity === url.searchParams.get("severity")) &&
+          (!url.searchParams.has("triage_status") || row.triage_status === url.searchParams.get("triage_status")) &&
+          (!url.searchParams.has("package") || row.package_name?.includes(url.searchParams.get("package"))) &&
+          (!url.searchParams.has("fix_status") || (url.searchParams.get("fix_status") === "exploited"
+            ? row.exploited : url.searchParams.get("fix_status") === "available" ? row.fix_status === "fix_available" : row.fix_status !== "fix_available")));
+        if (largePairFixture && !focused) {
+          rows = Array.from({ length: 205 }, (_, index) => ({
+            ...cveRowFixture, cve_id: `CVE-2024-${String(2000 + index)}`,
+            package_name: "openssl", affected_environments: ["Production"],
+          }));
+          if (environmentId && environmentId !== environmentIds.production) rows = [];
+        }
+        const keys = new Set(rows.map((row) => `${row.cve_id}|${row.package_name}`));
+        members = members.filter((member) => keys.has(`${member.cve_id}|${member.package_name}`));
+        return { rows, members };
+      };
+      const inventoryRoute = /\/api\/v1\/cves\/inventory\/(pairs|groups|members)(?:\?.*)?$/;
+      const serveInventory = async (route) => {
+        const url = new URL(route.request().url());
+        const endpoint = url.pathname.split("/").at(-1);
+        inventoryRequests[endpoint].push(url);
+        const { rows, members } = inventoryRows(url);
+        let items = rows;
+        if (endpoint === "groups") {
+          const byHost = url.searchParams.get("group_by") === "host";
+          if (!byHost && url.searchParams.get("group_by") !== "environment") throw new Error(`Invalid CVE group scope: ${url}`);
+          const groups = new Map();
+          for (const member of members) {
+            const id = byHost ? member.system_id : member.environment_id;
+            if (!groups.has(id)) groups.set(id, []);
+            groups.get(id).push(member);
+          }
+          items = [...groups].map(([id, found]) => {
+            const pairs = rows.filter((row) => found.some((member) =>
+              member.cve_id === row.cve_id && member.package_name === row.package_name));
+            return {
+            group_id: id,
+            name: byHost ? found[0].hostname : fleetDetail.environments.find((env) => env.environment_id === id).environment_name,
+            cve_package_count: pairs.length,
+            cve_count: new Set(found.map((member) => member.cve_id)).size,
+            critical_pair_count: pairs.filter((pair) => pair.severity === "critical").length,
+            high_pair_count: pairs.filter((pair) => pair.severity === "high").length,
+            medium_pair_count: pairs.filter((pair) => pair.severity === "medium").length,
+            low_pair_count: pairs.filter((pair) => pair.severity === "low").length,
+            unknown_pair_count: pairs.filter((pair) => !["critical", "high", "medium", "low"].includes(pair.severity)).length,
+            exploited_pair_count: pairs.filter((pair) => pair.exploited).length,
+            patchable_pair_count: pairs.filter((pair) => pair.fix_status === "fix_available").length,
+            host_count: new Set(found.map((member) => member.system_id)).size,
+            total_active_hosts: null,
+            current_host_count: new Set(found.filter((member) => member.inventory_section === "current").map((member) => member.system_id)).size,
+            scheduled_host_count: new Set(found.filter((member) => member.inventory_section === "scheduled_deployment_target").map((member) => member.system_id)).size,
+            historical_host_count: new Set(found.filter((member) => member.inventory_section === "historical").map((member) => member.system_id)).size,
+            flake_name: byHost ? found[0].flake_name : null,
+            deployment_status: byHost ? found[0].deployment_status : null,
+          }; }).sort((left, right) => left.name.localeCompare(right.name) || left.group_id.localeCompare(right.group_id));
+        } else if (endpoint === "members") {
+          const byHost = url.searchParams.get("group_by") === "host";
+          const id = url.searchParams.get("group_id");
+          items = members.filter((member) => (byHost ? member.system_id : member.environment_id) === id)
+            .sort((left, right) => left.cve_id.localeCompare(right.cve_id) ||
+              (left.package_name || "").localeCompare(right.package_name || "") ||
+              left.system_id.localeCompare(right.system_id) || left.inventory_section.localeCompare(right.inventory_section));
+        }
+        await route.fulfill({ status: 200, contentType: "application/json",
+          body: JSON.stringify(inventoryPage(items, url, endpoint === "pairs" ? 200 : 50)) });
+      };
+      await page.route(inventoryRoute, serveInventory);
       let fleetDetailRequests = 0;
       let fleetDetailAfterMutation = null;
       await page.route(/\/api\/v1\/cves\/CVE-2024-1234\/fleet\?package=openssl$/, async (route) => {
@@ -12961,56 +13100,6 @@ const steps = [
             poam_id: "00000000-0000-0000-0000-0000000000d1",
             poam_reused: true,
           }),
-        });
-      });
-      let focusedCveFixtureMode = "single";
-      await page.route(/\/api\/v1\/cves(?:\?.*)?$/, async (route) => {
-        const url = new URL(route.request().url());
-        const search = url.searchParams.get("search");
-        let rows = [cveRowFixture, inventoryOnlyRowFixture];
-        if (search?.startsWith("CVE-")) {
-          if (search !== "CVE-2024-1234" || focusedCveFixtureMode === "stale") {
-            rows = [];
-          } else if (focusedCveFixtureMode === "multiple") {
-            rows = [
-              cveRowFixture,
-              { ...cveRowFixture, package_name: "glibc", current_affected_count: 2 },
-            ];
-          } else if (focusedCveFixtureMode === "scheduled") {
-            rows = [{
-              ...cveRowFixture,
-              affected_count: 2,
-              current_affected_count: 0,
-              scheduled_deployment_target_count: 2,
-              historical_inventory_count: 0,
-            }];
-          } else if (focusedCveFixtureMode === "historical") {
-            rows = [{
-              ...cveRowFixture,
-              affected_count: 0,
-              current_affected_count: 0,
-              scheduled_deployment_target_count: 0,
-              historical_inventory_count: 1,
-            }];
-          } else if (focusedCveFixtureMode === "metadata-only") {
-            rows = [{
-              ...cveRowFixture,
-              package_name: null,
-              affected_count: 0,
-              exact_affected_count: 0,
-              legacy_affected_count: 0,
-              current_affected_count: 0,
-              scheduled_deployment_target_count: 0,
-              historical_inventory_count: 0,
-            }];
-          } else {
-            rows = [cveRowFixture];
-          }
-        }
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify(rows),
         });
       });
       const cveCsv = [
@@ -13272,24 +13361,7 @@ const steps = [
           }
           await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(["openssl"]) });
         });
-        await viewerPage.route(/\/api\/v1\/cves\/grouped(?:\?.*)?$/, async (route) => {
-          await route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: JSON.stringify([{
-              package_name: "openssl", cve_count: 1, critical_count: 1,
-              high_count: 0, medium_count: 0, low_count: 0,
-              environments_count: 3, total_affected_systems: 3,
-              current_affected_systems: 2, scheduled_deployment_target_systems: 2,
-              historical_inventory_systems: 1,
-              fixable_count: 1, outstanding_count: 1, exploited_count: 1,
-              max_cvss: 9.8, severity_score: 1000, cves: [cveRowFixture],
-            }]),
-          });
-        });
-        await viewerPage.route(/\/api\/v1\/cves(?:\?.*)?$/, async (route) => {
-          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([cveRowFixture]) });
-        });
+        await viewerPage.route(inventoryRoute, serveInventory);
       let viewerFleetRequests = 0;
       await viewerPage.route(/\/api\/v1\/cves\/CVE-2024-1234\/fleet(?:\?.*)?$/, async (route) => {
         const url = new URL(route.request().url());
@@ -13384,8 +13456,7 @@ const steps = [
           no_scan_systems: 0, outstanding: 1, accepted: 1, scheduled: 1,
         }) }));
         await operatorPage.route("**/api/v1/cves/packages*", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(["openssl"]) }));
-        await operatorPage.route(/\/api\/v1\/cves\/grouped(?:\?.*)?$/, async (route) => route.fulfill({ status: 200, contentType: "application/json", body: "[]" }));
-        await operatorPage.route(/\/api\/v1\/cves(?:\?.*)?$/, async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([cveRowFixture]) }));
+        await operatorPage.route(inventoryRoute, serveInventory);
         await operatorPage.route(/\/api\/v1\/cves\/CVE-2024-1234\/fleet\?package=openssl$/, async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(fleetDetail) }));
         await operatorPage.route("**/api/v1/poams/assignees", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ people: [], groups: [{ group_name: "platform-operators" }] }) }));
         await operatorPage.goto(`${baseUrl}/cves?cve=CVE-2024-1234&cve_package=openssl`, { timeout: LOAD_TIMEOUT });
@@ -13496,15 +13567,21 @@ const steps = [
       const severityFilterSeg = page.locator("main .seg button:has-text('Critical')");
       await assertVisible(severityFilterSeg, "Expected severity filter controls");
 
-      // Grouped view is the default. Assert the package group card renders the
-      // real-shaped grouped data (package-first parity surface).
-      const groupCard = page.locator("main .mono:has-text('openssl')").first();
+      // Package is the default grouping; its pair page is bounded and scoped.
+      const groupCard = page.locator("main .card").filter({ hasText: "openssl" }).first();
       await assertVisible(groupCard, "Expected grouped package card to render");
+      const expectedPackageRollup = { critical_count: 2, fixable_count: 2, exploited_count: 2 };
+      const initialPairs = inventoryRows(new URL(`${baseUrl}/api/v1/cves/inventory/pairs`)).rows;
+      if (initialPairs.filter((row) => row.severity === "critical").length !== expectedPackageRollup.critical_count ||
+          initialPairs.filter((row) => row.fix_status === "fix_available").length !== expectedPackageRollup.fixable_count ||
+          initialPairs.filter((row) => row.exploited).length !== expectedPackageRollup.exploited_count) {
+        throw new Error("Package fixture lost critical, fixable, or exploited pairs");
+      }
 
       const inventoryOnlyFilter = page.getByRole("button", { name: "Inventory only", exact: true });
       const inventoryOnlyRequest = page.waitForRequest((request) => {
         const url = new URL(request.url());
-        return url.pathname === "/api/v1/cves/grouped" && url.searchParams.get("triage_status") === "inventory_only";
+        return url.pathname === "/api/v1/cves/inventory/pairs" && url.searchParams.get("triage_status") === "inventory_only";
       });
       await inventoryOnlyFilter.click();
       await inventoryOnlyRequest;
@@ -13532,13 +13609,54 @@ const steps = [
         throw new Error(`CVE CSV must preserve overlap-deduplicated active/current/scheduled/historical values: ${csvRow}`);
       }
       await page.getByRole("button", { name: "Any triage", exact: true }).click();
-      if (!groupedCveRequests.some((url) => url.searchParams.get("triage_status") === "inventory_only")) {
-        throw new Error("Grouped CVE request did not use triage_status=inventory_only");
+      if (!inventoryRequests.pairs.some((url) => url.searchParams.get("triage_status") === "inventory_only")) {
+        throw new Error("Paged CVE request did not use triage_status=inventory_only");
       }
 
-      // Verify flat view mode renders individual CVE rows in a table, then
-      // return to grouped mode so the drawer is opened from the design's default surface.
-      const flatViewBtn = page.locator("button:has-text('Flat')");
+      // Each grouping must use the exact scoped aggregate and membership IDs.
+      const groupMode = (name) => page.getByRole("button", { name, exact: true }).last();
+      await groupMode("Environment").click();
+       const productionGroup = page.getByRole("button", { name: /Production.*2 distinct CVEs/ });
+       await assertVisible(productionGroup, "Environment mode must show Production's distinct CVEs");
+       await assertVisible(productionGroup.locator("xpath=../..").getByText("1 hosts with findings"), "Environment mode must deduplicate the current/scheduled Production host");
+      await productionGroup.click();
+      await assertVisible(page.getByText("prod-web-01", { exact: true }).first(), "Environment members must retain exact host identity");
+      if (!inventoryRequests.members.some((url) => url.searchParams.get("group_by") === "environment" &&
+          url.searchParams.get("group_id") === environmentIds.production)) {
+        throw new Error("Production expansion did not request exact environment membership");
+      }
+      await groupMode("Env › System").click();
+       const prodHosts = page.getByRole("button", { name: /Production.*2 distinct CVEs/ });
+      await prodHosts.click();
+       const prodHost = page.getByRole("button", { name: /prod-web-01.*2 distinct CVEs/ });
+       await assertVisible(prodHost, "Nested host mode must aggregate by stable system ID");
+       if (await prodHost.getAttribute("aria-expanded") === "false") await prodHost.click();
+       await assertAttribute(prodHost, "aria-expanded", "true", "Production host members must be expanded");
+       await assertVisible(page.getByText("Scheduled configuration", { exact: true }).first(), "Overlapping host must retain scheduled evidence");
+      if (!inventoryRequests.groups.some((url) => url.searchParams.get("group_by") === "host" &&
+          url.searchParams.get("environment_id") === environmentIds.production) ||
+          !inventoryRequests.members.some((url) => url.searchParams.get("group_by") === "host" &&
+            url.searchParams.get("group_id") === "00000000-0000-0000-0000-0000000000a2")) {
+        throw new Error("Nested host view did not request exact Production host membership");
+      }
+      await page.getByRole("combobox", { name: "Environment" }).selectOption(environmentIds.production);
+       await assertVisible(page.getByRole("button", { name: /Production.*2 distinct CVEs/ }), "Environment filter must retain matching group");
+       await assertCount(page.getByRole("button", { name: /Development.*distinct CVEs/ }), 0, "Environment filter must not leak another environment");
+      if (!inventoryRequests.groups.some((url) => url.searchParams.get("environment_id") === environmentIds.production &&
+          url.searchParams.get("group_by") === "environment") ||
+          !inventoryRequests.pairs.some((url) => url.searchParams.get("environment_id") === environmentIds.production)) {
+        throw new Error("Environment filter must reach both group and pair endpoints before paging");
+      }
+      const productionPairs = inventoryRows(new URL(`${baseUrl}/api/v1/cves/inventory/pairs?environment_id=${environmentIds.production}`)).rows;
+      if (productionPairs.length !== 2 || productionPairs.some((row) => row.affected_count !== 1 ||
+          row.current_affected_count !== (row.cve_id === cveRowFixture.cve_id ? 1 : 0) ||
+          row.scheduled_deployment_target_count !== 1)) {
+        throw new Error(`Scoped pairs must deduplicate the exact current/scheduled Production host: ${JSON.stringify(productionPairs)}`);
+      }
+      await assertDisabled(page.getByRole("button", { name: "Export report", exact: true }), "Environment-scoped export must not claim fleet CSV scope");
+      await page.getByRole("combobox", { name: "Environment" }).selectOption("");
+      // Flat mode still opens the same exact fleet drawer and retains inventory-only semantics.
+      const flatViewBtn = groupMode("None");
       await flatViewBtn.waitFor({ timeout: 5000 });
       await flatViewBtn.click();
 
@@ -13907,6 +14025,19 @@ const steps = [
         throw new Error(`CVE detail drawer overflows the viewport: ${JSON.stringify(drawerGeometry)}`);
       }
 
+      largePairFixture = true;
+      await page.goto(`${baseUrl}/cves?view=flat`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.getByRole("button", { name: "Show more pairs (200 of 205)" }), "First bounded pair page must expose continuation");
+      await assertCount(page.getByTestId("cve-row"), 200, "First pair page must not silently truncate or prefetch remaining rows");
+      await page.getByRole("button", { name: "Show more pairs (200 of 205)" }).click();
+      await page.waitForFunction(() => document.querySelectorAll('[data-testid="cve-row"]').length === 205, null, { timeout: LOAD_TIMEOUT });
+      await assertCount(page.getByTestId("cve-row"), 205, "Second pair page must append remaining pairs");
+      if (!inventoryRequests.pairs.some((url) => url.searchParams.get("offset") === "200" &&
+          url.searchParams.get("limit") === "200")) {
+        throw new Error("Pair continuation did not request exact offset 200 and limit 200");
+      }
+      largePairFixture = false;
+
       await page.goto(`${baseUrl}/cves?focus_cve=CVE-2024-1234`, { timeout: LOAD_TIMEOUT });
       await assertCount(page.getByTestId("cve-notification-focus"), 0, "CVE focus must not add an unapproved notification banner");
       await assertVisible(page.getByTestId("cve-fleet-drawer"), "One current package match should open its exact fleet drawer");
@@ -13967,14 +14098,14 @@ const steps = [
       fleetDetailAfterMutation = null;
       await page.goto(`${baseUrl}/cves?focus_cve=CVE-2024-1234`, { timeout: LOAD_TIMEOUT });
       await assertCount(page.getByTestId("cve-fleet-drawer"), 0, "Metadata without package evidence must not fabricate a package drawer");
-      await assertVisible(page.getByText("No CVEs match the current filters."), "Metadata-only focus must use the existing empty-list state");
+      await assertVisible(page.getByText("No retained package finding matches this focused CVE."), "Metadata-only focus must use the paged empty-list state");
       await assertCount(page.getByTestId("cve-notification-focus"), 0, "Metadata-only focus must not invent presentation copy");
       await captureWorkflowViewportState(page, "16-cves", "notification-focus-metadata-only", "desktop");
 
       focusedCveFixtureMode = "stale";
       await page.goto(`${baseUrl}/cves?focus_cve=CVE-2024-9999`, { timeout: LOAD_TIMEOUT });
       await assertValue(page.getByPlaceholder("Search CVE / package / title…"), "CVE-2024-9999", "A stale CVE should retain its focused URL-backed filter");
-      await assertVisible(page.getByText("No CVEs match the current filters."), "A stale focused CVE should use the existing empty-list state");
+      await assertVisible(page.getByText("No retained package finding matches this focused CVE."), "A stale focused CVE should use the paged empty-list state");
       await assertCount(page.getByTestId("cve-notification-focus"), 0, "A stale focus must not display an invented notification banner");
       await assertHidden(page.getByTestId("cve-fleet-drawer"), "A stale CVE must not open a package drawer");
       await captureWorkflowViewportState(page, "16-cves", "notification-focus-stale-cve", "desktop");
@@ -13986,11 +14117,11 @@ const steps = [
       // Unroute after test.
       await page.unroute("**/api/v1/cves/stats*");
       await page.unroute("**/api/v1/cves/packages*");
-      await page.unroute(/\/api\/v1\/cves\/grouped(?:\?.*)?$/);
+      await page.unroute("**/api/v1/environments");
+      await page.unroute(inventoryRoute);
       await page.unroute(/\/api\/v1\/cves\/CVE-2024-1234\/fleet\?package=openssl$/);
       await page.unroute("**/api/v1/poams/assignees");
       await page.unroute(/\/api\/v1\/cves\/CVE-2024-1234\/triage$/);
-      await page.unroute(/\/api\/v1\/cves(?:\?.*)?$/);
       await page.unroute(/\/api\/v1\/cves\/export(?:\?.*)?$/);
       await page.unroute("**/api/v1/cves/rescan-fleet");
 
@@ -17402,8 +17533,6 @@ security.audit.enable = true;</fixtext>
     name: "16c-scanning-view",
     description: "Scanning view - authoritative lifecycle collections, diagnostics, retention, and system history",
     action: async (page) => {
-      const systemId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-      const buildRequiredSystemId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
       const ids = {
         running: "10000000-0000-4000-8000-000000000001",
         build: "10000000-0000-4000-8000-000000000002",
@@ -17518,9 +17647,6 @@ security.audit.enable = true;</fixtext>
       const scanDetailRoute = /\/api\/v1\/scanning\/scans\/([0-9a-f-]+)$/;
       const exactRetryRoute = /\/api\/v1\/cves\/rescan\/(\d+)$/;
       const withArchiveState = (row) => ({ ...row, archived_at: archivedIds.has(row.scan_id) ? timestamp(16) : null });
-      const historyRows = (requestedSystemId) => (requestedSystemId === systemId
-        ? terminalRows.filter((row) => [201, 202, 401].includes(row.derivation_id))
-        : []);
       const revisionClass = (row) => (row.is_current ? "deployed" : row.is_latest_per_flake ? "recent" : "superseded");
       const matchesScanFilters = (row, filters) => {
         const haystack = [row.hostname, row.flake_name || "", row.commit_hash || "", row.scan_id, String(row.derivation_id)].join(" ").toLowerCase();
@@ -17620,7 +17746,7 @@ security.audit.enable = true;</fixtext>
           after,
           query: url.search,
         });
-        if (!["active", "completed", "history"].includes(collection)
+        if (!["active", "completed"].includes(collection)
           || !Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 500
           || !["true", "false"].includes(params.get("include_archived"))
           || !["true", "false"].includes(params.get("latest_only"))
@@ -17631,14 +17757,14 @@ security.audit.enable = true;</fixtext>
           || search.length > 200) {
           throw new Error(`Unexpected scanning collection contract: ${url.search}`);
         }
-        if (collection === "active" || collection === "history") {
+        if (collection === "active") {
           // The server rejects continuation cursors for collections without a
           // keyset order, so the browser must never send one here.
           if (after !== null) {
             await route.fulfill({ status: 400, contentType: "application/json", body: invalidCursorBody });
             return;
           }
-          const rows = collection === "history" ? historyRows(params.get("system_id")) : activeRows;
+          const rows = activeRows;
           const hiddenArchived = includeArchived ? 0 : rows.filter((row) => archivedIds.has(row.scan_id)).length;
           const items = rows
             .filter((row) => includeArchived || !archivedIds.has(row.scan_id))
@@ -17760,42 +17886,22 @@ security.audit.enable = true;</fixtext>
         retryRequests.push(derivationId);
         await route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify({ derivation_id: derivationId, scan_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", enqueued: true, message: "Exact retry queued" }) });
       });
-      await page.route("**/api/v1/scanning/systems?limit=500", async (route) => route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify([
-          { system_id: systemId, hostname: "prod-server-01", environment: "production", total_configs: 6, scanned: 2, stale: 1, needs_build: 1, unscanned: 2, current_crit: 1, current_high: 2, current_derivation_id: 201 },
-          { system_id: buildRequiredSystemId, hostname: "build-required-01", environment: "staging", total_configs: 1, scanned: 0, stale: 0, needs_build: 1, unscanned: 1, current_crit: 0, current_high: 0, current_derivation_id: null },
-        ]),
-      }));
-      await page.route(`**/api/v1/scanning/systems/${systemId}/scans?limit=500`, async (route) => route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify([
-          { derivation_id: 201, rescan_eligible: true, scan_id: ids.newest, hostname: "prod-server-01", flake_name: "core-fleet", commit_hash: "zzzz-current", status: "completed", completed_at: timestamp(15), scheduled_at: timestamp(15), critical_count: 1, high_count: 2, medium_count: 1, freshness: "deployed", is_current: true, is_latest_per_flake: true, source_trigger: "manual" },
-          { derivation_id: 202, rescan_eligible: true, scan_id: ids.superseded, hostname: "prod-server-01", flake_name: "core-fleet", commit_hash: "aaaa-old", status: "completed", completed_at: terminalAt(5), scheduled_at: terminalAt(5), critical_count: 0, high_count: 0, medium_count: 0, freshness: "superseded", is_current: false, is_latest_per_flake: false, source_trigger: "manual" },
-          { derivation_id: 401, rescan_eligible: true, scan_id: ids.systemFailed, hostname: "prod-server-01", flake_name: "core-fleet", commit_hash: "dddd-system-failure", status: "failed", completed_at: terminalAt(13), scheduled_at: terminalAt(13), critical_count: 0, high_count: 0, medium_count: 0, freshness: "archived", is_current: false, is_latest_per_flake: false, source_trigger: "manual" },
-          { derivation_id: 301, rescan_eligible: true, scan_id: null, hostname: "prod-server-01", flake_name: "core-fleet", commit_hash: "cccc-no-scan", status: "never_scanned", completed_at: null, scheduled_at: null, critical_count: 0, high_count: 0, medium_count: 0, freshness: "recent", is_current: false, is_latest_per_flake: true, source_trigger: null },
-          { derivation_id: 302, rescan_eligible: false, scan_id: null, hostname: "prod-server-01", flake_name: "core-fleet", commit_hash: "bbbb-needs-build", status: "never_scanned", completed_at: null, scheduled_at: null, critical_count: 0, high_count: 0, medium_count: 0, freshness: "recent", is_current: false, is_latest_per_flake: false, source_trigger: null },
-          { derivation_id: 303, rescan_eligible: true, scan_id: null, hostname: "prod-server-01", flake_name: "core-fleet", commit_hash: "aaaa-superseded", status: "never_scanned", completed_at: null, scheduled_at: null, critical_count: 0, high_count: 0, medium_count: 0, freshness: "archived", is_current: false, is_latest_per_flake: false, source_trigger: null },
-        ]),
-      }));
-      await page.route(`**/api/v1/scanning/systems/${buildRequiredSystemId}/scans?limit=500`, async (route) => route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify([]),
-      }));
-      await page.route("**/api/v1/environments", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(mockBuilderEnvironments()) }));
       await page.route("**/api/v1/scanning/schedule", async (route) => {
         const policy = { on_build: true, deployed_interval: "24h", recent_interval: "24h", archived_interval: "168h", archived_enabled: true, rebuild_to_scan: false, updated_at: timestamp(16) };
         if (route.request().method() === "PUT") scheduleRequest = route.request().postDataJSON();
         await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(scheduleRequest ? { ...policy, ...scheduleRequest } : policy) });
       });
+      const removedTabRequests = [];
+      const noteRemovedTabRequest = (request) => {
+        if (/\/api\/v1\/scanning\/systems(?:\/|\?|$)/.test(request.url())) removedTabRequests.push(request.url());
+      };
+      page.on("request", noteRemovedTabRequest);
 
       try {
         await page.goto(`${baseUrl}/scanning`, { timeout: LOAD_TIMEOUT });
         await assertVisible(page.getByRole("heading", { name: "Scanning" }), "Expected Scanning heading");
-        for (const tab of ["Active", "Completed", "By system"]) await assertVisible(page.getByRole("tab", { name: new RegExp(`^${tab}`) }), `Expected ${tab} tab`);
+        for (const tab of ["Active", "Completed"]) await assertVisible(page.getByRole("tab", { name: new RegExp(`^${tab}`) }), `Expected ${tab} tab`);
+        await assertCount(page.getByRole("tab", { name: /^By system/ }), 0, "Scanning must have only the two designed tabs");
         await assertVisible(page.getByText("1 queued · 1 awaiting build · 1 awaiting closure"), "Expected prerequisite wait totals");
         await assertVisible(page.getByText("Awaiting: Build output is not available."), "Expected build wait reason");
         await assertVisible(page.getByText("Awaiting: A completed cache closure is not available."), "Expected closure wait reason");
@@ -17816,11 +17922,11 @@ security.audit.enable = true;</fixtext>
         if (initialActiveOrder.join(",") !== "gamma-queued,zeta-running,alpha-build-wait,beta-closure-wait") {
           throw new Error(`Active queue sorting must use scheduled_at with created_at fallback: ${initialActiveOrder.join(",")}`);
         }
-        const scheduledQueuedTitle = await page.getByTestId(`scanning-record-${ids.pending}`).locator(".scanning-last-scan").getAttribute("title");
+        const scheduledQueuedTitle = await page.getByTestId(`scanning-record-${ids.pending}`).locator(".scanning-last-scan time").getAttribute("datetime");
         if (Date.parse(scheduledQueuedTitle) !== Date.parse(timestamp(10))) {
           throw new Error(`The Queued timestamp must prefer scheduled_at over created_at: ${scheduledQueuedTitle}`);
         }
-        const unscheduledQueuedTitle = await page.getByTestId(`scanning-record-${ids.build}`).locator(".scanning-last-scan").getAttribute("title");
+        const unscheduledQueuedTitle = await page.getByTestId(`scanning-record-${ids.build}`).locator(".scanning-last-scan time").getAttribute("datetime");
         if (Date.parse(unscheduledQueuedTitle) !== Date.parse(timestamp(8))) {
           throw new Error(`An Active row without scheduled_at must display created_at: ${unscheduledQueuedTitle}`);
         }
@@ -17829,8 +17935,8 @@ security.audit.enable = true;</fixtext>
         const activeTab = page.getByRole("tab", { name: /^Active/ });
         await activeTab.focus();
         await activeTab.press("End");
-        await assertAttribute(page.getByRole("tab", { name: /^By system/ }), "aria-selected", "true", "End should select the last scan tab");
-        await page.getByRole("tab", { name: /^By system/ }).press("Home");
+        await assertAttribute(page.getByRole("tab", { name: /^Completed/ }), "aria-selected", "true", "End should select Completed");
+        await page.getByRole("tab", { name: /^Completed/ }).press("Home");
         await assertAttribute(activeTab, "aria-selected", "true", "Home should select the first scan tab");
 
         const search = page.getByRole("textbox", { name: "Search scans by configuration, flake, revision, scan ID, or derivation ID" });
@@ -18003,9 +18109,9 @@ security.audit.enable = true;</fixtext>
         await revisionFilter.selectOption("all");
         const completedRow = page.locator("#scan-completed-panel tbody tr").filter({ hasText: "alpha-current" });
         await assertVisible(completedRow.getByRole("button", { name: `View CVEs for scan ${ids.newest}` }), "Critical/high findings should retain the CVE navigation action");
-        const completedLastScanTitle = await page.getByTestId(`scanning-record-${ids.newest}`).locator(".scanning-last-scan").getAttribute("title");
+        const completedLastScanTitle = await page.getByTestId(`scanning-record-${ids.newest}`).locator(".scanning-last-scan time").getAttribute("datetime");
         if (Date.parse(completedLastScanTitle) !== Date.parse(terminalAt(3))) {
-          throw new Error(`Completed Last scan must continue to use completion time: ${completedLastScanTitle}`);
+          throw new Error(`Completed Scanned must continue to use terminal time: ${completedLastScanTitle}`);
         }
         await completedRow.click();
         detail = page.locator("#scan-diagnostics-dialog");
@@ -18267,7 +18373,7 @@ security.audit.enable = true;</fixtext>
         const completedColumnNames = (await completedTable.locator("thead th").allTextContents())
           .map((label) => label.replace(/\s+/g, " ").trim());
         const expectedCompletedColumns = [
-          "Configuration", "Revision", "Status", "Findings", "Last scan", "Trigger", "Actions",
+          "Configuration", "Revision", "Status", "Findings", "Scanned", "Trigger", "Actions",
         ];
         if (completedColumnNames.join("|") !== expectedCompletedColumns.join("|")) {
           throw new Error(`Completed columns must match the approved design: ${JSON.stringify(completedColumnNames)}`);
@@ -18421,115 +18527,13 @@ security.audit.enable = true;</fixtext>
         await page.getByRole("button", { name: "Clear selection" }).click();
         await assertCount(bulkBar, 0, "Clearing an oversized selection should remove BulkBar without truncating the selection first");
 
-        await page.getByRole("tab", { name: /^By system/ }).click();
-        const buildRequiredRow = page.locator("#scan-systems-panel tbody tr").filter({ hasText: "build-required-01" });
-        await assertVisible(buildRequiredRow.getByText("1 needs build", { exact: true }), "Expected by-system needs-build aggregate");
-        const prodSystemToggle = page.locator("#scan-systems-panel .scanning-system-toggle").filter({ hasText: "prod-server-01" });
-        const currentRescan = page.getByRole("button", { name: "Rescan current for prod-server-01" });
-        await assertAttribute(currentRescan, "title", "Rescan current", "Current system action should use the approved icon action title");
-        await assertAttribute(currentRescan, "class", "btn-icon focus-ring", "Current system rescan should be icon-only");
-        const rescanCurrentResponse = page.waitForResponse((response) => response.request().method() === "POST" && response.url().endsWith("/api/v1/cves/rescan/201"));
-        await currentRescan.click();
-        await rescanCurrentResponse;
-        await assertAttribute(prodSystemToggle, "aria-expanded", "false", "Current rescan must not expand the system row");
-        await prodSystemToggle.click();
-        const noScanRow = page.locator(".scanning-history-table tbody tr").filter({ hasText: "cccc-no-scan" });
-        const needsBuildRow = page.locator(".scanning-history-table tbody tr").filter({ hasText: "bbbb-needs-build" });
-        const supersededRow = page.locator(".scanning-history-table tbody tr").filter({ hasText: "aaaa-superseded" });
-        const systemHistoryHeader = page.locator(".scan-sys-expand-head");
-        await assertVisible(systemHistoryHeader.getByText("6 configs for this system · newest first", { exact: true }), "Expanded header should show the exact config count and newest-first order");
-        await assertCount(systemHistoryHeader.getByRole("button", { name: /Rescan all/i }), 0, "By-system must not invent an unsupported Rescan all operation");
-        const archivedHistoryResponse = page.waitForResponse((response) =>
-          response.request().method() === "GET" && response.url().match(scansRoute) &&
-          response.url().includes("collection=history") && response.url().includes("include_archived=true"));
-        await page.getByRole("checkbox", { name: "Include archived" }).check();
-        await archivedHistoryResponse;
-        await assertVisible(noScanRow.getByText("Never scanned", { exact: true }), "Expected truthful no-scan revision row");
-        await assertVisible(needsBuildRow.getByText("Needs build", { exact: true }), "Expected truthful needs-build revision row");
-        await assertVisible(supersededRow.getByText("Superseded config", { exact: true }), "Expected superseded revision relation");
-        await assertAttribute(noScanRow.getByRole("button", { name: "Rescan this config 301" }), "title", "Rescan this config", "Directly eligible no-scan revisions should use the sync icon action");
-        await assertCount(noScanRow.getByText("Check now", { exact: true }), 0, "No-scan history must not show textual Check now");
-        await assertCount(needsBuildRow.getByRole("button", { name: /Build & scan/i }), 0, "Needs-build history must not claim an unsupported build action");
-        await assertCount(needsBuildRow.getByRole("button", { name: /Rescan this config/i }), 0, "An unbuilt revision must not offer a scan-only action");
-
-        const exactHistoryRow = page.locator(".scanning-history-table tbody tr").filter({ hasText: "zzzz-current" });
-        if (await exactHistoryRow.count() !== 1) {
-          throw new Error(`Expected one current exact history row; found ${JSON.stringify(await page.locator(".scanning-history-table tbody tr").allTextContents())}`);
+        await assertCount(page.getByRole("tab"), 2, "Scanning must expose exactly Active and Completed");
+        await assertCount(page.locator("#scan-systems-panel"), 0, "The removed system-history panel must not mount");
+        if (collectionRequests.some((request) => request.collection === "history")) {
+          throw new Error("Scanning must not request removed per-system history");
         }
-        const exactHistoryOpenCount = scanDetailRequests.length;
-        await exactHistoryRow.click();
-        detail = page.locator("#scan-diagnostics-dialog");
-        await assertVisible(detail.getByText(`Scan ID ${ids.newest}`, { exact: true }), "Plain-clicking an exact By-system history row should open that scan");
-        if (scanDetailRequests.length !== exactHistoryOpenCount + 1 || scanDetailRequests.at(-1) !== ids.newest) {
-          throw new Error(`By-system plain click opened a non-exact scan: ${JSON.stringify(scanDetailRequests)}`);
-        }
-        await detail.getByRole("button", { name: "Close exact scan detail" }).click();
-        await assertFocused(exactHistoryRow, "Closing an exact history drawer should restore focus to its row");
-        const exactActionOpenCount = scanDetailRequests.length;
-        await exactHistoryRow.getByRole("button", { name: `Open details for scan ${ids.newest}` }).click();
-        detail = page.locator("#scan-diagnostics-dialog");
-        await assertVisible(detail.getByText(`Scan ID ${ids.newest}`, { exact: true }), "Terminal icon should open the same exact scan as its row");
-        if (scanDetailRequests.length !== exactActionOpenCount + 1 || scanDetailRequests.at(-1) !== ids.newest) {
-          throw new Error(`Terminal action propagated to another row action: ${JSON.stringify(scanDetailRequests)}`);
-        }
-        await detail.getByRole("button", { name: "Close exact scan detail" }).click();
-
-        const failedSystemRow = page.locator(".scanning-history-table tbody tr").filter({ hasText: "dddd-system-failure" });
-        await assertCount(failedSystemRow.getByRole("button", { name: /Retry exact/i }), 0, "Failed By-system history rows must not duplicate Retry exact outside the drawer");
-        const failedHistoryOpenCount = scanDetailRequests.length;
-        await failedSystemRow.click();
-        detail = page.locator("#scan-diagnostics-dialog");
-        await assertVisible(detail.getByRole("heading", { name: "prod-server-01", exact: true }), "Failed By-system row should open its exact drawer");
-        await assertVisible(detail.getByRole("alert").getByText("failure for dddd-system-failure", { exact: true }), "Failed drawer should retain exact failure context");
-        await assertVisible(detail.getByRole("button", { name: "Retry scan" }), "Authorized retry remains available in the exact failure drawer");
-        if (scanDetailRequests.length !== failedHistoryOpenCount + 1 || scanDetailRequests.at(-1) !== ids.systemFailed) {
-          throw new Error(`Failed By-system row click did not open its exact scan: ${JSON.stringify(scanDetailRequests)}`);
-        }
-        await detail.getByRole("button", { name: "Close exact scan detail" }).click();
-        await assertAttribute(prodSystemToggle, "aria-expanded", "true", "Nested scan detail actions must not collapse By-system history");
-        const failedActionOpenCount = scanDetailRequests.length;
-        await failedSystemRow.getByRole("button", { name: `Open details for scan ${ids.systemFailed}` }).click();
-        detail = page.locator("#scan-diagnostics-dialog");
-        await assertVisible(detail.getByText(`Scan ID ${ids.systemFailed}`, { exact: true }), "Failed-row terminal icon should reopen the same exact scan");
-        if (scanDetailRequests.length !== failedActionOpenCount + 1 || scanDetailRequests.at(-1) !== ids.systemFailed) {
-          throw new Error(`Failed-row terminal icon propagated to a second action: ${JSON.stringify(scanDetailRequests)}`);
-        }
-        await detail.getByRole("button", { name: "Close exact scan detail" }).click();
-
-        const noScanRequestCount = retryRequests.length;
-        const eligibleRescanResponse = page.waitForResponse((response) => response.request().method() === "POST" && response.url().endsWith("/api/v1/cves/rescan/301"));
-        await noScanRow.getByRole("button", { name: "Rescan this config 301" }).click();
-        await eligibleRescanResponse;
-        if (retryRequests.length !== noScanRequestCount + 1 || retryRequests.at(-1) !== 301) {
-          throw new Error(`Directly eligible revision did not enqueue its exact scan: ${JSON.stringify(retryRequests)}`);
-        }
-        await assertHidden(page.locator("#scan-diagnostics-dialog"), "An unscanned revision must not open a fabricated scan drawer");
-
-        const defaultHistoryResponse = page.waitForResponse((response) =>
-          response.request().method() === "GET" && response.url().match(scansRoute) &&
-          response.url().includes("collection=history") && response.url().includes("include_archived=false"));
-        await page.getByRole("checkbox", { name: "Include archived" }).uncheck();
-        await defaultHistoryResponse;
-        if (!collectionRequests.some((request) => request.collection === "history" && request.systemId === systemId)) throw new Error("By-system expansion did not request scoped history collection");
-        const prodArchived = page.getByRole("checkbox", { name: "Include archived" });
-        if (await prodArchived.isChecked()) throw new Error("Completed archived state leaked into By-system history");
-        const prodArchivedReload = page.waitForResponse((response) => {
-          const url = new URL(response.url());
-          return url.pathname.endsWith("/api/v1/scanning/scans") &&
-            url.searchParams.get("collection") === "history" &&
-            url.searchParams.get("system_id") === systemId &&
-            url.searchParams.get("include_archived") === "true" &&
-            response.request().method() === "GET";
-        });
-        await prodArchived.check();
-        await prodArchivedReload;
-        await page.getByRole("button", { name: /build-required-01/ }).click();
-        const buildRequiredArchived = page.getByRole("checkbox", { name: "Include archived" });
-        if (await buildRequiredArchived.isChecked()) throw new Error("One system's archived state leaked into another system");
-        await page.getByRole("tab", { name: /^Completed/ }).click();
-        await assertAttribute(page.getByRole("button", { name: "Archived [7]" }), "aria-pressed", "true", "By-system archived state must not change Completed");
-        await page.getByRole("tab", { name: /^By system/ }).click();
-        await prodSystemToggle.click();
+        if (removedTabRequests.length) throw new Error(`Scanning still polls the removed system view: ${JSON.stringify(removedTabRequests)}`);
+        await assertAttribute(page.getByRole("button", { name: "Archived [7]" }), "aria-pressed", "true", "Completed archived state must survive selection changes");
 
         await page.getByRole("button", { name: "Schedule" }).click();
         const scheduleDialog = page.getByRole("dialog", { name: "Scan schedule" });
@@ -18540,21 +18544,282 @@ security.audit.enable = true;</fixtext>
         await assertHidden(scheduleDialog, "Expected saved schedule dialog to close");
         if (scheduleRequest?.deployed_interval !== "12h" || scheduleRequest?.rebuild_to_scan !== true) throw new Error(`Schedule request did not preserve controls: ${JSON.stringify(scheduleRequest)}`);
 
-        await captureWorkflowViewportState(page, "16c-scanning-view", "by-system-history", "desktop");
-        await captureWorkflowViewportState(page, "16c-scanning-view", "by-system-history", "narrowDesktop", async () => {
+        await captureWorkflowViewportState(page, "16c-scanning-view", "completed-history", "desktop");
+        await captureWorkflowViewportState(page, "16c-scanning-view", "completed-history", "narrowDesktop", async () => {
           const width = await page.evaluate(() => ({ viewport: window.innerWidth, document: document.documentElement.scrollWidth }));
           if (width.document > width.viewport) throw new Error(`Scanning narrow layout overflows: ${JSON.stringify(width)}`);
         });
       } finally {
+        page.off("request", noteRemovedTabRequest);
         await page.unroute("**/api/v1/scanning/stats");
         await page.unroute(scansRoute);
         await page.unroute(scanDetailRoute);
         await page.unroute(exactRetryRoute);
-        await page.unroute("**/api/v1/scanning/systems?limit=500");
-        await page.unroute(`**/api/v1/scanning/systems/${systemId}/scans?limit=500`);
-        await page.unroute(`**/api/v1/scanning/systems/${buildRequiredSystemId}/scans?limit=500`);
-        await page.unroute("**/api/v1/environments");
         await page.unroute("**/api/v1/scanning/schedule");
+      }
+    },
+  },
+  {
+    name: "16e-poam-register-design",
+    description: "Mocked paged POA&M register: loaded-only counts, exact scopes, groups, selection and partial bulk failures",
+    action: async (page) => {
+      const ids = {
+        envA: "31000000-0000-4000-8000-000000000001",
+        envB: "31000000-0000-4000-8000-000000000002",
+        host: "31000000-0000-4000-8000-000000000003",
+        bundle: "31000000-0000-4000-8000-000000000004",
+        version: "31000000-0000-4000-8000-000000000005",
+        assignment: "31000000-0000-4000-8000-000000000006",
+        owner: "31000000-0000-4000-8000-000000000007",
+      };
+      const planId = (number) => `30000000-0000-4000-8000-${String(number).padStart(12, "0")}`;
+      const today = new Date().toISOString().slice(0, 10);
+      const dueSoon = new Date(Date.now() + 7 * 86400_000).toISOString().slice(0, 10);
+      const rows = Array.from({ length: 105 }, (_, index) => {
+        const number = index + 1;
+        return {
+          id: planId(number), human_id: `POAM-${String(number).padStart(4, "0")}`,
+          title: number === 105 ? "CVE-only remediation" : `Register plan ${number}`,
+          plan: "Review and remediate retained evidence", owner: "", revision: 1,
+          assignee: number === 6 ? { kind: "unassigned" } : { kind: "user", user_id: ids.owner, display: "Morgan Owner", available: true },
+          status: number === 3 ? "awaiting_verification" : number === 4 ? "blocked" : number === 104 ? "completed" : "in_progress",
+          risk: number === 1 ? "high" : number === 2 ? "low" : "medium",
+          target_date: number === 1 ? "2020-01-01" : number === 2 ? dueSoon : "2099-01-01",
+          overdue: number === 1, finding_count: 1, cve_finding_count: number === 105 ? 1 : 0,
+          created_at: "2026-01-01T12:00:00Z", updated_at: "2026-01-02T12:00:00Z",
+          closed_at: number === 104 ? "2026-01-03T12:00:00Z" : null, closure_attempt_id: null,
+          environment_ids: number === 1 ? [ids.envA, ids.envB] : number === 2 ? [ids.envB] : [ids.envA],
+          system_ids: number === 1 || number === 2 ? [ids.host] : [],
+          bundle_ids: number <= 2 ? [ids.bundle] : [],
+          bundle_version_ids: number <= 2 ? [ids.version] : [],
+          assignment_version_ids: number <= 2 ? [ids.assignment] : [],
+          first_requirement: number === 105 ? null : `AC-${number}`,
+          first_cve: number === 105 ? "CVE-2024-1234" : null,
+          milestone_count: number === 1 ? 3 : 0,
+          completed_milestone_count: number === 1 ? 1 : 0,
+          last_activity_at: number === 5 ? "2020-01-01T12:00:00Z" : `${today}T12:00:00Z`,
+        };
+      });
+      const requests = [];
+      const writes = [];
+      const poamWrites = [];
+      const noteWrite = (request) => {
+        if (/\/api\/v1\/poams(?:\/|\?|$)/.test(request.url()) && request.method() !== "GET") {
+          poamWrites.push(`${request.method()} ${new URL(request.url()).pathname}`);
+        }
+      };
+      page.on("request", noteWrite);
+      const failPlan = planId(2);
+      const listRoute = /\/api\/v1\/poams(?:\?.*)?$/;
+      const detailRoute = /\/api\/v1\/poams\/([0-9a-f-]+)(?:\?.*)?$/;
+      const transitionRoute = /\/api\/v1\/poams\/([0-9a-f-]+)\/transition$/;
+      const acceptanceRoute = /\/api\/v1\/acceptances(?:\?.*)?$/;
+      const accepted = [
+        { source: "cve_host", source_id: "32000000-0000-4000-8000-000000000001", waiver_updated_at: null, status: "accepted", finding_id: null,
+          system_id: ids.host, environment_id: null, policy_lineage_id: null, policy_version_id: null,
+          canonical_cve_id: "CVE-2024-1234", canonical_package_name: "openssl", justification: "Reviewed host risk",
+          review_date: "2026-11-01", expires_at: null, accepted_by: ids.owner, accepted_at: "2026-09-20T12:00:00Z",
+          retired_at: null, retired_by: null, retirement_reason: null, recorded_at: "2026-09-20T12:00:00Z" },
+        { source: "policy_waiver", source_id: "32000000-0000-4000-8000-000000000002", waiver_updated_at: "2026-09-18T12:00:00Z", status: "accepted", finding_id: planId(1),
+          system_id: ids.host, environment_id: null, policy_lineage_id: ids.bundle, policy_version_id: ids.version,
+          canonical_cve_id: null, canonical_package_name: null, justification: "Approved policy exception",
+          review_date: null, expires_at: "2026-12-01T12:00:00Z", accepted_by: ids.owner, accepted_at: "2026-09-18T12:00:00Z",
+          retired_at: null, retired_by: null, retirement_reason: null, recorded_at: "2026-09-18T12:00:00Z" },
+      ];
+      const detailPayload = (row) => ({ ...row, findings: [], cve_findings: [], findings_has_more: false,
+        findings_next_cursor: null, milestones: [], assignment_references: [], verification_attempts: [],
+        verification_has_more: false, verification_next_cursor: null, activity: [],
+        activity_has_more: false, activity_next_cursor: null });
+      await page.route(listRoute, async (route) => {
+        const request = route.request();
+        if (request.method() !== "GET") throw new Error(`Unexpected register write: ${request.method()}`);
+        const url = new URL(request.url());
+        requests.push(url);
+        const limit = Number(url.searchParams.get("limit"));
+        const offset = Number(url.searchParams.get("offset"));
+        if (limit !== 100 || ![0, 100].includes(offset)) throw new Error(`Invalid register page: ${url}`);
+        const scoped = rows.filter((row) =>
+          (!url.searchParams.has("system_id") || row.system_ids.includes(url.searchParams.get("system_id"))) &&
+          (!url.searchParams.has("bundle_id") || row.bundle_ids.includes(url.searchParams.get("bundle_id"))));
+        const items = scoped.slice(offset, offset + limit);
+        await route.fulfill({ json: { items, limit, offset, has_more: offset + limit < scoped.length,
+          next_offset: offset + limit < scoped.length ? offset + limit : null } });
+      });
+      await page.route(acceptanceRoute, (route) => {
+        if (route.request().method() !== "GET") throw new Error("Register acceptance read attempted a write");
+        const url = new URL(route.request().url());
+        if (url.searchParams.get("status") !== "accepted" || url.searchParams.get("limit") !== "100") {
+          throw new Error(`Acceptance register requested an unapproved scope: ${url}`);
+        }
+        const visible = accepted.filter((item) => !url.searchParams.has("environment_id") || url.searchParams.get("environment_id") === ids.envA);
+        const offset = Number(url.searchParams.get("offset"));
+        return route.fulfill({ json: { items: visible.slice(offset, offset + 100), total: visible.length, offset,
+          limit: 100, has_more: offset + 100 < visible.length } });
+      });
+      await page.route("**/api/v1/poams/assignees", (route) => route.fulfill({ json: { people: [], groups: [] } }));
+      await page.route(detailRoute, (route) => {
+        const id = new URL(route.request().url()).pathname.split("/").at(-1);
+        if (route.request().method() !== "GET") throw new Error(`Unexpected detail write: ${route.request().method()}`);
+        const row = rows.find((item) => item.id === id);
+        if (!row) throw new Error(`Unexpected detail ID: ${id}`);
+        return route.fulfill({ json: detailPayload(row) });
+      });
+      await page.route(transitionRoute, (route) => {
+        const id = new URL(route.request().url()).pathname.split("/").at(-2);
+        const body = route.request().postDataJSON();
+        writes.push({ id, method: route.request().method(), body });
+        if (route.request().method() !== "POST" || body.revision !== 1 || body.status !== "blocked") {
+          throw new Error(`Unexpected bulk transition: ${JSON.stringify(writes.at(-1))}`);
+        }
+        if (id === failPlan) return route.fulfill({ status: 409, json: { error: "stale revision" } });
+        const row = rows.find((item) => item.id === id);
+        row.status = "blocked";
+        row.revision += 1;
+        return route.fulfill({ json: detailPayload(row) });
+      });
+      const selected = page.getByRole("group", { name: "Selected remediation plans" });
+      const row = (number) => page.locator(".poams-group tbody tr").filter({ hasText: `POAM-${String(number).padStart(4, "0")}` });
+      const browse = (name) => page.getByRole("tablist", { name: "Browse by" }).getByRole("tab", { name });
+      const scopeUrl = (key, id) => new URL(page.url()).searchParams.get(key) === id;
+      try {
+        await page.goto(`${baseUrl}/poams`, { timeout: LOAD_TIMEOUT, waitUntil: "commit" });
+        await assertVisible(page.getByRole("heading", { name: "POA&M", exact: true }), "Register heading must load");
+        await assertVisible(page.getByText("100 open plans in 100 loaded - accepted decisions read separately - more pages available"), "First page must not claim fleet completeness");
+        await assertVisible(page.getByText("50 shown / 100 matching loaded / 100 loaded - more pages available"), "Initial window is bounded");
+        await assertVisible(row(1).getByText("CAT I"), "Risk category must come from the plan summary");
+        await assertVisible(row(1).getByText("1/3 milestones"), "Milestone progress must come from the register projection");
+        await assertVisible(row(6).getByText("Unassigned"), "Missing owner must not be given an invented identity");
+        await assertVisible(page.getByText("Work queue counts are for loaded pages only. They may grow as more pages load."), "Queues must disclose their loaded-only scope");
+        for (const [label, count] of [["Overdue plans", "1"], ["Due in 14 days", "1"], ["Awaiting verification", "1"], ["Blocked", "1"], ["No activity in 30 days", "1"], ["Unassigned", "1"]]) {
+          await assertVisible(page.getByRole("group", { name: "Work queues" }).getByRole("button", { name: `${count} ${label}` }), `${label} must count loaded rows only`);
+        }
+        await assertAttribute(page.getByRole("tab", { name: "Everything" }), "aria-selected", "true", "Everything is the initial type");
+        await page.getByRole("tab", { name: "Risk acceptances" }).click();
+        await assertVisible(page.getByRole("region", { name: "Risk acceptances" }).getByText("CVE-2024-1234", { exact: false }), "Accepted CVE host decision must keep its canonical package identity");
+        await assertVisible(page.getByRole("region", { name: "Risk acceptances" }).getByText("Authorization expires 2026", { exact: false }), "Policy waiver expiry must not be mistaken for a review deadline");
+        await assertCount(page.getByRole("group", { name: "Work queues" }), 0, "Decisions must not inherit plan queues");
+        await captureWorkflowViewportState(page, "16e-poam-register-design", "source-decisions-readonly", "desktop");
+        await page.getByRole("tab", { name: "Remediation plans" }).click();
+        await assertAttribute(page.getByRole("tab", { name: "Remediation plans" }), "aria-selected", "true", "Plan type must be URL-backed");
+        if (!new URL(page.url()).searchParams.has("kind")) throw new Error(`Plan type missing in URL: ${page.url()}`);
+
+        await page.getByRole("button", { name: "Load next page" }).click();
+        await assertVisible(page.getByText("104 open plans in 105 loaded - accepted decisions read separately - all pages loaded"), "Second page must append five plans, not acceptances");
+        if (!requests.some((url) => url.searchParams.get("offset") === "100" && url.searchParams.get("limit") === "100")) throw new Error("Register did not request page two");
+        await page.getByRole("textbox", { name: "Search loaded plans" }).fill("CVE-2024-1234");
+        await assertVisible(row(105).getByText("CVE-only remediation"), "First CVE must be searchable without a policy requirement");
+        await page.getByRole("textbox", { name: "Search loaded plans" }).fill("");
+        await page.getByRole("combobox", { name: "Status", exact: true }).selectOption("all");
+        await page.getByRole("combobox", { name: "Group loaded plans" }).selectOption("environment");
+        await assertVisible(page.getByRole("button", { name: `Environment ${ids.envA} - 104 loaded` }), "Environment A must count unique plans in its group");
+        await assertVisible(page.getByRole("button", { name: `Environment ${ids.envB} - 2 loaded` }), "One plan must appear in two environment groups");
+        await page.getByRole("button", { name: "Show more loaded plans in each group" }).click();
+        await page.getByRole("button", { name: "Show more loaded plans in each group" }).click();
+        await assertVisible(page.getByText("105 shown / 105 matching loaded / 105 loaded - all pages loaded"), "Group display must deduplicate shown IDs");
+        await assertCount(row(1), 2, "One multi-environment plan must render once in each group");
+        await row(1).first().click({ modifiers: ["Control"] });
+        await assertVisible(selected.getByText("1 loaded plans selected"), "The same POA&M must be selected only once across groups");
+        await selected.getByRole("button", { name: "Clear" }).click();
+        await page.getByRole("combobox", { name: "Group loaded plans" }).selectOption("none");
+        await page.getByRole("combobox", { name: "Sort loaded plans" }).selectOption("id");
+        await row(1).click({ modifiers: ["Control"] });
+        await row(2).click({ modifiers: ["Shift"] });
+        await assertVisible(selected.getByText("2 loaded plans selected"), "Shift must select the visible loaded-order range");
+        await assertAttribute(row(1), "aria-selected", "true", "Range start must be selected");
+        await assertAttribute(row(2), "aria-selected", "true", "Range end must be selected");
+        await selected.getByRole("button", { name: "Clear" }).click();
+        await assertCount(selected, 0, "Clear must remove selection without a write");
+        if (poamWrites.length) throw new Error(`Selection or cancel caused a write: ${JSON.stringify(poamWrites)}`);
+
+        await row(1).getByRole("button", { name: `Environment ${ids.envB}` }).click();
+        if (!scopeUrl("environment", ids.envB)) throw new Error(`Environment scope did not preserve exact ID: ${page.url()}`);
+        await assertVisible(page.getByText("scope is partial across pages"), "Environment client scope must disclose partial pagination");
+        await assertVisible(row(1), "Environment B must load its spanning plan");
+        await assertCount(row(1), 1, "Spanning plan must remain in environment B");
+        await assertCount(row(3), 0, "Environment B must exclude unrelated plans");
+        await page.reload({ waitUntil: "commit" });
+        await assertVisible(row(2), "Environment-scoped rows must load after refresh");
+        await assertCount(row(2), 1, "Environment URL must survive refresh");
+        const hostScopeResponse = page.waitForResponse((response) => {
+          const url = new URL(response.url());
+          return url.pathname === "/api/v1/poams" && url.searchParams.get("system_id") === ids.host;
+        });
+        await row(1).getByRole("button", { name: `Host ${ids.host}` }).click();
+        await hostScopeResponse.catch(() => {
+          throw new Error(`Host list did not request exact server scope: ${page.url()} ${JSON.stringify(requests.map((url) => url.toString()).slice(-8))}`);
+        });
+        if (!scopeUrl("system", ids.host)) throw new Error(`Host scope did not preserve exact ID: ${page.url()}`);
+        if (!requests.some((url) => url.searchParams.get("system_id") === ids.host)) throw new Error("Host list did not request exact server scope");
+        await page.goBack();
+        if (!scopeUrl("environment", ids.envB)) throw new Error(`Back did not restore environment scope: ${page.url()}`);
+        await browse("Bundle").click();
+        await row(1).getByRole("button", { name: `Bundle ${ids.bundle}` }).click();
+        if (!scopeUrl("bundle", ids.bundle) || !requests.some((url) => url.searchParams.get("bundle_id") === ids.bundle)) throw new Error("Bundle scope must keep its exact UUID in URL and server query");
+        await page.reload({ waitUntil: "commit" });
+        await assertVisible(row(2), "Bundle-scoped rows must load after refresh");
+        await assertCount(row(2), 1, "Bundle URL must survive refresh");
+        await browse("Environment").click();
+        await page.getByRole("combobox", { name: "Sort loaded plans" }).selectOption("id");
+        await row(1).click();
+        const detail = page.locator(`[data-testid="poam-detail"][data-poam-id="${planId(1)}"]`);
+        await assertVisible(detail, "Plain row click must open exact POA&M detail");
+        await detail.getByRole("button", { name: "Close", exact: true }).click();
+        await assertCount(detail, 0, "Closing detail must not mutate the plan");
+        if (poamWrites.length) throw new Error(`Read-only detail close caused a write: ${JSON.stringify(poamWrites)}`);
+
+        await row(1).click({ modifiers: ["Control"] });
+        await row(2).click({ modifiers: ["Control"] });
+        await assertVisible(selected.getByText("2 loaded plans selected"), "Both visible plans must be selected before the batch starts");
+        await selected.getByRole("combobox", { name: "Set selected plan status" }).selectOption("blocked");
+        try {
+          await assertVisible(page.getByText("1 plan(s) confirmed; 1 not confirmed.", { exact: false }), "Partial batch must report confirmed and failed IDs");
+        } catch (error) {
+          throw new Error(`${error.message}; writes: ${JSON.stringify(writes)}; selected: ${await selected.textContent().catch(() => "not visible")}`);
+        }
+        await assertVisible(selected.getByText("1 loaded plans selected"), "Only failed POA&M must remain selected");
+        await assertAttribute(row(2), "aria-selected", "true", "Failed row must remain selected after refresh");
+        await assertAttribute(row(1), "aria-selected", "false", "Confirmed row must clear after refresh");
+        if (writes.length !== 2 || new Set(writes.map((item) => item.id)).size !== 2) throw new Error(`Bulk mutation must target each exact POA&M once: ${JSON.stringify(writes)}`);
+        if (poamWrites.length !== 2) throw new Error(`Bulk mutation sent an unexpected write: ${JSON.stringify(poamWrites)}`);
+
+        // A previous scope's delayed response must not replace the newer URL's
+        // rows, loaded count, or pagination state after the newer request wins.
+        let releaseOldScope;
+        const waitForOldScope = new Promise((resolve) => { releaseOldScope = resolve; });
+        let delayedScopeRequest = false;
+        const outOfOrderRoute = async (route) => {
+          const url = new URL(route.request().url());
+          if (url.searchParams.get("offset") !== "0") throw new Error(`Unexpected scope-race page: ${url}`);
+          const oldScope = !delayedScopeRequest;
+          delayedScopeRequest = true;
+          if (oldScope) await waitForOldScope;
+          await route.fulfill({ json: { items: rows.slice(0, 100), limit: 100, offset: 0,
+            has_more: true, next_offset: 100 }, headers: oldScope ? { "x-old-scope-response": "true" } : {} });
+        };
+        await selected.getByRole("button", { name: "Clear" }).click();
+        await page.route(listRoute, outOfOrderRoute);
+        try {
+          const slowRequest = page.waitForRequest((request) => new URL(request.url()).pathname === "/api/v1/poams");
+          await row(1).getByRole("button", { name: `Environment ${ids.envA}` }).click();
+          await slowRequest;
+          await page.getByRole("navigation", { name: "Scope" }).getByRole("button", { name: "All" }).click();
+          await assertVisible(row(2), "The newer unscoped response must restore the second environment's plan");
+          const staleResponse = page.waitForResponse((response) => response.headers()["x-old-scope-response"] === "true");
+          releaseOldScope();
+          await staleResponse;
+          await assertVisible(row(2), "The stale environment response must not replace the current scope's rows");
+          await assertVisible(page.getByText("50 shown / 100 matching loaded / 100 loaded - more pages available"), "A stale response must not replace the current loaded count");
+        } finally {
+          releaseOldScope();
+          await page.unroute(listRoute, outOfOrderRoute);
+        }
+      } finally {
+        page.off("request", noteWrite);
+        await page.unroute(listRoute);
+        await page.unroute(acceptanceRoute);
+        await page.unroute(detailRoute);
+        await page.unroute(transitionRoute);
+        await page.unroute("**/api/v1/poams/assignees");
       }
     },
   },
@@ -18620,7 +18885,6 @@ security.audit.enable = true;</fixtext>
             : [];
         return route.fulfill({ json: { items, total: collection === "completed" ? 1 : items.length, hidden_archived: collection === "completed" && archived && params.get("include_archived") !== "true" ? 1 : 0, has_more: false, next_cursor: null } });
       });
-      await page.route("**/api/v1/scanning/systems?limit=500", (route) => route.fulfill({ json: [] }));
       try {
         await page.goto(`${baseUrl}/scanning`, { timeout: LOAD_TIMEOUT });
         const card = (label) => page.locator(".scanning-stats .stat").filter({ has: page.locator(".stat-label", { hasText: label }) });
@@ -18650,7 +18914,6 @@ security.audit.enable = true;</fixtext>
       } finally {
         await page.unroute("**/api/v1/scanning/stats");
         await page.unroute(scansRoute);
-        await page.unroute("**/api/v1/scanning/systems?limit=500");
       }
     },
   },
@@ -23802,21 +24065,19 @@ function runStaticHarnessContracts() {
   );
   for (const contract of [
     'collection === "active"',
-    'collection === "history"',
+    'Scanning must have only the two designed tabs',
+    'Scanning still polls the removed system view',
+    '"Scanned", "Trigger", "Actions"',
     "awaiting_build",
     "awaiting_closure",
     'name: "Archive 4"',
     'name: "Restore 4"',
     '"No persisted diagnostic events"',
-    '"Rescan current"',
-    '"Rescan this config"',
     "Plain-clicking an Active queued row",
     "Plain Active running-row click",
-    "Plain-clicking an exact By-system history row",
     "Mixed archive must carry both exact IDs once",
     "Selected BulkBar must be centered and sticky",
     "Clear must reset the range anchor",
-    "must not claim an unsupported build action",
     "A plain Completed row click should open the exact config",
     "View CVEs for scan",
     "active-running-drawer",

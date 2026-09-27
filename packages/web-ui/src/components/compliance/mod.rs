@@ -53,6 +53,7 @@ pub struct BundleCatalogProps {
 pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
     let mut query = use_signal(String::new);
     let mut framework = use_signal(|| "all".to_string());
+    let mut expanded = use_signal(std::collections::BTreeSet::<uuid::Uuid>::new);
     let query_value = query.read().trim().to_ascii_lowercase();
     let frameworks = {
         let mut counts = std::collections::BTreeMap::<String, usize>::new();
@@ -105,18 +106,20 @@ pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
                 } else {
                 table { class: "sys-table sys-table-fixed",
                     colgroup {
-                        col { style: "width:38%;" }
+                        col { style: "width:32px;" }
+                        col { style: "width:34%;" }
                         col { style: "width:16%;" }
-                        col { style: "width:18%;" }
+                        col { style: "width:16%;" }
                         col { style: "width:18%;" }
                         col { style: "width:10%;" }
                     }
-                    thead { tr { th { "Bundle" } th { "Framework" } th { "Version" } th { "Score" } th { "" } } }
+                    thead { tr { th { "" } th { "Bundle" } th { "Framework" } th { "Version" } th { "Score" } th { "" } } }
                     tbody {
                 for bundle in visible.iter() {
                     {
                         let id = bundle.id;
                         let selected = props.selected_id == Some(id);
+                        let is_expanded = expanded.read().contains(&id);
                         let framework = bundle.framework.clone();
                         let revisions = bundle.versions.clone();
                         let summary_version_id = bundle
@@ -138,11 +141,29 @@ pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
                         let system_count_label = format!("{} system{}", bundle.applicable_system_count, if bundle.applicable_system_count == 1 { "" } else { "s" });
                         let poam_rollup = props.poam_rollups.iter().find(|rollup| rollup.scope_id == id);
                         rsx! {
+                            // Catalog rows represent lineages. Only the server's current
+                            // pointer supplies the summary; other versions keep their IDs.
                             tr {
                                 class: if selected { "selected" } else { "" },
                                 "data-testid": "compliance-bundle-row",
                                 "data-bundle-id": "{id}",
                                 onclick: move |_| props.on_select.call(id),
+                                td { style: "text-align:center;",
+                                    if revisions.len() > 1 {
+                                        button {
+                                            class: "btn-icon focus-ring",
+                                            "data-testid": "bundle-versions-toggle",
+                                            title: if is_expanded { "Hide other versions" } else { "Show other versions" },
+                                            aria_label: if is_expanded { "Hide other versions" } else { "Show other versions" },
+                                            aria_expanded: is_expanded,
+                                            onclick: move |event| {
+                                                event.stop_propagation();
+                                                expanded.with_mut(|ids| { if !ids.insert(id) { ids.remove(&id); } });
+                                            },
+                                            Icon { name: if is_expanded { IconName::ChevronDown } else { IconName::ChevronRight }, size: 13 }
+                                        }
+                                    }
+                                }
                                 td {
                                     div { style: "display:flex;align-items:center;gap:8px;min-width:0;",
                                         span { style: "width:7px;height:7px;border-radius:50%;flex-shrink:0;background:{score_color};" }
@@ -164,7 +185,43 @@ pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
                                 td { span { class: "chip chip-info", "{framework}" } }
                                  td { div { class: "mono", style: "font-size:12px;", "{version}" } div { style: "margin-top:3px;", span { class: "chip", style: "font-size:9px;padding:1px 6px;", "{publication_state}" } } }
                                 td { span { class: "mono", style: "font-size:13px;font-weight:600;color:{score_color};", "{score_label}" } div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;", "{system_count_label}" } }
-                                td { style: "text-align:right;", div { class: "row-actions", style: "opacity:1;justify-content:flex-end;", button { class: "btn-icon focus-ring", title: "View bundle", onclick: move |event| { event.stop_propagation(); props.on_select.call(id); }, Icon { name: IconName::ArrowRight, size: 14 } } } }
+                                td { style: "text-align:right;", div { class: "row-actions", style: "opacity:1;justify-content:flex-end;",
+                                    if !id.is_nil() {
+                                        Link {
+                                            class: "btn-icon focus-ring",
+                                            title: "Open bundle POA&M register",
+                                            aria_label: "Open bundle POA&M register",
+                                            to: Route::PoamsView { query: format!("dim=bundle&bundle={id}") },
+                                            onclick: move |event: MouseEvent| { event.stop_propagation(); },
+                                            Icon { name: IconName::Gear, size: 13 }
+                                        }
+                                    }
+                                    button { class: "btn-icon focus-ring", title: "View bundle", onclick: move |event| { event.stop_propagation(); props.on_select.call(id); }, Icon { name: IconName::ArrowRight, size: 14 } }
+                                } }
+                            }
+                            if is_expanded {
+                                for revision in revisions.iter().filter(|revision| Some(revision.id) != summary_version_id) {
+                                    {
+                                        let version_id = revision.id;
+                                        let version_label = revision.version.clone();
+                                        let state = revision.publication_state.clone();
+                                        let date = revision.published_at.unwrap_or(revision.created_at).format("%Y-%m-%d").to_string();
+                                        rsx! {
+                                            tr {
+                                                class: if selected && props.selected_version_id == Some(version_id) { "cf-rev-row selected" } else { "cf-rev-row" },
+                                                "data-testid": "compliance-bundle-version-row",
+                                                "data-version-id": "{version_id}",
+                                                onclick: move |_| props.on_select_version.call(version_id),
+                                                td {}
+                                                td { style: "padding-left:28px;font-size:12px;color:var(--cf-text-secondary);", Icon { name: IconName::History, size: 11 } " {version_label}" }
+                                                td { style: "font-size:11px;color:var(--cf-text-muted);", "{framework}" }
+                                                td { span { class: "chip", "{state}" } div { style: "font-size:10px;color:var(--cf-text-muted);margin-top:3px;", "{date}" } }
+                                                td { style: "font-size:11px;color:var(--cf-text-muted);", "Exact version" }
+                                                td { style: "text-align:right;", button { class: "btn-icon focus-ring", title: "View this version", onclick: move |event| { event.stop_propagation(); props.on_select_version.call(version_id); }, Icon { name: IconName::ArrowRight, size: 13 } } }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

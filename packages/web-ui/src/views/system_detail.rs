@@ -3282,25 +3282,35 @@ fn ComplianceTab(system: SystemDetail, viewer: bool, initial_poam: String) -> El
                     }
                 },
                 Some(SystemPoamData::Loaded { rollup, items }) => rsx! {
-                    SystemPoamSection {
-                        hostname: system.hostname.clone(),
-                        rollup,
-                        items,
-                        filter: poam_filter(),
-                        on_filter: move |filter| poam_filter.set(filter),
-                        on_open: move |poam_id| {
-                            selected_poam.set(Some(poam_id));
-                            let query = query_with_parameter(
-                                &query_with_parameter(
-                                    &current_system_detail_query(),
-                                    "tab",
-                                    Some("compliance"),
-                                ),
-                                "poam",
-                                Some(&poam_id.to_string()),
-                            );
-                            sync_system_detail_query(&query, true);
-                        },
+                    div {
+                        SystemPoamSection {
+                            hostname: system.hostname.clone(),
+                            rollup,
+                            items,
+                            filter: poam_filter(),
+                            on_filter: move |filter| poam_filter.set(filter),
+                            on_open: move |poam_id| {
+                                selected_poam.set(Some(poam_id));
+                                let query = query_with_parameter(
+                                    &query_with_parameter(
+                                        &current_system_detail_query(),
+                                        "tab",
+                                        Some("compliance"),
+                                    ),
+                                    "poam",
+                                    Some(&poam_id.to_string()),
+                                );
+                                sync_system_detail_query(&query, true);
+                            },
+                        }
+                        if !system_id.is_nil() {
+                            Link {
+                                class: "btn btn-ghost xs focus-ring",
+                                to: crate::routes::Route::PoamsView { query: format!("dim=environment&system={system_id}") },
+                                Icon { name: IconName::ArrowRight, size: 11 }
+                                " View in POA&M register"
+                            }
+                        }
                     }
                 },
             }

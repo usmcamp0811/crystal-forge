@@ -164,7 +164,7 @@ pub async fn list(
         Ok(v) => v,
         Err(e) => return e,
     };
-    match poam::list(&pool, &actor, &query, &SystemClock).await {
+    match poam::list_register(&pool, &actor, &query, &SystemClock).await {
         Ok(v) => Json(v).into_response(),
         Err(e) => error_response(e),
     }

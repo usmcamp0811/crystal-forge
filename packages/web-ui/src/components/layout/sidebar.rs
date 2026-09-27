@@ -457,7 +457,7 @@ pub fn SidebarNav() -> Element {
                 NavLink {
                     collapsed: is_collapsed,
                     to: Route::ComplianceView { bundle: String::new(), version: String::new(), system: String::new(), policy: String::new(), poam: String::new(), view: String::new() },
-                    label: "Compliance",
+                    label: "Bundles",
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -469,6 +469,12 @@ pub fn SidebarNav() -> Element {
                             path { d: "M9 12l2 2 4-4" }
                         }
                     )
+                }
+                NavLink {
+                    collapsed: is_collapsed,
+                    to: Route::PoamsView { query: String::new() },
+                    label: "POA&M",
+                    icon: rsx!(svg { class: "w-4 h-4", fill: "none", stroke: "currentColor", stroke_width: "1.75", view_box: "0 0 24 24", path { d: "M8 4h8l4 4v12H4V4h4zM8 12h8M8 16h6M15 4v4h5" } })
                 }
 
                 // ── System ────────────────────────────────────────────────
@@ -825,7 +831,7 @@ pub fn MobileDrawer() -> Element {
                 NavLink {
                     collapsed: false,
                     to: Route::ComplianceView { bundle: String::new(), version: String::new(), system: String::new(), policy: String::new(), poam: String::new(), view: String::new() },
-                    label: "Compliance",
+                    label: "Bundles",
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -837,6 +843,12 @@ pub fn MobileDrawer() -> Element {
                             path { d: "M9 12l2 2 4-4" }
                         }
                     )
+                }
+                NavLink {
+                    collapsed: false,
+                    to: Route::PoamsView { query: String::new() },
+                    label: "POA&M",
+                    icon: rsx!(svg { class: "w-4 h-4", fill: "none", stroke: "currentColor", stroke_width: "1.75", view_box: "0 0 24 24", path { d: "M8 4h8l4 4v12H4V4h4zM8 12h8M8 16h6M15 4v4h5" } })
                 }
 
                 NavSection { collapsed: false, label: "System" }

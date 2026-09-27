@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod acceptance_register;
 pub mod agent_heartbeat;
 pub mod attention;
 pub mod auth_identity;
