@@ -14,6 +14,8 @@ use uuid::Uuid;
 use wasm_bindgen::{JsCast, closure::Closure};
 
 use crate::components::poam::PoamDetailHost;
+use crate::api::client::fetch_environments;
+use crate::api::models::EnvironmentSummary;
 use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
@@ -74,6 +76,12 @@ enum Queue {
     Blocked,
     Quiet,
     Unassigned,
+    ExpiredAcceptance,
+    ReviewSoon,
+    NoReview,
+    Accepted,
+    ComingDue,
+    Gaps,
 }
 
 impl Queue {
@@ -85,6 +93,12 @@ impl Queue {
             Self::Blocked => "blocked",
             Self::Quiet => "stale",
             Self::Unassigned => "unassigned",
+            Self::ExpiredAcceptance => "expired",
+            Self::ReviewSoon => "review_soon",
+            Self::NoReview => "no_review",
+            Self::Accepted => "accepted",
+            Self::ComingDue => "coming_due",
+            Self::Gaps => "gaps",
         }
     }
 
@@ -96,6 +110,12 @@ impl Queue {
             "blocked" => Some(Self::Blocked),
             "stale" => Some(Self::Quiet),
             "unassigned" => Some(Self::Unassigned),
+            "expired" => Some(Self::ExpiredAcceptance),
+            "review_soon" => Some(Self::ReviewSoon),
+            "no_review" => Some(Self::NoReview),
+            "accepted" => Some(Self::Accepted),
+            "coming_due" => Some(Self::ComingDue),
+            "gaps" => Some(Self::Gaps),
             _ => None,
         }
     }
@@ -108,6 +128,29 @@ impl Queue {
             Self::Blocked => "Blocked",
             Self::Quiet => "No activity in 30 days",
             Self::Unassigned => "Unassigned",
+            Self::ExpiredAcceptance => "Expired acceptances",
+            Self::ReviewSoon => "Review in 30 days",
+            Self::NoReview => "No review date",
+            Self::Accepted => "Accepted decisions",
+            Self::ComingDue => "Coming due",
+            Self::Gaps => "Missing owner/review",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Overdue => "Past target completion",
+            Self::Soon => "Coming up next",
+            Self::Awaiting => "Re-evaluate to close",
+            Self::Blocked => "Dependency to clear",
+            Self::Quiet => "Open but quiet",
+            Self::Unassigned => "Needs an owner",
+            Self::ExpiredAcceptance => "Renew or plan a fix",
+            Self::ReviewSoon => "Re-review before expiry",
+            Self::NoReview => "Assessors flag these",
+            Self::Accepted => "Source-approved risk",
+            Self::ComingDue => "Plans ≤14d · reviews ≤30d",
+            Self::Gaps => "Unassigned or undated",
         }
     }
 
@@ -127,6 +170,9 @@ impl Queue {
                 .last_activity_at
                 .is_some_and(|at| (Utc::now() - at).num_days() >= 30),
             Self::Unassigned => matches!(p.assignee, None | Some(PoamAssigneeView::Unassigned)),
+            Self::ComingDue => p.target_date.is_some_and(|date| date >= today && (date - today).num_days() <= 14),
+            Self::Gaps => matches!(p.assignee, None | Some(PoamAssigneeView::Unassigned)),
+            _ => false,
         }
     }
 }
@@ -321,12 +367,89 @@ fn owner(row: &PoamRegisterSummary) -> String {
     }
 }
 
+fn approver_label(id: Option<Uuid>, catalog: Option<&PoamAssigneeCatalog>) -> String {
+    id.and_then(|id| catalog?.people.iter().find(|person| person.user_id == id))
+        .map(|person| person.label.clone())
+        .unwrap_or_else(|| "Approver unavailable".into())
+}
+
+fn group_title(key: &str) -> &str {
+    if key.starts_with("Host ") { "Host" } else { key }
+}
+
+// An acceptance names either its environment directly or its host directly.
+// A host-only source never establishes a host-to-environment edge.
+fn acceptance_group_keys(
+    item: &AcceptanceEntry,
+    group: &str,
+    environments: &[EnvironmentSummary],
+    catalog: Option<&PoamAssigneeCatalog>,
+    today: NaiveDate,
+) -> Vec<String> {
+    match group {
+        "environment" => vec![item.environment_id.map(|id| environment_name(id, environments))
+            .unwrap_or_else(|| if item.system_id.is_some() { "Host-only decisions" } else { "No host scope" }.into())],
+        "system" => vec![item.system_id.map(|id| format!("Host {id}"))
+            .unwrap_or_else(|| if item.environment_id.is_some() { "Environment decisions" } else { "No host scope" }.into())],
+        "bundle" => vec!["No bundle attribution".into()],
+        "owner" => vec![approver_label(item.accepted_by, catalog)],
+        "type" => vec!["Risk acceptances".into()],
+        "due" => vec![if item.status != "accepted" { "Closed".into() }
+            else if item.review_due_at.or(item.review_date).is_some_and(|due| due < today) { "Late".into() }
+            else { "Upcoming / no date".into() }],
+        _ => vec!["Records".into()],
+    }
+}
+
+fn acceptance_matches(
+    item: &AcceptanceEntry,
+    location: RegisterLocation,
+    today: NaiveDate,
+    status: &str,
+    risk: &str,
+    mine: bool,
+    me: Option<Uuid>,
+    query: &str,
+) -> bool {
+    acceptance_in_scope(item, location.scope)
+        && acceptance_queue(item, location.queue, today)
+        && (status == "all" || (status == "active") == (item.retired_at.is_none()
+            && (item.status == "accepted" || (location.queue == Some(Queue::ExpiredAcceptance) && item.status == "expired"))))
+        // Acceptance sources have no recorded plan-risk category.
+        && risk == "all"
+        && (!mine || me.is_some_and(|id| item.accepted_by == Some(id)))
+        && (query.trim().is_empty() || [item.source_id.to_string(), acceptance_subject(item), item.justification.clone()]
+            .iter().any(|value| value.to_lowercase().contains(&query.trim().to_lowercase())))
+}
+
+fn acceptance_compare(a: &AcceptanceEntry, b: &AcceptanceEntry, sort: &str) -> std::cmp::Ordering {
+    let due = || a.review_due_at.or(a.review_date).cmp(&b.review_due_at.or(b.review_date));
+    match sort {
+        "activity" => b.recorded_at.cmp(&a.recorded_at),
+        "id" => a.source_id.cmp(&b.source_id),
+        // The source has no severity. Within a decision group, urgency and
+        // risk sorting retain the recorded review-date order.
+        _ => due(),
+    }.then_with(|| a.source_id.cmp(&b.source_id))
+}
+
+fn environment_name(id: Uuid, environments: &[EnvironmentSummary]) -> String {
+    environments.iter().find(|environment| environment.id == id)
+        .map(|environment| environment.name.trim())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| "Environment unavailable".into())
+}
+
 fn scope_pills(
     rows: &[PoamRegisterSummary],
     dimension: &str,
     current: Option<Scope>,
+    environments: &[EnvironmentSummary],
+    acceptances: &[AcceptanceEntry],
+    catalog: Option<&PoamAssigneeCatalog>,
 ) -> Vec<(Scope, String, usize)> {
-    let mut keys: BTreeMap<Scope, (String, BTreeSet<Uuid>)> = BTreeMap::new();
+    let mut keys: BTreeMap<Scope, (String, BTreeSet<String>)> = BTreeMap::new();
     for row in rows {
         let candidates: Vec<(Scope, String)> = match (dimension, current) {
             ("environment", Some(Scope::Environment(env))) => {
@@ -344,7 +467,7 @@ fn scope_pills(
             ("environment", None) => row
                 .environment_ids
                 .iter()
-                .map(|id| (Scope::Environment(*id), format!("Environment {id}")))
+                .map(|id| (Scope::Environment(*id), environment_name(*id, environments)))
                 .collect(),
             ("bundle", None) => row
                 .bundle_ids
@@ -361,7 +484,19 @@ fn scope_pills(
         };
         for (key, label) in candidates {
             let entry = keys.entry(key).or_insert_with(|| (label, BTreeSet::new()));
-            entry.1.insert(row.summary.id);
+            entry.1.insert(format!("poam:{}", row.summary.id));
+        }
+    }
+    // A host-only acceptance does not establish an environment membership.
+    // Only add direct environment/approver identities recorded by its source.
+    for item in acceptances {
+        let candidate = match (dimension, current) {
+            ("environment", None) => item.environment_id.map(|id| (Scope::Environment(id), environment_name(id, environments))),
+            ("owner", None) => item.accepted_by.map(|id| (Scope::Owner(id), approver_label(Some(id), catalog))),
+            _ => None,
+        };
+        if let Some((scope, label)) = candidate {
+            keys.entry(scope).or_insert_with(|| (label, BTreeSet::new())).1.insert(format!("{}:{}", item.source.key(), item.source_id));
         }
     }
     let mut pills: Vec<_> = keys
@@ -586,10 +721,9 @@ async fn refresh_loaded_pages(
 fn acceptance_in_scope(item: &AcceptanceEntry, scope: Option<Scope>) -> bool {
     match scope {
         None => true,
-        Some(Scope::Environment(id)) => {
-            item.environment_id == Some(id)
-                || item.system_id.is_some() && item.environment_id.is_none()
-        }
+        // Host decisions without an environment edge cannot be attributed to
+        // an environment from the flat decision projection.
+        Some(Scope::Environment(id)) => item.environment_id == Some(id),
         Some(Scope::System(id)) => item.system_id == Some(id),
         Some(Scope::Owner(id)) => item.accepted_by == Some(id),
         // A decision is not evidence that any particular bundle applies.
@@ -612,6 +746,30 @@ fn acceptance_subject(item: &AcceptanceEntry) -> String {
         }
     } else {
         "Subject unavailable".into()
+    }
+}
+
+fn acceptance_status(item: &AcceptanceEntry) -> &'static str {
+    if item.replacement_poam_id.is_some() { "Converted to POA&M" }
+    else if item.status == "expired" || item.expires_at.is_some_and(|at| at <= Utc::now()) { "Authorization expired" }
+    else if item.retired_at.is_some() || item.status == "revoked" { "Retired" }
+    else if item.status == "accepted" { "Risk accepted" }
+    else { "Decision pending" }
+}
+
+fn acceptance_queue(item: &AcceptanceEntry, queue: Option<Queue>, today: NaiveDate) -> bool {
+    let due = item.review_due_at.or(item.review_date);
+    let active = item.status == "accepted" && item.retired_at.is_none() && item.replacement_poam_id.is_none();
+    match queue {
+        None => true,
+        Some(Queue::ExpiredAcceptance) => (active && (due.is_some_and(|date| date < today) || item.expires_at.is_some_and(|at| at.date_naive() < today)))
+            || (item.source == AcceptanceSource::PolicyWaiver && item.status == "expired" && item.retired_at.is_none() && item.replacement_poam_id.is_none()),
+        Some(Queue::ReviewSoon) => active && due.is_some_and(|date| date >= today && (date - today).num_days() <= 30),
+        Some(Queue::NoReview) => active && due.is_none(),
+        Some(Queue::Accepted) => active,
+        Some(Queue::ComingDue) => active && due.is_some_and(|date| date >= today && (date - today).num_days() <= 30),
+        Some(Queue::Gaps) => active && due.is_none(),
+        _ => false,
     }
 }
 
@@ -659,6 +817,7 @@ async fn refresh_acceptances(
 #[component]
 fn AcceptanceTray(
     entry: AcceptanceEntry,
+    environments: Vec<EnvironmentSummary>,
     operator: bool,
     admin: bool,
     catalog: Option<PoamAssigneeCatalog>,
@@ -787,7 +946,7 @@ fn AcceptanceTray(
                 section { h3 { "Original justification" } p { "{entry.justification}" } }
                 section { h3 { "Decision scope and evidence" } p { class: "mono", "{acceptance_subject(&entry)}" }
                     if let Some(host) = entry.system_id { p { "Host {host}" } }
-                    if let Some(env) = entry.environment_id { p { "Environment {env}" } }
+                    if let Some(env) = entry.environment_id { p { "{environment_name(env, &environments)}" } }
                     p { "Original decision {entry.recorded_at}" }
                 }
                 if let Some(id) = entry.replacement_poam_id { p { "Converted to POA&M {id}" } }
@@ -862,6 +1021,17 @@ fn AcceptanceRegister(
     location: RegisterLocation,
     refresh: Signal<u64>,
     catalog: Option<PoamAssigneeCatalog>,
+    overview: Signal<Vec<AcceptanceEntry>>,
+    environments: Vec<EnvironmentSummary>,
+    group_by: String,
+    sort_by: String,
+    status_filter: String,
+    risk_filter: String,
+    mine: bool,
+    me: Option<Uuid>,
+    search: String,
+    progress_column: bool,
+    owner_column: bool,
 ) -> Element {
     let app = use_context::<Signal<AppState>>();
     let auth_context = app.read().auth.clone();
@@ -883,12 +1053,13 @@ fn AcceptanceRegister(
     };
     let scope_key = location.selection_key();
     use_effect(use_reactive(
-        &(scope_key, refresh()),
+        &(scope_key.clone(), refresh()),
         move |(key, generation)| {
             let changed_scope = *loaded_scope.peek() != key;
             loaded_scope.set(key.clone());
             if changed_scope {
                 rows.set(Vec::new());
+                overview.set(Vec::new());
                 total.set(0);
                 has_more.set(false);
                 selected.set(BTreeSet::new());
@@ -909,6 +1080,7 @@ fn AcceptanceRegister(
                     Ok((items, count, more)) => {
                         total.set(count);
                         has_more.set(more);
+                        overview.set(items.clone());
                         rows.set(items);
                     }
                     Err(err) => error.set(Some(err.to_string())),
@@ -918,11 +1090,16 @@ fn AcceptanceRegister(
         },
     ));
     let loaded = rows();
-    let shown: Vec<_> = loaded
-        .iter()
-        .filter(|item| acceptance_in_scope(item, location.scope))
-        .cloned()
-        .collect();
+    let today = Utc::now().date_naive();
+    let mut shown: Vec<_> = loaded.iter().filter(|item| acceptance_matches(item, location, today,
+        &status_filter, &risk_filter, mine, me, &search)).cloned().collect();
+    shown.sort_by(|a, b| acceptance_compare(a, b, &sort_by));
+    let mut groups: BTreeMap<String, Vec<AcceptanceEntry>> = BTreeMap::new();
+    for item in shown {
+        for key in acceptance_group_keys(&item, &group_by, &environments, catalog.as_ref(), today) {
+            groups.entry(key).or_default().push(item.clone());
+        }
+    }
     let chosen = selected();
     let batch: Vec<_> = loaded
         .iter()
@@ -940,41 +1117,18 @@ fn AcceptanceRegister(
             .find(|item| acceptance_id(item) == id)
             .cloned()
     });
-    let partial_scope = matches!(
-        location.scope,
-        Some(Scope::System(_) | Scope::Owner(_) | Scope::Bundle(_))
-    );
-    let export_scope = environment_id
-        .map(|id| format!("&environment_id={id}"))
-        .unwrap_or_default();
-    let export_csv = format!(
-        "{}/acceptances/export?format=csv&status=accepted_or_converted{export_scope}",
-        crate::api::client::base_url()
-    );
-    let export_xlsx = format!(
-        "{}/acceptances/export?format=xlsx&status=accepted_or_converted{export_scope}",
-        crate::api::client::base_url()
-    );
     rsx! {
-        section { class: "card poams-main", aria_label: "Risk acceptances",
-            div { class: "poams-scope",
-                strong { "Risk acceptances" }
-                span { "{shown.len()} shown / {loaded.len()} loaded / {total()} matching server scope"
-                    if has_more() { " - more pages available" }
-                    if partial_scope { " - this scope is partial across pages" }
-                }
-            }
-            p { class: "poam-muted", style: "padding: 10px 18px;", "Plain click opens the decision without writing. Ctrl/Cmd selects a source decision for bounded re-review." }
+        div { class: "poams-acceptances", aria_label: "Risk acceptances",
             if loading() && loaded.is_empty() { p { class: "poams-notice", role: "status", "Loading accepted decisions..." } }
             if let Some(message) = error() { p { class: "poams-notice", role: "alert", "Could not load risk acceptances: {message}" } }
-            if !loading() && error().is_none() && shown.is_empty() {
-                p { class: "poams-notice", "No accepted decisions in the loaded scope." }
-            }
-            if !shown.is_empty() {
-                div { class: "poams-table-wrap",
-                    table { class: "sys-table compact sys-table-dense poams-table",
-                        thead { tr { th { "SOURCE" } th { "SUBJECT" } th { "DECISION" } th { "REVIEW / EXPIRY" } } }
-                        tbody { for item in shown {
+            if !loading() && groups.is_empty() && error().is_none() { p { class: "poams-notice", "No decisions match these filters." } }
+            for (group_name, items) in groups {
+                section { class: "poams-group pv-group", key: "acceptance-{group_name}",
+                    if group_by != "none" { div { class: "pv-group-head", span { class: "pv-group-name", "{group_title(&group_name)}" } span { class: "pv-group-n", "{items.len()}" } } }
+                div { class: "poams-table-wrap pv-table-wrap",
+                    table { class: "sys-table compact sys-table-dense poams-table pv-table",
+                        thead { tr { th { "ID" } th { "Title" } th { "Risk" } th { "Status" } th { class: if progress_column { "pv-c-ms" } else { "pv-c-ms poams-hidden" }, "Progress" } th { class: if owner_column { "pv-c-owner" } else { "pv-c-owner poams-hidden" }, "Owner" } th { "Due" } } }
+                        tbody { for item in items {
                             tr { key: "{item.source:?}:{item.source_id}", class: if chosen.contains(&acceptance_id(&item)) { "selectable row-checked" } else { "selectable" },
                                 aria_selected: if chosen.contains(&acceptance_id(&item)) { "true" } else { "false" }, tabindex: "0",
                                 onclick: { let item = item.clone(); move |e: MouseEvent| {
@@ -985,28 +1139,20 @@ fn AcceptanceRegister(
                                 } },
                                 onkeydown: { let item = item.clone(); move |e: KeyboardEvent| if e.key() == Key::Enter { opened.set(Some(acceptance_id(&item))); } },
                                 td { class: "mono", "{item.source_id}" }
-                                td {
-                                    strong { {match item.source { AcceptanceSource::PolicyWaiver => "Policy waiver", AcceptanceSource::CveHost => "Host CVE", AcceptanceSource::CveEnvironment => "Environment CVE" }} }
-                                    small { class: "mono", "{acceptance_subject(&item)}" }
-                                    small { if let Some(host) = item.system_id { "Host {host}" } else if let Some(env) = item.environment_id { "Environment {env}" } }
+                                td { div { class: "pv-title", {match item.source { AcceptanceSource::PolicyWaiver => "Policy waiver", AcceptanceSource::CveHost => "Host CVE", AcceptanceSource::CveEnvironment => "Environment CVE" }} }
+                                    div { class: "pv-sub", span { class: "mono", "{acceptance_subject(&item)}" } if let Some(env) = item.environment_id { span { "{environment_name(env, &environments)}" } } else if let Some(host) = item.system_id { span { title: "Host {host}", "Host decision" } } span { class: "rr-just", "{item.justification}" } }
                                 }
-                                td { "{item.justification}" small { if let Some(poam_id) = item.replacement_poam_id { "Converted to POA&M {poam_id}" }
-                                    else if item.retired_at.is_some() { "Historical decision (retired)" }
-                                    else { "{item.status}" } } }
-                                td { if let Some(date) = item.review_due_at.or(item.review_date) { "Review {date}" }
-                                    else { "No review date recorded" }
+                                td { "Not recorded" }
+                                td { span { class: "chip poams-accepted", "{acceptance_status(&item)}" } }
+                                td { class: if progress_column { "pv-c-ms rr-appr" } else { "pv-c-ms poams-hidden" }, if let Some(at) = item.accepted_at { "Approved {at}" } else { "Approval not recorded" } }
+                                td { class: if owner_column { "pv-c-owner" } else { "pv-c-owner poams-hidden" }, "{approver_label(item.accepted_by, catalog.as_ref())}" }
+                                td { if let Some(date) = item.review_due_at.or(item.review_date) { "{date}" } else { "No review date" }
                                     if let Some(expiry) = item.expires_at { small { "Authorization expires {expiry}" } }
                                 }
                             }
                         } }
                     }
                 }
-            }
-            if !partial_scope {
-                div { class: "poams-scope", role: "group", aria_label: "Export risk acceptances",
-                    span { "Download all authorized decisions matching this server scope (up to 1,000; not just loaded pages):" }
-                    a { class: "btn btn-ghost xs focus-ring", href: "{export_csv}", "CSV" }
-                    a { class: "btn btn-ghost xs focus-ring", href: "{export_xlsx}", "Excel XLSX" }
                 }
             }
             if has_more() { button { r#type: "button", class: "btn btn-ghost focus-ring poams-more", disabled: loading(), onclick: move |_| {
@@ -1017,7 +1163,7 @@ fn AcceptanceRegister(
                     let result = poam_api::list_acceptances(offset, environment_id).await;
                     if *loaded_scope.peek() != key { return; }
                     match result {
-                        Ok(page) => { rows.write().extend(page.items); total.set(page.total); has_more.set(page.has_more); error.set(None); }
+                        Ok(page) => { rows.write().extend(page.items); overview.set(rows()); total.set(page.total); has_more.set(page.has_more); error.set(None); }
                         Err(err) => error.set(Some(err.to_string())),
                     }
                     loading.set(false);
@@ -1047,7 +1193,7 @@ fn AcceptanceRegister(
                 if eligible.len() != batch.len() { span { "{batch.len() - eligible.len()} ineligible loaded decisions will not be renewed." } }
             } }
             if let Some(result) = outcome() { p { role: "status", "{result}" } }
-            if let Some(entry) = opened_entry { AcceptanceTray { key: "{entry.source:?}:{entry.source_id}", entry, operator, admin, catalog,
+            if let Some(entry) = opened_entry { AcceptanceTray { key: "{entry.source:?}:{entry.source_id}", entry, environments, operator, admin, catalog,
                 on_close: move |_| opened.set(None), on_changed: move |_| { refresh.set(refresh().wrapping_add(1)); }
             } }
         }
@@ -1069,6 +1215,7 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
     let app = use_context::<Signal<AppState>>();
     let auth_context = app.read().auth.clone();
     let viewer = !auth::is_operator_or_above(&auth_context);
+    let is_admin = auth::is_admin(&auth_context);
     let me = auth_context
         .as_ref()
         .and_then(|ctx| ctx.user.as_ref())
@@ -1083,7 +1230,7 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
     let mut risk = use_signal(|| "all".to_string());
     let mut mine = use_signal(|| false);
     let mut search = use_signal(String::new);
-    let mut grouping = use_signal(|| "none".to_string());
+    let mut grouping = use_signal(|| "environment".to_string());
     let mut sort = use_signal(|| "urgency".to_string());
     let mut progress_column = use_signal(|| true);
     let mut owner_column = use_signal(|| true);
@@ -1098,6 +1245,18 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
     let mut refresh_error = use_signal(|| None::<String>);
     let mut loaded_scope = use_signal(String::new);
     let mut refresh = use_signal(|| 0_u64);
+    let mut acceptance_overview = use_signal(Vec::<AcceptanceEntry>::new);
+    let mut acceptance_next = use_signal(|| false);
+    let mut acceptance_loading = use_signal(|| true);
+    let mut acceptance_error = use_signal(|| None::<String>);
+    let mut acceptance_scope = use_signal(String::new);
+    let mut mixed_open = use_signal(|| None::<AcceptanceId>);
+    let mut mixed_selected = use_signal(BTreeSet::<AcceptanceId>::new);
+    let mut mixed_busy = use_signal(|| false);
+    let mut mixed_outcome = use_signal(|| None::<String>);
+    let mut environments = use_signal(Vec::<EnvironmentSummary>::new);
+    let mut export_open = use_signal(|| false);
+    let mut columns_open = use_signal(|| false);
     let nav = use_navigator();
     let detail_id = location.poam;
 
@@ -1105,7 +1264,7 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
     // Discard that response so it cannot replace the new scope's rows.
     let scope_key = location.selection_key();
     use_effect(use_reactive(
-        &(scope_key, refresh()),
+        &(scope_key.clone(), refresh()),
         move |(key, generation)| {
             let changed_scope = *loaded_scope.peek() != key;
             loaded_scope.set(key.clone());
@@ -1145,6 +1304,32 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
             }
         }
     });
+    use_future(move || async move {
+        if let Ok(items) = fetch_environments().await {
+            environments.set(items);
+        }
+    });
+    // CONCURRENCY: The two source readers page independently. A response for an
+    // old URL scope or refresh generation must not replace current decisions.
+    use_effect(use_reactive(&(scope_key, refresh()), move |(key, generation)| {
+        if location.kind == Tab::Acceptances { return; }
+        let changed = *acceptance_scope.peek() != key;
+        acceptance_scope.set(key.clone());
+        if changed { acceptance_overview.set(Vec::new()); acceptance_next.set(false); mixed_selected.set(BTreeSet::new()); mixed_open.set(None); }
+        acceptance_loading.set(true);
+        acceptance_error.set(None);
+        spawn(async move {
+            let environment_id = match location.scope { Some(Scope::Environment(id)) => Some(id), _ => None };
+            match refresh_acceptances(if changed { 0 } else { acceptance_overview.peek().len() }, environment_id).await {
+                Ok((items, _, more)) if *acceptance_scope.peek() == key && *refresh.peek() == generation => {
+                    acceptance_overview.set(items); acceptance_next.set(more);
+                }
+                Err(err) if *acceptance_scope.peek() == key => acceptance_error.set(Some(err.to_string())),
+                _ => return,
+            }
+            acceptance_loading.set(false);
+        });
+    }));
 
     let run_bulk = move |action: BulkAction| {
         if viewer || bulk_busy() || refresh_error().is_some() || loading() {
@@ -1203,41 +1388,57 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
         "closed" => Some("completed"),
         _ => None,
     };
-    let plan_filters = format!(
-        "{}{}",
-        server_status.map(|value| format!("&status={value}")).unwrap_or_default(),
-        if risk() == "all" { String::new() } else { format!("&risk={}", risk()) }
-    );
-    let mixed_filters = format!(
-        "{}{}",
-        server_status.map(|value| format!("&poam_status={value}")).unwrap_or_default(),
-        if risk() == "all" { String::new() } else { format!("&poam_risk={}", risk()) }
-    );
-    let plan_export_csv = format!("{}/poams/export?format=csv{plan_filters}", crate::api::client::base_url());
-    let plan_export_xlsx = format!("{}/poams/export?format=xlsx{plan_filters}", crate::api::client::base_url());
+    // A plan-risk filter excludes decisions because acceptance sources have no
+    // plan-risk category. Select only source families present in the view.
+    let export_family = match location.kind {
+        Tab::Acceptances => "acceptances",
+        Tab::Plans => "plans",
+        Tab::Everything if risk() != "all" => "plans",
+        Tab::Everything => "all",
+    };
+    let plan_filters = if export_family == "acceptances" {
+        String::new()
+    } else {
+        format!(
+            "{}{}",
+            server_status.map(|value| format!("&poam_status={value}")).unwrap_or_default(),
+            if risk() == "all" { String::new() } else { format!("&poam_risk={}", risk()) }
+        )
+    };
+    let acceptance_filters = if export_family == "plans" {
+        String::new()
+    } else if status() == "all" {
+        "&acceptance_status=accepted_or_converted".into()
+    } else {
+        "&acceptance_status=accepted_current".into()
+    };
     let mixed_export = format!(
-        "{}/register/export?acceptance_status=accepted_or_converted{mixed_filters}&format=",
+        "{}/register/export?record_type={export_family}{plan_filters}{acceptance_filters}&format=",
         crate::api::client::base_url()
     );
-    let page_label = if loading() {
-        "loading page; total unknown"
-    } else if error().is_some() {
-        "page load failed; total unknown"
-    } else if has_more {
-        "more pages available"
-    } else {
-        "all pages loaded"
-    };
+    let acceptance_rows = acceptance_overview();
+    // A decision has no plan-risk category or inferred host/environment edge.
+    // Count only the source identities that the active scope can prove.
+    let scoped_acceptances: Vec<_> = acceptance_rows.iter().filter(|item| acceptance_in_scope(item, location.scope)).collect();
+    let acceptance_visible: Vec<_> = acceptance_rows.iter().filter(|item|
+        acceptance_matches(item, location, today, &status(), &risk(), mine(), me, &search())
+    ).collect();
+    let mixed_eligible_count = acceptance_rows.iter().filter(|item| mixed_selected().contains(&acceptance_id(item)) && renewable(item, !viewer, is_admin)).count();
+    let active_acceptances = scoped_acceptances.iter().filter(|item| item.status == "accepted" && item.retired_at.is_none() && item.replacement_poam_id.is_none()).count();
+    let expired_acceptances = scoped_acceptances.iter().filter(|item| acceptance_queue(item, Some(Queue::ExpiredAcceptance), today)).count();
+    let soon_acceptances = scoped_acceptances.iter().filter(|item| acceptance_queue(item, Some(Queue::ReviewSoon), today)).count();
+    let undated_acceptances = scoped_acceptances.iter().filter(|item| acceptance_queue(item, Some(Queue::NoReview), today)).count();
+    let env_names = environments();
     let scope_label = location.scope.map(|s| match s {
-        Scope::Environment(id) => format!("Environment {id}"),
-        Scope::System(id) => format!("Host {id}"),
+        Scope::Environment(id) => environment_name(id, &env_names),
+        Scope::System(_) => "Host".into(),
         Scope::Bundle(id) => format!("Bundle {id}"),
-        Scope::Owner(id) => format!("Owner {id}"),
+        Scope::Owner(id) => approver_label(Some(id), catalog().as_ref()),
     });
     let available = loaded.len();
     let open = loaded
         .iter()
-        .filter(|r| r.summary.status.is_active())
+        .filter(|r| in_scope(r, location.scope) && r.summary.status.is_active())
         .count();
     let filtered: Vec<_> = loaded
         .iter()
@@ -1282,25 +1483,38 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
         cmp.then_with(|| x.id.cmp(&y.id))
     });
     let matching = ordered.len();
+    let export_count = match export_family {
+        "plans" => matching,
+        "acceptances" => acceptance_visible.len(),
+        _ => matching + acceptance_visible.len(),
+    };
+    let export_may_have_more = (export_family != "acceptances" && has_more)
+        || (export_family != "plans" && acceptance_next());
+    let export_enabled = export_plans
+        && (export_family == "plans" || status() != "closed")
+        && (export_count > 0 || export_may_have_more);
+    let export_label = format!("Export {export_count}{}", if export_may_have_more { "+" } else { "" });
     let mut groups: BTreeMap<String, Vec<&PoamRegisterSummary>> = BTreeMap::new();
     for row in ordered {
         let keys: Vec<String> = match grouping().as_str() {
+            "environment" if matches!(location.scope, Some(Scope::System(_))) => vec!["Host scope".into()],
             "environment" => row
                 .environment_ids
                 .iter()
-                .map(|id| format!("Environment {id}"))
+                .filter(|id| !matches!(location.scope, Some(Scope::Environment(selected)) if **id != selected))
+                .map(|id| environment_name(*id, &env_names))
                 .collect(),
-            "system" => row
-                .system_ids
-                .iter()
-                .map(|id| format!("Host {id}"))
-                .collect(),
+            "system" => row.system_ids.iter()
+                .filter(|id| !matches!(location.scope, Some(Scope::System(selected)) if **id != selected))
+                .map(|id| format!("Host {id}")).collect(),
             "bundle" => row
                 .bundle_ids
                 .iter()
+                .filter(|id| !matches!(location.scope, Some(Scope::Bundle(selected)) if **id != selected))
                 .map(|id| format!("Bundle {id}"))
                 .collect(),
             "owner" => vec![owner(row)],
+            "type" => vec!["Remediation plans".into()],
             "due" => vec![if row.summary.status == PoamStatus::Completed {
                 "Closed".into()
             } else if row.summary.overdue {
@@ -1316,6 +1530,18 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
             keys
         } {
             groups.entry(key).or_default().push(row);
+        }
+    }
+    let mut acceptance_groups: BTreeMap<String, Vec<&AcceptanceEntry>> = BTreeMap::new();
+    if location.kind == Tab::Everything {
+        for item in &acceptance_visible {
+            for key in acceptance_group_keys(item, &grouping(), &env_names, catalog().as_ref(), today) {
+                acceptance_groups.entry(key.clone()).or_default().push(item);
+                groups.entry(key).or_default();
+            }
+        }
+        for entries in acceptance_groups.values_mut() {
+            entries.sort_by(|a, b| acceptance_compare(a, b, &sort()));
         }
     }
     let order = displayed_order(&groups, &collapsed(), visible());
@@ -1356,32 +1582,17 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
     let mut status_bulk = run_bulk.clone();
     let mut extend_bulk = run_bulk;
     let shown_count = order.len();
+    let visible_count = if location.kind == Tab::Acceptances { acceptance_visible.len() } else { shown_count + if location.kind == Tab::Everything { acceptance_visible.len().min(visible()) } else { 0 } };
     let can_show_more = groups.values().any(|entries| entries.len() > visible());
-    let pills = scope_pills(&loaded, location.dimension.key(), location.scope);
-    let scope_partial = location.partial_scope();
-    let scope_notice = if scope_partial {
-        " - scope is partial across pages"
-    } else {
-        ""
-    };
+    let pills = scope_pills(if location.kind == Tab::Acceptances { &[] } else { &loaded }, location.dimension.key(), location.scope, &env_names, if location.kind == Tab::Plans { &[] } else { &acceptance_rows }, catalog().as_ref());
     let host_id = match location.scope {
         Some(Scope::System(id)) if loaded.iter().any(|row| row.system_ids.contains(&id)) => {
             Some(id)
         }
         _ => None,
     };
-    let parent_env = host_id.and_then(|host| {
-        let mut envs = loaded
-            .iter()
-            .filter(|row| row.system_ids.contains(&host))
-            .flat_map(|row| row.environment_ids.iter().copied())
-            .collect::<BTreeSet<_>>();
-        if envs.len() == 1 {
-            envs.pop_first()
-        } else {
-            None
-        }
-    });
+    // A flat register projection cannot prove a host-to-environment edge.
+    let parent_env: Option<Uuid> = None;
     let row_view = |row: &PoamRegisterSummary| {
         let p = &row.summary;
         let id = p.id;
@@ -1391,19 +1602,17 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
             .unwrap_or_else(|| "No date".into());
         let status_label = p.status.label();
         let risk_label = p.risk.category_label();
+        let progress_width = if row.milestone_count == 0 { 0 } else { 100 * row.completed_milestone_count / row.milestone_count };
         let owner_label = owner(row);
         let owner_id = match &p.assignee {
             Some(PoamAssigneeView::User { user_id, .. }) => Some(*user_id),
             _ => None,
         };
-        let context = row
-            .first_requirement
-            .as_deref()
-            .or(row.first_cve.as_deref())
-            .unwrap_or("No linked requirement or CVE");
+        let context = row.first_requirement.as_deref().or(row.first_cve.as_deref())
+            .unwrap_or(if p.finding_count > p.cve_finding_count { "Policy finding" } else { "" });
         let checked = selected().contains(&id);
         let order = order.clone();
-        let environments = row.environment_ids.clone();
+        let environment_scopes: Vec<_> = row.environment_ids.iter().map(|id| (*id, environment_name(*id, &env_names))).collect();
         let systems = row.system_ids.clone();
         let bundles = row.bundle_ids.clone();
         rsx! {
@@ -1418,52 +1627,99 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
                     else { anchor.set(at); nav.push(Route::PoamsView { query: RegisterLocation { poam: Some(id), ..location }.query() }); }
                 },
                 onkeydown: move |event| if event.key() == Key::Enter { nav.push(Route::PoamsView { query: RegisterLocation { poam: Some(id), ..location }.query() }); },
-                td { class: "mono", "{p.human_id}" }
-                td { strong { "{p.title}" } small { "{context}" }
-                    div { class: "poams-row-scope",
-                        for env in environments { button { r#type: "button", class: "pv-link focus-ring", onclick: move |e| { e.stop_propagation(); nav.push(Route::PoamsView { query: RegisterLocation { scope: Some(Scope::Environment(env)), poam: None, ..location }.query() }); }, "Environment {env}" } }
-                        for host in systems { button { r#type: "button", class: "pv-link focus-ring", onclick: move |e| { e.stop_propagation(); nav.push(Route::PoamsView { query: RegisterLocation { scope: Some(Scope::System(host)), poam: None, ..location }.query() }); }, "Host {host}" } }
-                        for bundle in bundles { button { r#type: "button", class: "pv-link focus-ring", onclick: move |e| { e.stop_propagation(); nav.push(Route::PoamsView { query: RegisterLocation { dimension: Dimension::Bundle, scope: Some(Scope::Bundle(bundle)), poam: None, ..location }.query() }); }, "Bundle {bundle}" } }
-                    }
-                }
-                td { "{risk_label}" } td { "{status_label}" }
-                if progress_column() { td { "{row.completed_milestone_count}/{row.milestone_count} milestones" } }
-                if owner_column() { td { if let Some(user_id) = owner_id { button { r#type: "button", class: "pv-link focus-ring", onclick: move |e| { e.stop_propagation(); nav.push(Route::PoamsView { query: RegisterLocation { dimension: Dimension::Owner, scope: Some(Scope::Owner(user_id)), poam: None, ..location }.query() }); }, "{owner_label}" } } else { "{owner_label}" } } }
-                td { "{due}" }
+                 td { class: "mono", "{p.human_id}" }
+                  td { div { class: "pv-title", "{p.title}" }
+                      div { class: "pv-sub", if !context.is_empty() { span { "{context}" } }
+                          for (env, label) in environment_scopes { button { r#type: "button", class: "pv-link focus-ring", onclick: move |e| { e.stop_propagation(); nav.push(Route::PoamsView { query: RegisterLocation { scope: Some(Scope::Environment(env)), poam: None, ..location }.query() }); }, "{label}" } }
+                          for host in systems { button { r#type: "button", class: "pv-link focus-ring", title: "Host {host}", aria_label: "Host {host}", onclick: move |e| { e.stop_propagation(); nav.push(Route::PoamsView { query: RegisterLocation { scope: Some(Scope::System(host)), poam: None, ..location }.query() }); }, "Host" } }
+                          for bundle in bundles { button { r#type: "button", class: "pv-link focus-ring", title: "Bundle {bundle}", aria_label: "Bundle {bundle}", onclick: move |e| { e.stop_propagation(); nav.push(Route::PoamsView { query: RegisterLocation { dimension: Dimension::Bundle, scope: Some(Scope::Bundle(bundle)), poam: None, ..location }.query() }); }, "Bundle" } }
+                      }
+                  }
+                  td { class: "poams-risk", span { class: "chip {crate::components::poam::risk_class(p.risk)}", "{risk_label}" } }
+                  td { span { class: "chip {crate::components::poam::status_class(p.status)}", "{status_label}" } }
+                 td { class: if progress_column() { "pv-c-ms" } else { "pv-c-ms poams-hidden" }, div { class: "pv-prog", span { class: "pv-prog-bar", span { style: "width: {progress_width}%" } } span { class: "mono pv-prog-t", "{row.completed_milestone_count}/{row.milestone_count}" } } }
+                 td { class: if owner_column() { "pv-c-owner" } else { "pv-c-owner poams-hidden" }, if let Some(user_id) = owner_id { button { r#type: "button", class: "pv-link focus-ring", onclick: move |e| { e.stop_propagation(); nav.push(Route::PoamsView { query: RegisterLocation { dimension: Dimension::Owner, scope: Some(Scope::Owner(user_id)), poam: None, ..location }.query() }); }, "{owner_label}" } } else { "{owner_label}" } }
+                 td { class: if p.overdue { "poam-overdue" } else { "" }, "{due}" if p.overdue { small { "Overdue" } } }
             }
         }
     };
+    let mixed_acceptance = |item: &AcceptanceEntry| {
+        let id = acceptance_id(item);
+        let checked = mixed_selected().contains(&id);
+        let subject = acceptance_subject(item);
+        let source = match item.source { AcceptanceSource::PolicyWaiver => "Policy waiver", AcceptanceSource::CveHost => "Host CVE", AcceptanceSource::CveEnvironment => "Environment CVE" };
+        let review = item.review_due_at.or(item.review_date).map(|date| date.to_string()).unwrap_or_else(|| "No review date".into());
+        let approver = approver_label(item.accepted_by, catalog().as_ref());
+        rsx! { tr { key: "{item.source:?}:{item.source_id}", class: if checked { "selectable row-checked" } else { "selectable" }, aria_selected: if checked { "true" } else { "false" }, tabindex: "0", onclick: move |e: MouseEvent| {
+            if e.modifiers().ctrl() || e.modifiers().meta() {
+                let mut ids = mixed_selected(); if !ids.insert(id) { ids.remove(&id); } mixed_selected.set(ids);
+            } else { mixed_open.set(Some(id)); }
+        }, onkeydown: move |e| if e.key() == Key::Enter { mixed_open.set(Some(id)); },
+            td { class: "mono", "{item.source_id}" }
+            td { div { class: "pv-title", "{source}" } div { class: "pv-sub", span { class: "mono", "{subject}" } if let Some(env) = item.environment_id { span { "{environment_name(env, &env_names)}" } } else if let Some(host) = item.system_id { span { title: "Host {host}", "Host decision" } } span { class: "rr-just", "{item.justification}" } } }
+            td { "Not recorded" }
+            td { span { class: "chip poams-accepted", "{acceptance_status(item)}" } }
+            td { class: if progress_column() { "pv-c-ms rr-appr" } else { "pv-c-ms poams-hidden" }, if let Some(at) = item.accepted_at { "Approved {at}" } else { "Approval not recorded" } }
+            td { class: if owner_column() { "pv-c-owner" } else { "pv-c-owner poams-hidden" }, "{approver}" }
+            td { "{review}" if let Some(expiry) = item.expires_at { small { "Authorization expires {expiry}" } } }
+        } }
+    };
+    let plan_tab_count = format!("{available}{}", if has_more { "+" } else { "" });
+    let acceptance_tab_count = format!("{}{}", scoped_acceptances.len(), if acceptance_next() { "+" } else { "" });
+    let everything_tab_count = format!("{}{}", available + scoped_acceptances.len(), if has_more || acceptance_next() { "+" } else { "" });
 
     rsx! {
         div { class: "poams-register",
             div { class: "page-head", div { h1 { class: "page-title", "POA&M" }
-                p { class: "page-subtitle", "{open} open plans in {available} loaded - accepted decisions read separately - {page_label}" }
-            } }
+                p { class: "page-subtitle", "Showing {open} open remediation plans · {active_acceptances} active risk decisions" }
+            }
+                if export_enabled { div { class: "rr-export",
+                    button { r#type: "button", class: "btn btn-ghost focus-ring", aria_expanded: if export_open() { "true" } else { "false" }, onclick: move |_| export_open.set(!export_open()), "{export_label} ▾" }
+                    if export_open() { div { class: "rr-export-pop card", role: "menu", aria_label: "Export POA&Ms",
+                        div { class: "rr-export-title", "Export POA&Ms" }
+                        for (format, label, description) in [("oscal-json", "OSCAL JSON", "Machine-readable POA&M"), ("xlsx", "Excel XLSX", "Spreadsheet for review"), ("csv", "CSV", "Flat data for import"), ("oscal-xml", "OSCAL XML", "Standards-compatible XML")] {
+                            a { role: "menuitem", class: "rr-export-item focus-ring", href: "{mixed_export}{format}", onclick: move |_| export_open.set(false), span { class: "rr-export-item-l", "{label}" } span { class: "rr-export-item-sub", "{description}" } }
+                        }
+                    } }
+                } } else { button { r#type: "button", class: "btn btn-ghost focus-ring", disabled: true, title: if location.scope.is_some() || location.queue.is_some() || mine() || !search().trim().is_empty() { "Clear local filters to export the complete scope" } else if status() == "closed" && export_family != "plans" { "Choose All statuses to export historical decisions" } else { "No records to export" }, "Export ▾" } }
+            }
             div { class: "rr-kinds", role: "tablist", aria_label: "Record type",
-                for (kind, label) in [(Tab::Everything, "Everything"), (Tab::Plans, "Remediation plans"), (Tab::Acceptances, "Risk acceptances")] {
-                    button { r#type: "button", role: "tab", class: if location.kind == kind { "rr-kind active focus-ring" } else { "rr-kind focus-ring" }, aria_selected: if location.kind == kind { "true" } else { "false" }, onclick: move |_| { nav.push(Route::PoamsView { query: RegisterLocation { kind, queue: if kind == Tab::Acceptances { None } else { location.queue }, poam: None, ..location }.query() }); }, "{label}" }
+                for (kind, label, count) in [(Tab::Everything, "Everything", everything_tab_count), (Tab::Plans, "Remediation plans", plan_tab_count), (Tab::Acceptances, "Risk acceptances", acceptance_tab_count)] {
+                    button { r#type: "button", role: "tab", class: if location.kind == kind { "rr-kind active focus-ring" } else { "rr-kind focus-ring" }, aria_selected: if location.kind == kind { "true" } else { "false" }, onclick: move |_| { export_open.set(false); columns_open.set(false); nav.push(Route::PoamsView { query: RegisterLocation { kind, queue: None, poam: None, ..location }.query() }); },
+                        if kind == Tab::Plans { span { class: "rr-kind-mark poams-plan-mark" } }
+                        if kind == Tab::Acceptances { span { class: "rr-kind-mark poams-acceptance-mark" } }
+                        "{label}" span { class: "rr-kind-n", "{count}" }
+                    }
                 }
+                span { class: "rr-kinds-note", "Plans fix a deficiency by a target date; acceptances record a decision to let it stand until review." }
             }
-            if location.kind == Tab::Everything && export_plans {
-                div { class: "poams-scope", role: "group", aria_label: "Export full register",
-                    span { "Download all authorized plans matching the selected status and risk, plus accepted, expired or converted decisions (up to 1,000 total; not just loaded pages):" }
-                    a { class: "btn btn-ghost xs focus-ring", href: "{mixed_export}oscal-json", "OSCAL JSON" }
-                    a { class: "btn btn-ghost xs focus-ring", href: "{mixed_export}xlsx", "Excel XLSX" }
-                    a { class: "btn btn-ghost xs focus-ring", href: "{mixed_export}csv", "CSV" }
-                    a { class: "btn btn-ghost xs focus-ring", href: "{mixed_export}oscal-xml", "OSCAL XML" }
+            div { class: "pv-queues", role: "group", aria_label: "Work queues",
+                if location.kind == Tab::Everything {
+                    for (queue, count) in [
+                        (Queue::Overdue, loaded.iter().filter(|row| in_scope(row, location.scope) && Queue::Overdue.includes(row, today)).count()),
+                        (Queue::ExpiredAcceptance, expired_acceptances),
+                        (Queue::ComingDue, loaded.iter().filter(|row| in_scope(row, location.scope) && Queue::ComingDue.includes(row, today)).count() + soon_acceptances),
+                        (Queue::Awaiting, loaded.iter().filter(|row| in_scope(row, location.scope) && Queue::Awaiting.includes(row, today)).count()),
+                        (Queue::Blocked, loaded.iter().filter(|row| in_scope(row, location.scope) && Queue::Blocked.includes(row, today)).count()),
+                        (Queue::Gaps, loaded.iter().filter(|row| in_scope(row, location.scope) && Queue::Gaps.includes(row, today)).count() + undated_acceptances),
+                    ] {
+                        button { r#type: "button", class: if location.queue == Some(queue) { "pv-q active focus-ring" } else { "pv-q focus-ring" }, "data-queue": queue.key(), aria_pressed: if location.queue == Some(queue) { "true" } else { "false" }, onclick: move |_| { nav.push(Route::PoamsView { query: RegisterLocation { queue: if location.queue == Some(queue) { None } else { Some(queue) }, poam: None, ..location }.query() }); }, strong { class: "pv-q-count", "{count}" } span { class: "pv-q-label", "{queue.label()}" } span { class: "pv-q-sub", "{queue.description()}" } }
+                    }
                 }
-            }
-            if location.kind != Tab::Plans { AcceptanceRegister { key: "acceptances-{location.selection_key()}", location, refresh, catalog: catalog() } }
-            if location.kind != Tab::Acceptances {
-                div { class: "pv-queues", role: "group", aria_label: "Work queues",
-                    for q in [Queue::Overdue, Queue::Soon, Queue::Awaiting, Queue::Blocked, Queue::Quiet, Queue::Unassigned] {
-                        button { r#type: "button", class: if location.queue == Some(q) { "pv-q active focus-ring" } else { "pv-q focus-ring" }, aria_pressed: if location.queue == Some(q) { "true" } else { "false" }, onclick: move |_| { nav.push(Route::PoamsView { query: RegisterLocation { queue: if location.queue == Some(q) { None } else { Some(q) }, poam: None, ..location }.query() }); },
-                            strong { "{loaded.iter().filter(|r| in_scope(r, location.scope) && q.includes(r, today)).count()}" } span { "{q.label()}" }
+                if location.kind == Tab::Plans {
+                    for q in [Queue::Overdue, Queue::Soon, Queue::Awaiting, Queue::Blocked, Queue::Quiet, Queue::Unassigned].into_iter().filter(|q| location.kind != Tab::Everything || !matches!(q, Queue::Quiet | Queue::Unassigned)) {
+                        button { r#type: "button", class: if location.queue == Some(q) { "pv-q active focus-ring" } else { "pv-q focus-ring" }, "data-queue": q.key(), aria_pressed: if location.queue == Some(q) { "true" } else { "false" }, onclick: move |_| { nav.push(Route::PoamsView { query: RegisterLocation { queue: if location.queue == Some(q) { None } else { Some(q) }, poam: None, ..location }.query() }); },
+                            strong { class: "pv-q-count", "{loaded.iter().filter(|r| in_scope(r, location.scope) && q.includes(r, today)).count()}" } span { class: "pv-q-label", "{q.label()}" } span { class: "pv-q-sub", "{q.description()}" }
                         }
                     }
                 }
-                p { class: "poam-muted", "Work queue counts are for loaded pages only. They may grow as more pages load." }
-                div { class: "card poams-main",
+                if location.kind == Tab::Acceptances {
+                    for (queue, count, sub) in [(Queue::ExpiredAcceptance, expired_acceptances, "Renew or plan a fix"), (Queue::ReviewSoon, soon_acceptances, "Re-review before expiry"), (Queue::NoReview, undated_acceptances, "Assessors flag these"), (Queue::Accepted, active_acceptances, "Source-approved risk") ] {
+                        button { r#type: "button", class: if location.queue == Some(queue) { "pv-q active focus-ring" } else { "pv-q focus-ring" }, "data-queue": queue.key(), aria_pressed: if location.queue == Some(queue) { "true" } else { "false" }, onclick: move |_| { nav.push(Route::PoamsView { query: RegisterLocation { kind: Tab::Acceptances, queue: if location.queue == Some(queue) { None } else { Some(queue) }, poam: None, ..location }.query() }); }, strong { class: "pv-q-count", "{count}" } span { class: "pv-q-label", "{queue.label()}" } span { class: "pv-q-sub", "{sub}" } }
+                    }
+                }
+            }
+            div { class: "card poams-main pv-main",
                     div { class: "poams-scope",
                         div { class: "seg xs", role: "tablist", aria_label: "Browse by",
                             for (key, label) in [("environment", "Environment"), ("bundle", "Bundle"), ("owner", "Owner / Approver")] {
@@ -1472,14 +1728,14 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
                         }
                         nav { aria_label: "Scope", class: "poams-crumb",
                             button { r#type: "button", class: "pv-link focus-ring", onclick: move |_| { nav.push(Route::PoamsView { query: RegisterLocation { scope: None, poam: None, ..location }.query() }); }, "All" }
-                            if let Some(env) = parent_env { button { r#type: "button", class: "pv-link focus-ring", onclick: move |_| { nav.push(Route::PoamsView { query: RegisterLocation { scope: Some(Scope::Environment(env)), poam: None, ..location }.query() }); }, " / Environment {env}" } }
+                            if let Some(env) = parent_env { button { r#type: "button", class: "pv-link focus-ring", onclick: move |_| { nav.push(Route::PoamsView { query: RegisterLocation { scope: Some(Scope::Environment(env)), poam: None, ..location }.query() }); }, " / {environment_name(env, &env_names)}" } }
                             if let Some(label) = scope_label { strong { " / {label}" } }
                         }
-                        span { "{shown_count} shown / {matching} matching loaded / {available} loaded - {page_label}{scope_notice}" }
+                        span { "{visible_count} items" }
                         if let Some(host) = host_id { button { r#type: "button", class: "btn btn-ghost xs focus-ring", onclick: move |_| { nav.push(Route::SystemDetailView { id: host.to_string(), tab: "compliance".into(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new(), cve_target: String::new(), cve_mode: String::new() }); }, "Open host" } }
                     }
                     if !pills.is_empty() {
-                        div { class: "poams-pills", aria_label: "Narrow to loaded scopes",
+                        div { class: "poams-pills", aria_label: "Narrow to scopes",
                             for (key, label, count) in pills.iter().take(7).cloned() {
                                 button { r#type: "button", class: "rr-pill focus-ring", onclick: move |_| { nav.push(Route::PoamsView { query: RegisterLocation { scope: Some(key), poam: None, ..location }.query() }); }, span { "{label}" } span { "{count}" } }
                             }
@@ -1488,42 +1744,108 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
                                 if overflow_open() { div { class: "card poams-picker", role: "dialog", aria_label: "More loaded scopes",
                                     input { class: "input focus-ring", aria_label: "Find loaded scope", placeholder: "Find UUID or owner", value: "{overflow_search()}", oninput: move |e| overflow_search.set(e.value()) }
                                     div { class: "poams-picker-list", for (key, label, count) in pills.iter().skip(7).filter(|(_, label, _)| label.to_lowercase().contains(&overflow_search().to_lowercase())).cloned() {
-                                        button { r#type: "button", class: "rr-pill focus-ring", onclick: move |_| { nav.push(Route::PoamsView { query: RegisterLocation { scope: Some(key), poam: None, ..location }.query() }); }, "{label} ({count} loaded)" }
+                                        button { r#type: "button", class: "rr-pill focus-ring", onclick: move |_| { nav.push(Route::PoamsView { query: RegisterLocation { scope: Some(key), poam: None, ..location }.query() }); }, "{label} ({count})" }
                                     } }
                                     button { r#type: "button", class: "btn btn-ghost xs focus-ring", onclick: move |_| overflow_open.set(false), "Close" }
                                 } }
                             } }
                         }
                     }
-                    div { class: "poams-toolbar",
-                        input { class: "input focus-ring", aria_label: "Search loaded plans", placeholder: "Search loaded ID, title, requirement, CVE", value: "{search()}", oninput: move |e| { search.set(e.value()); visible.set(50); selected.set(BTreeSet::new()); anchor.set(None); } }
-                        select { aria_label: "Status", class: "cfgx-select focus-ring", value: "{status()}", onchange: move |e| { status.set(e.value()); selected.set(BTreeSet::new()); anchor.set(None); }, option { value: "active", "Active" } option { value: "closed", "Closed" } option { value: "all", "All" } }
-                        select { aria_label: "Risk", class: "cfgx-select focus-ring", value: "{risk()}", onchange: move |e| { risk.set(e.value()); selected.set(BTreeSet::new()); anchor.set(None); }, option { value: "all", "Any risk" } option { value: "high", "CAT I" } option { value: "medium", "CAT II" } option { value: "low", "CAT III" } }
-                        button { r#type: "button", class: "btn btn-ghost xs focus-ring", disabled: me.is_none(), aria_pressed: if mine() { "true" } else { "false" }, onclick: move |_| { mine.set(!mine()); selected.set(BTreeSet::new()); anchor.set(None); }, "Mine" }
-                        select { aria_label: "Group loaded plans", class: "cfgx-select focus-ring", value: "{grouping()}", onchange: move |e| { grouping.set(e.value()); selected.set(BTreeSet::new()); anchor.set(None); }, option { value: "none", "No grouping" } option { value: "environment", "Environment" } option { value: "system", "Host" } option { value: "bundle", "Bundle" } option { value: "owner", "Owner" } option { value: "due", "Due" } }
-                        select { aria_label: "Sort loaded plans", class: "cfgx-select focus-ring", value: "{sort()}", onchange: move |e| { sort.set(e.value()); selected.set(BTreeSet::new()); anchor.set(None); }, option { value: "urgency", "Urgency" } option { value: "due", "Due" } option { value: "risk", "Risk" } option { value: "activity", "Last activity" } option { value: "id", "ID" } }
-                        label { input { r#type: "checkbox", checked: progress_column(), onchange: move |e| progress_column.set(e.checked()) } "Progress" }
-                        label { input { r#type: "checkbox", checked: owner_column(), onchange: move |e| owner_column.set(e.checked()) } "Owner" }
+                    div { class: "poams-toolbar pv-toolbar",
+                        input { class: "input focus-ring", aria_label: "Search register", placeholder: "Search ID, title, requirement, CVE", value: "{search()}", oninput: move |e| { search.set(e.value()); visible.set(50); selected.set(BTreeSet::new()); mixed_selected.set(BTreeSet::new()); anchor.set(None); } }
+                        select { aria_label: "Status", class: "cfgx-select focus-ring", value: "{status()}", onchange: move |e| { status.set(e.value()); selected.set(BTreeSet::new()); mixed_selected.set(BTreeSet::new()); anchor.set(None); }, option { value: "active", "Active" } option { value: "closed", "Closed" } option { value: "all", "All" } }
+                        select { aria_label: "Risk", class: "cfgx-select focus-ring", disabled: location.kind == Tab::Acceptances, title: if location.kind == Tab::Acceptances { "Decision sources do not record a plan risk category" } else { "Filter plan risk" }, value: "{risk()}", onchange: move |e| { risk.set(e.value()); selected.set(BTreeSet::new()); mixed_selected.set(BTreeSet::new()); anchor.set(None); }, option { value: "all", "Any risk" } option { value: "high", "CAT I" } option { value: "medium", "CAT II" } option { value: "low", "CAT III" } }
+                        button { r#type: "button", class: "btn btn-ghost xs focus-ring", disabled: me.is_none(), aria_pressed: if mine() { "true" } else { "false" }, onclick: move |_| { mine.set(!mine()); selected.set(BTreeSet::new()); mixed_selected.set(BTreeSet::new()); anchor.set(None); }, "Mine" }
+                        label { class: "pv-tool-label", "Group" }
+                        select { aria_label: "Group register", class: "cfgx-select focus-ring", value: "{grouping()}", onchange: move |e| { grouping.set(e.value()); selected.set(BTreeSet::new()); mixed_selected.set(BTreeSet::new()); anchor.set(None); }, option { value: "none", "No grouping" } if location.kind == Tab::Everything { option { value: "type", "Type" } } option { value: "environment", "Environment" } option { value: "system", "Host" } option { value: "bundle", "Bundle" } option { value: "owner", "Owner / Approver" } option { value: "due", "Due / review date" } }
+                        label { class: "pv-tool-label", "Sort" }
+                        select { aria_label: "Sort register", class: "cfgx-select focus-ring", value: "{sort()}", onchange: move |e| { sort.set(e.value()); selected.set(BTreeSet::new()); mixed_selected.set(BTreeSet::new()); anchor.set(None); }, option { value: "urgency", "Urgency" } option { value: "due", "Due / review date" } if location.kind != Tab::Acceptances { option { value: "risk", "Risk" } } option { value: "activity", "Last activity" } option { value: "id", "ID" } }
+                        div { class: "rr-cols", button { r#type: "button", class: "btn btn-ghost xs focus-ring", aria_expanded: if columns_open() { "true" } else { "false" }, onclick: move |_| columns_open.set(!columns_open()), "Columns" }
+                            if columns_open() { div { class: "rr-cols-pop card", role: "menu", aria_label: "Toggle columns",
+                                label { class: "rr-cols-item", input { r#type: "checkbox", checked: progress_column(), onchange: move |e| progress_column.set(e.checked()) } "Progress" }
+                                label { class: "rr-cols-item", input { r#type: "checkbox", checked: owner_column(), onchange: move |e| owner_column.set(e.checked()) } "Owner" }
+                            } }
+                        }
+                        span { class: "pv-selection-hint", "⌘ / ⌃ · click to select" }
                     }
-                    p { class: "poam-muted", "Search, sort, grouping, scope and queue filters apply to loaded pages. Ctrl/Cmd toggles a row; Shift adds the range in the displayed order." }
-                    if export_plans { div { class: "poams-scope", role: "group", aria_label: "Export remediation plans",
-                        span { "Download all authorized plans matching the selected status and risk, including pages not loaded here (up to 1,000):" }
-                        a { class: "btn btn-ghost xs focus-ring", href: "{plan_export_csv}", "CSV" }
-                        a { class: "btn btn-ghost xs focus-ring", href: "{plan_export_xlsx}", "Excel XLSX" }
-                    } }
+                    if location.kind != Tab::Acceptances {
                     if loading() && available == 0 { div { class: "poams-notice", role: "status", "Loading plans..." } }
                     if let Some(err) = error() { div { class: "poams-notice", role: "alert", "Could not load plans: {err}" } }
-                    if !loading() && matching == 0 && error().is_none() { div { class: "poams-notice", "No matching plans in loaded pages." } }
+                    if !loading() && matching == 0 && error().is_none() && location.kind == Tab::Plans { div { class: "poams-notice", "No plans match these filters." } }
                     for (name, entries) in groups {
-                        section { class: "poams-group", key: "{name}", if grouping() != "none" { button { r#type: "button", class: "poams-group-toggle focus-ring", aria_expanded: if collapsed().contains(&name) { "false" } else { "true" }, onclick: { let name = name.clone(); move |_| { let mut set = collapsed(); if !set.insert(name.clone()) { set.remove(&name); } collapsed.set(set); selected.set(BTreeSet::new()); anchor.set(None); } }, "{name} - {entries.len()} loaded" } }
+                        {
+                        let decision_rows = acceptance_groups.get(&name);
+                        let group_count = entries.len() + decision_rows.map_or(0, Vec::len);
+                        let late_count = entries.iter().filter(|row| row.summary.overdue).count()
+                            + decision_rows.map_or(0, |items| items.iter().filter(|item| acceptance_queue(item, Some(Queue::ExpiredAcceptance), today)).count());
+                        let high_plans = entries.iter().filter(|row| row.summary.risk == PoamRisk::High).count();
+                        let unique_environment = if grouping() == "environment" {
+                            let matching: Vec<_> = env_names.iter().filter(|environment| environment.name == group_title(&name)).map(|environment| environment.id).collect();
+                            if matching.len() == 1 { matching.first().copied() } else { None }
+                        } else { None };
+                        rsx! { section { class: "poams-group pv-group", key: "{name}", if grouping() != "none" { div { class: "pv-group-head", role: "group", aria_label: "Register group {group_title(&name)}", button { r#type: "button", class: "poams-group-toggle pv-group-toggle focus-ring", aria_expanded: if collapsed().contains(&name) { "false" } else { "true" }, onclick: { let name = name.clone(); move |_| { let mut set = collapsed(); if !set.insert(name.clone()) { set.remove(&name); } collapsed.set(set); selected.set(BTreeSet::new()); mixed_selected.set(BTreeSet::new()); anchor.set(None); } }, span { class: "pv-group-name", "{group_title(&name)}" } span { class: "pv-group-n", "{group_count}" } }
+                            if late_count > 0 { span { class: "pv-group-late", "{late_count} late" } }
+                            if high_plans > 0 { span { class: "pv-group-risk", "{high_plans} CAT I plans" } }
+                            if let Some(environment) = unique_environment { button { r#type: "button", class: "btn btn-ghost xs focus-ring pv-group-focus", onclick: move |_| { nav.push(Route::PoamsView { query: RegisterLocation { scope: Some(Scope::Environment(environment)), poam: None, ..location }.query() }); }, "Focus" } }
+                        } }
                             if !collapsed().contains(&name) {
-                            div { class: "poams-table-wrap", table { class: "sys-table compact sys-table-dense poams-table", thead { tr { th { "ID" } th { "Title" } th { "Risk" } th { "Status" } if progress_column() { th { "Progress" } } if owner_column() { th { "Owner" } } th { "Due" } } }
-                                tbody { for row in entries.into_iter().take(visible()) { {row_view(row)} } }
+                            div { class: "poams-table-wrap pv-table-wrap", table { class: "sys-table compact sys-table-dense poams-table pv-table", thead { tr { th { "ID" } th { "Title" } th { "Risk" } th { "Status" } th { class: if progress_column() { "pv-c-ms" } else { "pv-c-ms poams-hidden" }, "Progress" } th { class: if owner_column() { "pv-c-owner" } else { "pv-c-owner poams-hidden" }, "Owner" } th { "Due" } } }
+                                tbody { for row in entries.into_iter().take(visible()) { {row_view(row)} }
+                                    if location.kind == Tab::Everything {
+                                        for item in acceptance_groups.get(&name).into_iter().flat_map(|items| items.iter().take(visible())) { {mixed_acceptance(item)} }
+                                    }
+                                }
                             } }
                             }
+                        } }
                         }
                     }
-                    if can_show_more { button { r#type: "button", class: "btn btn-ghost focus-ring poams-more", onclick: move |_| visible.set(visible() + 50), "Show more loaded plans in each group" } }
+                    if location.kind == Tab::Everything && acceptance_loading() && acceptance_rows.is_empty() { div { class: "poams-notice", role: "status", "Loading risk acceptances..." } }
+                    if let Some(message) = acceptance_error() { div { class: "poams-notice", role: "alert", "Could not load risk acceptances: {message}" } }
+                    if location.kind == Tab::Everything && acceptance_visible.len() > visible() { button { r#type: "button", class: "pv-more pv-more-row focus-ring", onclick: move |_| visible.set(visible() + 50), "Show more decisions" } }
+                    if location.kind == Tab::Everything && acceptance_next() { button { r#type: "button", class: "btn btn-ghost focus-ring poams-more", disabled: acceptance_loading(), onclick: move |_| {
+                        acceptance_loading.set(true);
+                        let key = location.selection_key();
+                        let generation = *refresh.peek();
+                        let offset = acceptance_overview.peek().len() as i64;
+                        spawn(async move {
+                            let environment_id = match location.scope { Some(Scope::Environment(id)) => Some(id), _ => None };
+                            match poam_api::list_acceptances(offset, environment_id).await {
+                                Ok(page) if *acceptance_scope.peek() == key && *refresh.peek() == generation => { acceptance_overview.write().extend(page.items); acceptance_next.set(page.has_more); acceptance_error.set(None); }
+                                Err(err) if *acceptance_scope.peek() == key && *refresh.peek() == generation => acceptance_error.set(Some(err.to_string())),
+                                _ => return,
+                            }
+                            acceptance_loading.set(false);
+                        });
+                    }, "Load more risk acceptances" } }
+                    if location.kind == Tab::Everything && !mixed_selected().is_empty() {
+                        div { class: "bulk-bar poams-bulk", role: "group", aria_label: "Selected risk acceptances",
+                            span { "{mixed_selected().len()} source decisions selected" }
+                            button { r#type: "button", class: "btn btn-ghost xs focus-ring", disabled: mixed_busy() || mixed_selected().len() > 100 || mixed_eligible_count == 0 || acceptance_loading(), onclick: move |_| {
+                                let chosen = mixed_selected();
+                                let targets: Vec<_> = acceptance_overview().into_iter().filter(|entry| chosen.contains(&acceptance_id(entry)) && renewable(entry, !viewer, is_admin)).collect();
+                                if targets.is_empty() || chosen.len() > 100 { return; }
+                                let key = location.selection_key();
+                                mixed_busy.set(true); mixed_outcome.set(None);
+                                spawn(async move {
+                                    let mut succeeded = BTreeSet::new(); let mut failures = Vec::new();
+                                    for entry in &targets {
+                                        let result = poam_api::renew_acceptance(entry).await;
+                                        if *acceptance_scope.peek() != key { mixed_busy.set(false); return; }
+                                        match result { Ok(_) => { succeeded.insert(acceptance_id(entry)); }, Err(error) => failures.push(format!("{} {}: {error}", entry.source.key(), entry.source_id)) }
+                                    }
+                                    mixed_selected.set(chosen.difference(&succeeded).copied().collect());
+                                    mixed_outcome.set(Some(format!("{} renewed; {} failed; {} ineligible. {}", succeeded.len(), failures.len(), chosen.len() - targets.len(), failures.join("; "))));
+                                    if !succeeded.is_empty() { refresh.set(refresh().wrapping_add(1)); }
+                                    mixed_busy.set(false);
+                                });
+                            }, "Renew eligible decisions 90 days" }
+                            button { r#type: "button", class: "btn btn-ghost xs focus-ring", disabled: mixed_busy(), onclick: move |_| { mixed_selected.set(BTreeSet::new()); mixed_outcome.set(None); }, "Clear" }
+                            if mixed_selected().len() > 100 { span { "Select at most 100 source decisions." } }
+                        }
+                    }
+                    if let Some(result) = mixed_outcome() { p { class: "poams-notice", role: "status", "{result}" } }
+                    if can_show_more { button { r#type: "button", class: "pv-more pv-more-row focus-ring", onclick: move |_| visible.set(visible() + 50), "Show more plans" } }
                      if let Some(offset) = next() { button { r#type: "button", class: "btn btn-ghost focus-ring poams-more", disabled: loading() || bulk_busy(), onclick: move |_| { loading.set(true); error.set(None); let request_scope = location.selection_key(); spawn(async move {
                          let result = poam_api::list_poam_register(&location.list_query(offset)).await;
                          if *loaded_scope.peek() != request_scope { return; }
@@ -1533,10 +1855,11 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
                         }
                         loading.set(false);
                     }); }, "Load next page" } }
-                    if loading() && available > 0 { span { role: "status", "Loading next page; showing {available} loaded plans." } }
+                    if loading() && available > 0 { span { role: "status", "Loading more plans..." } }
                 }
+                if location.kind == Tab::Acceptances { AcceptanceRegister { key: "acceptances-{location.selection_key()}", location, refresh, catalog: catalog(), overview: acceptance_overview, environments: env_names.clone(), group_by: grouping(), sort_by: sort(), status_filter: status(), risk_filter: risk(), mine: mine(), me, search: search(), progress_column: progress_column(), owner_column: owner_column() } }
                 if selection_count > 0 { div { class: "bulk-bar poams-bulk", role: "group", aria_label: "Selected remediation plans",
-                    span { "{selection_count} loaded plans selected" }
+                    span { "{selection_count} plans selected" }
                     if !viewer {
                         select { class: "cfgx-select focus-ring", aria_label: "Reassign selected owners", value: "", disabled: !can_assign || catalog().is_none(), onchange: move |event| {
                             if let Some(assignee) = catalog().as_ref().and_then(|data| assignee_from_catalog(&event.value(), data)) {
@@ -1579,6 +1902,9 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
                         loading.set(false);
                     }); }, "Retry refresh" }
                 } }
+            }
+            if let Some(entry) = mixed_open().and_then(|id| acceptance_rows.iter().find(|entry| acceptance_id(entry) == id).cloned()) {
+                AcceptanceTray { key: "mixed-{entry.source:?}:{entry.source_id}", entry, environments: env_names.clone(), operator: !viewer, admin: is_admin, catalog: catalog(), on_close: move |_| mixed_open.set(None), on_changed: move |_| { refresh.set(refresh().wrapping_add(1)); } }
             }
             PoamDetailHost { poam_id: detail_id, viewer, on_close: move |_| { nav.push(Route::PoamsView { query: RegisterLocation { poam: None, ..location }.query() }); }, on_open_finding: move |finding: poam_api::FindingView| { nav.push(Route::SystemDetailView { id: finding.system_id.to_string(), tab: "compliance".into(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new(), cve_target: String::new(), cve_mode: String::new() }); } }
         }
@@ -1784,17 +2110,17 @@ mod tests {
         let rows = vec![register_row(1), register_row(2)];
         let env = Scope::Environment(Uuid::from_u128(2));
         assert_eq!(
-            scope_pills(&rows, "environment", None),
-            vec![(env, format!("Environment {}", Uuid::from_u128(2)), 2)]
+            scope_pills(&rows, "environment", None, &[], &[], None),
+            vec![(env, "Environment unavailable".into(), 2)]
         );
         assert_eq!(
-            scope_pills(&rows, "environment", Some(env))[0].0,
+            scope_pills(&rows, "environment", Some(env), &[], &[], None)[0].0,
             Scope::System(Uuid::from_u128(3))
         );
-        assert!(scope_pills(&rows, "owner", None).is_empty());
+        assert!(scope_pills(&rows, "owner", None, &[], &[], None).is_empty());
         let mut ambiguous = rows;
         ambiguous[0].environment_ids.push(Uuid::from_u128(9));
-        assert_eq!(scope_pills(&ambiguous, "environment", Some(env))[0].2, 1);
+        assert_eq!(scope_pills(&ambiguous, "environment", Some(env), &[], &[], None)[0].2, 1);
     }
 
     #[test]

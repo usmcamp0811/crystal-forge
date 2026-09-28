@@ -740,17 +740,6 @@ fn revision_class(row: &ScanningScanRecordResponse) -> &'static str {
     }
 }
 
-fn bounded_failure_preview(value: &str) -> String {
-    const MAX_CHARS: usize = 120;
-    let mut chars = value.chars();
-    let preview = chars.by_ref().take(MAX_CHARS).collect::<String>();
-    if chars.next().is_some() {
-        format!("{preview}…")
-    } else {
-        preview
-    }
-}
-
 fn is_prerequisite_build_failure(row: &ScanningScanRecordResponse) -> bool {
     row.status == "failed"
         && row.source_trigger.as_deref() == Some("post_build")
@@ -1328,13 +1317,13 @@ pub fn ScanningView() -> Element {
         div { class: "scanning-view",
             div { class: "page-head scanning-head",
                 div {
-                    div { class: "scanning-title-line",
-                        h1 { class: "page-title", "Scanning" }
-                        span { class: "scanning-live", title: "Active scans and fleet totals refresh every 15 seconds", span { class: "scan-pulse" } "Live" }
-                    }
-                    p { class: "page-subtitle", "Exact CVE scan lifecycles and bounded vulnix diagnostics" }
+                    h1 { class: "page-title", "Scanning" }
+                    // Neither the schedule nor the fleet summary reports a
+                    // scanner version or vulnerability database update time.
+                    p { class: "page-subtitle", "CVE scanning · vulnix · database update time unavailable" }
                 }
                 div { class: "scanning-head-actions",
+                    span { class: "scanning-live", title: "Active scans and fleet totals refresh every 15 seconds", span { class: "scan-pulse" } "Live" }
                     button {
                         class: "btn btn-ghost focus-ring",
                         onclick: move |_| {
@@ -1371,7 +1360,7 @@ pub fn ScanningView() -> Element {
 
             div { class: "stat-strip scanning-stats",
                 if let Some(Ok(summary)) = stats.read().as_ref() {
-                    { stat_card("Scanning now", &summary.scanning.to_string(), Some(&format!("{} queued · {} awaiting build · {} awaiting closure", summary.queued, summary.awaiting_build, summary.awaiting_closure)), "#60a5fa") }
+                    { stat_card("Scanning now", &summary.scanning.to_string(), Some(&format!("{} queued · {} awaiting", summary.queued, summary.awaiting_build + summary.awaiting_closure)), "#60a5fa") }
                     { stat_card("Stale", &summary.stale.to_string(), Some("past rescan interval"), "#fbbf24") }
                     { stat_card("Never scanned", &summary.never_scanned.to_string(), None, "#9ca3af") }
                     if summary.failed > 0 {
@@ -1386,7 +1375,7 @@ pub fn ScanningView() -> Element {
                             span { class: "stat-accent", style: "--stat-color:#f87171;" }
                             div { class: "stat-label", "Failed" }
                             div { class: "stat-value", style: "color:#f87171;", "{summary.failed}" }
-                            div { class: "stat-meta", "Open newest failure" }
+                            div { class: "stat-meta", "view log →" }
                         }
                     } else {
                         { stat_card("Failed", "0", None, "#34d399") }
@@ -1666,7 +1655,7 @@ fn completed_panel(
                 option { value: "superseded", "Superseded" }
             }
             button { class: if latest_only() { "btn btn-ghost xs focus-ring active-filter" } else { "btn btn-ghost xs focus-ring" }, aria_pressed: latest_only(), onclick: move |_| latest_only.toggle(), Icon { name: IconName::Star, size: 12 } " Latest per flake" }
-            span { class: "filter-count", "{loaded} loaded · {available} matching" if has_more { " · more pages available" } }
+            span { class: "filter-count", "{loaded} of {available}" if has_more { "+" } }
             button {
                 class: if include_archived() { "btn btn-ghost xs focus-ring active-filter scanning-archived-filter" } else { "btn btn-ghost xs focus-ring scanning-archived-filter" },
                 aria_pressed: include_archived(),
@@ -1685,7 +1674,7 @@ fn completed_panel(
                     kbd { "⌘" } "/" kbd { "⇧" } "-click to select"
                 }
             }
-            if hidden_archived > 0 { span { class: "scanning-hidden-count", "{hidden_archived} archived scans hidden by retention view" } }
+            if hidden_archived > 0 { span { class: "scanning-hidden-count", title: "Archived scans are retained but hidden from this view", "{hidden_archived} archived scans hidden by retention view" } }
         }
 
         if let Some(error) = error {
@@ -1854,7 +1843,7 @@ fn active_panel(
                 option { value: "superseded", "Superseded" }
             }
             button { class: if latest_only() { "btn btn-ghost xs focus-ring active-filter" } else { "btn btn-ghost xs focus-ring" }, aria_pressed: latest_only(), onclick: move |_| latest_only.toggle(), Icon { name: IconName::Star, size: 12 } " Latest per flake" }
-            span { class: "filter-count", "{filtered} visible · {loaded} loaded" if capped { " · the server reports {available} active scans; this page holds the first {loaded} and sorting is unavailable" } }
+            span { class: "filter-count", "{filtered} of {available}" if capped { "+ · loaded page only; sorting unavailable" } }
         }
 
         if let Some(error) = error {
@@ -2142,8 +2131,15 @@ fn record_row(
             td { span { class: if relation == "deployed" { "chip chip-healthy" } else if relation == "recent" { "chip chip-info" } else { "chip chip-unknown" }, "{relation_label}" } }
             td {
                 span { class: "chip {meta.class}", span { class: "chip-dot", style: "background:{meta.color};" } "{meta.label}" }
-                if let Some(reason) = row.wait_reason.as_deref() { div { class: "scanning-wait", "Awaiting: {reason}" } }
-                if let Some(failure) = row.failure.as_deref() { div { class: "scanning-row-failure", title: "{failure}", "{bounded_failure_preview(failure)}" } }
+                if row.status == "in_progress" {
+                    div { class: "scanning-running", span { class: "scan-pulse" } "running"
+                        if let Some(started) = row.started_at { " · {relative_time(started)}" }
+                    }
+                }
+                if row.wait_reason.is_some() { div { class: "scanning-wait", "View wait details in scan log" } }
+                if row.failure.is_some() {
+                    div { class: "scanning-row-failure", if prerequisite_build_failure { "Build unavailable · view log" } else { "Scan failed · view log" } }
+                }
                 if row.archived_at.is_some() { div { class: "scanning-archived-label", Icon { name: IconName::Archive, size: 9 } " Archived" } }
             }
             td { { findings(row.critical_count, row.high_count, row.medium_count, row.low_count, row.status == "completed") } }
@@ -3252,14 +3248,6 @@ mod tests {
         failed.attempts = 0;
         failed.source_trigger = Some("manual".to_string());
         assert!(!is_prerequisite_build_failure(&failed));
-    }
-
-    #[test]
-    fn failure_preview_is_unicode_safe_and_bounded() {
-        let preview = bounded_failure_preview(&"å".repeat(121));
-        assert_eq!(preview.chars().count(), 121);
-        assert!(preview.ends_with('…'));
-        assert_eq!(bounded_failure_preview("short failure"), "short failure");
     }
 
     #[test]

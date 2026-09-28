@@ -182,10 +182,14 @@ pub fn AppShell() -> Element {
         });
     });
 
+    // The overdue count belongs to this authenticated shell. It must not
+    // persist into another user's navigation after the shell unmounts.
+    let poam_overdue = use_signal(|| None::<i64>);
     // Provide sidebar context
     use_context_provider(|| SidebarContext {
         is_mobile_drawer_open,
         is_collapsed,
+        poam_overdue,
     });
 
     // Provide preferences context

@@ -1772,6 +1772,66 @@ mod tests {
             .unwrap();
         sqlx::query("INSERT INTO cve_environment_dispositions(canonical_cve_id,canonical_package_name,environment_id,state,justification,review_date,accepted_by,accepted_at) VALUES('CVE-2099-54321','sample',$1,'accepted','Reviewed source risk','2099-01-10',$2,now())")
             .bind(environment).bind(user_id).execute(&pool).await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        let host: Uuid = sqlx::query_scalar("INSERT INTO systems(hostname,public_key,derivation,environment_id) VALUES($1,'key','key',$2) RETURNING id")
+            .bind(format!("export-http-{}", Uuid::new_v4())).bind(environment)
+            .fetch_one(&mut *tx).await.unwrap();
+        let policy: Uuid = sqlx::query_scalar("INSERT INTO deployment_policies(name,policy_type,config,enabled) VALUES($1,'custom_check','{}',false) RETURNING id")
+            .bind(format!("Export HTTP {}", Uuid::new_v4())).fetch_one(&mut *tx).await.unwrap();
+        let finding: Uuid = sqlx::query_scalar(
+            "INSERT INTO poam_findings(system_id,policy_lineage_id) VALUES($1,$2) RETURNING id",
+        )
+        .bind(host)
+        .bind(policy)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        let plan: Uuid = sqlx::query_scalar("INSERT INTO poams(title,risk,created_by) VALUES('HTTP scoped plan','high',$1) RETURNING id")
+            .bind(user_id).fetch_one(&mut *tx).await.unwrap();
+        sqlx::query(
+            "INSERT INTO poam_finding_links(poam_id,finding_id,linked_by) VALUES($1,$2,$3)",
+        )
+        .bind(plan)
+        .bind(finding)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let invalid_scopes = [
+            "record_type=plans&acceptance_status=accepted_current",
+            "record_type=acceptances&poam_status=completed",
+            "record_type=unknown",
+            "record_type=acceptances&acceptance_status=accepted_historical",
+        ];
+        for scope in invalid_scopes {
+            let response = client
+                .get(format!("{base}/api/v1/register/export?format=csv&{scope}"))
+                .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 400, "{scope}");
+        }
+        let plan_csv = client
+            .get(format!(
+                "{base}/api/v1/register/export?format=csv&record_type=plans"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(plan_csv.status(), 200);
+        let plan_text = plan_csv.text().await.unwrap();
+        assert!(plan_text.contains(&plan.to_string()));
+        assert!(!plan_text.contains("CVE-2099-54321"));
+        let acceptance_csv = client.get(format!("{base}/api/v1/register/export?format=csv&record_type=acceptances&acceptance_status=accepted_current"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send().await.unwrap();
+        assert_eq!(acceptance_csv.status(), 200);
+        let acceptance_text = acceptance_csv.text().await.unwrap();
+        assert!(acceptance_text.contains("CVE-2099-54321"));
+        assert!(!acceptance_text.contains(&plan.to_string()));
         for (format, media_type, marker) in [
             ("csv", "text/csv; charset=utf-8", "CVE-2099-54321"),
             (
@@ -1801,6 +1861,34 @@ mod tests {
                 assert!(bytes.starts_with(marker.as_bytes()));
             } else {
                 assert!(String::from_utf8(bytes.to_vec()).unwrap().contains(marker));
+            }
+            for record_type in ["plans", "acceptances"] {
+                let scoped = client
+                    .get(format!(
+                        "{base}/api/v1/register/export?format={format}&record_type={record_type}"
+                    ))
+                    .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(scoped.status(), 200, "{format}/{record_type}");
+                assert_eq!(scoped.headers()["content-type"], media_type);
+                let body = scoped.bytes().await.unwrap();
+                if format == "xlsx" {
+                    assert!(body.starts_with(b"PK"));
+                } else {
+                    let text = String::from_utf8(body.to_vec()).unwrap();
+                    assert!(text.contains(if record_type == "plans" {
+                        "HTTP scoped plan"
+                    } else {
+                        "CVE-2099-54321"
+                    }));
+                    assert!(!text.contains(if record_type == "plans" {
+                        "CVE-2099-54321"
+                    } else {
+                        "HTTP scoped plan"
+                    }));
+                }
             }
         }
     }

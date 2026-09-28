@@ -36,7 +36,7 @@ impl AcceptanceSource {
 pub struct AcceptanceListQuery {
     /// Restricts results to one source family.
     pub source: Option<AcceptanceSource>,
-    /// Restricts results to one source-native status (`accepted` for CVE).
+    /// Restricts results to one source-native status or a documented accepted view.
     pub status: Option<String>,
     /// Restricts results to the original environment scope, or the host's
     /// current environment for host decisions. Waivers have no environment scope.
@@ -243,7 +243,13 @@ fn validate(query: &AcceptanceListQuery) -> Result<(i64, i64), AcceptanceReadErr
     if !query.status.as_deref().is_none_or(|status| {
         matches!(
             status,
-            "pending" | "accepted" | "rejected" | "revoked" | "expired" | "accepted_or_converted"
+            "pending"
+                | "accepted"
+                | "rejected"
+                | "revoked"
+                | "expired"
+                | "accepted_or_converted"
+                | "accepted_current"
         )
     }) {
         return Err(AcceptanceReadError::Validation("invalid acceptance status"));
@@ -302,6 +308,8 @@ async fn list_scoped_tx(
           WHERE $2 AND ($5::uuid IS NULL OR waiver_host.environment_id=$5)
             AND ($3::text IS NULL OR $3='policy_waiver')
             AND ($4::text IS NULL OR w.status=$4
+              OR ($4='accepted_current' AND w.status='accepted'
+                AND replacement.waiver_id IS NULL)
               OR ($4='accepted_or_converted' AND (w.status IN ('accepted','expired')
                 OR replacement.waiver_id IS NOT NULL)))
           UNION ALL
@@ -322,6 +330,7 @@ async fn list_scoped_tx(
           ) conversion ON TRUE
           WHERE d.state='accepted' AND ($3::text IS NULL OR $3='cve_host')
             AND ($4::text IS NULL OR $4='accepted'
+              OR ($4='accepted_current' AND d.retired_at IS NULL AND conversion.poam_id IS NULL)
               OR ($4='accepted_or_converted' AND (d.retired_at IS NULL OR conversion.poam_id IS NOT NULL)))
             AND ($2 OR s.environment_id=ANY($1))
             AND ($5::uuid IS NULL OR s.environment_id=$5)
@@ -343,6 +352,7 @@ async fn list_scoped_tx(
           ) conversion ON TRUE
           WHERE d.state='accepted' AND ($3::text IS NULL OR $3='cve_environment')
             AND ($4::text IS NULL OR $4='accepted'
+              OR ($4='accepted_current' AND d.retired_at IS NULL AND conversion.poam_id IS NULL)
               OR ($4='accepted_or_converted' AND (d.retired_at IS NULL OR conversion.poam_id IS NOT NULL)))
             AND ($2 OR d.environment_id=ANY($1))
             AND ($5::uuid IS NULL OR d.environment_id=$5)

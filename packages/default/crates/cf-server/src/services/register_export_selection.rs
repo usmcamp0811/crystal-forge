@@ -19,6 +19,19 @@ use crate::services::poam::{self, PoamActor, PoamClock, PoamError};
 pub const MAX_AUTHORIZED_EXPORT_ROWS: usize = 1_000;
 const PAGE_SIZE: i64 = 100;
 
+/// Selects the source families included in a register export.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegisterRecordType {
+    /// Includes plans and acceptance decisions.
+    #[default]
+    All,
+    /// Includes only plans.
+    Plans,
+    /// Includes only acceptance decisions.
+    Acceptances,
+}
+
 /// Contains the source rows and effective actor scope from one database snapshot.
 ///
 /// Each POA&M retains its `summary.id`; each acceptance retains its typed
@@ -208,7 +221,44 @@ pub async fn select(
     acceptance_query: &AcceptanceListQuery,
     clock: &dyn PoamClock,
 ) -> Result<RegisterExportSelection, RegisterExportSelectionError> {
-    select_inner(pool, actor, poam_query, acceptance_query, clock, true).await
+    select_scoped(
+        pool,
+        actor,
+        poam_query,
+        acceptance_query,
+        clock,
+        RegisterRecordType::All,
+    )
+    .await
+}
+
+/// Loads the selected source families in one authorized repeatable-read snapshot.
+///
+/// The caller must authenticate the actor. Pagination is ignored and the
+/// 1,000-row cap applies to the selected families together. Excluded families
+/// are not read and cannot contribute rows or a candidate-limit failure.
+///
+/// # Errors
+///
+/// Returns a sanitized authorization, filter, cap, incomplete-context, or
+/// persistence error instead of a partial selection.
+pub async fn select_scoped(
+    pool: &PgPool,
+    actor: &PoamActor,
+    poam_query: &PoamListQuery,
+    acceptance_query: &AcceptanceListQuery,
+    clock: &dyn PoamClock,
+    record_type: RegisterRecordType,
+) -> Result<RegisterExportSelection, RegisterExportSelectionError> {
+    select_inner(
+        pool,
+        actor,
+        poam_query,
+        acceptance_query,
+        clock,
+        record_type,
+    )
+    .await
 }
 
 /// Selects the entire authorized acceptance register without unrelated POA&M rows.
@@ -230,7 +280,7 @@ pub async fn select_acceptances(
         &PoamListQuery::default(),
         query,
         &poam::SystemClock,
-        false,
+        RegisterRecordType::Acceptances,
     )
     .await
 }
@@ -241,7 +291,7 @@ async fn select_inner(
     poam_query: &PoamListQuery,
     acceptance_query: &AcceptanceListQuery,
     clock: &dyn PoamClock,
-    include_poams: bool,
+    record_type: RegisterRecordType,
 ) -> Result<RegisterExportSelection, RegisterExportSelectionError> {
     let mut tx = pool
         .begin()
@@ -255,7 +305,7 @@ async fn select_inner(
     let mut poams = Vec::new();
     let mut poam_ids = HashSet::new();
     let mut offset = 0;
-    while include_poams {
+    while record_type != RegisterRecordType::Acceptances {
         let page = poam::list_register_tx(
             &mut tx,
             &actor,
@@ -287,7 +337,7 @@ async fn select_inner(
     // The context matcher may stop after finding enough matches to fill a page.
     // CONCURRENCY: Probe past its candidate boundary in the same snapshot so
     // >1,000 candidates never become a silently incomplete export.
-    if include_poams
+    if record_type != RegisterRecordType::Acceptances
         && (poam_query.policy_lineage_id.is_some()
             || poam_query.bundle_id.is_some()
             || poam_query.requirement.is_some())
@@ -466,7 +516,7 @@ async fn select_inner(
     let mut acceptances = Vec::new();
     let mut acceptance_ids = HashSet::<(u8, Uuid)>::new();
     let mut offset = 0;
-    loop {
+    while record_type != RegisterRecordType::Plans {
         let page = acceptance_register::list_tx(
             &mut tx,
             actor.user_id,

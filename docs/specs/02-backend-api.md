@@ -1229,7 +1229,11 @@ The POA&M status filter also accepts `active`, meaning every status except
 Source review dates are date-only CSV/XLSX cells, not midnight timestamps.
 
 `GET /register/export?format=csv|xlsx|oscal-json|oscal-xml` selects both
-source families in one read-only repeatable-read authorization snapshot.
+source families by default. Optional `record_type=all|plans|acceptances`
+selects both, only plans, or only acceptance decisions in one read-only
+repeatable-read authorization snapshot. An excluded family's filters return
+HTTP 400 instead of being silently ignored; an unsupported record type or
+acceptance status (including `accepted_historical`) also returns HTTP 400.
 `poam_status`, `poam_risk`, `poam_owner`, `poam_system_id`,
 `poam_policy_lineage_id`, `poam_bundle_id`, `poam_requirement`,
 `poam_overdue`, and `poam_q` filter plans. `acceptance_source`,
@@ -1237,6 +1241,12 @@ source families in one read-only repeatable-read authorization snapshot.
 The `accepted_or_converted` decision filter also includes expired policy
 waiver history. Inclusion does not authorize renewal: the source service
 rechecks current approval authority and evidence before any mutation.
+`accepted_current` includes persisted accepted waivers without a durable
+conversion and accepted CVE decisions without retirement or conversion.
+An elapsed waiver `expires_at` does not erase the recorded accepted decision:
+it remains in this export, but does not renew or confer an authorization grant.
+`accepted_or_converted` remains the source-history view for Closed; it is not
+an alias for current authorization.
 Filters do not silently reduce the other family. The combined cap is 1,000
 source records; duplicate presentation-group identities remain one record.
 CSV and genuine XLSX repeat exact source UUIDs for each recorded evidence

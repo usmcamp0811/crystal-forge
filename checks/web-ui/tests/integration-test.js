@@ -1430,6 +1430,21 @@ async function routeStandaloneUiBootstrap(page, role = "Admin") {
       return;
     }
 
+    if (path === "/api/v1/poams/dashboard" && method === "GET") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ total: 0, active: 0, overdue: 0, awaiting_verification: 0, completed: 0 }),
+      });
+      return;
+    }
+
+    if (path === "/api/v1/cves/grouped" && method === "GET") {
+      // The focused CVE workflow installs its exact group fixture afterward.
+      await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      return;
+    }
+
     if (path === "/api/v1/admin/setup-progress" && method === "GET") {
       await route.fulfill({
         status: 200,
@@ -12980,6 +12995,18 @@ const steps = [
         return { rows, members };
       };
       const inventoryRoute = /\/api\/v1\/cves\/inventory\/(pairs|groups|members)(?:\?.*)?$/;
+      await page.route(/\/api\/v1\/cves\/grouped(?:\?.*)?$/, async (route) => {
+        const url = new URL(route.request().url());
+        const rows = inventoryRows(url).rows;
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(
+          rows.length ? [{ package_name: "openssl", cve_count: rows.length,
+            critical_count: rows.length, high_count: 0, medium_count: 0, low_count: 0,
+            environments_count: 4, total_affected_systems: 4,
+            current_affected_systems: 3, scheduled_deployment_target_systems: 2,
+            historical_inventory_systems: 1, fixable_count: rows.length,
+            outstanding_count: rows.filter((row) => row.triage_status === "outstanding").length,
+            exploited_count: rows.length, max_cvss: 9.8, severity_score: 2000, cves: null }] : []) });
+      });
       const serveInventory = async (route) => {
         const url = new URL(route.request().url());
         const endpoint = url.pathname.split("/").at(-1);
@@ -13557,6 +13584,10 @@ const steps = [
       // Assert summary stat cards are rendered.
       const patchableCard = page.locator("main").getByText("Patchable now");
       await assertVisible(patchableCard, "Expected 'Patchable now' stat card");
+      const kpis = page.locator("main .stat-strip .stat");
+      await assertCount(kpis, 5, "CVE strip must have exactly five fleet-wide KPIs");
+      await assertVisible(kpis.filter({ hasText: "Accepted risk" }).getByText("8", { exact: true }), "Scheduled is not accepted risk");
+      await assertVisible(kpis.filter({ hasText: "Patchable now" }).getByText("Fixed package version available"), "Patch availability must not claim deployment readiness");
 
       // Assert severity breakdown section.
       const criticalCard = page.locator("main").getByText("Critical").first();
@@ -13570,6 +13601,12 @@ const steps = [
       // Package is the default grouping; its pair page is bounded and scoped.
       const groupCard = page.locator("main .card").filter({ hasText: "openssl" }).first();
       await assertVisible(groupCard, "Expected grouped package card to render");
+      const packageHeader = page.locator("main .cve-package-toggle").filter({ hasText: "openssl" });
+      await assertVisible(packageHeader.getByText("4 distinct systems affected", { exact: false }), "Package host union must use aggregate rather than summed pair counts");
+      await assertVisible(packageHeader.getByText("Worst CVSS"), "Collapsed package must show worst CVSS");
+      await assertVisible(packageHeader.getByText("2 crit"), "Collapsed package must show severity rollup");
+      await assertVisible(page.getByRole("toolbar", { name: "CVE selection" }).getByText("SELECT", { exact: true }), "Source-backed selection strip belongs before package groups");
+      await captureWorkflowViewportState(page, "16-cves", "package-groups-visible", "desktop");
       const expectedPackageRollup = { critical_count: 2, fixable_count: 2, exploited_count: 2 };
       const initialPairs = inventoryRows(new URL(`${baseUrl}/api/v1/cves/inventory/pairs`)).rows;
       if (initialPairs.filter((row) => row.severity === "critical").length !== expectedPackageRollup.critical_count ||
@@ -13590,7 +13627,9 @@ const steps = [
         throw new Error(`Inventory-only filter was not retained in route state: ${page.url()}`);
       }
       const csvDownloadPromise = page.waitForEvent("download");
-      await page.getByRole("button", { name: "Export report", exact: true }).click();
+      await page.getByRole("button", { name: /Export 1 ▾/ }).click();
+      await assertCount(page.getByRole("menu", { name: "Export CVEs" }).getByRole("menuitem"), 1, "Only working CSV export may appear");
+      await page.getByRole("menuitem", { name: /CSV/ }).click();
       const csvDownload = await csvDownloadPromise;
       const csvStream = await csvDownload.createReadStream();
       let downloadedCsv = "";
@@ -13653,7 +13692,10 @@ const steps = [
           row.scheduled_deployment_target_count !== 1)) {
         throw new Error(`Scoped pairs must deduplicate the exact current/scheduled Production host: ${JSON.stringify(productionPairs)}`);
       }
-      await assertDisabled(page.getByRole("button", { name: "Export report", exact: true }), "Environment-scoped export must not claim fleet CSV scope");
+      await page.getByRole("button", { name: /Export \d+ ▾/ }).click();
+      await assertDisabled(page.getByRole("menuitem", { name: /CSV/ }), "Environment-scoped export must not claim fleet CSV scope");
+      await assertVisible(page.getByText("Environment-scoped CSV unavailable"), "Scoped CSV limit must be explicit");
+      await page.getByRole("button", { name: /Export \d+ ▾/ }).click();
       await page.getByRole("combobox", { name: "Environment" }).selectOption("");
       // Flat mode still opens the same exact fleet drawer and retains inventory-only semantics.
       const flatViewBtn = groupMode("None");
@@ -13662,6 +13704,12 @@ const steps = [
 
       const cveRow = page.locator("main td:has-text('CVE-2024-1234')");
       await assertVisible(cveRow, "Expected CVE row to render");
+      const selectableRow = page.getByTestId("cve-row").filter({ hasText: "CVE-2024-1234" });
+      await selectableRow.click({ modifiers: ["Control"] });
+      await assertVisible(page.getByRole("toolbar", { name: "CVE selection" }).getByText("1 selected"), "Modifier click selects exact pair");
+      await assertCount(page.getByRole("dialog", { name: /fleet inventory/ }), 0, "Selecting must not open a drawer or mutate");
+      await selectableRow.click({ modifiers: ["Control"] });
+      await assertCount(page.getByRole("toolbar", { name: "CVE selection" }).getByText("1 selected", { exact: true }), 0, "Modifier click toggles pair");
       await assertVisible(page.getByText("inventory only", { exact: true }), "Inventory-only rows must render read-only rather than outstanding");
 
       // Open the CVE detail drawer from the flat-view row and assert it renders.
@@ -14027,9 +14075,9 @@ const steps = [
 
       largePairFixture = true;
       await page.goto(`${baseUrl}/cves?view=flat`, { timeout: LOAD_TIMEOUT });
-      await assertVisible(page.getByRole("button", { name: "Show more pairs (200 of 205)" }), "First bounded pair page must expose continuation");
+       await assertVisible(page.getByRole("button", { name: "Show more findings (200 of 205)" }), "First bounded pair page must expose continuation");
       await assertCount(page.getByTestId("cve-row"), 200, "First pair page must not silently truncate or prefetch remaining rows");
-      await page.getByRole("button", { name: "Show more pairs (200 of 205)" }).click();
+       await page.getByRole("button", { name: "Show more findings (200 of 205)" }).click();
       await page.waitForFunction(() => document.querySelectorAll('[data-testid="cve-row"]').length === 205, null, { timeout: LOAD_TIMEOUT });
       await assertCount(page.getByTestId("cve-row"), 205, "Second pair page must append remaining pairs");
       if (!inventoryRequests.pairs.some((url) => url.searchParams.get("offset") === "200" &&
@@ -18099,9 +18147,9 @@ security.audit.enable = true;</fixtext>
           await assertCount(detail.getByRole("button", { name: "Retry scan" }), 0, `${hostname} detail must not offer scan retry`);
           await detail.getByRole("button", { name: "Close exact scan detail" }).click();
         }
-        const boundedFailure = page.locator("#scan-completed-panel tbody tr").filter({ hasText: "omega-old-failure" }).locator(".scanning-row-failure");
-        const boundedFailureText = await boundedFailure.textContent();
-        if (!boundedFailureText.endsWith("…") || [...boundedFailureText].length > 121) throw new Error(`Failure preview was not bounded: ${boundedFailureText}`);
+        const failedPreview = page.locator("#scan-completed-panel tbody tr").filter({ hasText: "omega-old-failure" }).locator(".scanning-row-failure");
+        if ((await failedPreview.textContent()).trim() !== "Scan failed · view log") throw new Error("Scan failure must show a concise primary-table reason");
+        if ((await failedPreview.textContent()).includes("/nix/store/")) throw new Error("Scanner diagnostics must stay in the detail drawer");
         const revisionFilter = page.getByRole("combobox", { name: "Filter by revision freshness" });
         await revisionFilter.selectOption("superseded");
         await assertVisible(page.getByText("alpha-old", { exact: true }), "Expected superseded revision filter");
@@ -18561,7 +18609,7 @@ security.audit.enable = true;</fixtext>
   },
   {
     name: "16e-poam-register-design",
-    description: "Mocked paged POA&M register: loaded-only counts, exact scopes, groups, selection and partial bulk failures",
+    description: "Mocked paged POA&M register: source-backed mixed rows, bounded counts, exact scopes and partial bulk failures",
     action: async (page) => {
       const ids = {
         envA: "31000000-0000-4000-8000-000000000001",
@@ -18625,8 +18673,13 @@ security.audit.enable = true;</fixtext>
         { source: "policy_waiver", source_id: "32000000-0000-4000-8000-000000000002", waiver_updated_at: "2026-09-18T12:00:00Z", status: "accepted", finding_id: planId(1),
           system_id: ids.host, environment_id: null, policy_lineage_id: ids.bundle, policy_version_id: ids.version,
           canonical_cve_id: null, canonical_package_name: null, justification: "Approved policy exception",
-          review_date: null, review_due_at: null, expires_at: "2026-12-01T12:00:00Z", accepted_by: ids.owner, accepted_at: "2026-09-18T12:00:00Z",
+          review_date: null, review_due_at: null, expires_at: "2026-12-01T12:00:00Z", accepted_by: planId(89), accepted_at: "2026-09-18T12:00:00Z",
           retired_at: null, retired_by: null, retirement_reason: null, replacement_poam_id: null, recorded_at: "2026-09-18T12:00:00Z" },
+        { source: "cve_environment", source_id: "32000000-0000-4000-8000-000000000003", waiver_updated_at: null, status: "converted", finding_id: null,
+          system_id: null, environment_id: ids.envA, policy_lineage_id: null, policy_version_id: null,
+          canonical_cve_id: "CVE-2025-1234", canonical_package_name: "curl", justification: "Historical environment decision",
+          review_date: "2026-10-15", review_due_at: null, expires_at: null, accepted_by: ids.owner, accepted_at: "2026-09-10T12:00:00Z",
+          retired_at: "2026-09-21T12:00:00Z", retired_by: ids.owner, retirement_reason: "converted", replacement_poam_id: planId(94), recorded_at: "2026-09-10T12:00:00Z" },
       ];
       const detailPayload = (row) => ({ ...row, findings: [], cve_findings: [], findings_has_more: false,
         findings_next_cursor: null, milestones: [], assignment_references: [], verification_attempts: [],
@@ -18695,6 +18748,10 @@ security.audit.enable = true;</fixtext>
         return route.fulfill({ json: { source, predecessor_id: sourceId, poam_id: planId(91), poam_reused: false } });
       });
       await page.route("**/api/v1/poams/assignees", (route) => route.fulfill({ json: { people: [{ user_id: ids.owner, label: "Morgan Owner" }], groups: [] } }));
+      await page.route("**/api/v1/environments", (route) => route.fulfill({ json: [
+        { id: ids.envA, name: "Production", color_hex: "#a78bfa", is_active: true, system_count: 1 },
+        { id: ids.envB, name: "Staging", color_hex: "#60a5fa", is_active: true, system_count: 1 },
+      ] }));
       await page.route(detailRoute, (route) => {
         const id = new URL(route.request().url()).pathname.split("/").at(-1);
         if (route.request().method() !== "GET") throw new Error(`Unexpected detail write: ${route.request().method()}`);
@@ -18722,38 +18779,76 @@ security.audit.enable = true;</fixtext>
       try {
         await page.goto(`${baseUrl}/poams`, { timeout: LOAD_TIMEOUT, waitUntil: "commit" });
         await assertVisible(page.getByRole("heading", { name: "POA&M", exact: true }), "Register heading must load");
-        await assertVisible(page.getByText("100 open plans in 100 loaded - accepted decisions read separately - more pages available"), "First page must not claim fleet completeness");
-        const fullRegister = page.getByRole("group", { name: "Export full register" });
+        await assertVisible(page.getByText("Showing 100 open remediation plans · 2 active risk decisions"), "First page must describe only fetched records");
+        await assertVisible(page.getByRole("tab", { name: "Everything 103" }), "Mixed tab must show the count of fetched source records");
+        const mixedDecision = page.locator(".poams-group tbody tr").filter({ hasText: accepted[0].source_id });
+        await assertVisible(mixedDecision, "Mixed register must render the source decision alongside plans");
+        await mixedDecision.click();
+        const mixedTray = page.getByRole("dialog", { name: `Risk acceptance ${accepted[0].source_id}` });
+        await assertVisible(mixedTray.getByText("Reviewed host risk"), "Mixed row must open the exact source decision without writing");
+        await mixedTray.getByRole("button", { name: "Close acceptance" }).click();
+        await mixedDecision.click({ modifiers: ["Control"] });
+        await assertVisible(page.getByRole("group", { name: "Selected risk acceptances" }).getByText("1 source decisions selected"), "Mixed selection must preserve typed source identity");
+        await page.getByRole("group", { name: "Selected risk acceptances" }).getByRole("button", { name: "Clear" }).click();
+        if (acceptanceWrites.length) throw new Error("Mixed row read or selection wrote a source decision");
+        const exportMenu = page.getByRole("menu", { name: "Export POA&Ms" });
+        await page.getByRole("button", { name: /^Export \d+\+? ▾$/ }).click();
         for (const [name, format] of [["OSCAL JSON", "oscal-json"], ["Excel XLSX", "xlsx"], ["CSV", "csv"], ["OSCAL XML", "oscal-xml"]]) {
-          const href = new URL(await fullRegister.getByRole("link", { name }).getAttribute("href"));
-          if (href.pathname !== "/api/v1/register/export" || href.searchParams.get("poam_status") !== "active" || href.searchParams.get("acceptance_status") !== "accepted_or_converted" || href.searchParams.get("format") !== format || href.searchParams.has("limit") || href.searchParams.has("offset")) {
+          const href = new URL(await exportMenu.getByRole("menuitem", { name: new RegExp(`^${name}`) }).getAttribute("href"));
+          if (href.pathname !== "/api/v1/register/export" || href.searchParams.get("record_type") !== "all" || href.searchParams.get("poam_status") !== "active" || href.searchParams.get("acceptance_status") !== "accepted_current" || href.searchParams.get("format") !== format || href.searchParams.has("limit") || href.searchParams.has("offset")) {
             throw new Error(`Mixed ${format} download must use the complete authorized default scope: ${href}`);
           }
         }
-        await assertVisible(page.getByText("50 shown / 100 matching loaded / 100 loaded - more pages available"), "Initial window is bounded");
-        await assertVisible(row(1).getByText("CAT I"), "Risk category must come from the plan summary");
-        await assertVisible(row(1).getByText("1/3 milestones"), "Milestone progress must come from the register projection");
+        await assertVisible(page.getByText("53 items", { exact: false }), "Initial environment-grouped window deduplicates a plan that spans two environments");
+        await assertVisible(row(1).first().getByText("CAT I"), "Risk category must come from the plan summary");
+        await assertVisible(row(1).first().getByText("1/3"), "Milestone progress must come from the register projection");
         await assertVisible(row(6).getByText("Unassigned"), "Missing owner must not be given an invented identity");
-        await assertVisible(page.getByText("Work queue counts are for loaded pages only. They may grow as more pages load."), "Queues must disclose their loaded-only scope");
-        for (const [label, count] of [["Overdue plans", "1"], ["Due in 14 days", "1"], ["Awaiting verification", "1"], ["Blocked", "1"], ["No activity in 30 days", "1"], ["Unassigned", "1"]]) {
-          await assertVisible(page.getByRole("group", { name: "Work queues" }).getByRole("button", { name: `${count} ${label}` }), `${label} must count loaded rows only`);
+        await page.getByRole("button", { name: "Columns" }).click();
+        await page.getByRole("menu", { name: "Toggle columns" }).getByRole("checkbox", { name: "Progress" }).uncheck();
+        await assertCount(row(1).first().locator("td.pv-c-ms:visible"), 0, "Column control must hide only the requested progress column");
+        await page.getByRole("menu", { name: "Toggle columns" }).getByRole("checkbox", { name: "Progress" }).check();
+        for (const [label, count] of [["Overdue plans", "1"], ["Expired acceptances", "0"], ["Coming due", "1"], ["Awaiting verification", "1"], ["Blocked", "1"], ["Missing owner/review", "2"]]) {
+          await assertVisible(page.getByRole("group", { name: "Work queues" }).getByRole("button", { name: new RegExp(`^${count} ${label}`) }), `${label} must count loaded rows only`);
         }
+        await assertVisible(page.locator(".poams-pills").getByRole("button", { name: "Production", exact: false }), "Authorized environment name must replace UUID in scope pills");
+        await assertVisible(page.locator(".poams-group").filter({ hasText: "Host-only decisions" }).getByRole("row").filter({ hasText: accepted[0].source_id }), "Host-only decisions must not be inferred into an environment group");
         await assertAttribute(page.getByRole("tab", { name: "Everything" }), "aria-selected", "true", "Everything is the initial type");
         await page.getByRole("tab", { name: "Risk acceptances" }).click();
-        await assertVisible(page.getByRole("region", { name: "Risk acceptances" }).getByText("CVE-2024-1234", { exact: false }), "Accepted CVE host decision must keep its canonical package identity");
-        await assertVisible(page.getByRole("region", { name: "Risk acceptances" }).getByText("Authorization expires 2026", { exact: false }), "Policy waiver expiry must not be mistaken for a review deadline");
-        const downloadGroup = page.getByRole("group", { name: "Export risk acceptances" });
-        for (const [label, format] of [["CSV", "csv"], ["Excel XLSX", "xlsx"]]) {
-          const link = downloadGroup.getByRole("link", { name: label });
-          await assertVisible(link, `Accepted-decision ${format} download must be available for full server scope`);
-          const href = new URL(await link.getAttribute("href"));
-          if (href.pathname !== "/api/v1/acceptances/export" || href.searchParams.get("format") !== format || href.searchParams.get("status") !== "accepted_or_converted" || href.searchParams.has("limit") || href.searchParams.has("offset")) {
-            throw new Error(`Export ${format} must use the complete authorized server-filtered scope: ${href}`);
-          }
+        await assertVisible(page.getByRole("navigation", { name: "Scope" }), "Acceptance tab must retain the shared scope bar");
+        await assertVisible(page.getByRole("textbox", { name: "Search register" }), "Acceptance tab must retain register search");
+        await assertVisible(page.getByRole("combobox", { name: "Group register" }), "Acceptance tab must retain grouping");
+        await assertDisabled(page.getByRole("combobox", { name: "Risk" }), "No acceptance source records a CAT severity");
+        await assertVisible(page.locator(".poams-acceptances").getByText("Host-only decisions"), "Host decision group must remain separate from environment decisions");
+        for (const label of ["Expired acceptances", "Review in 30 days", "No review date", "Accepted decisions"]) {
+          await assertVisible(page.getByRole("group", { name: "Work queues" }).getByText(label), `${label} must be a source-backed acceptance card`);
         }
-        await assertCount(page.getByRole("group", { name: "Work queues" }), 0, "Decisions must not inherit plan queues");
+        await assertVisible(page.locator(".poams-acceptances").getByText("CVE-2024-1234", { exact: false }), "Accepted CVE host decision must keep its canonical package identity");
+        await assertVisible(page.locator(".poams-acceptances").getByText("Authorization expires 2026", { exact: false }), "Policy waiver expiry must not be mistaken for a review deadline");
+        await assertVisible(page.locator(".poams-acceptances").getByRole("cell", { name: "Morgan Owner" }).first(), "Approver should use the authorized catalog label");
+        await assertVisible(page.locator(".poams-acceptances").getByRole("cell", { name: "Approver unavailable" }), "Unknown approver must not render as a UUID");
+        await page.setViewportSize({ width: 1000, height: 1000 });
+        const bounds = await page.locator(".poams-acceptances .poams-table").first().evaluate((table) => {
+          const card = table.closest(".poams-main").getBoundingClientRect();
+          const cells = [...table.querySelectorAll("thead th")].filter((th) => th.getBoundingClientRect().width > 0)
+            .map((th) => ({ label: th.textContent, left: th.getBoundingClientRect().left, right: th.getBoundingClientRect().right }));
+          return { cardLeft: card.left, cardRight: card.right, tableRight: table.getBoundingClientRect().right, cells };
+        });
+        if (bounds.tableRight > bounds.cardRight + 1 || bounds.cells.some((cell) => cell.left < bounds.cardLeft - 1 || cell.right > bounds.cardRight + 1)) {
+          throw new Error(`Acceptances table overflows the 1000px register: ${JSON.stringify(bounds)}`);
+        }
+        await page.setViewportSize(MANIFEST.settings.viewport);
+        await page.getByRole("textbox", { name: "Search register" }).fill("CVE-2024-1234");
+        await assertCount(page.locator(".poams-acceptances tbody tr"), 1, "Acceptance search filters source subject");
+        await page.getByRole("textbox", { name: "Search register" }).fill("");
+        await page.getByRole("combobox", { name: "Group register" }).selectOption("owner");
+        await assertVisible(page.locator(".poams-acceptances").getByText("Morgan Owner", { exact: true }).first(), "Approver grouping must use a name");
+        await page.getByRole("combobox", { name: "Group register" }).selectOption("environment");
+        await page.getByRole("combobox", { name: "Status" }).selectOption("all");
+        await assertVisible(page.locator(".poams-acceptances .poams-group").filter({ hasText: "Production" }).getByRole("row").filter({ hasText: accepted[2].source_id }), "Environment decision must join its exact source environment group");
+        await page.getByRole("combobox", { name: "Status" }).selectOption("active");
+        await assertVisible(page.getByRole("group", { name: "Work queues" }).getByText("No review date"), "Acceptance queues must remain available");
         await captureWorkflowViewportState(page, "16e-poam-register-design", "source-decisions-readonly", "desktop");
-        const acceptanceTable = page.getByRole("region", { name: "Risk acceptances" });
+        const acceptanceTable = page.locator(".poams-acceptances");
         const hostDecision = acceptanceTable.getByRole("row").filter({ hasText: accepted[0].source_id });
         const policyDecision = acceptanceTable.getByRole("row").filter({ hasText: accepted[1].source_id });
         await hostDecision.click();
@@ -18821,36 +18916,36 @@ security.audit.enable = true;</fixtext>
         if (!new URL(page.url()).searchParams.has("kind")) throw new Error(`Plan type missing in URL: ${page.url()}`);
 
         await page.getByRole("button", { name: "Load next page" }).click();
-        await assertVisible(page.getByText("104 open plans in 105 loaded - accepted decisions read separately - all pages loaded"), "Second page must append five plans, not acceptances");
+        await assertVisible(page.getByText("Showing 104 open remediation plans · 0 active risk decisions"), "Converted source decisions are not active acceptances");
         if (!requests.some((url) => url.searchParams.get("offset") === "100" && url.searchParams.get("limit") === "100")) throw new Error("Register did not request page two");
-        await page.getByRole("textbox", { name: "Search loaded plans" }).fill("CVE-2024-1234");
+        await page.getByRole("textbox", { name: "Search register" }).fill("CVE-2024-1234");
         await assertVisible(row(105).getByText("CVE-only remediation"), "First CVE must be searchable without a policy requirement");
-        await page.getByRole("textbox", { name: "Search loaded plans" }).fill("");
+        await page.getByRole("textbox", { name: "Search register" }).fill("");
         await page.getByRole("combobox", { name: "Status", exact: true }).selectOption("all");
-        await page.getByRole("combobox", { name: "Group loaded plans" }).selectOption("environment");
-        await assertVisible(page.getByRole("button", { name: `Environment ${ids.envA} - 104 loaded` }), "Environment A must count unique plans in its group");
-        await assertVisible(page.getByRole("button", { name: `Environment ${ids.envB} - 2 loaded` }), "One plan must appear in two environment groups");
-        await page.getByRole("button", { name: "Show more loaded plans in each group" }).click();
-        await page.getByRole("button", { name: "Show more loaded plans in each group" }).click();
-        await assertVisible(page.getByText("105 shown / 105 matching loaded / 105 loaded - all pages loaded"), "Group display must deduplicate shown IDs");
+        await page.getByRole("combobox", { name: "Group register" }).selectOption("environment");
+        await assertVisible(page.getByRole("group", { name: "Register group Production" }).getByText("104", { exact: true }), "Environment A must count unique plans in its group");
+        await assertVisible(page.getByRole("group", { name: "Register group Staging" }).getByText("2", { exact: true }), "One plan must appear in two environment groups");
+        await page.getByRole("button", { name: "Show more plans" }).click();
+        await page.getByRole("button", { name: "Show more plans" }).click();
+        await assertVisible(page.getByText("105 items"), "Group display must deduplicate shown IDs");
         await assertCount(row(1), 2, "One multi-environment plan must render once in each group");
         await row(1).first().click({ modifiers: ["Control"] });
-        await assertVisible(selected.getByText("1 loaded plans selected"), "The same POA&M must be selected only once across groups");
+        await assertVisible(selected.getByText("1 plans selected"), "The same POA&M must be selected only once across groups");
         await selected.getByRole("button", { name: "Clear" }).click();
-        await page.getByRole("combobox", { name: "Group loaded plans" }).selectOption("none");
-        await page.getByRole("combobox", { name: "Sort loaded plans" }).selectOption("id");
+        await page.getByRole("combobox", { name: "Group register" }).selectOption("none");
+        await page.getByRole("combobox", { name: "Sort register" }).selectOption("id");
         await row(1).click({ modifiers: ["Control"] });
         await row(2).click({ modifiers: ["Shift"] });
-        await assertVisible(selected.getByText("2 loaded plans selected"), "Shift must select the visible loaded-order range");
+        await assertVisible(selected.getByText("2 plans selected"), "Shift must select the visible loaded-order range");
         await assertAttribute(row(1), "aria-selected", "true", "Range start must be selected");
         await assertAttribute(row(2), "aria-selected", "true", "Range end must be selected");
         await selected.getByRole("button", { name: "Clear" }).click();
         await assertCount(selected, 0, "Clear must remove selection without a write");
         if (poamWrites.length) throw new Error(`Selection or cancel caused a write: ${JSON.stringify(poamWrites)}`);
 
-        await row(1).getByRole("button", { name: `Environment ${ids.envB}` }).click();
+        await row(1).getByRole("button", { name: "Staging" }).click();
         if (!scopeUrl("environment", ids.envB)) throw new Error(`Environment scope did not preserve exact ID: ${page.url()}`);
-        await assertVisible(page.getByText("scope is partial across pages"), "Environment client scope must disclose partial pagination");
+        await assertVisible(page.getByRole("navigation", { name: "Scope" }).getByText("Staging"), "Environment scope must be visible without implying page completeness");
         await assertVisible(row(1), "Environment B must load its spanning plan");
         await assertCount(row(1), 1, "Spanning plan must remain in environment B");
         await assertCount(row(3), 0, "Environment B must exclude unrelated plans");
@@ -18870,13 +18965,14 @@ security.audit.enable = true;</fixtext>
         await page.goBack();
         if (!scopeUrl("environment", ids.envB)) throw new Error(`Back did not restore environment scope: ${page.url()}`);
         await browse("Bundle").click();
-        await row(1).getByRole("button", { name: `Bundle ${ids.bundle}` }).click();
+        await row(1).first().getByRole("button", { name: `Bundle ${ids.bundle}` }).click();
         if (!scopeUrl("bundle", ids.bundle) || !requests.some((url) => url.searchParams.get("bundle_id") === ids.bundle)) throw new Error("Bundle scope must keep its exact UUID in URL and server query");
         await page.reload({ waitUntil: "commit" });
         await assertVisible(row(2), "Bundle-scoped rows must load after refresh");
         await assertCount(row(2), 1, "Bundle URL must survive refresh");
         await browse("Environment").click();
-        await page.getByRole("combobox", { name: "Sort loaded plans" }).selectOption("id");
+        await page.getByRole("combobox", { name: "Group register" }).selectOption("none");
+        await page.getByRole("combobox", { name: "Sort register" }).selectOption("id");
         await row(1).click();
         const detail = page.locator(`[data-testid="poam-detail"][data-poam-id="${planId(1)}"]`);
         await assertVisible(detail, "Plain row click must open exact POA&M detail");
@@ -18886,14 +18982,14 @@ security.audit.enable = true;</fixtext>
 
         await row(1).click({ modifiers: ["Control"] });
         await row(2).click({ modifiers: ["Control"] });
-        await assertVisible(selected.getByText("2 loaded plans selected"), "Both visible plans must be selected before the batch starts");
+        await assertVisible(selected.getByText("2 plans selected"), "Both visible plans must be selected before the batch starts");
         await selected.getByRole("combobox", { name: "Set selected plan status" }).selectOption("blocked");
         try {
           await assertVisible(page.getByText("1 plan(s) confirmed; 1 not confirmed.", { exact: false }), "Partial batch must report confirmed and failed IDs");
         } catch (error) {
           throw new Error(`${error.message}; writes: ${JSON.stringify(writes)}; selected: ${await selected.textContent().catch(() => "not visible")}`);
         }
-        await assertVisible(selected.getByText("1 loaded plans selected"), "Only failed POA&M must remain selected");
+        await assertVisible(selected.getByText("1 plans selected"), "Only failed POA&M must remain selected");
         await assertAttribute(row(2), "aria-selected", "true", "Failed row must remain selected after refresh");
         await assertAttribute(row(1), "aria-selected", "false", "Confirmed row must clear after refresh");
         if (writes.length !== 2 || new Set(writes.map((item) => item.id)).size !== 2) throw new Error(`Bulk mutation must target each exact POA&M once: ${JSON.stringify(writes)}`);
@@ -18917,7 +19013,7 @@ security.audit.enable = true;</fixtext>
         await page.route(listRoute, outOfOrderRoute);
         try {
           const slowRequest = page.waitForRequest((request) => new URL(request.url()).pathname === "/api/v1/poams");
-          await row(1).getByRole("button", { name: `Environment ${ids.envA}` }).click();
+        await row(1).getByRole("button", { name: "Production" }).click();
           await slowRequest;
           await page.getByRole("navigation", { name: "Scope" }).getByRole("button", { name: "All" }).click();
           await assertVisible(row(2), "The newer unscoped response must restore the second environment's plan");
@@ -18925,7 +19021,7 @@ security.audit.enable = true;</fixtext>
           releaseOldScope();
           await staleResponse;
           await assertVisible(row(2), "The stale environment response must not replace the current scope's rows");
-          await assertVisible(page.getByText("50 shown / 100 matching loaded / 100 loaded - more pages available"), "A stale response must not replace the current loaded count");
+          await assertVisible(page.getByText("50 items", { exact: false }), "A stale response must not replace the current loaded count");
         } finally {
           releaseOldScope();
           await page.unroute(listRoute, outOfOrderRoute);
@@ -18938,6 +19034,7 @@ security.audit.enable = true;</fixtext>
         await page.unroute(detailRoute);
         await page.unroute(transitionRoute);
         await page.unroute("**/api/v1/poams/assignees");
+        await page.unroute("**/api/v1/environments");
       }
     },
   },

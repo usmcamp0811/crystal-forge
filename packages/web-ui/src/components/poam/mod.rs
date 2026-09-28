@@ -2252,12 +2252,43 @@ pub struct BundlePoamRollupProps {
     pub rollup: Rollup,
     /// Receives the lifecycle filter selected by a roll-up action.
     pub on_open_list: EventHandler<PoamFilter>,
+    /// Shows only the four source-backed summary counters in a bundle overview.
+    #[props(default)]
+    pub compact: bool,
 }
 
 /// Renders bundle-scoped finding coverage and POA&M navigation actions.
 #[component]
 pub fn BundlePoamRollup(props: BundlePoamRollupProps) -> Element {
-    rsx! { section { class: "poam-bundle-rollup", div { class: "poam-rollup-title", Icon { name: IconName::Gear, size: 14 } div { strong { "POA&M roll-up" } small { "Authoritative finding coverage for {props.bundle_name}" } } } div { class: "poam-rollup-counts", div { strong { class: "poam-count-fail", "{props.rollup.open_findings}" } span { "Open findings" } } div { strong { class: "poam-count-info", "{props.rollup.on_poam_findings}" } span { "On POA&M" } } div { strong { class: "poam-count-warn", "{props.rollup.no_poam_findings}" } span { "No POA&M" } } button { onclick: move |_| props.on_open_list.call(PoamFilter::Overdue), strong { class: "poam-count-fail", "{props.rollup.overdue}" } span { "Overdue" } } button { onclick: move |_| props.on_open_list.call(PoamFilter::Awaiting), strong { class: "poam-count-awaiting", "{props.rollup.awaiting_verification}" } span { "Awaiting" } } button { onclick: move |_| props.on_open_list.call(PoamFilter::Closed), strong { class: "poam-count-ok", "{props.rollup.completed}" } span { "Closed" } } button { class: "btn btn-ghost xs focus-ring", onclick: move |_| props.on_open_list.call(PoamFilter::All), "{props.rollup.total} POA&M items" Icon { name: IconName::ArrowRight, size: 11 } } } } }
+    rsx! {
+        section { class: "poam-bundle-rollup",
+            div { class: "poam-rollup-title", title: "Finding coverage for {props.bundle_name}",
+                Icon { name: IconName::Gear, size: 14 }
+                div { strong { "POA&M roll-up" }
+                    small { "Which failing findings have a remediation plan — and which do not." }
+                }
+            }
+            div { class: "poam-rollup-counts",
+                div { strong { class: "poam-count-fail", "{props.rollup.open_findings}" } span { "Open findings" } }
+                div { strong { class: "poam-count-info", "{props.rollup.on_poam_findings}" } span { "On POA&M" } }
+                div { strong { class: "poam-count-warn", "{props.rollup.no_poam_findings}" } span { "No POA&M" } }
+                button { onclick: move |_| props.on_open_list.call(PoamFilter::Overdue),
+                    strong { class: "poam-count-fail", "{props.rollup.overdue}" } span { "Overdue" }
+                }
+                if !props.compact {
+                    button { onclick: move |_| props.on_open_list.call(PoamFilter::Awaiting),
+                        strong { class: "poam-count-awaiting", "{props.rollup.awaiting_verification}" } span { "Awaiting" }
+                    }
+                    button { onclick: move |_| props.on_open_list.call(PoamFilter::Closed),
+                        strong { class: "poam-count-ok", "{props.rollup.completed}" } span { "Closed" }
+                    }
+                }
+                button { class: "btn btn-ghost xs focus-ring", onclick: move |_| props.on_open_list.call(PoamFilter::All),
+                    "{props.rollup.total} POA&M items" Icon { name: IconName::ArrowRight, size: 11 }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

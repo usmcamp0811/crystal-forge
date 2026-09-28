@@ -41,12 +41,6 @@ pub struct BundleCatalogProps {
     pub selected_version_id: Option<uuid::Uuid>,
     #[props(default)]
     pub on_select_version: EventHandler<uuid::Uuid>,
-    /// Provides server-computed POA&M counts for each bundle lineage.
-    #[props(default)]
-    pub poam_rollups: Vec<poam_api::Rollup>,
-    /// Indicates that POA&M roll-ups are still loading.
-    #[props(default)]
-    pub poam_rollups_loading: bool,
 }
 
 #[component]
@@ -106,10 +100,10 @@ pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
                 } else {
                 table { class: "sys-table sys-table-fixed",
                     colgroup {
-                        col { style: "width:32px;" }
-                        col { style: "width:34%;" }
-                        col { style: "width:16%;" }
-                        col { style: "width:16%;" }
+                        col { style: "width:20px;" }
+                        col { style: "width:37%;" }
+                        col { style: "width:15%;" }
+                        col { style: "width:17%;" }
                         col { style: "width:18%;" }
                         col { style: "width:10%;" }
                     }
@@ -139,7 +133,6 @@ pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
                         let score_color = score.map_or("var(--cf-text-muted)", |score| if score >= 90 { "#34d399" } else if score >= 70 { "#fbbf24" } else { "#f87171" });
                         let score_label = score.map_or_else(|| "—".to_string(), |score| format!("{score}%"));
                         let system_count_label = format!("{} system{}", bundle.applicable_system_count, if bundle.applicable_system_count == 1 { "" } else { "s" });
-                        let poam_rollup = props.poam_rollups.iter().find(|rollup| rollup.scope_id == id);
                         rsx! {
                             // Catalog rows represent lineages. Only the server's current
                             // pointer supplies the summary; other versions keep their IDs.
@@ -170,32 +163,14 @@ pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
                                         span { style: "font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;", "{name}" }
                                     }
                                     div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;",
-                                        "{bundle.requirement_count} requirements · {bundle.policy_count} policies"
-                                        if revisions.len() > 1 { " · {revisions.len()} revisions" }
-                                    }
-                                    if let Some(rollup) = poam_rollup {
-                                        div { "data-testid": "bundle-poam-summary", style: "font-size:10px;color:var(--cf-text-muted);margin-top:3px;",
-                                            span { style: "color:#f87171;font-weight:700;", "{rollup.open_findings} open" }
-                                            " · {rollup.on_poam_findings} on POA&M · {rollup.no_poam_findings} unassigned"
-                                        }
-                                    } else if props.poam_rollups_loading {
-                                        div { style: "font-size:10px;color:var(--cf-text-muted);margin-top:3px;", "Loading POA&M roll-up…" }
+                                        "{bundle.policy_count} controls"
+                                        if revisions.len() > 1 { " · {revisions.len()} versions" }
                                     }
                                 }
                                 td { span { class: "chip chip-info", "{framework}" } }
                                  td { div { class: "mono", style: "font-size:12px;", "{version}" } div { style: "margin-top:3px;", span { class: "chip", style: "font-size:9px;padding:1px 6px;", "{publication_state}" } } }
                                 td { span { class: "mono", style: "font-size:13px;font-weight:600;color:{score_color};", "{score_label}" } div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;", "{system_count_label}" } }
                                 td { style: "text-align:right;", div { class: "row-actions", style: "opacity:1;justify-content:flex-end;",
-                                    if !id.is_nil() {
-                                        Link {
-                                            class: "btn-icon focus-ring",
-                                            title: "Open bundle POA&M register",
-                                            aria_label: "Open bundle POA&M register",
-                                            to: Route::PoamsView { query: format!("dim=bundle&bundle={id}") },
-                                            onclick: move |event: MouseEvent| { event.stop_propagation(); },
-                                            Icon { name: IconName::Gear, size: 13 }
-                                        }
-                                    }
                                     button { class: "btn-icon focus-ring", title: "View bundle", onclick: move |event| { event.stop_propagation(); props.on_select.call(id); }, Icon { name: IconName::ArrowRight, size: 14 } }
                                 } }
                             }
@@ -243,6 +218,10 @@ fn env_count_suffix(n: i64) -> &'static str {
 pub struct BundleHeaderProps {
     pub bundle: ComplianceBundleSummary,
     pub on_edit: EventHandler<()>,
+    /// Displays the exact revision selected in the drawer rather than the
+    /// bundle lineage's current published or draft version.
+    #[props(default)]
+    pub selected_version: Option<String>,
     /// When false the Edit button is hidden — non-admin users get a read-only view.
     #[props(default = false)]
     pub is_admin: bool,
@@ -255,13 +234,15 @@ pub fn BundleHeader(props: BundleHeaderProps) -> Element {
     let last_review = props
         .bundle
         .last_review
-        .map(|dt| dt.format("%Y-%m-%d").to_string())
-        .unwrap_or_else(|| "never".to_string());
+        .map(|dt| dt.format("%Y-%m-%d").to_string());
     let description = props.bundle.description.clone().unwrap_or_default();
     let owner = props.bundle.owner.clone();
     let name = props.bundle.name.clone();
     let framework = props.bundle.framework.clone();
-    let version = props.bundle.version.clone();
+    let version = props
+        .selected_version
+        .clone()
+        .unwrap_or_else(|| props.bundle.version.clone());
     let layer = props.bundle.layer.clone();
 
     rsx! {
@@ -277,11 +258,16 @@ pub fn BundleHeader(props: BundleHeaderProps) -> Element {
                         span { class: "chip chip-info", "{framework}" }
                         span { class: "chip chip-unknown", "{version}" }
                         span { class: "chip chip-unknown", "{layer}" }
-                        span {
-                            style: "font-size:11px;color:var(--cf-text-muted);",
-                            "Owned by "
-                            span { class: "mono", "{owner}" }
-                            " · Last reviewed {last_review}"
+                        if !owner.trim().is_empty() {
+                            span { style: "font-size:11px;color:var(--cf-text-muted);",
+                                "Owned by " span { class: "mono", "{owner}" }
+                            }
+                        }
+                        if let Some(reviewed) = last_review {
+                            span { style: "font-size:11px;color:var(--cf-text-muted);",
+                                if !owner.trim().is_empty() { "· " }
+                                "Last reviewed {reviewed}"
+                            }
                         }
                     }
                 }
@@ -331,7 +317,9 @@ pub struct ScoreStripProps {
 #[component]
 pub fn ScoreStrip(props: ScoreStripProps) -> Element {
     let score = props.totals.overall_score;
-    let score_color = if score >= 90 {
+    let score_color = if props.totals.evaluated_controls == 0 {
+        "var(--cf-text-muted)"
+    } else if score >= 90 {
         "#34d399"
     } else if score >= 70 {
         "#fbbf24"
@@ -343,7 +331,9 @@ pub fn ScoreStrip(props: ScoreStripProps) -> Element {
         div { class: "stat-strip stat-strip-flush",
             div { class: "stat",
                 div { class: "stat-label", "Overall score" }
-                div { class: "stat-value", style: "color:{score_color};", "{score}%" }
+                div { class: "stat-value", style: "color:{score_color};",
+                    if props.totals.evaluated_controls == 0 { "—" } else { "{score}%" }
+                }
             }
             ScoreStat { label: "Pass",          value: props.totals.pass,          color: "#34d399" }
             ScoreStat { label: "Warn",          value: props.totals.warn,          color: "#fbbf24" }
@@ -425,7 +415,7 @@ pub fn SystemsMatrix(props: SystemsMatrixProps) -> Element {
                 span { class: "filter-count", "{visible.len()} hosts" }
             }
             // Info callout
-            div {
+            if !props.systems.is_empty() { div {
                 class: "sd-callout sd-callout-info",
                 style: "margin:12px 16px 0;",
                 Icon { name: IconName::Shield, size: 13 }
@@ -435,6 +425,9 @@ pub fn SystemsMatrix(props: SystemsMatrixProps) -> Element {
                     strong { "per-control evidence" }
                     " — the proof Crystal Forge collected that each control is satisfied."
                 }
+            } }
+            if props.systems.is_empty() {
+                p { class: "poam-muted", style: "padding:10px 16px;margin:0;", "No systems are assigned to this bundle revision." }
             }
             if viewing_non_current_revision && pinned_system_count > 0 {
                 div { class: "sd-callout sd-callout-warn", style: "margin:10px 16px 0;",

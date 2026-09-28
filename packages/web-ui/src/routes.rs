@@ -128,6 +128,10 @@ pub enum Route {
 }
 
 impl Route {
+    /// Returns the navigation breadcrumb for this route.
+    ///
+    /// The bundle catalog retains its Compliance page heading, while the
+    /// breadcrumb identifies its specific Bundles destination.
     pub fn title(&self) -> String {
         match self {
             Route::DashboardView { .. } => "Dashboard".to_string(),
@@ -146,7 +150,7 @@ impl Route {
             Route::ScanningView { .. } => "Scanning".to_string(),
             Route::PoliciesView { .. } => "Deployment Policies".to_string(),
             Route::PoamsView { .. } => "POA&M".to_string(),
-            Route::ComplianceView { .. } => "Compliance".to_string(),
+            Route::ComplianceView { .. } => "Bundles".to_string(),
             Route::AdminView { .. } => "Server Management".to_string(),
             Route::ProfileView { .. } => "Profile & Preferences".to_string(),
             Route::StyleGuideView { .. } => "Component Showcase".to_string(),

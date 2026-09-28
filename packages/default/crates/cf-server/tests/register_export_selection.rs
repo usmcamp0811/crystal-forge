@@ -1,7 +1,9 @@
 use crystal_forge::models::poam::PoamListQuery;
 use crystal_forge::queries::acceptance_register::{AcceptanceListQuery, AcceptanceSource};
 use crystal_forge::services::poam::{PoamActor, SystemClock};
-use crystal_forge::services::register_export_selection::{self, RegisterExportSelectionError};
+use crystal_forge::services::register_export_selection::{
+    self, RegisterExportSelectionError, RegisterRecordType,
+};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -63,6 +65,8 @@ async fn pages_whole_filtered_scope_and_rechecks_reader(pool: PgPool) {
         .bind(cve).bind(visible).bind(actor.user_id).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO cve_environment_dispositions(canonical_cve_id,canonical_package_name,environment_id,state,justification,accepted_by,accepted_at) VALUES($1,'hidden',$2,'accepted','review',$3,now())")
         .bind(cve).bind(hidden).bind(actor.user_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO cve_environment_dispositions(canonical_cve_id,canonical_package_name,environment_id,state,justification,accepted_by,accepted_at,retired_at,retired_by,retirement_reason) VALUES($1,'retired',$2,'accepted','review',$3,now(),now(),$3,'superseded')")
+        .bind(cve).bind(visible).bind(actor.user_id).execute(&pool).await.unwrap();
 
     let query = AcceptanceListQuery {
         source: Some(AcceptanceSource::CveEnvironment),
@@ -71,12 +75,13 @@ async fn pages_whole_filtered_scope_and_rechecks_reader(pool: PgPool) {
         offset: Some(101),
         ..Default::default()
     };
-    let result = register_export_selection::select(
+    let result = register_export_selection::select_scoped(
         &pool,
         &actor,
         &PoamListQuery::default(),
         &query,
         &SystemClock,
+        RegisterRecordType::Acceptances,
     )
     .await
     .unwrap();
@@ -84,8 +89,8 @@ async fn pages_whole_filtered_scope_and_rechecks_reader(pool: PgPool) {
     assert!(!result.is_admin);
     assert_eq!(result.environment_ids, vec![visible]);
     assert!(result.poams.is_empty());
-    assert_eq!(result.acceptances.len(), 102);
-    assert_eq!(result.acceptance_context.len(), 102);
+    assert_eq!(result.acceptances.len(), 103);
+    assert_eq!(result.acceptance_context.len(), 103);
     assert!(
         result
             .acceptance_context
@@ -95,6 +100,33 @@ async fn pages_whole_filtered_scope_and_rechecks_reader(pool: PgPool) {
     assert!(result.acceptances.iter().all(|entry| {
         entry.source == AcceptanceSource::CveEnvironment && entry.environment_id == Some(visible)
     }));
+    let current = register_export_selection::select_scoped(
+        &pool,
+        &actor,
+        &PoamListQuery::default(),
+        &AcceptanceListQuery {
+            status: Some("accepted_current".into()),
+            ..Default::default()
+        },
+        &SystemClock,
+        RegisterRecordType::Acceptances,
+    )
+    .await
+    .unwrap();
+    assert!(current.poams.is_empty() && current.poam_context.is_empty());
+    assert_eq!(current.acceptances.len(), 102);
+    assert!(
+        current
+            .acceptances
+            .iter()
+            .all(|row| row.environment_id == Some(visible))
+    );
+    assert!(
+        current
+            .acceptances
+            .iter()
+            .all(|row| row.retired_at.is_none())
+    );
 
     sqlx::query("UPDATE users SET is_active=false WHERE id=$1")
         .bind(actor.user_id)
@@ -172,11 +204,14 @@ async fn policy_export_context_uses_actual_waiver_finding(pool: PgPool) {
         "INSERT INTO finding_waivers(finding_id,justification,policy_version_id,observation_token,observation_snapshot,created_by) VALUES($1,'policy justification',$2,'observed','{}',$3) RETURNING id",
     ).bind(finding).bind(Uuid::new_v4()).bind(actor.user_id)
         .fetch_one(&pool).await.unwrap();
+    sqlx::query("UPDATE finding_waivers SET status='accepted',accepted_by=$1,accepted_at=now()-interval '30 days',expires_at=now()-interval '1 day' WHERE id=$2")
+        .bind(actor.user_id).bind(waiver).execute(&pool).await.unwrap();
     let result = register_export_selection::select_acceptances(
         &pool,
         &actor,
         &AcceptanceListQuery {
             source: Some(AcceptanceSource::PolicyWaiver),
+            status: Some("accepted_current".into()),
             ..Default::default()
         },
     )
@@ -184,6 +219,7 @@ async fn policy_export_context_uses_actual_waiver_finding(pool: PgPool) {
     .unwrap();
     assert_eq!(result.acceptances.len(), 1);
     assert_eq!(result.acceptances[0].source_id, waiver);
+    assert!(result.acceptances[0].expires_at.unwrap() < chrono::Utc::now());
     assert_eq!(result.acceptance_context[0].finding_id, Some(finding));
     assert!(
         result.acceptance_context[0]
@@ -219,6 +255,29 @@ async fn exceeds_combined_cap_without_partial_selection(pool: PgPool) {
     .await;
     assert!(matches!(
         result,
+        Err(RegisterExportSelectionError::TooManyRows)
+    ));
+    let plans = register_export_selection::select_scoped(
+        &pool,
+        &actor,
+        &PoamListQuery::default(),
+        &AcceptanceListQuery::default(),
+        &SystemClock,
+        RegisterRecordType::Plans,
+    )
+    .await
+    .unwrap();
+    assert!(plans.poams.is_empty() && plans.acceptances.is_empty());
+    assert!(matches!(
+        register_export_selection::select_scoped(
+            &pool,
+            &actor,
+            &PoamListQuery::default(),
+            &AcceptanceListQuery::default(),
+            &SystemClock,
+            RegisterRecordType::Acceptances,
+        )
+        .await,
         Err(RegisterExportSelectionError::TooManyRows)
     ));
 }
@@ -285,6 +344,19 @@ async fn plan_context_retains_all_linked_systems_in_one_snapshot(pool: PgPool) {
         .unwrap();
     assert_eq!(plan_context.system_ids.len(), 2);
     assert!(plan_context.cve_ids.is_empty());
+    let plans = register_export_selection::select_scoped(
+        &pool,
+        &actor,
+        &PoamListQuery::default(),
+        &AcceptanceListQuery::default(),
+        &SystemClock,
+        RegisterRecordType::Plans,
+    )
+    .await
+    .unwrap();
+    assert_eq!(plans.poams.len(), 1);
+    assert_eq!(plans.poam_context.len(), 1);
+    assert!(plans.acceptances.is_empty() && plans.acceptance_context.is_empty());
     sqlx::query("UPDATE user_role_assignments SET role='viewer' WHERE user_id=$1")
         .bind(actor.user_id)
         .execute(&pool)

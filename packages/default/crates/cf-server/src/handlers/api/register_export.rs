@@ -18,7 +18,7 @@ use crate::{
     queries::acceptance_register::{AcceptanceListQuery, AcceptanceSource},
     services::{
         poam::SystemClock,
-        register_export_selection::{self, RegisterExportSelectionError},
+        register_export_selection::{self, RegisterExportSelectionError, RegisterRecordType},
         register_mixed_tabular, register_oscal_snapshot,
     },
 };
@@ -29,6 +29,9 @@ use crate::{
 pub struct RegisterExportQuery {
     /// Chooses `csv`, `xlsx`, `oscal-json`, or `oscal-xml`.
     pub format: String,
+    /// Selects both source families by default, or only plans or acceptances.
+    #[serde(default)]
+    pub record_type: RegisterRecordType,
     /// Restricts POA&M lifecycle state.
     pub poam_status: Option<String>,
     /// Restricts POA&M risk.
@@ -87,11 +90,32 @@ pub async fn export(
             "Unsupported export format",
         );
     }
+    if (query.record_type == RegisterRecordType::Plans
+        && (query.acceptance_source.is_some()
+            || query.acceptance_status.is_some()
+            || query.acceptance_environment_id.is_some()))
+        || (query.record_type == RegisterRecordType::Acceptances
+            && (query.poam_status.is_some()
+                || query.poam_risk.is_some()
+                || query.poam_owner.is_some()
+                || query.poam_system_id.is_some()
+                || query.poam_policy_lineage_id.is_some()
+                || query.poam_bundle_id.is_some()
+                || query.poam_requirement.is_some()
+                || query.poam_overdue.is_some()
+                || query.poam_q.is_some()))
+    {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "invalid_query",
+            "Filter targets an excluded record type",
+        );
+    }
     let actor = match poam::actor(&pool, user, &headers).await {
         Ok(actor) => actor,
         Err(response) => return response,
     };
-    let selection = register_export_selection::select(
+    let selection = register_export_selection::select_scoped(
         &pool,
         &actor,
         &PoamListQuery {
@@ -113,6 +137,7 @@ pub async fn export(
             ..Default::default()
         },
         &SystemClock,
+        query.record_type,
     )
     .await;
     let selection = match selection {
