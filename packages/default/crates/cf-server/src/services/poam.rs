@@ -1328,6 +1328,21 @@ pub async fn create(
     request: CreatePoamRequest,
     clock: &dyn PoamClock,
 ) -> Result<PoamDetail, PoamError> {
+    let tx = pool.begin().await?;
+    let (tx, poam_id) = create_policy_poam_tx(tx, actor, request, clock).await?;
+    tx.commit().await?;
+    detail(pool, actor, poam_id, clock).await
+}
+
+// CONCURRENCY: The caller can retain the finding lock and keep POA&M creation
+// inside a larger acceptance replacement transaction. An error drops the
+// uncommitted transaction and its link, milestone, and activity writes.
+async fn create_policy_poam_tx<'a>(
+    mut tx: Transaction<'a, Postgres>,
+    actor: &PoamActor,
+    request: CreatePoamRequest,
+    clock: &dyn PoamClock,
+) -> Result<(Transaction<'a, Postgres>, Uuid), PoamError> {
     require_mutator(actor)?;
     if request.assignee.is_some() && !request.owner.trim().is_empty() {
         return Err(PoamError::Validation(
@@ -1359,7 +1374,6 @@ pub async fn create(
     let mut assignment_version_ids = request.assignment_version_ids.clone();
     assignment_version_ids.sort_unstable();
     assignment_version_ids.dedup();
-    let mut tx = pool.begin().await?;
     let resolved_assignee = match request.assignee.as_ref() {
         Some(assignee) => Some(resolve_assignee_tx(&mut tx, assignee).await?),
         None => None,
@@ -1498,8 +1512,7 @@ pub async fn create(
                 "title":title,"target_date":target_date,"initial":true}),actor.request_origin.as_deref()).await?;
         }
     }
-    tx.commit().await?;
-    detail(pool, actor, poam_id, clock).await
+    Ok((tx, poam_id))
 }
 
 /// Creates a POA&M from one current unwhitelisted and unjustified CVE occurrence.
@@ -1673,6 +1686,23 @@ pub async fn list(
     query: &PoamListQuery,
     clock: &dyn PoamClock,
 ) -> Result<Page<PoamSummary>, PoamError> {
+    let mut tx = pool.begin().await?;
+    let page = list_tx(&mut tx, actor, query, clock).await?;
+    tx.commit().await?;
+    Ok(page)
+}
+
+/// Lists visible POA&Ms using only the caller's transaction snapshot.
+///
+/// # Errors
+///
+/// Returns the same validation and database errors as [`list`].
+pub async fn list_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: &PoamActor,
+    query: &PoamListQuery,
+    clock: &dyn PoamClock,
+) -> Result<Page<PoamSummary>, PoamError> {
     let mut query = query.clone();
     normalized_search(&mut query.owner);
     normalized_search(&mut query.requirement);
@@ -1687,7 +1717,7 @@ pub async fn list(
     if query.status.as_deref().is_some_and(|status| {
         !matches!(
             status,
-            "open" | "in_progress" | "blocked" | "awaiting_verification" | "completed"
+            "open" | "in_progress" | "blocked" | "awaiting_verification" | "completed" | "active"
         )
     }) {
         return Err(PoamError::Validation(
@@ -1707,8 +1737,8 @@ pub async fn list(
     }
     if query.policy_lineage_id.is_none() && query.bundle_id.is_none() && query.requirement.is_none()
     {
-        return Ok(poam::list(
-            pool,
+        return Ok(poam::list_tx(
+            tx,
             &query,
             clock.today(),
             actor.is_admin,
@@ -1720,7 +1750,7 @@ pub async fn list(
     let needed = offset.saturating_add(limit).saturating_add(1) as usize;
     let requirement_ids = if let Some(requirement) = query.requirement.as_deref() {
         let ids=sqlx::query_scalar::<_,Uuid>("SELECT id FROM compliance_requirement_versions WHERE external_id ILIKE $1 OR title ILIKE $1 LIMIT $2")
-          .bind(format!("%{}%",requirement.trim())).bind(MAX_RESOLVER_FINDINGS as i64 + 1).fetch_all(pool).await?;
+          .bind(format!("%{}%",requirement.trim())).bind(MAX_RESOLVER_FINDINGS as i64 + 1).fetch_all(&mut **tx).await?;
         if ids.len() > MAX_RESOLVER_FINDINGS {
             return Err(PoamError::Validation(
                 "candidate_scan_limit",
@@ -1739,8 +1769,8 @@ pub async fn list(
     let mut matches = Vec::new();
     let mut scanned = 0i64;
     loop {
-        let candidates = poam::list(
-            pool,
+        let candidates = poam::list_tx(
+            tx,
             &candidate_query,
             clock.today(),
             actor.is_admin,
@@ -1752,7 +1782,7 @@ pub async fn list(
         }
         scanned += candidates.items.len() as i64;
         let matching_ids =
-            canonical_context_match_ids(pool, &query, &candidates.items, &requirement_ids, clock)
+            canonical_context_match_ids_tx(tx, &query, &candidates.items, &requirement_ids, clock)
                 .await?;
         matches.extend(
             candidates
@@ -1803,8 +1833,27 @@ pub async fn list_register(
     Ok(poam::register_page(pool, page, actor.is_admin, &actor.environment_ids).await?)
 }
 
-async fn canonical_context_match_ids(
-    pool: &PgPool,
+/// Loads a bounded register page entirely within the caller's transaction.
+///
+/// Callers needing a stable export snapshot must begin a REPEATABLE READ
+/// transaction before the first page. The existing candidate scan limit still
+/// applies separately to each page; this method does not expand it.
+///
+/// # Errors
+///
+/// Returns the same validation and database errors as [`list_register`].
+pub async fn list_register_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: &PoamActor,
+    query: &PoamListQuery,
+    clock: &dyn PoamClock,
+) -> Result<Page<PoamRegisterSummary>, PoamError> {
+    let page = list_tx(tx, actor, query, clock).await?;
+    Ok(poam::register_page_tx(tx, page, actor.is_admin, &actor.environment_ids).await?)
+}
+
+async fn canonical_context_match_ids_tx(
+    tx: &mut Transaction<'_, Postgres>,
     query: &PoamListQuery,
     candidates: &[PoamSummary],
     requirement_ids: &[Uuid],
@@ -1818,7 +1867,7 @@ async fn canonical_context_match_ids(
       WHERE link.poam_id=ANY($1) AND poam.status<>'completed'"#,
     )
     .bind(&poam_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await?;
     let tuples = active
         .iter()
@@ -1827,10 +1876,7 @@ async fn canonical_context_match_ids(
     let active_items = if tuples.is_empty() {
         Vec::new()
     } else {
-        let mut tx = pool.begin().await?;
-        let items = current_verification_items_tx(&mut tx, &tuples, clock.now()).await?;
-        tx.commit().await?;
-        items
+        current_verification_items_tx(tx, &tuples, clock.now()).await?
     };
     let completed = sqlx::query_as::<_, (Uuid, Uuid, Vec<Uuid>, Vec<Uuid>)>(
         r#"SELECT poam.id,item.policy_lineage_id,
@@ -1838,13 +1884,13 @@ async fn canonical_context_match_ids(
       ON item.attempt_id=poam.closure_attempt_id WHERE poam.id=ANY($1)"#,
     )
     .bind(&poam_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await?;
     let assignment_bundle_poams = if let Some(bundle_id) = query.bundle_id {
         sqlx::query_scalar::<_,Uuid>(r#"SELECT DISTINCT reference.poam_id FROM poam_assignment_references reference
           JOIN compliance_bundle_assignment_versions version ON version.id=reference.assignment_version_id
           JOIN compliance_bundle_versions bundle_version ON bundle_version.id=version.bundle_version_id
-          WHERE reference.poam_id=ANY($1) AND bundle_version.bundle_id=$2"#).bind(&poam_ids).bind(bundle_id).fetch_all(pool).await?
+          WHERE reference.poam_id=ANY($1) AND bundle_version.bundle_id=$2"#).bind(&poam_ids).bind(bundle_id).fetch_all(&mut **tx).await?
     } else {
         Vec::new()
     };
@@ -4965,6 +5011,7 @@ enum CveTriageMutationScope {
 enum CveTriageMutationResult {
     Fleet(FleetCveTriageResponse),
     System(SystemCveTriageResponse),
+    Conversion(CveAcceptanceConversion),
 }
 
 /// Applies environment-scoped exact-CVE triage in one transaction.
@@ -4994,6 +5041,7 @@ pub async fn triage_fleet_cve(
             request.clone(),
             CveTriageMutationScope::Fleet,
             clock,
+            None,
         )
         .await
         {
@@ -5005,6 +5053,9 @@ pub async fn triage_fleet_cve(
                 return Err(PoamError::Database(anyhow::anyhow!(
                     "fleet CVE triage returned system detail"
                 )));
+            }
+            Ok(CveTriageMutationResult::Conversion(_)) => {
+                unreachable!("ordinary fleet triage cannot convert")
             }
             Err(error) => return Err(error),
         }
@@ -5040,6 +5091,7 @@ pub async fn triage_system_cve(
                 cve_id,
                 request.clone(),
                 clock,
+                None,
             )
             .await
             {
@@ -5048,7 +5100,7 @@ pub async fn triage_system_cve(
                 {
                     continue;
                 }
-                result => return result,
+                result => return result.map(|(response, _)| response),
             }
         }
         unreachable!();
@@ -5094,6 +5146,7 @@ pub async fn triage_system_cve(
                 environment_id,
             },
             clock,
+            None,
         )
         .await
         {
@@ -5105,6 +5158,9 @@ pub async fn triage_system_cve(
                 return Err(PoamError::Database(anyhow::anyhow!(
                     "system CVE triage returned fleet detail"
                 )));
+            }
+            Ok(CveTriageMutationResult::Conversion(_)) => {
+                unreachable!("ordinary system triage cannot convert")
             }
             Err(error) => return Err(error),
         }
@@ -5119,7 +5175,8 @@ async fn triage_system_host_cve_once(
     cve_id: &str,
     request: SystemCveTriageRequest,
     clock: &dyn PoamClock,
-) -> Result<SystemCveTriageResponse, PoamError> {
+    conversion: Option<CveAcceptanceSource>,
+) -> Result<(SystemCveTriageResponse, Option<CveAcceptanceConversion>), PoamError> {
     require_mutator(actor)?;
     let cve_id = cve_id.trim().to_ascii_uppercase();
     let package_name = request.canonical_package_name.trim().to_owned();
@@ -5236,6 +5293,11 @@ async fn triage_system_host_cve_once(
             "cve_evidence_changed",
             "The selected system's exact occurrence changed; refresh and retry".into(),
         ));
+    }
+
+    if let Some(source) = conversion {
+        conversion_source_guard_tx(&mut tx, source, selected_system_id, &cve_id, &package_name)
+            .await?;
     }
 
     let current_host: Option<(String, Option<Uuid>)> = sqlx::query_as(
@@ -5402,13 +5464,13 @@ async fn triage_system_host_cve_once(
     .bind(&package_name)
     .bind(now)
     .bind(actor.user_id)
-    .bind(
-        if matches!(request.action, SystemCveTriageAction::LeaveOpen) {
-            "host_triage_open"
-        } else {
-            "host_triage_changed"
-        },
-    )
+    .bind(if conversion.is_some() {
+        "converted_to_poam"
+    } else if matches!(request.action, SystemCveTriageAction::LeaveOpen) {
+        "host_triage_open"
+    } else {
+        "host_triage_changed"
+    })
     .execute(&mut *tx)
     .await?;
     if matches!(request.action, SystemCveTriageAction::LeaveOpen) {
@@ -5532,6 +5594,30 @@ async fn triage_system_host_cve_once(
     .execute(&mut *tx)
     .await?;
 
+    let conversion_result = if let Some(source) = conversion {
+        Some(
+            conversion_event_tx(
+                &mut tx,
+                &actor,
+                source,
+                selected_system_id,
+                &cve_id,
+                &package_name,
+                poam_id.ok_or_else(|| {
+                    PoamError::Database(anyhow::anyhow!("conversion lacks a POA&M"))
+                })?,
+                poam_reused,
+                now,
+                request.poam.as_ref().ok_or_else(|| {
+                    PoamError::Database(anyhow::anyhow!("conversion metadata missing"))
+                })?,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
     let mut environment_dispositions =
         fleet_cve_dispositions_tx(&mut tx, &cve_id, &package_name, &[environment_id]).await?;
     retain_coherent_scheduled_dispositions_tx(
@@ -5554,10 +5640,653 @@ async fn triage_system_host_cve_once(
     )?;
     tx.commit().await?;
     schedule_scheduled_environment_cve_reconciliation_for_system(pool, selected_system_id);
-    Ok(SystemCveTriageResponse {
-        detail,
+    Ok((
+        SystemCveTriageResponse {
+            detail,
+            poam_id,
+            poam_reused,
+        },
+        conversion_result,
+    ))
+}
+
+/// Selects the immutable accepted-risk decision family and source row UUID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CveAcceptanceSource {
+    /// Identifies a host override decision.
+    Host(Uuid),
+    /// Identifies an environment default decision.
+    Environment(Uuid),
+}
+
+impl CveAcceptanceSource {
+    fn id(self) -> Uuid {
+        match self {
+            Self::Host(id) | Self::Environment(id) => id,
+        }
+    }
+}
+
+/// Identifies the accepted successor and its new server-owned review deadline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CveAcceptanceRenewal {
+    /// Identifies the original immutable decision.
+    pub predecessor_id: Uuid,
+    /// Identifies the accepted successor, including on an idempotent retry.
+    pub successor_id: Uuid,
+    /// Is the successor's review deadline, 90 calendar days after review.
+    pub review_date: NaiveDate,
+}
+
+/// Identifies the remediation that replaced one immutable CVE acceptance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CveAcceptanceConversion {
+    /// Identifies the retired accepted decision.
+    pub predecessor_id: Uuid,
+    /// Identifies the scheduled decision created by conversion; a later
+    /// disposition can retire that decision without changing this result.
+    pub successor_id: Uuid,
+    /// Identifies the created or explicitly compatible reused remediation.
+    pub poam_id: Uuid,
+    /// Reports whether the original conversion reused an existing plan.
+    pub poam_reused: bool,
+}
+
+fn cve_source_conflict() -> PoamError {
+    PoamError::Conflict(
+        "cve_source_changed",
+        "The CVE acceptance version changed; refresh and retry".into(),
+    )
+}
+
+// CONCURRENCY: Call only after the canonical CVE and scope locks and after
+// reloading the actor. This guard and the disposition replacement share a tx.
+async fn conversion_source_guard_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    source: CveAcceptanceSource,
+    scope_id: Uuid,
+    cve_id: &str,
+    package_name: &str,
+) -> Result<(), PoamError> {
+    let row = renewal_source_tx(tx, source).await?;
+    if row.scope_id != scope_id
+        || row.canonical_cve_id != cve_id
+        || row.canonical_package_name != package_name
+        || row.state != "accepted"
+        || row.retired_at.is_some()
+    {
+        return Err(cve_source_conflict());
+    }
+    let (table, column) = match source {
+        CveAcceptanceSource::Host(_) => ("cve_system_dispositions", "system_id"),
+        CveAcceptanceSource::Environment(_) => ("cve_environment_dispositions", "environment_id"),
+    };
+    let active: Option<Uuid> = sqlx::query_scalar(&format!(
+        "SELECT id FROM {table} WHERE {column}=$1 AND canonical_cve_id=$2 AND canonical_package_name=$3 AND retired_at IS NULL FOR UPDATE"
+    ))
+    .bind(scope_id).bind(cve_id).bind(package_name)
+    .fetch_optional(&mut **tx).await?;
+    if active != Some(source.id()) {
+        return Err(cve_source_conflict());
+    }
+    Ok(())
+}
+
+async fn conversion_event_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: &PoamActor,
+    source: CveAcceptanceSource,
+    scope_id: Uuid,
+    cve_id: &str,
+    package_name: &str,
+    poam_id: Uuid,
+    poam_reused: bool,
+    now: DateTime<Utc>,
+    request: &FleetCvePoamRequest,
+) -> Result<CveAcceptanceConversion, PoamError> {
+    let (table, column, scope_name) = match source {
+        CveAcceptanceSource::Host(_) => ("cve_system_dispositions", "system_id", "host"),
+        CveAcceptanceSource::Environment(_) => (
+            "cve_environment_dispositions",
+            "environment_id",
+            "environment",
+        ),
+    };
+    let successor_id: Uuid = sqlx::query_scalar(&format!(
+        "SELECT id FROM {table} WHERE {column}=$1 AND canonical_cve_id=$2 AND canonical_package_name=$3 AND retired_at IS NULL AND state='scheduled' AND poam_id=$4"
+    ))
+    .bind(scope_id).bind(cve_id).bind(package_name).bind(poam_id)
+    .fetch_one(&mut **tx).await?;
+    let request_digest = semantic_digest(
+        &serde_json::to_value(request)
+            .map_err(|error| PoamError::Database(anyhow::Error::new(error)))?,
+    );
+    sqlx::query("INSERT INTO admin_audit_events(actor_user_id,actor_identifier,action,target,request_origin,metadata,created_at) VALUES($1,$2,'cve_acceptance_converted',$3,$4,$5,$6)")
+        .bind(actor.user_id).bind(&actor.identifier)
+        .bind(format!("cve:{cve_id}:{package_name}"))
+        .bind(actor.request_origin.as_deref())
+        .bind(json!({"source_type":scope_name,"scope_id":scope_id,
+            "predecessor_id":source.id(),"successor_id":successor_id,
+            "poam_id":poam_id,"poam_reused":poam_reused,"request_digest":request_digest,
+            "canonical_cve_id":cve_id,"canonical_package_name":package_name}))
+        .bind(now).execute(&mut **tx).await?;
+    Ok(CveAcceptanceConversion {
+        predecessor_id: source.id(),
+        successor_id,
         poam_id,
         poam_reused,
+    })
+}
+
+/// Converts one accepted CVE source revision to scheduled remediation.
+///
+/// The host path preserves the environment default and peer overrides. The
+/// environment path derives every exact Current subject without a host override.
+/// A retry of the identical source and metadata returns its committed plan and
+/// scheduled decision even after later plan edits or disposition changes. A
+/// different request is a source-version conflict and never creates a plan.
+/// No verification result or technical finding status is changed.
+///
+/// # Errors
+///
+/// Returns forbidden or not-found for an inaccessible source, a conflict for a
+/// stale revision, changed evidence, or incompatible plan, and a database error
+/// when the atomic mutation cannot commit.
+pub async fn convert_cve_acceptance(
+    pool: &PgPool,
+    actor: &PoamActor,
+    source: CveAcceptanceSource,
+    expected_source_id: Uuid,
+    poam: FleetCvePoamRequest,
+    clock: &dyn PoamClock,
+) -> Result<CveAcceptanceConversion, PoamError> {
+    require_mutator(actor)?;
+    if source.id() != expected_source_id {
+        return Err(cve_source_conflict());
+    }
+    for retry in 0..3 {
+        match convert_cve_acceptance_once(pool, actor, source, poam.clone(), clock).await {
+            Err(PoamError::Database(error)) if retry < 2 && is_serialization_failure(&error) => {}
+            // A peer can commit after our preflight but before the triage
+            // source guard. Reenter under the CVE lock to read its replacement.
+            Err(PoamError::Conflict("cve_source_changed", _)) if retry < 2 => {}
+            result => return result,
+        }
+    }
+    unreachable!()
+}
+
+async fn convert_cve_acceptance_once(
+    pool: &PgPool,
+    actor: &PoamActor,
+    source: CveAcceptanceSource,
+    poam: FleetCvePoamRequest,
+    clock: &dyn PoamClock,
+) -> Result<CveAcceptanceConversion, PoamError> {
+    // A separate preflight reads only immutable source identity. Both paths
+    // reload permissions and the decision after acquiring the triage locks.
+    let mut tx = pool.begin().await?;
+    let initial = renewal_source_tx(&mut tx, source).await?;
+    sqlx::query("SELECT lock_poam_cve_key($1)")
+        .bind(&initial.canonical_cve_id)
+        .execute(&mut *tx)
+        .await?;
+    let current = renewal_source_tx(&mut tx, source).await?;
+    if current.scope_id != initial.scope_id
+        || current.canonical_cve_id != initial.canonical_cve_id
+        || current.canonical_package_name != initial.canonical_package_name
+    {
+        return Err(cve_source_conflict());
+    }
+    let actor = current_mutating_actor_tx(&mut tx, actor).await?;
+    let environment_id = match source {
+        CveAcceptanceSource::Host(_) => sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT environment_id FROM systems WHERE id=$1 AND is_active",
+        )
+        .bind(current.scope_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .flatten()
+        .ok_or(PoamError::NotFound)?,
+        CveAcceptanceSource::Environment(_) => current.scope_id,
+    };
+    if !actor.is_admin && !actor.environment_ids.contains(&environment_id) {
+        return Err(PoamError::NotFound);
+    }
+    if current.retired_at.is_some() {
+        if current.retirement_reason.as_deref() != Some("converted_to_poam") {
+            return Err(cve_source_conflict());
+        }
+        let (table, column, scope_name) = match source {
+            CveAcceptanceSource::Host(_) => ("cve_system_dispositions", "system_id", "host"),
+            CveAcceptanceSource::Environment(_) => (
+                "cve_environment_dispositions",
+                "environment_id",
+                "environment",
+            ),
+        };
+        let event: Option<(Uuid, Uuid, bool, String)> = sqlx::query_as(&format!(
+            "SELECT scheduled.id,scheduled.poam_id,(audit.metadata->>'poam_reused')::boolean,audit.metadata->>'request_digest' FROM admin_audit_events audit JOIN {table} scheduled ON scheduled.id=(audit.metadata->>'successor_id')::uuid AND scheduled.{column}=$3 AND scheduled.canonical_cve_id=$4 AND scheduled.canonical_package_name=$5 AND scheduled.state='scheduled' AND scheduled.poam_id=(audit.metadata->>'poam_id')::uuid WHERE audit.action='cve_acceptance_converted' AND audit.metadata->>'source_type'=$1 AND audit.metadata->>'predecessor_id'=$2 ORDER BY audit.created_at DESC LIMIT 1"
+        ))
+        .bind(scope_name).bind(source.id().to_string())
+        .bind(current.scope_id).bind(&current.canonical_cve_id)
+        .bind(&current.canonical_package_name).fetch_optional(&mut *tx).await?;
+        let Some((successor_id, poam_id, poam_reused, request_digest)) = event else {
+            return Err(cve_source_conflict());
+        };
+        // CONCURRENCY: A retry reads the immutable committed command, not the
+        // mutable POA&M fields or current disposition state. Later plan edits
+        // and remediation progress must not create a second plan or obscure the
+        // result of a committed conversion.
+        let submitted_digest = semantic_digest(
+            &serde_json::to_value(&poam)
+                .map_err(|error| PoamError::Database(anyhow::Error::new(error)))?,
+        );
+        if request_digest != submitted_digest {
+            return Err(cve_source_conflict());
+        }
+        tx.commit().await?;
+        return Ok(CveAcceptanceConversion {
+            predecessor_id: source.id(),
+            successor_id,
+            poam_id,
+            poam_reused,
+        });
+    }
+    if current.state != "accepted" {
+        return Err(cve_source_conflict());
+    }
+    let selected_system_id = match source {
+        CveAcceptanceSource::Host(_) => current.scope_id,
+        CveAcceptanceSource::Environment(_) => {
+            let subjects = fleet_cve_subjects_tx(
+                &mut tx,
+                &actor,
+                &current.canonical_cve_id,
+                &current.canonical_package_name,
+                Some(&[environment_id]),
+            )
+            .await?;
+            subjects
+                .first()
+                .ok_or_else(|| {
+                    PoamError::Conflict(
+                        "cve_evidence_changed",
+                        "No current exact CVE subjects remain for this scope".into(),
+                    )
+                })?
+                .system_id
+        }
+    };
+    tx.commit().await?;
+    match source {
+        CveAcceptanceSource::Host(_) => {
+            let request = SystemCveTriageRequest {
+                canonical_package_name: current.canonical_package_name,
+                scope: SystemCveTriageScopeChoice::Host,
+                action: SystemCveTriageAction::SchedulePatch,
+                poam: Some(poam),
+            };
+            triage_system_host_cve_once(
+                pool,
+                &actor,
+                selected_system_id,
+                &current.canonical_cve_id,
+                request,
+                clock,
+                Some(source),
+            )
+            .await?
+            .1
+            .ok_or_else(|| PoamError::Database(anyhow::anyhow!("conversion result missing")))
+        }
+        CveAcceptanceSource::Environment(_) => {
+            let request = FleetCveTriageRequest {
+                canonical_package_name: current.canonical_package_name,
+                actions: vec![CveEnvironmentTriageAction::SchedulePatch { environment_id }],
+                poam: Some(poam),
+            };
+            match triage_cve_once(
+                pool,
+                &actor,
+                &current.canonical_cve_id,
+                request,
+                CveTriageMutationScope::System {
+                    selected_system_id,
+                    environment_id,
+                },
+                clock,
+                Some(source),
+            )
+            .await?
+            {
+                CveTriageMutationResult::Conversion(result) => Ok(result),
+                _ => Err(PoamError::Database(anyhow::anyhow!(
+                    "conversion result missing"
+                ))),
+            }
+        }
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct RenewalSourceRow {
+    canonical_cve_id: String,
+    canonical_package_name: String,
+    scope_id: Uuid,
+    state: String,
+    justification: Option<String>,
+    review_date: Option<NaiveDate>,
+    accepted_by: Option<Uuid>,
+    accepted_at: Option<DateTime<Utc>>,
+    retired_at: Option<DateTime<Utc>>,
+    retirement_reason: Option<String>,
+}
+
+async fn renewal_source_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    source: CveAcceptanceSource,
+) -> Result<RenewalSourceRow, PoamError> {
+    let sql = match source {
+        CveAcceptanceSource::Host(_) => {
+            "SELECT canonical_cve_id,canonical_package_name,system_id AS scope_id,state,justification,review_date,accepted_by,accepted_at,retired_at,retirement_reason FROM cve_system_dispositions WHERE id=$1"
+        }
+        CveAcceptanceSource::Environment(_) => {
+            "SELECT canonical_cve_id,canonical_package_name,environment_id AS scope_id,state,justification,review_date,accepted_by,accepted_at,retired_at,retirement_reason FROM cve_environment_dispositions WHERE id=$1"
+        }
+    };
+    sqlx::query_as(sql)
+        .bind(source.id())
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or(PoamError::NotFound)
+}
+
+/// Renews one host or environment CVE acceptance by its typed source row UUID.
+///
+/// The source row is never edited except for retirement. The successor preserves
+/// its original approver, approval time, justification, and canonical scope.
+/// The same-transaction audit links both row UUIDs and the exact Current evidence.
+/// A retry returns that successor only while it remains the active decision;
+/// later triage of the same source is a stale-version conflict.
+///
+/// # Errors
+///
+/// Returns forbidden or not-found for inaccessible sources, and a conflict for
+/// a stale revision, changed exact evidence, or a source that is not accepted.
+pub async fn renew_cve_acceptance(
+    pool: &PgPool,
+    actor: &PoamActor,
+    source: CveAcceptanceSource,
+    expected_source_id: Uuid,
+    clock: &dyn PoamClock,
+) -> Result<CveAcceptanceRenewal, PoamError> {
+    require_mutator(actor)?;
+    if source.id() != expected_source_id {
+        return Err(PoamError::Conflict(
+            "cve_source_changed",
+            "The CVE acceptance version changed; refresh and retry".into(),
+        ));
+    }
+    let mut tx = pool.begin().await?;
+    let before = renewal_source_tx(&mut tx, source).await?;
+    sqlx::query("SELECT lock_poam_cve_key($1)")
+        .bind(&before.canonical_cve_id)
+        .execute(&mut *tx)
+        .await?;
+    if let CveAcceptanceSource::Environment(_) = source {
+        sqlx::query("SELECT id FROM environments WHERE id=$1 FOR UPDATE")
+            .bind(before.scope_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    let host_environment_id = if matches!(source, CveAcceptanceSource::Host(_)) {
+        Some(
+            sqlx::query_scalar::<_, Option<Uuid>>(
+                "SELECT environment_id FROM systems WHERE id=$1 AND is_active",
+            )
+            .bind(before.scope_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .flatten()
+            .ok_or(PoamError::NotFound)?,
+        )
+    } else {
+        None
+    };
+    let subject_environment_id = host_environment_id.unwrap_or(before.scope_id);
+    if !actor.is_admin && !actor.environment_ids.contains(&subject_environment_id) {
+        return Err(PoamError::NotFound);
+    }
+    let before_subjects = fleet_cve_subjects_tx(
+        &mut tx,
+        actor,
+        &before.canonical_cve_id,
+        &before.canonical_package_name,
+        Some(std::slice::from_ref(&subject_environment_id)),
+    )
+    .await?;
+    let system_ids = match source {
+        CveAcceptanceSource::Host(_) => vec![before.scope_id],
+        CveAcceptanceSource::Environment(_) => before_subjects
+            .iter()
+            .map(|subject| subject.system_id)
+            .collect::<Vec<_>>(),
+    };
+    if system_ids.is_empty() {
+        return Err(PoamError::Conflict(
+            "cve_evidence_changed",
+            "No current exact CVE subjects remain for this scope".into(),
+        ));
+    }
+    lock_fleet_cve_scope_tx(
+        &mut tx,
+        &before.canonical_cve_id,
+        &system_ids,
+        &before.canonical_package_name,
+    )
+    .await?;
+    sqlx::query("SELECT id FROM systems WHERE id=ANY($1) ORDER BY id FOR UPDATE")
+        .bind(&system_ids)
+        .execute(&mut *tx)
+        .await?;
+    let actor = current_mutating_actor_tx(&mut tx, actor).await?;
+    let current = renewal_source_tx(&mut tx, source).await?;
+    if current.scope_id != before.scope_id
+        || current.canonical_cve_id != before.canonical_cve_id
+        || current.canonical_package_name != before.canonical_package_name
+    {
+        return Err(PoamError::Conflict(
+            "cve_source_changed",
+            "The CVE acceptance version changed; refresh and retry".into(),
+        ));
+    }
+    let current_host_environment_id = if matches!(source, CveAcceptanceSource::Host(_)) {
+        sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT environment_id FROM systems WHERE id=$1 AND is_active",
+        )
+        .bind(current.scope_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .flatten()
+    } else {
+        None
+    };
+    if host_environment_id != current_host_environment_id {
+        return Err(PoamError::Conflict(
+            "cve_evidence_changed",
+            "The host's environment changed; refresh and retry".into(),
+        ));
+    }
+    if !actor.is_admin && !actor.environment_ids.contains(&subject_environment_id) {
+        return Err(PoamError::NotFound);
+    }
+    let subjects = fleet_cve_subjects_tx(
+        &mut tx,
+        &actor,
+        &current.canonical_cve_id,
+        &current.canonical_package_name,
+        Some(std::slice::from_ref(&subject_environment_id)),
+    )
+    .await?;
+    let applicable = match source {
+        CveAcceptanceSource::Host(_) => {
+            let selected = subjects
+                .iter()
+                .filter(|row| row.system_id == current.scope_id)
+                .count();
+            selected == 1
+                && before_subjects
+                    .iter()
+                    .find(|row| row.system_id == current.scope_id)
+                    == subjects
+                        .iter()
+                        .find(|row| row.system_id == current.scope_id)
+                && sqlx::query_scalar::<_, bool>("SELECT is_active FROM systems WHERE id=$1")
+                    .bind(current.scope_id)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .unwrap_or(false)
+        }
+        CveAcceptanceSource::Environment(_) => {
+            !subjects.is_empty()
+                && subjects
+                    .iter()
+                    .all(|row| row.environment_id == current.scope_id)
+                && before_subjects == subjects
+        }
+    };
+    if !applicable {
+        return Err(PoamError::Conflict(
+            "cve_evidence_changed",
+            "Current exact CVE evidence or affected scope changed; refresh and retry".into(),
+        ));
+    }
+    let (table, scope_column, scope_name) = match source {
+        CveAcceptanceSource::Host(_) => ("cve_system_dispositions", "system_id", "host"),
+        CveAcceptanceSource::Environment(_) => (
+            "cve_environment_dispositions",
+            "environment_id",
+            "environment",
+        ),
+    };
+    // CONCURRENCY: The CVE and scope locks serialize triage and retries. A
+    // successor audit is consulted only after the source and active decision
+    // are rechecked; it cannot revive a later retired successor.
+    let active_id: Option<Uuid> = sqlx::query_scalar(&format!(
+        "SELECT id FROM {table} WHERE canonical_cve_id=$1 AND canonical_package_name=$2 AND {scope_column}=$3 AND retired_at IS NULL FOR UPDATE"
+    ))
+    .bind(&current.canonical_cve_id)
+    .bind(&current.canonical_package_name)
+    .bind(current.scope_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if current.retired_at.is_some() {
+        if current.retirement_reason.as_deref() == Some("renewed") {
+            let successor: Option<(Uuid, Option<NaiveDate>)> = sqlx::query_as(&format!(
+                "SELECT successor.id,successor.review_date FROM admin_audit_events audit JOIN {table} successor ON successor.id=(audit.metadata->>'successor_id')::uuid WHERE audit.action='cve_acceptance_renewed' AND audit.metadata->>'source_type'=$1 AND audit.metadata->>'predecessor_id'=$2 ORDER BY audit.created_at DESC LIMIT 1"
+            ))
+            .bind(scope_name)
+            .bind(source.id().to_string())
+            .fetch_optional(&mut *tx)
+            .await?;
+            if let Some((successor_id, Some(review_date))) = successor
+                && active_id == Some(successor_id)
+            {
+                tx.commit().await?;
+                return Ok(CveAcceptanceRenewal {
+                    predecessor_id: source.id(),
+                    successor_id,
+                    review_date,
+                });
+            }
+        }
+        return Err(PoamError::Conflict(
+            "cve_source_changed",
+            "The CVE acceptance version changed; refresh and retry".into(),
+        ));
+    }
+    if current.state != "accepted" || active_id != Some(source.id()) {
+        return Err(PoamError::Conflict(
+            "cve_source_changed",
+            "Only the current accepted CVE decision can be renewed".into(),
+        ));
+    }
+    let now = clock.now();
+    let deadline = now.date_naive() + Duration::days(90);
+    let evidence = subjects
+        .iter()
+        .filter(|row| {
+            matches!(source, CveAcceptanceSource::Environment(_))
+                || row.system_id == current.scope_id
+        })
+        .map(|row| {
+            json!({"system_id":row.system_id,"scan_id":row.scan_id,
+            "scan_derivation_id":row.scan_derivation_id,
+            "scan_completed_at":row.scan_completed_at,
+            "generation_snapshot_id":row.generation_snapshot_id,
+            "generation":row.generation,
+            "target_store_path":row.target_store_path,
+            "occurrence_derivation_path":row.occurrence_derivation_path,
+            "observed_package_version":row.observed_package_version})
+        })
+        .collect::<Vec<_>>();
+    let overridden_system_ids = if matches!(source, CveAcceptanceSource::Environment(_)) {
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT system_id FROM cve_current_system_dispositions WHERE canonical_cve_id=$1 AND canonical_package_name=$2 AND system_id=ANY($3) ORDER BY system_id",
+        )
+        .bind(&current.canonical_cve_id)
+        .bind(&current.canonical_package_name)
+        .bind(&system_ids)
+        .fetch_all(&mut *tx)
+        .await?
+    } else {
+        Vec::new()
+    };
+    let retire = format!(
+        "UPDATE {table} SET retired_at=$2,retired_by=$3,retirement_reason='renewed' WHERE id=$1 AND retired_at IS NULL"
+    );
+    sqlx::query(&retire)
+        .bind(source.id())
+        .bind(now)
+        .bind(actor.user_id)
+        .execute(&mut *tx)
+        .await?;
+    let insert = format!(
+        "INSERT INTO {table}(canonical_cve_id,canonical_package_name,{scope_column},state,justification,review_date,accepted_by,accepted_at) VALUES($1,$2,$3,'accepted',$4,$5,$6,$7) RETURNING id"
+    );
+    let successor_id: Uuid = sqlx::query_scalar(&insert)
+        .bind(&current.canonical_cve_id)
+        .bind(&current.canonical_package_name)
+        .bind(current.scope_id)
+        .bind(current.justification.as_deref())
+        .bind(deadline)
+        .bind(current.accepted_by)
+        .bind(current.accepted_at)
+        .fetch_one(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO admin_audit_events(actor_user_id,actor_identifier,action,target,request_origin,metadata,created_at) VALUES($1,$2,'cve_acceptance_renewed',$3,$4,$5,$6)",
+    )
+    .bind(actor.user_id)
+    .bind(&actor.identifier)
+    .bind(format!("cve:{}:{}", current.canonical_cve_id, current.canonical_package_name))
+    .bind(actor.request_origin.as_deref())
+    .bind(json!({"source_type":scope_name,"scope_id":current.scope_id,
+        "predecessor_id":source.id(),"successor_id":successor_id,
+        "canonical_cve_id":current.canonical_cve_id,
+        "canonical_package_name":current.canonical_package_name,
+        "reviewed_at":now,"previous_review_date":current.review_date,
+        "review_date":deadline,"evidence":evidence,
+        "host_override_system_ids":overridden_system_ids}))
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(CveAcceptanceRenewal {
+        predecessor_id: source.id(),
+        successor_id,
+        review_date: deadline,
     })
 }
 
@@ -5568,6 +6297,7 @@ async fn triage_cve_once(
     request: FleetCveTriageRequest,
     mutation_scope: CveTriageMutationScope,
     clock: &dyn PoamClock,
+    conversion: Option<CveAcceptanceSource>,
 ) -> Result<CveTriageMutationResult, PoamError> {
     require_mutator(actor)?;
     let cve_id = cve_id.trim().to_ascii_uppercase();
@@ -5763,6 +6493,16 @@ async fn triage_cve_once(
             "cve_evidence_changed",
             "The complete visible affected environment set changed; refresh and retry".into(),
         ));
+    }
+
+    if let Some(source) = conversion {
+        let CveAcceptanceSource::Environment(_) = source else {
+            return Err(cve_source_conflict());
+        };
+        let environment_id = *requested_environment_ids
+            .first()
+            .ok_or_else(cve_source_conflict)?;
+        conversion_source_guard_tx(&mut tx, source, environment_id, &cve_id, &package_name).await?;
     }
 
     let overridden_system_ids = sqlx::query_scalar::<_, Uuid>(
@@ -6100,7 +6840,7 @@ async fn triage_cve_once(
         }
         sqlx::query(
             r#"UPDATE cve_environment_dispositions
-               SET retired_at=$4,retired_by=$5,retirement_reason='triage_changed'
+               SET retired_at=$4,retired_by=$5,retirement_reason=$6
                WHERE canonical_cve_id=$1 AND canonical_package_name=$2
                  AND environment_id=$3 AND retired_at IS NULL"#,
         )
@@ -6109,6 +6849,11 @@ async fn triage_cve_once(
         .bind(environment_id)
         .bind(now)
         .bind(actor.user_id)
+        .bind(if conversion.is_some() {
+            "converted_to_poam"
+        } else {
+            "triage_changed"
+        })
         .execute(&mut *tx)
         .await?;
         match action {
@@ -6177,45 +6922,75 @@ async fn triage_cve_once(
     }))
     .execute(&mut *tx)
     .await?;
-    // Build the authoritative response before commit. A later read race cannot
-    // turn a committed triage mutation into an HTTP failure.
-    let result = match mutation_scope {
-        CveTriageMutationScope::Fleet => CveTriageMutationResult::Fleet(FleetCveTriageResponse {
-            detail: fleet_cve_detail_tx(&mut tx, &actor, &cve_id, &package_name).await?,
-            detail_scope: crate::api::models::FleetCveMutationDetailScope::ExactMutationSubjects,
-            poam_id,
-            poam_reused,
-        }),
-        CveTriageMutationScope::System {
-            selected_system_id,
-            environment_id,
-        } => {
-            let mut dispositions =
-                fleet_cve_dispositions_tx(&mut tx, &cve_id, &package_name, &[environment_id])
-                    .await?;
-            retain_coherent_scheduled_dispositions_tx(
+    let conversion_result = if let Some(source) = conversion {
+        Some(
+            conversion_event_tx(
                 &mut tx,
-                &mut dispositions,
-                &subjects,
+                &actor,
+                source,
+                requested_environment_ids[0],
                 &cve_id,
                 &package_name,
+                poam_id.ok_or_else(|| {
+                    PoamError::Database(anyhow::anyhow!("conversion lacks a POA&M"))
+                })?,
+                poam_reused,
+                now,
+                request.poam.as_ref().ok_or_else(|| {
+                    PoamError::Database(anyhow::anyhow!("conversion metadata missing"))
+                })?,
             )
-            .await?;
-            let host_disposition =
-                system_cve_disposition_tx(&mut tx, selected_system_id, &cve_id, &package_name)
-                    .await?;
-            CveTriageMutationResult::System(SystemCveTriageResponse {
-                detail: system_cve_triage_detail_from_subjects(
-                    selected_system_id,
+            .await?,
+        )
+    } else {
+        None
+    };
+    // Build the authoritative response before commit. A later read race cannot
+    // turn a committed triage mutation into an HTTP failure.
+    let result = if let Some(conversion) = conversion_result {
+        CveTriageMutationResult::Conversion(conversion)
+    } else {
+        match mutation_scope {
+            CveTriageMutationScope::Fleet => {
+                CveTriageMutationResult::Fleet(FleetCveTriageResponse {
+                    detail: fleet_cve_detail_tx(&mut tx, &actor, &cve_id, &package_name).await?,
+                    detail_scope:
+                        crate::api::models::FleetCveMutationDetailScope::ExactMutationSubjects,
+                    poam_id,
+                    poam_reused,
+                })
+            }
+            CveTriageMutationScope::System {
+                selected_system_id,
+                environment_id,
+            } => {
+                let mut dispositions =
+                    fleet_cve_dispositions_tx(&mut tx, &cve_id, &package_name, &[environment_id])
+                        .await?;
+                retain_coherent_scheduled_dispositions_tx(
+                    &mut tx,
+                    &mut dispositions,
+                    &subjects,
                     &cve_id,
                     &package_name,
-                    &subjects,
-                    host_disposition,
-                    dispositions.remove(&environment_id),
-                )?,
-                poam_id,
-                poam_reused,
-            })
+                )
+                .await?;
+                let host_disposition =
+                    system_cve_disposition_tx(&mut tx, selected_system_id, &cve_id, &package_name)
+                        .await?;
+                CveTriageMutationResult::System(SystemCveTriageResponse {
+                    detail: system_cve_triage_detail_from_subjects(
+                        selected_system_id,
+                        &cve_id,
+                        &package_name,
+                        &subjects,
+                        host_disposition,
+                        dispositions.remove(&environment_id),
+                    )?,
+                    poam_id,
+                    poam_reused,
+                })
+            }
         }
     };
     tx.commit().await?;
@@ -6751,21 +7526,45 @@ pub async fn create_waiver(
         "justification",
     )?;
     let mut tx = pool.begin().await?;
+    let payload = create_waiver_tx(&mut tx, actor, request, None).await?;
+    tx.commit().await?;
+    Ok(payload)
+}
+
+async fn create_waiver_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: &PoamActor,
+    request: CreateWaiverRequest,
+    renewal: Option<(Uuid, DateTime<Utc>, NaiveDate)>,
+) -> Result<Value, PoamError> {
+    require_mutator(actor)?;
+    if request.justification.trim().is_empty() {
+        return Err(PoamError::Validation(
+            "invalid_justification",
+            "Justification is required".into(),
+        ));
+    }
+    validate_text_length(
+        request.justification.trim(),
+        MAX_NOTE_BYTES,
+        "text_too_long",
+        "justification",
+    )?;
     let legacy_finding_id = request
         .assessment_id
         .is_none()
         .then_some(request.finding_id);
     let key = finding_action_key_tx(
-        &mut tx,
+        tx,
         actor,
         request.assessment_id,
         legacy_finding_id,
         request.observation.as_ref(),
     )
     .await?;
-    lock_assessment_finding_key_tx(&mut tx, key).await?;
+    lock_assessment_finding_key_tx(tx, key).await?;
     let context = finding_action_context_tx(
-        &mut tx,
+        tx,
         actor,
         request.assessment_id,
         legacy_finding_id,
@@ -6775,7 +7574,7 @@ pub async fn create_waiver(
     if context.finding_id != request.finding_id {
         return Err(PoamError::NotFound);
     }
-    if !actor_can_access_systems_tx(&mut tx, actor, &[context.system_id]).await? {
+    if !actor_can_access_systems_tx(tx, actor, &[context.system_id]).await? {
         return Err(PoamError::NotFound);
     }
     if context.overall_outcome != "fail" {
@@ -6788,7 +7587,7 @@ pub async fn create_waiver(
     let (policy_version_id, observation_snapshot, observation_token) = if let Some(assessment_id) =
         request.assessment_id
     {
-        let observation_snapshot = observation_snapshot_tx(&mut tx, assessment_id)
+        let observation_snapshot = observation_snapshot_tx(tx, assessment_id)
             .await?
             .ok_or(PoamError::NotFound)?;
         let observation_token = semantic_digest(&observation_snapshot);
@@ -6799,7 +7598,7 @@ pub async fn create_waiver(
         )
     } else {
         let items = current_verification_items_tx(
-            &mut tx,
+            tx,
             &[(
                 context.finding_id,
                 context.system_id,
@@ -6837,14 +7636,14 @@ pub async fn create_waiver(
             })?,
         )
     };
-    let waiver_id:Uuid=sqlx::query_scalar("INSERT INTO finding_waivers(finding_id,justification,policy_version_id,assessment_id,observation_token,observation_snapshot,created_by) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id")
-      .bind(request.finding_id).bind(request.justification.trim()).bind(policy_version_id).bind(request.assessment_id).bind(&observation_token).bind(&observation_snapshot).bind(actor.user_id).fetch_one(&mut *tx).await?;
+    let waiver_id:Uuid=sqlx::query_scalar("INSERT INTO finding_waivers(finding_id,justification,policy_version_id,assessment_id,observation_token,observation_snapshot,created_by,predecessor_id,predecessor_updated_at,review_due_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id")
+      .bind(request.finding_id).bind(request.justification.trim()).bind(policy_version_id).bind(request.assessment_id).bind(&observation_token).bind(&observation_snapshot).bind(actor.user_id)
+      .bind(renewal.map(|value| value.0)).bind(renewal.map(|value| value.1)).bind(renewal.map(|value| value.2)).fetch_one(&mut **tx).await?;
     let payload = json!({"waiver_id":waiver_id,"finding_id":request.finding_id,"assessment_id":request.assessment_id,"status":"pending"});
     sqlx::query("INSERT INTO finding_waiver_events(waiver_id,actor_user_id,to_status,payload) VALUES($1,$2,'pending',$3)")
-      .bind(waiver_id).bind(actor.user_id).bind(&payload).execute(&mut *tx).await?;
+      .bind(waiver_id).bind(actor.user_id).bind(&payload).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO admin_audit_events(actor_user_id,actor_identifier,action,target,request_origin,metadata) VALUES($1,$2,'finding_waiver_created',$3,$4,$5)")
-      .bind(actor.user_id).bind(&actor.identifier).bind(format!("finding:{}",request.finding_id)).bind(actor.request_origin.as_deref()).bind(&payload).execute(&mut *tx).await?;
-    tx.commit().await?;
+      .bind(actor.user_id).bind(&actor.identifier).bind(format!("finding:{}",request.finding_id)).bind(actor.request_origin.as_deref()).bind(&payload).execute(&mut **tx).await?;
     Ok(payload)
 }
 
@@ -6909,6 +7708,28 @@ pub async fn decide_waiver(
     if !actor.is_admin {
         return Err(PoamError::Forbidden);
     }
+    if request.status != WaiverDecision::Accepted && request.expires_at.is_some() {
+        return Err(PoamError::Validation(
+            "invalid_expiry",
+            "expires_at is only valid when accepting a waiver".into(),
+        ));
+    }
+    let mut tx = pool.begin().await?;
+    let payload = decide_waiver_tx(&mut tx, actor, waiver_id, request, clock).await?;
+    tx.commit().await?;
+    Ok(payload)
+}
+
+async fn decide_waiver_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: &PoamActor,
+    waiver_id: Uuid,
+    request: WaiverDecisionRequest,
+    clock: &dyn PoamClock,
+) -> Result<Value, PoamError> {
+    if !actor.is_admin {
+        return Err(PoamError::Forbidden);
+    }
     let decision = request.status.as_str();
     if decision != "accepted" && request.expires_at.is_some() {
         return Err(PoamError::Validation(
@@ -6916,13 +7737,12 @@ pub async fn decide_waiver(
             "expires_at is only valid when accepting a waiver".into(),
         ));
     }
-    let mut tx = pool.begin().await?;
     let key=sqlx::query_as::<_,(Uuid,Uuid)>("SELECT f.system_id,f.policy_lineage_id FROM finding_waivers w JOIN poam_findings f ON f.id=w.finding_id WHERE w.id=$1")
-      .bind(waiver_id).fetch_optional(&mut *tx).await?.ok_or(PoamError::NotFound)?;
-    lock_assessment_finding_key_tx(&mut tx, key).await?;
+      .bind(waiver_id).fetch_optional(&mut **tx).await?.ok_or(PoamError::NotFound)?;
+    lock_assessment_finding_key_tx(tx, key).await?;
     let row=sqlx::query_as::<_,(Uuid,String,Uuid,Option<Uuid>,Uuid,String,Value)>("SELECT w.finding_id,w.status,f.system_id,w.assessment_id,w.policy_version_id,w.observation_token,w.observation_snapshot FROM finding_waivers w JOIN poam_findings f ON f.id=w.finding_id WHERE w.id=$1 FOR UPDATE OF w")
-      .bind(waiver_id).fetch_optional(&mut *tx).await?.ok_or(PoamError::NotFound)?;
-    if !actor_can_access_systems_tx(&mut tx, actor, &[row.2]).await? {
+      .bind(waiver_id).fetch_optional(&mut **tx).await?.ok_or(PoamError::NotFound)?;
+    if !actor_can_access_systems_tx(tx, actor, &[row.2]).await? {
         return Err(PoamError::NotFound);
     }
     let allowed = matches!(
@@ -6943,7 +7763,7 @@ pub async fn decide_waiver(
     }
     if decision == "accepted" {
         if let Some(assessment_id) = row.3 {
-            let context = assessment_context_tx(&mut tx, assessment_id)
+            let context = assessment_context_tx(tx, assessment_id)
                 .await?
                 .ok_or(PoamError::NotFound)?;
             if context.finding_id != row.0 || context.overall_outcome != "fail" {
@@ -6953,8 +7773,8 @@ pub async fn decide_waiver(
                     None,
                 ));
             }
-            validate_current_assessment_tx(&mut tx, &context).await?;
-            if observation_snapshot_tx(&mut tx, assessment_id)
+            validate_current_assessment_tx(tx, &context).await?;
+            if observation_snapshot_tx(tx, assessment_id)
                 .await?
                 .map(|snapshot| semantic_digest(&snapshot))
                 .as_deref()
@@ -6971,17 +7791,14 @@ pub async fn decide_waiver(
                 "SELECT system_id,policy_lineage_id FROM poam_findings WHERE id=$1",
             )
             .bind(row.0)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?;
-            let item = current_verification_items_tx(
-                &mut tx,
-                &[(row.0, finding.0, finding.1)],
-                clock.now(),
-            )
-            .await?
-            .into_iter()
-            .next()
-            .ok_or(PoamError::NotFound)?;
+            let item =
+                current_verification_items_tx(tx, &[(row.0, finding.0, finding.1)], clock.now())
+                    .await?
+                    .into_iter()
+                    .next()
+                    .ok_or(PoamError::NotFound)?;
             if item.assessment_id.is_some()
                 || item.observed_outcome.as_deref() != Some("fail")
                 || item.policy_version_id != Some(row.4)
@@ -6996,27 +7813,559 @@ pub async fn decide_waiver(
             }
         }
         let expired_ids=sqlx::query_scalar::<_,Uuid>("UPDATE finding_waivers SET status='expired',updated_at=$2 WHERE finding_id=$1 AND status='accepted' AND expires_at<=$2 RETURNING id")
-            .bind(row.0).bind(clock.now()).fetch_all(&mut *tx).await?;
+             .bind(row.0).bind(clock.now()).fetch_all(&mut **tx).await?;
         for expired_id in expired_ids {
             let expired_payload = json!({"waiver_id":expired_id,"finding_id":row.0,"from":"accepted","to":"expired","reason":"elapsed"});
             sqlx::query("INSERT INTO finding_waiver_events(waiver_id,actor_user_id,from_status,to_status,payload) VALUES($1,$2,'accepted','expired',$3)")
-                .bind(expired_id).bind(actor.user_id).bind(&expired_payload).execute(&mut *tx).await?;
+                 .bind(expired_id).bind(actor.user_id).bind(&expired_payload).execute(&mut **tx).await?;
             sqlx::query("INSERT INTO admin_audit_events(actor_user_id,actor_identifier,action,target,request_origin,metadata) VALUES($1,$2,'finding_waiver_status_changed',$3,$4,$5)")
-                .bind(actor.user_id).bind(&actor.identifier).bind(format!("finding:{}",row.0)).bind(actor.request_origin.as_deref()).bind(&expired_payload).execute(&mut *tx).await?;
+                 .bind(actor.user_id).bind(&actor.identifier).bind(format!("finding:{}",row.0)).bind(actor.request_origin.as_deref()).bind(&expired_payload).execute(&mut **tx).await?;
         }
     }
     if let Err(error) = sqlx::query(r#"UPDATE finding_waivers SET status=$2,accepted_by=CASE WHEN $2='accepted' THEN $3 ELSE accepted_by END,
       accepted_at=CASE WHEN $2='accepted' THEN $4 ELSE accepted_at END,expires_at=CASE WHEN $2='accepted' THEN $5 ELSE expires_at END,updated_at=$4 WHERE id=$1"#)
-      .bind(waiver_id).bind(decision).bind(actor.user_id).bind(clock.now()).bind(request.expires_at).execute(&mut *tx).await {
+      .bind(waiver_id).bind(decision).bind(actor.user_id).bind(clock.now()).bind(request.expires_at).execute(&mut **tx).await {
         return Err(db_conflict(&error).unwrap_or_else(|| error.into()));
     }
     let payload = json!({"waiver_id":waiver_id,"finding_id":row.0,"from":row.1,"to":decision,"expires_at":request.expires_at});
     sqlx::query("INSERT INTO finding_waiver_events(waiver_id,actor_user_id,from_status,to_status,payload) VALUES($1,$2,$3,$4,$5)")
-      .bind(waiver_id).bind(actor.user_id).bind(&row.1).bind(decision).bind(&payload).execute(&mut *tx).await?;
+      .bind(waiver_id).bind(actor.user_id).bind(&row.1).bind(decision).bind(&payload).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO admin_audit_events(actor_user_id,actor_identifier,action,target,request_origin,metadata) VALUES($1,$2,'finding_waiver_status_changed',$3,$4,$5)")
-      .bind(actor.user_id).bind(&actor.identifier).bind(format!("finding:{}",row.0)).bind(actor.request_origin.as_deref()).bind(&payload).execute(&mut *tx).await?;
-    tx.commit().await?;
+      .bind(actor.user_id).bind(&actor.identifier).bind(format!("finding:{}",row.0)).bind(actor.request_origin.as_deref()).bind(&payload).execute(&mut **tx).await?;
     Ok(payload)
+}
+
+/// Reports the one committed policy waiver replacement, including on retry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaiverConversion {
+    /// Identifies the selected acceptance that was replaced.
+    pub waiver_id: Uuid,
+    /// Identifies the policy-family remediation plan.
+    pub poam_id: Uuid,
+    /// Indicates whether the plan existed before conversion.
+    pub poam_reused: bool,
+}
+
+/// Converts one exact policy waiver revision into policy-family remediation.
+///
+/// The selected waiver alone is revoked when active. An already expired waiver
+/// stays expired in history. Both forms require the same exact Current Fail
+/// version and observation. A retry with the same source revision and request
+/// returns the durable replacement even if the plan changes later.
+/// No assessment, technical outcome, or host override is modified.
+///
+/// # Errors
+///
+/// Returns forbidden if the actor loses Admin or operator authority, not-found
+/// for an inaccessible finding, conflict for a stale version or incompatible
+/// plan, and precondition for superseded Fail evidence. Database errors roll
+/// back the entire conversion transaction.
+pub async fn convert_waiver_to_poam(
+    pool: &PgPool,
+    actor: &PoamActor,
+    waiver_id: Uuid,
+    expected_updated_at: DateTime<Utc>,
+    mut request: CreatePoamRequest,
+    reuse_poam_id: Option<Uuid>,
+    clock: &dyn PoamClock,
+) -> Result<WaiverConversion, PoamError> {
+    if !actor.is_admin || !actor.can_mutate {
+        return Err(PoamError::Forbidden);
+    }
+    if request.assessment_id.is_some()
+        || request.finding_id.is_some()
+        || request.observation.is_some()
+    {
+        return Err(PoamError::Validation(
+            "invalid_finding_observation",
+            "Conversion resolves the source finding and observation on the server".into(),
+        ));
+    }
+    let digest = semantic_digest(&json!({"metadata":request,"reuse_poam_id":reuse_poam_id}));
+    let mut tx = pool.begin().await?;
+    let key = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT f.system_id,f.policy_lineage_id FROM finding_waivers w JOIN poam_findings f ON f.id=w.finding_id WHERE w.id=$1",
+    )
+    .bind(waiver_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(PoamError::NotFound)?;
+    // CONCURRENCY: Assessment writers, waiver decisions, and POA&M link writers
+    // all serialize on this key before acquiring waiver or plan row locks.
+    lock_assessment_finding_key_tx(&mut tx, key).await?;
+    let actor = current_mutating_actor_tx(&mut tx, actor).await?;
+    if !actor.is_admin || !actor.can_mutate {
+        return Err(PoamError::Forbidden);
+    }
+    if !actor_can_access_systems_tx(&mut tx, &actor, &[key.0]).await? {
+        return Err(PoamError::NotFound);
+    }
+    let source = sqlx::query_as::<_, (Uuid, String, Uuid, Option<Uuid>, String, Value, DateTime<Utc>)>(
+        "SELECT finding_id,status,policy_version_id,assessment_id,observation_token,observation_snapshot,updated_at FROM finding_waivers WHERE id=$1 FOR UPDATE",
+    )
+    .bind(waiver_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(PoamError::NotFound)?;
+    let replacement = sqlx::query_as::<_, (Uuid, DateTime<Utc>, String, bool)>(
+        "SELECT poam_id,source_updated_at,request_digest,reused FROM finding_waiver_poam_replacements WHERE waiver_id=$1",
+    )
+    .bind(waiver_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some((poam_id, version, saved_digest, reused)) = replacement {
+        if version != expected_updated_at || saved_digest != digest {
+            return Err(PoamError::Conflict(
+                "waiver_source_changed",
+                "Conversion request differs from the committed replacement".into(),
+            ));
+        }
+        // CONCURRENCY: This row records the committed command, not the
+        // current mutable plan. A retry never creates another plan because
+        // a later plan edit, unlink, or closure changed its presentation.
+        tx.commit().await?;
+        return Ok(WaiverConversion {
+            waiver_id,
+            poam_id,
+            poam_reused: reused,
+        });
+    }
+    if source.6 != expected_updated_at || !matches!(source.1.as_str(), "accepted" | "expired") {
+        return Err(PoamError::Conflict(
+            "waiver_source_changed",
+            "The accepted waiver version changed; refresh and retry".into(),
+        ));
+    }
+    let observation = if source.3.is_none() {
+        let (kind, source_id) = match source.5.get("source").and_then(Value::as_str) {
+            Some("nix_policy_result") => (
+                FindingObservationSource::NixPolicyResult,
+                source
+                    .5
+                    .get("derivation_id")
+                    .and_then(Value::as_i64)
+                    .map(|v| v.to_string()),
+            ),
+            Some("cve_scan") => (
+                FindingObservationSource::CveScan,
+                source
+                    .5
+                    .get("scan_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            ),
+            _ => {
+                return Err(PoamError::Precondition(
+                    "waiver_observation_changed",
+                    "Source observation is unavailable".into(),
+                    None,
+                ));
+            }
+        };
+        Some(FindingObservationReference {
+            source: kind,
+            source_id: source_id.ok_or_else(|| {
+                PoamError::Precondition(
+                    "waiver_observation_changed",
+                    "Source observation is incomplete".into(),
+                    None,
+                )
+            })?,
+            policy_version_id: source.2,
+            token: source.4.clone(),
+        })
+    } else {
+        None
+    };
+    let context = finding_action_context_tx(
+        &mut tx,
+        &actor,
+        source.3,
+        observation.as_ref().map(|_| source.0),
+        observation.as_ref(),
+    )
+    .await?;
+    if context.finding_id != source.0
+        || context.policy_version_id != source.2
+        || context.overall_outcome != "fail"
+    {
+        return Err(PoamError::Precondition(
+            "waiver_observation_changed",
+            "The source is not the exact Current Fail".into(),
+            None,
+        ));
+    }
+    let exact = if let Some(assessment_id) = source.3 {
+        observation_snapshot_tx(&mut tx, assessment_id)
+            .await?
+            .as_ref()
+            == Some(&source.5)
+    } else {
+        let item = current_verification_items_tx(&mut tx, &[(source.0, key.0, key.1)], clock.now())
+            .await?
+            .into_iter()
+            .next()
+            .ok_or(PoamError::NotFound)?;
+        item.assessment_id.is_none() && item.observation_snapshot.as_ref() == Some(&source.5)
+    };
+    if !exact || semantic_digest(&source.5) != source.4 {
+        return Err(PoamError::Precondition(
+            "waiver_observation_changed",
+            "The source observation changed".into(),
+            None,
+        ));
+    }
+    request.assessment_id = source.3;
+    request.finding_id = observation.as_ref().map(|_| source.0);
+    request.observation = observation;
+    let (mut tx, poam_id, poam_reused) = if let Some(id) = reuse_poam_id {
+        // A reuse never silently edits ownership, plan metadata, or evidence.
+        let existing = sqlx::query_as::<_, (String, String, String, Option<String>, Option<Uuid>, Option<String>, Option<NaiveDate>, String, String)>(
+            "SELECT title,plan,owner,owner_kind,owner_user_id,owner_group_name,target_date,risk,status FROM poams WHERE id=$1 FOR UPDATE",
+        ).bind(id).fetch_optional(&mut *tx).await?.ok_or(PoamError::NotFound)?;
+        require_poam_contexts_tx(&mut tx, &actor, id).await?;
+        let assignee = match request.assignee.as_ref() {
+            Some(value) => Some(resolve_assignee_tx(&mut tx, value).await?),
+            None => None,
+        };
+        let owner = assignee
+            .as_ref()
+            .map_or_else(|| request.owner.trim(), |v| v.owner.as_str());
+        if existing.0 != request.title.trim()
+            || existing.1 != request.plan.trim()
+            || existing.2 != owner
+            || existing.3.as_deref() != assignee.as_ref().and_then(|v| v.kind)
+            || existing.4 != assignee.as_ref().and_then(|v| v.user_id)
+            || existing.5.as_deref() != assignee.as_ref().and_then(|v| v.group_name.as_deref())
+            || existing.6 != request.target_date
+            || existing.7 != request.risk.as_str()
+            || existing.8 == "completed"
+        {
+            return Err(PoamError::Conflict(
+                "incompatible_poam",
+                "The selected plan metadata or lifecycle is incompatible".into(),
+            ));
+        }
+        let compatible: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM poam_finding_links l JOIN poam_findings f ON f.id=l.finding_id WHERE l.poam_id=$1 AND l.retired_at IS NULL AND f.policy_lineage_id=$2) AND NOT EXISTS(SELECT 1 FROM poam_cve_finding_links WHERE poam_id=$1 AND retired_at IS NULL)",
+        ).bind(id).bind(key.1).fetch_one(&mut *tx).await?;
+        let linked: Option<Uuid> = sqlx::query_scalar(
+            "SELECT poam_id FROM poam_finding_links WHERE finding_id=$1 AND retired_at IS NULL",
+        )
+        .bind(source.0)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if !compatible || linked.is_some_and(|value| value != id) {
+            return Err(PoamError::Conflict(
+                "incompatible_poam",
+                "The finding is managed by an incompatible plan".into(),
+            ));
+        }
+        validate_assignment_refs_tx(&mut tx, &actor, &request.assignment_version_ids).await?;
+        validate_assignment_compatibility_tx(&mut tx, &request.assignment_version_ids, &[key])
+            .await?;
+        let refs: Vec<Uuid> = sqlx::query_scalar("SELECT assignment_version_id FROM poam_assignment_references WHERE poam_id=$1 ORDER BY assignment_version_id")
+            .bind(id).fetch_all(&mut *tx).await?;
+        let mut requested = request.assignment_version_ids.clone();
+        requested.sort_unstable();
+        requested.dedup();
+        let milestones: Vec<(i32, String)> = sqlx::query_as(
+            "SELECT ordinal,title FROM poam_milestones WHERE poam_id=$1 ORDER BY ordinal",
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let standard = [
+            "Update NixOS module",
+            "Deploy to staging",
+            "Validate new configuration",
+            "Deploy to production",
+            "Verify compliance evaluation passes",
+        ];
+        let same_milestones = if request.default_milestones {
+            milestones.len() == standard.len()
+                && milestones
+                    .iter()
+                    .enumerate()
+                    .all(|(index, row)| row.0 == index as i32 && row.1 == standard[index])
+        } else {
+            milestones.is_empty()
+        };
+        if refs != requested || !same_milestones {
+            return Err(PoamError::Conflict(
+                "incompatible_poam",
+                "Plan assignment or milestone scope differs".into(),
+            ));
+        }
+        if linked.is_none() {
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM poam_finding_links WHERE poam_id=$1 AND retired_at IS NULL",
+            )
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if count >= MAX_POAM_RELATIONSHIPS {
+                return Err(PoamError::Conflict(
+                    "incompatible_poam",
+                    "The selected plan has no finding capacity".into(),
+                ));
+            }
+            sqlx::query(
+                "INSERT INTO poam_finding_links(poam_id,finding_id,linked_by) VALUES($1,$2,$3)",
+            )
+            .bind(id)
+            .bind(source.0)
+            .bind(actor.user_id)
+            .execute(&mut *tx)
+            .await?;
+            bump_and_audit(&mut tx, &actor, id, "finding_linked", json!({"finding_id":source.0,"assessment_id":source.3,"observation":request.observation,"conversion_waiver_id":waiver_id})).await?;
+        }
+        (tx, id, true)
+    } else {
+        let (tx, id) = create_policy_poam_tx(tx, &actor, request, clock).await?;
+        (tx, id, false)
+    };
+    if source.1 == "accepted" {
+        decide_waiver_tx(
+            &mut tx,
+            &actor,
+            waiver_id,
+            WaiverDecisionRequest {
+                status: WaiverDecision::Revoked,
+                expires_at: None,
+            },
+            clock,
+        )
+        .await?;
+    }
+    let now = clock.now();
+    let event = json!({"source":"policy_waiver","waiver_id":waiver_id,"source_updated_at":expected_updated_at,
+        "poam_id":poam_id,"finding_id":source.0,"poam_reused":poam_reused,
+        "policy_version_id":source.2,"observation_token":source.4,
+        "from":source.1,"to":if source.1 == "accepted" { "revoked" } else { "expired" },
+        "reason":"converted_to_poam"});
+    sqlx::query("INSERT INTO finding_waiver_poam_replacements(waiver_id,source_updated_at,poam_id,finding_id,converted_by,converted_at,request_digest,reused) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
+        .bind(waiver_id).bind(expected_updated_at).bind(poam_id).bind(source.0)
+        .bind(actor.user_id).bind(now).bind(&digest).bind(poam_reused).execute(&mut *tx).await?;
+    // This is a conversion event, not a second lifecycle transition. The
+    // decision service already recorded accepted -> revoked in this tx.
+    sqlx::query("INSERT INTO finding_waiver_events(waiver_id,actor_user_id,from_status,to_status,payload) VALUES($1,$2,NULL,$3,$4)")
+        .bind(waiver_id).bind(actor.user_id)
+        .bind(if source.1 == "accepted" { "revoked" } else { "expired" })
+        .bind(&event).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO admin_audit_events(actor_user_id,actor_identifier,action,target,request_origin,metadata) VALUES($1,$2,'finding_waiver_converted',$3,$4,$5)")
+        .bind(actor.user_id).bind(&actor.identifier).bind(format!("finding:{}",source.0))
+        .bind(actor.request_origin.as_deref()).bind(&event).execute(&mut *tx).await?;
+    bump_and_audit(&mut tx, &actor, poam_id, "waiver_converted", event).await?;
+    tx.commit().await?;
+    Ok(WaiverConversion {
+        waiver_id,
+        poam_id,
+        poam_reused,
+    })
+}
+
+/// Identifies the successor approval and its independent review deadline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaiverRenewal {
+    /// Identifies the original approved waiver.
+    pub predecessor_id: Uuid,
+    /// Identifies the newly approved waiver, including on exact retry.
+    pub successor_id: Uuid,
+    /// Dates the next review without changing authorization expiration.
+    pub review_due_at: NaiveDate,
+}
+
+/// Renews an approved policy waiver through a linked, newly approved request.
+///
+/// The source's approval and expiration remain immutable. A waiver whose
+/// authorization has already elapsed is not renewable, even if its status has
+/// not yet been changed to `expired`. A retry with the same source revision
+/// returns the active successor without writing another approval.
+///
+/// # Errors
+///
+/// Returns forbidden for a non-admin, conflict for stale or terminal sources,
+/// precondition for elapsed authorization or changed Fail evidence, and a
+/// database error if the linked successor cannot be persisted atomically.
+pub async fn renew_waiver(
+    pool: &PgPool,
+    actor: &PoamActor,
+    source_id: Uuid,
+    expected_updated_at: DateTime<Utc>,
+    clock: &dyn PoamClock,
+) -> Result<WaiverRenewal, PoamError> {
+    if !actor.is_admin {
+        return Err(PoamError::Forbidden);
+    }
+    let mut tx = pool.begin().await?;
+    let key = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT f.system_id,f.policy_lineage_id FROM finding_waivers w JOIN poam_findings f ON f.id=w.finding_id WHERE w.id=$1",
+    )
+    .bind(source_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(PoamError::NotFound)?;
+    // CONCURRENCY: Serialize source decisions and successor creation on the
+    // finding key before locking the source row or reading the actor's roles.
+    lock_assessment_finding_key_tx(&mut tx, key).await?;
+    let actor = current_mutating_actor_tx(&mut tx, actor).await?;
+    if !actor.is_admin {
+        return Err(PoamError::Forbidden);
+    }
+    let source = sqlx::query_as::<_, (Uuid, String, String, Uuid, Option<Uuid>, Uuid, String, Value, DateTime<Utc>, Option<DateTime<Utc>>)>(
+        "SELECT finding_id,status,justification,policy_version_id,assessment_id,created_by,observation_token,observation_snapshot,updated_at,expires_at FROM finding_waivers WHERE id=$1 FOR UPDATE",
+    )
+    .bind(source_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(PoamError::NotFound)?;
+    let previous_review_due_at: Option<NaiveDate> =
+        sqlx::query_scalar("SELECT review_due_at FROM finding_waivers WHERE id=$1")
+            .bind(source_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let successor = sqlx::query_as::<_, (Uuid, String, NaiveDate)>(
+        "SELECT id,status,review_due_at FROM finding_waivers WHERE predecessor_id=$1 AND predecessor_updated_at=$2 FOR UPDATE",
+    )
+    .bind(source_id)
+    .bind(expected_updated_at)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some((successor_id, status, review_due_at)) = successor {
+        if source.1 == "revoked" && status == "accepted" {
+            tx.commit().await?;
+            return Ok(WaiverRenewal {
+                predecessor_id: source_id,
+                successor_id,
+                review_due_at,
+            });
+        }
+    }
+    if source.8 != expected_updated_at || source.1 != "accepted" {
+        return Err(PoamError::Conflict(
+            "waiver_source_changed",
+            "The approved waiver version changed; refresh and retry".into(),
+        ));
+    }
+    if source.9.is_some_and(|expiry| expiry <= clock.now()) {
+        return Err(PoamError::Precondition(
+            "waiver_authorization_elapsed",
+            "The waiver authorization expired before renewal".into(),
+            None,
+        ));
+    }
+    let observation = if source.4.is_some() {
+        None
+    } else {
+        let source_type = source.7.get("source").and_then(Value::as_str);
+        let (kind, source_id) = match source_type {
+            Some("nix_policy_result") => (
+                FindingObservationSource::NixPolicyResult,
+                source
+                    .7
+                    .get("derivation_id")
+                    .and_then(Value::as_i64)
+                    .map(|id| id.to_string()),
+            ),
+            Some("cve_scan") => (
+                FindingObservationSource::CveScan,
+                source
+                    .7
+                    .get("scan_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            ),
+            _ => {
+                return Err(PoamError::Precondition(
+                    "waiver_observation_changed",
+                    "The original observation cannot be resolved".into(),
+                    None,
+                ));
+            }
+        };
+        Some(FindingObservationReference {
+            source: kind,
+            source_id: source_id.ok_or_else(|| {
+                PoamError::Precondition(
+                    "waiver_observation_changed",
+                    "The original observation is incomplete".into(),
+                    None,
+                )
+            })?,
+            policy_version_id: source.3,
+            token: source.6.clone(),
+        })
+    };
+    let now = clock.now();
+    let review_due_at = now.date_naive() + Duration::days(90);
+    decide_waiver_tx(
+        &mut tx,
+        &actor,
+        source_id,
+        WaiverDecisionRequest {
+            status: WaiverDecision::Revoked,
+            expires_at: None,
+        },
+        clock,
+    )
+    .await?;
+    let pending = create_waiver_tx(
+        &mut tx,
+        &actor,
+        CreateWaiverRequest {
+            finding_id: source.0,
+            assessment_id: source.4,
+            observation,
+            justification: source.2,
+        },
+        Some((source_id, expected_updated_at, review_due_at)),
+    )
+    .await?;
+    let successor_id = pending["waiver_id"]
+        .as_str()
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| PoamError::Database(anyhow::anyhow!("waiver creation returned no UUID")))?;
+    // INVARIANT: A new current Fail must resolve to the same version and
+    // observation. A different observation cannot inherit old authorization.
+    let same_evidence: bool = sqlx::query_scalar(
+        "SELECT policy_version_id=$2 AND assessment_id IS NOT DISTINCT FROM $3 AND observation_token=$4 AND observation_snapshot=$5 FROM finding_waivers WHERE id=$1",
+    )
+    .bind(successor_id).bind(source.3).bind(source.4).bind(&source.6).bind(&source.7)
+    .fetch_one(&mut *tx).await?;
+    if !same_evidence {
+        return Err(PoamError::Precondition(
+            "waiver_observation_changed",
+            "The exact Fail observation changed after the original approval".into(),
+            None,
+        ));
+    }
+    decide_waiver_tx(
+        &mut tx,
+        &actor,
+        successor_id,
+        WaiverDecisionRequest {
+            status: WaiverDecision::Accepted,
+            expires_at: source.9,
+        },
+        clock,
+    )
+    .await?;
+    sqlx::query("INSERT INTO admin_audit_events(actor_user_id,actor_identifier,action,target,request_origin,metadata,created_at) VALUES($1,$2,'finding_waiver_renewed',$3,$4,$5,$6)")
+        .bind(actor.user_id).bind(&actor.identifier).bind(format!("finding:{}", source.0))
+        .bind(actor.request_origin.as_deref())
+        .bind(json!({"predecessor_id":source_id,"predecessor_updated_at":expected_updated_at,
+            "successor_id":successor_id,"reviewed_at":now,
+            "previous_review_due_at":previous_review_due_at,"review_due_at":review_due_at,
+            "authorization_expires_at":source.9,"finding_id":source.0,
+            "policy_version_id":source.3,"observation_token":source.6}))
+        .bind(now).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(WaiverRenewal {
+        predecessor_id: source_id,
+        successor_id,
+        review_due_at,
+    })
 }
 
 #[derive(Debug)]

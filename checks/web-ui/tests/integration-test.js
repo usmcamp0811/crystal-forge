@@ -18614,17 +18614,19 @@ security.audit.enable = true;</fixtext>
       const detailRoute = /\/api\/v1\/poams\/([0-9a-f-]+)(?:\?.*)?$/;
       const transitionRoute = /\/api\/v1\/poams\/([0-9a-f-]+)\/transition$/;
       const acceptanceRoute = /\/api\/v1\/acceptances(?:\?.*)?$/;
+      const acceptanceCommand = /\/api\/v1\/acceptances\/(policy_waiver|cve_host|cve_environment)\/([0-9a-f-]+)\/(renew|convert)$/;
+      const acceptanceWrites = [];
       const accepted = [
         { source: "cve_host", source_id: "32000000-0000-4000-8000-000000000001", waiver_updated_at: null, status: "accepted", finding_id: null,
           system_id: ids.host, environment_id: null, policy_lineage_id: null, policy_version_id: null,
           canonical_cve_id: "CVE-2024-1234", canonical_package_name: "openssl", justification: "Reviewed host risk",
-          review_date: "2026-11-01", expires_at: null, accepted_by: ids.owner, accepted_at: "2026-09-20T12:00:00Z",
-          retired_at: null, retired_by: null, retirement_reason: null, recorded_at: "2026-09-20T12:00:00Z" },
+          review_date: "2026-11-01", review_due_at: null, expires_at: null, accepted_by: ids.owner, accepted_at: "2026-09-20T12:00:00Z",
+          retired_at: null, retired_by: null, retirement_reason: null, replacement_poam_id: null, recorded_at: "2026-09-20T12:00:00Z" },
         { source: "policy_waiver", source_id: "32000000-0000-4000-8000-000000000002", waiver_updated_at: "2026-09-18T12:00:00Z", status: "accepted", finding_id: planId(1),
           system_id: ids.host, environment_id: null, policy_lineage_id: ids.bundle, policy_version_id: ids.version,
           canonical_cve_id: null, canonical_package_name: null, justification: "Approved policy exception",
-          review_date: null, expires_at: "2026-12-01T12:00:00Z", accepted_by: ids.owner, accepted_at: "2026-09-18T12:00:00Z",
-          retired_at: null, retired_by: null, retirement_reason: null, recorded_at: "2026-09-18T12:00:00Z" },
+          review_date: null, review_due_at: null, expires_at: "2026-12-01T12:00:00Z", accepted_by: ids.owner, accepted_at: "2026-09-18T12:00:00Z",
+          retired_at: null, retired_by: null, retirement_reason: null, replacement_poam_id: null, recorded_at: "2026-09-18T12:00:00Z" },
       ];
       const detailPayload = (row) => ({ ...row, findings: [], cve_findings: [], findings_has_more: false,
         findings_next_cursor: null, milestones: [], assignment_references: [], verification_attempts: [],
@@ -18648,7 +18650,7 @@ security.audit.enable = true;</fixtext>
       await page.route(acceptanceRoute, (route) => {
         if (route.request().method() !== "GET") throw new Error("Register acceptance read attempted a write");
         const url = new URL(route.request().url());
-        if (url.searchParams.get("status") !== "accepted" || url.searchParams.get("limit") !== "100") {
+        if (url.searchParams.get("status") !== "accepted_or_converted" || url.searchParams.get("limit") !== "100") {
           throw new Error(`Acceptance register requested an unapproved scope: ${url}`);
         }
         const visible = accepted.filter((item) => !url.searchParams.has("environment_id") || url.searchParams.get("environment_id") === ids.envA);
@@ -18656,7 +18658,43 @@ security.audit.enable = true;</fixtext>
         return route.fulfill({ json: { items: visible.slice(offset, offset + 100), total: visible.length, offset,
           limit: 100, has_more: offset + 100 < visible.length } });
       });
-      await page.route("**/api/v1/poams/assignees", (route) => route.fulfill({ json: { people: [], groups: [] } }));
+      await page.route(acceptanceCommand, (route) => {
+        const [, source, sourceId, command] = new URL(route.request().url()).pathname.match(acceptanceCommand) || [];
+        const body = route.request().postDataJSON();
+        acceptanceWrites.push({ source, sourceId, command, body });
+        const original = accepted.find((item) => item.source === source && item.source_id === sourceId);
+        if (route.request().method() !== "POST" || !original || body.expected_source_id !== sourceId ||
+            body.expected_waiver_updated_at !== original.waiver_updated_at) {
+          throw new Error(`Acceptance command did not retain exact source identity: ${JSON.stringify(acceptanceWrites.at(-1))}`);
+        }
+        if (command === "renew") {
+          if (!isDeepStrictEqual(body, { expected_source_id: sourceId, expected_waiver_updated_at: original.waiver_updated_at })) {
+            throw new Error(`Renewal must carry only exact source revision: ${JSON.stringify(body)}`);
+          }
+          if (source === "policy_waiver") return route.fulfill({ status: 409, json: { error: "waiver_source_changed", message: "Policy waiver changed" } });
+          original.review_date = "2027-02-01";
+          return route.fulfill({ json: { source, predecessor_id: sourceId, successor_id: planId(90), review_deadline: original.review_date } });
+        }
+        if (source === "cve_host") {
+          if (body.reuse_poam_id !== null || !isDeepStrictEqual(body.poam, {
+            title: "Patch openssl", plan: "Deploy verified patch", assignee: { kind: "user", user_id: ids.owner },
+            target_date: "2027-05-01", risk: "high", default_milestones: true,
+          })) throw new Error(`CVE conversion must send a server-eligible typed assignee: ${JSON.stringify(body)}`);
+          original.status = "converted";
+          original.replacement_poam_id = planId(92);
+          return route.fulfill({ json: { source, predecessor_id: sourceId, successor_id: planId(93), poam_id: planId(92), poam_reused: false } });
+        }
+        if (source !== "policy_waiver" || body.reuse_poam_id !== null || body.poam.assessment_id !== undefined ||
+            body.poam.finding_id !== undefined || body.poam.observation !== undefined || body.poam.owner !== "Named owner" ||
+            body.poam.title !== "Real remediation" || body.poam.plan !== "Apply approved configuration" ||
+            body.poam.risk !== "high" || body.poam.target_date !== "2027-05-01") {
+          throw new Error(`Conversion must use entered policy metadata without invented evidence: ${JSON.stringify(body)}`);
+        }
+        original.status = "converted";
+        original.replacement_poam_id = planId(91);
+        return route.fulfill({ json: { source, predecessor_id: sourceId, poam_id: planId(91), poam_reused: false } });
+      });
+      await page.route("**/api/v1/poams/assignees", (route) => route.fulfill({ json: { people: [{ user_id: ids.owner, label: "Morgan Owner" }], groups: [] } }));
       await page.route(detailRoute, (route) => {
         const id = new URL(route.request().url()).pathname.split("/").at(-1);
         if (route.request().method() !== "GET") throw new Error(`Unexpected detail write: ${route.request().method()}`);
@@ -18685,6 +18723,13 @@ security.audit.enable = true;</fixtext>
         await page.goto(`${baseUrl}/poams`, { timeout: LOAD_TIMEOUT, waitUntil: "commit" });
         await assertVisible(page.getByRole("heading", { name: "POA&M", exact: true }), "Register heading must load");
         await assertVisible(page.getByText("100 open plans in 100 loaded - accepted decisions read separately - more pages available"), "First page must not claim fleet completeness");
+        const fullRegister = page.getByRole("group", { name: "Export full register" });
+        for (const [name, format] of [["OSCAL JSON", "oscal-json"], ["Excel XLSX", "xlsx"], ["CSV", "csv"], ["OSCAL XML", "oscal-xml"]]) {
+          const href = new URL(await fullRegister.getByRole("link", { name }).getAttribute("href"));
+          if (href.pathname !== "/api/v1/register/export" || href.searchParams.get("poam_status") !== "active" || href.searchParams.get("acceptance_status") !== "accepted_or_converted" || href.searchParams.get("format") !== format || href.searchParams.has("limit") || href.searchParams.has("offset")) {
+            throw new Error(`Mixed ${format} download must use the complete authorized default scope: ${href}`);
+          }
+        }
         await assertVisible(page.getByText("50 shown / 100 matching loaded / 100 loaded - more pages available"), "Initial window is bounded");
         await assertVisible(row(1).getByText("CAT I"), "Risk category must come from the plan summary");
         await assertVisible(row(1).getByText("1/3 milestones"), "Milestone progress must come from the register projection");
@@ -18697,8 +18742,80 @@ security.audit.enable = true;</fixtext>
         await page.getByRole("tab", { name: "Risk acceptances" }).click();
         await assertVisible(page.getByRole("region", { name: "Risk acceptances" }).getByText("CVE-2024-1234", { exact: false }), "Accepted CVE host decision must keep its canonical package identity");
         await assertVisible(page.getByRole("region", { name: "Risk acceptances" }).getByText("Authorization expires 2026", { exact: false }), "Policy waiver expiry must not be mistaken for a review deadline");
+        const downloadGroup = page.getByRole("group", { name: "Export risk acceptances" });
+        for (const [label, format] of [["CSV", "csv"], ["Excel XLSX", "xlsx"]]) {
+          const link = downloadGroup.getByRole("link", { name: label });
+          await assertVisible(link, `Accepted-decision ${format} download must be available for full server scope`);
+          const href = new URL(await link.getAttribute("href"));
+          if (href.pathname !== "/api/v1/acceptances/export" || href.searchParams.get("format") !== format || href.searchParams.get("status") !== "accepted_or_converted" || href.searchParams.has("limit") || href.searchParams.has("offset")) {
+            throw new Error(`Export ${format} must use the complete authorized server-filtered scope: ${href}`);
+          }
+        }
         await assertCount(page.getByRole("group", { name: "Work queues" }), 0, "Decisions must not inherit plan queues");
         await captureWorkflowViewportState(page, "16e-poam-register-design", "source-decisions-readonly", "desktop");
+        const acceptanceTable = page.getByRole("region", { name: "Risk acceptances" });
+        const hostDecision = acceptanceTable.getByRole("row").filter({ hasText: accepted[0].source_id });
+        const policyDecision = acceptanceTable.getByRole("row").filter({ hasText: accepted[1].source_id });
+        await hostDecision.click();
+        const hostTray = page.getByRole("dialog", { name: `Risk acceptance ${accepted[0].source_id}` });
+        await assertVisible(hostTray.getByText("Reviewed host risk"), "Tray must preserve original justification");
+        await assertVisible(hostTray.getByText(accepted[0].source_id, { exact: true }), "Tray must show exact source ID");
+        await hostTray.getByRole("button", { name: "Close acceptance" }).click();
+        await policyDecision.click();
+        const policyTray = page.getByRole("dialog", { name: `Risk acceptance ${accepted[1].source_id}` });
+        await assertVisible(policyTray.getByText("Policy authorization expires"), "Policy expiry is distinct from review deadline");
+        await page.keyboard.press("Escape");
+        await assertCount(policyTray, 0, "Escape closes without a write");
+        await hostDecision.click();
+        await page.locator(".poam-tray-backdrop").click({ position: { x: 5, y: 5 } });
+        await assertCount(hostTray, 0, "Backdrop closes without a write");
+        if (acceptanceWrites.length) throw new Error("Read, close, Escape or backdrop wrote a decision");
+
+        await hostDecision.click({ modifiers: ["Control"] });
+        await policyDecision.click({ modifiers: ["Control"] });
+        const acceptanceBulk = page.getByRole("group", { name: "Selected risk acceptances" });
+        await assertVisible(acceptanceBulk.getByText("2 source decisions selected"), "Bulk identities must be distinct");
+        await acceptanceBulk.getByRole("button", { name: "Renew 2 acceptance(s) 90 days" }).click();
+        await assertVisible(page.getByText("1 renewed; 1 failed; 0 ineligible.", { exact: false }), "Partial renewal reports source-specific failures");
+        await assertAttribute(policyDecision, "aria-selected", "true", "Failed source remains selected");
+        await assertAttribute(hostDecision, "aria-selected", "false", "Confirmed source clears");
+        if (acceptanceWrites.length !== 2 || acceptanceWrites[0].source !== "cve_host" || acceptanceWrites[1].source !== "policy_waiver") {
+          throw new Error(`Bulk must be sequential and exact: ${JSON.stringify(acceptanceWrites)}`);
+        }
+        await acceptanceBulk.getByRole("button", { name: "Renew 1 acceptance(s) 90 days" }).click();
+        await assertVisible(page.getByText("0 renewed; 1 failed; 0 ineligible.", { exact: false }), "Retry must not repeat successes");
+        if (acceptanceWrites.length !== 3 || acceptanceWrites[2].source !== "policy_waiver") throw new Error("Retry repeated successful renewal");
+        await acceptanceBulk.getByRole("button", { name: "Clear" }).click();
+        await policyDecision.click();
+        await policyTray.getByRole("button", { name: "Convert to POA&M" }).click();
+        await assertDisabled(policyTray.getByRole("button", { name: "Review conversion" }), "Empty conversion cannot send fabricated metadata");
+        await policyTray.getByRole("button", { name: "Cancel" }).click();
+        if (acceptanceWrites.length !== 3) throw new Error("Cancel wrote a decision");
+        await policyTray.getByRole("button", { name: "Convert to POA&M" }).click();
+        await policyTray.getByRole("textbox", { name: "Conversion title" }).fill("Real remediation");
+        await policyTray.getByRole("textbox", { name: "Conversion plan" }).fill("Apply approved configuration");
+        await policyTray.getByRole("textbox", { name: "Conversion owner" }).fill("Named owner");
+        await policyTray.getByRole("combobox", { name: "Conversion risk" }).selectOption("high");
+        await policyTray.getByLabel("Conversion due date").fill("2027-05-01");
+        await policyTray.getByRole("button", { name: "Review conversion" }).click();
+        if (acceptanceWrites.length !== 3) throw new Error("Review without confirmation wrote a decision");
+        await policyTray.getByRole("button", { name: "Confirm conversion" }).click();
+        await assertVisible(policyTray.getByText(`Converted to POA&M ${planId(91)}`), "Committed replacement must be read back");
+        if (acceptanceWrites.length !== 4) throw new Error("Confirmation must send one conversion");
+        await policyTray.getByRole("button", { name: "Close acceptance" }).click();
+        await hostDecision.click();
+        await hostTray.getByRole("button", { name: "Convert to POA&M" }).click();
+        await hostTray.getByRole("textbox", { name: "Conversion title" }).fill("Patch openssl");
+        await hostTray.getByRole("textbox", { name: "Conversion plan" }).fill("Deploy verified patch");
+        await hostTray.getByRole("combobox", { name: "Conversion assignee" }).selectOption(`user:${ids.owner}`);
+        await hostTray.getByRole("combobox", { name: "Conversion risk" }).selectOption("high");
+        await hostTray.getByLabel("Conversion due date").fill("2027-05-01");
+        await hostTray.getByRole("button", { name: "Review conversion" }).click();
+        if (acceptanceWrites.length !== 4) throw new Error("CVE review without confirmation wrote a decision");
+        await hostTray.getByRole("button", { name: "Confirm conversion" }).click();
+        await assertVisible(hostTray.getByText(`Converted to POA&M ${planId(92)}`), "CVE conversion must re-read committed replacement");
+        await hostTray.getByRole("button", { name: "Close acceptance" }).click();
+        if (acceptanceWrites.length !== 5) throw new Error("CVE conversion must issue one source-owned command");
         await page.getByRole("tab", { name: "Remediation plans" }).click();
         await assertAttribute(page.getByRole("tab", { name: "Remediation plans" }), "aria-selected", "true", "Plan type must be URL-backed");
         if (!new URL(page.url()).searchParams.has("kind")) throw new Error(`Plan type missing in URL: ${page.url()}`);
@@ -18817,6 +18934,7 @@ security.audit.enable = true;</fixtext>
         page.off("request", noteWrite);
         await page.unroute(listRoute);
         await page.unroute(acceptanceRoute);
+        await page.unroute(acceptanceCommand);
         await page.unroute(detailRoute);
         await page.unroute(transitionRoute);
         await page.unroute("**/api/v1/poams/assignees");

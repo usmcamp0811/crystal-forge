@@ -6,7 +6,7 @@
 use anyhow::anyhow;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 /// Selects one source family, or all source families when absent.
@@ -78,6 +78,8 @@ pub struct AcceptanceEntry {
     pub justification: String,
     /// Gives the actual CVE review date, if one was recorded. Waivers have none.
     pub review_date: Option<NaiveDate>,
+    /// Gives the independent policy-waiver review deadline after renewal.
+    pub review_due_at: Option<NaiveDate>,
     /// Gives the actual waiver authorization expiry, if set. CVEs have none.
     pub expires_at: Option<DateTime<Utc>>,
     /// Identifies the user who accepted the decision, if accepted.
@@ -90,6 +92,8 @@ pub struct AcceptanceEntry {
     pub retired_by: Option<Uuid>,
     /// Gives the source's recorded reason for CVE retirement.
     pub retirement_reason: Option<String>,
+    /// Identifies a plan only when a committed replacement link or event exists.
+    pub replacement_poam_id: Option<Uuid>,
     /// Gives the waiver creation time, or the CVE decision acceptance time.
     pub recorded_at: DateTime<Utc>,
 }
@@ -163,12 +167,14 @@ struct PageRow {
     canonical_package_name: Option<String>,
     justification: Option<String>,
     review_date: Option<NaiveDate>,
+    review_due_at: Option<NaiveDate>,
     expires_at: Option<DateTime<Utc>>,
     accepted_by: Option<Uuid>,
     accepted_at: Option<DateTime<Utc>>,
     retired_at: Option<DateTime<Utc>>,
     retired_by: Option<Uuid>,
     retirement_reason: Option<String>,
+    replacement_poam_id: Option<Uuid>,
     recorded_at: Option<DateTime<Utc>>,
 }
 
@@ -193,6 +199,39 @@ pub async fn list(
     actor_id: Uuid,
     query: &AcceptanceListQuery,
 ) -> Result<AcceptancePage, AcceptanceReadError> {
+    let (limit, offset) = validate(query)?;
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    let page = list_scoped_tx(&mut tx, actor_id, query, limit, offset).await?;
+    tx.commit().await?;
+    Ok(page)
+}
+
+/// Lists authorized decisions in the caller's repeatable-read, read-only snapshot.
+///
+/// SECURITY: The caller must authenticate `actor_id` and start a REPEATABLE READ
+/// READ ONLY transaction before any reads. This function rechecks current roles
+/// and memberships in that snapshot, alongside the rows and filtered total.
+/// The caller owns the transaction and may page through the full result in the
+/// same snapshot; this function does not commit or change its isolation level.
+/// Each page still has the normal 1..100 limit.
+///
+/// # Errors
+///
+/// Returns an error for an inactive or roleless actor, invalid bounds or status,
+/// or a database or projection failure. No decision or audit rows are changed.
+pub async fn list_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    actor_id: Uuid,
+    query: &AcceptanceListQuery,
+) -> Result<AcceptancePage, AcceptanceReadError> {
+    let (limit, offset) = validate(query)?;
+    list_scoped_tx(tx, actor_id, query, limit, offset).await
+}
+
+fn validate(query: &AcceptanceListQuery) -> Result<(i64, i64), AcceptanceReadError> {
     let limit = query.limit.unwrap_or(25);
     let offset = query.offset.unwrap_or(0);
     if !(1..=100).contains(&limit) {
@@ -204,21 +243,27 @@ pub async fn list(
     if !query.status.as_deref().is_none_or(|status| {
         matches!(
             status,
-            "pending" | "accepted" | "rejected" | "revoked" | "expired"
+            "pending" | "accepted" | "rejected" | "revoked" | "expired" | "accepted_or_converted"
         )
     }) {
         return Err(AcceptanceReadError::Validation("invalid acceptance status"));
     }
 
-    let mut tx = pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        .execute(&mut *tx)
-        .await?;
+    Ok((limit, offset))
+}
+
+async fn list_scoped_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    actor_id: Uuid,
+    query: &AcceptanceListQuery,
+    limit: i64,
+    offset: i64,
+) -> Result<AcceptancePage, AcceptanceReadError> {
     let roles: Vec<String> = sqlx::query_scalar(
         "SELECT role::text FROM user_role_assignments WHERE user_id=$1 AND EXISTS (SELECT 1 FROM users WHERE id=$1 AND is_active)",
     )
     .bind(actor_id)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
     if !roles
         .iter()
@@ -234,7 +279,7 @@ pub async fn list(
             "SELECT environment_id FROM user_environment_memberships WHERE user_id=$1",
         )
         .bind(actor_id)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await?
     };
     // SECURITY: Both source selection and actor scope precede LIMIT and COUNT.
@@ -247,33 +292,58 @@ pub async fn list(
             w.finding_id,f.system_id,NULL::uuid AS environment_id,
             f.policy_lineage_id,w.policy_version_id,
             NULL::text AS canonical_cve_id,NULL::text AS canonical_package_name,
-            w.justification,NULL::date AS review_date,w.expires_at,
+            w.justification,NULL::date AS review_date,w.review_due_at,w.expires_at,
             w.accepted_by,w.accepted_at,NULL::timestamptz AS retired_at,
             NULL::uuid AS retired_by,NULL::text AS retirement_reason,
-            w.created_at AS recorded_at
+            w.created_at AS recorded_at,replacement.poam_id AS replacement_poam_id
           FROM finding_waivers w JOIN poam_findings f ON f.id=w.finding_id
           JOIN systems waiver_host ON waiver_host.id=f.system_id
+          LEFT JOIN finding_waiver_poam_replacements replacement ON replacement.waiver_id=w.id
           WHERE $2 AND ($5::uuid IS NULL OR waiver_host.environment_id=$5)
             AND ($3::text IS NULL OR $3='policy_waiver')
-            AND ($4::text IS NULL OR w.status=$4)
+            AND ($4::text IS NULL OR w.status=$4
+              OR ($4='accepted_or_converted' AND (w.status IN ('accepted','expired')
+                OR replacement.waiver_id IS NOT NULL)))
           UNION ALL
           SELECT 'cve_host',d.id,NULL::timestamptz,d.state,NULL::uuid,d.system_id,NULL::uuid,
             NULL::uuid,NULL::uuid,d.canonical_cve_id::text,d.canonical_package_name,
-            d.justification,d.review_date,NULL::timestamptz,d.accepted_by,
-            d.accepted_at,d.retired_at,d.retired_by,d.retirement_reason,d.accepted_at
+             d.justification,d.review_date,NULL::date,NULL::timestamptz,d.accepted_by,
+             d.accepted_at,d.retired_at,d.retired_by,d.retirement_reason,d.accepted_at,
+             conversion.poam_id
           FROM cve_system_dispositions d JOIN systems s ON s.id=d.system_id
+          LEFT JOIN LATERAL (
+            SELECT (audit.metadata->>'poam_id')::uuid AS poam_id
+            FROM admin_audit_events audit
+            WHERE d.retirement_reason='converted_to_poam'
+              AND audit.action='cve_acceptance_converted'
+              AND audit.metadata->>'predecessor_id'=d.id::text
+              AND audit.metadata->>'source_type'='host'
+            ORDER BY audit.created_at DESC LIMIT 1
+          ) conversion ON TRUE
           WHERE d.state='accepted' AND ($3::text IS NULL OR $3='cve_host')
-            AND ($4::text IS NULL OR $4='accepted')
+            AND ($4::text IS NULL OR $4='accepted'
+              OR ($4='accepted_or_converted' AND (d.retired_at IS NULL OR conversion.poam_id IS NOT NULL)))
             AND ($2 OR s.environment_id=ANY($1))
             AND ($5::uuid IS NULL OR s.environment_id=$5)
           UNION ALL
           SELECT 'cve_environment',d.id,NULL::timestamptz,d.state,NULL::uuid,NULL::uuid,d.environment_id,
             NULL::uuid,NULL::uuid,d.canonical_cve_id::text,d.canonical_package_name,
-            d.justification,d.review_date,NULL::timestamptz,d.accepted_by,
-            d.accepted_at,d.retired_at,d.retired_by,d.retirement_reason,d.accepted_at
+             d.justification,d.review_date,NULL::date,NULL::timestamptz,d.accepted_by,
+             d.accepted_at,d.retired_at,d.retired_by,d.retirement_reason,d.accepted_at,
+             conversion.poam_id
           FROM cve_environment_dispositions d
+          LEFT JOIN LATERAL (
+            SELECT (audit.metadata->>'poam_id')::uuid AS poam_id
+            FROM admin_audit_events audit
+            WHERE d.retirement_reason='converted_to_poam'
+              AND audit.action='cve_acceptance_converted'
+              AND audit.metadata->>'predecessor_id'=d.id::text
+              AND audit.metadata->>'source_type'='environment'
+            ORDER BY audit.created_at DESC LIMIT 1
+          ) conversion ON TRUE
           WHERE d.state='accepted' AND ($3::text IS NULL OR $3='cve_environment')
-            AND ($4::text IS NULL OR $4='accepted')
+            AND ($4::text IS NULL OR $4='accepted'
+              OR ($4='accepted_or_converted' AND (d.retired_at IS NULL OR conversion.poam_id IS NOT NULL)))
             AND ($2 OR d.environment_id=ANY($1))
             AND ($5::uuid IS NULL OR d.environment_id=$5)
         ), total AS (SELECT count(*) AS total FROM decisions),
@@ -291,9 +361,8 @@ pub async fn list(
     .bind(query.environment_id)
     .bind(limit)
     .bind(offset)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
-    tx.commit().await?;
     let total = rows.first().map_or(0, |row| row.total);
     let items = rows
         .into_iter()
@@ -324,12 +393,14 @@ pub async fn list(
                     .justification
                     .ok_or_else(|| anyhow!("decision missing justification"))?,
                 review_date: row.review_date,
+                review_due_at: row.review_due_at,
                 expires_at: row.expires_at,
                 accepted_by: row.accepted_by,
                 accepted_at: row.accepted_at,
                 retired_at: row.retired_at,
                 retired_by: row.retired_by,
                 retirement_reason: row.retirement_reason,
+                replacement_poam_id: row.replacement_poam_id,
                 recorded_at: row
                     .recorded_at
                     .ok_or_else(|| anyhow!("decision missing timestamp"))?,
@@ -348,6 +419,153 @@ pub async fn list(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified disposable PG35457"]
+    async fn caller_snapshot_pages_full_authorized_register(pool: PgPool) {
+        let admin: Uuid = sqlx::query_scalar("INSERT INTO users(username,first_name,last_name,email) VALUES($1,'Admin','Reader',$2) RETURNING id")
+            .bind(format!("snap-a-{}", Uuid::new_v4()))
+            .bind(format!("snapshot-admin-{}@example.invalid", Uuid::new_v4()))
+            .fetch_one(&pool).await.unwrap();
+        let viewer: Uuid = sqlx::query_scalar("INSERT INTO users(username,first_name,last_name,email) VALUES($1,'Viewer','Reader',$2) RETURNING id")
+            .bind(format!("snap-v-{}", Uuid::new_v4()))
+            .bind(format!("snapshot-viewer-{}@example.invalid", Uuid::new_v4()))
+            .fetch_one(&pool).await.unwrap();
+        for (id, role) in [(admin, "admin"), (viewer, "viewer")] {
+            sqlx::query("INSERT INTO user_role_assignments(user_id,role) VALUES($1,$2::auth_role)")
+                .bind(id)
+                .bind(role)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let a: Uuid = sqlx::query_scalar("INSERT INTO environments(name) VALUES($1) RETURNING id")
+            .bind(format!("snapshot-a-{}", Uuid::new_v4()))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let b: Uuid = sqlx::query_scalar("INSERT INTO environments(name) VALUES($1) RETURNING id")
+            .bind(format!("snapshot-b-{}", Uuid::new_v4()))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO user_environment_memberships(user_id,environment_id) VALUES($1,$2)",
+        )
+        .bind(viewer)
+        .bind(a)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let host: Uuid = sqlx::query_scalar("INSERT INTO systems(hostname,public_key,derivation,environment_id) VALUES($1,$2,$2,$3) RETURNING id")
+            .bind(format!("snap-h-{}", Uuid::new_v4()))
+            .bind("snapshot-test-key").bind(a).fetch_one(&pool).await.unwrap();
+        let cve = "CVE-2099-12345";
+        sqlx::query("INSERT INTO cves(id) VALUES($1)")
+            .bind(cve)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let host_id: Uuid = sqlx::query_scalar("INSERT INTO cve_system_dispositions(canonical_cve_id,canonical_package_name,system_id,state,justification,accepted_by,accepted_at) VALUES($1,'openssl',$2,'accepted','host review',$3,now()) RETURNING id")
+            .bind(cve).bind(host).bind(admin).fetch_one(&pool).await.unwrap();
+        sqlx::query("INSERT INTO cve_environment_dispositions(canonical_cve_id,canonical_package_name,environment_id,state,justification,accepted_by,accepted_at) SELECT $1, 'snapshot-' || n, $2, 'accepted', 'environment review', $3, now() FROM generate_series(1, 102) n")
+            .bind(cve).bind(a).bind(admin).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO cve_environment_dispositions(canonical_cve_id,canonical_package_name,environment_id,state,justification,accepted_by,accepted_at) VALUES($1,'hidden',$2,'accepted','hidden review',$3,now())")
+            .bind(cve).bind(b).bind(admin).execute(&pool).await.unwrap();
+
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let environment_query = AcceptanceListQuery {
+            source: Some(AcceptanceSource::CveEnvironment),
+            limit: Some(100),
+            ..Default::default()
+        };
+        let first = list_tx(&mut tx, viewer, &environment_query).await.unwrap();
+        assert_eq!(first.total, 102);
+        assert_eq!(first.items.len(), 100);
+        assert!(first.has_more);
+        let last = list_tx(
+            &mut tx,
+            viewer,
+            &AcceptanceListQuery {
+                offset: Some(100),
+                ..environment_query
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(last.total, 102);
+        assert_eq!(last.items.len(), 2);
+        assert!(!last.has_more);
+        assert!(first.items.iter().chain(&last.items).all(|row| {
+            row.source == AcceptanceSource::CveEnvironment && row.environment_id == Some(a)
+        }));
+        let host_page = list_tx(
+            &mut tx,
+            viewer,
+            &AcceptanceListQuery {
+                source: Some(AcceptanceSource::CveHost),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(host_page.total, 1);
+        assert_eq!(host_page.items[0].source_id, host_id);
+        assert_eq!(host_page.items[0].system_id, Some(host));
+        assert_eq!(
+            list_tx(
+                &mut tx,
+                viewer,
+                &AcceptanceListQuery {
+                    source: Some(AcceptanceSource::CveHost),
+                    environment_id: Some(b),
+                    ..Default::default()
+                }
+            )
+            .await
+            .unwrap()
+            .total,
+            0
+        );
+        let combined = list_tx(&mut tx, viewer, &AcceptanceListQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(combined.total, 103);
+        assert_eq!(
+            list_tx(&mut tx, admin, &AcceptanceListQuery::default())
+                .await
+                .unwrap()
+                .total,
+            104
+        );
+
+        sqlx::query("INSERT INTO cve_environment_dispositions(canonical_cve_id,canonical_package_name,environment_id,state,justification,accepted_by,accepted_at) VALUES($1,'later',$2,'accepted','later review',$3,now())")
+            .bind(cve).bind(a).bind(admin).execute(&pool).await.unwrap();
+        sqlx::query("DELETE FROM user_environment_memberships WHERE user_id=$1")
+            .bind(viewer)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE users SET is_active=false WHERE id=$1")
+            .bind(viewer)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let unchanged = list_tx(&mut tx, viewer, &AcceptanceListQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(unchanged.total, 103);
+        assert_eq!(unchanged.items[0].source_id, combined.items[0].source_id);
+        assert!(matches!(
+            list(&pool, viewer, &AcceptanceListQuery::default()).await,
+            Err(AcceptanceReadError::Forbidden)
+        ));
+        tx.commit().await.unwrap();
+    }
 
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires verified disposable PG35457"]

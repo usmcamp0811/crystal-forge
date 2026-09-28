@@ -1,22 +1,26 @@
 //! Authenticated, page-backed POA&M register.
 //!
 //! All counts and scope memberships here describe loaded pages only. Risk
-//! acceptance decisions are not POA&Ms and have no register reader yet.
+//! acceptance decisions remain owned by their source services.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{Days, NaiveDate, Utc};
 use dioxus::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use std::rc::Rc;
 use uuid::Uuid;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::{JsCast, closure::Closure};
 
 use crate::components::poam::PoamDetailHost;
 use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
 use crate::views::poam_api::{
-    self, AcceptanceEntry, AcceptanceSource, PoamApiError, PoamAssigneeCatalog,
-    PoamAssigneeRequest, PoamAssigneeView, PoamListQuery, PoamRegisterSummary, PoamRisk,
-    PoamStatus, TransitionPoamRequest, UpdatePoamRequest,
+    self, AcceptanceEntry, AcceptanceSource, CreatePoamRequest, FleetCvePoamRequest, PoamApiError,
+    PoamAssigneeCatalog, PoamAssigneeRequest, PoamAssigneeView, PoamListQuery, PoamRegisterSummary,
+    PoamRisk, PoamStatus, TransitionPoamRequest, UpdatePoamRequest,
 };
 
 const MAX_BULK_PLANS: usize = 100;
@@ -611,51 +615,345 @@ fn acceptance_subject(item: &AcceptanceEntry) -> String {
     }
 }
 
+type AcceptanceId = (AcceptanceSource, Uuid);
+
+fn acceptance_id(item: &AcceptanceEntry) -> AcceptanceId {
+    (item.source, item.source_id)
+}
+
+fn renewable(item: &AcceptanceEntry, operator: bool, admin: bool) -> bool {
+    item.status == "accepted"
+        && item.retired_at.is_none()
+        && item.replacement_poam_id.is_none()
+        && match item.source {
+            AcceptanceSource::PolicyWaiver => {
+                admin
+                    && item.waiver_updated_at.is_some()
+                    && item.expires_at.is_none_or(|expiry| expiry > Utc::now())
+            }
+            AcceptanceSource::CveHost | AcceptanceSource::CveEnvironment => operator,
+        }
+}
+
+async fn refresh_acceptances(
+    count: usize,
+    environment_id: Option<Uuid>,
+) -> Result<(Vec<AcceptanceEntry>, i64, bool), PoamApiError> {
+    let mut items = Vec::new();
+    let mut total = 0;
+    let mut more = false;
+    for offset in (0..count.div_ceil(100).max(1)).map(|page| (page * 100) as i64) {
+        let page = poam_api::list_acceptances(offset, environment_id).await?;
+        total = page.total;
+        more = page.has_more;
+        items.extend(page.items);
+        if !more {
+            break;
+        }
+    }
+    let mut seen = BTreeSet::new();
+    items.retain(|entry| seen.insert(acceptance_id(entry)));
+    Ok((items, total, more))
+}
+
 #[component]
-fn AcceptanceRegister(location: RegisterLocation) -> Element {
+fn AcceptanceTray(
+    entry: AcceptanceEntry,
+    operator: bool,
+    admin: bool,
+    catalog: Option<PoamAssigneeCatalog>,
+    on_close: EventHandler<()>,
+    on_changed: EventHandler<()>,
+) -> Element {
+    let mut converting = use_signal(|| false);
+    let mut confirming = use_signal(|| false);
+    let mut busy = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+    let mut title = use_signal(String::new);
+    let mut plan = use_signal(String::new);
+    let mut owner = use_signal(String::new);
+    let mut assignee = use_signal(String::new);
+    let mut risk = use_signal(String::new);
+    let mut due = use_signal(String::new);
+    let mut reuse = use_signal(String::new);
+    #[cfg(target_arch = "wasm32")]
+    {
+        let listener = use_hook(move || {
+            let callback = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
+                move |event: web_sys::KeyboardEvent| {
+                    if event.key() == "Escape" && !*busy.peek() {
+                        on_close.call(());
+                    }
+                },
+            );
+            if let Some(window) = web_sys::window() {
+                let _ = window
+                    .add_event_listener_with_callback("keydown", callback.as_ref().unchecked_ref());
+            }
+            Rc::new(callback)
+        });
+        let remove = listener.clone();
+        use_drop(move || {
+            if let Some(window) = web_sys::window() {
+                let _ = window.remove_event_listener_with_callback(
+                    "keydown",
+                    remove.as_ref().as_ref().unchecked_ref(),
+                );
+            }
+        });
+    }
+    let active = (entry.status == "accepted"
+        || (entry.source == AcceptanceSource::PolicyWaiver && entry.status == "expired"))
+        && entry.retired_at.is_none()
+        && entry.replacement_poam_id.is_none();
+    let can_renew = renewable(&entry, operator, admin);
+    let can_convert = active
+        && match entry.source {
+            AcceptanceSource::PolicyWaiver => admin && entry.waiver_updated_at.is_some(),
+            _ => operator,
+        };
+    let date = NaiveDate::parse_from_str(&due(), "%Y-%m-%d")
+        .ok()
+        .filter(|d| *d >= Utc::now().date_naive());
+    let parsed_risk = match risk().as_str() {
+        "high" => Some(PoamRisk::High),
+        "medium" => Some(PoamRisk::Medium),
+        "low" => Some(PoamRisk::Low),
+        _ => None,
+    };
+    let typed = catalog
+        .as_ref()
+        .and_then(|c| assignee_from_catalog(&assignee(), c));
+    let reuse_id = if reuse().trim().is_empty() {
+        Some(None)
+    } else {
+        Uuid::parse_str(reuse().trim()).ok().map(Some)
+    };
+    let valid = !title().trim().is_empty()
+        && !plan().trim().is_empty()
+        && date.is_some()
+        && parsed_risk.is_some()
+        && reuse_id.is_some()
+        && match entry.source {
+            AcceptanceSource::PolicyWaiver => !owner().trim().is_empty() || typed.is_some(),
+            _ => {
+                typed
+                    .as_ref()
+                    .is_some_and(|choice| !matches!(choice, PoamAssigneeRequest::Unassigned))
+                    && reuse_id == Some(None)
+            }
+        };
+    let validation = if !valid {
+        "Provide title, remediation plan, future due date, risk and a valid owner or typed assignee. CVE plans require a selected user or group; only policy plans can reuse a compatible plan UUID."
+    } else {
+        "Review the metadata before confirming. The source service checks current evidence and compatibility."
+    };
+    let label = match entry.source {
+        AcceptanceSource::PolicyWaiver => "Policy waiver",
+        AcceptanceSource::CveHost => "Host CVE",
+        AcceptanceSource::CveEnvironment => "Environment CVE",
+    };
+    let source = entry.source_id;
+    let approved = entry
+        .accepted_at
+        .map(|at| at.to_string())
+        .unwrap_or_else(|| "Not recorded".into());
+    let review = entry
+        .review_due_at
+        .or(entry.review_date)
+        .map(|d| d.to_string())
+        .unwrap_or_else(|| "Not set".into());
+    let conversion_owner = if entry.source == AcceptanceSource::PolicyWaiver {
+        owner()
+    } else {
+        assignee()
+    };
+    let entry_renew = entry.clone();
+    let entry_convert = entry.clone();
+    rsx! {
+        div { class: "poam-tray-backdrop", onclick: move |_| if !busy() { on_close.call(()); } }
+        aside { class: "fl-tray poam-tray", role: "dialog", aria_label: "Risk acceptance {source}",
+            header { class: "fl-tray-head",
+                div { h2 { "{label} · {source}" } small { "{entry.status}" } }
+                button { r#type: "button", class: "btn-icon focus-ring", aria_label: "Close acceptance", disabled: busy(), onclick: move |_| on_close.call(()), "×" }
+            }
+            div { style: "overflow:auto; flex:1; padding:18px;",
+                div { class: "poam-meta",
+                    div { span { "Source ID" } b { class: "mono", "{source}" } }
+                    div { span { "Approved" } b { "{approved}" } }
+                    div { span { "Review by" } b { "{review}" } }
+                    if let Some(expiry) = entry.expires_at { div { span { "Policy authorization expires" } b { "{expiry}" } } }
+                }
+                section { h3 { "Original justification" } p { "{entry.justification}" } }
+                section { h3 { "Decision scope and evidence" } p { class: "mono", "{acceptance_subject(&entry)}" }
+                    if let Some(host) = entry.system_id { p { "Host {host}" } }
+                    if let Some(env) = entry.environment_id { p { "Environment {env}" } }
+                    p { "Original decision {entry.recorded_at}" }
+                }
+                if let Some(id) = entry.replacement_poam_id { p { "Converted to POA&M {id}" } }
+                if let Some(reason) = &entry.retirement_reason { p { "Retired: {reason}" } }
+                if converting() && can_convert {
+                    section { aria_label: "Conversion metadata",
+                        h3 { "Convert to POA&M" }
+                        p { "The source service verifies the original finding. Conversion does not change technical evidence." }
+                        label { "Title" input { aria_label: "Conversion title", class: "input", value: "{title()}", oninput: move |e| { title.set(e.value()); confirming.set(false); } } }
+                        label { "Remediation plan" textarea { aria_label: "Conversion plan", class: "input", value: "{plan()}", oninput: move |e| { plan.set(e.value()); confirming.set(false); } } }
+                        if entry.source == AcceptanceSource::PolicyWaiver { label { "Owner" input { aria_label: "Conversion owner", class: "input", value: "{owner()}", oninput: move |e| { owner.set(e.value()); confirming.set(false); } } } }
+                        label { "Assignee" select { aria_label: "Conversion assignee", class: "cfgx-select", value: "{assignee()}", onchange: move |e| { assignee.set(e.value()); confirming.set(false); },
+                            option { value: "", "Select assignee" }
+                            if entry.source == AcceptanceSource::PolicyWaiver { option { value: "unassigned", "Explicitly unassigned" } }
+                            if let Some(c) = &catalog { for person in &c.people { option { value: "user:{person.user_id}", "{person.label}" } } for group in &c.groups { option { value: "group:{group.group_name}", "Group: {group.group_name}" } } }
+                        } }
+                        label { "Risk" select { aria_label: "Conversion risk", class: "cfgx-select", value: "{risk()}", onchange: move |e| { risk.set(e.value()); confirming.set(false); }, option { value: "", "Select risk" } option { value: "high", "CAT I" } option { value: "medium", "CAT II" } option { value: "low", "CAT III" } } }
+                        label { "Target date" input { r#type: "date", aria_label: "Conversion due date", class: "input", value: "{due()}", oninput: move |e| { due.set(e.value()); confirming.set(false); } } }
+                        if entry.source == AcceptanceSource::PolicyWaiver { label { "Reuse compatible plan UUID (optional)" input { aria_label: "Reuse plan UUID", class: "input", value: "{reuse()}", oninput: move |e| { reuse.set(e.value()); confirming.set(false); } } } }
+                        p { role: "status", "{validation}" }
+                    }
+                    if confirming() && valid { section { aria_label: "Confirm conversion metadata",
+                        h3 { "Confirm replacement" }
+                        p { "{title()} · {plan()} · {risk()} · due {due()}" }
+                        p { "Owner: {conversion_owner}" }
+                        if let Some(id) = reuse_id.flatten() { p { "Reuse compatible plan {id}" } }
+                    } }
+                }
+                if let Some(reason) = error() { p { role: "alert", "{label} {source}: {reason}" } }
+            }
+            footer { class: "rr-tray-foot",
+                if can_renew { button { r#type: "button", class: "btn btn-ghost focus-ring", disabled: busy(), onclick: move |_| { busy.set(true); error.set(None); let entry = entry_renew.clone(); spawn(async move {
+                    match poam_api::renew_acceptance(&entry).await { Ok(_) => on_changed.call(()), Err(err) => error.set(Some(err.to_string())) }
+                    busy.set(false);
+                }); }, "Re-review · renew 90 days" } }
+                if can_convert && !converting() { button { r#type: "button", class: "btn btn-ghost focus-ring", onclick: move |_| converting.set(true), "Convert to POA&M" } }
+                if converting() { button { r#type: "button", class: "btn btn-ghost focus-ring", disabled: busy(), onclick: move |_| { converting.set(false); confirming.set(false); }, "Cancel" }
+                    if !confirming() { button { r#type: "button", class: "btn btn-primary focus-ring", disabled: !valid || busy(), onclick: move |_| confirming.set(true), "Review conversion" } }
+                    else { button { r#type: "button", class: "btn btn-primary focus-ring", disabled: !valid || busy(), onclick: move |_| {
+                        let Some((date, risk, reuse_id)) = date.zip(parsed_risk).zip(reuse_id).map(|((d, r), id)| (d, r, id)) else { return; };
+                        let title = title().trim().to_string(); let plan = plan().trim().to_string(); let owner = owner().trim().to_string();
+                        let assignee = typed.clone(); let entry = entry_convert.clone();
+                        busy.set(true); error.set(None);
+                        spawn(async move {
+                            let result = match entry.source {
+                                AcceptanceSource::PolicyWaiver => poam_api::convert_acceptance(&entry, &CreatePoamRequest {
+                                    assessment_id: None, finding_id: None, observation: None, title, plan, owner,
+                                    assignee, target_date: Some(date), risk, default_milestones: true, assignment_version_ids: Vec::new(),
+                                }, reuse_id).await,
+                                _ => match assignee {
+                                    Some(assignee @ (PoamAssigneeRequest::User { .. } | PoamAssigneeRequest::OidcGroup { .. })) => {
+                                        poam_api::convert_acceptance(&entry, &FleetCvePoamRequest {
+                                            title, plan, assignee, target_date: date,
+                                            risk, default_milestones: true,
+                                        }, None).await
+                                    }
+                                    _ => Err(PoamApiError::Deserialize("Choose a user or group assignee for CVE remediation".into())),
+                                },
+                            };
+                            match result { Ok(_) => on_changed.call(()), Err(err) => error.set(Some(err.to_string())) }
+                            busy.set(false);
+                        });
+                    }, "Confirm conversion" } }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn AcceptanceRegister(
+    location: RegisterLocation,
+    refresh: Signal<u64>,
+    catalog: Option<PoamAssigneeCatalog>,
+) -> Element {
+    let app = use_context::<Signal<AppState>>();
+    let auth_context = app.read().auth.clone();
+    let operator = auth::is_operator_or_above(&auth_context);
+    let admin = auth::is_admin(&auth_context);
     let mut rows = use_signal(Vec::<AcceptanceEntry>::new);
     let mut total = use_signal(|| 0_i64);
     let mut has_more = use_signal(|| false);
     let mut loading = use_signal(|| true);
     let mut error = use_signal(|| None::<String>);
     let mut loaded_scope = use_signal(String::new);
+    let mut selected = use_signal(BTreeSet::<AcceptanceId>::new);
+    let mut opened = use_signal(|| None::<AcceptanceId>);
+    let mut busy = use_signal(|| false);
+    let mut outcome = use_signal(|| None::<String>);
     let environment_id = match location.scope {
         Some(Scope::Environment(id)) => Some(id),
         _ => None,
     };
     let scope_key = location.selection_key();
-    use_effect(use_reactive(&scope_key, move |key| {
-        loaded_scope.set(key.clone());
-        rows.set(Vec::new());
-        total.set(0);
-        has_more.set(false);
-        error.set(None);
-        loading.set(true);
-        spawn(async move {
-            let result = poam_api::list_acceptances(0, environment_id).await;
-            if *loaded_scope.peek() != key {
-                return;
+    use_effect(use_reactive(
+        &(scope_key, refresh()),
+        move |(key, generation)| {
+            let changed_scope = *loaded_scope.peek() != key;
+            loaded_scope.set(key.clone());
+            if changed_scope {
+                rows.set(Vec::new());
+                total.set(0);
+                has_more.set(false);
+                selected.set(BTreeSet::new());
+                opened.set(None);
             }
-            match result {
-                Ok(page) => {
-                    total.set(page.total);
-                    has_more.set(page.has_more);
-                    rows.set(page.items);
+            error.set(None);
+            loading.set(true);
+            spawn(async move {
+                let result = refresh_acceptances(
+                    if changed_scope { 0 } else { rows.peek().len() },
+                    environment_id,
+                )
+                .await;
+                if *loaded_scope.peek() != key || *refresh.peek() != generation {
+                    return;
                 }
-                Err(err) => error.set(Some(err.to_string())),
-            }
-            loading.set(false);
-        });
-    }));
+                match result {
+                    Ok((items, count, more)) => {
+                        total.set(count);
+                        has_more.set(more);
+                        rows.set(items);
+                    }
+                    Err(err) => error.set(Some(err.to_string())),
+                }
+                loading.set(false);
+            });
+        },
+    ));
     let loaded = rows();
     let shown: Vec<_> = loaded
         .iter()
         .filter(|item| acceptance_in_scope(item, location.scope))
         .cloned()
         .collect();
+    let chosen = selected();
+    let batch: Vec<_> = loaded
+        .iter()
+        .filter(|item| chosen.contains(&acceptance_id(item)))
+        .cloned()
+        .collect();
+    let eligible: Vec<_> = batch
+        .iter()
+        .filter(|item| renewable(item, operator, admin))
+        .cloned()
+        .collect();
+    let opened_entry = opened().and_then(|id| {
+        loaded
+            .iter()
+            .find(|item| acceptance_id(item) == id)
+            .cloned()
+    });
     let partial_scope = matches!(
         location.scope,
         Some(Scope::System(_) | Scope::Owner(_) | Scope::Bundle(_))
+    );
+    let export_scope = environment_id
+        .map(|id| format!("&environment_id={id}"))
+        .unwrap_or_default();
+    let export_csv = format!(
+        "{}/acceptances/export?format=csv&status=accepted_or_converted{export_scope}",
+        crate::api::client::base_url()
+    );
+    let export_xlsx = format!(
+        "{}/acceptances/export?format=xlsx&status=accepted_or_converted{export_scope}",
+        crate::api::client::base_url()
     );
     rsx! {
         section { class: "card poams-main", aria_label: "Risk acceptances",
@@ -666,9 +964,7 @@ fn AcceptanceRegister(location: RegisterLocation) -> Element {
                     if partial_scope { " - this scope is partial across pages" }
                 }
             }
-            p { class: "poam-muted", style: "padding: 10px 18px;",
-                "These decisions belong to their policy-waiver or CVE service. Renewal and conversion are not yet available here; opening or filtering cannot change a decision."
-            }
+            p { class: "poam-muted", style: "padding: 10px 18px;", "Plain click opens the decision without writing. Ctrl/Cmd selects a source decision for bounded re-review." }
             if loading() && loaded.is_empty() { p { class: "poams-notice", role: "status", "Loading accepted decisions..." } }
             if let Some(message) = error() { p { class: "poams-notice", role: "alert", "Could not load risk acceptances: {message}" } }
             if !loading() && error().is_none() && shown.is_empty() {
@@ -679,21 +975,38 @@ fn AcceptanceRegister(location: RegisterLocation) -> Element {
                     table { class: "sys-table compact sys-table-dense poams-table",
                         thead { tr { th { "SOURCE" } th { "SUBJECT" } th { "DECISION" } th { "REVIEW / EXPIRY" } } }
                         tbody { for item in shown {
-                            tr { key: "{item.source:?}:{item.source_id}",
+                            tr { key: "{item.source:?}:{item.source_id}", class: if chosen.contains(&acceptance_id(&item)) { "selectable row-checked" } else { "selectable" },
+                                aria_selected: if chosen.contains(&acceptance_id(&item)) { "true" } else { "false" }, tabindex: "0",
+                                onclick: { let item = item.clone(); move |e: MouseEvent| {
+                                    let id = acceptance_id(&item);
+                                    if e.modifiers().ctrl() || e.modifiers().meta() {
+                                        let mut ids = selected(); if !ids.insert(id) { ids.remove(&id); } selected.set(ids);
+                                    } else { opened.set(Some(id)); }
+                                } },
+                                onkeydown: { let item = item.clone(); move |e: KeyboardEvent| if e.key() == Key::Enter { opened.set(Some(acceptance_id(&item))); } },
                                 td { class: "mono", "{item.source_id}" }
                                 td {
                                     strong { {match item.source { AcceptanceSource::PolicyWaiver => "Policy waiver", AcceptanceSource::CveHost => "Host CVE", AcceptanceSource::CveEnvironment => "Environment CVE" }} }
                                     small { class: "mono", "{acceptance_subject(&item)}" }
                                     small { if let Some(host) = item.system_id { "Host {host}" } else if let Some(env) = item.environment_id { "Environment {env}" } }
                                 }
-                                td { "{item.justification}" small { if item.retired_at.is_some() { "Historical decision (retired)" } else { "Accepted decision" } } }
-                                td { if let Some(date) = item.review_date { "Review {date}" }
-                                    else if let Some(expiry) = item.expires_at { "Authorization expires {expiry}" }
+                                td { "{item.justification}" small { if let Some(poam_id) = item.replacement_poam_id { "Converted to POA&M {poam_id}" }
+                                    else if item.retired_at.is_some() { "Historical decision (retired)" }
+                                    else { "{item.status}" } } }
+                                td { if let Some(date) = item.review_due_at.or(item.review_date) { "Review {date}" }
                                     else { "No review date recorded" }
+                                    if let Some(expiry) = item.expires_at { small { "Authorization expires {expiry}" } }
                                 }
                             }
                         } }
                     }
+                }
+            }
+            if !partial_scope {
+                div { class: "poams-scope", role: "group", aria_label: "Export risk acceptances",
+                    span { "Download all authorized decisions matching this server scope (up to 1,000; not just loaded pages):" }
+                    a { class: "btn btn-ghost xs focus-ring", href: "{export_csv}", "CSV" }
+                    a { class: "btn btn-ghost xs focus-ring", href: "{export_xlsx}", "Excel XLSX" }
                 }
             }
             if has_more() { button { r#type: "button", class: "btn btn-ghost focus-ring poams-more", disabled: loading(), onclick: move |_| {
@@ -710,6 +1023,33 @@ fn AcceptanceRegister(location: RegisterLocation) -> Element {
                     loading.set(false);
                 });
             }, "Load more accepted decisions" } }
+            if !chosen.is_empty() { div { class: "bulk-bar poams-bulk", role: "group", aria_label: "Selected risk acceptances",
+                span { "{chosen.len()} source decisions selected" }
+                button { r#type: "button", class: "btn btn-ghost xs focus-ring", disabled: busy() || chosen.len() > 100 || eligible.is_empty() || loading(), onclick: move |_| {
+                    let targets = eligible.clone(); let selected_before = selected(); let scope = location.selection_key();
+                    busy.set(true); outcome.set(None);
+                    spawn(async move {
+                        let mut succeeded = BTreeSet::new(); let mut failures = Vec::new();
+                        for item in &targets {
+                            let result = poam_api::renew_acceptance(item).await;
+                            if *loaded_scope.peek() != scope { busy.set(false); return; }
+                            match result { Ok(_) => { succeeded.insert(acceptance_id(item)); }, Err(err) => failures.push(format!("{} {}: {err}", item.source.key(), item.source_id)) }
+                        }
+                        selected.set(selected_before.difference(&succeeded).copied().collect());
+                        let ineligible = selected_before.len() - targets.len();
+                        outcome.set(Some(format!("{} renewed; {} failed; {} ineligible. Failed and ineligible IDs remain selected. {}", succeeded.len(), failures.len(), ineligible, failures.join("; "))));
+                        if !succeeded.is_empty() { refresh.set(refresh().wrapping_add(1)); }
+                        busy.set(false);
+                    });
+                }, "Renew {eligible.len()} acceptance(s) 90 days" }
+                button { r#type: "button", class: "btn btn-ghost xs focus-ring", disabled: busy(), onclick: move |_| { selected.set(BTreeSet::new()); outcome.set(None); }, "Clear" }
+                if chosen.len() > 100 { span { "Select at most 100 source identities." } }
+                if eligible.len() != batch.len() { span { "{batch.len() - eligible.len()} ineligible loaded decisions will not be renewed." } }
+            } }
+            if let Some(result) = outcome() { p { role: "status", "{result}" } }
+            if let Some(entry) = opened_entry { AcceptanceTray { key: "{entry.source:?}:{entry.source_id}", entry, operator, admin, catalog,
+                on_close: move |_| opened.set(None), on_changed: move |_| { refresh.set(refresh().wrapping_add(1)); }
+            } }
         }
     }
 }
@@ -757,35 +1097,46 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
     let mut bulk_outcome = use_signal(|| None::<BulkOutcome>);
     let mut refresh_error = use_signal(|| None::<String>);
     let mut loaded_scope = use_signal(String::new);
+    let mut refresh = use_signal(|| 0_u64);
     let nav = use_navigator();
     let detail_id = location.poam;
 
     // CONCURRENCY: A URL scope change can finish after a previous list request.
     // Discard that response so it cannot replace the new scope's rows.
     let scope_key = location.selection_key();
-    use_effect(use_reactive(&scope_key, move |key| {
-        loaded_scope.set(key.clone());
-        rows.set(Vec::new());
-        next.set(None);
-        selected.write().clear();
-        anchor.set(None);
-        error.set(None);
-        loading.set(true);
-        spawn(async move {
-            let result = poam_api::list_poam_register(&location.list_query(0)).await;
-            if *loaded_scope.peek() != key {
-                return;
+    use_effect(use_reactive(
+        &(scope_key, refresh()),
+        move |(key, generation)| {
+            let changed_scope = *loaded_scope.peek() != key;
+            loaded_scope.set(key.clone());
+            if changed_scope {
+                rows.set(Vec::new());
+                next.set(None);
+                selected.write().clear();
+                anchor.set(None);
             }
-            match result {
-                Ok(page) => {
-                    rows.set(page.items);
-                    next.set(page.next_offset);
+            error.set(None);
+            loading.set(true);
+            spawn(async move {
+                let result = refresh_loaded_pages(
+                    location,
+                    if changed_scope { 0 } else { rows.peek().len() },
+                )
+                .await;
+                if *loaded_scope.peek() != key || *refresh.peek() != generation {
+                    return;
                 }
-                Err(err) => error.set(Some(err.to_string())),
-            }
-            loading.set(false);
-        });
-    }));
+                match result {
+                    Ok((items, cursor)) => {
+                        rows.set(items);
+                        next.set(cursor);
+                    }
+                    Err(err) => error.set(Some(err.to_string())),
+                }
+                loading.set(false);
+            });
+        },
+    ));
     use_future(move || async move {
         if !viewer {
             match poam_api::fetch_assignee_catalog().await {
@@ -840,6 +1191,34 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
     let today = Utc::now().date_naive();
     let loaded = rows();
     let has_more = next().is_some();
+    // The server has no equivalent of the loaded-only queue/search or Mine
+    // filter. It does support active/completed status and risk; never offer a
+    // file as if it represented unsupported client-side selections.
+    let export_plans = location.scope.is_none()
+        && location.queue.is_none()
+        && !mine()
+        && search().trim().is_empty();
+    let server_status = match status().as_str() {
+        "active" => Some("active"),
+        "closed" => Some("completed"),
+        _ => None,
+    };
+    let plan_filters = format!(
+        "{}{}",
+        server_status.map(|value| format!("&status={value}")).unwrap_or_default(),
+        if risk() == "all" { String::new() } else { format!("&risk={}", risk()) }
+    );
+    let mixed_filters = format!(
+        "{}{}",
+        server_status.map(|value| format!("&poam_status={value}")).unwrap_or_default(),
+        if risk() == "all" { String::new() } else { format!("&poam_risk={}", risk()) }
+    );
+    let plan_export_csv = format!("{}/poams/export?format=csv{plan_filters}", crate::api::client::base_url());
+    let plan_export_xlsx = format!("{}/poams/export?format=xlsx{plan_filters}", crate::api::client::base_url());
+    let mixed_export = format!(
+        "{}/register/export?acceptance_status=accepted_or_converted{mixed_filters}&format=",
+        crate::api::client::base_url()
+    );
     let page_label = if loading() {
         "loading page; total unknown"
     } else if error().is_some() {
@@ -1065,7 +1444,16 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
                     button { r#type: "button", role: "tab", class: if location.kind == kind { "rr-kind active focus-ring" } else { "rr-kind focus-ring" }, aria_selected: if location.kind == kind { "true" } else { "false" }, onclick: move |_| { nav.push(Route::PoamsView { query: RegisterLocation { kind, queue: if kind == Tab::Acceptances { None } else { location.queue }, poam: None, ..location }.query() }); }, "{label}" }
                 }
             }
-            if location.kind != Tab::Plans { AcceptanceRegister { key: "acceptances-{location.selection_key()}", location } }
+            if location.kind == Tab::Everything && export_plans {
+                div { class: "poams-scope", role: "group", aria_label: "Export full register",
+                    span { "Download all authorized plans matching the selected status and risk, plus accepted, expired or converted decisions (up to 1,000 total; not just loaded pages):" }
+                    a { class: "btn btn-ghost xs focus-ring", href: "{mixed_export}oscal-json", "OSCAL JSON" }
+                    a { class: "btn btn-ghost xs focus-ring", href: "{mixed_export}xlsx", "Excel XLSX" }
+                    a { class: "btn btn-ghost xs focus-ring", href: "{mixed_export}csv", "CSV" }
+                    a { class: "btn btn-ghost xs focus-ring", href: "{mixed_export}oscal-xml", "OSCAL XML" }
+                }
+            }
+            if location.kind != Tab::Plans { AcceptanceRegister { key: "acceptances-{location.selection_key()}", location, refresh, catalog: catalog() } }
             if location.kind != Tab::Acceptances {
                 div { class: "pv-queues", role: "group", aria_label: "Work queues",
                     for q in [Queue::Overdue, Queue::Soon, Queue::Awaiting, Queue::Blocked, Queue::Quiet, Queue::Unassigned] {
@@ -1118,6 +1506,11 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
                         label { input { r#type: "checkbox", checked: owner_column(), onchange: move |e| owner_column.set(e.checked()) } "Owner" }
                     }
                     p { class: "poam-muted", "Search, sort, grouping, scope and queue filters apply to loaded pages. Ctrl/Cmd toggles a row; Shift adds the range in the displayed order." }
+                    if export_plans { div { class: "poams-scope", role: "group", aria_label: "Export remediation plans",
+                        span { "Download all authorized plans matching the selected status and risk, including pages not loaded here (up to 1,000):" }
+                        a { class: "btn btn-ghost xs focus-ring", href: "{plan_export_csv}", "CSV" }
+                        a { class: "btn btn-ghost xs focus-ring", href: "{plan_export_xlsx}", "Excel XLSX" }
+                    } }
                     if loading() && available == 0 { div { class: "poams-notice", role: "status", "Loading plans..." } }
                     if let Some(err) = error() { div { class: "poams-notice", role: "alert", "Could not load plans: {err}" } }
                     if !loading() && matching == 0 && error().is_none() { div { class: "poams-notice", "No matching plans in loaded pages." } }

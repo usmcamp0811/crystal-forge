@@ -507,6 +507,24 @@ pub async fn list(
     is_admin: bool,
     environment_ids: &[Uuid],
 ) -> Result<Page<PoamSummary>> {
+    let mut tx = pool.begin().await?;
+    let page = list_tx(&mut tx, query, today, is_admin, environment_ids).await?;
+    tx.commit().await?;
+    Ok(page)
+}
+
+/// Loads one visible POA&M page inside the caller's transaction.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode the query.
+pub async fn list_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    query: &PoamListQuery,
+    today: NaiveDate,
+    is_admin: bool,
+    environment_ids: &[Uuid],
+) -> Result<Page<PoamSummary>> {
     let limit = query.limit.unwrap_or(25).clamp(1, 100);
     let offset = query.offset.unwrap_or(0).max(0);
     let mut builder = QueryBuilder::<Postgres>::new("SELECT ");
@@ -522,7 +540,11 @@ pub async fn list(
         .push_bind(environment_ids)
         .push(")) ");
     if let Some(status) = query.status.as_deref() {
-        builder.push(" AND p.status = ").push_bind(status);
+        if status == "active" {
+            builder.push(" AND p.status <> 'completed' ");
+        } else {
+            builder.push(" AND p.status = ").push_bind(status);
+        }
     }
     if let Some(risk) = query.risk.as_deref() {
         builder.push(" AND p.risk = ").push_bind(risk);
@@ -599,7 +621,7 @@ pub async fn list(
         .push_bind(offset);
     let mut items = builder
         .build_query_as::<PoamSummary>()
-        .fetch_all(pool)
+        .fetch_all(&mut **tx)
         .await?;
     let has_more = items.len() as i64 > limit;
     if has_more {
@@ -640,6 +662,23 @@ struct RegisterContext {
 /// Returns a database error if the register context cannot be loaded.
 pub async fn register_page(
     pool: &PgPool,
+    page: Page<PoamSummary>,
+    is_admin: bool,
+    environment_ids: &[Uuid],
+) -> Result<Page<PoamRegisterSummary>> {
+    let mut tx = pool.begin().await?;
+    let page = register_page_tx(&mut tx, page, is_admin, environment_ids).await?;
+    tx.commit().await?;
+    Ok(page)
+}
+
+/// Hydrates a register page in the caller's transaction and actor scope.
+///
+/// # Errors
+///
+/// Returns a database error if context cannot be loaded or visibility changed.
+pub async fn register_page_tx(
+    tx: &mut Transaction<'_, Postgres>,
     page: Page<PoamSummary>,
     is_admin: bool,
     environment_ids: &[Uuid],
@@ -736,14 +775,13 @@ pub async fn register_page(
                AND activity.payload#>>'{finding,cve_finding_id}' IS NULL
                AND activity.payload->'items' IS NULL AND activity.payload->'cve_items' IS NULL))) AS last_activity_at
         FROM poams p WHERE p.id=ANY($1) AND ($2 OR poam_visible_to_environments(p.id,$3))"#)
-        .bind(&ids).bind(is_admin).bind(environment_ids).fetch_all(pool).await?;
+         .bind(&ids).bind(is_admin).bind(environment_ids).fetch_all(&mut **tx).await?;
     let contexts = contexts
         .into_iter()
         .map(|row| (row.poam_id, row))
         .collect::<std::collections::HashMap<_, _>>();
-    // CONCURRENCY: The list and context reads use separate snapshots. If scope
-    // changes between them, fail the whole page instead of retaining an offset
-    // that could skip a visible plan or returning its stale summary.
+    // CONCURRENCY: In READ COMMITTED, scope can change between list and
+    // hydration. Fail the page rather than return a stale summary or offset.
     anyhow::ensure!(
         contexts.len() == ids.len(),
         "register scope changed while loading the page; retry"
@@ -780,6 +818,118 @@ pub async fn register_page(
 #[cfg(test)]
 mod register_tests {
     use super::*;
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires the verified isolated PG35457 test cluster"]
+    async fn register_tx_matches_pool_filters_and_is_read_only(pool: PgPool) {
+        use crate::services::poam::{PoamActor, SystemClock, list_register, list_register_tx};
+
+        let user: Uuid =
+            sqlx::query_scalar("INSERT INTO users(username,first_name,last_name,email) VALUES($1,'Register','Reader',$2) RETURNING id")
+                .bind(format!("register-tx-{}", Uuid::new_v4()))
+                .bind(format!("register-tx-{}@example.invalid", Uuid::new_v4()))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let a: Uuid = sqlx::query_scalar("INSERT INTO environments(name) VALUES($1) RETURNING id")
+            .bind(format!("register-tx-a-{}", Uuid::new_v4()))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let b: Uuid = sqlx::query_scalar("INSERT INTO environments(name) VALUES($1) RETURNING id")
+            .bind(format!("register-tx-b-{}", Uuid::new_v4()))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let policy: Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policies(name,policy_type,config,enabled) VALUES($1,'custom_check','{}',false) RETURNING id",
+        )
+        .bind(format!("register-tx-policy-{}", Uuid::new_v4()))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let mut visible_ids = Vec::new();
+        for (index, environment) in [a, a, b].into_iter().enumerate() {
+            let host = format!("register-tx-{index}-{}", Uuid::new_v4());
+            let system: Uuid = sqlx::query_scalar(
+                "INSERT INTO systems(hostname,public_key,derivation,environment_id) VALUES($1,$2,$2,$3) RETURNING id",
+            )
+            .bind(&host)
+            .bind(format!("test-key-{host}"))
+            .bind(environment)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let finding: Uuid = sqlx::query_scalar(
+                "INSERT INTO poam_findings(system_id,policy_lineage_id) VALUES($1,$2) RETURNING id",
+            )
+            .bind(system)
+            .bind(policy)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let mut tx = pool.begin().await.unwrap();
+            let id: Uuid = sqlx::query_scalar(
+                "INSERT INTO poams(title,risk,created_by) VALUES($1,'high',$2) RETURNING id",
+            )
+            .bind(format!("Register tx {index}"))
+            .bind(user)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO poam_finding_links(poam_id,finding_id,linked_by) VALUES($1,$2,$3)",
+            )
+            .bind(id)
+            .bind(finding)
+            .bind(user)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+            if environment == a {
+                visible_ids.push(id);
+            }
+        }
+        let actor = PoamActor {
+            user_id: user,
+            identifier: "register-tx".into(),
+            is_admin: false,
+            can_mutate: false,
+            environment_ids: vec![a],
+            request_origin: None,
+        };
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        for offset in [0, 1] {
+            let query = PoamListQuery {
+                policy_lineage_id: Some(policy),
+                risk: Some("high".into()),
+                q: Some(" Register tx ".into()),
+                limit: Some(1),
+                offset: Some(offset),
+                ..Default::default()
+            };
+            let expected = list_register(&pool, &actor, &query, &SystemClock)
+                .await
+                .unwrap();
+            let actual = list_register_tx(&mut tx, &actor, &query, &SystemClock)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(&actual).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
+            assert_eq!(actual.items.len(), 1);
+            assert!(visible_ids.contains(&actual.items[0].summary.id));
+            assert_eq!(actual.items[0].environment_ids, vec![a]);
+            assert_eq!(actual.has_more, offset == 0);
+        }
+        tx.commit().await.unwrap();
+    }
 
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires the verified isolated PG35457 test cluster"]

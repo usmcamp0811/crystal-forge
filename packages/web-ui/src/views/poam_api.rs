@@ -1757,7 +1757,7 @@ pub async fn list_poam_register(
 }
 
 /// Identifies which existing service owns a register acceptance decision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AcceptanceSource {
     /// A policy finding waiver.
@@ -1766,6 +1766,17 @@ pub enum AcceptanceSource {
     CveHost,
     /// An environment CVE disposition.
     CveEnvironment,
+}
+
+impl AcceptanceSource {
+    /// Returns the source-specific route segment used by the server command.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::PolicyWaiver => "policy_waiver",
+            Self::CveHost => "cve_host",
+            Self::CveEnvironment => "cve_environment",
+        }
+    }
 }
 
 /// Describes one source-owned risk decision without granting mutation authority.
@@ -1797,6 +1808,8 @@ pub struct AcceptanceEntry {
     pub justification: String,
     /// Persisted CVE review date, if present.
     pub review_date: Option<NaiveDate>,
+    /// Persisted policy-waiver review deadline, separate from authorization.
+    pub review_due_at: Option<NaiveDate>,
     /// Policy-waiver authorization expiry, not its review deadline.
     pub expires_at: Option<DateTime<Utc>>,
     /// User who accepted the decision, if accepted.
@@ -1809,6 +1822,8 @@ pub struct AcceptanceEntry {
     pub retired_by: Option<Uuid>,
     /// Persisted reason for a retired CVE decision.
     pub retirement_reason: Option<String>,
+    /// Plan ID only when committed replacement history identifies that plan.
+    pub replacement_poam_id: Option<Uuid>,
     /// Source decision creation or acceptance time.
     pub recorded_at: DateTime<Utc>,
 }
@@ -1838,7 +1853,7 @@ pub async fn list_acceptances(
     environment_id: Option<Uuid>,
 ) -> Result<AcceptancePage, PoamApiError> {
     let mut url = format!(
-        "{}/acceptances?status=accepted&limit=100&offset={offset}",
+        "{}/acceptances?status=accepted_or_converted&limit=100&offset={offset}",
         base_url()
     );
     if let Some(id) = environment_id {
@@ -1857,6 +1872,76 @@ pub async fn list_acceptances(
         ));
     }
     Ok(page)
+}
+
+/// Returns the source-specific committed review successor or replacement plan.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AcceptanceCommandResult {
+    /// Names the source-family decision.
+    pub source: AcceptanceSource,
+    /// Identifies the original acceptance row.
+    pub predecessor_id: Uuid,
+    /// Identifies the new effective CVE decision or policy approval, if any.
+    pub successor_id: Option<Uuid>,
+    /// Gives the new review deadline, only for a renewal.
+    pub review_deadline: Option<NaiveDate>,
+    /// Gives the replacement plan, only for a conversion.
+    pub poam_id: Option<Uuid>,
+    /// Reports source-approved plan reuse after conversion.
+    pub poam_reused: Option<bool>,
+}
+
+fn acceptance_command_url(entry: &AcceptanceEntry, command: &str) -> String {
+    format!(
+        "{}/acceptances/{}/{}/{}",
+        base_url(),
+        entry.source.key(),
+        entry.source_id,
+        command
+    )
+}
+
+/// Re-reviews one current accepted decision through its owning service.
+///
+/// # Errors
+///
+/// Returns source-specific permission, stale revision, or evidence failures.
+pub async fn renew_acceptance(
+    entry: &AcceptanceEntry,
+) -> Result<AcceptanceCommandResult, PoamApiError> {
+    request(
+        "POST",
+        &acceptance_command_url(entry, "renew"),
+        Some(&serde_json::json!({
+            "expected_source_id":entry.source_id,
+            "expected_waiver_updated_at":entry.waiver_updated_at,
+        })),
+    )
+    .await
+}
+
+/// Replaces one accepted decision with source-compatible tracked remediation.
+///
+/// # Errors
+///
+/// Returns source-specific permission, stale evidence, incompatible plan, or
+/// request errors; a rejected conversion has no committed partial result.
+pub async fn convert_acceptance<T: Serialize>(
+    entry: &AcceptanceEntry,
+    poam: &T,
+    reuse_poam_id: Option<Uuid>,
+) -> Result<AcceptanceCommandResult, PoamApiError> {
+    request(
+        "POST",
+        &acceptance_command_url(entry, "convert"),
+        Some(&serde_json::json!({
+            "expected_source_id":entry.source_id,
+            "expected_waiver_updated_at":entry.waiver_updated_at,
+            "reuse_poam_id":reuse_poam_id,
+            "poam":poam,
+        })),
+    )
+    .await
 }
 
 /// Fetches the server-computed POA&M dashboard summary.

@@ -1142,6 +1142,9 @@ value.
 |--------|----------|------|-------------|
 | GET | `/poams` | Viewer+ | One visibility-filtered page of plan summaries with batched register scope and progress metadata |
 | GET | `/acceptances` | Viewer+ | Source-owned policy waiver and CVE disposition decisions, scoped and paged before presentation |
+| GET | `/acceptances/export?format=csv\|xlsx` | Viewer+ | Download the full authorized, filtered acceptance register |
+| POST | `/acceptances/:source/:id/renew` | Source-specific | Renew one accepted source decision through its owning service |
+| POST | `/acceptances/:source/:id/convert` | Source-specific | Replace one acceptance with an atomically linked policy or CVE POA&M |
 | POST | `/poams/cves` | Operator+ | Create a POA&M from one server-issued exact occurrence |
 | GET | `/poams/relationships/cves?system_id=:id` | Viewer+ | Return bounded current exact occurrences and POA&M relationships |
 | POST | `/poams/:id/cve-findings` | Operator+ | Link one current exact occurrence |
@@ -1183,12 +1186,102 @@ original historical scope. Retired CVE decisions keep their `retired_at` and
 Waivers have no invented review date; CVE decisions have no invented
 authorization expiry. This endpoint grants no mutation permission.
 
+`GET /acceptances/export` accepts `format=csv` or `format=xlsx` and the
+`source`, `status`, and `environment_id` filters from `/acceptances`. It ignores
+list pagination. The server rechecks the active reader role and environment
+memberships, pages all matches in one repeatable-read, read-only snapshot, and
+rejects the entire download above 1,000 authorized decisions (HTTP 422,
+`export_limit`). CSV and XLSX contain the same rows. Source UUID, stored
+system or environment UUID, current scope name, justification, native status, canonical
+CVE identity, policy finding UUID, and source-specific dates are populated
+from that snapshot. A retired CVE decision is labeled `retired accepted` or
+`converted (retired accepted)` when a durable plan replacement exists; its
+source status remains `accepted` in the register read. A converted policy
+waiver is labeled `converted (revoked)`; its native status remains `revoked`.
+A CVE disposition has
+no linked scan UUID in its source
+record; the scan cell is empty. A policy waiver's review deadline is separate
+from its authorization expiry; a CVE review deadline is the recorded
+`review_date` (the renewal service sets it to server-clock date plus 90 days),
+and CVEs have no authorization
+expiry. Spreadsheet formula-like fields are escaped. Downloads use fixed
+filenames, `Content-Disposition: attachment`, `Cache-Control: private, no-store`,
+and the CSV or XLSX media type. Invalid format/filter returns HTTP 400;
+unavailable source context or serialization rejects the entire response.
+This route exports acceptances only. It does not claim to export POA&M plans
+or OSCAL documents.
+
+`GET /poams/export?format=csv|xlsx` accepts the `/poams` list filters and
+ignores `limit` and `offset`. The server rechecks current reader roles and
+environment membership, then loads every matching POA&M and its recorded
+finding links in one repeatable-read snapshot. It rejects more than 1,000
+authorized plans (HTTP 422, `export_limit`), hidden linked evidence, or an
+unrepresentable scope rather than returning a partial file. CSV and real XLSX
+use the same source UUID and rows. Multi-system or multi-environment scopes
+contain the exact recorded identity/name arrays; a plan without a recorded
+scope is marked `unspecified`. The export does not turn the first displayed
+requirement or CVE into complete technical evidence. Text that could be a
+spreadsheet formula is neutralized in both files. The browser offers these
+downloads only when its loaded-only filters do not narrow the server selection;
+grouping and sorting do not alter the exported identity set.
+The POA&M status filter also accepts `active`, meaning every status except
+`completed`; the browser's Closed filter maps to the native `completed` value.
+Source review dates are date-only CSV/XLSX cells, not midnight timestamps.
+
+`GET /register/export?format=csv|xlsx|oscal-json|oscal-xml` selects both
+source families in one read-only repeatable-read authorization snapshot.
+`poam_status`, `poam_risk`, `poam_owner`, `poam_system_id`,
+`poam_policy_lineage_id`, `poam_bundle_id`, `poam_requirement`,
+`poam_overdue`, and `poam_q` filter plans. `acceptance_source`,
+`acceptance_status`, and `acceptance_environment_id` filter decisions.
+The `accepted_or_converted` decision filter also includes expired policy
+waiver history. Inclusion does not authorize renewal: the source service
+rechecks current approval authority and evidence before any mutation.
+Filters do not silently reduce the other family. The combined cap is 1,000
+source records; duplicate presentation-group identities remain one record.
+CSV and genuine XLSX repeat exact source UUIDs for each recorded evidence
+link, and neutralize spreadsheet formulas. OSCAL JSON and XML represent the
+same authorized source records as valid OSCAL 1.1.2 POA&M items. Source
+decision justification is a rationale, not a measured risk impact. A generated
+document UUID, version 1 and the actual export-generation timestamp describe
+the output document, not an assessment or approval. Source dates remain
+date-only; approval user/time appear only when stored. The server rejects an
+incomplete or hidden linked context instead of issuing a partial export.
+An empty authorized OSCAL selection returns HTTP 204 with no file. OSCAL 1.1.2
+requires at least one POA&M item, so the server does not add a fictitious item.
+
 Renew uses a new review date from the
 server clock and a deadline 90 days later; it does not edit original approval.
 Convert must atomically create or compatibly reuse a source-family plan,
 replace only the selected effective decision, and record the relationship.
-No separate waiver-to-plan frontend write sequence is authorized. Do not claim
-these commands are available until their source-specific endpoints exist.
+No separate waiver-to-plan frontend write sequence is authorized. These two
+commands require an authenticated session and a matching CSRF cookie/header.
+`source` is `policy_waiver`, `cve_host`, or `cve_environment`, and `:id` is the
+source decision UUID. Both bodies require `expected_source_id` equal to `:id`.
+Policy waivers additionally require `expected_waiver_updated_at`; CVE rows use
+their immutable UUID as their source version. A missing or stale version fails
+without mutation. The server rechecks the source-specific role, complete scope,
+and current technical evidence after it takes its writer locks.
+
+Renewal returns `source`, `predecessor_id`, `successor_id`, and
+`review_deadline`. The server uses its clock to set the deadline 90 calendar
+days after review. The policy-waiver successor has a separate `review_due_at`;
+its original approval and authorization expiry are not rewritten. The CVE
+successor preserves the original approval attribution, while the reviewer,
+timestamp, evidence, and old/new review dates remain in committed audit data.
+An elapsed policy authorization does not become valid by renewal.
+
+Conversion requires `poam` with the existing source-family creation metadata.
+Policy-family requests may additionally select `reuse_poam_id`; CVE-family
+requests use their existing source-owned compatibility rules and reject that
+field. The response includes `source`, `predecessor_id`, `poam_id`, and
+`poam_reused`; CVE responses also include the scheduled `successor_id`.
+Policy conversions store an immutable waiver-to-plan replacement relationship.
+CVE conversions retain a retired accepted decision, an active scheduled
+decision, and a same-transaction replacement audit. The server never edits a
+technical finding to PASS or closes the resulting plan. A repeat of the exact
+committed command returns its prior result; a mismatched command or changed
+permission does not create another plan.
 
 All routes require an authenticated session. Mutation routes require matching
 CSRF cookie and header values. Operator and Admin roles can mutate. Viewer can

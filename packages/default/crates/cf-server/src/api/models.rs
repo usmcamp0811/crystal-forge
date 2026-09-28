@@ -1496,7 +1496,7 @@ impl CveEnvironmentTriageAction {
 }
 
 /// Supplies POA&M metadata when any environment schedules patching.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FleetCvePoamRequest {
     /// Gives the remediation title.
     pub title: String,

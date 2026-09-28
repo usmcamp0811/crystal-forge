@@ -24,8 +24,8 @@ use crystal_forge::{
             acceptance_register, admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status,
             auth_whoami, builders, caches, commits, compliance, config_health, cves, dashboard,
             deployment_policies, deployments, environments, flakes, framework_requirements,
-            hardening, navigation, nixos_options, poam, scanning, setup_wizard, systems,
-            user_notifications, user_preferences, user_sessions,
+            hardening, navigation, nixos_options, poam, register_export, scanning, setup_wizard,
+            systems, user_notifications, user_preferences, user_sessions,
         },
         status,
         webhook::webhook_handler,
@@ -338,6 +338,20 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/v1/finding-waivers/:id", get(poam::get_waiver))
         .route("/api/v1/acceptances", get(acceptance_register::list))
+        .route("/api/v1/poams/export", get(poam::export))
+        .route("/api/v1/register/export", get(register_export::export))
+        .route(
+            "/api/v1/acceptances/export",
+            get(acceptance_register::export),
+        )
+        .route(
+            "/api/v1/acceptances/:source/:id/renew",
+            post(acceptance_register::renew),
+        )
+        .route(
+            "/api/v1/acceptances/:source/:id/convert",
+            post(acceptance_register::convert),
+        )
         .route(
             "/api/v1/finding-waivers/:id/status",
             post(poam::decide_waiver),

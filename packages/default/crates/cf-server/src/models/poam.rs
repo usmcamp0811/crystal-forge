@@ -152,7 +152,7 @@ impl PoamRisk {
 /// Callers provide `assessment_id` for composite-assessment compatibility or
 /// provide `finding_id` and `observation` together for source-neutral evidence.
 /// Mixing or omitting these forms is invalid.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreatePoamRequest {
     /// Identifies a current composite assessment when using the compatibility API.
     #[serde(default)]
@@ -483,7 +483,8 @@ pub struct WaiverView {
 /// Filters, searches, and bounds a POA&M list query.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct PoamListQuery {
-    /// Filters by normalized lifecycle status.
+    /// Filters by normalized lifecycle status; `active` includes every
+    /// non-completed status without changing any persisted lifecycle value.
     pub status: Option<String>,
     /// Filters by normalized risk classification.
     pub risk: Option<String>,
