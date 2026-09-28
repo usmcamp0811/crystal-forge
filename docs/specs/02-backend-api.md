@@ -1156,7 +1156,13 @@ value.
 The register response retains list pagination (`limit`, `offset`, `has_more`,
 `next_offset`) and includes exact environment, system, bundle lineage, bundle
 version and assignment-version IDs, first requirement/CVE, milestone totals,
-and last activity for each visible plan. It does not turn a POA&M into a risk
+and last activity for each visible plan. Each `systems` entry gives the visible
+`system_id`, current `hostname`, and current `environment_id` for one system
+in `system_ids`. The server applies the same actor-scope filter to both fields.
+Current membership is not historical link-time scope. A moved host hidden from
+the reader cannot supply a hostname in either field. The first requirement/CVE
+describes the page-visible plan, not one particular environment in a plan that
+spans environments. The register does not turn a POA&M into a risk
 acceptance. CVE-only plans can have no policy finding, and version IDs must not
 be replaced by a bundle's catalog-current pointer. The register currently
 does not return whole-collection work-queue facets or risk-acceptance records;
@@ -1181,8 +1187,11 @@ It returns `items`, complete scoped `total`, `limit`, `offset`, and `has_more`.
 Admin can read policy waivers; Viewer and Operator can read CVE decisions only
 in currently assigned environments. Host decisions retain `system_id`; the
 host's current environment is used for read visibility, not presented as its
-original historical scope. Retired CVE decisions keep their `retired_at` and
-`retirement_reason` and must not be presented as current accepted authority.
+original historical scope. Host-scoped entries include `system_hostname` from
+the authorized current system; environment decisions have no hostname. This
+field does not change the source's original scope. Retired CVE decisions keep
+their `retired_at` and `retirement_reason` and must not be presented as current
+accepted authority.
 Waivers have no invented review date; CVE decisions have no invented
 authorization expiry. This endpoint grants no mutation permission.
 

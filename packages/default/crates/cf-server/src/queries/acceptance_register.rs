@@ -63,6 +63,8 @@ pub struct AcceptanceEntry {
     pub finding_id: Option<Uuid>,
     /// Gives the original system scope for a waiver or host decision.
     pub system_id: Option<Uuid>,
+    /// Gives the actor-visible current hostname of a host-scoped decision.
+    pub system_hostname: Option<String>,
     /// Gives the original environment scope only for environment decisions.
     /// Host and waiver decisions do not store an original environment ID.
     pub environment_id: Option<Uuid>,
@@ -160,6 +162,7 @@ struct PageRow {
     status: Option<String>,
     finding_id: Option<Uuid>,
     system_id: Option<Uuid>,
+    system_hostname: Option<String>,
     environment_id: Option<Uuid>,
     policy_lineage_id: Option<Uuid>,
     policy_version_id: Option<Uuid>,
@@ -360,7 +363,9 @@ async fn list_scoped_tx(
         page AS (SELECT * FROM decisions
           ORDER BY recorded_at DESC,source COLLATE "C",source_id DESC
           LIMIT $6 OFFSET $7)
-        SELECT total.total,page.* FROM total LEFT JOIN page ON TRUE
+        SELECT total.total,page.*,scope_host.hostname AS system_hostname
+        FROM total LEFT JOIN page ON TRUE
+        LEFT JOIN systems scope_host ON scope_host.id=page.system_id
         ORDER BY page.recorded_at DESC,page.source COLLATE "C",page.source_id DESC
     "#,
     )
@@ -394,6 +399,7 @@ async fn list_scoped_tx(
                     .ok_or_else(|| anyhow!("decision missing status"))?,
                 finding_id: row.finding_id,
                 system_id: row.system_id,
+                system_hostname: row.system_hostname,
                 environment_id: row.environment_id,
                 policy_lineage_id: row.policy_lineage_id,
                 policy_version_id: row.policy_version_id,
@@ -510,6 +516,28 @@ mod tests {
         assert_eq!(last.total, 102);
         assert_eq!(last.items.len(), 2);
         assert!(!last.has_more);
+        let host_page = list_tx(
+            &mut tx,
+            viewer,
+            &AcceptanceListQuery {
+                source: Some(AcceptanceSource::CveHost),
+                limit: Some(100),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(host_page.items.len(), 1);
+        let hostname: String = sqlx::query_scalar("SELECT hostname FROM systems WHERE id=$1")
+            .bind(host)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(host_page.items[0].system_id, Some(host));
+        assert_eq!(
+            host_page.items[0].system_hostname.as_deref(),
+            Some(hostname.as_str())
+        );
         assert!(first.items.iter().chain(&last.items).all(|row| {
             row.source == AcceptanceSource::CveEnvironment && row.environment_id == Some(a)
         }));

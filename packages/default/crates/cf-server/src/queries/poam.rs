@@ -13,8 +13,8 @@ use crate::models::poam::{
     ActivityView, AssignmentReferenceView, CompatibleFinding, CveFindingView,
     CveVerificationItemView, DashboardSummary, FindingRequirementView, FindingView, HistoryCursor,
     MilestoneView, Page, PoamAssigneeCatalog, PoamAssigneeGroup, PoamAssigneePerson, PoamDetail,
-    PoamListQuery, PoamRegisterSummary, PoamSummary, Rollup, VerificationAttemptView,
-    VerificationItemView, WaiverListQuery, WaiverView,
+    PoamListQuery, PoamRegisterSummary, PoamSummary, RegisterSystemScope, Rollup,
+    VerificationAttemptView, VerificationItemView, WaiverListQuery, WaiverView,
 };
 
 const SUMMARY_COLUMNS: &str = r#"
@@ -641,6 +641,7 @@ struct RegisterContext {
     poam_id: Uuid,
     environment_ids: Vec<Uuid>,
     system_ids: Vec<Uuid>,
+    systems: sqlx::types::Json<Vec<RegisterSystemScope>>,
     bundle_ids: Vec<Uuid>,
     bundle_version_ids: Vec<Uuid>,
     assignment_version_ids: Vec<Uuid>,
@@ -702,9 +703,15 @@ pub async fn register_page_tx(
             UNION SELECT d.environment_id FROM cve_current_environment_dispositions d
             WHERE d.poam_id=p.id AND d.state='scheduled' AND p.status<>'completed'
               AND ($2 OR d.environment_id=ANY($3))) AS environment_ids,
-          ARRAY(SELECT DISTINCT c.system_id FROM poam_context_systems c
-            JOIN systems s ON s.id=c.system_id WHERE c.poam_id=p.id
-              AND ($2 OR s.environment_id=ANY($3))) AS system_ids,
+           ARRAY(SELECT DISTINCT c.system_id FROM poam_context_systems c
+             JOIN systems s ON s.id=c.system_id WHERE c.poam_id=p.id
+               AND ($2 OR s.environment_id=ANY($3))) AS system_ids,
+           (SELECT COALESCE(jsonb_agg(jsonb_build_object(
+               'system_id', scoped.id, 'hostname', scoped.hostname,
+               'environment_id', scoped.environment_id) ORDER BY scoped.id), '[]'::jsonb)
+            FROM (SELECT DISTINCT s.id, s.hostname, s.environment_id
+              FROM poam_context_systems c JOIN systems s ON s.id=c.system_id
+              WHERE c.poam_id=p.id AND ($2 OR s.environment_id=ANY($3))) scoped) AS systems,
           ARRAY(SELECT DISTINCT a.bundle_id FROM poam_assignment_references r
             JOIN compliance_bundle_assignments a ON a.id=r.assignment_id
             LEFT JOIN systems s ON s.id=a.system_id
@@ -795,6 +802,7 @@ pub async fn register_page_tx(
                 summary,
                 environment_ids: row.environment_ids.clone(),
                 system_ids: row.system_ids.clone(),
+                systems: row.systems.0.clone(),
                 bundle_ids: row.bundle_ids.clone(),
                 bundle_version_ids: row.bundle_version_ids.clone(),
                 assignment_version_ids: row.assignment_version_ids.clone(),
@@ -1029,6 +1037,15 @@ mod register_tests {
             .iter()
             .find(|item| item.summary.id == visible_ids[104].0)
             .unwrap();
+        let hostname: String = sqlx::query_scalar("SELECT hostname FROM systems WHERE id=$1")
+            .bind(visible_ids[104].1)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(milestone.systems.len(), 1);
+        assert_eq!(milestone.systems[0].system_id, visible_ids[104].1);
+        assert_eq!(milestone.systems[0].hostname, hostname);
+        assert_eq!(milestone.systems[0].environment_id, Some(a));
         assert_eq!(milestone.milestone_count, 1);
         assert_eq!(milestone.completed_milestone_count, 0);
         assert!(milestone.last_activity_at.is_some());
@@ -1098,6 +1115,8 @@ mod register_tests {
         assert_eq!(hidden_admin.items.len(), 1);
         assert_eq!(hidden_admin.items[0].summary.id, hidden_id);
         assert_eq!(hidden_admin.items[0].environment_ids, vec![b]);
+        assert_eq!(hidden_admin.items[0].systems.len(), 1);
+        assert_eq!(hidden_admin.items[0].systems[0].environment_id, Some(b));
     }
 }
 

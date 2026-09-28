@@ -7434,11 +7434,15 @@ tr.attention-flash {
 .poams-register .pv-group-toggle { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; width: auto; padding: 2px 4px; }
 .poams-register .pv-group-name { font-size: 13px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .poams-register .pv-group-n { color: var(--cf-text-muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.poams-register .pv-stack { display: flex; width: 110px; height: 6px; flex-shrink: 0; gap: 1px; overflow: hidden; border-radius: 99px; background: var(--cf-divider); }
+.poams-register .pv-stack > span { min-width: 0; }
+.poams-register .poams-acceptances .pv-group-head .pv-stack { margin-left: auto; }
 .poams-register .pv-group-head:has(.pv-group-risk)::before,
 .poams-register .pv-group-head:has(.pv-group-late)::before { content: ""; flex: 0 0 7px; width: 7px; height: 7px; border-radius: 50%; background: #f87171; }
 .poams-register .pv-group-late,
 .poams-register .pv-group-risk { flex-shrink: 0; border-radius: 99px; padding: 2px 7px; background: rgba(248,113,113,.12); color: #f87171; font-size: 10px; font-weight: 700; }
 .poams-register .pv-group-focus { margin-left: auto; }
+.poams-register .pv-group-head:has(.pv-group-focus) .pv-stack { margin-left: 0; }
 .poams-register .pv-tool-label { color: var(--cf-text-muted); font-size: 10px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; }
 .poams-register .pv-selection-hint { margin-left: auto; color: var(--cf-text-muted); font-size: 10.5px; white-space: nowrap; }
 .poams-register .pv-q[data-queue="late"] .pv-q-count,

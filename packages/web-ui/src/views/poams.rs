@@ -374,7 +374,100 @@ fn approver_label(id: Option<Uuid>, catalog: Option<&PoamAssigneeCatalog>) -> St
 }
 
 fn group_title(key: &str) -> &str {
-    if key.starts_with("Host ") { "Host" } else { key }
+    if key.starts_with("Host ") { "System name unavailable" } else { key }
+}
+
+fn system_group_name(
+    key: &str,
+    plans: &[&PoamRegisterSummary],
+    decisions: &[&AcceptanceEntry],
+) -> String {
+    let Some(id) = key.strip_prefix("Host ").and_then(|id| Uuid::parse_str(id).ok()) else {
+        return group_title(key).to_string();
+    };
+    plans.iter().flat_map(|row| &row.systems)
+        .find(|system| system.system_id == id)
+        .map(|system| system.hostname.clone())
+        .or_else(|| decisions.iter().find(|item| item.system_id == Some(id))
+            .and_then(|item| item.system_hostname.clone()))
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "System name unavailable".into())
+}
+
+// A plan can appear in several environment groups. Only current visible
+// members of the displayed environment contribute to its host summary.
+fn plan_subtitle(
+    row: &PoamRegisterSummary,
+    environment: Option<Uuid>,
+    environment_grouped: bool,
+    environments: &[EnvironmentSummary],
+) -> String {
+    let members: Vec<_> = row.systems.iter()
+        .filter(|system| !environment_grouped || environment == system.environment_id && environment.is_some())
+        .collect();
+    let mut parts = Vec::new();
+    if members.len() == 1 && !members[0].hostname.trim().is_empty() {
+        parts.push(members[0].hostname.trim().to_string());
+    } else if !members.is_empty() {
+        parts.push(format!("{} hosts", members.len()));
+    } else if !environment_grouped && !row.system_ids.is_empty() {
+        parts.push(format!("{} {}", row.system_ids.len(), if row.system_ids.len() == 1 { "host" } else { "hosts" }));
+    }
+    let scoped_environment = if environment_grouped { environment } else {
+        (row.environment_ids.len() == 1).then(|| row.environment_ids[0])
+    };
+    if let Some(id) = scoped_environment {
+        parts.push(environment_name(id, environments));
+    }
+    // The first evidence ID is page-wide. On a multi-environment plan it
+    // cannot be attributed to one group, so omit it rather than mislabel it.
+    if row.environment_ids.len() <= 1 {
+        if let Some(identity) = row.first_requirement.as_deref().or(row.first_cve.as_deref()) {
+            parts.push(identity.to_string());
+        }
+    }
+    if parts.is_empty() { "Scope unavailable".into() } else { parts.join(" · ") }
+}
+
+fn decision_subtitle(item: &AcceptanceEntry, environments: &[EnvironmentSummary]) -> String {
+    let mut parts = Vec::new();
+    if let Some(host) = item.system_hostname.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
+        parts.push(host.to_string());
+    } else if item.system_id.is_some() {
+        parts.push("System name unavailable".into());
+    }
+    if let Some(id) = item.environment_id { parts.push(environment_name(id, environments)); }
+    if let Some(cve) = &item.canonical_cve_id { parts.push(cve.clone()); }
+    else if item.source == AcceptanceSource::PolicyWaiver { parts.push("Policy finding".into()); }
+    parts.join(" · ")
+}
+
+fn group_distribution(
+    plans: &[&PoamRegisterSummary],
+    decisions: &[&AcceptanceEntry],
+) -> Vec<(&'static str, &'static str, usize)> {
+    let mut segments = Vec::new();
+    for (status, label, color) in [
+        (PoamStatus::Open, "Open", "#60a5fa"),
+        (PoamStatus::InProgress, "In progress", "#fbbf24"),
+        (PoamStatus::Blocked, "Blocked", "#f97316"),
+        (PoamStatus::AwaitingVerification, "Awaiting verification", "#a78bfa"),
+        (PoamStatus::Completed, "Completed", "#34d399"),
+    ] {
+        let count = plans.iter().filter(|row| row.summary.status == status).count();
+        if count > 0 { segments.push((label, color, count)); }
+    }
+    for (label, color) in [
+        ("Risk accepted", "#a78bfa"),
+        ("Authorization expired", "#f87171"),
+        ("Retired", "#9ca3af"),
+        ("Converted to POA&M", "#60a5fa"),
+        ("Decision pending", "#fbbf24"),
+    ] {
+        let count = decisions.iter().filter(|item| acceptance_status(item) == label).count();
+        if count > 0 { segments.push((label, color, count)); }
+    }
+    segments
 }
 
 // An acceptance names either its environment directly or its host directly.
@@ -458,7 +551,7 @@ fn scope_pills(
                 if row.environment_ids.as_slice() == [env] {
                     row.system_ids
                         .iter()
-                        .map(|id| (Scope::System(*id), format!("Host {id}")))
+                        .map(|id| (Scope::System(*id), row.systems.iter().find(|system| system.system_id == *id).map(|system| system.hostname.clone()).unwrap_or_else(|| "System name unavailable".into())))
                         .collect()
                 } else {
                     Vec::new()
@@ -945,7 +1038,7 @@ fn AcceptanceTray(
                 }
                 section { h3 { "Original justification" } p { "{entry.justification}" } }
                 section { h3 { "Decision scope and evidence" } p { class: "mono", "{acceptance_subject(&entry)}" }
-                    if let Some(host) = entry.system_id { p { "Host {host}" } }
+                    if let Some(host) = entry.system_hostname.as_deref() { p { "{host}" } }
                     if let Some(env) = entry.environment_id { p { "{environment_name(env, &environments)}" } }
                     p { "Original decision {entry.recorded_at}" }
                 }
@@ -1123,13 +1216,18 @@ fn AcceptanceRegister(
             if let Some(message) = error() { p { class: "poams-notice", role: "alert", "Could not load risk acceptances: {message}" } }
             if !loading() && groups.is_empty() && error().is_none() { p { class: "poams-notice", "No decisions match these filters." } }
             for (group_name, items) in groups {
-                section { class: "poams-group pv-group", key: "acceptance-{group_name}",
-                    if group_by != "none" { div { class: "pv-group-head", span { class: "pv-group-name", "{group_title(&group_name)}" } span { class: "pv-group-n", "{items.len()}" } } }
+                { let decisions: Vec<_> = items.iter().collect();
+                  let distribution = group_distribution(&[], &decisions);
+                  let display_name = system_group_name(&group_name, &[], &decisions);
+                  rsx! { section { class: "poams-group pv-group", key: "acceptance-{group_name}",
+                    if group_by != "none" { div { class: "pv-group-head", span { class: "pv-group-name", "{display_name}" } span { class: "pv-group-n", "{items.len()}" }
+                        span { class: "pv-stack", aria_label: "Group status distribution", for (label, color, count) in distribution { span { title: "{count} {label}", style: "flex:{count};background:{color};" } } }
+                    } }
                 div { class: "poams-table-wrap pv-table-wrap",
                     table { class: "sys-table compact sys-table-dense poams-table pv-table",
                         thead { tr { th { "ID" } th { "Title" } th { "Risk" } th { "Status" } th { class: if progress_column { "pv-c-ms" } else { "pv-c-ms poams-hidden" }, "Progress" } th { class: if owner_column { "pv-c-owner" } else { "pv-c-owner poams-hidden" }, "Owner" } th { "Due" } } }
                         tbody { for item in items {
-                            tr { key: "{item.source:?}:{item.source_id}", class: if chosen.contains(&acceptance_id(&item)) { "selectable row-checked" } else { "selectable" },
+                             tr { key: "{item.source:?}:{item.source_id}", "data-source-id": "{item.source_id}", class: if chosen.contains(&acceptance_id(&item)) { "selectable row-checked" } else { "selectable" },
                                 aria_selected: if chosen.contains(&acceptance_id(&item)) { "true" } else { "false" }, tabindex: "0",
                                 onclick: { let item = item.clone(); move |e: MouseEvent| {
                                     let id = acceptance_id(&item);
@@ -1138,9 +1236,9 @@ fn AcceptanceRegister(
                                     } else { opened.set(Some(id)); }
                                 } },
                                 onkeydown: { let item = item.clone(); move |e: KeyboardEvent| if e.key() == Key::Enter { opened.set(Some(acceptance_id(&item))); } },
-                                td { class: "mono", "{item.source_id}" }
-                                td { div { class: "pv-title", {match item.source { AcceptanceSource::PolicyWaiver => "Policy waiver", AcceptanceSource::CveHost => "Host CVE", AcceptanceSource::CveEnvironment => "Environment CVE" }} }
-                                    div { class: "pv-sub", span { class: "mono", "{acceptance_subject(&item)}" } if let Some(env) = item.environment_id { span { "{environment_name(env, &environments)}" } } else if let Some(host) = item.system_id { span { title: "Host {host}", "Host decision" } } span { class: "rr-just", "{item.justification}" } }
+                                 td { class: "mono", title: "Exact source ID in decision details", "—" }
+                                 td { div { class: "pv-title", {match item.source { AcceptanceSource::PolicyWaiver => "Policy waiver", AcceptanceSource::CveHost => "Host CVE", AcceptanceSource::CveEnvironment => "Environment CVE" }} }
+                                     div { class: "pv-sub", span { "{decision_subtitle(&item, &environments)}" } span { class: "rr-just", "{item.justification}" } }
                                 }
                                 td { "Not recorded" }
                                 td { span { class: "chip poams-accepted", "{acceptance_status(&item)}" } }
@@ -1152,8 +1250,9 @@ fn AcceptanceRegister(
                             }
                         } }
                     }
+                } }
                 }
-                }
+            }
             }
             if has_more() { button { r#type: "button", class: "btn btn-ghost focus-ring poams-more", disabled: loading(), onclick: move |_| {
                 loading.set(true);
@@ -1593,7 +1692,7 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
     };
     // A flat register projection cannot prove a host-to-environment edge.
     let parent_env: Option<Uuid> = None;
-    let row_view = |row: &PoamRegisterSummary| {
+    let row_view = |row: &PoamRegisterSummary, group_environment: Option<Uuid>| {
         let p = &row.summary;
         let id = p.id;
         let due = p
@@ -1608,13 +1707,9 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
             Some(PoamAssigneeView::User { user_id, .. }) => Some(*user_id),
             _ => None,
         };
-        let context = row.first_requirement.as_deref().or(row.first_cve.as_deref())
-            .unwrap_or(if p.finding_count > p.cve_finding_count { "Policy finding" } else { "" });
+        let subtitle = plan_subtitle(row, group_environment, grouping() == "environment", &env_names);
         let checked = selected().contains(&id);
         let order = order.clone();
-        let environment_scopes: Vec<_> = row.environment_ids.iter().map(|id| (*id, environment_name(*id, &env_names))).collect();
-        let systems = row.system_ids.clone();
-        let bundles = row.bundle_ids.clone();
         rsx! {
             tr { key: "{id}", class: if checked { "selectable row-checked" } else { "selectable" },
                 tabindex: "0", aria_selected: if checked { "true" } else { "false" },
@@ -1628,13 +1723,9 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
                 },
                 onkeydown: move |event| if event.key() == Key::Enter { nav.push(Route::PoamsView { query: RegisterLocation { poam: Some(id), ..location }.query() }); },
                  td { class: "mono", "{p.human_id}" }
-                  td { div { class: "pv-title", "{p.title}" }
-                      div { class: "pv-sub", if !context.is_empty() { span { "{context}" } }
-                          for (env, label) in environment_scopes { button { r#type: "button", class: "pv-link focus-ring", onclick: move |e| { e.stop_propagation(); nav.push(Route::PoamsView { query: RegisterLocation { scope: Some(Scope::Environment(env)), poam: None, ..location }.query() }); }, "{label}" } }
-                          for host in systems { button { r#type: "button", class: "pv-link focus-ring", title: "Host {host}", aria_label: "Host {host}", onclick: move |e| { e.stop_propagation(); nav.push(Route::PoamsView { query: RegisterLocation { scope: Some(Scope::System(host)), poam: None, ..location }.query() }); }, "Host" } }
-                          for bundle in bundles { button { r#type: "button", class: "pv-link focus-ring", title: "Bundle {bundle}", aria_label: "Bundle {bundle}", onclick: move |e| { e.stop_propagation(); nav.push(Route::PoamsView { query: RegisterLocation { dimension: Dimension::Bundle, scope: Some(Scope::Bundle(bundle)), poam: None, ..location }.query() }); }, "Bundle" } }
-                      }
-                  }
+                   td { div { class: "pv-title", "{p.title}" }
+                       div { class: "pv-sub", span { "{subtitle}" } }
+                   }
                   td { class: "poams-risk", span { class: "chip {crate::components::poam::risk_class(p.risk)}", "{risk_label}" } }
                   td { span { class: "chip {crate::components::poam::status_class(p.status)}", "{status_label}" } }
                  td { class: if progress_column() { "pv-c-ms" } else { "pv-c-ms poams-hidden" }, div { class: "pv-prog", span { class: "pv-prog-bar", span { style: "width: {progress_width}%" } } span { class: "mono pv-prog-t", "{row.completed_milestone_count}/{row.milestone_count}" } } }
@@ -1646,17 +1737,16 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
     let mixed_acceptance = |item: &AcceptanceEntry| {
         let id = acceptance_id(item);
         let checked = mixed_selected().contains(&id);
-        let subject = acceptance_subject(item);
         let source = match item.source { AcceptanceSource::PolicyWaiver => "Policy waiver", AcceptanceSource::CveHost => "Host CVE", AcceptanceSource::CveEnvironment => "Environment CVE" };
         let review = item.review_due_at.or(item.review_date).map(|date| date.to_string()).unwrap_or_else(|| "No review date".into());
         let approver = approver_label(item.accepted_by, catalog().as_ref());
-        rsx! { tr { key: "{item.source:?}:{item.source_id}", class: if checked { "selectable row-checked" } else { "selectable" }, aria_selected: if checked { "true" } else { "false" }, tabindex: "0", onclick: move |e: MouseEvent| {
+        rsx! { tr { key: "{item.source:?}:{item.source_id}", "data-source-id": "{item.source_id}", class: if checked { "selectable row-checked" } else { "selectable" }, aria_selected: if checked { "true" } else { "false" }, tabindex: "0", onclick: move |e: MouseEvent| {
             if e.modifiers().ctrl() || e.modifiers().meta() {
                 let mut ids = mixed_selected(); if !ids.insert(id) { ids.remove(&id); } mixed_selected.set(ids);
             } else { mixed_open.set(Some(id)); }
         }, onkeydown: move |e| if e.key() == Key::Enter { mixed_open.set(Some(id)); },
-            td { class: "mono", "{item.source_id}" }
-            td { div { class: "pv-title", "{source}" } div { class: "pv-sub", span { class: "mono", "{subject}" } if let Some(env) = item.environment_id { span { "{environment_name(env, &env_names)}" } } else if let Some(host) = item.system_id { span { title: "Host {host}", "Host decision" } } span { class: "rr-just", "{item.justification}" } } }
+            td { class: "mono", title: "Exact source ID in decision details", "—" }
+            td { div { class: "pv-title", "{source}" } div { class: "pv-sub", span { "{decision_subtitle(item, &env_names)}" } span { class: "rr-just", "{item.justification}" } } }
             td { "Not recorded" }
             td { span { class: "chip poams-accepted", "{acceptance_status(item)}" } }
             td { class: if progress_column() { "pv-c-ms rr-appr" } else { "pv-c-ms poams-hidden" }, if let Some(at) = item.accepted_at { "Approved {at}" } else { "Approval not recorded" } }
@@ -1775,6 +1865,9 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
                     for (name, entries) in groups {
                         {
                         let decision_rows = acceptance_groups.get(&name);
+                        let decision_slice = decision_rows.map_or(&[][..], Vec::as_slice);
+                        let distribution = group_distribution(&entries, decision_slice);
+                        let display_name = system_group_name(&name, &entries, decision_slice);
                         let group_count = entries.len() + decision_rows.map_or(0, Vec::len);
                         let late_count = entries.iter().filter(|row| row.summary.overdue).count()
                             + decision_rows.map_or(0, |items| items.iter().filter(|item| acceptance_queue(item, Some(Queue::ExpiredAcceptance), today)).count());
@@ -1783,14 +1876,17 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
                             let matching: Vec<_> = env_names.iter().filter(|environment| environment.name == group_title(&name)).map(|environment| environment.id).collect();
                             if matching.len() == 1 { matching.first().copied() } else { None }
                         } else { None };
-                        rsx! { section { class: "poams-group pv-group", key: "{name}", if grouping() != "none" { div { class: "pv-group-head", role: "group", aria_label: "Register group {group_title(&name)}", button { r#type: "button", class: "poams-group-toggle pv-group-toggle focus-ring", aria_expanded: if collapsed().contains(&name) { "false" } else { "true" }, onclick: { let name = name.clone(); move |_| { let mut set = collapsed(); if !set.insert(name.clone()) { set.remove(&name); } collapsed.set(set); selected.set(BTreeSet::new()); mixed_selected.set(BTreeSet::new()); anchor.set(None); } }, span { class: "pv-group-name", "{group_title(&name)}" } span { class: "pv-group-n", "{group_count}" } }
+                        rsx! { section { class: "poams-group pv-group", key: "{name}", if grouping() != "none" { div { class: "pv-group-head", role: "group", aria_label: "Register group {display_name}", button { r#type: "button", class: "poams-group-toggle pv-group-toggle focus-ring", aria_expanded: if collapsed().contains(&name) { "false" } else { "true" }, onclick: { let name = name.clone(); move |_| { let mut set = collapsed(); if !set.insert(name.clone()) { set.remove(&name); } collapsed.set(set); selected.set(BTreeSet::new()); mixed_selected.set(BTreeSet::new()); anchor.set(None); } }, span { class: "pv-group-name", "{display_name}" } span { class: "pv-group-n", "{group_count}" } }
                             if late_count > 0 { span { class: "pv-group-late", "{late_count} late" } }
                             if high_plans > 0 { span { class: "pv-group-risk", "{high_plans} CAT I plans" } }
+                            span { class: "pv-stack", aria_label: "Group status distribution",
+                                for (label, color, count) in distribution { span { title: "{count} {label}", style: "flex:{count};background:{color};" } }
+                            }
                             if let Some(environment) = unique_environment { button { r#type: "button", class: "btn btn-ghost xs focus-ring pv-group-focus", onclick: move |_| { nav.push(Route::PoamsView { query: RegisterLocation { scope: Some(Scope::Environment(environment)), poam: None, ..location }.query() }); }, "Focus" } }
                         } }
                             if !collapsed().contains(&name) {
                             div { class: "poams-table-wrap pv-table-wrap", table { class: "sys-table compact sys-table-dense poams-table pv-table", thead { tr { th { "ID" } th { "Title" } th { "Risk" } th { "Status" } th { class: if progress_column() { "pv-c-ms" } else { "pv-c-ms poams-hidden" }, "Progress" } th { class: if owner_column() { "pv-c-owner" } else { "pv-c-owner poams-hidden" }, "Owner" } th { "Due" } } }
-                                tbody { for row in entries.into_iter().take(visible()) { {row_view(row)} }
+                                tbody { for row in entries.into_iter().take(visible()) { {row_view(row, unique_environment)} }
                                     if location.kind == Tab::Everything {
                                         for item in acceptance_groups.get(&name).into_iter().flat_map(|items| items.iter().take(visible())) { {mixed_acceptance(item)} }
                                     }
@@ -2078,6 +2174,31 @@ mod tests {
             "environment_ids":[Uuid::from_u128(2)],"system_ids":[Uuid::from_u128(3)],"bundle_ids":[Uuid::from_u128(4)],"bundle_version_ids":[],"assignment_version_ids":[],"first_requirement":null,"first_cve":null,"milestone_count":0,"completed_milestone_count":0,"last_activity_at":null
         });
         serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn subtitles_count_only_visible_members_in_the_displayed_environment() {
+        let a = Uuid::from_u128(2);
+        let b = Uuid::from_u128(5);
+        let environments: Vec<EnvironmentSummary> = serde_json::from_value(serde_json::json!([
+            {"id":a,"name":"edge","description":null,"color_hex":"#123456","is_active":true,"system_count":1},
+            {"id":b,"name":"core","description":null,"color_hex":"#654321","is_active":true,"system_count":2}
+        ])).unwrap();
+        let mut row = register_row(1);
+        row.environment_ids = vec![a, b];
+        row.first_cve = Some("CVE-2026-27442".into());
+        row.system_ids = vec![Uuid::from_u128(3), Uuid::from_u128(6), Uuid::from_u128(7)];
+        row.systems = vec![
+            poam_api::RegisterSystemScope { system_id: Uuid::from_u128(3), hostname: "edge-node".into(), environment_id: Some(a) },
+            poam_api::RegisterSystemScope { system_id: Uuid::from_u128(6), hostname: "core-one".into(), environment_id: Some(b) },
+            poam_api::RegisterSystemScope { system_id: Uuid::from_u128(7), hostname: "core-two".into(), environment_id: Some(b) },
+        ];
+        assert_eq!(plan_subtitle(&row, Some(a), true, &environments), "edge-node · edge");
+        assert_eq!(plan_subtitle(&row, Some(b), true, &environments), "2 hosts · core");
+        assert_eq!(row.summary.id, Uuid::from_u128(1));
+        row.environment_ids = vec![b];
+        assert_eq!(plan_subtitle(&row, Some(b), true, &environments), "2 hosts · core · CVE-2026-27442");
+        assert_eq!(group_distribution(&[&row], &[]), vec![("Open", "#60a5fa", 1)]);
     }
 
     #[test]

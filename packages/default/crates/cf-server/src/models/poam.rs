@@ -598,6 +598,9 @@ pub struct PoamRegisterSummary {
     pub environment_ids: Vec<Uuid>,
     /// Lists visible systems in current finding or assignment context.
     pub system_ids: Vec<Uuid>,
+    /// Gives visible current host names and their current environment membership.
+    /// Does not include a moved host whose current scope is hidden from the actor.
+    pub systems: Vec<RegisterSystemScope>,
     /// Lists explicitly linked bundle lineages.
     pub bundle_ids: Vec<Uuid>,
     /// Lists explicitly linked immutable bundle versions.
@@ -616,6 +619,17 @@ pub struct PoamRegisterSummary {
     /// Records the latest scope-neutral activity time for non-admin readers.
     /// Finding-specific activity is omitted rather than exposing hidden context.
     pub last_activity_at: Option<DateTime<Utc>>,
+}
+
+/// Identifies one actor-visible system in a register page's current context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterSystemScope {
+    /// Identifies the system without using its hostname as an identity key.
+    pub system_id: Uuid,
+    /// Gives the current system hostname.
+    pub hostname: String,
+    /// Gives current environment membership, not historical link-time scope.
+    pub environment_id: Option<Uuid>,
 }
 
 /// Reports active and historical POA&M links for an exact CVE occurrence.

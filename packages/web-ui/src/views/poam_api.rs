@@ -771,6 +771,9 @@ pub struct PoamRegisterSummary {
     pub environment_ids: Vec<Uuid>,
     /// Identifies visible current systems or assignment contexts.
     pub system_ids: Vec<Uuid>,
+    /// Lists only actor-visible current systems for name and group presentation.
+    #[serde(default)]
+    pub systems: Vec<RegisterSystemScope>,
     /// Identifies explicitly linked bundle lineages.
     pub bundle_ids: Vec<Uuid>,
     /// Identifies explicitly linked bundle versions.
@@ -787,6 +790,17 @@ pub struct PoamRegisterSummary {
     pub completed_milestone_count: i64,
     /// Contains the latest scope-neutral activity time, if available.
     pub last_activity_at: Option<DateTime<Utc>>,
+}
+
+/// Identifies one authorized current host in a register plan's context.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RegisterSystemScope {
+    /// Identifies the system independently of its display name.
+    pub system_id: Uuid,
+    /// Contains the source-backed current hostname.
+    pub hostname: String,
+    /// Contains current membership, not a link-time environment snapshot.
+    pub environment_id: Option<Uuid>,
 }
 
 /// Identifies one immutable occurrence in current exact-CVE scan evidence.
@@ -1794,6 +1808,9 @@ pub struct AcceptanceEntry {
     pub finding_id: Option<Uuid>,
     /// Exact host identity for a host decision or policy waiver.
     pub system_id: Option<Uuid>,
+    /// Contains the current hostname for an authorized host-scoped decision.
+    #[serde(default)]
+    pub system_hostname: Option<String>,
     /// Original environment identity for an environment decision.
     pub environment_id: Option<Uuid>,
     /// Policy lineage identity for a policy waiver.

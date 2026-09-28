@@ -1269,6 +1269,45 @@ fn loaded_package_groups(items: &[CveListItem]) -> BTreeMap<String, Vec<CveListI
     groups
 }
 
+/// Applies the same pair-level predicates as the scoped inventory request.
+/// The environment restriction is enforced by the server and its request
+/// identity, because a pair's environment names are not stable UUID scopes.
+fn matches_pair_filters(item: &CveListItem, filters: &CveFilters) -> bool {
+    filters
+        .severity
+        .as_deref()
+        .is_none_or(|severity| item.severity.eq_ignore_ascii_case(severity))
+        && filters
+            .triage_status
+            .as_deref()
+            .is_none_or(|status| item.triage_status.eq_ignore_ascii_case(status))
+        && filters
+            .fix_status
+            .as_deref()
+            .is_none_or(|status| match status {
+                "available" => item.fix_status == "fix_available",
+                "pending" => item.fix_status == "open",
+                "exploited" => item.exploited,
+                _ => false,
+            })
+        && filters.package.as_deref().is_none_or(|package| {
+            item.package_name
+                .as_deref()
+                .is_some_and(|name| name.to_lowercase().contains(&package.to_lowercase()))
+        })
+        && filters.search.as_deref().is_none_or(|search| {
+            let search = search.to_lowercase();
+            [
+                Some(item.cve_id.as_str()),
+                item.package_name.as_deref(),
+                Some(item.title.as_str()),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|text| text.to_lowercase().contains(&search))
+        })
+}
+
 fn severity_weight(severity: &str) -> u8 {
     match severity.to_ascii_uppercase().as_str() {
         "CRITICAL" => 4,
@@ -1388,32 +1427,50 @@ fn CvePairsView(
     let mut default_package = use_signal(|| None::<String>);
     let mut default_applied = use_signal(|| false);
     let mut selected = use_signal(BTreeSet::<ExactCveSelection>::new);
-    let grouped_filters = query.filters.clone();
-    let grouped_response = use_resource(move || {
-        let filters = grouped_filters.clone();
-        async move {
-            let response = if grouped {
+    let mut loaded_identity = use_signal(|| query.clone());
+    // CONCURRENCY: A page from the previous filter identity cannot supply
+    // package headers or children after the operator changes any filter.
+    use_effect(use_reactive(&query, move |request| {
+        if *loaded_identity.peek() != request {
+            loaded_identity.set(request);
+            loaded.set(Vec::new());
+            offset.set(0);
+            next.set(None);
+            total.set(0);
+            applied.set(None);
+            expanded_packages.set(BTreeMap::new());
+            default_package.set(None);
+            default_applied.set(false);
+            selected.set(BTreeSet::new());
+        }
+    }));
+    let grouped_response = use_resource(use_reactive(
+        &(query.filters.clone(), query.environment_id, grouped),
+        move |(filters, environment, is_grouped)| async move {
+            let response = if is_grouped && environment.is_none() {
                 client::fetch_cves_grouped(&filters).await
             } else {
                 Ok(Vec::new())
             };
             (filters, response)
-        }
-    });
-    let resource_query = query.clone();
-    let page = use_resource(move || {
-        let mut request = resource_query.clone();
+        },
+    ));
+    let page = use_resource(use_reactive(&query, move |mut request| {
         request.offset = offset();
         async move {
             (
-                request.offset,
+                request.clone(),
                 client::fetch_cve_inventory_pairs(&request).await,
             )
         }
-    });
+    }));
     use_effect(move || {
-        if let Some((response_offset, Ok(response))) = page.read().as_ref()
-            && *response_offset == offset()
+        if let Some((request, Ok(response))) = page.read().as_ref()
+            && request.offset == offset()
+            && (CveInventoryQuery {
+                offset: 0,
+                ..request.clone()
+            }) == *loaded_identity.read()
             && applied() != Some(offset())
         {
             loaded.write().extend(response.items.iter().cloned());
@@ -1422,16 +1479,21 @@ fn CvePairsView(
             applied.set(Some(offset()));
         }
     });
-    let visible = loaded()
-        .into_iter()
-        .filter(|item| {
-            focused.as_ref().is_none_or(|id| {
+    let visible = if *loaded_identity.read() == query {
+        loaded()
+    } else {
+        Vec::new()
+    }
+    .into_iter()
+    .filter(|item| {
+        matches_pair_filters(item, &query.filters)
+            && focused.as_ref().is_none_or(|id| {
                 item.cve_id == *id
                     && item.package_name.is_some()
                     && has_retained_package_evidence(item)
             })
-        })
-        .collect::<Vec<_>>();
+    })
+    .collect::<Vec<_>>();
     let seen = seen_for_user(seen_state.read().as_ref(), user_id.as_deref()).cloned();
     let ordered = ordered_package_groups(&visible, now, seen.as_ref())
         .into_iter()
@@ -1449,6 +1511,7 @@ fn CvePairsView(
         })
         .collect::<Vec<_>>();
     let effect_user = user_id.clone();
+    let default_query = query.clone();
     use_effect(move || {
         if !grouped || default_applied() || applied().is_none() {
             return;
@@ -1457,7 +1520,14 @@ fn CvePairsView(
         let Some(seen) = seen_for_user(current_seen.as_ref(), effect_user.as_deref()) else {
             return;
         };
-        let rows = loaded();
+        let rows = if *loaded_identity.read() == default_query {
+            loaded()
+                .into_iter()
+                .filter(|row| matches_pair_filters(row, &default_query.filters))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         let ordered = ordered_package_groups(&rows, now, Some(seen));
         if let Some((package, _)) = ordered.into_iter().find(|(_, pairs)| {
             pairs
@@ -1483,8 +1553,8 @@ fn CvePairsView(
             }
             span { class: "cve-selection-hint", "Ctrl/Cmd-click to select" }
         }
-        if let Some((response_offset, Err(error))) = page.read().as_ref()
-            && *response_offset == offset() {
+        if let Some((request, Err(error))) = page.read().as_ref()
+            && request.offset == offset() && request.filters == query.filters && request.environment_id == query.environment_id {
             div { class: "empty", "Unable to load CVE pairs: {error}" }
         }
         if loaded().is_empty() && page.read().is_none() {
@@ -1504,14 +1574,23 @@ fn CvePairsView(
         }
         if grouped {
             for (package, cves, is_new, is_expanded, count, newly_observed) in ordered {
-                { let aggregate = if query.environment_id.is_none() {
-                    matching_group(&grouped_response.read(), &query.filters, &package).cloned()
-                } else { None };
+                { // The fleet aggregate gives a distinct-host union only when
+                  // every filtered pair is loaded for this exact scope. All
+                  // other visible metrics come directly from child rows.
                 let patchable_shown = cves.iter().filter(|c| c.fix_status == "fix_available").count();
                 let outstanding_shown = cves.iter().filter(|c| c.triage_status == "outstanding").count();
-                let worst = aggregate.as_ref().and_then(|g| g.max_cvss).or_else(|| cves.iter().filter_map(|c| c.cvss_v3_score).reduce(f32::max));
-                let severities = aggregate.as_ref().map(|g| (g.critical_count > 0, g.high_count > 0, g.medium_count > 0))
-                    .unwrap_or_else(|| (cves.iter().any(|c| c.severity.eq_ignore_ascii_case("critical")), cves.iter().any(|c| c.severity.eq_ignore_ascii_case("high")), cves.iter().any(|c| c.severity.eq_ignore_ascii_case("medium"))));
+                let worst = cves.iter().filter_map(|c| c.cvss_v3_score).reduce(f32::max);
+                let aggregate = if query.environment_id.is_none() && next().is_none() && total() == loaded().len() as i64 {
+                    matching_group(&grouped_response.read(), &query.filters, &package).cloned()
+                        .filter(|g| g.cve_count == count as i64
+                            && g.critical_count == cves.iter().filter(|c| c.severity.eq_ignore_ascii_case("critical")).count() as i64
+                            && g.high_count == cves.iter().filter(|c| c.severity.eq_ignore_ascii_case("high")).count() as i64
+                            && g.medium_count == cves.iter().filter(|c| c.severity.eq_ignore_ascii_case("medium")).count() as i64
+                            && g.low_count == cves.iter().filter(|c| c.severity.eq_ignore_ascii_case("low")).count() as i64
+                            && g.fixable_count == patchable_shown as i64
+                            && g.outstanding_count == outstanding_shown as i64)
+                  } else { None };
+                let severities = (cves.iter().any(|c| c.severity.eq_ignore_ascii_case("critical")), cves.iter().any(|c| c.severity.eq_ignore_ascii_case("high")), cves.iter().any(|c| c.severity.eq_ignore_ascii_case("medium")));
                 let meter_color = if severities.0 { "#f87171" } else if severities.1 { "#fbbf24" } else if severities.2 { "#60a5fa" } else { "#9ca3af" };
                 rsx! {
                 div {
@@ -1538,26 +1617,19 @@ fn CvePairsView(
                         span { class: "cve-package-info",
                             span { class: "cve-package-name mono", "{package}" }
                             if is_new { span { class: "chip chip-info", "new" } }
-                            span { class: "cve-package-count", if let Some(g) = &aggregate { "{g.cve_count} CVEs" } else { "{count} CVEs shown" } }
+                            span { class: "cve-package-count", "{count} CVEs shown" }
                             small {
                                 if let Some(g) = &aggregate {
-                                    "{g.total_affected_systems} distinct systems affected · {g.fixable_count} patchable · {g.outstanding_count} outstanding"
+                                    "{g.total_affected_systems} distinct systems affected · {patchable_shown} patchable · {outstanding_shown} outstanding"
                                 } else {
                                     "{count} shown pairs · {patchable_shown} patchable · {outstanding_shown} outstanding · host total unavailable"
                                 }
                             }
                         }
                         span { class: "cve-package-severities",
-                            if let Some(g) = &aggregate {
-                                if g.critical_count > 0 { span { class: "chip chip-critical", "{g.critical_count} crit" } }
-                                if g.high_count > 0 { span { class: "chip chip-warning", "{g.high_count} high" } }
-                                if g.medium_count > 0 { span { class: "chip chip-info", "{g.medium_count} med" } }
-                                if g.low_count > 0 { span { class: "chip chip-unknown", "{g.low_count} low" } }
-                            } else {
                                 for (severity, label, class) in [("critical", "crit", "chip-critical"), ("high", "high", "chip-warning"), ("medium", "med", "chip-info"), ("low", "low", "chip-unknown")] {
                                     { let n = cves.iter().filter(|c| c.severity.eq_ignore_ascii_case(severity)).count(); rsx! { if n > 0 { span { class: "chip {class}", "{n} {label} shown" } } } }
                                 }
-                            }
                         }
                         span { class: "cve-package-cvss",
                             small { "Worst CVSS" }
@@ -3206,14 +3278,14 @@ mod tests {
         CveSeenState, FleetDetailState, ToastLifecycle, authenticated_user_id,
         complete_focus_package, deployment_dot, environment_triage_eligible, fleet_error_state,
         fleet_fix_label, fleet_triage_draft, has_retained_package_evidence, initially_expanded,
-        inventory_section_label, is_canonical_cve_id, loaded_package_groups,
+        inventory_section_label, is_canonical_cve_id, loaded_package_groups, matches_pair_filters,
         ordered_package_groups, pair_metadata_for_member, recently_observed_unseen,
         request_token_is_current, seen_for_user, seen_storage_key, systems_in_inventory_section,
         triage_status_presentation, unique_retained_package_for_cve, unseen_new_pairs,
     };
     use crate::api::models::{
-        AuthContext, AuthMode, AuthUser, CveInventoryMember, CveInventoryPairPage, CveListItem,
-        FleetCveInventorySection, SystemCveInventoryAuthority,
+        AuthContext, AuthMode, AuthUser, CveFilters, CveInventoryMember, CveInventoryPairPage,
+        CveListItem, FleetCveInventorySection, SystemCveInventoryAuthority,
     };
     use crate::components::cve::triage::{
         CveTriageDraft, EnvironmentTriageChoice, EnvironmentTriageDraft,
@@ -3365,6 +3437,72 @@ mod tests {
             ..member
         };
         assert!(pair_metadata_for_member(&other, &items).is_none());
+    }
+
+    #[test]
+    fn every_filtered_package_group_has_matching_children_and_no_excluded_counts() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 9, 26, 12, 0, 0)
+            .single()
+            .unwrap();
+        let mut critical = cve_item("CVE-2025-1234", Some("nginx"), Some(1));
+        critical.severity = "critical".into();
+        critical.triage_status = "outstanding".into();
+        critical.fix_status = "fix_available".into();
+        let mut low = cve_item("CVE-2025-5678", Some("nginx"), Some(1));
+        low.severity = "low".into();
+        low.triage_status = "accepted".into();
+        low.fix_status = "open".into();
+        let mut other = cve_item("CVE-2025-9876", Some("openssl"), Some(1));
+        other.severity = "critical".into();
+        let all = [critical, low.clone(), other];
+        let groups_for = |filters: CveFilters| {
+            ordered_package_groups(
+                &all.iter()
+                    .filter(|row| matches_pair_filters(row, &filters))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                now,
+                None,
+            )
+        };
+        let low_groups = groups_for(CveFilters {
+            severity: Some("low".into()),
+            ..Default::default()
+        });
+        assert_eq!(low_groups.len(), 1);
+        assert_eq!(low_groups[0].0, "nginx");
+        assert_eq!(low_groups[0].1.len(), 1);
+        assert_eq!(low_groups[0].1[0].cve_id, low.cve_id);
+        assert!(
+            groups_for(CveFilters {
+                severity: Some("medium".into()),
+                ..Default::default()
+            })
+            .is_empty()
+        );
+        for filters in [
+            CveFilters {
+                triage_status: Some("accepted".into()),
+                ..Default::default()
+            },
+            CveFilters {
+                fix_status: Some("pending".into()),
+                ..Default::default()
+            },
+            CveFilters {
+                package: Some("nginx".into()),
+                search: Some("5678".into()),
+                ..Default::default()
+            },
+        ] {
+            let groups = groups_for(filters);
+            assert_eq!(groups.len(), 1);
+            assert_eq!(groups[0].0, "nginx");
+            assert_eq!(groups[0].1.len(), 1);
+            assert!(groups.iter().all(|(_, children)| !children.is_empty()));
+        }
+        assert_eq!(groups_for(CveFilters::default()).len(), 2);
     }
 
     #[test]
