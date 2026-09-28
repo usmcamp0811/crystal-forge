@@ -4415,3 +4415,20 @@ tr.cve-row-new { background-color: color-mix(in oklab, var(--cf-red) 9%, transpa
 .cve-host-fresh{display:flex;align-items:center;gap:7px;font-size:10.5px;color:var(--cf-text-muted);flex-shrink:0}
 .cve-host-bar{display:flex;width:70px;height:5px;border-radius:99px;overflow:hidden;background:var(--cf-subtle-bg)}
 .cve-host-clean{display:flex;align-items:center;gap:6px;padding:8px 14px 8px 34px;font-size:11.5px;color:var(--cf-text-muted);border-top:1px solid var(--cf-divider)}
+
+.cve-sel-bar{display:flex;align-items:center;gap:6px 8px;flex-wrap:wrap;padding:7px 10px;border:1px solid var(--cf-divider);border-radius:8px;background:var(--cf-subtle-bg);min-height:34px}
+.cve-sel-label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--cf-text-muted);margin-right:2px}
+.cve-sel-chip{all:unset;cursor:pointer;display:inline-flex;align-items:center;gap:5px;font-size:11.5px;padding:3px 9px;border-radius:99px;border:1px solid var(--cf-divider);background:var(--cf-card-bg);color:var(--cf-text-secondary)}
+.cve-sel-chip .mono{font-size:10.5px;color:var(--cf-text-muted)}
+.cve-sel-chip:hover{color:var(--cf-text-primary);border-color:var(--cf-card-border)}
+.cve-sel-chip.on{border-color:var(--cf-brand-purple);color:var(--cf-text-primary);background:color-mix(in oklab,var(--cf-brand-purple) 12%,var(--cf-card-bg))}
+.cve-batch-list{display:flex;flex-direction:column;gap:8px;max-height:200px;overflow-y:auto;padding:10px 12px;border:1px solid var(--cf-divider);border-radius:9px;background:var(--cf-subtle-bg)}
+.cve-batch-pkg{display:grid;grid-template-columns:110px minmax(0,1fr);gap:10px;align-items:start}
+.cve-batch-pkg-name{font-size:12px;font-weight:700;padding-top:3px;overflow:hidden;text-overflow:ellipsis}
+.cve-batch-ids{display:flex;flex-wrap:wrap;gap:5px}
+.cve-batch-id{display:inline-flex;align-items:center;gap:5px;font-size:11px;padding:2px 8px;border-radius:99px;background:var(--cf-card-bg);border:1px solid var(--cf-divider)}
+.cve-batch-id.skip{opacity:.5;text-decoration:line-through}
+.cve-batch-dot{width:6px;height:6px;border-radius:99px;background:#9ca3af}
+.cve-batch-dot[data-sev=critical]{background:#f87171}.cve-batch-dot[data-sev=high]{background:#fbbf24}.cve-batch-dot[data-sev=medium]{background:#60a5fa}
+.cve-batch-body>*{flex-shrink:0}
+.cve-batch-envs{display:flex;flex-wrap:wrap;gap:6px}

@@ -1713,6 +1713,25 @@ function CvesTab({ sys, scenarioKey }) {
     return <span className="chip chip-info" style={{ fontSize:10 }} title={`Patch scheduled for ${where} · ${d.owner || "unassigned"}${d.due ? ` · due ${d.due}` : ""}`}>scheduled{scopeOf(c) === "env" ? " · env" : ""}</span>;
   };
 
+  // Multi-select for batch triage. Quick picks add a whole slice (all high, all
+  // patchable…); package headers select that package.
+  // Same ⌘/⇧-click gesture as every other list; ⌘-click a package header to take the whole package.
+  const sel = useMultiSelect(revKey + "|" + scenarioKey);
+  const [batchOpen, setBatchOpen] = React.useState(false);
+  const canBatch = !readOnly && !!window.CveBatchTriageModal;
+  const stateOf = (list) => { const n = list.filter(c => sel.has(c.id)).length; return n === 0 ? "none" : n === list.length ? "all" : "some"; };
+  const toggleSet = (list) => { const all = list.every(c => sel.has(c.id)); list.forEach(c => sel.toggle(c.id, !all)); };
+  const visibleIds = groups.filter(g => g.pkg === expanded).flatMap(g => g.list.map(c => c.id));
+  const quick = [
+    ["Critical", cves.filter(c => c.level === "critical")],
+    ["High", cves.filter(c => c.level === "high")],
+    ["Patchable", cves.filter(c => c.fix === "available")],
+    ["Outstanding", cves.filter(c => !dispOf(c))],
+  ].filter(([, l]) => l.length);
+  const selList = cves.filter(c => sel.has(c.id));
+  const selPkgs = new Set(selList.map(c => c.pkg)).size;
+  const toModalCve = (c) => ({ id: c.id, pkg: c.pkg, cvss: parseFloat(c.score), severity: c.level, fix: c.fix, fixedIn: c.fixedIn || null, dispositions: c.dispositions });
+
   return (
     <>
     {scenario ? <CveScenarioScopeBar scope={scenarioScope} state={retry === "pending" ? { ...scenario, kind: "loading", description: null } : scenario}/> : <RevScopeBar sys={sys} scope={scope} label="Scan target"/>}
@@ -1741,17 +1760,29 @@ function CvesTab({ sys, scenarioKey }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: 14 }}>
           {scenario?.attempt && <div className="sd-card-meta">{scenario.attempt}</div>}
           {scenario?.partial && retry !== "success" && <div className="sd-card-meta" role="status">More findings could not be loaded. The rows below are partial; retry the selected page without discarding them. <button type="button" className="btn btn-ghost xs focus-ring" onClick={retryRead}>Retry page</button></div>}
+          {canBatch && (
+            <div className="cve-sel-bar">
+              <span className="cve-sel-label">Select</span>
+              {quick.map(([l, list]) => (
+                <button key={l} type="button" className={`cve-sel-chip focus-ring${stateOf(list) === "all" ? " on" : ""}`} onClick={() => toggleSet(list)}>{l} <span className="mono">{list.length}</span></button>
+              ))}
+              <span style={{ marginLeft:"auto" }}><MultiSelectHint/></span>
+            </div>
+          )}
           {groups.map(g => {
             const sevColor = g.counts.critical > 0 ? "#f87171" : g.counts.high > 0 ? "#fbbf24" : g.counts.medium > 0 ? "#60a5fa" : "#9ca3af";
             const isOpen = expanded === g.pkg;
             return (
               <div key={g.pkg} className="card" style={{ overflow: "hidden" }}>
-                <button className="focus-ring" onClick={() => setExpanded(isOpen ? null : g.pkg)}
-                  style={{ all: "unset", display: "grid", gridTemplateColumns: "24px 1fr auto", alignItems: "center", gap: 14, padding: "12px 16px", cursor: "pointer", width: "100%", boxSizing: "border-box", borderLeft: `3px solid ${sevColor}`, background: isOpen ? "color-mix(in oklab,var(--cf-brand-purple) 6%,var(--cf-card-bg))" : "transparent" }}>
+                <div style={{ display: "flex", alignItems: "stretch", borderLeft: `3px solid ${sevColor}`, background: isOpen ? "color-mix(in oklab,var(--cf-brand-purple) 6%,var(--cf-card-bg))" : "transparent" }}>
+                <button className="focus-ring" title={canBatch ? "⌘/Ctrl-click to select every CVE in this package" : undefined}
+                  onClick={(e) => { if (canBatch && (e.metaKey || e.ctrlKey || e.shiftKey)) { e.preventDefault(); toggleSet(g.list); return; } setExpanded(isOpen ? null : g.pkg); }}
+                  style={{ all: "unset", flex: 1, minWidth: 0, display: "grid", gridTemplateColumns: "24px 1fr auto", alignItems: "center", gap: 14, padding: "12px 16px", cursor: "pointer", boxSizing: "border-box", boxShadow: canBatch && stateOf(g.list) === "all" ? "inset 0 0 0 1px var(--cf-brand-purple)" : "none" }}>
                   <Icon name={isOpen ? "chevron-down" : "chevron-right"} size={14} style={{ color: "var(--cf-text-muted)" }} />
                   <div style={{ minWidth: 0 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                       <span className="mono" style={{ fontSize: 14, fontWeight: 700 }}>{g.pkg}</span>
+                      {canBatch && stateOf(g.list) !== "none" && <span className="chip chip-info" style={{ fontSize: 10 }}>{g.list.filter(c => sel.has(c.id)).length} selected</span>}
                       <span className="mono" style={{ fontSize: 11, color: "var(--cf-text-muted)" }}>{g.version}</span>
                        <span style={{ fontSize: 12, color: "var(--cf-text-muted)" }}>{g.list.length} CVE{g.list.length === 1 ? "" : "s"}</span>
                     </div>
@@ -1766,6 +1797,7 @@ function CvesTab({ sys, scenarioKey }) {
                        {g.counts.unknown > 0 && <span className="chip chip-unknown" style={{ fontSize: 10 }}>{g.counts.unknown} unknown</span>}
                   </div>
                 </button>
+                </div>
                 {isOpen && (
                   <table className="sys-table">
                     <thead>
@@ -1780,7 +1812,8 @@ function CvesTab({ sys, scenarioKey }) {
                     </thead>
                     <tbody>
                       {g.list.map(c => (
-                        <tr key={c.id}>
+                        <tr key={c.id} className={`${canBatch ? "selectable" : ""}${sel.has(c.id) ? " row-checked" : ""}`}
+                          onClick={canBatch ? (e) => { if (!sel.handleClick(e, c.id, visibleIds)) sel.setAnchor(c.id); } : undefined}>
                           <td className="mono" style={{ color: "var(--cf-text-primary)" }}>{c.id}</td>
                           <td>{chipFor(c.level)}</td>
                            <td className="mono">{c.score == null ? "—" : c.score}</td>
@@ -1809,6 +1842,27 @@ function CvesTab({ sys, scenarioKey }) {
             );
           })}
         </div>
+      )}
+      {canBatch && (
+        <BulkBar count={sel.size} onClear={sel.clear}>
+          <span style={{ fontSize:12, color:"var(--cf-text-muted)" }}>{selPkgs} package{selPkgs === 1 ? "" : "s"}</span>
+          <button type="button" className="btn btn-primary xs focus-ring" onClick={() => setBatchOpen(true)}><Icon name="shield" size={12}/> Triage {sel.size} together</button>
+        </BulkBar>
+      )}
+      {batchOpen && canBatch && selList.length > 0 && (
+        <window.CveBatchTriageModal
+          cves={selList.map(toModalCve)} sys={sys}
+          envSystems={(typeof SYSTEMS !== "undefined" ? SYSTEMS.filter(s => s.environment === sys.environment) : [sys])}
+          onClose={() => setBatchOpen(false)}
+          onSubmit={(out) => {
+            cves.forEach(c => {
+              if (!out.has(c.id)) return;
+              c.dispositions = out.get(c.id);
+              const d = (c.dispositions.hosts && c.dispositions.hosts[sys.id]) || c.dispositions[sys.environment];
+              c.acceptance = d ? d.state : "outstanding";
+            });
+            setBatchOpen(false); sel.clear(); bumpTriage();
+          }}/>
       )}
       {triageCve && window.CveTriageModal && (
         <window.CveTriageModal

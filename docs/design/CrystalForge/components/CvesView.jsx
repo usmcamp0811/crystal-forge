@@ -1,5 +1,19 @@
 // CVE view — fleet-wide vulnerabilities
 
+// Multi-select plumbing: the selection lives on CvesView; each table publishes the
+// ids it shows (in display order) so Shift-click ranges stay within what you see.
+const CveSelCtx = React.createContext(null);
+const CveSelIdsCtx = React.createContext([]);
+// ⌘/Ctrl/Shift-click on a group header takes every CVE in the group.
+function cveGroupClick(sel, list, e) {
+  if (!sel || !(e.metaKey || e.ctrlKey || e.shiftKey)) return false;
+  e.preventDefault(); e.stopPropagation();
+  const all = list.every(c => sel.has(c.id));
+  list.forEach(c => sel.toggle(c.id, !all));
+  return true;
+}
+function cveGroupSelN(sel, list) { return sel ? list.filter(c => sel.has(c.id)).length : 0; }
+
 function CvesView({ onOpenSystem, focus, onClearFocus }) {
   const [query, setQuery] = React.useState("");
   const [sevFilter, setSevFilter] = React.useState("all");
@@ -12,6 +26,9 @@ function CvesView({ onOpenSystem, focus, onClearFocus }) {
   const [envFilter, setEnvFilter] = React.useState("all");
   const [expandedPkg, setExpandedPkg] = React.useState(null);
   const [selectedCve, setSelectedCve] = React.useState(null);
+  const sel = useMultiSelect();
+  const [batchOpen, setBatchOpen] = React.useState(false);
+  const [, bumpTriage] = React.useReducer(x => x + 1, 0);
   useAttentionFlash("cves", (CVE_STATS.critical || 0) > 0);
   const seenNew = useCveSeenSet();
   React.useEffect(() => {
@@ -44,6 +61,14 @@ function CvesView({ onOpenSystem, focus, onClearFocus }) {
   if (sort === "cvss") filtered = [...filtered].sort((a, b) => b.cvss - a.cvss);
   if (sort === "age") filtered = [...filtered].sort((a, b) => a.ageDays - b.ageDays);
   if (sort === "affected") filtered = [...filtered].sort((a, b) => b.affectedCount - a.affectedCount);
+  const quickSel = [
+    ["Critical", filtered.filter(c => c.severity === "critical")],
+    ["High", filtered.filter(c => c.severity === "high")],
+    ["Patchable", filtered.filter(c => c.fix === "available")],
+    ["Outstanding", filtered.filter(c => c.acceptance === "outstanding")],
+  ].filter(([, l]) => l.length);
+  const selList = CVES.filter(c => sel.has(c.id));
+  const selPkgs = new Set(selList.map(c => c.pkg)).size;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -179,6 +204,16 @@ function CvesView({ onOpenSystem, focus, onClearFocus }) {
         </div>
       </div>
 
+      <div className="cve-sel-bar">
+        <span className="cve-sel-label">Select</span>
+        {quickSel.map(([l, list]) => {
+          const on = list.every(c => sel.has(c.id));
+          return <button key={l} type="button" className={`cve-sel-chip focus-ring${on ? " on" : ""}`} onClick={() => list.forEach(c => sel.toggle(c.id, !on))}>{l} <span className="mono">{list.length}</span></button>;
+        })}
+        <span style={{ marginLeft: "auto" }}><MultiSelectHint /></span>
+      </div>
+
+      <CveSelCtx.Provider value={sel}>
       {groupMode === "package" ?
       <CvePackageGroups
         cves={filtered}
@@ -207,7 +242,9 @@ function CvesView({ onOpenSystem, focus, onClearFocus }) {
             </tr>
           </thead>
           <tbody>
+            <CveSelIdsCtx.Provider value={filtered.map(c => c.id)}>
             {filtered.map((cve) => <CveRow key={cve.id} cve={cve} seenNew={seenNew} onOpen={() => setSelectedCve(cve)} />)}
+            </CveSelIdsCtx.Provider>
             {filtered.length === 0 &&
             <tr><td colSpan={10} style={{ padding: 24, textAlign: "center", color: "var(--cf-text-muted)", fontSize: 13 }}>No CVEs match the current filters.</td></tr>
             }
@@ -215,6 +252,20 @@ function CvesView({ onOpenSystem, focus, onClearFocus }) {
         </table>
       </div>
       }
+
+      </CveSelCtx.Provider>
+
+      <BulkBar count={sel.size} onClear={sel.clear}>
+        <span style={{ fontSize: 12, color: "var(--cf-text-muted)" }}>{selPkgs} package{selPkgs === 1 ? "" : "s"}</span>
+        <button type="button" className="btn btn-primary xs focus-ring" onClick={() => setBatchOpen(true)}><Icon name="shield" size={12} /> Triage {sel.size} together</button>
+      </BulkBar>
+      {batchOpen && window.CveBatchTriageModal && selList.length > 0 &&
+      <window.CveBatchTriageModal cves={selList} defaultEnvs={envFilter !== "all" ? [envFilter] : null}
+        onClose={() => setBatchOpen(false)}
+        onSubmit={(out) => {
+          selList.forEach(c => { if (out.has(c.id)) cveApplyFleetDispositions(c, out.get(c.id)); });
+          setBatchOpen(false); sel.clear(); bumpTriage();
+        }} />}
 
       {selectedCve && <CveDrawer key={selectedCve.id} cve={selectedCve} onClose={() => setSelectedCve(null)} onOpenSystem={onOpenSystem} />}
     </div>);
@@ -356,7 +407,7 @@ function CveTable({ cves, seenNew, onSelectCve, limit, onMore }) {
         <thead>
           <tr><th>CVE</th><th>Severity</th><th>CVSS</th><th>Package</th><th>Title</th><th>Affected</th><th>Fix</th><th>Triage</th><th>Age</th><th style={{ textAlign: "right" }}> </th></tr>
         </thead>
-        <tbody>{shown.map((cve) => <CveRow key={cve.id} cve={cve} seenNew={seenNew} onOpen={() => onSelectCve(cve)} />)}</tbody>
+        <tbody><CveSelIdsCtx.Provider value={shown.map(c => c.id)}>{shown.map((cve) => <CveRow key={cve.id} cve={cve} seenNew={seenNew} onOpen={() => onSelectCve(cve)} />)}</CveSelIdsCtx.Provider></tbody>
       </table>
       {cves.length > shown.length &&
       <button type="button" className="pv-more pv-more-row focus-ring" onClick={onMore}>
@@ -365,6 +416,7 @@ function CveTable({ cves, seenNew, onSelectCve, limit, onMore }) {
     </>);
 }
 function CveEnvGroups({ cves, nested, envFilter, onSelectCve, onOpenSystem, seenNew }) {
+  const sel = React.useContext(CveSelCtx);
   const [collapsed, setCollapsed] = React.useState({});
   const [limits, setLimits] = React.useState({});
   const sysById = React.useMemo(() => new Map(SYSTEMS.map((s) => [s.id, s])), []);
@@ -405,10 +457,11 @@ function CveEnvGroups({ cves, nested, envFilter, onSelectCve, onOpenSystem, seen
           return (
             <section key={k} className="pv-group">
               <div className="pv-group-head">
-                <button type="button" className="pv-group-toggle focus-ring" aria-expanded={open} onClick={() => toggle(k, dflt)}>
+                <button type="button" className="pv-group-toggle focus-ring" aria-expanded={open} title="⌘/Ctrl-click to select every CVE in this environment" onClick={(e) => { if (cveGroupClick(sel, g.list, e)) return; toggle(k, dflt); }}>
                   <Icon name={open ? "chevron-down" : "chevron-right"} size={13} style={{ color: "var(--cf-text-muted)" }} />
                   <span className="pv-dot" style={{ background: envColor }} />
                   <span className="pv-group-name">{g.env}</span>
+                  {cveGroupSelN(sel, g.list) > 0 && <span className="chip chip-info" style={{ fontSize: 10 }}>{cveGroupSelN(sel, g.list)} selected</span>}
                   <span className="pv-group-n">{g.list.length} CVE{g.list.length === 1 ? "" : "s"} · {g.hosts.length} of {g.total} host{g.total === 1 ? "" : "s"}</span>
                   <span style={{ fontSize: 11, color: "var(--cf-text-muted)" }}>{g.t.fixable} patchable · {g.t.outstanding} outstanding</span>
                 </button>
@@ -423,12 +476,13 @@ function CveEnvGroups({ cves, nested, envFilter, onSelectCve, onOpenSystem, seen
                   return (
                     <div key={hk} className="cve-host-group">
                         <div className="cve-host-head">
-                          <button type="button" className="pv-group-toggle focus-ring" aria-expanded={hOpen} onClick={() => toggle(hk, hd)}>
+                          <button type="button" className="pv-group-toggle focus-ring" aria-expanded={hOpen} title="⌘/Ctrl-click to select every CVE on this host" onClick={(e) => { if (cveGroupClick(sel, h.cves, e)) return; toggle(hk, hd); }}>
                             <Icon name={hOpen ? "chevron-down" : "chevron-right"} size={12} style={{ color: "var(--cf-text-muted)" }} />
                             <span className="status-dot" style={{ "--status-color": h.sys.statusColor }} />
                             <span className="mono" style={{ fontSize: 12.5, fontWeight: 600 }}>{h.sys.hostname}</span>
                             <span className="mono cve-host-flake" style={{ fontSize: 11, color: "var(--cf-text-muted)" }}>{h.sys.flake}</span>
                             <span className="pv-group-n">{h.cves.length} CVE{h.cves.length === 1 ? "" : "s"}</span>
+                            {cveGroupSelN(sel, h.cves) > 0 && <span className="chip chip-info" style={{ fontSize: 10 }}>{cveGroupSelN(sel, h.cves)} selected</span>}
                           </button>
                           {sc &&
                         <span className="cve-host-fresh" title={`Scan freshness · ${sc.scanned} fresh · ${sc.stale} stale · ${sc.needsBuild} need build · ${sc.unscanned} never scanned`}>
@@ -525,14 +579,17 @@ function CvePackageGroups({ cves, expanded, onToggle, onSelectCve, seenNew }) {
 }
 
 function CvePackageGroup({ group, isExpanded, onToggle, onSelectCve, seenNew }) {
+  const sel = React.useContext(CveSelCtx);
+  const selN = cveGroupSelN(sel, group.list);
   const sevColor = group.counts.critical > 0 ? "#f87171" :
   group.counts.high > 0 ? "#fbbf24" :
   group.counts.medium > 0 ? "#60a5fa" : "#9ca3af";
   return (
     <div className={`card${group.isNew ? " cve-pkg-new" : ""}`} style={{ overflow: "hidden" }}>
-      <button className="focus-ring" onClick={onToggle}
+      <button className="focus-ring" title="⌘/Ctrl-click to select every CVE in this package" onClick={(e) => { if (cveGroupClick(sel, group.list, e)) return; onToggle(); }}
       style={{
         all: "unset", display: "grid",
+        boxShadow: selN && selN === group.list.length ? "inset 0 0 0 1px var(--cf-brand-purple)" : "none",
         gridTemplateColumns: "24px 1fr auto auto",
         alignItems: "center", gap: 14,
         padding: "14px 18px",
@@ -547,6 +604,7 @@ function CvePackageGroup({ group, isExpanded, onToggle, onSelectCve, seenNew }) 
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <span className="mono" style={{ fontSize: 14, fontWeight: 700 }}>{group.pkg}</span>
             {group.isNew && <span className="chip cve-new-chip" style={{ fontSize: 10 }}>new</span>}
+            {selN > 0 && <span className="chip chip-info" style={{ fontSize: 10 }}>{selN} selected</span>}
             <span style={{ fontSize: 12, color: "var(--cf-text-muted)" }}>{group.list.length} CVE{group.list.length === 1 ? "" : "s"}</span>
             {group.exploited > 0 && <span className="chip chip-critical" style={{ fontSize: 10 }}>{group.exploited} exploited</span>}
           </div>
@@ -587,7 +645,9 @@ function CvePackageGroup({ group, isExpanded, onToggle, onSelectCve, seenNew }) 
               </tr>
             </thead>
             <tbody>
+              <CveSelIdsCtx.Provider value={group.list.map(c => c.id)}>
               {group.list.map((cve) => <CveRow key={cve.id} cve={cve} seenNew={seenNew} onOpen={() => onSelectCve(cve)} />)}
+              </CveSelIdsCtx.Provider>
             </tbody>
           </table>
         </div>
@@ -600,8 +660,12 @@ function CveRow({ cve, onOpen, seenNew }) {
   const sevCls = { critical: "chip-critical", high: "chip-warning", medium: "chip-info", low: "chip-unknown" }[cve.severity];
   const sevColor = { critical: "#f87171", high: "#fbbf24", medium: "#60a5fa", low: "#9ca3af" }[cve.severity];
   const isNew = cve.ageDays <= 1 && !(seenNew && seenNew.has(cve.id));
+  const sel = React.useContext(CveSelCtx);
+  const ids = React.useContext(CveSelIdsCtx);
+  const checked = sel && sel.has(cve.id);
   return (
-    <tr style={{ cursor: "pointer" }} className={isNew ? "cve-row-new" : ""} onClick={() => { if (isNew) cveMarkSeen([cve.id]); onOpen(); }}>
+    <tr style={{ cursor: "pointer" }} className={`${isNew ? "cve-row-new" : ""}${checked ? " row-checked" : ""}`}
+      onClick={(e) => { if (sel && sel.handleClick(e, cve.id, ids)) return; sel && sel.setAnchor(cve.id); if (isNew) cveMarkSeen([cve.id]); onOpen(); }}>
       <td>
         <div className="mono" style={{ fontWeight: 600, fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
           {cve.id}
@@ -645,6 +709,7 @@ function CveRow({ cve, onOpen, seenNew }) {
         {cve.acceptance === "accepted" && <span className="chip chip-info" title={cve.justification}>accepted</span>}
         {cve.acceptance === "scheduled" && <span className="chip chip-info" title={cve.justification}>scheduled</span>}
         {cve.acceptance === "outstanding" && <span className="chip chip-critical">outstanding</span>}
+        {cve.acceptance === "partial" && <span className="chip chip-warning" title={cve.scopeEnvs ? `Decided for ${cve.scopeEnvs.join(", ")}` : undefined}>partial</span>}
       </td>
       <td style={{ fontSize: 12, color: "var(--cf-text-muted)" }}>{cve.ageDays}d</td>
       <td>
