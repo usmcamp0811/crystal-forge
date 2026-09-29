@@ -452,6 +452,14 @@ async fn main() -> anyhow::Result<()> {
             post(cves::trigger_derivation_rescan),
         )
         .route("/api/v1/cves/export", get(cves::export_cves))
+        .route(
+            "/api/v1/cves/batch-detail",
+            post(poam::fleet_cve_batch_detail),
+        )
+        .route(
+            "/api/v1/cves/batch-triage",
+            post(poam::triage_fleet_cves_batch),
+        )
         .route("/api/v1/cves/:cve_id/fleet", get(poam::fleet_cve_detail))
         .route("/api/v1/cves/:cve_id/triage", post(poam::triage_fleet_cve))
         .route("/api/v1/cves/:cve_id", get(cves::get_cve_detail))

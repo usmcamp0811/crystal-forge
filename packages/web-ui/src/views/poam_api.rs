@@ -300,6 +300,153 @@ pub struct FleetCveDetail {
     pub environments: Vec<CveAffectedEnvironment>,
 }
 
+/// Identifies one exact fleet CVE/package pair without exposing host identities.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CveBatchPairIdentity {
+    /// Gives the canonical CVE ID.
+    pub cve_id: String,
+    /// Gives the canonical package name.
+    pub canonical_package_name: String,
+}
+
+/// Requests metadata for the entire exact selection, including unloaded rows.
+#[derive(Debug, Clone, Serialize)]
+pub struct FleetCveBatchDetailRequest {
+    /// Lists the selected exact pairs.
+    pub pairs: Vec<CveBatchPairIdentity>,
+}
+
+/// Describes an existing decision on an applicable pair and environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CveBatchExistingState {
+    /// Risk is already accepted.
+    Accepted,
+    /// Remediation is already scheduled and cannot be overwritten in bulk.
+    Scheduled,
+}
+
+/// Describes the current exact applicability of one environment.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CveBatchEnvironmentSummary {
+    /// Identifies the environment.
+    pub environment_id: Uuid,
+    /// Gives the environment's display name.
+    pub environment_name: String,
+    /// Counts current exact affected hosts, without disclosing their IDs.
+    pub exact_affected_system_count: i64,
+    /// Describes an existing decision, if present.
+    pub existing_state: Option<CveBatchExistingState>,
+    /// Binds the server-derived subject set, including an empty set.
+    pub evidence_token: String,
+}
+
+/// Contains authoritative display metadata for one requested exact pair.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FleetCveBatchDetailItem {
+    /// Gives the canonical CVE ID.
+    pub cve_id: String,
+    /// Gives the canonical package name.
+    pub canonical_package_name: String,
+    /// Gives advisory severity.
+    pub severity: String,
+    /// Gives the optional CVSS score.
+    pub cvss_v3_score: Option<f32>,
+    /// Lists every environment in the batch, including zero-subject tokens.
+    pub environments: Vec<CveBatchEnvironmentSummary>,
+}
+
+/// Contains hydrated detail for the selected exact pairs.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FleetCveBatchDetailResponse {
+    /// Lists the visible requested pairs.
+    pub items: Vec<FleetCveBatchDetailItem>,
+}
+
+/// Selects the boundary of newly created remediation plans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum CveBatchScheduleGrouping {
+    /// Creates one plan for all writable pairs.
+    One,
+    /// Creates one plan per package.
+    PerPackage,
+    /// Creates one plan per environment.
+    PerEnvironment,
+}
+
+/// Applies one shared decision through the atomic batch endpoint.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum CveBatchDisposition {
+    /// Accepts risk with a shared rationale and optional review date.
+    AcceptRisk {
+        /// Gives the rationale for each written decision.
+        justification: String,
+        /// Gives the optional review date.
+        review_date: Option<NaiveDate>,
+    },
+    /// Schedules remediation using server-generated plans when plan is empty.
+    SchedulePatch {
+        /// Chooses the plan grouping.
+        grouping: CveBatchScheduleGrouping,
+        /// Selects a server-validated typed assignee.
+        assignee: PoamAssigneeRequest,
+        /// Gives the completion target date.
+        target_date: NaiveDate,
+        /// Gives optional plan text.
+        plan: String,
+        /// Requests standard patch milestones.
+        default_milestones: bool,
+    },
+}
+
+/// Binds one pair/environment combination to server-issued exact evidence.
+#[derive(Debug, Clone, Serialize)]
+pub struct CveBatchEvidenceToken {
+    /// Identifies the exact pair.
+    pub pair: CveBatchPairIdentity,
+    /// Identifies the selected environment.
+    pub environment_id: Uuid,
+    /// Contains the opaque server-issued token.
+    pub evidence_token: String,
+}
+
+/// Requests one atomic batch mutation across the complete selected scope.
+#[derive(Debug, Clone, Serialize)]
+pub struct FleetCveBatchTriageRequest {
+    /// Lists all exact selected pairs.
+    pub pairs: Vec<CveBatchPairIdentity>,
+    /// Lists selected environments.
+    pub environment_ids: Vec<Uuid>,
+    /// Covers every selected pair/environment combination, even empty ones.
+    pub expected_tokens: Vec<CveBatchEvidenceToken>,
+    /// Leaves existing accepted decisions unchanged when true.
+    pub skip_existing: bool,
+    /// Selects the shared action.
+    pub disposition: CveBatchDisposition,
+}
+
+/// Reports one exact pair actually changed by the transaction.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CveBatchAppliedPair {
+    /// Identifies the changed pair.
+    pub pair: CveBatchPairIdentity,
+    /// Lists environments changed for the pair.
+    pub environment_ids: Vec<Uuid>,
+}
+
+/// Reports the committed atomic batch result.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FleetCveBatchTriageResponse {
+    /// Lists changed pairs and environments.
+    pub applied: Vec<CveBatchAppliedPair>,
+    /// Lists pairs with no writable selected environment.
+    pub skipped: Vec<CveBatchPairIdentity>,
+    /// Lists newly created POA&M identities.
+    pub poam_ids: Vec<Uuid>,
+}
+
 impl FleetCveDetail {
     // COMPATIBILITY: Servers from before inventory-authority rollout emitted
     // exact-only rows without the additive authority counters.
@@ -2085,6 +2232,39 @@ pub async fn fetch_fleet_cve_detail(
     let mut detail = request::<FleetCveDetail, ()>("GET", &url, None).await?;
     detail.normalize_inventory_counts();
     Ok(detail)
+}
+
+/// Hydrates exactly the named CVE/package pairs for batch triage.
+///
+/// # Errors
+///
+/// Returns [`PoamApiError`] on authorization, transport, validation, or decode failure.
+pub async fn fetch_fleet_cve_batch_detail(
+    body: &FleetCveBatchDetailRequest,
+) -> Result<FleetCveBatchDetailResponse, PoamApiError> {
+    request(
+        "POST",
+        &format!("{}/cves/batch-detail", base_url()),
+        Some(body),
+    )
+    .await
+}
+
+/// Commits one atomic, evidence-bound batch triage decision.
+///
+/// # Errors
+///
+/// Returns [`PoamApiError`] on stale evidence, authorization, validation,
+/// transport, or decode failure. No per-item browser retries occur.
+pub async fn triage_fleet_cve_batch(
+    body: &FleetCveBatchTriageRequest,
+) -> Result<FleetCveBatchTriageResponse, PoamApiError> {
+    request(
+        "POST",
+        &format!("{}/cves/batch-triage", base_url()),
+        Some(body),
+    )
+    .await
 }
 
 /// Applies one atomic fleet triage request for an exact CVE/package pair.

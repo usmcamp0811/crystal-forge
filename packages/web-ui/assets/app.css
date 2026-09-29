@@ -8297,3 +8297,20 @@ html[data-theme="light"] .scanning-detail-callout-danger strong { color:#b91c1c;
 .cve-package-meter > span { display: block; height: 100%; }
 .cve-export .rr-export-pop { z-index: 30; }
 @media (max-width: 800px) { .cve-package-toggle { grid-template-columns: 20px minmax(0, 1fr); } .cve-package-severities, .cve-package-cvss { grid-column: 2; justify-content: flex-start; } }
+.cve-bulk-bar { flex-wrap: wrap; justify-content: center; }
+.cve-bulk-bar small { flex-basis: 100%; text-align: center; color: var(--cf-text-muted); }
+.cve-batch-modal { position: fixed; top: 50%; left: 50%; z-index: 201; width: min(720px, 95vw); max-height: 92vh; transform: translate(-50%, -50%); }
+.cve-batch-body { overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
+.cve-batch-list { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--cf-divider); border-radius: 9px; }
+.cve-batch-pkg { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.cve-batch-ids, .cve-batch-envs { display: flex; gap: 6px; flex-wrap: wrap; }
+.cve-batch-id, .cve-sel-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; border-radius: 8px; border: 1px solid var(--cf-divider); background: var(--cf-subtle-bg); font-size: 11px; }
+.cve-batch-dot { width: 7px; height: 7px; border-radius: 50%; background: #9ca3af; }
+.cve-batch-dot[data-sev="critical"] { background: #f87171; }
+.cve-batch-dot[data-sev="high"] { background: #fbbf24; }
+.cve-batch-dot[data-sev="medium"] { background: #60a5fa; }
+.cve-batch-existing { color: var(--cf-text-muted); font-size: 10px; }
+.cve-sel-chip { cursor: pointer; color: var(--cf-text-primary); }
+.cve-sel-chip.on { border-color: var(--cf-brand-purple); background: color-mix(in oklab, var(--cf-brand-purple) 12%, var(--cf-card-bg)); }
+.cve-batch-fields { display: flex; flex-direction: column; gap: 12px; padding: 13px; border: 1px solid var(--cf-divider); border-radius: 9px; }
+.cve-batch-summary { margin-right: auto; font-size: 12px; color: var(--cf-text-muted); }

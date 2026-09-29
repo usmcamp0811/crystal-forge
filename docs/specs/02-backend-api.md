@@ -1146,12 +1146,34 @@ value.
 | POST | `/acceptances/:source/:id/renew` | Source-specific | Renew one accepted source decision through its owning service |
 | POST | `/acceptances/:source/:id/convert` | Source-specific | Replace one acceptance with an atomically linked policy or CVE POA&M |
 | POST | `/poams/cves` | Operator+ | Create a POA&M from one server-issued exact occurrence |
+| POST | `/cves/batch-detail` | Viewer+ | Hydrate at most 100 selected exact CVE/package pairs and per-environment evidence tokens, including pairs from unloaded list pages |
+| POST | `/cves/batch-triage` | Operator+ | Apply one atomic disposition to selected exact pairs in selected environments; schedule grouping is `ONE`, `PER_PACKAGE`, or `PER_ENVIRONMENT` |
 | GET | `/poams/relationships/cves?system_id=:id` | Viewer+ | Return bounded current exact occurrences and POA&M relationships |
 | POST | `/poams/:id/cve-findings` | Operator+ | Link one current exact occurrence |
 | DELETE | `/poams/:id/cve-findings/:finding_id?revision=:revision` | Operator+ | Retire one exact finding link |
 | POST | `/poams/:id/verify` | Operator+ | Seal exact current verification evidence |
 | POST | `/poams/:id/close` | Operator+ | Verify and close atomically |
 | POST | `/poams/:id/reopen` | Operator+ | Restore the exact closure finding set |
+
+The batch hydration request contains `pairs: [{cve_id,
+canonical_package_name}]`. It fails the entire request if any selected pair
+lacks visible current exact evidence. For each applicable pair/environment the
+response includes source-backed severity, disposition state, exact host count,
+and an opaque evidence token. The browser does not send host IDs as mutation
+authority. The mutation request contains the same bounded exact pairs,
+selected `environment_ids`, a complete per-pair/environment set of
+`expected_tokens`, `skip_existing`, and either `accept_risk` (one justification
+and optional review date) or `schedule_patch` (typed assignee, target date,
+optional plan, milestone toggle, and grouping). The server limits the request
+to 100 pairs and 100 environments. It reloads authorization, recomputes exact
+subjects under ordered locks, compares tokens, and commits every accepted
+decision, grouped POA&M, exact finding link, and audit event in one transaction.
+Changed evidence returns HTTP 409; no partial mutation commits. An unselected
+environment is unchanged. Existing schedules are skipped rather than
+overwritten; accepted decisions are skipped by default and require explicit
+`skip_existing: false` for replacement. A shared POA&M may contain multiple
+exact CVE/package identities, but never policy finding history. Existing
+single-CVE routes retain their independent contract.
 
 The register response retains list pagination (`limit`, `offset`, `has_more`,
 `next_offset`) and includes exact environment, system, bundle lineage, bundle

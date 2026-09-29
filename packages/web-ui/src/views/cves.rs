@@ -3,7 +3,8 @@
 //! Paged pair identities drive rows and drawer URLs. Fleet-wide grouped
 //! aggregates may label package headers only for the same filters; scoped or
 //! missing groups show loaded-pair counts without inferring distinct hosts.
-//! Row selection is local presentation state and never submits a bulk mutation.
+//! Exact pair selection persists across loaded pages; batch writes use server-issued
+//! evidence tokens and one atomic server transaction.
 
 use chrono::{DateTime, Duration, Utc};
 use dioxus::prelude::*;
@@ -530,6 +531,7 @@ pub fn CvesView(query: String) -> Element {
     let mut toast_lifecycle = use_signal(ToastLifecycle::default);
     let mut fleet_rescan_pending = use_signal(|| false);
     let mut export_open = use_signal(|| false);
+    let mut batch_refresh = use_signal(|| 0_u64);
 
     // Attention flash signal for the Critical stat card (set by the use_effect after stats resolves).
     let mut flash_crit_signal = use_signal(|| false);
@@ -618,7 +620,10 @@ pub fn CvesView(query: String) -> Element {
     }
 
     // Data resources
-    let stats = use_resource(move || async move { client::fetch_cve_fleet_stats().await });
+    let stats = use_resource(move || {
+        let _ = batch_refresh();
+        async move { client::fetch_cve_fleet_stats().await }
+    });
 
     // Attention flash for the Critical stat card when critical CVEs exist (TASK-385).
     // Must be placed after `stats` is declared so it can be captured in the closure.
@@ -640,6 +645,7 @@ pub fn CvesView(query: String) -> Element {
     let environments = use_resource(|| async move { client::fetch_environments().await });
 
     let pair_metadata = use_resource(move || {
+        let _ = batch_refresh();
         let query = CveInventoryQuery {
             group_by: "environment".into(),
             environment_id: environment_filter(),
@@ -1182,6 +1188,9 @@ pub fn CvesView(query: String) -> Element {
                         p { class: "page-subtitle", "Focused CVE resolution unavailable: {error}" }
                     }
                     CvePairsView {
+                    refresh: batch_refresh,
+                    active_environment: environment_filter(),
+                    can_triage: auth::is_operator_or_above(&app_state.read().auth),
                     fleet_stats: stats.read().as_ref().and_then(|result| result.as_ref().ok()).cloned(),
                     query: CveInventoryQuery {
                         group_by: "environment".into(), environment_id: environment_filter(), group_id: None,
@@ -1464,6 +1473,410 @@ fn toggle_quick_pairs(
     }
 }
 
+const MAX_CVE_BATCH_PAIRS: usize = 100;
+
+fn batch_identity(pair: &ExactCveSelection) -> poam_api::CveBatchPairIdentity {
+    poam_api::CveBatchPairIdentity {
+        cve_id: pair.cve_id.clone(),
+        canonical_package_name: pair.package.clone(),
+    }
+}
+
+// SECURITY: Hydration must account for every selected identity before a
+// mutation. A partial or duplicated response cannot silently narrow scope.
+fn validate_batch_detail(
+    selected: &BTreeSet<ExactCveSelection>,
+    response: &poam_api::FleetCveBatchDetailResponse,
+) -> Result<(), String> {
+    let actual = response
+        .items
+        .iter()
+        .map(|item| ExactCveSelection {
+            cve_id: item.cve_id.clone(),
+            package: item.canonical_package_name.clone(),
+        })
+        .collect::<BTreeSet<_>>();
+    if response.items.len() != selected.len() || &actual != selected {
+        return Err(
+            "Batch detail did not return every selected CVE/package pair. Refresh and retry."
+                .into(),
+        );
+    }
+    for item in &response.items {
+        let mut environments = BTreeSet::new();
+        if item.environments.iter().any(|env| {
+            !environments.insert(env.environment_id)
+                || env.exact_affected_system_count < 0
+                || env.evidence_token.is_empty()
+        }) {
+            return Err(
+                "Batch detail contains incomplete environment evidence. Refresh and retry.".into(),
+            );
+        }
+    }
+    let expected = response
+        .items
+        .first()
+        .map(|item| {
+            item.environments
+                .iter()
+                .map(|env| env.environment_id)
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    if response.items.iter().any(|item| {
+        item.environments
+            .iter()
+            .map(|env| env.environment_id)
+            .collect::<BTreeSet<_>>()
+            != expected
+    }) {
+        return Err(
+            "Batch detail is missing zero-subject environment evidence. Refresh and retry.".into(),
+        );
+    }
+    Ok(())
+}
+
+fn batch_tokens(
+    detail: &poam_api::FleetCveBatchDetailResponse,
+    environments: &BTreeSet<uuid::Uuid>,
+) -> Result<Vec<poam_api::CveBatchEvidenceToken>, String> {
+    let mut tokens = Vec::new();
+    for item in &detail.items {
+        for environment_id in environments {
+            // The server returns tokens for zero-subject combinations too.
+            let Some(env) = item
+                .environments
+                .iter()
+                .find(|env| env.environment_id == *environment_id)
+            else {
+                return Err("Selected environment evidence is missing for a CVE/package pair. Refresh and retry.".into());
+            };
+            tokens.push(poam_api::CveBatchEvidenceToken {
+                pair: poam_api::CveBatchPairIdentity {
+                    cve_id: item.cve_id.clone(),
+                    canonical_package_name: item.canonical_package_name.clone(),
+                },
+                environment_id: *environment_id,
+                evidence_token: env.evidence_token.clone(),
+            });
+        }
+    }
+    Ok(tokens)
+}
+
+fn batch_assignee(
+    value: &str,
+    catalog: &poam_api::PoamAssigneeCatalog,
+) -> Option<poam_api::PoamAssigneeRequest> {
+    if let Some(id) = value.strip_prefix("user:").and_then(|id| id.parse().ok()) {
+        return catalog
+            .people
+            .iter()
+            .any(|person| person.user_id == id)
+            .then_some(poam_api::PoamAssigneeRequest::User { user_id: id });
+    }
+    if let Some(group) = value.strip_prefix("group:") {
+        return catalog
+            .groups
+            .iter()
+            .any(|entry| entry.group_name == group)
+            .then(|| poam_api::PoamAssigneeRequest::OidcGroup {
+                group_name: group.into(),
+            });
+    }
+    None
+}
+
+#[component]
+fn CveBatchTriageDialog(
+    selection: BTreeSet<ExactCveSelection>,
+    active_environment: Option<uuid::Uuid>,
+    on_close: EventHandler<()>,
+    on_success: EventHandler<poam_api::FleetCveBatchTriageResponse>,
+) -> Element {
+    let mut detail = use_signal(|| None::<Result<poam_api::FleetCveBatchDetailResponse, String>>);
+    let mut catalog = use_signal(|| None::<Result<poam_api::PoamAssigneeCatalog, String>>);
+    let mut picked = use_signal(BTreeSet::<uuid::Uuid>::new);
+    let mut action = use_signal(|| "scheduled");
+    let mut skip_existing = use_signal(|| true);
+    let mut grouping = use_signal(|| poam_api::CveBatchScheduleGrouping::One);
+    let mut assignee = use_signal(String::new);
+    let mut target_date = use_signal(String::new);
+    let mut plan = use_signal(String::new);
+    let mut milestones = use_signal(|| true);
+    let mut justification = use_signal(String::new);
+    let mut review_date = use_signal(String::new);
+    let mut pending = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+    let component_active = use_hook(|| Rc::new(Cell::new(true)));
+    {
+        let component_active = component_active.clone();
+        use_drop(move || component_active.set(false));
+    }
+    use_effect({
+        let selection = selection.clone();
+        let component_active = component_active.clone();
+        move || {
+            let component_active = component_active.clone();
+            let selection = selection.clone();
+            let catalog_active = component_active.clone();
+            spawn(async move {
+                let response =
+                    poam_api::fetch_fleet_cve_batch_detail(&poam_api::FleetCveBatchDetailRequest {
+                        pairs: selection.iter().map(batch_identity).collect(),
+                    })
+                    .await
+                    .map_err(|err| err.to_string())
+                    .and_then(|response| {
+                        validate_batch_detail(&selection, &response)?;
+                        Ok(response)
+                    });
+                if !component_active.get() {
+                    return;
+                }
+                if let Ok(response) = &response {
+                    let applicable = response
+                        .items
+                        .iter()
+                        .flat_map(|item| &item.environments)
+                        .filter(|env| env.exact_affected_system_count > 0)
+                        .map(|env| env.environment_id)
+                        .collect::<BTreeSet<_>>();
+                    picked.set(
+                        active_environment
+                            .filter(|id| applicable.contains(id))
+                            .map(|id| BTreeSet::from([id]))
+                            .unwrap_or(applicable),
+                    );
+                    let most_severe = response
+                        .items
+                        .iter()
+                        .map(|item| severity_weight(&item.severity))
+                        .max()
+                        .unwrap_or(0);
+                    let days = if most_severe >= 4 {
+                        14
+                    } else if most_severe >= 3 {
+                        30
+                    } else {
+                        56
+                    };
+                    target_date.set((Utc::now().date_naive() + Duration::days(days)).to_string());
+                }
+                detail.set(Some(response));
+            });
+            spawn(async move {
+                let result = poam_api::fetch_assignee_catalog()
+                    .await
+                    .map_err(|err| err.to_string());
+                if catalog_active.get() {
+                    catalog.set(Some(result));
+                }
+            });
+        }
+    });
+    let hydrated = detail
+        .read()
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .cloned();
+    let mut environments = BTreeMap::<uuid::Uuid, (String, usize)>::new();
+    let mut packages = BTreeSet::new();
+    let mut writable = BTreeSet::new();
+    let mut scheduled_skipped = 0;
+    let mut accepted_skipped = 0;
+    if let Some(detail) = &hydrated {
+        for item in &detail.items {
+            packages.insert(item.canonical_package_name.clone());
+            for env in &item.environments {
+                if env.exact_affected_system_count > 0 {
+                    let entry = environments
+                        .entry(env.environment_id)
+                        .or_insert((env.environment_name.clone(), 0));
+                    entry.1 += 1;
+                    if picked().contains(&env.environment_id) {
+                        match env.existing_state {
+                            Some(poam_api::CveBatchExistingState::Scheduled) => {
+                                scheduled_skipped += 1
+                            }
+                            Some(poam_api::CveBatchExistingState::Accepted) if skip_existing() => {
+                                accepted_skipped += 1
+                            }
+                            _ => {
+                                writable.insert((
+                                    item.cve_id.clone(),
+                                    item.canonical_package_name.clone(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let valid_assignee = catalog
+        .read()
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .and_then(|catalog| batch_assignee(&assignee(), catalog));
+    let valid_date = target_date().parse::<chrono::NaiveDate>().ok();
+    let valid_review = if review_date().is_empty() {
+        Some(None)
+    } else {
+        review_date().parse::<chrono::NaiveDate>().ok().map(Some)
+    };
+    let can_apply = !pending()
+        && !writable.is_empty()
+        && hydrated.is_some()
+        && !picked().is_empty()
+        && if action() == "accepted" {
+            justification().trim().len() >= 10 && valid_review.is_some()
+        } else {
+            valid_assignee.is_some() && valid_date.is_some()
+        };
+    let selected_count = selection.len();
+    let submit_selection = selection.clone();
+    let submit = move |_: MouseEvent| {
+        if !can_apply || pending() {
+            return;
+        }
+        let Some(detail) = hydrated.clone() else {
+            return;
+        };
+        let chosen = picked();
+        let expected_tokens = match batch_tokens(&detail, &chosen) {
+            Ok(tokens) => tokens,
+            Err(message) => {
+                error.set(Some(message));
+                return;
+            }
+        };
+        let disposition = if action() == "accepted" {
+            poam_api::CveBatchDisposition::AcceptRisk {
+                justification: justification().trim().into(),
+                review_date: valid_review.flatten(),
+            }
+        } else {
+            let (Some(assignee), Some(target_date)) = (valid_assignee.clone(), valid_date) else {
+                return;
+            };
+            poam_api::CveBatchDisposition::SchedulePatch {
+                grouping: grouping(),
+                assignee,
+                target_date,
+                plan: plan().trim().into(),
+                default_milestones: milestones(),
+            }
+        };
+        let request = poam_api::FleetCveBatchTriageRequest {
+            pairs: submit_selection.iter().map(batch_identity).collect(),
+            environment_ids: chosen.into_iter().collect(),
+            expected_tokens,
+            skip_existing: skip_existing(),
+            disposition,
+        };
+        pending.set(true);
+        error.set(None);
+        spawn(async move {
+            match poam_api::triage_fleet_cve_batch(&request).await {
+                Ok(response) => on_success.call(response),
+                Err(PoamApiError::Server(server)) if server.status == 409 => {
+                    let detail = server
+                        .details
+                        .map(|value| value.to_string())
+                        .unwrap_or_default();
+                    error.set(Some(format!("Batch evidence changed: {} {} Refresh the page and retry; no changes were applied.", server.message, detail)));
+                }
+                Err(err) => error.set(Some(format!("Batch triage was not applied: {err}"))),
+            }
+            pending.set(false);
+        });
+    };
+    rsx! {
+        DialogFocusRestore {}
+        DialogInitialFocus { dialog_id: "cve-batch-dialog" }
+        button { class: "modal-backdrop cve-batch-backdrop", tabindex: "-1", aria_label: "Close batch triage", onclick: move |_| if !pending() { on_close.call(()) } }
+        div { id: "cve-batch-dialog", class: "modal cve-batch-modal", role: "dialog", aria_modal: "true", aria_label: "Batch triage", tabindex: "-1", "data-testid": "cve-batch-dialog", onkeydown: move |event| if event.key() == Key::Escape && !pending() { event.stop_propagation(); on_close.call(()); },
+            DialogFocusSentinel { dialog_id: "cve-batch-dialog", boundary: DialogFocusBoundary::Last }
+            div { class: "modal-head", div { h2 { "Triage {selected_count} CVEs together" } p { "One decision across selected current exact CVE/package findings. Each pair keeps its own environment decision." } } button { class: "btn-icon focus-ring", aria_label: "Close batch triage", autofocus: true, disabled: pending(), onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } } }
+            div { class: "modal-body cve-batch-body",
+                if let Some(Err(message)) = &*detail.read() {
+                    div { class: "sd-callout sd-callout-danger", role: "alert", "Batch detail unavailable: {message}. Selection was not changed; remove unavailable pairs or refresh." }
+                    div { class: "cve-batch-list",
+                        for package in selection.iter().map(|pair| pair.package.as_str()).collect::<BTreeSet<_>>() {
+                            div { class: "cve-batch-pkg", strong { class: "mono", "{package}" }
+                                div { class: "cve-batch-ids",
+                                    for pair in selection.iter().filter(|pair| pair.package == package) {
+                                        span { class: "cve-batch-id", span { class: "mono", "{pair.cve_id}" } small { class: "cve-batch-existing", "not actionable" } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if detail.read().is_none() { p { role: "status", "Loading selected CVE details…" } }
+                if let Some(message) = error() { div { class: "sd-callout sd-callout-danger", role: "alert", "{message}" } }
+                if let Some(detail) = detail.read().as_ref().and_then(|result| result.as_ref().ok()) {
+                    div { class: "cve-batch-list",
+                        for package in &packages {
+                            div { class: "cve-batch-pkg", strong { class: "mono", "{package}" }
+                                div { class: "cve-batch-ids", for item in detail.items.iter().filter(|item| &item.canonical_package_name == package) {
+                                    {
+                                        let score = item.cvss_v3_score.map(|score| format!("{score:.1}")).unwrap_or_else(|| "—".into());
+                                        let states = item.environments.iter()
+                                            .filter(|env| picked().contains(&env.environment_id))
+                                            .filter_map(|env| env.existing_state)
+                                            .collect::<Vec<_>>();
+                                        let state = if states.iter().any(|state| *state == poam_api::CveBatchExistingState::Scheduled) {
+                                            Some("scheduled")
+                                        } else if states.iter().any(|state| *state == poam_api::CveBatchExistingState::Accepted) {
+                                            Some("accepted")
+                                        } else { None };
+                                        rsx! { span { class: "cve-batch-id", title: "{item.severity} · CVSS {score}",
+                                            span { class: "cve-batch-dot", "data-sev": "{item.severity}" }
+                                            span { class: "mono", "{item.cve_id}" }
+                                            if let Some(state) = state { small { class: "cve-batch-existing", "{state}" } }
+                                        } }
+                                    }
+                                } }
+                            }
+                        }
+                    }
+                    div { class: "field", span { "Applies to" }
+                        div { class: "cve-batch-envs", for (id, (name, count)) in &environments {
+                            { let id = *id; rsx! { button { class: if picked().contains(&id) { "cve-sel-chip focus-ring on" } else { "cve-sel-chip focus-ring" }, r#type: "button", aria_pressed: picked().contains(&id), onclick: move |_| { if !picked.write().insert(id) { picked.write().remove(&id); } }, "{name} " span { class: "mono", "{count} CVEs" } } } }
+                        } }
+                    }
+                    div { class: "field", span { "Disposition" } div { class: "seg", for (value, label) in [("scheduled", "Schedule patch"), ("accepted", "Accept risk")] { button { class: if action() == value { "active" } else { "" }, onclick: move |_| action.set(value), "{label}" } } } }
+                    label { class: "poam-check", input { r#type: "checkbox", checked: skip_existing(), onchange: move |event| skip_existing.set(event.checked()) } span { "Skip already accepted decisions ({accepted_skipped} selected). Scheduled decisions ({scheduled_skipped} selected) are always skipped; edit them individually." } }
+                    if action() == "accepted" {
+                        div { class: "cve-batch-fields", label { class: "field", span { "Justification · at least 10 characters" } textarea { value: "{justification}", oninput: move |event| justification.set(event.value()) } }
+                            label { class: "field", span { "Review date · optional" } input { r#type: "date", value: "{review_date}", oninput: move |event| review_date.set(event.value()) } }
+                        }
+                    } else {
+                        div { class: "cve-batch-fields",
+                            div { class: "field", span { "Group into" } div { class: "seg", for (value, label) in [(poam_api::CveBatchScheduleGrouping::One, "One POA&M"), (poam_api::CveBatchScheduleGrouping::PerPackage, "Per package"), (poam_api::CveBatchScheduleGrouping::PerEnvironment, "Per environment")] { button { class: if grouping() == value { "active" } else { "" }, onclick: move |_| grouping.set(value), "{label}" } } } }
+                            label { class: "field", span { "Owner" } select { value: "{assignee}", disabled: catalog.read().is_none(), onchange: move |event| assignee.set(event.value()), option { value: "", "Select a user or group" }
+                                if let Some(Ok(catalog)) = &*catalog.read() { optgroup { label: "People", for person in &catalog.people { option { value: "user:{person.user_id}", "{person.label}" } } } optgroup { label: "Groups", for group in &catalog.groups { option { value: "group:{group.group_name}", "{group.group_name}" } } } }
+                            } if let Some(Err(message)) = &*catalog.read() { small { role: "alert", "Assignees unavailable: {message}" } } }
+                            label { class: "field", span { "Target completion · defaulted from most severe CVE" } input { r#type: "date", value: "{target_date}", oninput: move |event| target_date.set(event.value()) } }
+                            label { class: "field", span { "Remediation plan · optional; server generates a plan if empty" } textarea { value: "{plan}", oninput: move |event| plan.set(event.value()) } }
+                            label { class: "poam-check", input { r#type: "checkbox", checked: milestones(), onchange: move |event| milestones.set(event.checked()) } span { "Start from standard patch milestones" } }
+                        }
+                    }
+                }
+            }
+            div { class: "modal-foot", span { class: "cve-batch-summary", "{writable.len()} writable CVE/package pairs · {picked().len()} environments · {scheduled_skipped} scheduled skipped" }
+                button { class: "btn btn-ghost focus-ring", disabled: pending(), onclick: move |_| on_close.call(()), "Cancel" }
+                button { class: "btn btn-primary focus-ring", disabled: !can_apply, onclick: submit, if pending() { "Applying…" } else { "Apply to {writable.len()}" } }
+            }
+            DialogFocusSentinel { dialog_id: "cve-batch-dialog", boundary: DialogFocusBoundary::First }
+        }
+    }
+}
+
 /// Resolves every matching exact pair before a quick-select changes state.
 ///
 /// CONCURRENCY: Offset pages are separate server reads, not a snapshot. A
@@ -1521,6 +1934,134 @@ async fn fetch_quick_pairs(
             return Err("Matching CVE pagination was incomplete. Refresh and try again.".into());
         }
     }
+}
+
+/// Resolves a package header to every authorized exact pair in the current
+/// filter scope, including pairs outside the loaded UI page.
+///
+/// The existing package filter is an ILIKE pattern, not exact equality. Page
+/// the complete server response and retain only the exact canonical package;
+/// a package containing `%` or `_` can yield other package names that must be
+/// ignored rather than selected or treated as a changed package identity.
+/// Never treat the pattern response total as this package's selected count.
+/// A changed total, duplicate identity, missing package, or broken continuation
+/// invalidates the entire gesture instead of selecting a partial page.
+async fn fetch_package_pairs(
+    base: &CveInventoryQuery,
+    package: &str,
+) -> Result<BTreeSet<ExactCveSelection>, String> {
+    let mut request = base.clone();
+    request.offset = 0;
+    request.limit = 200;
+    request.filters.package = Some(package.to_owned());
+    let mut expected_total = None;
+    let mut read_count = 0_i64;
+    let mut seen = BTreeSet::new();
+    let mut matches = BTreeSet::new();
+    loop {
+        let page = client::fetch_cve_inventory_pairs(&request)
+            .await
+            .map_err(|error| format!("Package CVEs could not be loaded: {error}"))?;
+        if expected_total.is_some_and(|total| total != page.total) || page.total < 0 {
+            return Err("Package CVEs changed during selection. Refresh and try again.".into());
+        }
+        expected_total = Some(page.total);
+        read_count += page.items.len() as i64;
+        for pair in page.items {
+            let Some(name) = pair.package_name.as_deref() else {
+                return Err(
+                    "A matching CVE has no package identity and cannot be selected.".into(),
+                );
+            };
+            if name == package && !matches_pair_filters(&pair, &base.filters) {
+                return Err("Package CVEs changed during selection. Refresh and try again.".into());
+            }
+            let identity = ExactCveSelection {
+                cve_id: pair.cve_id,
+                package: name.to_owned(),
+            };
+            if !seen.insert(identity.clone()) {
+                return Err("Package CVEs changed during selection. Refresh and try again.".into());
+            }
+            if identity.package == package {
+                matches.insert(identity);
+            }
+        }
+        if let Some(next) = page.next_offset {
+            if next <= request.offset || next > page.total || read_count >= page.total {
+                return Err("Package CVE pagination changed. Refresh and try again.".into());
+            }
+            request.offset = next;
+        } else if read_count == page.total {
+            return if matches.is_empty() {
+                Err(
+                    "This package no longer matches the active filters. Refresh and try again."
+                        .into(),
+                )
+            } else {
+                Ok(matches)
+            };
+        } else {
+            return Err("Package CVE pagination was incomplete. Refresh and try again.".into());
+        }
+    }
+}
+
+fn request_package_selection(
+    base: CveInventoryQuery,
+    package: String,
+    generation: Signal<u64>,
+    mut pending: Signal<Option<String>>,
+    quick_pending: Signal<Option<QuickCveSelection>>,
+    mut feedback: Signal<Option<(String, bool)>>,
+    mut selected: Signal<BTreeSet<ExactCveSelection>>,
+    loaded_identity: Signal<CveInventoryQuery>,
+    loaded: Signal<Vec<CveListItem>>,
+) {
+    if pending().is_some() || quick_pending().is_some() {
+        return;
+    }
+    let version = generation();
+    pending.set(Some(package.clone()));
+    feedback.set(None);
+    spawn(async move {
+        let result = fetch_package_pairs(&base, &package).await;
+        // CONCURRENCY: Filter, grouping, scope, refresh and Clear invalidate
+        // this gesture. The original package must still have a matching loaded
+        // header; an obsolete response cannot repopulate a new selection.
+        if generation() != version || *loaded_identity.peek() != base {
+            return;
+        }
+        let still_present = loaded.peek().iter().any(|pair| {
+            pair.package_name.as_deref() == Some(package.as_str())
+                && matches_pair_filters(pair, &base.filters)
+        });
+        if !still_present {
+            pending.set(None);
+            feedback.set(Some((
+                "The package changed while selection was loading. Refresh and try again.".into(),
+                false,
+            )));
+            return;
+        }
+        match result {
+            Ok(matches) => {
+                let next = toggle_quick_pairs(&selected(), &matches);
+                let removed = next.len() < selected().len();
+                selected.set(next);
+                feedback.set(Some((
+                    format!(
+                        "{} {} matching {package} CVE/package pairs.",
+                        if removed { "Cleared" } else { "Selected" },
+                        matches.len()
+                    ),
+                    true,
+                )));
+            }
+            Err(message) => feedback.set(Some((message, false))),
+        }
+        pending.set(None);
+    });
 }
 
 fn request_quick_selection(
@@ -1599,6 +2140,9 @@ fn initially_expanded(group_by: &str, offset: i64, index: usize) -> bool {
 
 #[component]
 fn CvePairsView(
+    refresh: Signal<u64>,
+    active_environment: Option<uuid::Uuid>,
+    can_triage: bool,
     fleet_stats: Option<CveFleetStats>,
     query: CveInventoryQuery,
     grouped: bool,
@@ -1618,13 +2162,30 @@ fn CvePairsView(
     let mut default_package = use_signal(|| None::<String>);
     let mut default_applied = use_signal(|| false);
     let mut selected = use_signal(BTreeSet::<ExactCveSelection>::new);
+    let mut batch_open = use_signal(|| false);
+    let mut batch_notice = use_signal(|| None::<String>);
+    let mut refreshed_at = use_signal(|| refresh());
     let mut quick_scope = use_signal(|| query.clone());
     let mut quick_generation = use_signal(|| 0_u64);
     let mut quick_pending = use_signal(|| None::<QuickCveSelection>);
     let mut quick_feedback = use_signal(|| None::<(String, bool)>);
+    let mut package_scope = use_signal(|| (query.clone(), grouped, focused.clone(), refresh()));
+    let mut package_generation = use_signal(|| 0_u64);
+    let mut package_pending = use_signal(|| None::<String>);
     let mut quick_resolved =
         use_signal(BTreeMap::<QuickCveSelection, BTreeSet<ExactCveSelection>>::new);
     let mut loaded_identity = use_signal(|| query.clone());
+    use_effect(use_reactive(
+        &(query.clone(), grouped, focused.clone(), refresh()),
+        move |identity| {
+            if *package_scope.peek() != identity {
+                package_scope.set(identity);
+                let next_generation = package_generation.peek().wrapping_add(1);
+                package_generation.set(next_generation);
+                package_pending.set(None);
+            }
+        },
+    ));
     // CONCURRENCY: A page from the previous filter identity cannot supply
     // package headers or children after the operator changes any filter.
     use_effect(use_reactive(&query, move |request| {
@@ -1649,9 +2210,25 @@ fn CvePairsView(
             selected.set(BTreeSet::new());
         }
     }));
+    use_effect(move || {
+        let revision = refresh();
+        if *refreshed_at.peek() != revision {
+            refreshed_at.set(revision);
+            loaded.set(Vec::new());
+            offset.set(0);
+            next.set(None);
+            total.set(0);
+            applied.set(None);
+        }
+    });
     let grouped_response = use_resource(use_reactive(
-        &(query.filters.clone(), query.environment_id, grouped),
-        move |(filters, environment, is_grouped)| async move {
+        &(
+            query.filters.clone(),
+            query.environment_id,
+            grouped,
+            refresh(),
+        ),
+        move |(filters, environment, is_grouped, _revision)| async move {
             let response = if is_grouped && environment.is_none() {
                 client::fetch_cves_grouped(&filters).await
             } else {
@@ -1660,18 +2237,23 @@ fn CvePairsView(
             (filters, response)
         },
     ));
-    let page = use_resource(use_reactive(&query, move |mut request| {
-        request.offset = offset();
-        async move {
-            (
-                request.clone(),
-                client::fetch_cve_inventory_pairs(&request).await,
-            )
-        }
-    }));
+    let page = use_resource(use_reactive(
+        &(query.clone(), refresh()),
+        move |(mut request, revision)| {
+            request.offset = offset();
+            async move {
+                (
+                    request.clone(),
+                    revision,
+                    client::fetch_cve_inventory_pairs(&request).await,
+                )
+            }
+        },
+    ));
     use_effect(move || {
-        if let Some((request, Ok(response))) = page.read().as_ref()
+        if let Some((request, revision, Ok(response))) = page.read().as_ref()
             && request.offset == offset()
+            && *revision == refresh()
             && (CveInventoryQuery {
                 offset: 0,
                 ..request.clone()
@@ -1756,7 +2338,7 @@ fn CvePairsView(
                           "data-kind": "{kind.label().to_lowercase()}",
                           aria_pressed: on,
                           aria_busy: quick_pending() == Some(kind),
-                          disabled: count == 0 || quick_pending().is_some(),
+                           disabled: count == 0 || quick_pending().is_some() || package_pending().is_some(),
                           title: "Fleet-wide count. Selects all matching authorized pairs within the active filters; no triage action is submitted.",
                           onclick: move |_| request_quick_selection(request.clone(), kind, quick_generation, quick_pending, quick_feedback, selected, quick_resolved),
                           "{kind.label()} " span { class: "mono", "{count}" }
@@ -1766,15 +2348,15 @@ fn CvePairsView(
             }
             if !selected().is_empty() {
                 span { class: "mono", "{selected().len()} selected" }
-                button { class: "btn btn-ghost xs focus-ring", disabled: quick_pending().is_some(), onclick: move |_| selected.set(BTreeSet::new()), "Clear" }
             }
             span { class: "cve-selection-hint", "Ctrl/Cmd-click to select" }
         }
         if let Some((message, success)) = quick_feedback() {
             p { class: "page-subtitle", role: if success { "status" } else { "alert" }, "{message}" }
         }
-        if let Some((request, Err(error))) = page.read().as_ref()
-            && request.offset == offset() && request.filters == query.filters && request.environment_id == query.environment_id {
+        if let Some(message) = batch_notice() { p { class: "sd-callout sd-callout-info", role: "status", "{message}" } }
+        if let Some((request, revision, Err(error))) = page.read().as_ref()
+            && *revision == refresh() && request.offset == offset() && request.filters == query.filters && request.environment_id == query.environment_id {
             div { class: "empty", "Unable to load CVE pairs: {error}" }
         }
         if loaded().is_empty() && page.read().is_none() {
@@ -1821,10 +2403,16 @@ fn CvePairsView(
                         class: "focus-ring cve-package-toggle",
                         style: if is_expanded { "border-left-color:{meter_color};background:color-mix(in oklab,var(--cf-brand-purple) 6%,var(--cf-card-bg));" } else { "border-left-color:{meter_color};" },
                         aria_expanded: "{is_expanded}",
+                        aria_busy: package_pending().as_deref() == Some(package.as_str()),
                         onclick: {
                             let package = package.clone();
                             let newly_observed = newly_observed.clone();
-                            move |_| {
+                            let request = query.clone();
+                            move |event: MouseEvent| {
+                                if event.modifiers().ctrl() || event.modifiers().meta() {
+                                    request_package_selection(request.clone(), package.clone(), package_generation, package_pending, quick_pending, quick_feedback, selected, loaded_identity, loaded);
+                                    return;
+                                }
                                 let is_expanded = expanded_packages().get(&package).copied()
                                     .unwrap_or(default_package().as_ref() == Some(&package));
                                 expanded_packages.write().insert(package.clone(), !is_expanded);
@@ -1890,6 +2478,38 @@ fn CvePairsView(
                 disabled: applied() != Some(offset()),
                 onclick: move |_| offset.set(more),
                 "Show more findings ({loaded().len()} of {total()})"
+            }
+        }
+        if !selected().is_empty() {
+            { let count = selected().len(); let packages = selected().iter().map(|pair| pair.package.clone()).collect::<BTreeSet<_>>().len(); rsx! {
+                div { class: "bulk-bar cve-bulk-bar", role: "toolbar", aria_label: "Selected CVEs",
+                    span { class: "bulk-count", strong { "{count}" } " selected" }
+                    span { class: "bulk-sep" }
+                    span { class: "cve-bulk-packages", "{packages} package" if packages != 1 { "s" } }
+                    button { class: "btn btn-primary xs focus-ring", "data-testid": "cve-batch-open", disabled: !can_triage || count > MAX_CVE_BATCH_PAIRS || quick_pending().is_some() || package_pending().is_some(), title: if !can_triage { "Operator permission required" } else if count > MAX_CVE_BATCH_PAIRS { "Select at most 100 pairs for batch triage" } else { "Triage selected pairs together" }, onclick: move |_| batch_open.set(true), "Triage {count} together" }
+                    button { class: "btn btn-ghost xs focus-ring", onclick: move |_| {
+                        quick_generation.set(quick_generation().wrapping_add(1));
+                        package_generation.set(package_generation().wrapping_add(1));
+                        quick_pending.set(None);
+                        package_pending.set(None);
+                        quick_resolved.write().clear();
+                        selected.set(BTreeSet::new());
+                        batch_notice.set(None);
+                    }, "Clear" }
+                    if count > MAX_CVE_BATCH_PAIRS { small { role: "status", "Batch triage is limited to 100 pairs; clear or deselect pairs to continue." } }
+                    if !can_triage { small { "Operator permission required to triage." } }
+                }
+            } }
+        }
+        if batch_open() {
+            CveBatchTriageDialog { selection: selected(), active_environment, on_close: move |_| batch_open.set(false),
+                on_success: move |response: poam_api::FleetCveBatchTriageResponse| {
+                    let committed = response.applied.iter().map(|item| ExactCveSelection { cve_id: item.pair.cve_id.clone(), package: item.pair.canonical_package_name.clone() }).collect::<BTreeSet<_>>();
+                    selected.write().retain(|pair| !committed.contains(pair));
+                    batch_notice.set(Some(format!("Batch triage committed {} CVE/package pairs; {} skipped; {} POA&Ms created.", committed.len(), response.skipped.len(), response.poam_ids.len())));
+                    batch_open.set(false);
+                    refresh.set(refresh().wrapping_add(1));
+                }
             }
         }
     }
@@ -3558,13 +4178,13 @@ fn FleetCveTriageDialog(
 mod tests {
     use super::{
         CveSeenState, FleetDetailState, QuickCveSelection, ToastLifecycle, authenticated_user_id,
-        complete_focus_package, deployment_dot, environment_triage_eligible, fleet_error_state,
-        fleet_fix_label, fleet_triage_draft, has_retained_package_evidence, initially_expanded,
-        inventory_section_label, is_canonical_cve_id, loaded_package_groups, matches_pair_filters,
-        ordered_package_groups, pair_metadata_for_member, recently_observed_unseen,
-        request_token_is_current, seen_for_user, seen_storage_key, systems_in_inventory_section,
-        toggle_quick_pairs, triage_status_presentation, unique_retained_package_for_cve,
-        unseen_new_pairs,
+        batch_tokens, complete_focus_package, deployment_dot, environment_triage_eligible,
+        fleet_error_state, fleet_fix_label, fleet_triage_draft, has_retained_package_evidence,
+        initially_expanded, inventory_section_label, is_canonical_cve_id, loaded_package_groups,
+        matches_pair_filters, ordered_package_groups, pair_metadata_for_member,
+        recently_observed_unseen, request_token_is_current, seen_for_user, seen_storage_key,
+        systems_in_inventory_section, toggle_quick_pairs, triage_status_presentation,
+        unique_retained_package_for_cve, unseen_new_pairs, validate_batch_detail,
     };
     use crate::api::models::{
         AuthContext, AuthMode, AuthUser, CveFilters, CveInventoryMember, CveInventoryPairPage,
@@ -3579,6 +4199,69 @@ mod tests {
     use chrono::{Duration, TimeZone, Utc};
     use std::collections::BTreeSet;
     use uuid::Uuid;
+
+    #[test]
+    fn batch_hydration_requires_all_pairs_and_zero_subject_tokens() {
+        let a = super::ExactCveSelection {
+            cve_id: "CVE-2026-0001".into(),
+            package: "alpha".into(),
+        };
+        let b = super::ExactCveSelection {
+            cve_id: "CVE-2026-0002".into(),
+            package: "beta".into(),
+        };
+        let selected = BTreeSet::from([a.clone(), b.clone()]);
+        let env = Uuid::from_u128(1);
+        let item = |pair: &super::ExactCveSelection, count| poam_api::FleetCveBatchDetailItem {
+            cve_id: pair.cve_id.clone(),
+            canonical_package_name: pair.package.clone(),
+            severity: "high".into(),
+            cvss_v3_score: Some(7.0),
+            environments: vec![poam_api::CveBatchEnvironmentSummary {
+                environment_id: env,
+                environment_name: if count > 0 { "prod".into() } else { "".into() },
+                exact_affected_system_count: count,
+                existing_state: None,
+                evidence_token: format!("token-{count}"),
+            }],
+        };
+        let mut response = poam_api::FleetCveBatchDetailResponse {
+            items: vec![item(&a, 1)],
+        };
+        assert!(validate_batch_detail(&selected, &response).is_err());
+        response.items.push(item(&b, 0));
+        assert!(validate_batch_detail(&selected, &response).is_ok());
+        let tokens = batch_tokens(&response, &BTreeSet::from([env])).unwrap();
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[1].evidence_token, "token-0");
+        response.items[1].environments.clear();
+        assert!(batch_tokens(&response, &BTreeSet::from([env])).is_err());
+        response.items[1] = item(&a, 0);
+        assert!(validate_batch_detail(&selected, &response).is_err());
+    }
+
+    #[test]
+    fn package_toggle_preserves_unloaded_exact_pairs_and_has_no_mutation_cap() {
+        let matches = (0..202)
+            .map(|index| super::ExactCveSelection {
+                cve_id: format!("CVE-2026-{index:04}"),
+                package: "openssl".into(),
+            })
+            .collect::<BTreeSet<_>>();
+        let another_package = super::ExactCveSelection {
+            cve_id: "CVE-2026-0000".into(),
+            package: "glibc".into(),
+        };
+        let original = BTreeSet::from([another_package.clone()]);
+        let selected = toggle_quick_pairs(&original, &matches);
+        assert_eq!(selected.len(), 203);
+        assert!(selected.contains(&another_package));
+        assert!(selected.contains(&super::ExactCveSelection {
+            cve_id: "CVE-2026-0201".into(),
+            package: "openssl".into(),
+        }));
+        assert_eq!(toggle_quick_pairs(&selected, &matches), original);
+    }
 
     #[test]
     fn seen_storage_requires_authenticated_nonempty_user_id() {

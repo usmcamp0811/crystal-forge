@@ -1557,6 +1557,204 @@ pub struct FleetCveTriageResponse {
     pub poam_reused: bool,
 }
 
+/// Identifies one exact CVE/canonical-package identity for batch triage.
+///
+/// This mirrors the browser's `ExactCveSelection` identity. A batch request
+/// carries only this stable identity pair; the server re-derives every
+/// currently affected host and environment for it at submission time.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CveBatchPairIdentity {
+    /// Gives the canonical CVE identifier.
+    pub cve_id: String,
+    /// Gives the canonical package identity.
+    pub canonical_package_name: String,
+}
+
+/// Selects the shared disposition applied by a batch triage request.
+///
+/// Only the two approved bulk mutation intentions are supported. Leaving a
+/// decision open is not a batch destructive operation and is not offered.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum CveBatchDisposition {
+    /// Accepts risk for every applicable selected pair/environment.
+    ///
+    /// One justification is recorded, then applied separately to each
+    /// resulting source decision; no combined "batch acceptance record"
+    /// replaces the individually auditable per-environment decisions.
+    AcceptRisk {
+        /// Gives the shared acceptance rationale applied to every decision.
+        justification: String,
+        /// Gives an optional shared risk review date.
+        review_date: Option<chrono::NaiveDate>,
+    },
+    /// Schedules remediation for every applicable selected pair/environment.
+    ///
+    /// Each group receives only its affected exact pair/system subjects.
+    /// Grouping changes plan boundaries, not per-pair environment decisions.
+    SchedulePatch {
+        /// Chooses one plan, one per canonical package, or one per environment.
+        #[serde(default)]
+        grouping: CveBatchScheduleGrouping,
+        /// Selects one server-validated typed assignee shared by every POA&M.
+        assignee: crate::models::poam::PoamAssigneeRequest,
+        /// Gives the shared operator-selected target completion date.
+        target_date: chrono::NaiveDate,
+        /// Gives the shared remediation plan. An empty plan is replaced with
+        /// a generated plan per group, mirroring single-CVE fleet triage.
+        #[serde(default)]
+        plan: String,
+        /// Requests standard patch milestones on every newly created POA&M.
+        #[serde(default = "default_true_value")]
+        default_milestones: bool,
+    },
+}
+
+/// Chooses the boundary of newly created batch remediation plans.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum CveBatchScheduleGrouping {
+    /// Creates one POA&M containing all writable exact subjects in the batch.
+    #[default]
+    One,
+    /// Creates one POA&M for each canonical package across selected environments.
+    PerPackage,
+    /// Creates one POA&M for each selected environment with writable subjects.
+    PerEnvironment,
+}
+
+/// Applies one bounded, atomic disposition to many exact CVE/package
+/// identities across a chosen set of environments in one transaction.
+///
+/// # Invariants
+///
+/// - Every named pair has visible current exact evidence when hydrated. A pair
+///   absent from every picked environment is skipped, not written there.
+///   Changed picked-environment evidence or authorization rejects the entire
+///   transaction.
+///   The browser cannot supply host identities or trusted mutation scope.
+/// - Every requested pair and selected environment has one hydration token,
+///   including combinations with no affected subject at hydration time.
+///   The server checks these tokens against current evidence after locking.
+/// - A `(pair, environment)` combination that is not currently affected is
+///   never written.
+/// - An already-`Scheduled` `(pair, environment)` combination is never
+///   touched by this endpoint, independent of `skip_existing`; an operator
+///   who needs to change an existing scheduled decision uses the single-CVE
+///   triage endpoint instead. `skip_existing` controls only whether an
+///   existing `Accepted` decision is left alone (`true`, the UI default) or
+///   replaced (`false`).
+/// - The complete mutation commits in one database transaction. A failure
+///   anywhere leaves no partial acceptance, no half-created POA&M, and no
+///   partially updated environment decision.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FleetCveBatchTriageRequest {
+    /// Gives the bounded set of exact CVE/package identities.
+    pub pairs: Vec<CveBatchPairIdentity>,
+    /// Gives the bounded set of environments the operator picked.
+    pub environment_ids: Vec<Uuid>,
+    /// Supplies the opaque hydration token for every pair/environment in the
+    /// Cartesian product of `pairs` and `environment_ids`.
+    pub expected_tokens: Vec<CveBatchEvidenceToken>,
+    /// Leaves an existing `Accepted` decision unchanged when true (default).
+    #[serde(default = "default_true_value")]
+    pub skip_existing: bool,
+    /// Selects the shared disposition applied to every applicable subject.
+    pub disposition: CveBatchDisposition,
+}
+
+/// Binds one exact pair and environment to its hydrated current subject set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveBatchEvidenceToken {
+    /// Identifies the exact CVE and canonical package.
+    pub pair: CveBatchPairIdentity,
+    /// Identifies the environment whose evidence was hydrated.
+    pub environment_id: Uuid,
+    /// Contains an opaque digest of ordered exact evidence and the current
+    /// disposition source ID (or its absence) for this pair/environment.
+    pub evidence_token: String,
+}
+
+/// Reports one pair actually written by a batch triage mutation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveBatchAppliedPair {
+    /// Identifies the exact pair that was written.
+    pub pair: CveBatchPairIdentity,
+    /// Lists the environments actually written for this pair.
+    pub environment_ids: Vec<Uuid>,
+}
+
+/// Reports the committed result of one atomic batch triage mutation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FleetCveBatchTriageResponse {
+    /// Lists every pair with at least one environment actually written.
+    pub applied: Vec<CveBatchAppliedPair>,
+    /// Lists requested pairs where no environment was applicable or writable.
+    pub skipped: Vec<CveBatchPairIdentity>,
+    /// Lists every POA&M created by this mutation, in creation order.
+    pub poam_ids: Vec<Uuid>,
+}
+
+/// Requests hydrated batch metadata for exact CVE/package identities.
+///
+/// The browser's selection may include identities from unloaded pages; this
+/// endpoint hydrates authoritative metadata for exactly the identities named,
+/// regardless of whether they are currently rendered in the visible table.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FleetCveBatchDetailRequest {
+    /// Gives the bounded set of exact CVE/package identities to hydrate.
+    pub pairs: Vec<CveBatchPairIdentity>,
+}
+
+/// Identifies an existing active disposition state for one pair/environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CveBatchExistingState {
+    /// Risk is already accepted for this environment.
+    Accepted,
+    /// Remediation is already scheduled for this environment.
+    Scheduled,
+}
+
+/// Reports one environment's applicability for one hydrated batch pair.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveBatchEnvironmentSummary {
+    /// Identifies the environment.
+    pub environment_id: Uuid,
+    /// Gives the visible environment name.
+    pub environment_name: String,
+    /// Counts exact current affected systems in this environment.
+    pub exact_affected_system_count: i64,
+    /// Gives the existing disposition state, when one is active.
+    pub existing_state: Option<CveBatchExistingState>,
+    /// Binds this pair/environment to the exact current subject set, without
+    /// disclosing its host identities to the browser.
+    pub evidence_token: String,
+}
+
+/// Reports hydrated metadata for one exact batch CVE/package identity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FleetCveBatchDetailItem {
+    /// Gives the canonical CVE identifier.
+    pub cve_id: String,
+    /// Gives the canonical package identity.
+    pub canonical_package_name: String,
+    /// Gives the advisory severity label.
+    pub severity: String,
+    /// Gives the advisory CVSS v3 score when available.
+    pub cvss_v3_score: Option<f32>,
+    /// Lists the union of visible batch environments, including zero-subject
+    /// entries needed to detect new pair/environment membership before submit.
+    pub environments: Vec<CveBatchEnvironmentSummary>,
+}
+
+/// Reports hydrated batch detail for the requested exact identities.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FleetCveBatchDetailResponse {
+    /// Lists hydrated metadata for every visible requested pair.
+    pub items: Vec<FleetCveBatchDetailItem>,
+}
+
 /// Selects one disposition for a server-derived System Detail scope.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]

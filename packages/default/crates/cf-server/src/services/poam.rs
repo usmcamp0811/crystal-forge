@@ -13,10 +13,13 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::api::models::{
-    CveAffectedEnvironment, CveAffectedSystemDetail, CveDispositionActor,
-    CveEnvironmentDisposition, CveEnvironmentTriageAction, CveTriageConflictSubject,
-    FleetCveDetail, FleetCveInventorySection, FleetCvePoamRequest, FleetCveTriageRequest,
-    FleetCveTriageResponse, FleetCveTriageRollup, ScheduledPoamMetadata,
+    CveAffectedEnvironment, CveAffectedSystemDetail, CveBatchAppliedPair, CveBatchDisposition,
+    CveBatchEnvironmentSummary, CveBatchExistingState, CveBatchPairIdentity,
+    CveBatchScheduleGrouping, CveDispositionActor, CveEnvironmentDisposition,
+    CveEnvironmentTriageAction, CveTriageConflictSubject, FleetCveBatchDetailItem,
+    FleetCveBatchDetailRequest, FleetCveBatchDetailResponse, FleetCveBatchTriageRequest,
+    FleetCveBatchTriageResponse, FleetCveDetail, FleetCveInventorySection, FleetCvePoamRequest,
+    FleetCveTriageRequest, FleetCveTriageResponse, FleetCveTriageRollup, ScheduledPoamMetadata,
     SystemCveEffectiveDispositionSource, SystemCveInventoryAuthority, SystemCveTriageAction,
     SystemCveTriageDetail, SystemCveTriageRequest, SystemCveTriageResponse, SystemCveTriageScope,
     SystemCveTriageScopeChoice, SystemCveTriageScopeKind,
@@ -64,6 +67,11 @@ const MAX_ASSIGNEE_CATALOG_ITEMS: i64 = 1_000;
 const MAX_FLEET_CVE_ENVIRONMENTS: usize = 100;
 const MAX_FLEET_CVE_SUBJECTS: usize = 1_000;
 const MAX_FLEET_CVE_CONFLICTS: usize = 100;
+// INVARIANT: This bound follows the project's conventional bulk-action page
+// size (see `MAX_POAM_RELATIONSHIPS`, `MAX_FLEET_CVE_ENVIRONMENTS`, and the
+// Web UI's `MAX_BULK_PLANS`). A caller that needs more identities must submit
+// additional bounded batches rather than receive a silently truncated one.
+const MAX_FLEET_CVE_BATCH_IDENTITIES: usize = 100;
 const RECONCILIATION_PAGE_SIZE: i64 = 16;
 const RECONCILIATION_SUBJECT_LIMIT: usize = 100;
 impl PoamClock for SystemClock {
@@ -2715,9 +2723,10 @@ pub async fn unlink_finding(
 
 /// Links a current exact CVE occurrence to an active exact-CVE POA&M.
 ///
-/// All exact-CVE links in the POA&M must share canonical CVE and package
-/// identity. Policy and exact-CVE link families cannot be mixed. CVE links
-/// have no 100-member ceiling; the detail endpoint pages their history.
+/// The requested occurrence retains its exact system/CVE/package identity.
+/// A CVE remediation POA&M can contain distinct exact CVE/package findings,
+/// but cannot contain policy finding history. CVE links have no 100-member
+/// ceiling; the detail endpoint pages their history.
 ///
 /// # Errors
 ///
@@ -2735,24 +2744,20 @@ pub async fn link_cve_finding(
     let mut tx = pool.begin().await?;
     let occurrence = validate_cve_create_context_tx(&mut tx, actor, &request.observation).await?;
     lock_mutable_poam(&mut tx, actor, id, request.revision).await?;
-    let identity: Option<(String, String)> = sqlx::query_as(
-        r#"SELECT canonical_cve_id,canonical_package_name
-           FROM poam_cve_finding_links WHERE poam_id=$1 AND retired_at IS NULL
-           ORDER BY id LIMIT 1"#,
+    // INVARIANT: Family membership is historical. An otherwise empty live
+    // CVE episode can have retired links; never classify it as a policy plan
+    // merely because it has no active CVE link at this instant.
+    let family: (bool, bool) = sqlx::query_as(
+        r#"SELECT EXISTS(SELECT 1 FROM poam_cve_finding_links WHERE poam_id=$1),
+                  EXISTS(SELECT 1 FROM poam_finding_links WHERE poam_id=$1)"#,
     )
     .bind(id)
-    .fetch_optional(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
-    let Some((cve_id, package_name)) = identity else {
+    if !family.0 || family.1 {
         return Err(PoamError::Validation(
             "incompatible_finding",
             "An exact-CVE link cannot be added to a policy POA&M".into(),
-        ));
-    };
-    if cve_id != occurrence.canonical_cve_id || package_name != occurrence.canonical_package_name {
-        return Err(PoamError::Validation(
-            "incompatible_finding",
-            "Exact-CVE findings must share canonical CVE and package identity".into(),
         ));
     }
     let cve_finding_id: Uuid = sqlx::query_scalar(
@@ -7015,6 +7020,990 @@ fn is_canonical_cve_id(value: &str) -> bool {
         && parts.next().is_none()
 }
 
+fn canonicalize_batch_pair(pair: &CveBatchPairIdentity) -> Result<(String, String), PoamError> {
+    let cve_id = pair.cve_id.trim().to_ascii_uppercase();
+    let package_name = pair.canonical_package_name.trim().to_owned();
+    if !is_canonical_cve_id(&cve_id) || package_name.is_empty() {
+        return Err(PoamError::Validation(
+            "invalid_cve_identity",
+            "A canonical CVE ID and package name are required".into(),
+        ));
+    }
+    validate_text_length(
+        &package_name,
+        MAX_SHORT_TEXT_BYTES,
+        "text_too_long",
+        "package",
+    )?;
+    Ok((cve_id, package_name))
+}
+
+// INVARIANT: The active disposition row ID is immutable and changes on every
+// retirement/replacement. Include its absence too: an OPEN decision becoming
+// accepted or scheduled must invalidate even a zero-subject token. Sort exact
+// scan/occurrence membership before hashing; display names are not evidence.
+fn batch_evidence_token(
+    subjects: &[FleetCveSubject],
+    environment_id: Uuid,
+    disposition_id: Option<Uuid>,
+) -> String {
+    let mut evidence = subjects
+        .iter()
+        .filter(|subject| subject.environment_id == environment_id)
+        .map(|subject| {
+            (
+                subject.system_id,
+                subject.scan_id,
+                subject.scan_derivation_id,
+                subject.scan_completed_at,
+                subject.generation_snapshot_id,
+                subject.generation,
+                subject.target_store_path.as_str(),
+                subject.occurrence_derivation_path.as_str(),
+                subject.observed_package_version.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    evidence.sort_unstable();
+    semantic_digest(
+        &json!({"environment_id":environment_id,"subjects":evidence,"disposition_id":disposition_id}),
+    )
+}
+
+// SECURITY: Read only the exact selected pair/environment keys in one statement.
+// The caller's transaction supplies either the hydration snapshot or the
+// post-lock mutation view; a separate pool read could mix two decision epochs.
+async fn batch_disposition_ids_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    pairs: &[(String, String)],
+    environment_ids: &[Uuid],
+) -> Result<BTreeMap<(String, String, Uuid), Uuid>, PoamError> {
+    let cve_ids = pairs.iter().map(|pair| pair.0.clone()).collect::<Vec<_>>();
+    let packages = pairs.iter().map(|pair| pair.1.clone()).collect::<Vec<_>>();
+    let rows: Vec<(String, String, Uuid, Uuid)> = sqlx::query_as(
+        r#"SELECT disposition.canonical_cve_id::text,
+                  disposition.canonical_package_name,disposition.environment_id,
+                  disposition.id
+           FROM UNNEST($1::text[],$2::text[]) AS pair(cve_id,package_name)
+           JOIN cve_current_environment_dispositions disposition
+             ON disposition.canonical_cve_id=pair.cve_id
+            AND disposition.canonical_package_name=pair.package_name
+           WHERE disposition.environment_id=ANY($3)"#,
+    )
+    .bind(cve_ids)
+    .bind(packages)
+    .bind(environment_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(cve_id, package_name, environment_id, id)| {
+            ((cve_id, package_name, environment_id), id)
+        })
+        .collect())
+}
+
+fn batch_evidence_conflict(cve_id: &str, package_name: &str, environment_id: Uuid) -> PoamError {
+    PoamError::ConflictDetails(
+        "batch_evidence_changed",
+        "Exact current CVE evidence changed since batch hydration; refresh and retry".into(),
+        json!({"pair":{"cve_id":cve_id,"canonical_package_name":package_name},
+               "environment_id":environment_id}),
+    )
+}
+
+/// Hydrates authoritative batch metadata for exact CVE/package identities.
+///
+/// The browser's selection may reference identities from pages it has not
+/// loaded. This reads current exact evidence for exactly the named
+/// identities, independent of any visible table state, in one repeatable-read
+/// snapshot. If any requested pair lacks currently visible exact evidence,
+/// the entire hydration fails. The browser must not silently lose a selected
+/// identity merely because its current subject disappeared or became hidden.
+/// Each opaque token binds the exact subject set and the active environment
+/// disposition row ID (or its absence) in that same snapshot. A new or
+/// replaced decision requires hydration again before mutation.
+///
+/// # Errors
+///
+/// Returns a validation error when the pair list is empty, exceeds the
+/// bounded batch identity limit, or names a malformed identity; a forbidden
+/// error when the actor cannot read POA&M evidence; or a database error when
+/// evidence cannot be loaded, or a conflict if any selected identity no
+/// longer has a visible exact current subject.
+pub async fn fleet_cve_batch_detail(
+    pool: &PgPool,
+    actor: &PoamActor,
+    request: FleetCveBatchDetailRequest,
+) -> Result<FleetCveBatchDetailResponse, PoamError> {
+    if request.pairs.is_empty() || request.pairs.len() > MAX_FLEET_CVE_BATCH_IDENTITIES {
+        return Err(PoamError::Validation(
+            "invalid_batch_pairs",
+            format!(
+                "Batch hydration requires between 1 and {MAX_FLEET_CVE_BATCH_IDENTITIES} exact CVE/package identities"
+            ),
+        ));
+    }
+    let mut pairs = Vec::with_capacity(request.pairs.len());
+    for pair in &request.pairs {
+        pairs.push(canonicalize_batch_pair(pair)?);
+    }
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    let actor = current_reading_actor_tx(&mut tx, actor).await?;
+    let cve_ids = pairs
+        .iter()
+        .map(|(cve_id, _)| cve_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let advisories: BTreeMap<String, (String, Option<f32>)> =
+        sqlx::query_as::<_, (String, String, Option<f32>)>(
+            r#"SELECT id,lower(severity_from_cvss(cvss_v3_score)),cvss_v3_score::real
+           FROM cves WHERE id=ANY($1)"#,
+        )
+        .bind(&cve_ids)
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .map(|(cve_id, severity, cvss)| (cve_id, (severity, cvss)))
+        .collect();
+    let mut hydrated = Vec::with_capacity(pairs.len());
+    for (cve_id, package_name) in pairs {
+        let subjects = fleet_cve_subjects_tx(&mut tx, &actor, &cve_id, &package_name, None).await?;
+        if subjects.is_empty() {
+            // SECURITY: Do not reveal whether this pair is absent or hidden.
+            return Err(PoamError::Conflict(
+                "batch_pair_stale",
+                "A selected CVE/package pair is no longer actionable; refresh and retry".into(),
+            ));
+        }
+        hydrated.push((cve_id, package_name, subjects));
+    }
+    // A zero-subject token for another selected pair in the same environment
+    // detects a newly affected pair/environment between hydration and submit.
+    let environment_ids = hydrated
+        .iter()
+        .flat_map(|(_, _, subjects)| subjects.iter().map(|subject| subject.environment_id))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let disposition_ids = batch_disposition_ids_tx(
+        &mut tx,
+        &hydrated
+            .iter()
+            .map(|(cve_id, package_name, _)| (cve_id.clone(), package_name.clone()))
+            .collect::<Vec<_>>(),
+        &environment_ids,
+    )
+    .await?;
+    let mut items = Vec::with_capacity(hydrated.len());
+    for (cve_id, package_name, subjects) in hydrated {
+        let affected_environment_ids = subjects
+            .iter()
+            .map(|subject| subject.environment_id)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let dispositions =
+            fleet_cve_dispositions_tx(&mut tx, &cve_id, &package_name, &affected_environment_ids)
+                .await?;
+        let mut environments = environment_ids
+            .iter()
+            .map(|environment_id| {
+                let count = subjects
+                    .iter()
+                    .filter(|subject| subject.environment_id == *environment_id)
+                    .count() as i64;
+                let environment_name = subjects
+                    .iter()
+                    .find(|subject| subject.environment_id == *environment_id)
+                    .map(|subject| subject.environment_name.clone())
+                    .unwrap_or_default();
+                let existing_state =
+                    dispositions
+                        .get(environment_id)
+                        .map(|disposition| match disposition {
+                            CveEnvironmentDisposition::Accepted { .. } => {
+                                CveBatchExistingState::Accepted
+                            }
+                            CveEnvironmentDisposition::Scheduled { .. } => {
+                                CveBatchExistingState::Scheduled
+                            }
+                        });
+                CveBatchEnvironmentSummary {
+                    environment_id: *environment_id,
+                    environment_name,
+                    exact_affected_system_count: count,
+                    existing_state,
+                    evidence_token: batch_evidence_token(
+                        &subjects,
+                        *environment_id,
+                        disposition_ids
+                            .get(&(cve_id.clone(), package_name.clone(), *environment_id))
+                            .copied(),
+                    ),
+                }
+            })
+            .collect::<Vec<_>>();
+        environments.sort_by(|a, b| a.environment_name.cmp(&b.environment_name));
+        let (severity, cvss_v3_score) = advisories
+            .get(&cve_id)
+            .cloned()
+            .unwrap_or_else(|| ("unknown".to_string(), None));
+        items.push(FleetCveBatchDetailItem {
+            cve_id,
+            canonical_package_name: package_name,
+            severity,
+            cvss_v3_score,
+            environments,
+        });
+    }
+    tx.commit().await?;
+    Ok(FleetCveBatchDetailResponse { items })
+}
+
+async fn lock_batch_cve_keys_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    cve_ids: &[String],
+) -> Result<(), PoamError> {
+    sqlx::query(
+        r#"SELECT lock_poam_cve_key(key.cve_id)
+           FROM (SELECT DISTINCT unnest($1::text[]) AS cve_id ORDER BY cve_id) key"#,
+    )
+    .bind(cve_ids)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Locks the exact-CVE-finding key for every real `(system, cve, package)`
+/// triple observed by the batch, generalizing [`lock_fleet_cve_scope_tx`]
+/// across more than one CVE/package pair.
+///
+/// CONCURRENCY: `all_system_ids` bounds the existing-row lookup; the
+/// `requested_*` arrays carry only the exact triples actually affected by
+/// this batch, never a synthetic cross-product of every system and pair.
+async fn lock_batch_fleet_cve_finding_keys_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    all_system_ids: &[Uuid],
+    requested_system_ids: &[Uuid],
+    requested_cve_ids: &[String],
+    requested_packages: &[String],
+) -> Result<(), PoamError> {
+    sqlx::query(
+        r#"SELECT lock_poam_cve_finding_key(
+                    key.system_id,key.canonical_cve_id,key.canonical_package_name)
+           FROM (
+             SELECT DISTINCT system_id,canonical_cve_id,canonical_package_name
+             FROM (
+               SELECT finding.system_id,finding.canonical_cve_id,
+                      finding.canonical_package_name
+               FROM poam_cve_findings finding WHERE finding.system_id=ANY($1)
+               UNION ALL
+               SELECT * FROM UNNEST($2::uuid[],$3::text[],$4::text[])
+                 AS requested(system_id,cve_id,package)
+             ) all_keys
+             ORDER BY system_id,canonical_cve_id,canonical_package_name
+           ) key"#,
+    )
+    .bind(all_system_ids)
+    .bind(requested_system_ids)
+    .bind(requested_cve_ids)
+    .bind(requested_packages)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Generates a POA&M title for one exact CVE/package identity, matching the
+/// existing single-CVE fleet triage title format exactly
+/// (`"{cve_id} - patch {package}"`).
+fn batch_pair_title(cve_id: &str, package_name: &str) -> String {
+    format!("{cve_id} - patch {package_name}")
+}
+
+/// Maps one CVE's advisory severity to the existing production POA&M risk
+/// categories used for single-CVE fleet triage.
+fn batch_pair_risk(cve_id: &str, severities: &BTreeMap<String, String>) -> PoamRisk {
+    match severities.get(cve_id).map(String::as_str) {
+        Some("critical") | Some("high") => PoamRisk::High,
+        Some("medium") => PoamRisk::Medium,
+        _ => PoamRisk::Low,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BatchTriageTarget {
+    cve_id: String,
+    package_name: String,
+    environment_id: Uuid,
+    subjects: Vec<FleetCveSubject>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum BatchScheduleKey {
+    One,
+    Package(String),
+    Environment(Uuid),
+}
+
+fn batch_schedule_key(
+    grouping: CveBatchScheduleGrouping,
+    target: &BatchTriageTarget,
+) -> BatchScheduleKey {
+    match grouping {
+        CveBatchScheduleGrouping::One => BatchScheduleKey::One,
+        CveBatchScheduleGrouping::PerPackage => {
+            BatchScheduleKey::Package(target.package_name.clone())
+        }
+        CveBatchScheduleGrouping::PerEnvironment => {
+            BatchScheduleKey::Environment(target.environment_id)
+        }
+    }
+}
+
+/// Applies one bounded, atomic batch CVE triage mutation across many exact
+/// pairs and a chosen set of environments.
+///
+/// Retries serialization failures, matching ordinary single-CVE fleet
+/// triage.
+///
+/// # Errors
+///
+/// Returns a validation error for malformed, out-of-bound, or entirely
+/// ineligible input (no applicable writable pair/environment), a
+/// forbidden error when the actor cannot mutate or names an environment
+/// outside its scope, a conflict error when current evidence changed while
+/// locks were acquired or a disposition changed since hydration, or a
+/// database error on persistence failure.
+pub async fn triage_fleet_cves_batch(
+    pool: &PgPool,
+    actor: &PoamActor,
+    request: FleetCveBatchTriageRequest,
+    clock: &dyn PoamClock,
+) -> Result<FleetCveBatchTriageResponse, PoamError> {
+    for retry in 0..3 {
+        match triage_fleet_cves_batch_once(pool, actor, request.clone(), clock).await {
+            Err(PoamError::Database(error)) if retry < 2 && is_serialization_failure(&error) => {
+                continue;
+            }
+            result => return result,
+        }
+    }
+    unreachable!()
+}
+
+// INVARIANT: Unlike single-CVE fleet triage, a batch request need not supply a
+// disposition for every currently affected environment of a pair. It applies
+// its one chosen disposition only to the picked environments where that pair
+// is actually found and leaves every other environment fully untouched. An
+// environment/pair combination that already carries an active `Scheduled`
+// disposition is never written by this endpoint, independent of
+// `skip_existing`; overwriting an existing schedule requires the single-CVE
+// triage endpoint, which can safely retire and reuse or replace one active
+// remediation link. This keeps the batch mutation free of the final-active-
+// subject POA&M-emptying hazard that single-CVE triage must otherwise guard.
+async fn triage_fleet_cves_batch_once(
+    pool: &PgPool,
+    actor: &PoamActor,
+    request: FleetCveBatchTriageRequest,
+    clock: &dyn PoamClock,
+) -> Result<FleetCveBatchTriageResponse, PoamError> {
+    require_mutator(actor)?;
+    if request.pairs.is_empty() || request.pairs.len() > MAX_FLEET_CVE_BATCH_IDENTITIES {
+        return Err(PoamError::Validation(
+            "invalid_batch_pairs",
+            format!(
+                "Batch triage requires between 1 and {MAX_FLEET_CVE_BATCH_IDENTITIES} exact CVE/package identities"
+            ),
+        ));
+    }
+    if request.environment_ids.is_empty()
+        || request.environment_ids.len() > MAX_FLEET_CVE_ENVIRONMENTS
+    {
+        return Err(PoamError::Validation(
+            "invalid_environment_actions",
+            format!(
+                "Batch triage requires between 1 and {MAX_FLEET_CVE_ENVIRONMENTS} environments"
+            ),
+        ));
+    }
+    if !actor.is_admin {
+        let allowed = actor.environment_ids.iter().collect::<BTreeSet<_>>();
+        if request
+            .environment_ids
+            .iter()
+            .any(|id| !allowed.contains(id))
+        {
+            return Err(PoamError::Forbidden);
+        }
+    }
+    let mut pairs = BTreeSet::new();
+    for pair in &request.pairs {
+        pairs.insert(canonicalize_batch_pair(pair)?);
+    }
+    let environment_ids = request
+        .environment_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if request.expected_tokens.len() != pairs.len() * environment_ids.len() {
+        return Err(PoamError::Validation(
+            "invalid_batch_evidence_tokens",
+            "A hydration token is required for every selected pair and environment".into(),
+        ));
+    }
+    let mut expected_tokens = BTreeMap::new();
+    for token in &request.expected_tokens {
+        let key = canonicalize_batch_pair(&token.pair)?;
+        if !pairs.contains(&key)
+            || !environment_ids.contains(&token.environment_id)
+            || expected_tokens
+                .insert((key, token.environment_id), token.evidence_token.as_str())
+                .is_some()
+        {
+            return Err(PoamError::Validation(
+                "invalid_batch_evidence_tokens",
+                "Batch evidence tokens must uniquely match the selected pairs and environments"
+                    .into(),
+            ));
+        }
+    }
+    match &request.disposition {
+        CveBatchDisposition::AcceptRisk { justification, .. } => {
+            let justification = justification.trim();
+            if !(10..=2_000).contains(&justification.len()) {
+                return Err(PoamError::Validation(
+                    "invalid_acceptance_justification",
+                    "Acceptance justification must be between 10 and 2000 bytes".into(),
+                ));
+            }
+        }
+        CveBatchDisposition::SchedulePatch { assignee, plan, .. } => {
+            if !plan.trim().is_empty() {
+                validate_text_length(plan.trim(), MAX_PLAN_BYTES, "text_too_long", "plan")?;
+            }
+            if matches!(assignee, PoamAssigneeRequest::Unassigned) {
+                return Err(PoamError::Validation(
+                    "invalid_poam_assignee",
+                    "Scheduled remediation requires a typed user or group assignee".into(),
+                ));
+            }
+        }
+    }
+
+    let mut tx = pool.begin().await?;
+    let cve_ids = pairs
+        .iter()
+        .map(|(cve_id, _)| cve_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    // CONCURRENCY: Every distinct CVE key is locked in one sorted statement,
+    // the same pattern `reopen` uses for a POA&M spanning multiple CVEs, so a
+    // concurrent batch or single-CVE mutation cannot deadlock against this
+    // transaction's lock acquisition order.
+    lock_batch_cve_keys_tx(&mut tx, &cve_ids).await?;
+    let locked_environments: Vec<Uuid> =
+        sqlx::query_scalar("SELECT id FROM environments WHERE id=ANY($1) ORDER BY id FOR UPDATE")
+            .bind(&environment_ids)
+            .fetch_all(&mut *tx)
+            .await?;
+    if locked_environments != environment_ids {
+        return Err(PoamError::Conflict(
+            "batch_environment_missing",
+            "A selected environment no longer exists; refresh and retry".into(),
+        ));
+    }
+
+    let mut before_subjects: BTreeMap<(String, String), Vec<FleetCveSubject>> = BTreeMap::new();
+    for (cve_id, package_name) in &pairs {
+        let subjects =
+            fleet_cve_subjects_tx(&mut tx, actor, cve_id, package_name, Some(&environment_ids))
+                .await?;
+        before_subjects.insert((cve_id.clone(), package_name.clone()), subjects);
+    }
+    let all_system_ids = before_subjects
+        .values()
+        .flat_map(|subjects| subjects.iter().map(|subject| subject.system_id))
+        .collect::<BTreeSet<_>>();
+    for system_id in &all_system_ids {
+        crate::services::composite_enforcement::lock_poam_system_key_tx(&mut tx, *system_id)
+            .await?;
+    }
+    let system_ids_vec = all_system_ids.into_iter().collect::<Vec<_>>();
+    lock_policy_finding_keys_for_systems_tx(&mut tx, &system_ids_vec).await?;
+    let mut requested_system_ids = Vec::new();
+    let mut requested_cve_ids = Vec::new();
+    let mut requested_packages = Vec::new();
+    for ((cve_id, package_name), subjects) in &before_subjects {
+        for subject in subjects {
+            requested_system_ids.push(subject.system_id);
+            requested_cve_ids.push(cve_id.clone());
+            requested_packages.push(package_name.clone());
+        }
+    }
+    lock_batch_fleet_cve_finding_keys_tx(
+        &mut tx,
+        &system_ids_vec,
+        &requested_system_ids,
+        &requested_cve_ids,
+        &requested_packages,
+    )
+    .await?;
+    sqlx::query("SELECT id FROM systems WHERE id=ANY($1) ORDER BY id FOR UPDATE")
+        .bind(&system_ids_vec)
+        .execute(&mut *tx)
+        .await?;
+    let actor = current_mutating_actor_tx(&mut tx, actor).await?;
+    // SECURITY: The actor may have lost environment membership since the
+    // request was constructed. Check the full selected scope after reload.
+    if pairs.len() > MAX_FLEET_CVE_BATCH_IDENTITIES
+        || environment_ids.len() > MAX_FLEET_CVE_ENVIRONMENTS
+    {
+        return Err(PoamError::Validation(
+            "invalid_batch_size",
+            "Batch selection exceeds its limit".into(),
+        ));
+    }
+    if !actor.is_admin
+        && environment_ids
+            .iter()
+            .any(|id| !actor.environment_ids.contains(id))
+    {
+        return Err(PoamError::Forbidden);
+    }
+
+    let pair_keys = pairs.iter().cloned().collect::<Vec<_>>();
+    let disposition_ids = batch_disposition_ids_tx(&mut tx, &pair_keys, &environment_ids).await?;
+
+    // CONCURRENCY: Re-derive every pair's exact subject set after every lock
+    // is held. Any change fails the complete batch atomically; a partially
+    // stale batch never commits a partially stale mutation.
+    let mut after_subjects: BTreeMap<(String, String), Vec<FleetCveSubject>> = BTreeMap::new();
+    for (cve_id, package_name) in &pairs {
+        let subjects = fleet_cve_subjects_tx(
+            &mut tx,
+            &actor,
+            cve_id,
+            package_name,
+            Some(&environment_ids),
+        )
+        .await?;
+        let key = (cve_id.clone(), package_name.clone());
+        for environment_id in &environment_ids {
+            let disposition_id = disposition_ids
+                .get(&(cve_id.clone(), package_name.clone(), *environment_id))
+                .copied();
+            let current = batch_evidence_token(&subjects, *environment_id, disposition_id);
+            if before_subjects
+                .get(&key)
+                .map(|before| batch_evidence_token(before, *environment_id, disposition_id))
+                != Some(current.clone())
+                || expected_tokens
+                    .get(&(key.clone(), *environment_id))
+                    .copied()
+                    != Some(current.as_str())
+            {
+                return Err(batch_evidence_conflict(
+                    cve_id,
+                    package_name,
+                    *environment_id,
+                ));
+            }
+        }
+        // INVARIANT: A pair may be current only in an unpicked environment.
+        // Its picked-environment zero-subject token still has to match, but
+        // that pair is skipped rather than aborting the other exact targets.
+        // An identity that lost a picked subject fails the token comparison
+        // above before it reaches this branch.
+        after_subjects.insert(key, subjects);
+    }
+
+    let overridden: BTreeSet<(Uuid, String, String)> = if matches!(
+        request.disposition,
+        CveBatchDisposition::SchedulePatch { .. }
+    ) && !system_ids_vec.is_empty()
+    {
+        sqlx::query_as::<_, (Uuid, String, String)>(
+            r#"SELECT system_id,canonical_cve_id,canonical_package_name
+                   FROM cve_current_system_dispositions WHERE system_id=ANY($1)"#,
+        )
+        .bind(&system_ids_vec)
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .collect()
+    } else {
+        BTreeSet::new()
+    };
+
+    let mut pair_dispositions: BTreeMap<
+        (String, String),
+        BTreeMap<Uuid, CveEnvironmentDisposition>,
+    > = BTreeMap::new();
+    for (key, subjects) in &after_subjects {
+        let env_ids = subjects
+            .iter()
+            .map(|subject| subject.environment_id)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if env_ids.is_empty() {
+            continue;
+        }
+        let dispositions = fleet_cve_dispositions_tx(&mut tx, &key.0, &key.1, &env_ids).await?;
+        pair_dispositions.insert(key.clone(), dispositions);
+    }
+
+    let mut targets: Vec<BatchTriageTarget> = Vec::new();
+    let mut applied_pairs: BTreeMap<(String, String), Vec<Uuid>> = BTreeMap::new();
+    let mut skipped_pairs: BTreeSet<(String, String)> = BTreeSet::new();
+    for (key, subjects) in &after_subjects {
+        let (cve_id, package_name) = key.clone();
+        let empty = BTreeMap::new();
+        let dispositions = pair_dispositions.get(key).unwrap_or(&empty);
+        let env_ids = subjects
+            .iter()
+            .map(|subject| subject.environment_id)
+            .collect::<BTreeSet<_>>();
+        let mut wrote_any = false;
+        for environment_id in env_ids {
+            let existing = dispositions.get(&environment_id);
+            let unchanged_accepted = matches!(
+                (&request.disposition, existing),
+                (
+                    CveBatchDisposition::AcceptRisk { justification, review_date },
+                    Some(CveEnvironmentDisposition::Accepted {
+                        justification: current_justification,
+                        review_date: current_review_date,
+                        ..
+                    })
+                ) if justification.trim() == current_justification
+                    && review_date == current_review_date
+            );
+            let eligible = match existing {
+                None => true,
+                Some(CveEnvironmentDisposition::Accepted { .. }) => {
+                    !request.skip_existing && !unchanged_accepted
+                }
+                Some(CveEnvironmentDisposition::Scheduled { .. }) => false,
+            };
+            if !eligible {
+                continue;
+            }
+            let mut env_subjects = subjects
+                .iter()
+                .filter(|subject| subject.environment_id == environment_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            if matches!(
+                request.disposition,
+                CveBatchDisposition::SchedulePatch { .. }
+            ) {
+                env_subjects.retain(|subject| {
+                    !overridden.contains(&(subject.system_id, cve_id.clone(), package_name.clone()))
+                });
+            }
+            if env_subjects.is_empty() {
+                continue;
+            }
+            wrote_any = true;
+            applied_pairs
+                .entry(key.clone())
+                .or_default()
+                .push(environment_id);
+            targets.push(BatchTriageTarget {
+                cve_id: cve_id.clone(),
+                package_name: package_name.clone(),
+                environment_id,
+                subjects: env_subjects,
+            });
+        }
+        if !wrote_any {
+            skipped_pairs.insert(key.clone());
+        }
+    }
+    if targets.is_empty() {
+        return Err(PoamError::Validation(
+            "batch_no_applicable_targets",
+            "No selected CVE/package identity has an applicable, writable environment".into(),
+        ));
+    }
+
+    let now = clock.now();
+    let mut poam_ids_created: Vec<Uuid> = Vec::new();
+    // INVARIANT: Group plans can share distinct CVE identities under 0296,
+    // but each disposition and link still belongs to its exact pair/host.
+    let mut target_poam_id: BTreeMap<BatchScheduleKey, Uuid> = BTreeMap::new();
+    if let CveBatchDisposition::SchedulePatch {
+        grouping,
+        assignee,
+        target_date,
+        plan,
+        default_milestones,
+    } = &request.disposition
+    {
+        let resolved_assignee = resolve_assignee_tx(&mut tx, assignee).await?;
+        let cve_id_list = targets
+            .iter()
+            .map(|target| target.cve_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let severities: BTreeMap<String, String> = sqlx::query_as::<_, (String, String)>(
+            r#"SELECT id,lower(severity_from_cvss(cvss_v3_score)) FROM cves WHERE id=ANY($1)"#,
+        )
+        .bind(&cve_id_list)
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .collect();
+        let mut groups: BTreeMap<BatchScheduleKey, Vec<&BatchTriageTarget>> = BTreeMap::new();
+        for target in &targets {
+            groups
+                .entry(batch_schedule_key(*grouping, target))
+                .or_default()
+                .push(target);
+        }
+        for (key, members) in &groups {
+            let first = members[0];
+            let title = match key {
+                BatchScheduleKey::One => "Patch selected CVEs".to_string(),
+                BatchScheduleKey::Package(package) if members.len() == 1 => {
+                    batch_pair_title(&first.cve_id, package)
+                }
+                BatchScheduleKey::Package(package) => format!("Patch {package} CVEs"),
+                BatchScheduleKey::Environment(_) => {
+                    format!("Patch CVEs in {}", first.subjects[0].environment_name)
+                }
+            };
+            // The plan's risk is the highest advisory risk among its exact
+            // members; a low-risk pair must not downgrade a high-risk group.
+            let risk = if members
+                .iter()
+                .any(|target| batch_pair_risk(&target.cve_id, &severities) == PoamRisk::High)
+            {
+                PoamRisk::High
+            } else if members
+                .iter()
+                .any(|target| batch_pair_risk(&target.cve_id, &severities) == PoamRisk::Medium)
+            {
+                PoamRisk::Medium
+            } else {
+                PoamRisk::Low
+            };
+            let group_plan = if plan.trim().is_empty() {
+                match key {
+                    BatchScheduleKey::Package(package) => format!("Upgrade {package} to a patched release and verify with an exact follow-up scan."),
+                    _ => "Upgrade affected packages to patched releases and verify with exact follow-up scans.".to_string(),
+                }
+            } else {
+                plan.trim().to_string()
+            };
+            validate_text_length(&title, MAX_SHORT_TEXT_BYTES, "text_too_long", "title")?;
+            validate_text_length(&group_plan, MAX_PLAN_BYTES, "text_too_long", "plan")?;
+            let poam_id: Uuid = sqlx::query_scalar(
+                r#"INSERT INTO poams(title,plan,owner,owner_kind,owner_user_id,
+                      owner_group_name,target_date,risk,created_by)
+                   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id"#,
+            )
+            .bind(&title)
+            .bind(&group_plan)
+            .bind(&resolved_assignee.owner)
+            .bind(resolved_assignee.kind)
+            .bind(resolved_assignee.user_id)
+            .bind(resolved_assignee.group_name.as_deref())
+            .bind(target_date)
+            .bind(risk.as_str())
+            .bind(actor.user_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            poam_ids_created.push(poam_id);
+            target_poam_id.insert(key.clone(), poam_id);
+            if *default_milestones {
+                for (ordinal, (offset, milestone_title)) in [14_i64, 28, 35, 49, 56]
+                    .into_iter()
+                    .zip([
+                        "Update NixOS module",
+                        "Deploy to staging",
+                        "Validate new configuration",
+                        "Deploy to production",
+                        "Verify CVE remediation passes",
+                    ])
+                    .enumerate()
+                {
+                    let milestone_date = if ordinal == 4 {
+                        *target_date
+                    } else {
+                        (clock.today() + Duration::days(offset)).min(*target_date)
+                    };
+                    sqlx::query(
+                        r#"INSERT INTO poam_milestones(poam_id,ordinal,title,target_date,
+                              created_by,updated_by) VALUES($1,$2,$3,$4,$5,$5)"#,
+                    )
+                    .bind(poam_id)
+                    .bind(ordinal as i32)
+                    .bind(milestone_title)
+                    .bind(milestone_date)
+                    .bind(actor.user_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+            insert_activity_and_audit(
+                &mut tx,
+                poam_id,
+                actor.user_id,
+                &actor.identifier,
+                "created",
+                &json!({
+                    "poam_id":poam_id,"revision":1,"source":"fleet_cve_batch_triage",
+                    "grouping":format!("{grouping:?}"),
+                    "pairs":members.iter().map(|member| format!("{}:{}",member.cve_id,member.package_name)).collect::<Vec<_>>(),
+                    "subject_count":members.iter().map(|target| target.subjects.len()).sum::<usize>()
+                }),
+                actor.request_origin.as_deref(),
+            )
+            .await?;
+        }
+        for target in &targets {
+            let poam_id = target_poam_id[&batch_schedule_key(*grouping, target)];
+            let baselines = target
+                .subjects
+                .iter()
+                .map(FleetCveSubject::baseline)
+                .collect::<Vec<_>>();
+            materialize_exact_subjects_tx(
+                &mut tx,
+                poam_id,
+                actor.user_id,
+                &baselines,
+                &target.cve_id,
+                &target.package_name,
+            )
+            .await?;
+        }
+    }
+
+    for target in &targets {
+        let existing = pair_dispositions
+            .get(&(target.cve_id.clone(), target.package_name.clone()))
+            .and_then(|dispositions| dispositions.get(&target.environment_id));
+        if existing.is_some() {
+            sqlx::query(
+                r#"UPDATE cve_environment_dispositions
+                   SET retired_at=$4,retired_by=$5,retirement_reason='fleet_batch_triage_changed'
+                   WHERE canonical_cve_id=$1 AND canonical_package_name=$2
+                     AND environment_id=$3 AND retired_at IS NULL"#,
+            )
+            .bind(&target.cve_id)
+            .bind(&target.package_name)
+            .bind(target.environment_id)
+            .bind(now)
+            .bind(actor.user_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        match &request.disposition {
+            CveBatchDisposition::AcceptRisk {
+                justification,
+                review_date,
+            } => {
+                sqlx::query(
+                    r#"INSERT INTO cve_environment_dispositions(
+                          canonical_cve_id,canonical_package_name,environment_id,
+                          state,justification,review_date,accepted_by,accepted_at)
+                       VALUES($1,$2,$3,'accepted',$4,$5,$6,$7)"#,
+                )
+                .bind(&target.cve_id)
+                .bind(&target.package_name)
+                .bind(target.environment_id)
+                .bind(justification.trim())
+                .bind(review_date)
+                .bind(actor.user_id)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+            }
+            CveBatchDisposition::SchedulePatch { grouping, .. } => {
+                let poam_id = target_poam_id[&batch_schedule_key(*grouping, target)];
+                sqlx::query(
+                    r#"INSERT INTO cve_environment_dispositions(
+                          canonical_cve_id,canonical_package_name,environment_id,
+                          state,poam_id,scheduled_by,scheduled_at)
+                       VALUES($1,$2,$3,'scheduled',$4,$5,$6)"#,
+                )
+                .bind(&target.cve_id)
+                .bind(&target.package_name)
+                .bind(target.environment_id)
+                .bind(poam_id)
+                .bind(actor.user_id)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+    }
+
+    sqlx::query(
+        r#"INSERT INTO admin_audit_events(
+              actor_user_id,actor_identifier,action,target,request_origin,metadata)
+           VALUES($1,$2,'fleet_cve_batch_triaged',$3,$4,$5)"#,
+    )
+    .bind(actor.user_id)
+    .bind(&actor.identifier)
+    .bind(format!("cves:batch:{}", targets.len()))
+    .bind(actor.request_origin.as_deref())
+    .bind(json!({
+        "requested_pair_count":pairs.len(),"applied_target_count":targets.len(),
+        "applied_pairs":applied_pairs.keys().map(|(cve_id,package)| format!("{cve_id}:{package}")).collect::<Vec<_>>(),
+        "skipped_pairs":skipped_pairs.iter().map(|(cve_id,package)| format!("{cve_id}:{package}")).collect::<Vec<_>>(),
+        "poam_ids":poam_ids_created
+    }))
+    .execute(&mut *tx)
+    .await?;
+
+    let applied = applied_pairs
+        .into_iter()
+        .map(
+            |((cve_id, package_name), environment_ids)| CveBatchAppliedPair {
+                pair: CveBatchPairIdentity {
+                    cve_id,
+                    canonical_package_name: package_name,
+                },
+                environment_ids,
+            },
+        )
+        .collect::<Vec<_>>();
+    let skipped = skipped_pairs
+        .into_iter()
+        .map(|(cve_id, package_name)| CveBatchPairIdentity {
+            cve_id,
+            canonical_package_name: package_name,
+        })
+        .collect::<Vec<_>>();
+    tx.commit().await?;
+    for target in &targets {
+        schedule_scheduled_environment_cve_reconciliation_for_environment(
+            pool,
+            target.environment_id,
+            target.cve_id.clone(),
+            target.package_name.clone(),
+        );
+    }
+    Ok(FleetCveBatchTriageResponse {
+        applied,
+        skipped,
+        poam_ids: poam_ids_created,
+    })
+}
+
 /// Returns server-issued exact-CVE occurrence context and POA&M relationships.
 ///
 /// The response is derived only from the latest completed schema-1 scan for
@@ -9921,8 +10910,11 @@ async fn close_once(
 /// Reopens a completed POA&M and restores its closure finding set.
 ///
 /// Reopening fails if another active POA&M has claimed a closure finding. For
-/// environment-backed exact findings, current affected subjects must be covered
-/// by the closure set and no active disposition can conflict. Findings without an environment
+/// environment-backed exact findings, every schedule retired by the closure
+/// must have an exact environment/CVE/package closure subject. If a moved-out
+/// schedule has none, reopening fails atomically rather than dropping it.
+/// Current affected subjects must be covered by the closure set and no active
+/// disposition can conflict. Findings without an environment
 /// restore their links without creating an environment disposition. The
 /// operation builds the reopened detail before commit.
 ///
@@ -10072,6 +11064,36 @@ pub async fn reopen(
     .bind(format!("closed:{attempt_id}"))
     .fetch_all(&mut *tx)
     .await?;
+    // INVARIANT: Closure retires every scheduled disposition, including one
+    // whose last link was retired earlier by environment_moved. The join above
+    // can only restore schedules with a same-pair closure link still in their
+    // environment. Refuse the entire reopen if any retired schedule is absent;
+    // a different pair's link must never stand in for its history.
+    let missing_environment_schedule: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS(
+             SELECT 1 FROM cve_environment_dispositions disposition
+             WHERE disposition.poam_id=$1 AND disposition.state='scheduled'
+               AND disposition.retired_at=(SELECT closed_at FROM poams WHERE id=$1)
+               AND disposition.retirement_reason='poam_closed'
+               AND NOT EXISTS (
+                 SELECT 1 FROM poam_cve_finding_links link
+                 JOIN systems system ON system.id=link.system_id
+                   AND system.environment_id=disposition.environment_id
+                 WHERE link.poam_id=$1 AND link.retirement_reason=$2
+                   AND link.canonical_cve_id=disposition.canonical_cve_id
+                   AND link.canonical_package_name=disposition.canonical_package_name
+               ))"#,
+    )
+    .bind(id)
+    .bind(format!("closed:{attempt_id}"))
+    .fetch_one(&mut *tx)
+    .await?;
+    if missing_environment_schedule {
+        return Err(PoamError::Conflict(
+            "cve_disposition_conflict",
+            "A closure environment schedule has no exact restorable subject".into(),
+        ));
+    }
     let cve_hosts = sqlx::query_as::<_, (Uuid, String, String)>(
         r#"SELECT disposition.system_id,disposition.canonical_cve_id,
                   disposition.canonical_package_name

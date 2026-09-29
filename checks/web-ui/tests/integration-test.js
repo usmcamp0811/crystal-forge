@@ -12921,6 +12921,9 @@ const steps = [
         };
       };
       let packageFilterFixture = false;
+      let batchQuickFixture = false;
+      let wildcardPackageFixture = false;
+      let heldPackagePage = null;
       const inventoryRows = (url) => {
         const search = url.searchParams.get("search")?.toLowerCase();
         const focused = search?.startsWith("cve-");
@@ -13003,6 +13006,33 @@ const steps = [
           }));
           if (environmentId && environmentId !== environmentIds.production) rows = [];
         }
+        if (batchQuickFixture && !focused) {
+          rows = Array.from({ length: 202 }, (_, index) => ({
+            ...cveRowFixture,
+            cve_id: `CVE-2024-${String(3000 + index)}`,
+            severity: index < 200 ? "critical" : "high",
+            fix_status: index === 201 ? "open" : "fix_available",
+            triage_status: index === 201 ? "accepted" : "outstanding",
+            package_name: "openssl",
+          })).filter((row) =>
+            (!url.searchParams.has("severity") || row.severity === url.searchParams.get("severity")) &&
+            (!url.searchParams.has("triage_status") || row.triage_status === url.searchParams.get("triage_status")) &&
+            (!url.searchParams.has("fix_status") || row.fix_status === "fix_available") &&
+            (!url.searchParams.has("package") || row.package_name.includes(url.searchParams.get("package"))));
+          if (environmentId && environmentId !== environmentIds.production) rows = [];
+        }
+        if (wildcardPackageFixture && !focused) {
+          rows = [
+            { ...cveRowFixture, cve_id: "CVE-2024-7000", package_name: "lib_foo" },
+            { ...cveRowFixture, cve_id: "CVE-2024-7001", package_name: "libXfoo" },
+          ].filter((row) => {
+            const packageQuery = url.searchParams.get("package");
+            // Mirror the server's ILIKE: `_` in the query is one wildcard.
+            return !packageQuery || (packageQuery === "lib_foo"
+              ? /^lib.foo$/i.test(row.package_name)
+              : row.package_name.toLowerCase().includes(packageQuery.toLowerCase()));
+          });
+        }
         const keys = new Set(rows.map((row) => `${row.cve_id}|${row.package_name}`));
         members = members.filter((member) => keys.has(`${member.cve_id}|${member.package_name}`));
         return { rows, members };
@@ -13079,8 +13109,16 @@ const steps = [
               (left.package_name || "").localeCompare(right.package_name || "") ||
               left.system_id.localeCompare(right.system_id) || left.inventory_section.localeCompare(right.inventory_section));
         }
+        const held = endpoint === "pairs" && url.searchParams.get("package") === "openssl" &&
+          url.searchParams.get("offset") === "200" && !url.searchParams.has("severity") ? heldPackagePage : null;
+        if (held) {
+          heldPackagePage = null;
+          held.started();
+          await held.release;
+        }
         await route.fulfill({ status: 200, contentType: "application/json",
           body: JSON.stringify(inventoryPage(items, url, endpoint === "pairs" ? 200 : 50)) });
+        held?.completed();
       };
       await page.route(inventoryRoute, serveInventory);
       let fleetDetailRequests = 0;
@@ -13487,9 +13525,13 @@ const steps = [
       await assertVisible(viewerPage.getByText("No current inventory findings"), "404 should render the fleet inventory empty state");
       await viewerPage.goto(`${baseUrl}/cves?cve=CVE-DENIED&cve_package=openssl`, { timeout: LOAD_TIMEOUT });
       await assertVisible(viewerPage.getByText("Fleet detail unavailable"), "403 should render the exact-fleet unauthorized state");
-      await viewerPage.goto(`${baseUrl}/cves?cve=CVE-ERROR&cve_package=openssl`, { timeout: LOAD_TIMEOUT });
-      await assertVisible(viewerPage.getByText("Could not load fleet detail"), "500 should render the retryable exact-fleet error state");
-      await assertVisible(viewerPage.getByRole("button", { name: "Retry" }), "Retryable fleet errors should expose retry");
+        await viewerPage.goto(`${baseUrl}/cves?cve=CVE-ERROR&cve_package=openssl`, { timeout: LOAD_TIMEOUT });
+        await assertVisible(viewerPage.getByText("Could not load fleet detail"), "500 should render the retryable exact-fleet error state");
+        await assertVisible(viewerPage.getByRole("button", { name: "Retry" }), "Retryable fleet errors should expose retry");
+        await viewerPage.goto(`${baseUrl}/cves?view=flat`, { timeout: LOAD_TIMEOUT });
+        await viewerPage.getByTestId("cve-row").filter({ hasText: "CVE-2024-1234" }).click({ modifiers: ["Control"] });
+        await assertVisible(viewerPage.getByRole("toolbar", { name: "Selected CVEs" }).getByText("1 selected"), "Viewer may select exact pairs for inspection");
+        await assertDisabled(viewerPage.getByTestId("cve-batch-open"), "Viewer must not get an enabled batch mutation");
       } finally {
         if (releaseLoadingFleet) releaseLoadingFleet();
         await viewerPage.unrouteAll({ behavior: "ignoreErrors" }).catch(() => {});
@@ -13647,7 +13689,7 @@ const steps = [
       await assertVisible(quickSelection.getByText("1 selected"), "Outstanding quick-select must use source triage status");
       await quickSelection.getByRole("button", { name: "Patchable 20" }).click();
       await assertVisible(quickSelection.getByText("2 selected"), "Overlapping quick selections must union exact CVE/package identities");
-      await quickSelection.getByRole("button", { name: "Clear" }).click();
+      await page.getByRole("toolbar", { name: "Selected CVEs" }).getByRole("button", { name: "Clear" }).click();
       await page.getByRole("button", { name: "Medium", exact: true }).click();
       await criticalQuick.click();
       await assertVisible(page.getByRole("status").getByText("No matching CVEs in the current filters."), "A fleet statistic with no active-filter matches must not select anything");
@@ -13681,6 +13723,330 @@ const steps = [
           await assertCount(card.locator("tbody tr"), counts[i], "Visible package expanded without filtered children");
         }
       };
+      await assertPackages(["openssl", "glibc"], [3, 1]);
+      // Batch detail is authoritative for every selected pair, including
+      // identities not currently rendered by the bounded inventory page.
+      const batchPairs = inventoryRows(new URL(`${baseUrl}/api/v1/cves/inventory/pairs`)).rows;
+      const batchIdentity = (row) => ({ cve_id: row.cve_id, canonical_package_name: row.package_name });
+      const batchKey = (pair) => `${pair.cve_id}|${pair.canonical_package_name}`;
+      const pairById = (id) => batchIdentity(batchPairs.find((row) => row.cve_id === id));
+      const manualPairs = [pairById("CVE-2024-1234"), pairById("CVE-2024-9090")];
+      const packagePairs = batchPairs.filter((row) => row.package_name === "openssl").map(batchIdentity);
+      const batchDetailBodies = [];
+      const batchTriageBodies = [];
+      let batchConflict = false;
+      let batchPartialSuccess = false;
+      const batchEnvironments = fleetDetail.environments.map((env) => ({
+        id: env.environment_id, name: env.environment_name,
+      }));
+      const batchSubjectCounts = {
+        "CVE-2024-1234|openssl": { [environmentIds.development]: 1, [environmentIds.production]: 1, [environmentIds.lab]: 1 },
+        "CVE-2024-5678|openssl": {},
+        "CVE-2024-8080|openssl": { [environmentIds.development]: 1 },
+        "CVE-2024-9090|glibc": { [environmentIds.production]: 1 },
+      };
+      const batchToken = (pair, environmentId) => `fixture:${batchKey(pair)}:${environmentId}`;
+      await page.route(/\/api\/v1\/cves\/batch-detail$/, async (route) => {
+        if (route.request().method() !== "POST") throw new Error("Batch detail must use POST");
+        const body = route.request().postDataJSON();
+        batchDetailBodies.push(body);
+        if (body.pairs.some((pair) => batchKey(pair) === "CVE-2024-5678|openssl")) {
+          await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({
+            error: "batch_pair_stale", message: "A selected CVE/package pair is no longer actionable; refresh and retry",
+          }) });
+          return;
+        }
+        const sourcePairs = inventoryRows(new URL(`${baseUrl}/api/v1/cves/inventory/pairs`)).rows;
+        const items = body.pairs.map((pair) => {
+          const source = sourcePairs.find((row) => batchKey(batchIdentity(row)) === batchKey(pair));
+          if (!source) throw new Error(`Batch detail asked for a non-source pair: ${JSON.stringify(pair)}`);
+          return {
+            ...pair, severity: source.severity, cvss_v3_score: source.cvss_v3_score,
+            environments: batchEnvironments.map((env) => ({
+              environment_id: env.id, environment_name: env.name,
+              exact_affected_system_count: (batchQuickFixture ? env.id === environmentIds.production : batchSubjectCounts[batchKey(pair)]?.[env.id]) ? 1 : 0,
+              existing_state: null, evidence_token: batchToken(pair, env.id),
+            })),
+          };
+        });
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items }) });
+      });
+      await page.route(/\/api\/v1\/cves\/batch-triage$/, async (route) => {
+        if (route.request().method() !== "POST") throw new Error("Batch triage must use POST");
+        const body = route.request().postDataJSON();
+        batchTriageBodies.push(body);
+        if (batchConflict) {
+          await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({
+            error: "cve_evidence_changed", message: "Exact evidence changed before batch commit.",
+            details: { current_subject_count: 2 },
+          }) });
+          return;
+        }
+        if (batchPartialSuccess) {
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+            applied: [{ pair: body.pairs[0], environment_ids: [environmentIds.production] }],
+            skipped: [body.pairs[1]], poam_ids: [],
+          }) });
+          return;
+        }
+        const applied = body.pairs.map((pair) => ({ pair, environment_ids: body.environment_ids.filter((id) =>
+          (batchQuickFixture ? id === environmentIds.production : (batchSubjectCounts[batchKey(pair)]?.[id] || 0) > 0)) }));
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+          applied: applied.filter((item) => item.environment_ids.length),
+          skipped: applied.filter((item) => !item.environment_ids.length).map((item) => item.pair),
+          poam_ids: body.disposition.action === "schedule_patch" ? ["00000000-0000-0000-0000-0000000000d2"] : [],
+        }) });
+      });
+      const selectedBar = page.getByRole("toolbar", { name: "Selected CVEs" });
+      const batchDialog = page.getByRole("dialog", { name: "Batch triage" });
+      const expectBulkCount = async (count, packages) => {
+        await assertVisible(selectedBar.getByText(`${count} selected`), "Bulk bar must show the exact selected-pair count");
+        await assertVisible(selectedBar.getByText(`${packages} package${packages === 1 ? "" : "s"}`), "Bulk bar must show distinct selected packages");
+      };
+      const openBatch = async (pairs) => {
+        await selectedBar.getByTestId("cve-batch-open").click();
+        await assertVisible(batchDialog.getByRole("heading", { name: `Triage ${pairs.length} CVEs together` }), "Batch dialog must hydrate selected pairs");
+        await page.waitForFunction((count) => document.querySelectorAll("[data-testid='cve-batch-dialog'] .cve-batch-id").length === count, pairs.length);
+        const detail = batchDetailBodies.at(-1);
+        if (!isDeepStrictEqual(detail.pairs.map(batchKey).sort(), pairs.map(batchKey).sort())) {
+          throw new Error(`Batch hydration identities differ from selection: ${JSON.stringify(detail)}`);
+        }
+        for (const pair of pairs) {
+          await assertVisible(batchDialog.getByText(pair.cve_id, { exact: true }), `Missing hydrated ${batchKey(pair)}`);
+        }
+      };
+      const resetBatch = async () => {
+        await page.goto(`${baseUrl}/cves`);
+        await assertPackages(["openssl", "glibc"], [3, 1]);
+        await assertHidden(selectedBar, "Navigation must reset batch selection");
+      };
+      const chooseManualPairs = async () => {
+        for (const pair of manualPairs) {
+          const card = page.locator(".cve-package-card").filter({ has: page.locator(".cve-package-name", { hasText: pair.canonical_package_name }) });
+          const header = card.locator(".cve-package-toggle");
+          if (await header.getAttribute("aria-expanded") !== "true") await header.click();
+          await card.getByTestId("cve-row").filter({ hasText: pair.cve_id }).click({ modifiers: ["Control"] });
+        }
+        await expectBulkCount(2, 2);
+        await assertHidden(batchDialog, "Ctrl-row selection must not open fleet detail or batch dialog");
+        await assertHidden(page.getByTestId("cve-fleet-drawer"), "Ctrl-row selection must not open fleet detail");
+      };
+      await chooseManualPairs();
+      await captureWorkflowState(page, "16-cves", "batch-two-selected", () => expectBulkCount(2, 2));
+      await selectedBar.getByRole("button", { name: "Clear" }).click();
+      await assertHidden(selectedBar, "Bulk Clear must remove both manual selections");
+      await page.locator(".cve-package-toggle").filter({ hasText: "openssl" }).click({ modifiers: ["Control"] });
+      await expectBulkCount(3, 1);
+      await captureWorkflowState(page, "16-cves", "batch-package-selected", () => expectBulkCount(3, 1));
+      await openBatch(packagePairs);
+      await assertVisible(batchDialog.getByText(/Selection was not changed; remove unavailable pairs or refresh/), "Inventory-only selected pair must fail hydration without being dropped");
+      await assertDisabled(batchDialog.getByRole("button", { name: "Apply to 0" }), "A stale package selection must not mutate any pair");
+      await batchDialog.getByRole("button", { name: "Cancel" }).click();
+      await resetBatch();
+
+      await chooseManualPairs();
+      await openBatch(manualPairs);
+      await captureWorkflowState(page, "16-cves", "batch-modal-default", () => assertVisible(batchDialog.getByText("2 writable CVE/package pairs", { exact: false }), "Exact current pairs should be writable"));
+      await captureWorkflowState(page, "16-cves", "batch-multi-env", () => assertVisible(batchDialog.getByRole("button", { name: /Production 2 CVEs/ }), "Production must contain both selected pairs"));
+      await batchDialog.getByRole("button", { name: "Accept risk" }).click();
+      await batchDialog.getByRole("button", { name: /Development 1 CVEs/ }).click();
+      await batchDialog.getByRole("button", { name: /Lab 1 CVEs/ }).click();
+      await batchDialog.getByRole("textbox", { name: /Justification/ }).fill("Approved for the production fleet only.");
+      await captureWorkflowState(page, "16-cves", "batch-accept-panel", () => assertVisible(batchDialog.getByRole("button", { name: "Apply to 2" }), "Acceptance must be ready for two source pairs"));
+      await batchDialog.getByRole("button", { name: "Apply to 2" }).click();
+      await assertHidden(batchDialog, "Successful acceptance must close the batch dialog");
+      const acceptedBody = batchTriageBodies.at(-1);
+      if (batchTriageBodies.length !== 1 || acceptedBody.disposition.action !== "accept_risk" ||
+          acceptedBody.disposition.justification !== "Approved for the production fleet only." ||
+          !isDeepStrictEqual(acceptedBody.pairs.map(batchKey).sort(), manualPairs.map(batchKey).sort()) ||
+          !isDeepStrictEqual(acceptedBody.environment_ids, [environmentIds.production]) ||
+          !isDeepStrictEqual(acceptedBody.expected_tokens.map((token) => `${batchKey(token.pair)}|${token.environment_id}|${token.evidence_token}`).sort(),
+            manualPairs.map((pair) => `${batchKey(pair)}|${environmentIds.production}|${batchToken(pair, environmentIds.production)}`).sort()) ||
+          triageBodies.length !== 0) {
+        throw new Error(`Acceptance must submit one exact production-only batch, leaving unselected environments untouched: ${JSON.stringify(acceptedBody)}`);
+      }
+
+      await resetBatch();
+      await chooseManualPairs();
+      await openBatch(manualPairs);
+      await batchDialog.getByRole("combobox", { name: "Owner" }).selectOption(`user:00000000-0000-0000-0000-0000000000f1`);
+      await assertVisible(batchDialog.getByRole("button", { name: "One POA&M" }), "One-plan grouping must be available");
+      await captureWorkflowState(page, "16-cves", "batch-schedule-panel", () => assertVisible(batchDialog.getByRole("button", { name: "Apply to 2" }), "Schedule panel must accept typed assignee"));
+      await batchDialog.getByRole("button", { name: "Apply to 2" }).click();
+      await assertHidden(batchDialog, "Successful schedule must close the dialog");
+      const scheduledBody = batchTriageBodies.at(-1);
+      if (batchTriageBodies.length !== 2 || scheduledBody.disposition.action !== "schedule_patch" ||
+          scheduledBody.disposition.grouping !== "ONE" ||
+          !isDeepStrictEqual(scheduledBody.disposition.assignee, { kind: "user", user_id: "00000000-0000-0000-0000-0000000000f1" }) ||
+          !isDeepStrictEqual(scheduledBody.pairs.map(batchKey).sort(), manualPairs.map(batchKey).sort()) ||
+          !isDeepStrictEqual([...scheduledBody.environment_ids].sort(),
+            [environmentIds.development, environmentIds.production, environmentIds.lab].sort()) ||
+          scheduledBody.expected_tokens.length !== scheduledBody.pairs.length * scheduledBody.environment_ids.length ||
+          !isDeepStrictEqual(scheduledBody.expected_tokens.map((token) =>
+            `${batchKey(token.pair)}|${token.environment_id}|${token.evidence_token}`).sort(),
+            manualPairs.flatMap((pair) => scheduledBody.environment_ids.map((id) =>
+              `${batchKey(pair)}|${id}|${batchToken(pair, id)}`)).sort()) ||
+          triageBodies.length !== 0) {
+        throw new Error(`Schedule must submit one source-backed, grouped POST without per-CVE mutations: ${JSON.stringify(scheduledBody)}`);
+      }
+
+      await resetBatch();
+      await chooseManualPairs();
+      await openBatch(manualPairs);
+      batchConflict = true;
+      await batchDialog.getByRole("combobox", { name: "Owner" }).selectOption(`user:00000000-0000-0000-0000-0000000000f1`);
+      await batchDialog.getByRole("button", { name: "Apply to 2" }).click();
+      await assertVisible(batchDialog.getByRole("alert").filter({ hasText: "no changes were applied" }), "409 must report atomic failure");
+      await expectBulkCount(2, 2);
+      if (batchTriageBodies.length !== 3 || triageBodies.length !== 0) throw new Error("Conflict must not retry or fall back to per-CVE mutation");
+      batchConflict = false;
+      await batchDialog.getByRole("button", { name: "Cancel" }).click();
+      await resetBatch();
+      await chooseManualPairs();
+      await openBatch(manualPairs);
+      await batchDialog.getByRole("button", { name: "Accept risk" }).click();
+      await batchDialog.getByRole("textbox", { name: /Justification/ }).fill("Accepted under documented controls.");
+      batchPartialSuccess = true;
+      await batchDialog.getByRole("button", { name: "Apply to 2" }).click();
+      await assertHidden(batchDialog, "Committed batch closes the dialog");
+      await expectBulkCount(1, 1);
+      await assertVisible(selectedBar.getByText("1 selected"), "Skipped exact pairs must remain selected after a committed batch");
+      batchPartialSuccess = false;
+      await resetBatch();
+      batchQuickFixture = true;
+      packageFilterFixture = false;
+      await page.goto(`${baseUrl}/cves?view=flat`);
+      await assertVisible(page.getByRole("button", { name: "Show more findings (200 of 202)" }), "Quick-pick fixture must expose its bounded first page");
+      await assertCount(page.getByTestId("cve-row"), 200, "Quick-pick fixture must have unloaded source pairs");
+      const quickChips = page.getByRole("toolbar", { name: "CVE selection" });
+      const quickExpectations = [
+        ["Critical 5", 200, "critical"], ["High 12", 2, "high"],
+        ["Patchable 20", 201, "available"], ["Outstanding 30", 201, "outstanding"],
+      ];
+      for (const [label, count, filter] of quickExpectations) {
+        const before = inventoryRequests.pairs.length;
+        await quickChips.getByRole("button", { name: label }).click();
+        await assertVisible(quickChips.getByText(`${count} selected`), `${label} must resolve every source-backed pair`);
+        await expectBulkCount(count, 1);
+        const fetches = inventoryRequests.pairs.slice(before);
+        const lastOffset = filter === "available" || filter === "outstanding" ? "200" : "0";
+        if (!fetches.some((url) => url.searchParams.get("offset") === lastOffset &&
+            (filter === "outstanding" ? url.searchParams.get("triage_status") === filter :
+              filter === "available" ? url.searchParams.get("fix_status") === filter : url.searchParams.get("severity") === filter))) {
+          throw new Error(`${label} did not hydrate its exact filtered source pairs (offset ${lastOffset})`);
+        }
+        if (label === "Critical 5") {
+          await assertDisabled(selectedBar.getByTestId("cve-batch-open"), "More than 100 selected pairs must disable batch triage");
+          await captureWorkflowState(page, "16-cves", "batch-over-100-disabled", () => assertVisible(selectedBar.getByRole("status"), "Bounded batch selection must explain its limit"));
+        }
+        if (label === "High 12") {
+          const highPairs = [3000 + 200, 3000 + 201].map((id) => ({ cve_id: `CVE-2024-${id}`, canonical_package_name: "openssl" }));
+          await assertCount(page.getByTestId("cve-row").filter({ hasText: highPairs[0].cve_id }), 0, "High pair must remain unloaded in the table");
+          await openBatch(highPairs);
+          await batchDialog.getByRole("button", { name: "Cancel" }).click();
+        }
+        await selectedBar.getByRole("button", { name: "Clear" }).click();
+        await assertHidden(selectedBar, `Clearing ${label} must remove all exact pairs`);
+      }
+      await page.goto(`${baseUrl}/cves?view=grouped`);
+      await assertPackages(["openssl"], [200]);
+      await assertVisible(page.getByRole("button", { name: "Show more findings (200 of 202)" }), "Package fixture must have an unloaded second pair page");
+      await assertCount(page.getByTestId("cve-row"), 200, "Package header starts with only its first 200 children materialized");
+      const pagedHeader = page.locator(".cve-package-toggle").filter({ hasText: "openssl" });
+      const expandedBefore = await pagedHeader.getAttribute("aria-expanded");
+      const packageRequestsBefore = inventoryRequests.pairs.length;
+      await pagedHeader.click({ modifiers: ["Control"] });
+      await expectBulkCount(202, 1);
+      await assertDisabled(selectedBar.getByTestId("cve-batch-open"), "Package selection above the 100-pair mutation bound stays selected but cannot submit");
+      await assertVisible(selectedBar.getByRole("status"), "Over-limit package selection must explain the supported mutation maximum");
+      if (await pagedHeader.getAttribute("aria-expanded") !== expandedBefore) throw new Error("Modifier-click changed ordinary package expansion");
+      const packageFetches = inventoryRequests.pairs.slice(packageRequestsBefore);
+      if (!["0", "200"].every((offset) => packageFetches.some((url) => url.searchParams.get("package") === "openssl" && url.searchParams.get("offset") === offset))) {
+        throw new Error(`Package header did not page through the full authorized filtered pair set: ${packageFetches.join(", ")}`);
+      }
+      await captureWorkflowState(page, "16-cves", "batch-package-paged-selected", () => expectBulkCount(202, 1));
+      await pagedHeader.click({ modifiers: ["Control"] });
+      await assertHidden(selectedBar, "Second package modifier-click must deselect all 202 pairs, not just loaded children");
+      await pagedHeader.click({ modifiers: ["Control"] });
+      await expectBulkCount(202, 1);
+      await selectedBar.getByRole("button", { name: "Clear" }).click();
+      await assertHidden(selectedBar, "Clear must remove the full package set, including unloaded pairs");
+      await pagedHeader.click({ modifiers: ["Control"] });
+      await expectBulkCount(202, 1);
+      const loadedPackageRows = page.getByTestId("cve-row");
+      for (let index = 0; index < 103; index++) {
+        await loadedPackageRows.nth(index).click({ modifiers: ["Control"] });
+      }
+      await expectBulkCount(99, 1);
+      await assertCount(page.getByTestId("cve-row").filter({ hasText: "CVE-2024-3200" }), 0, "Unloaded package child stays absent from rendered rows");
+      await selectedBar.getByTestId("cve-batch-open").click();
+      await page.waitForFunction(() => document.querySelectorAll("[data-testid='cve-batch-dialog'] .cve-batch-id").length === 99);
+      const pagedBatchDetail = batchDetailBodies.at(-1);
+      for (const cveId of ["CVE-2024-3200", "CVE-2024-3201"]) {
+        if (!pagedBatchDetail.pairs.some((pair) => pair.cve_id === cveId && pair.canonical_package_name === "openssl")) {
+          throw new Error(`Batch hydration omitted unloaded selected package child ${cveId}`);
+        }
+        await assertVisible(batchDialog.getByText(cveId, { exact: true }), "Unloaded selected pair must appear in the batch modal");
+      }
+      await batchDialog.getByRole("button", { name: "Cancel" }).click();
+      await selectedBar.getByRole("button", { name: "Clear" }).click();
+      await page.getByRole("button", { name: "High", exact: true }).click();
+      await assertPackages(["openssl"], [2]);
+      const filteredRequestsBefore = inventoryRequests.pairs.length;
+      await page.locator(".cve-package-toggle").filter({ hasText: "openssl" }).click({ modifiers: ["Control"] });
+      await expectBulkCount(2, 1);
+      const filteredFetches = inventoryRequests.pairs.slice(filteredRequestsBefore);
+      if (!filteredFetches.some((url) => url.searchParams.get("package") === "openssl" && url.searchParams.get("severity") === "high" && url.searchParams.get("offset") === "0")) {
+        throw new Error("Package modifier-click ignored the active severity filter");
+      }
+      await page.locator(".cve-package-toggle").filter({ hasText: "openssl" }).click({ modifiers: ["Control"] });
+      await assertHidden(selectedBar, "Filtered package modifier-click must deselect exactly its two filtered pairs");
+      await page.getByRole("button", { name: "All", exact: true }).first().click();
+      await assertPackages(["openssl"], [200]);
+      let releasePackagePage;
+      let markPackagePageStarted;
+      let markPackagePageCompleted;
+      const packagePageStarted = new Promise((resolve) => { markPackagePageStarted = resolve; });
+      const packagePageCompleted = new Promise((resolve) => { markPackagePageCompleted = resolve; });
+      heldPackagePage = {
+        started: markPackagePageStarted,
+        release: new Promise((resolve) => { releasePackagePage = resolve; }),
+        completed: markPackagePageCompleted,
+      };
+      try {
+        await page.locator(".cve-package-toggle").filter({ hasText: "openssl" }).click({ modifiers: ["Control"] });
+        await packagePageStarted;
+        await page.getByRole("button", { name: "High", exact: true }).click();
+        await assertPackages(["openssl"], [2]);
+        releasePackagePage();
+        await packagePageCompleted;
+        await assertHidden(selectedBar, "Late unfiltered package page must not select pairs after the filter changes");
+      } finally {
+        heldPackagePage = null;
+        releasePackagePage?.();
+      }
+      batchQuickFixture = false;
+      wildcardPackageFixture = true;
+      await page.goto(`${baseUrl}/cves?view=grouped`);
+      await assertPackages(["lib_foo", "libXfoo"], [1, 1]);
+      const wildcardRequestsBefore = inventoryRequests.pairs.length;
+      const wildcardHeader = page.locator(".cve-package-toggle").filter({ hasText: "lib_foo" });
+      await wildcardHeader.click({ modifiers: ["Control"] });
+      await expectBulkCount(1, 1);
+      if (!inventoryRequests.pairs.slice(wildcardRequestsBefore).some((url) => url.searchParams.get("package") === "lib_foo")) {
+        throw new Error("Wildcard-bearing package did not resolve server-backed exact pairs");
+      }
+      const exactWildcardRow = page.getByTestId("cve-row").filter({ hasText: "CVE-2024-7000" });
+      const otherWildcardRow = page.getByTestId("cve-row").filter({ hasText: "CVE-2024-7001" });
+      if (!(await exactWildcardRow.getAttribute("class"))?.includes("cve-row-selected") ||
+          (await otherWildcardRow.getAttribute("class"))?.includes("cve-row-selected")) {
+        throw new Error("ILIKE wildcard expansion selected a different canonical package");
+      }
+      await wildcardHeader.click({ modifiers: ["Control"] });
+      await assertHidden(selectedBar, "Wildcard-bearing package toggle must deselect only its exact identity");
+      wildcardPackageFixture = false;
+      packageFilterFixture = true;
+      await page.goto(`${baseUrl}/cves`);
       await assertPackages(["openssl", "glibc"], [3, 1]);
       await page.getByRole("button", { name: "Low", exact: true }).click();
       await assertPackages(["openssl"], [1]);

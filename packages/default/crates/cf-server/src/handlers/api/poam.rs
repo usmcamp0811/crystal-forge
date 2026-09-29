@@ -653,6 +653,61 @@ pub async fn triage_fleet_cve(
     }
 }
 
+/// Hydrates authoritative batch metadata for exact CVE/package identities.
+///
+/// The browser's selection may include identities from unloaded pages; this
+/// endpoint re-derives severity, applicable environments, and existing
+/// disposition state for exactly the requested identities.
+///
+/// Returns a structured error response for malformed input, hidden scope, or
+/// persistence failures.
+pub async fn fleet_cve_batch_detail(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    body: Result<Json<crate::api::models::FleetCveBatchDetailRequest>, JsonRejection>,
+) -> Response {
+    let body = match json_body(body, "Malformed fleet CVE batch detail request") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match poam::fleet_cve_batch_detail(&pool, &actor, body).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+/// Applies one bounded, atomic batch CVE triage mutation.
+///
+/// Returns a structured error response for CSRF, authorization, bounded
+/// input, exact-evidence, or ownership conflicts.
+pub async fn triage_fleet_cves_batch(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    body: Result<Json<crate::api::models::FleetCveBatchTriageRequest>, JsonRejection>,
+) -> Response {
+    if let Err(response) = csrf(&headers) {
+        return response;
+    }
+    let body = match json_body(body, "Malformed fleet CVE batch triage request") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match poam::triage_fleet_cves_batch(&pool, &actor, body, &SystemClock).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
 /// Returns host and environment triage state for one System Detail CVE row.
 ///
 /// The service derives the selected hostname, current environment, exact
