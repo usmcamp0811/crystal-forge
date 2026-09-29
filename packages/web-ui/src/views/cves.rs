@@ -1382,6 +1382,197 @@ fn pair_selection(mut selected: Signal<BTreeSet<ExactCveSelection>>, selection: 
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum QuickCveSelection {
+    Critical,
+    High,
+    Patchable,
+    Outstanding,
+}
+
+impl QuickCveSelection {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Critical => "Critical",
+            Self::High => "High",
+            Self::Patchable => "Patchable",
+            Self::Outstanding => "Outstanding",
+        }
+    }
+
+    fn matches(self, pair: &CveListItem) -> bool {
+        match self {
+            Self::Critical => pair.severity.eq_ignore_ascii_case("critical"),
+            Self::High => pair.severity.eq_ignore_ascii_case("high"),
+            Self::Patchable => pair.fix_status == "fix_available",
+            Self::Outstanding => pair.triage_status == "outstanding",
+        }
+    }
+
+    // A conflicting filter has no matches. Keep every other active filter;
+    // `exploited` can overlap `patchable` and is checked on returned rows.
+    fn query(self, base: &CveInventoryQuery) -> Option<CveInventoryQuery> {
+        let mut request = base.clone();
+        request.offset = 0;
+        request.limit = 200;
+        match self {
+            Self::Critical | Self::High => {
+                let severity = if self == Self::Critical {
+                    "critical"
+                } else {
+                    "high"
+                };
+                if request
+                    .filters
+                    .severity
+                    .as_deref()
+                    .is_some_and(|value| value != severity)
+                {
+                    return None;
+                }
+                request.filters.severity = Some(severity.into());
+            }
+            Self::Patchable => match request.filters.fix_status.as_deref() {
+                Some("pending") => return None,
+                None => request.filters.fix_status = Some("available".into()),
+                _ => {}
+            },
+            Self::Outstanding => {
+                if request
+                    .filters
+                    .triage_status
+                    .as_deref()
+                    .is_some_and(|value| value != "outstanding")
+                {
+                    return None;
+                }
+                request.filters.triage_status = Some("outstanding".into());
+            }
+        }
+        Some(request)
+    }
+}
+
+fn toggle_quick_pairs(
+    selected: &BTreeSet<ExactCveSelection>,
+    matches: &BTreeSet<ExactCveSelection>,
+) -> BTreeSet<ExactCveSelection> {
+    if matches.is_subset(selected) {
+        selected.difference(matches).cloned().collect()
+    } else {
+        selected.union(matches).cloned().collect()
+    }
+}
+
+/// Resolves every matching exact pair before a quick-select changes state.
+///
+/// CONCURRENCY: Offset pages are separate server reads, not a snapshot. A
+/// changed total, repeated pair, missing package or broken continuation fails
+/// the entire gesture; selecting a partial set would misrepresent the badge.
+async fn fetch_quick_pairs(
+    base: &CveInventoryQuery,
+    kind: QuickCveSelection,
+) -> Result<BTreeSet<ExactCveSelection>, String> {
+    let Some(mut request) = kind.query(base) else {
+        return Ok(BTreeSet::new());
+    };
+    let mut expected_total = None;
+    let mut read_count = 0_i64;
+    let mut found = BTreeSet::new();
+    loop {
+        let page = client::fetch_cve_inventory_pairs(&request)
+            .await
+            .map_err(|error| format!("Matching CVEs could not be loaded: {error}"))?;
+        if expected_total.is_some_and(|total| total != page.total) || page.total < 0 {
+            return Err("Matching CVEs changed during selection. Refresh and try again.".into());
+        }
+        expected_total = Some(page.total);
+        read_count += page.items.len() as i64;
+        for pair in page.items {
+            if !matches_pair_filters(&pair, &base.filters) {
+                return Err(
+                    "Matching CVEs changed during selection. Refresh and try again.".into(),
+                );
+            }
+            if kind.matches(&pair) {
+                let Some(package) = pair.package_name else {
+                    return Err(
+                        "A matching CVE has no package identity and cannot be selected.".into(),
+                    );
+                };
+                if !found.insert(ExactCveSelection {
+                    cve_id: pair.cve_id,
+                    package,
+                }) {
+                    return Err(
+                        "Matching CVEs changed during selection. Refresh and try again.".into(),
+                    );
+                }
+            }
+        }
+        if let Some(next) = page.next_offset {
+            if next <= request.offset || next > page.total || read_count >= page.total {
+                return Err("Matching CVE pagination changed. Refresh and try again.".into());
+            }
+            request.offset = next;
+        } else if read_count == page.total {
+            return Ok(found);
+        } else {
+            return Err("Matching CVE pagination was incomplete. Refresh and try again.".into());
+        }
+    }
+}
+
+fn request_quick_selection(
+    base: CveInventoryQuery,
+    kind: QuickCveSelection,
+    generation: Signal<u64>,
+    mut pending: Signal<Option<QuickCveSelection>>,
+    mut feedback: Signal<Option<(String, bool)>>,
+    mut selected: Signal<BTreeSet<ExactCveSelection>>,
+    mut resolved: Signal<BTreeMap<QuickCveSelection, BTreeSet<ExactCveSelection>>>,
+) {
+    if pending().is_some() {
+        return;
+    }
+    pending.set(Some(kind));
+    feedback.set(None);
+    let version = generation();
+    spawn(async move {
+        let result = fetch_quick_pairs(&base, kind).await;
+        // CONCURRENCY: A filter change invalidates this request. In particular,
+        // it must not write stale pair identities after the new page mounts.
+        if generation() != version {
+            return;
+        }
+        match result {
+            Ok(matches) if matches.is_empty() => {
+                feedback.set(Some((
+                    "No matching CVEs in the current filters.".into(),
+                    true,
+                )));
+            }
+            Ok(matches) => {
+                let next = toggle_quick_pairs(&selected(), &matches);
+                let removed = next.len() < selected().len();
+                let count = matches.len();
+                selected.set(next);
+                resolved.write().insert(kind, matches);
+                feedback.set(Some((
+                    format!(
+                        "{} {count} matching {} CVE/package pairs.",
+                        if removed { "Cleared" } else { "Selected" },
+                        kind.label()
+                    ),
+                    true,
+                )));
+            }
+            Err(message) => feedback.set(Some((message, false))),
+        }
+        pending.set(None);
+    });
+}
+
 fn pair_metadata_for_member<'a>(
     member: &CveInventoryMember,
     pairs: &'a [CveListItem],
@@ -1427,10 +1618,24 @@ fn CvePairsView(
     let mut default_package = use_signal(|| None::<String>);
     let mut default_applied = use_signal(|| false);
     let mut selected = use_signal(BTreeSet::<ExactCveSelection>::new);
+    let mut quick_scope = use_signal(|| query.clone());
+    let mut quick_generation = use_signal(|| 0_u64);
+    let mut quick_pending = use_signal(|| None::<QuickCveSelection>);
+    let mut quick_feedback = use_signal(|| None::<(String, bool)>);
+    let mut quick_resolved =
+        use_signal(BTreeMap::<QuickCveSelection, BTreeSet<ExactCveSelection>>::new);
     let mut loaded_identity = use_signal(|| query.clone());
     // CONCURRENCY: A page from the previous filter identity cannot supply
     // package headers or children after the operator changes any filter.
     use_effect(use_reactive(&query, move |request| {
+        if *quick_scope.peek() != request {
+            quick_scope.set(request.clone());
+            let next_generation = quick_generation.peek().wrapping_add(1);
+            quick_generation.set(next_generation);
+            quick_pending.set(None);
+            quick_feedback.set(None);
+            quick_resolved.write().clear();
+        }
         if *loaded_identity.peek() != request {
             loaded_identity.set(request);
             loaded.set(Vec::new());
@@ -1542,16 +1747,31 @@ fn CvePairsView(
         div { class: "cve-selection-strip", role: "toolbar", aria_label: "CVE selection",
             span { class: "cve-selection-label", "SELECT" }
             if let Some(stats) = fleet_stats.as_ref() {
-                span { class: "cve-selection-chip", "data-kind": "critical", "Critical {stats.critical}" }
-                span { class: "cve-selection-chip", "data-kind": "high", "High {stats.high}" }
-                span { class: "cve-selection-chip", "data-kind": "patchable", "Patchable {stats.fixable}" }
-                span { class: "cve-selection-chip", "data-kind": "outstanding", "Outstanding {stats.outstanding}" }
+                for (kind, count) in [(QuickCveSelection::Critical, stats.critical), (QuickCveSelection::High, stats.high), (QuickCveSelection::Patchable, stats.fixable), (QuickCveSelection::Outstanding, stats.outstanding)] {
+                    { let request = query.clone();
+                      let on = quick_resolved.read().get(&kind)
+                          .is_some_and(|matches| !matches.is_empty() && matches.is_subset(&selected()));
+                      rsx! { button {
+                          class: if on { "cve-selection-chip focus-ring on" } else { "cve-selection-chip focus-ring" },
+                          "data-kind": "{kind.label().to_lowercase()}",
+                          aria_pressed: on,
+                          aria_busy: quick_pending() == Some(kind),
+                          disabled: count == 0 || quick_pending().is_some(),
+                          title: "Fleet-wide count. Selects all matching authorized pairs within the active filters; no triage action is submitted.",
+                          onclick: move |_| request_quick_selection(request.clone(), kind, quick_generation, quick_pending, quick_feedback, selected, quick_resolved),
+                          "{kind.label()} " span { class: "mono", "{count}" }
+                      } }
+                    }
+                }
             }
             if !selected().is_empty() {
                 span { class: "mono", "{selected().len()} selected" }
-                button { class: "btn btn-ghost xs focus-ring", onclick: move |_| selected.set(BTreeSet::new()), "Clear" }
+                button { class: "btn btn-ghost xs focus-ring", disabled: quick_pending().is_some(), onclick: move |_| selected.set(BTreeSet::new()), "Clear" }
             }
             span { class: "cve-selection-hint", "Ctrl/Cmd-click to select" }
+        }
+        if let Some((message, success)) = quick_feedback() {
+            p { class: "page-subtitle", role: if success { "status" } else { "alert" }, "{message}" }
         }
         if let Some((request, Err(error))) = page.read().as_ref()
             && request.offset == offset() && request.filters == query.filters && request.environment_id == query.environment_id {
@@ -2681,6 +2901,28 @@ fn fleet_rollup_class(rollup: poam_api::FleetCveTriageRollup) -> &'static str {
     }
 }
 
+fn fleet_severity_color(severity: &str) -> &'static str {
+    match severity.to_ascii_lowercase().as_str() {
+        "critical" => "#f87171",
+        "high" => "#fbbf24",
+        "medium" => "#60a5fa",
+        _ => "#9ca3af",
+    }
+}
+
+fn fleet_severity_chip_class(severity: &str) -> &'static str {
+    match severity.to_ascii_lowercase().as_str() {
+        "critical" => "chip-critical",
+        "high" => "chip-warning",
+        "medium" => "chip-info",
+        _ => "chip-unknown",
+    }
+}
+
+fn fleet_human_date(date: chrono::NaiveDate) -> String {
+    date.format("%b %-d, %Y").to_string()
+}
+
 fn fleet_fix_label(detail: &poam_api::FleetCveDetail) -> String {
     fixed_version_label(
         detail.cve.fixed_version.as_deref(),
@@ -2717,6 +2959,7 @@ fn ExactCveFleetDrawer(selection: ExactCveSelection, on_close: EventHandler<()>)
     let mut triage_open = use_signal(|| false);
     let mut mutation_error = use_signal(|| None::<String>);
     let mut result_poam = use_signal(|| None::<(uuid::Uuid, bool)>);
+    let mut maximized = use_signal(|| false);
     let component_active = use_hook(|| Rc::new(Cell::new(true)));
     {
         let component_active = component_active.clone();
@@ -2757,6 +3000,10 @@ fn ExactCveFleetDrawer(selection: ExactCveSelection, on_close: EventHandler<()>)
     });
 
     let dialog_label = format!("{} {} fleet inventory", selection.cve_id, selection.package);
+    let severity_color = match &*state.read() {
+        FleetDetailState::Loaded(detail) => fleet_severity_color(&detail.cve.severity),
+        _ => "#9ca3af",
+    };
     rsx! {
         DialogFocusRestore {}
         button {
@@ -2767,7 +3014,7 @@ fn ExactCveFleetDrawer(selection: ExactCveSelection, on_close: EventHandler<()>)
         }
         aside {
             id: "cve-fleet-drawer",
-            class: "fl-tray cve-fleet-drawer",
+            class: if maximized() { "fl-tray cve-fleet-drawer cve-fleet-expanded" } else { "fl-tray cve-fleet-drawer" },
             role: "dialog",
             aria_modal: "true",
             aria_label: "{dialog_label}",
@@ -2777,12 +3024,12 @@ fn ExactCveFleetDrawer(selection: ExactCveSelection, on_close: EventHandler<()>)
             DialogFocusSentinel { dialog_id: "cve-fleet-drawer", boundary: DialogFocusBoundary::Last }
             header { class: "fl-tray-head cve-fleet-head",
                 div { class: "cve-fleet-heading",
-                    Icon { name: IconName::Shield, size: 18 }
+                    span { style: "color:{severity_color};", Icon { name: IconName::Shield, size: 18 } }
                     div { class: "cve-fleet-heading-copy",
                         div { class: "cve-fleet-identity",
                             span { class: "mono", "{selection.cve_id}" }
                             if let FleetDetailState::Loaded(detail) = &*state.read() {
-                                span { class: "chip chip-{detail.cve.severity.to_ascii_lowercase()}",
+                                span { class: "chip {fleet_severity_chip_class(&detail.cve.severity)}",
                                     span { class: "chip-dot" }
                                     "{detail.cve.severity}"
                                 }
@@ -2800,9 +3047,36 @@ fn ExactCveFleetDrawer(selection: ExactCveSelection, on_close: EventHandler<()>)
                     if let FleetDetailState::Loaded(detail) = &*state.read() {
                         a { class: "btn btn-ghost xs focus-ring", href: "https://nvd.nist.gov/vuln/detail/{detail.cve.cve_id}", target: "_blank", rel: "noopener noreferrer", title: "Open NVD advisory", "data-testid": "cve-advisory-link", Icon { name: IconName::Link, size: 11 } " Advisory" }
                         if can_triage {
-                            button { class: if detail.exact_mutation_target_count > 0 { "btn btn-primary xs focus-ring" } else { "btn btn-primary xs focus-ring cve-triage-disabled" }, "data-testid": "cve-triage-open", disabled: detail.exact_mutation_target_count == 0, title: if detail.exact_mutation_target_count == 0 { "Exact current scan evidence is required for fleet triage." } else { "Triage exact affected environments" }, onclick: move |_| { mutation_error.set(None); triage_open.set(true); }, Icon { name: IconName::Shield, size: 11 } if detail.exact_mutation_target_count > 0 { " Triage" } else { " Triage unavailable" } }
+                            button {
+                                class: if detail.exact_mutation_target_count == 0 {
+                                    "btn btn-primary xs focus-ring cve-triage-disabled"
+                                } else if detail.rollup == poam_api::FleetCveTriageRollup::Outstanding {
+                                    "btn btn-primary xs focus-ring"
+                                } else {
+                                    "btn btn-ghost xs focus-ring"
+                                },
+                                "data-testid": "cve-triage-open",
+                                disabled: detail.exact_mutation_target_count == 0,
+                                title: if detail.exact_mutation_target_count == 0 {
+                                    "Exact current scan evidence is required for fleet triage."
+                                } else if detail.rollup == poam_api::FleetCveTriageRollup::Outstanding {
+                                    "Triage exact affected environments"
+                                } else {
+                                    "Edit triage for exact affected environments"
+                                },
+                                onclick: move |_| { mutation_error.set(None); triage_open.set(true); },
+                                Icon { name: IconName::Shield, size: 11 }
+                                if detail.exact_mutation_target_count == 0 {
+                                    " Triage unavailable"
+                                } else if detail.rollup == poam_api::FleetCveTriageRollup::Outstanding {
+                                    " Triage"
+                                } else {
+                                    " Edit triage"
+                                }
+                            }
                         }
                     }
+                    button { class: "btn-icon focus-ring", aria_label: if maximized() { "Restore fleet inventory" } else { "Maximize fleet inventory" }, title: if maximized() { "Restore" } else { "Maximize" }, onclick: move |_| maximized.toggle(), Icon { name: if maximized() { IconName::Minimize } else { IconName::Maximize }, size: 15 } }
                     button { class: "btn-icon focus-ring", aria_label: "Close fleet inventory", autofocus: true, onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } }
                 }
             }
@@ -2860,6 +3134,16 @@ fn ExactCveFleetDrawer(selection: ExactCveSelection, on_close: EventHandler<()>)
 fn FleetCveDetailBody(detail: poam_api::FleetCveDetail) -> Element {
     let total = detail.affected_system_count;
     let (current_affected, scheduled_configuration, historical) = detail.inventory_counts();
+    let legacy = detail.legacy_affected_system_count;
+    let no_scan = detail.no_scan_system_count;
+    let no_scan_hosts = if no_scan == 1 {
+        "active host"
+    } else {
+        "active hosts"
+    };
+    let no_scan_verb = if no_scan == 1 { "has" } else { "have" };
+    let historical_hosts = if historical == 1 { "host" } else { "hosts" };
+    let legacy_hosts = if legacy == 1 { "host" } else { "hosts" };
     let cvss = detail
         .cve
         .cvss_v3_score
@@ -2874,7 +3158,7 @@ fn FleetCveDetailBody(detail: poam_api::FleetCveDetail) -> Element {
     let published = detail
         .cve
         .published_date
-        .map(|date| date.to_string())
+        .map(fleet_human_date)
         .unwrap_or_else(|| "Unknown".to_string());
     let cvss_vector = detail
         .cve
@@ -2902,44 +3186,14 @@ fn FleetCveDetailBody(detail: poam_api::FleetCveDetail) -> Element {
             h3 { "CVSS vector" }
             code { class: "mono", "{cvss_vector}" }
         }
-        div { class: "cve-authority-strip", "data-testid": "cve-authority-details",
-            div { span { "Current exposure" } strong { "{current_affected}" } }
-            div { span { "Scheduled configuration" } strong { "{scheduled_configuration}" } }
-            div { span { "Historical evidence" } strong { "{historical}" } }
-            div { span { "Exact authority" } strong { "{detail.exact_affected_system_count}" } }
-            div { span { "Legacy authority" } strong { "{detail.legacy_affected_system_count}" } }
-            div { span { "Current exact actionable" } strong { "{detail.exact_mutation_target_count}" } }
-            div { span { "Exact rollup" } strong { class: "chip {fleet_rollup_class(detail.rollup)}", "{fleet_rollup_label(detail.rollup)}" } }
-        }
-        if detail.legacy_affected_system_count > 0 {
-            div { class: "sd-callout sd-callout-warn", "data-testid": "cve-fleet-legacy",
-                strong { "Historical inventory cannot authorize fleet triage. " }
-                "{detail.legacy_affected_system_count} affected host(s) do not have exact immutable evidence. Fleet accepted risk, scheduling, POA&M, verification, and closure remain unavailable for those hosts. Ordinary per-system justification remains separate."
-            }
-        }
-        if scheduled_configuration > 0 {
-            div { class: "sd-callout sd-callout-info", "data-testid": "cve-fleet-scheduled-configuration",
-                strong { "Scheduled configuration exposure is read-only. " }
-                "{scheduled_configuration} host(s) have an active exact deployment target that contains this finding. This is deployment intent, not POA&M Patch scheduled triage, and it cannot authorize a mutation."
-            }
-        }
-        if historical > 0 {
-            div { class: "sd-callout sd-callout-warn", "data-testid": "cve-fleet-historical-evidence",
-                strong { "Historical evidence is read-only. " }
-                "{historical} host(s) retain this finding outside current or scheduled configuration exposure."
-            }
-        }
-        if detail.no_scan_system_count > 0 {
-            div { class: "sd-callout sd-callout-warn", "data-testid": "cve-fleet-no-scan",
-                "{detail.no_scan_system_count} visible active host(s) have no usable completed CVE scan and are not counted as affected."
-            }
-        }
-        section { class: "cve-fleet-section",
+        section { class: "cve-fleet-section", "data-testid": "cve-triage-status",
             div { class: "cve-section-head",
                 h3 { "Triage status" }
-                span { "{dispositioned} of {detail.exact_mutation_target_count} actionable host(s) dispositioned" }
+                if detail.exact_mutation_target_count > 0 {
+                    span { "{dispositioned} of {detail.exact_mutation_target_count} current hosts dispositioned" }
+                }
             }
-            p { class: "cve-fleet-truth", "Accepted risk records rationale only. It does not verify or remediate the vulnerability. Scheduled patching remains separate from accepted risk." }
+            p { class: "cve-fleet-truth", "Decisions apply to current exact findings. Accepting risk records rationale; it does not pass or remediate a result." }
             if detail.environments.is_empty() {
                 div { class: "empty", "No visible affected environments." }
             }
@@ -2947,7 +3201,7 @@ fn FleetCveDetailBody(detail: poam_api::FleetCveDetail) -> Element {
                 FleetEnvironmentCard { environment }
             }
             if detail.exact_mutation_target_count == 0 {
-                div { class: "sd-callout sd-callout-warn", "No exact current scan subjects are available. Fleet triage remains read-only until an exact scan reports this CVE and package." }
+                p { class: "cve-fleet-readonly-note", "No current exact scan findings are available for fleet triage." }
             }
         }
         section { class: "cve-fleet-section cve-remediation", "data-testid": "cve-remediation",
@@ -2965,8 +3219,30 @@ fn FleetCveDetailBody(detail: poam_api::FleetCveDetail) -> Element {
                 dt { "Advisory" } dd { a { href: "{advisory_url}", target: "_blank", rel: "noopener noreferrer", "nvd.nist.gov" } }
             }
         }
+        details { class: "cve-authority-details", "data-testid": "cve-authority-details",
+            summary {
+                "Evidence authority · {current_affected} current · {scheduled_configuration} scheduled · {historical} historical"
+            }
+            div { class: "cve-authority-detail-grid",
+                div { span { "Current exact exposure" } strong { "{current_affected}" } }
+                div { span { "Scheduled target exposure" } strong { "{scheduled_configuration}" } }
+                div { span { "Historical retained evidence" } strong { "{historical}" } }
+                div { span { "Legacy evidence" } strong { "{legacy}" } }
+                div { span { "Actionable current hosts" } strong { "{detail.exact_mutation_target_count}" } }
+                div { span { "Triage rollup" } strong { class: "chip {fleet_rollup_class(detail.rollup)}", "{fleet_rollup_label(detail.rollup)}" } }
+            }
+            if historical > 0 || legacy > 0 {
+                p { "Historical and legacy evidence is read-only and cannot authorize fleet triage. {historical} {historical_hosts} have retained historical findings; {legacy} {legacy_hosts} are legacy-only evidence." }
+            }
+            if scheduled_configuration > 0 {
+                p { "Scheduled configuration findings describe deployment intent. They are not POA&M patch scheduling or fleet-triage targets." }
+            }
+            if no_scan > 0 {
+                p { "{no_scan} {no_scan_hosts} {no_scan_verb} no usable completed CVE scan. They are not counted as affected." }
+            }
+        }
         section { class: "cve-fleet-section", "data-testid": "cve-affected-systems",
-            h3 { "Fleet inventory · {detail.affected_system_count} current or scheduled affected" }
+            h3 { "Affected systems · {total} current or scheduled" }
             for (section, section_count, description) in [
                 (FleetCveInventorySection::Current, current_affected, "Exact current deployment findings. Environment-assigned exact subjects can be triaged."),
                 (FleetCveInventorySection::ScheduledDeploymentTarget, scheduled_configuration, "Exact active deployment targets. Scheduled configuration is read-only and is not POA&M Patch scheduled triage."),
@@ -2997,39 +3273,45 @@ fn FleetCveDetailBody(detail: poam_api::FleetCveDetail) -> Element {
 
 #[component]
 fn FleetEnvironmentCard(environment: poam_api::CveAffectedEnvironment) -> Element {
-    let (current_affected, scheduled_configuration, historical) = environment.inventory_counts();
-    let status = if !environment_triage_eligible(&environment) {
-        "INVENTORY ONLY"
-    } else {
-        match &environment.disposition {
-            Some(poam_api::CveEnvironmentDisposition::Accepted { .. }) => "EXACT ACCEPTED",
-            Some(poam_api::CveEnvironmentDisposition::Scheduled { .. }) => "EXACT SCHEDULED",
-            None => "EXACT OPEN",
-        }
+    let current_affected = environment.inventory_counts().0;
+    let can_triage = environment_triage_eligible(&environment);
+    let state_label = match &environment.disposition {
+        Some(poam_api::CveEnvironmentDisposition::Accepted { .. }) => "Risk accepted",
+        Some(poam_api::CveEnvironmentDisposition::Scheduled { .. }) => "Patch scheduled",
+        None => "Outstanding",
     };
+    let state_class = match &environment.disposition {
+        Some(poam_api::CveEnvironmentDisposition::Accepted { .. }) => "chip-info cve-env-accepted",
+        Some(poam_api::CveEnvironmentDisposition::Scheduled { .. }) => {
+            "chip-info cve-env-scheduled"
+        }
+        None => "chip-critical",
+    };
+    let state_test_id = state_label.to_ascii_lowercase().replace(' ', "-");
     rsx! {
-        article { class: "cve-fleet-env", "data-testid": "cve-fleet-environment", "data-state": "{status.to_ascii_lowercase()}",
-            header { div { strong { "{environment.environment_name}" } span { class: "mono", " · {current_affected} current host(s)" } } span { class: "chip", "{status}" } }
-            if scheduled_configuration > 0 || historical > 0 || environment.legacy_affected_system_count > 0 {
-                small { "{current_affected} current · {scheduled_configuration} scheduled configuration · {historical} historical evidence · {environment.legacy_affected_system_count} legacy-authority row(s). Only current exact environment-assigned subjects can be triaged." }
+        article { class: "cve-fleet-env", "data-testid": "cve-fleet-environment", "data-state": "{state_test_id}",
+            header {
+                div { strong { "{environment.environment_name}" } span { class: "mono", "{current_affected} host" if current_affected != 1 { "s" } }
+                    span { class: "chip {state_class}", "{state_label}" }
+                }
             }
             match &environment.disposition {
-                Some(poam_api::CveEnvironmentDisposition::Accepted { justification, review_date, actor, accepted_at }) => { let accepted_date = accepted_at.format("%Y-%m-%d").to_string(); rsx! {
-                    p { "{justification}" }
-                    small { "Accepted by {actor.display} on {accepted_date}" if let Some(review_date) = review_date { " · review {review_date}" } else { " · no review date" } }
+                Some(poam_api::CveEnvironmentDisposition::Accepted { justification, review_date, actor, accepted_at }) => { let accepted_date = fleet_human_date(accepted_at.date_naive()); rsx! {
+                    p { class: "cve-fleet-env-rationale", "{justification}" }
+                    small { class: "cve-fleet-env-meta", "Accepted by {actor.display} · {accepted_date}" if let Some(review_date) = review_date { " · review {fleet_human_date(*review_date)}" } else { " · no review date" } }
                 } },
-                Some(poam_api::CveEnvironmentDisposition::Scheduled { poam_id, poam, actor, scheduled_at }) => { let scheduled_date = scheduled_at.format("%Y-%m-%d").to_string(); let label = poam.as_ref().map(|poam| format!("{}: {}", poam.human_id, poam.title)).unwrap_or_else(|| format!("POA&M {poam_id}")); rsx! {
+                Some(poam_api::CveEnvironmentDisposition::Scheduled { poam_id, poam, actor, scheduled_at }) => { let scheduled_date = fleet_human_date(scheduled_at.date_naive()); let label = poam.as_ref().map(|poam| format!("{}: {}", poam.human_id, poam.title)).unwrap_or_else(|| format!("POA&M {poam_id}")); rsx! {
                     if let Some(poam) = poam {
-                        p { class: "cve-scheduled-plan", "{poam.plan}" }
+                        if !poam.plan.trim().is_empty() { p { class: "cve-scheduled-plan", "{poam.plan}" } }
                         div { class: "cve-scheduled-meta",
                             span { "Owner" strong { "{fleet_assignee_label(&poam.assignee)}" } }
-                            span { "Target" strong { "{poam.target_date}" } }
+                            span { "Target" strong { "{fleet_human_date(poam.target_date)}" } }
                             span { "Risk" strong { "{fleet_risk_label(poam.risk)}" } }
                         }
                     }
-                    div { class: "cve-fleet-scheduled", span { "Scheduled by {actor.display} on {scheduled_date}" } Link { to: Route::ComplianceView { bundle: String::new(), version: String::new(), system: String::new(), policy: String::new(), poam: poam_id.to_string(), view: String::new() }, class: "poam-ref focus-ring", Icon { name: IconName::File, size: 11 } " {label}" } }
+                    div { class: "cve-fleet-scheduled", span { "Scheduled by {actor.display} · {scheduled_date}" } Link { to: Route::ComplianceView { bundle: String::new(), version: String::new(), system: String::new(), policy: String::new(), poam: poam_id.to_string(), view: String::new() }, class: "poam-ref focus-ring", Icon { name: IconName::File, size: 11 } " {label}" } }
                 } },
-                None => rsx! { small { "No active disposition covers the exact subjects. Exact subjects remain outstanding." } },
+                None => rsx! { small { class: "cve-fleet-env-meta", if can_triage { "No disposition covers {current_affected} current hosts." } else { "No source-authorized triage target is available." } } },
             }
         }
     }
@@ -3275,17 +3557,18 @@ fn FleetCveTriageDialog(
 #[cfg(test)]
 mod tests {
     use super::{
-        CveSeenState, FleetDetailState, ToastLifecycle, authenticated_user_id,
+        CveSeenState, FleetDetailState, QuickCveSelection, ToastLifecycle, authenticated_user_id,
         complete_focus_package, deployment_dot, environment_triage_eligible, fleet_error_state,
         fleet_fix_label, fleet_triage_draft, has_retained_package_evidence, initially_expanded,
         inventory_section_label, is_canonical_cve_id, loaded_package_groups, matches_pair_filters,
         ordered_package_groups, pair_metadata_for_member, recently_observed_unseen,
         request_token_is_current, seen_for_user, seen_storage_key, systems_in_inventory_section,
-        triage_status_presentation, unique_retained_package_for_cve, unseen_new_pairs,
+        toggle_quick_pairs, triage_status_presentation, unique_retained_package_for_cve,
+        unseen_new_pairs,
     };
     use crate::api::models::{
         AuthContext, AuthMode, AuthUser, CveFilters, CveInventoryMember, CveInventoryPairPage,
-        CveListItem, FleetCveInventorySection, SystemCveInventoryAuthority,
+        CveInventoryQuery, CveListItem, FleetCveInventorySection, SystemCveInventoryAuthority,
     };
     use crate::components::cve::triage::{
         CveTriageDraft, EnvironmentTriageChoice, EnvironmentTriageDraft,
@@ -3437,6 +3720,60 @@ mod tests {
             ..member
         };
         assert!(pair_metadata_for_member(&other, &items).is_none());
+    }
+
+    #[test]
+    fn quick_selection_toggles_exact_pairs_without_losing_other_selected_families() {
+        let a = super::ExactCveSelection {
+            cve_id: "CVE-2026-1000".into(),
+            package: "nginx".into(),
+        };
+        let b = super::ExactCveSelection {
+            cve_id: "CVE-2026-1000".into(),
+            package: "openssl".into(),
+        };
+        let c = super::ExactCveSelection {
+            cve_id: "CVE-2026-2000".into(),
+            package: "nginx".into(),
+        };
+        let matching = BTreeSet::from([a.clone(), b.clone()]);
+        assert_eq!(toggle_quick_pairs(&BTreeSet::new(), &matching), matching);
+        assert_eq!(
+            toggle_quick_pairs(&BTreeSet::from([a.clone(), c.clone()]), &matching),
+            BTreeSet::from([a, b, c.clone()])
+        );
+        assert_eq!(
+            toggle_quick_pairs(
+                &BTreeSet::from_iter(matching.iter().cloned().chain([c.clone()])),
+                &matching
+            ),
+            BTreeSet::from([c])
+        );
+    }
+
+    #[test]
+    fn quick_selection_retains_active_scope_and_does_not_replace_conflicting_filters() {
+        let query = CveInventoryQuery {
+            group_by: "environment".into(),
+            environment_id: Some(Uuid::from_u128(11)),
+            group_id: None,
+            filters: CveFilters {
+                severity: Some("low".into()),
+                search: Some("nginx".into()),
+                sort: Some("severity".into()),
+                ..Default::default()
+            },
+            offset: 200,
+            limit: 200,
+        };
+        assert!(QuickCveSelection::Critical.query(&query).is_none());
+        let low = QuickCveSelection::Patchable.query(&query).unwrap();
+        assert_eq!(low.environment_id, query.environment_id);
+        assert_eq!(low.offset, 0);
+        assert_eq!(low.filters.severity, query.filters.severity);
+        assert_eq!(low.filters.search, query.filters.search);
+        assert_eq!(low.filters.fix_status.as_deref(), Some("available"));
+        assert_eq!(query.filters.fix_status, None);
     }
 
     #[test]

@@ -13633,6 +13633,26 @@ const steps = [
       await assertVisible(packageHeader.getByText("2 crit"), "Collapsed package must show severity rollup");
       await assertVisible(page.getByRole("toolbar", { name: "CVE selection" }).getByText("SELECT", { exact: true }), "Source-backed selection strip belongs before package groups");
       await captureWorkflowViewportState(page, "16-cves", "package-groups-visible", "desktop");
+      const quickSelection = page.getByRole("toolbar", { name: "CVE selection" });
+      const criticalQuick = quickSelection.getByRole("button", { name: "Critical 5" });
+      await assertVisible(criticalQuick, "The Critical quick-select chip must be a button");
+      await criticalQuick.click();
+      await assertVisible(quickSelection.getByText("2 selected"), "Quick-select must resolve exact matching pairs, not merely highlight a KPI");
+      await assertAttribute(criticalQuick, "aria-pressed", "true", "Selected category should expose its toggle state");
+      await captureWorkflowViewportState(page, "16-cves", "quick-select-critical", "desktop");
+      await criticalQuick.click();
+      await page.waitForFunction(() => ![...document.querySelectorAll(".cve-selection-strip span")].some((node) => /\d+ selected/.test(node.textContent)));
+      await assertAttribute(criticalQuick, "aria-pressed", "false", "Second category click must clear its selected exact pairs");
+      await quickSelection.getByRole("button", { name: "Outstanding 30" }).click();
+      await assertVisible(quickSelection.getByText("1 selected"), "Outstanding quick-select must use source triage status");
+      await quickSelection.getByRole("button", { name: "Patchable 20" }).click();
+      await assertVisible(quickSelection.getByText("2 selected"), "Overlapping quick selections must union exact CVE/package identities");
+      await quickSelection.getByRole("button", { name: "Clear" }).click();
+      await page.getByRole("button", { name: "Medium", exact: true }).click();
+      await criticalQuick.click();
+      await assertVisible(page.getByRole("status").getByText("No matching CVEs in the current filters."), "A fleet statistic with no active-filter matches must not select anything");
+      await assertCount(quickSelection.getByText(/\d+ selected/), 0, "Zero matching quick-select must leave selection unchanged");
+      await page.getByRole("button", { name: "All", exact: true }).first().click();
       const expectedPackageRollup = { critical_count: 2, fixable_count: 2, exploited_count: 2 };
       const initialPairs = inventoryRows(new URL(`${baseUrl}/api/v1/cves/inventory/pairs`)).rows;
       if (initialPairs.filter((row) => row.severity === "critical").length !== expectedPackageRollup.critical_count ||
@@ -13803,15 +13823,26 @@ const steps = [
       const advisoryLink = drawer.getByTestId("cve-advisory-link");
       await assertVisible(advisoryLink, "Expected advisory action in drawer header");
       await assertAttribute(advisoryLink, "target", "_blank", "Advisory should open separately");
-      await assertAttribute(advisoryLink, "rel", "noopener noreferrer", "Advisory must not receive opener access");
-      await assertVisible(drawer.getByTestId("cve-cvss-vector").getByText(cveRowFixture.cvss_vector), "Expected CVSS vector section");
-      await assertVisible(drawer.getByTestId("cve-authority-details"), "Expected exact and legacy authority summary");
-      await assertVisible(drawer.getByTestId("cve-remediation").getByText("openssl-3.0.2"), "Expected prominent fixed-version remediation");
+       await assertAttribute(advisoryLink, "rel", "noopener noreferrer", "Advisory must not receive opener access");
+       await assertVisible(drawer.getByRole("button", { name: "Maximize fleet inventory" }), "Drawer must support maximize");
+       await assertVisible(drawer.getByTestId("cve-cvss-vector").getByText(cveRowFixture.cvss_vector), "Expected CVSS vector section");
+       for (const label of ["CVSS", "Package", "Affected", "Fix", "Published"]) {
+         await assertVisible(drawer.locator(".cve-fleet-stats").getByText(label, { exact: true }), `Expected source-backed ${label} summary stat`);
+       }
+       await assertCount(drawer.locator(".cve-fleet-stats").getByText("Discovered", { exact: true }), 0, "Publication date must not be relabeled as discovery time");
+        await assertVisible(drawer.getByTestId("cve-authority-details"), "Expected exact and legacy authority summary");
+        await assertVisible(drawer.getByTestId("cve-triage-open"), "Authorized operator must retain fleet triage action");
+        await assertVisible(drawer.getByRole("button", { name: "Edit triage" }), "A previously dispositioned fleet must offer the edit action");
+       await assertVisible(drawer.getByTestId("cve-remediation").getByText("openssl-3.0.2"), "Expected prominent fixed-version remediation");
+       await assertVisible(drawer.getByTestId("cve-remediation").getByText("3.0.1", { exact: true }), "Fixed-patch detail must retain the installed version");
+       await assertVisible(drawer.getByTestId("cve-remediation").getByText("3.0.2", { exact: true }), "Fixed-patch detail must identify the upstream fixed version");
+       await assertVisible(drawer.getByTestId("cve-remediation").getByText(/exact follow-up scan verifies absence/), "Fixed-patch detail must explain that exposure clears only after verification");
       await assertVisible(drawer.getByTestId("cve-affected-systems"), "Expected a distinct affected-systems section");
       await assertVisible(drawer.getByText("Current exposure · 3", { exact: true }), "Expected current exposure inventory section");
       await assertVisible(drawer.getByText("Scheduled configuration exposure · 2", { exact: true }), "Expected scheduled configuration inventory section");
       await assertVisible(drawer.getByText("Historical evidence · 1", { exact: true }), "Expected historical evidence inventory section");
-      await assertVisible(drawer.getByTestId("cve-fleet-scheduled-configuration"), "Expected scheduled configuration to be explained separately from POA&M patch scheduling");
+       const authorityDetails = drawer.getByTestId("cve-authority-details");
+        await assertVisible(authorityDetails.locator("summary"), "Expected authority disclosure before checking scheduled-target semantics");
 
       const environmentCards = drawer.getByTestId("cve-fleet-environment");
       const developmentCard = environmentCards.filter({ has: page.getByText("Development", { exact: true }) });
@@ -13820,21 +13851,25 @@ const steps = [
       const affectedEnvironmentCards = drawer.getByTestId("cve-affected-environment");
       const archiveInventory = affectedEnvironmentCards.filter({ has: page.getByText("Archive", { exact: true }) });
       const rolloutInventory = affectedEnvironmentCards.filter({ has: page.getByText("Rollout target", { exact: true }) });
-      await assertVisible(drawer.getByText("MIXED", { exact: true }), "Expected authoritative mixed fleet rollup");
-      await assertVisible(developmentCard.getByText("EXACT ACCEPTED", { exact: true }), "Expected accepted environment state");
-      await assertVisible(developmentCard.getByText(/Accepted by Morgan Reyes/), "Expected accepted-risk disposition actor");
-      await assertVisible(developmentCard.getByText("review 2026-10-01"), "Expected accepted review date");
-      await assertVisible(productionCard.getByText("EXACT SCHEDULED", { exact: true }), "Expected scheduled environment state");
+       await assertVisible(developmentCard.getByText("Risk accepted", { exact: true }), "Expected accepted environment state");
+       await assertVisible(developmentCard.getByText(/Accepted by Morgan Reyes/), "Expected accepted-risk disposition actor");
+       await assertVisible(developmentCard.getByText("review Oct 1, 2026"), "Expected accepted review date");
+       await assertVisible(productionCard.getByText("Patch scheduled", { exact: true }), "Expected scheduled environment state");
       await assertVisible(productionCard.getByText(/Scheduled by Morgan Reyes/), "Expected scheduled-remediation actor");
       await assertVisible(productionCard.getByText("POAM-0042: Existing OpenSSL fleet remediation"), "Expected useful scheduled POA&M link label");
       await assertVisible(productionCard.getByText("Promote the fixed OpenSSL package and verify exact scan absence."), "Expected scheduled remediation plan");
       await assertVisible(productionCard.getByText("Platform operators"), "Expected typed scheduled assignee");
-      await assertVisible(productionCard.getByText("2026-10-15"), "Expected scheduled target date");
+       await assertVisible(productionCard.getByText("Oct 15, 2026"), "Expected scheduled target date");
       await assertVisible(productionCard.getByText("CAT I - High"), "Expected scheduled risk");
-      await assertVisible(labCard.getByText("EXACT OPEN", { exact: true }), "Expected open environment state");
-      await assertCount(environmentCards.filter({ has: page.getByText("Archive", { exact: true }) }), 0, "Legacy-only environments must not imply a triage disposition");
-      await assertVisible(drawer.getByTestId("cve-fleet-legacy"), "Expected display-only legacy fleet warning");
-      await assertVisible(drawer.getByTestId("cve-fleet-no-scan"), "Expected no-scan fleet warning");
+       await assertVisible(labCard.getByText("Outstanding", { exact: true }), "Expected open environment state");
+       await assertCount(environmentCards.filter({ has: page.getByText("Archive", { exact: true }) }), 0, "Legacy-only environments must not imply a triage disposition");
+         await authorityDetails.locator("summary").click();
+         await assertVisible(authorityDetails.getByText("MIXED", { exact: true }), "Expected authoritative mixed fleet rollup");
+         await assertVisible(authorityDetails.getByText(/Scheduled configuration findings describe deployment intent/), "Scheduled targets must remain distinct from POA&M patch scheduling");
+        await assertVisible(authorityDetails.getByText(/Historical and legacy evidence is read-only/), "Evidence authority disclosure must retain historical/legacy read-only limits");
+        await assertVisible(authorityDetails.getByText(/1 active host has no usable completed CVE scan/), "No-scan hosts must remain clearly excluded from exposure counts");
+        await authorityDetails.locator("summary").click();
+       await assertCount(drawer.getByTestId("cve-fleet-legacy"), 0, "Legacy evidence must not dominate the primary hierarchy");
       await assertVisible(archiveInventory.locator(".cve-inventory-authority").getByText("HISTORICAL", { exact: true }), "Expected historical host authority label");
       await assertVisible(rolloutInventory.locator(".cve-inventory-authority").getByText("SCHEDULED CONFIGURATION", { exact: true }), "Expected scheduled-only host section label");
       await assertCount(environmentCards.filter({ has: page.getByText("Rollout target", { exact: true }) }), 0, "Scheduled-target-only environments must not imply a triage disposition");
@@ -13849,25 +13884,35 @@ const steps = [
       if (!new URL(page.url()).searchParams.get("cve_package")) {
         throw new Error(`Exact package selection was not encoded in URL state: ${page.url()}`);
       }
-      const assertFleetDetailCapture = async () => {
-        const authority = drawer.getByTestId("cve-authority-details");
-        const vector = drawer.getByTestId("cve-cvss-vector");
-        const legacyWarning = drawer.getByTestId("cve-fleet-legacy");
-        await assertVisible(authority, "CVE capture must preserve authority details");
-        const [authorityBox, vectorBox, legacyBox] = await Promise.all([
-          authority.boundingBox(),
-          vector.boundingBox(),
-          legacyWarning.boundingBox(),
-        ]);
-        const authorityRender = await authority.evaluate((element) => ({
-          opacity: getComputedStyle(element).opacity,
-        }));
-        if (!authorityBox || !vectorBox || !legacyBox || authorityBox.height < 30 || authorityRender.opacity !== "1" || authorityBox.y <= vectorBox.y || authorityBox.y >= legacyBox.y) {
-          throw new Error(`CVE authority details must render between the vector and legacy warning: ${JSON.stringify({ authorityBox, vectorBox, legacyBox, authorityRender })}`);
-        }
-      };
-      await captureWorkflowViewportState(page, "16-cves", "mixed-fleet-detail", "wide", assertFleetDetailCapture);
-      await captureWorkflowViewportState(page, "16-cves", "mixed-fleet-detail", "tablet", assertFleetDetailCapture);
+        const assertFleetDetailCapture = async () => {
+          await drawer.locator(".ed-body").evaluate((element) => { element.scrollTop = 0; });
+          await page.evaluate(() => { if (typeof window.closeDXToast === "function") window.closeDXToast(); });
+          const dismissToast = page.getByRole("button", { name: "Dismiss notification" });
+          if (await dismissToast.count()) await dismissToast.click();
+          const authority = drawer.getByTestId("cve-authority-details");
+         const vector = drawer.getByTestId("cve-cvss-vector");
+         await assertVisible(authority, "CVE capture must preserve authority details");
+         const [statsBox, vectorBox, triageBox, remediationBox, authorityBox, inventoryBox] = await Promise.all([
+           drawer.locator(".cve-fleet-stats").boundingBox(),
+           vector.boundingBox(),
+           drawer.getByTestId("cve-triage-status").boundingBox(),
+           drawer.getByTestId("cve-remediation").boundingBox(),
+           authority.boundingBox(),
+           drawer.getByTestId("cve-affected-systems").boundingBox(),
+         ]);
+         if (!statsBox || !vectorBox || !triageBox || !remediationBox || !authorityBox || !inventoryBox || !(statsBox.y < vectorBox.y && vectorBox.y < triageBox.y && triageBox.y < remediationBox.y && remediationBox.y < authorityBox.y && authorityBox.y < inventoryBox.y)) {
+           throw new Error(`CVE drawer does not follow the approved information hierarchy: ${JSON.stringify({ statsBox, vectorBox, triageBox, remediationBox, authorityBox, inventoryBox })}`);
+         }
+       };
+        await captureWorkflowViewportState(page, "16-cves", "fixed-patch-detail", "desktop", assertFleetDetailCapture);
+        await captureWorkflowViewportState(page, "16-cves", "mixed-fleet-detail", "desktop", assertFleetDetailCapture);
+        await captureWorkflowViewportState(page, "16-cves", "mixed-fleet-detail", "wide", assertFleetDetailCapture);
+        await captureWorkflowViewportState(page, "16-cves", "mixed-fleet-detail", "tablet", assertFleetDetailCapture);
+        await captureWorkflowViewportState(page, "16-cves", "mixed-fleet-detail", "narrowDesktop", assertFleetDetailCapture);
+        await drawer.getByRole("button", { name: "Maximize fleet inventory" }).click();
+        await assertVisible(drawer.getByRole("button", { name: "Restore fleet inventory" }), "Maximized drawer must expose restore");
+        await captureWorkflowViewportState(page, "16-cves", "mixed-fleet-detail-maximized", "desktop", assertFleetDetailCapture);
+       await drawer.getByRole("button", { name: "Restore fleet inventory" }).click();
       await page.goBack();
       await assertHidden(drawer, "Browser back should close exact fleet detail");
       await page.goForward();
@@ -14092,14 +14137,55 @@ const steps = [
         drawer.getByTestId("cve-triage-open"),
         "Legacy-only CVE inventory should show why fleet triage is unavailable",
       );
-      await assertVisible(
-        drawer.getByText("No exact current scan subjects are available"),
-        "Legacy-only CVE inventory should explain the read-only authority boundary",
-      );
-      await drawer.getByRole("button", { name: "Close fleet inventory" }).click();
-      await assertHidden(drawer, "Expected legacy-only detail to close");
+       const legacyAuthority = drawer.getByTestId("cve-authority-details");
+       await legacyAuthority.locator("summary").click();
+       await assertVisible(
+         legacyAuthority.getByText(/read-only and cannot authorize fleet triage/),
+         "Legacy-only CVE inventory should explain the read-only authority boundary",
+       );
+       await drawer.getByRole("button", { name: "Close fleet inventory" }).click();
+       await assertHidden(drawer, "Expected legacy-only detail to close");
 
-      const exactOnlyDetail = JSON.parse(JSON.stringify(fleetDetail));
+       const historicalHeavyDetail = JSON.parse(JSON.stringify(legacyOnlyDetail));
+       const historicalArchive = historicalHeavyDetail.environments[0];
+       historicalArchive.affected_system_count = 4;
+       historicalArchive.exact_affected_system_count = 0;
+       historicalArchive.legacy_affected_system_count = 4;
+       historicalArchive.current_affected_system_count = 0;
+       historicalArchive.historical_inventory_system_count = 4;
+       const historicalTemplate = historicalArchive.systems[0];
+       historicalArchive.systems = [historicalTemplate, ...[2, 3, 4].map((index) => ({
+         ...historicalTemplate,
+         system_id: `00000000-0000-0000-0000-0000000000b${index}`,
+         hostname: `archive-web-0${index}`,
+         primary_ip_address: `10.0.3.${index}`,
+       }))];
+       historicalHeavyDetail.affected_system_count = 4;
+       historicalHeavyDetail.exact_affected_system_count = 0;
+       historicalHeavyDetail.legacy_affected_system_count = 4;
+       historicalHeavyDetail.historical_inventory_system_count = 4;
+       fleetDetailAfterMutation = historicalHeavyDetail;
+       await openFleet.click();
+       await assertVisible(drawer, "Expected the historical-heavy CVE detail drawer to open");
+       await assertVisible(drawer.getByText("Historical evidence · 4", { exact: true }), "Historical-heavy detail must show the retained-evidence count");
+       await assertCount(drawer.getByTestId("cve-fleet-host"), 4, "Historical-heavy detail must retain all four historical hosts");
+       await assertDisabled(drawer.getByTestId("cve-triage-open"), "Historical-heavy evidence must remain read-only");
+       const historicalAuthority = drawer.getByTestId("cve-authority-details");
+       await historicalAuthority.locator("summary").click();
+       await assertVisible(historicalAuthority.getByText(/4 hosts have retained historical findings/), "Historical-heavy authority summary must disclose all retained hosts");
+       const assertHistoricalCapture = async () => {
+         await drawer.locator(".ed-body").evaluate((element) => { element.scrollTop = 0; });
+         await page.evaluate(() => { if (typeof window.closeDXToast === "function") window.closeDXToast(); });
+         const dismissToast = page.getByRole("button", { name: "Dismiss notification" });
+         if (await dismissToast.count()) await dismissToast.click();
+         await assertCount(drawer.getByTestId("cve-fleet-host"), 4, "Historical-heavy capture must retain all four historical hosts");
+       };
+       await captureWorkflowViewportState(page, "16-cves", "historical-heavy-detail", "desktop", assertHistoricalCapture);
+       await captureWorkflowViewportState(page, "16-cves", "historical-heavy-detail", "narrowDesktop", assertHistoricalCapture);
+       await drawer.getByRole("button", { name: "Close fleet inventory" }).click();
+       await assertHidden(drawer, "Expected historical-heavy detail to close");
+
+       const exactOnlyDetail = JSON.parse(JSON.stringify(fleetDetail));
       exactOnlyDetail.affected_system_count = 3;
       exactOnlyDetail.exact_affected_system_count = 3;
       exactOnlyDetail.exact_mutation_target_count = 3;
@@ -14161,6 +14247,16 @@ const steps = [
           url.searchParams.get("limit") === "200")) {
         throw new Error("Pair continuation did not request exact offset 200 and limit 200");
       }
+      const largeQuick = page.getByRole("toolbar", { name: "CVE selection" });
+      const readsBeforeQuick = inventoryRequests.pairs.length;
+      await largeQuick.getByRole("button", { name: "Critical 5" }).click();
+      await assertVisible(largeQuick.getByText("205 selected"), "Critical quick-select must page beyond 200 without truncating");
+      if (!inventoryRequests.pairs.slice(readsBeforeQuick).some((url) => url.searchParams.get("severity") === "critical" && url.searchParams.get("offset") === "200")) {
+        throw new Error("Quick-select did not fetch the second exact filtered pair page");
+      }
+      await largeQuick.getByRole("button", { name: "Critical 5" }).click();
+      await page.waitForFunction(() => ![...document.querySelectorAll(".cve-selection-strip span")].some((node) => node.textContent.trim() === "205 selected"));
+      await assertAttribute(largeQuick.getByRole("button", { name: "Critical 5" }), "aria-pressed", "false", "Second quick-select click must remove all 205 exact pairs");
       largePairFixture = false;
 
       await page.goto(`${baseUrl}/cves?focus_cve=CVE-2024-1234`, { timeout: LOAD_TIMEOUT });
@@ -14201,7 +14297,7 @@ const steps = [
       fleetDetailAfterMutation = scheduledOnlyDetail;
       await page.goto(`${baseUrl}/cves?focus_cve=CVE-2024-1234`, { timeout: LOAD_TIMEOUT });
       await assertVisible(page.getByTestId("cve-fleet-drawer"), "A unique scheduled-target package must remain discoverable");
-      await assertVisible(page.getByTestId("cve-fleet-scheduled-configuration"), "Scheduled-only focus must disclose target exposure");
+       await assertVisible(page.getByText("Scheduled configuration exposure · 2", { exact: true }), "Scheduled-only focus must disclose target exposure");
       await assertVisible(page.getByText("rollout-web-01", { exact: true }), "Scheduled-only focus must open the exact package drawer");
       await assertDisabled(page.getByTestId("cve-triage-open"), "Scheduled deployment evidence must remain read-only");
       await captureWorkflowViewportState(page, "16-cves", "notification-focus-scheduled-package", "desktop");
@@ -14212,7 +14308,7 @@ const steps = [
       fleetDetailAfterMutation = legacyOnlyDetail;
       await page.goto(`${baseUrl}/cves?focus_cve=CVE-2024-1234`, { timeout: LOAD_TIMEOUT });
       await assertVisible(page.getByTestId("cve-fleet-drawer"), "A unique historical package must remain discoverable");
-      await assertVisible(page.getByTestId("cve-fleet-historical-evidence"), "Historical-only focus must disclose retained evidence");
+       await assertVisible(page.getByText("Historical evidence · 1", { exact: true }), "Historical-only focus must disclose retained evidence");
       await assertVisible(page.getByText("archive-web-01", { exact: true }), "Historical-only focus must open the exact package drawer");
       await assertDisabled(page.getByTestId("cve-triage-open"), "Historical evidence must remain read-only");
       await captureWorkflowViewportState(page, "16-cves", "notification-focus-historical-package", "desktop");
@@ -18754,7 +18850,7 @@ security.audit.enable = true;</fixtext>
         { source: "cve_host", source_id: "32000000-0000-4000-8000-000000000001", waiver_updated_at: null, status: "accepted", finding_id: null,
            system_id: ids.host, system_hostname: "prod-node-01", environment_id: null, policy_lineage_id: null, policy_version_id: null,
           canonical_cve_id: "CVE-2024-1234", canonical_package_name: "openssl", justification: "Reviewed host risk",
-          review_date: "2026-11-01", review_due_at: null, expires_at: null, accepted_by: ids.owner, accepted_at: "2026-09-20T12:00:00Z",
+           review_date: "2026-09-25", review_due_at: null, expires_at: null, accepted_by: ids.owner, accepted_at: "2026-09-20T12:00:00Z",
           retired_at: null, retired_by: null, retirement_reason: null, replacement_poam_id: null, recorded_at: "2026-09-20T12:00:00Z" },
         { source: "policy_waiver", source_id: "32000000-0000-4000-8000-000000000002", waiver_updated_at: "2026-09-18T12:00:00Z", status: "accepted", finding_id: planId(1),
            system_id: ids.host, system_hostname: "prod-node-01", environment_id: null, policy_lineage_id: ids.bundle, policy_version_id: ids.version,
@@ -18870,7 +18966,7 @@ security.audit.enable = true;</fixtext>
         const mixedDecision = page.locator(`.poams-group tbody tr[data-source-id="${accepted[0].source_id}"]`);
         await assertVisible(mixedDecision, "Mixed register must render the source decision alongside plans");
         await mixedDecision.click();
-        const mixedTray = page.getByRole("dialog", { name: `Risk acceptance ${accepted[0].source_id}` });
+        const mixedTray = page.getByRole("dialog", { name: "Risk acceptance Host CVE" });
         await assertVisible(mixedTray.getByText("Reviewed host risk"), "Mixed row must open the exact source decision without writing");
         await mixedTray.getByRole("button", { name: "Close acceptance" }).click();
         await mixedDecision.click({ modifiers: ["Control"] });
@@ -18909,7 +19005,7 @@ security.audit.enable = true;</fixtext>
         await page.getByRole("menu", { name: "Toggle columns" }).getByRole("checkbox", { name: "Progress" }).uncheck();
         await assertCount(row(1).first().locator("td.pv-c-ms:visible"), 0, "Column control must hide only the requested progress column");
         await page.getByRole("menu", { name: "Toggle columns" }).getByRole("checkbox", { name: "Progress" }).check();
-        for (const [label, count] of [["Overdue plans", "1"], ["Expired acceptances", "0"], ["Coming due", "1"], ["Awaiting verification", "1"], ["Blocked", "1"], ["Missing owner/review", "2"]]) {
+        for (const [label, count] of [["Overdue plans", "1"], ["Expired acceptances", "1"], ["Coming due", "1"], ["Awaiting verification", "1"], ["Blocked", "1"], ["Missing owner/review", "2"]]) {
           await assertVisible(page.getByRole("group", { name: "Work queues" }).getByRole("button", { name: new RegExp(`^${count} ${label}`) }), `${label} must count loaded rows only`);
         }
         await assertVisible(page.locator(".poams-pills").getByRole("button", { name: "Production", exact: false }), "Authorized environment name must replace UUID in scope pills");
@@ -18957,13 +19053,29 @@ security.audit.enable = true;</fixtext>
         const acceptanceTable = page.locator(".poams-acceptances");
         const hostDecision = acceptanceTable.locator(`tbody tr[data-source-id="${accepted[0].source_id}"]`);
         const policyDecision = acceptanceTable.locator(`tbody tr[data-source-id="${accepted[1].source_id}"]`);
+        await page.setViewportSize({ width: 1000, height: 1000 });
         await hostDecision.click();
-        const hostTray = page.getByRole("dialog", { name: `Risk acceptance ${accepted[0].source_id}` });
+        const hostTray = page.getByRole("dialog", { name: "Risk acceptance Host CVE" });
+        await assertVisible(hostTray.getByRole("heading", { name: "Host CVE", exact: true }), "Drawer title must be human-facing, not a source UUID");
         await assertVisible(hostTray.getByText("Reviewed host risk"), "Tray must preserve original justification");
-        await assertVisible(hostTray.getByText(accepted[0].source_id, { exact: true }), "Tray must show exact source ID");
+        await assertVisible(hostTray.getByText("CVE-2024-1234 · openssl · prod-node-01", { exact: true }), "Drawer subject must use actual CVE, package and hostname");
+        await assertVisible(hostTray.getByText("Morgan Owner", { exact: true }), "Approver must resolve through the authorized catalog");
+        await assertVisible(hostTray.getByText("Sep 20, 2026", { exact: true }), "Approval time must render as a human-readable date");
+        await assertVisible(hostTray.getByText("Sep 25, 2026", { exact: true }), "Review date must render as a human-readable date");
+        await assertVisible(hostTray.getByText("review expired", { exact: true }), "Past source review date must use the review-expired treatment");
+        await assertVisible(hostTray.getByRole("heading", { name: "Justification" }), "Drawer must label justification");
+        await assertVisible(hostTray.getByRole("heading", { name: "Decision scope and evidence" }), "Drawer must present source evidence");
+        const sourceIdentity = hostTray.locator("details.rr-acceptance-source-id");
+        await sourceIdentity.locator("summary").click();
+        await assertVisible(sourceIdentity.getByText(`Decision ${accepted[0].source_id}`, { exact: true }), "Exact source UUID must remain inspectable in metadata");
+        await assertCount(hostTray.locator(".chip").filter({ hasText: /CAT|Risk level/ }), 0, "CVE decisions do not record a CAT/risk category");
+        await assertVisible(hostTray.getByRole("button", { name: /Re-review · renew 90 days/ }), "Authorized host decision must offer renewal");
+        await assertVisible(hostTray.getByRole("button", { name: /Convert to POA&M/ }), "Authorized host decision must offer conversion");
+        await assertCount(hostTray.getByRole("button", { name: /Revoke/ }), 0, "No source-owned revoke operation is available");
+        await captureWorkflowViewportState(page, "16e-poam-register-design", "acceptance-tray-host-cve", "desktop");
         await hostTray.getByRole("button", { name: "Close acceptance" }).click();
         await policyDecision.click();
-        const policyTray = page.getByRole("dialog", { name: `Risk acceptance ${accepted[1].source_id}` });
+        const policyTray = page.getByRole("dialog", { name: "Risk acceptance Policy waiver" });
         await assertVisible(policyTray.getByText("Policy authorization expires"), "Policy expiry is distinct from review deadline");
         await page.keyboard.press("Escape");
         await assertCount(policyTray, 0, "Escape closes without a write");
@@ -18971,6 +19083,14 @@ security.audit.enable = true;</fixtext>
         await page.locator(".poam-tray-backdrop").click({ position: { x: 5, y: 5 } });
         await assertCount(hostTray, 0, "Backdrop closes without a write");
         if (acceptanceWrites.length) throw new Error("Read, close, Escape or backdrop wrote a decision");
+        await page.getByRole("combobox", { name: "Status" }).selectOption("all");
+        const convertedDecision = acceptanceTable.locator(`tbody tr[data-source-id="${accepted[2].source_id}"]`);
+        await convertedDecision.click();
+        const convertedTray = page.getByRole("dialog", { name: "Risk acceptance Environment CVE" });
+        await assertVisible(convertedTray.getByText(`Superseded by POA&M ${planId(94)}`), "Converted decision must link its source-backed replacement");
+        await assertCount(convertedTray.getByRole("button", { name: /Re-review|Convert to POA&M/ }), 0, "Converted historical decision must not offer active actions");
+        await convertedTray.getByRole("button", { name: "Close acceptance" }).click();
+        await page.setViewportSize(MANIFEST.settings.viewport);
 
         await hostDecision.click({ modifiers: ["Control"] });
         await policyDecision.click({ modifiers: ["Control"] });
@@ -19001,7 +19121,7 @@ security.audit.enable = true;</fixtext>
         await policyTray.getByRole("button", { name: "Review conversion" }).click();
         if (acceptanceWrites.length !== 3) throw new Error("Review without confirmation wrote a decision");
         await policyTray.getByRole("button", { name: "Confirm conversion" }).click();
-        await assertVisible(policyTray.getByText(`Converted to POA&M ${planId(91)}`), "Committed replacement must be read back");
+        await assertVisible(policyTray.getByText(`Superseded by POA&M ${planId(91)}`), "Committed replacement must be read back");
         if (acceptanceWrites.length !== 4) throw new Error("Confirmation must send one conversion");
         await policyTray.getByRole("button", { name: "Close acceptance" }).click();
         await hostDecision.click();
@@ -19014,7 +19134,7 @@ security.audit.enable = true;</fixtext>
         await hostTray.getByRole("button", { name: "Review conversion" }).click();
         if (acceptanceWrites.length !== 4) throw new Error("CVE review without confirmation wrote a decision");
         await hostTray.getByRole("button", { name: "Confirm conversion" }).click();
-        await assertVisible(hostTray.getByText(`Converted to POA&M ${planId(92)}`), "CVE conversion must re-read committed replacement");
+        await assertVisible(hostTray.getByText(`Superseded by POA&M ${planId(92)}`), "CVE conversion must re-read committed replacement");
         await hostTray.getByRole("button", { name: "Close acceptance" }).click();
         if (acceptanceWrites.length !== 5) throw new Error("CVE conversion must issue one source-owned command");
         await page.getByRole("tab", { name: "Remediation plans" }).click();
