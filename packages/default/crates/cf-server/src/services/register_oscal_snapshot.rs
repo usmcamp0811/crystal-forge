@@ -27,6 +27,7 @@ struct OwnedEntry {
     target_date: Option<NaiveDate>,
     status: String,
     source_kind: String,
+    human_id: Option<String>,
     rationale: Option<String>,
     accepted_by: Option<Uuid>,
     accepted_at: Option<chrono::DateTime<Utc>>,
@@ -177,6 +178,7 @@ pub fn write_authorized(selection: &RegisterExportSelection) -> Result<Encodings
             target_date: plan.target_date,
             status: plan.status.clone(),
             source_kind: "plan".into(),
+            human_id: None,
             rationale: None,
             accepted_by: None,
             accepted_at: None,
@@ -249,6 +251,7 @@ pub fn write_authorized(selection: &RegisterExportSelection) -> Result<Encodings
             target_date: None,
             status: decision.status.clone(),
             source_kind: source_kind.into(),
+            human_id: Some(decision.human_id.clone()),
             rationale: Some(decision.justification.clone()),
             accepted_by: decision.accepted_by,
             accepted_at: decision.accepted_at,
@@ -282,6 +285,7 @@ pub fn write_authorized(selection: &RegisterExportSelection) -> Result<Encodings
             technical_evidence: None,
             source: if let Some(rationale) = &row.rationale {
                 Source::Acceptance {
+                    human_id: row.human_id.as_deref(),
                     source_kind: &row.source_kind,
                     rationale,
                     accepted_by: row.accepted_by,

@@ -1201,33 +1201,45 @@ does not make this POA&M list an acceptance reader. Policy waivers and CVE
 accepted dispositions keep their own stable source identities, source-specific
 version checks, authorization rules, audit history, and lifecycle. The GET
 `/acceptances` projection tags each entry as `policy_waiver`, `cve_host`, or
-`cve_environment` and returns its exact source UUID. CVE decision UUIDs are
-immutable version identities; `waiver_updated_at` is the waiver status-change
-version to pair with its UUID for later optimistic checks. It accepts `source`,
-`status`, `environment_id`, `limit` (1–100, default 25), and nonnegative `offset`.
+`cve_environment` and returns its exact source UUID. Its `human_id` (`RA-####`)
+identifies a renewal chain: distinct predecessor and successor source UUIDs
+share that number. An unrelated acceptance chain gets a new number. The number
+does not authorize mutation. CVE decision UUIDs are immutable version
+identities; `waiver_updated_at` is the waiver status-change version to pair
+with its UUID for later optimistic checks. The list accepts `source`, `status`,
+`environment_id`, `limit` (1–100, default 25), nonnegative `offset`, and an
+optional literal case-insensitive `search` of at most 256 bytes. Search matches
+RA ID, exact-version policy title, trusted requirement ID, CVE ID, package,
+hostname, directly stored environment name, or justification after actor
+scoping but before total and pagination. A missing source label stays absent.
 It returns `items`, complete scoped `total`, `limit`, `offset`, and `has_more`.
 Admin can read policy waivers; Viewer and Operator can read CVE decisions only
 in currently assigned environments. Host decisions retain `system_id`; the
 host's current environment is used for read visibility, not presented as its
 original historical scope. Host-scoped entries include `system_hostname` from
-the authorized current system; environment decisions have no hostname. This
-field does not change the source's original scope. Retired CVE decisions keep
-their `retired_at` and `retirement_reason` and must not be presented as current
-accepted authority.
+the authorized current system; environment decisions include `environment_name`
+but have no hostname. Policy waiver entries expose the name of their recorded
+policy version and an optional trusted requirement ID from that exact version.
+These labels do not change the source's original scope. Retired CVE decisions
+retain `retired_at` and `retirement_reason`. They are not current accepted
+authority.
 Waivers have no invented review date; CVE decisions have no invented
 authorization expiry. This endpoint grants no mutation permission.
 
 `GET /acceptances/export` accepts `format=csv` or `format=xlsx` and the
 `source`, `status`, and `environment_id` filters from `/acceptances`. It ignores
-list pagination. The server rechecks the active reader role and environment
-memberships, pages all matches in one repeatable-read, read-only snapshot, and
-rejects the entire download above 1,000 authorized decisions (HTTP 422,
-`export_limit`). CSV and XLSX contain the same rows. Source UUID, stored
-system or environment UUID, current scope name, justification, native status, canonical
-CVE identity, policy finding UUID, and source-specific dates are populated
-from that snapshot. A retired CVE decision is labeled `retired accepted` or
-`converted (retired accepted)` when a durable plan replacement exists; its
-source status remains `accepted` in the register read. A converted policy
+list search and pagination. The server rechecks the active reader role and
+environment memberships. It pages all matches in one repeatable-read,
+read-only snapshot. It rejects the entire download above 1,000 authorized
+decisions (HTTP 422, `export_limit`). CSV and XLSX contain the same rows. A
+separate Risk Acceptance ID column retains the chain number. It never replaces
+the typed source UUID.
+The source UUID, stored system or environment UUID, current scope name,
+justification, native status, canonical CVE identity, policy finding UUID,
+and source-specific dates come from that snapshot. A retired CVE decision
+is labeled `retired accepted`, or `converted (retired accepted)` when a
+durable plan replacement exists. Its source status remains `accepted` in the
+register read. A converted policy
 waiver is labeled `converted (revoked)`; its native status remains `revoked`.
 A CVE disposition has
 no linked scan UUID in its source
@@ -1281,8 +1293,11 @@ an alias for current authorization.
 Filters do not silently reduce the other family. The combined cap is 1,000
 source records; duplicate presentation-group identities remain one record.
 CSV and genuine XLSX repeat exact source UUIDs for each recorded evidence
-link, and neutralize spreadsheet formulas. OSCAL JSON and XML represent the
-same authorized source records as valid OSCAL 1.1.2 POA&M items. Source
+link. Acceptance rows have a separate human RA ID; plan rows do not. Both
+formats neutralize spreadsheet formulas. OSCAL JSON and XML represent the
+same authorized source records as valid OSCAL 1.1.2
+POA&M items. A Crystal Forge-namespaced property carries the human RA ID;
+OSCAL `source-id` retains the typed source identity. Source
 decision justification is a rationale, not a measured risk impact. A generated
 document UUID, version 1 and the actual export-generation timestamp describe
 the output document, not an assessment or approval. Source dates remain

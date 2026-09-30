@@ -12647,7 +12647,7 @@ const steps = [
         await route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: JSON.stringify(["openssl", "glibc"]),
+          body: JSON.stringify(["openssl", "glibc", "lib_foo", "libXfoo", "lib%foo", "lib\\foo"]),
         });
       });
       const cveRowFixture = {
@@ -13025,12 +13025,12 @@ const steps = [
           rows = [
             { ...cveRowFixture, cve_id: "CVE-2024-7000", package_name: "lib_foo" },
             { ...cveRowFixture, cve_id: "CVE-2024-7001", package_name: "libXfoo" },
+            { ...cveRowFixture, cve_id: "CVE-2024-7002", package_name: "lib%foo" },
+            { ...cveRowFixture, cve_id: "CVE-2024-7003", package_name: "lib\\foo" },
           ].filter((row) => {
             const packageQuery = url.searchParams.get("package");
-            // Mirror the server's ILIKE: `_` in the query is one wildcard.
-            return !packageQuery || (packageQuery === "lib_foo"
-              ? /^lib.foo$/i.test(row.package_name)
-              : row.package_name.toLowerCase().includes(packageQuery.toLowerCase()));
+            // The server escapes %, _ and backslash before matching literal package text.
+            return !packageQuery || row.package_name.toLowerCase().includes(packageQuery.toLowerCase());
           });
         }
         const keys = new Set(rows.map((row) => `${row.cve_id}|${row.package_name}`));
@@ -13038,7 +13038,9 @@ const steps = [
         return { rows, members };
       };
       const inventoryRoute = /\/api\/v1\/cves\/inventory\/(pairs|groups|members)(?:\?.*)?$/;
+      let legacyGroupedRequests = 0;
       await page.route(/\/api\/v1\/cves\/grouped(?:\?.*)?$/, async (route) => {
+        legacyGroupedRequests += 1;
         const url = new URL(route.request().url());
         const { rows, members } = inventoryRows(url);
         const packages = [...new Set(rows.map((row) => row.package_name))].filter(Boolean).map((packageName) => {
@@ -13051,7 +13053,9 @@ const steps = [
             medium_count: pairs.filter((row) => row.severity === "medium").length,
             low_count: pairs.filter((row) => row.severity === "low").length,
             environments_count: new Set(matching.map((member) => member.environment_id)).size,
-            total_affected_systems: hosts(["current", "scheduled_deployment_target"]).size,
+            // Deliberately disagree with the pair-page snapshot. A late legacy
+            // grouped response must never label a pair-page package header.
+            total_affected_systems: 777,
             current_affected_systems: hosts(["current"]).size,
             scheduled_deployment_target_systems: hosts(["scheduled_deployment_target"]).size,
             historical_inventory_systems: hosts(["historical"]).size,
@@ -13116,8 +13120,18 @@ const steps = [
           held.started();
           await held.release;
         }
-        await route.fulfill({ status: 200, contentType: "application/json",
-          body: JSON.stringify(inventoryPage(items, url, endpoint === "pairs" ? 200 : 50)) });
+        const result = inventoryPage(items, url, endpoint === "pairs" ? 200 : 50);
+        if (endpoint === "pairs") {
+          result.package_host_unions = result.next_offset === null && Number(url.searchParams.get("offset") || 0) === 0 && result.total === result.items.length
+            ? [...new Set(items.map((row) => row.package_name))].filter(Boolean).map((name) => ({
+              package_name: name,
+              pair_count: items.filter((row) => row.package_name === name).length,
+              affected_system_count: new Set(members.filter((member) => member.package_name === name &&
+                items.some((row) => row.package_name === name && row.cve_id === member.cve_id) &&
+                ["current", "scheduled_deployment_target"].includes(member.inventory_section)).map((member) => member.system_id)).size,
+            })) : [];
+        }
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(result) });
         held?.completed();
       };
       await page.route(inventoryRoute, serveInventory);
@@ -13671,6 +13685,8 @@ const steps = [
       await assertVisible(groupCard, "Expected grouped package card to render");
       const packageHeader = page.locator("main .cve-package-toggle").filter({ hasText: "openssl" });
       await assertVisible(packageHeader.getByText("4 distinct systems affected", { exact: false }), "Package host union must use aggregate rather than summed pair counts");
+      await assertCount(packageHeader.getByText(/777 distinct systems/), 0, "Old grouped snapshot must not label the pair page even when it arrives later");
+      if (legacyGroupedRequests !== 0) throw new Error("Package labels must not fetch the independent grouped snapshot");
       await assertVisible(packageHeader.getByText("Worst CVSS"), "Collapsed package must show worst CVSS");
       await assertVisible(packageHeader.getByText("2 crit"), "Collapsed package must show severity rollup");
       await assertVisible(page.getByRole("toolbar", { name: "CVE selection" }).getByText("SELECT", { exact: true }), "Source-backed selection strip belongs before package groups");
@@ -13750,19 +13766,15 @@ const steps = [
         if (route.request().method() !== "POST") throw new Error("Batch detail must use POST");
         const body = route.request().postDataJSON();
         batchDetailBodies.push(body);
-        if (body.pairs.some((pair) => batchKey(pair) === "CVE-2024-5678|openssl")) {
-          await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({
-            error: "batch_pair_stale", message: "A selected CVE/package pair is no longer actionable; refresh and retry",
-          }) });
-          return;
-        }
         const sourcePairs = inventoryRows(new URL(`${baseUrl}/api/v1/cves/inventory/pairs`)).rows;
         const items = body.pairs.map((pair) => {
           const source = sourcePairs.find((row) => batchKey(batchIdentity(row)) === batchKey(pair));
           if (!source) throw new Error(`Batch detail asked for a non-source pair: ${JSON.stringify(pair)}`);
           return {
             ...pair, severity: source.severity, cvss_v3_score: source.cvss_v3_score,
-            environments: batchEnvironments.map((env) => ({
+            state: batchKey(pair) === "CVE-2024-5678|openssl" ? "unavailable" : "actionable",
+            unavailable_reason: batchKey(pair) === "CVE-2024-5678|openssl" ? "inventory_only" : null,
+            environments: batchKey(pair) === "CVE-2024-5678|openssl" ? [] : batchEnvironments.map((env) => ({
               environment_id: env.id, environment_name: env.name,
               exact_affected_system_count: (batchQuickFixture ? env.id === environmentIds.production : batchSubjectCounts[batchKey(pair)]?.[env.id]) ? 1 : 0,
               existing_state: null, evidence_token: batchToken(pair, env.id),
@@ -13839,20 +13851,35 @@ const steps = [
       await expectBulkCount(3, 1);
       await captureWorkflowState(page, "16-cves", "batch-package-selected", () => expectBulkCount(3, 1));
       await openBatch(packagePairs);
-      await assertVisible(batchDialog.getByText(/Selection was not changed; remove unavailable pairs or refresh/), "Inventory-only selected pair must fail hydration without being dropped");
-      await assertDisabled(batchDialog.getByRole("button", { name: "Apply to 0" }), "A stale package selection must not mutate any pair");
+      await assertVisible(batchDialog.getByText(/Inventory only — no current exact subjects/), "Inventory-only selected pair must report its typed reason");
+      await assertDisabled(batchDialog.getByRole("button", { name: /Apply to/ }), "An unavailable selected pair blocks the entire set");
+      if (batchTriageBodies.length !== 0) throw new Error("Unavailable hydration must not submit a subset");
+      await captureWorkflowViewportState(page, "16-cves", "batch-unavailable", "desktop");
+      await batchDialog.getByRole("button", { name: "Cancel" }).click();
+      await resetBatch();
+
+      // One actionable pair plus one unavailable pair is still one indivisible selection.
+      const oneValid = page.locator(".cve-package-card").filter({ has: page.locator(".cve-package-name", { hasText: "openssl" }) });
+      await oneValid.getByTestId("cve-row").filter({ hasText: "CVE-2024-1234" }).click({ modifiers: ["Control"] });
+      await oneValid.getByTestId("cve-row").filter({ hasText: "CVE-2024-5678" }).click({ modifiers: ["Control"] });
+      await openBatch([pairById("CVE-2024-1234"), pairById("CVE-2024-5678")]);
+      await assertVisible(batchDialog.getByText(/Inventory only — no current exact subjects/), "One unavailable pair must remain in the selected set");
+      await assertDisabled(batchDialog.getByRole("button", { name: /Apply to/ }), "One valid pair cannot authorize a partial write");
       await batchDialog.getByRole("button", { name: "Cancel" }).click();
       await resetBatch();
 
       await chooseManualPairs();
       await openBatch(manualPairs);
-      await captureWorkflowState(page, "16-cves", "batch-modal-default", () => assertVisible(batchDialog.getByText("2 writable CVE/package pairs", { exact: false }), "Exact current pairs should be writable"));
+      await captureWorkflowState(page, "16-cves", "batch-modal-default", () => assertVisible(batchDialog.getByText(/creates 1 POA&M/), "Exact current pairs should be writable"));
+      await captureWorkflowViewportState(page, "16-cves", "batch-default", "narrowDesktop");
       await captureWorkflowState(page, "16-cves", "batch-multi-env", () => assertVisible(batchDialog.getByRole("button", { name: /Production 2 CVEs/ }), "Production must contain both selected pairs"));
+      await captureWorkflowViewportState(page, "16-cves", "batch-multi-env", "desktop");
       await batchDialog.getByRole("button", { name: "Accept risk" }).click();
       await batchDialog.getByRole("button", { name: /Development 1 CVEs/ }).click();
       await batchDialog.getByRole("button", { name: /Lab 1 CVEs/ }).click();
       await batchDialog.getByRole("textbox", { name: /Justification/ }).fill("Approved for the production fleet only.");
       await captureWorkflowState(page, "16-cves", "batch-accept-panel", () => assertVisible(batchDialog.getByRole("button", { name: "Apply to 2" }), "Acceptance must be ready for two source pairs"));
+      await captureWorkflowViewportState(page, "16-cves", "batch-accept", "narrowDesktop");
       await batchDialog.getByRole("button", { name: "Apply to 2" }).click();
       await assertHidden(batchDialog, "Successful acceptance must close the batch dialog");
       const acceptedBody = batchTriageBodies.at(-1);
@@ -13872,6 +13899,7 @@ const steps = [
       await batchDialog.getByRole("combobox", { name: "Owner" }).selectOption(`user:00000000-0000-0000-0000-0000000000f1`);
       await assertVisible(batchDialog.getByRole("button", { name: "One POA&M" }), "One-plan grouping must be available");
       await captureWorkflowState(page, "16-cves", "batch-schedule-panel", () => assertVisible(batchDialog.getByRole("button", { name: "Apply to 2" }), "Schedule panel must accept typed assignee"));
+      await captureWorkflowViewportState(page, "16-cves", "batch-schedule", "narrowDesktop");
       await batchDialog.getByRole("button", { name: "Apply to 2" }).click();
       await assertHidden(batchDialog, "Successful schedule must close the dialog");
       const scheduledBody = batchTriageBodies.at(-1);
@@ -13951,6 +13979,7 @@ const steps = [
       await page.goto(`${baseUrl}/cves?view=grouped`);
       await assertPackages(["openssl"], [200]);
       await assertVisible(page.getByRole("button", { name: "Show more findings (200 of 202)" }), "Package fixture must have an unloaded second pair page");
+      await assertVisible(page.locator(".cve-package-toggle").getByText(/host total unavailable/), "Multi-page package has no co-snapshot union");
       await assertCount(page.getByTestId("cve-row"), 200, "Package header starts with only its first 200 children materialized");
       const pagedHeader = page.locator(".cve-package-toggle").filter({ hasText: "openssl" });
       const expandedBefore = await pagedHeader.getAttribute("aria-expanded");
@@ -14028,7 +14057,7 @@ const steps = [
       batchQuickFixture = false;
       wildcardPackageFixture = true;
       await page.goto(`${baseUrl}/cves?view=grouped`);
-      await assertPackages(["lib_foo", "libXfoo"], [1, 1]);
+      await assertPackages(["lib_foo", "libXfoo", "lib%foo", "lib\\foo"], [1, 1, 1, 1]);
       const wildcardRequestsBefore = inventoryRequests.pairs.length;
       const wildcardHeader = page.locator(".cve-package-toggle").filter({ hasText: "lib_foo" });
       await wildcardHeader.click({ modifiers: ["Control"] });
@@ -14040,10 +14069,21 @@ const steps = [
       const otherWildcardRow = page.getByTestId("cve-row").filter({ hasText: "CVE-2024-7001" });
       if (!(await exactWildcardRow.getAttribute("class"))?.includes("cve-row-selected") ||
           (await otherWildcardRow.getAttribute("class"))?.includes("cve-row-selected")) {
-        throw new Error("ILIKE wildcard expansion selected a different canonical package");
+        throw new Error("Literal package selection included a different canonical package");
       }
       await wildcardHeader.click({ modifiers: ["Control"] });
       await assertHidden(selectedBar, "Wildcard-bearing package toggle must deselect only its exact identity");
+      await page.getByPlaceholder("All packages…").fill("lib_foo");
+      await assertPackages(["lib_foo"], [1]);
+      await page.getByPlaceholder("All packages…").fill("lib%foo");
+      await assertPackages(["lib%foo"], [1]);
+      await page.locator(".cve-package-toggle").filter({ hasText: "lib%foo" }).click({ modifiers: ["Control"] });
+      await expectBulkCount(1, 1);
+      await assertVisible(page.getByTestId("cve-row").filter({ hasText: "CVE-2024-7002" }).locator(".mono").first(), "Literal percent package must be selectable");
+      if (!inventoryRequests.pairs.some((url) => url.searchParams.get("package") === "lib%foo")) throw new Error("Percent package selection must send literal package filter");
+      await selectedBar.getByRole("button", { name: "Clear" }).click();
+      await page.getByPlaceholder("All packages…").fill("lib\\foo");
+      await assertPackages(["lib\\foo"], [1]);
       wildcardPackageFixture = false;
       packageFilterFixture = true;
       await page.goto(`${baseUrl}/cves`);
@@ -14648,6 +14688,8 @@ const steps = [
       await assertHidden(page.getByTestId("cve-fleet-drawer"), "Multiple current packages must not choose a package drawer");
       await assertVisible(page.getByText("openssl", { exact: true }), "Focused list should retain the first matching package");
       await assertVisible(page.getByText("glibc", { exact: true }), "Focused list should retain the second matching package");
+      await page.getByRole("button", { name: "Package", exact: true }).click();
+      await assertVisible(page.locator(".cve-package-toggle").filter({ hasText: "openssl" }).getByText(/host total unavailable/), "Focused CVE must not count hosts from hidden package siblings");
       await captureWorkflowViewportState(page, "16-cves", "notification-focus-multiple-packages", "desktop");
 
       focusedCveFixtureMode = "scheduled";
@@ -19213,17 +19255,17 @@ security.audit.enable = true;</fixtext>
       const acceptanceCommand = /\/api\/v1\/acceptances\/(policy_waiver|cve_host|cve_environment)\/([0-9a-f-]+)\/(renew|convert)$/;
       const acceptanceWrites = [];
       const accepted = [
-        { source: "cve_host", source_id: "32000000-0000-4000-8000-000000000001", waiver_updated_at: null, status: "accepted", finding_id: null,
+        { source: "cve_host", human_id: "RA-0001", source_id: "32000000-0000-4000-8000-000000000001", waiver_updated_at: null, status: "accepted", finding_id: null,
            system_id: ids.host, system_hostname: "prod-node-01", environment_id: null, policy_lineage_id: null, policy_version_id: null,
           canonical_cve_id: "CVE-2024-1234", canonical_package_name: "openssl", justification: "Reviewed host risk",
            review_date: "2026-09-25", review_due_at: null, expires_at: null, accepted_by: ids.owner, accepted_at: "2026-09-20T12:00:00Z",
           retired_at: null, retired_by: null, retirement_reason: null, replacement_poam_id: null, recorded_at: "2026-09-20T12:00:00Z" },
-        { source: "policy_waiver", source_id: "32000000-0000-4000-8000-000000000002", waiver_updated_at: "2026-09-18T12:00:00Z", status: "accepted", finding_id: planId(1),
+        { source: "policy_waiver", human_id: "RA-0002", source_id: "32000000-0000-4000-8000-000000000002", waiver_updated_at: "2026-09-18T12:00:00Z", status: "accepted", finding_id: planId(1),
            system_id: ids.host, system_hostname: "prod-node-01", environment_id: null, policy_lineage_id: ids.bundle, policy_version_id: ids.version,
           canonical_cve_id: null, canonical_package_name: null, justification: "Approved policy exception",
           review_date: null, review_due_at: null, expires_at: "2026-12-01T12:00:00Z", accepted_by: planId(89), accepted_at: "2026-09-18T12:00:00Z",
           retired_at: null, retired_by: null, retirement_reason: null, replacement_poam_id: null, recorded_at: "2026-09-18T12:00:00Z" },
-        { source: "cve_environment", source_id: "32000000-0000-4000-8000-000000000003", waiver_updated_at: null, status: "converted", finding_id: null,
+        { source: "cve_environment", human_id: "RA-0003", source_id: "32000000-0000-4000-8000-000000000003", waiver_updated_at: null, status: "converted", finding_id: null,
           system_id: null, environment_id: ids.envA, policy_lineage_id: null, policy_version_id: null,
           canonical_cve_id: "CVE-2025-1234", canonical_package_name: "curl", justification: "Historical environment decision",
           review_date: "2026-10-15", review_due_at: null, expires_at: null, accepted_by: ids.owner, accepted_at: "2026-09-10T12:00:00Z",
@@ -19254,7 +19296,12 @@ security.audit.enable = true;</fixtext>
         if (url.searchParams.get("status") !== "accepted_or_converted" || url.searchParams.get("limit") !== "100") {
           throw new Error(`Acceptance register requested an unapproved scope: ${url}`);
         }
-        const visible = accepted.filter((item) => !url.searchParams.has("environment_id") || url.searchParams.get("environment_id") === ids.envA);
+        const search = (url.searchParams.get("search") || "").trim().toLowerCase();
+        const visible = accepted.filter((item) =>
+          (!url.searchParams.has("environment_id") || url.searchParams.get("environment_id") === ids.envA) &&
+          (!search || [item.human_id, item.policy_title, item.requirement_external_id,
+            item.canonical_cve_id, item.canonical_package_name, item.system_hostname,
+            item.environment_name, item.justification].some((label) => label?.toLowerCase().includes(search))));
         const offset = Number(url.searchParams.get("offset"));
         return route.fulfill({ json: { items: visible.slice(offset, offset + 100), total: visible.length, offset,
           limit: 100, has_more: offset + 100 < visible.length } });
@@ -19331,9 +19378,16 @@ security.audit.enable = true;</fixtext>
         await assertVisible(page.getByRole("tab", { name: "Everything 103" }), "Mixed tab must show the count of fetched source records");
         const mixedDecision = page.locator(`.poams-group tbody tr[data-source-id="${accepted[0].source_id}"]`);
         await assertVisible(mixedDecision, "Mixed register must render the source decision alongside plans");
+        await assertVisible(mixedDecision.getByRole("cell", { name: "RA-0001" }), "Everything must show the source-assigned RA identity");
+        await assertVisible(mixedDecision.getByRole("cell", { name: "No category" }), "Everything must not infer plan risk for an acceptance");
+        await page.getByRole("textbox", { name: "Search register" }).fill("RA-0001");
+        await assertVisible(page.locator(`.poams-group tbody tr[data-source-id="${accepted[0].source_id}"]`), "Everything search must match RA ID");
+        await assertCount(page.locator(`.poams-group tbody tr[data-source-id="${accepted[0].source_id}"]`), 1, "Everything search must match RA ID");
+        await page.getByRole("textbox", { name: "Search register" }).fill("");
         await mixedDecision.click();
-        const mixedTray = page.getByRole("dialog", { name: "Risk acceptance Host CVE" });
+        const mixedTray = page.getByRole("dialog", { name: "Risk acceptance RA-0001 · Host CVE" });
         await assertVisible(mixedTray.getByText("Reviewed host risk"), "Mixed row must open the exact source decision without writing");
+        await assertVisible(mixedTray.getByRole("heading", { name: "RA-0001 · Host CVE" }), "Mixed drawer must retain the chain ID");
         await mixedTray.getByRole("button", { name: "Close acceptance" }).click();
         await mixedDecision.click({ modifiers: ["Control"] });
         await assertVisible(page.getByRole("group", { name: "Selected risk acceptances" }).getByText("1 source decisions selected"), "Mixed selection must preserve typed source identity");
@@ -19361,6 +19415,7 @@ security.audit.enable = true;</fixtext>
         await assertVisible(groupDistribution, "Status distribution belongs before Focus");
         if ((await groupDistribution.locator("span").count()) < 1) throw new Error("Group distribution omitted recorded plan statuses");
         await captureWorkflowViewportState(page, "16e-poam-register-design", "group-scoped-subtitles", "desktop");
+        await captureWorkflowViewportState(page, "16e-poam-register-design", "everything", "narrowDesktop");
         await page.getByRole("button", { name: /^Export \d+\+? ▾$/ }).click();
         await stagingGroup.scrollIntoViewIfNeeded();
         await page.evaluate(() => window.scrollBy(0, 480));
@@ -19375,9 +19430,19 @@ security.audit.enable = true;</fixtext>
           await assertVisible(page.getByRole("group", { name: "Work queues" }).getByRole("button", { name: new RegExp(`^${count} ${label}`) }), `${label} must count loaded rows only`);
         }
         await assertVisible(page.locator(".poams-pills").getByRole("button", { name: "Production", exact: false }), "Authorized environment name must replace UUID in scope pills");
+        const prodPillDot = page.locator(".poams-pills").getByRole("button", { name: "Production", exact: false }).locator(".rr-scope-dot");
+        await assertVisible(prodPillDot, "Environment pill uses its catalog color");
+        if (await prodPillDot.evaluate((dot) => getComputedStyle(dot).backgroundColor) !== "rgb(167, 139, 250)") throw new Error("Environment pill color must be source-backed");
+        await assertVisible(productionGroup.locator(".rr-group-source-dot"), "Environment group uses its catalog color");
         const hostOnly = page.locator(".poams-group").filter({ hasText: "Host-only decisions" }).locator(`tbody tr[data-source-id="${accepted[0].source_id}"]`);
         await assertVisible(hostOnly, "Host-only decisions must not be inferred into an environment group");
-        await assertVisible(hostOnly.locator(".pv-sub").getByText("prod-node-01 · CVE-2024-1234"), "Host-only decision must display its source-backed hostname");
+        await assertVisible(hostOnly.locator(".pv-title").getByText("CVE-2024-1234 — openssl on prod-node-01"), "Host-only title must use its source-backed hostname");
+        await assertVisible(page.locator(".rr-host-only-summary"), "Host-only scope summary stays neutral");
+        await assertCount(hostOnly.locator(".rr-group-source-dot"), 0, "Host-only scope must not inherit a plan environment color");
+        await page.getByRole("tab", { name: "Remediation plans" }).click();
+        await captureWorkflowViewportState(page, "16e-poam-register-design", "plans", "desktop");
+        await captureWorkflowViewportState(page, "16e-poam-register-design", "plans", "narrowDesktop");
+        await page.getByRole("tab", { name: "Everything" }).click();
         const visibleRegisterCopy = (await page.locator(".poams-group tbody").allTextContents()).join(" ");
         if (/\bHost(?:\s+Host)+\b/.test(visibleRegisterCopy) || visibleRegisterCopy.includes(ids.host) || visibleRegisterCopy.includes(accepted[0].source_id)) throw new Error("Register leaked repeated scope types or raw UUIDs in row copy");
         await assertAttribute(page.getByRole("tab", { name: "Everything" }), "aria-selected", "true", "Everything is the initial type");
@@ -19387,11 +19452,22 @@ security.audit.enable = true;</fixtext>
         await assertVisible(page.getByRole("combobox", { name: "Group register" }), "Acceptance tab must retain grouping");
         await assertDisabled(page.getByRole("combobox", { name: "Risk" }), "No acceptance source records a CAT severity");
         await assertVisible(page.locator(".poams-acceptances").getByText("Host-only decisions"), "Host decision group must remain separate from environment decisions");
+        const hostOnlyGroup = page.locator(".poams-acceptances .poams-group").filter({ hasText: "Host-only decisions" });
+        await assertVisible(hostOnlyGroup.locator(".rr-group-neutral-dot"), "Host-only group has a neutral identity marker");
+        await assertCount(hostOnlyGroup.getByRole("button", { name: "Focus" }), 0, "Host-only group must not infer an environment Focus");
+        const hostGroupToggle = hostOnlyGroup.getByRole("button", { name: /Host-only decisions/ });
+        await hostGroupToggle.click();
+        await assertCount(hostOnlyGroup.locator("tbody tr"), 0, "Collapse hides the group rows");
+        await hostGroupToggle.click();
+        await assertVisible(hostOnlyGroup.locator(`tbody tr[data-source-id="${accepted[0].source_id}"]`), "Expand restores source rows");
         for (const label of ["Expired acceptances", "Review in 30 days", "No review date", "Accepted decisions"]) {
           await assertVisible(page.getByRole("group", { name: "Work queues" }).getByText(label), `${label} must be a source-backed acceptance card`);
         }
         await assertVisible(page.locator(".poams-acceptances").getByText("CVE-2024-1234", { exact: false }), "Accepted CVE host decision must keep its canonical package identity");
-        await assertVisible(page.locator(".poams-acceptances").getByText("Authorization expires 2026", { exact: false }), "Policy waiver expiry must not be mistaken for a review deadline");
+        await assertVisible(page.locator(".poams-acceptances").getByText("Authorization expires Dec 1, 2026", { exact: false }), "Policy waiver expiry must not be mistaken for a review deadline");
+        await assertVisible(page.locator(".poams-acceptances").getByRole("cell", { name: "RA-0001" }), "Acceptance-only table retains the ID column");
+        const acceptanceHeaders = await page.locator(".poams-acceptances thead th").allTextContents();
+        if (!isDeepStrictEqual(acceptanceHeaders, ["ID", "Title", "Status", "Approved", "Approver", "Review"])) throw new Error(`Expected six acceptance columns: ${acceptanceHeaders}`);
         await assertVisible(page.locator(".poams-acceptances").getByRole("cell", { name: "Morgan Owner" }).first(), "Approver should use the authorized catalog label");
         await assertVisible(page.locator(".poams-acceptances").getByRole("cell", { name: "Approver unavailable" }), "Unknown approver must not render as a UUID");
         await page.setViewportSize({ width: 1000, height: 1000 });
@@ -19406,7 +19482,11 @@ security.audit.enable = true;</fixtext>
         }
         await page.setViewportSize(MANIFEST.settings.viewport);
         await page.getByRole("textbox", { name: "Search register" }).fill("CVE-2024-1234");
+        await assertVisible(page.locator(`.poams-acceptances tbody tr[data-source-id="${accepted[0].source_id}"]`), "Acceptance search filters source subject");
         await assertCount(page.locator(".poams-acceptances tbody tr"), 1, "Acceptance search filters source subject");
+        await page.getByRole("textbox", { name: "Search register" }).fill("RA-0001");
+        await assertVisible(page.locator(`.poams-acceptances tbody tr[data-source-id="${accepted[0].source_id}"]`), "Acceptance search must match the human RA ID");
+        await assertCount(page.locator(".poams-acceptances tbody tr"), 1, "Acceptance search must match the human RA ID");
         await page.getByRole("textbox", { name: "Search register" }).fill("");
         await page.getByRole("combobox", { name: "Group register" }).selectOption("owner");
         await assertVisible(page.locator(".poams-acceptances").getByText("Morgan Owner", { exact: true }).first(), "Approver grouping must use a name");
@@ -19416,13 +19496,14 @@ security.audit.enable = true;</fixtext>
         await page.getByRole("combobox", { name: "Status" }).selectOption("active");
         await assertVisible(page.getByRole("group", { name: "Work queues" }).getByText("No review date"), "Acceptance queues must remain available");
         await captureWorkflowViewportState(page, "16e-poam-register-design", "source-decisions-readonly", "desktop");
+        await captureWorkflowViewportState(page, "16e-poam-register-design", "source-decisions-readonly", "narrowDesktop");
         const acceptanceTable = page.locator(".poams-acceptances");
         const hostDecision = acceptanceTable.locator(`tbody tr[data-source-id="${accepted[0].source_id}"]`);
         const policyDecision = acceptanceTable.locator(`tbody tr[data-source-id="${accepted[1].source_id}"]`);
         await page.setViewportSize({ width: 1000, height: 1000 });
         await hostDecision.click();
-        const hostTray = page.getByRole("dialog", { name: "Risk acceptance Host CVE" });
-        await assertVisible(hostTray.getByRole("heading", { name: "Host CVE", exact: true }), "Drawer title must be human-facing, not a source UUID");
+        const hostTray = page.getByRole("dialog", { name: "Risk acceptance RA-0001 · Host CVE" });
+        await assertVisible(hostTray.getByRole("heading", { name: "RA-0001 · Host CVE", exact: true }), "Drawer title must show the human RA ID, not a source UUID");
         await assertVisible(hostTray.getByText("Reviewed host risk"), "Tray must preserve original justification");
         await assertVisible(hostTray.getByText("CVE-2024-1234 · openssl · prod-node-01", { exact: true }), "Drawer subject must use actual CVE, package and hostname");
         await assertVisible(hostTray.getByText("Morgan Owner", { exact: true }), "Approver must resolve through the authorized catalog");
@@ -19439,9 +19520,19 @@ security.audit.enable = true;</fixtext>
         await assertVisible(hostTray.getByRole("button", { name: /Convert to POA&M/ }), "Authorized host decision must offer conversion");
         await assertCount(hostTray.getByRole("button", { name: /Revoke/ }), 0, "No source-owned revoke operation is available");
         await captureWorkflowViewportState(page, "16e-poam-register-design", "acceptance-tray-host-cve", "desktop");
+        await captureWorkflowViewportState(page, "16e-poam-register-design", "acceptance-tray-host-cve", "narrowDesktop");
+        await page.setViewportSize({ width: 560, height: 900 });
+        const conversionActionBounds = await hostTray.getByRole("button", { name: "Convert to POA&M" }).evaluate((button) => {
+          const bounds = button.getBoundingClientRect();
+          return { left: bounds.left, right: bounds.right, width: window.innerWidth };
+        });
+        if (conversionActionBounds.left < 0 || conversionActionBounds.right > conversionActionBounds.width) {
+          throw new Error(`Acceptance conversion action is clipped on narrow screens: ${JSON.stringify(conversionActionBounds)}`);
+        }
+        await page.setViewportSize(MANIFEST.settings.viewport);
         await hostTray.getByRole("button", { name: "Close acceptance" }).click();
         await policyDecision.click();
-        const policyTray = page.getByRole("dialog", { name: "Risk acceptance Policy waiver" });
+        const policyTray = page.getByRole("dialog", { name: "Risk acceptance RA-0002 · Policy waiver" });
         await assertVisible(policyTray.getByText("Policy authorization expires"), "Policy expiry is distinct from review deadline");
         await page.keyboard.press("Escape");
         await assertCount(policyTray, 0, "Escape closes without a write");
@@ -19452,8 +19543,10 @@ security.audit.enable = true;</fixtext>
         await page.getByRole("combobox", { name: "Status" }).selectOption("all");
         const convertedDecision = acceptanceTable.locator(`tbody tr[data-source-id="${accepted[2].source_id}"]`);
         await convertedDecision.click();
-        const convertedTray = page.getByRole("dialog", { name: "Risk acceptance Environment CVE" });
-        await assertVisible(convertedTray.getByText(`Superseded by POA&M ${planId(94)}`), "Converted decision must link its source-backed replacement");
+        const convertedTray = page.getByRole("dialog", { name: "Risk acceptance RA-0003 · Environment CVE" });
+        await assertVisible(convertedTray.getByRole("button", { name: "Open replacement POA&M" }), "Converted decision must link its source-backed replacement");
+        await convertedTray.locator("details.rr-acceptance-source-id summary").click();
+        await assertVisible(convertedTray.getByText(`Replacement POA&M ${planId(94)}`), "Replacement UUID stays in disclosure metadata");
         await assertCount(convertedTray.getByRole("button", { name: /Re-review|Convert to POA&M/ }), 0, "Converted historical decision must not offer active actions");
         await convertedTray.getByRole("button", { name: "Close acceptance" }).click();
         await page.setViewportSize(MANIFEST.settings.viewport);
@@ -19487,7 +19580,10 @@ security.audit.enable = true;</fixtext>
         await policyTray.getByRole("button", { name: "Review conversion" }).click();
         if (acceptanceWrites.length !== 3) throw new Error("Review without confirmation wrote a decision");
         await policyTray.getByRole("button", { name: "Confirm conversion" }).click();
-        await assertVisible(policyTray.getByText(`Superseded by POA&M ${planId(91)}`), "Committed replacement must be read back");
+        await assertVisible(policyDecision.getByText("Converted to POA&M"), "Policy conversion must refresh the source decision");
+        if (await policyTray.count() === 0) await policyDecision.click();
+        await policyTray.locator("details.rr-acceptance-source-id summary").click();
+        await assertVisible(policyTray.getByText(`Replacement POA&M ${planId(91)}`), "Committed replacement must be read back");
         if (acceptanceWrites.length !== 4) throw new Error("Confirmation must send one conversion");
         await policyTray.getByRole("button", { name: "Close acceptance" }).click();
         await hostDecision.click();
@@ -19500,7 +19596,10 @@ security.audit.enable = true;</fixtext>
         await hostTray.getByRole("button", { name: "Review conversion" }).click();
         if (acceptanceWrites.length !== 4) throw new Error("CVE review without confirmation wrote a decision");
         await hostTray.getByRole("button", { name: "Confirm conversion" }).click();
-        await assertVisible(hostTray.getByText(`Superseded by POA&M ${planId(92)}`), "CVE conversion must re-read committed replacement");
+        await assertVisible(hostDecision.getByText("Converted to POA&M"), "CVE conversion must refresh the source decision");
+        if (await hostTray.count() === 0) await hostDecision.click();
+        await hostTray.locator("details.rr-acceptance-source-id summary").click();
+        await assertVisible(hostTray.getByText(`Replacement POA&M ${planId(92)}`), "CVE conversion must re-read committed replacement");
         await hostTray.getByRole("button", { name: "Close acceptance" }).click();
         if (acceptanceWrites.length !== 5) throw new Error("CVE conversion must issue one source-owned command");
         await page.getByRole("tab", { name: "Remediation plans" }).click();

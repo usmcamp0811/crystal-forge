@@ -99,6 +99,7 @@ fn all_source_items_are_valid_without_inferred_risk_or_approval() {
             target_date: None,
             technical_evidence: None,
             source: Source::Acceptance {
+                human_id: Some("RA-0042"),
                 source_kind: "cve-host-decision",
                 rationale: "Decision & review",
                 accepted_by: None,
@@ -151,6 +152,21 @@ fn all_source_items_are_valid_without_inferred_risk_or_approval() {
             .any(|p| p["name"] == "source-target-date" && p["value"] == "2026-09-27")
     );
     let decision = poam["poam-items"][1]["props"].as_array().unwrap();
+    assert!(
+        decision
+            .iter()
+            .any(|p| p["name"] == "source-id" && p["value"] == "cve_host:9")
+    );
+    assert!(
+        decision
+            .iter()
+            .any(|p| p["name"] == "risk-acceptance-id" && p["value"] == "RA-0042")
+    );
+    assert!(
+        output
+            .xml
+            .contains("name=\"risk-acceptance-id\" value=\"RA-0042\"")
+    );
     assert!(decision.iter().any(|p| p["name"] == "decision-rationale"));
     assert!(!decision.iter().any(|p| p["name"] == "accepted-at"));
     assert!(!decision.iter().any(|p| p["name"] == "decision-expires-at"));
@@ -187,6 +203,7 @@ fn rejects_partial_approval_without_emitting_a_document() {
         target_date: None,
         technical_evidence: None,
         source: Source::Acceptance {
+            human_id: None,
             source_kind: "policy-waiver",
             rationale: "Rationale",
             accepted_by: Some(Uuid::new_v4()),

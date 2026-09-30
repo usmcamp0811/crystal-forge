@@ -2,12 +2,13 @@ use axum::{Router, routing::get};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, NaiveDate, TimeDelta, TimeZone, Utc};
 use crystal_forge::api::models::{
-    CveBatchDisposition, CveBatchExistingState, CveBatchPairIdentity, CveBatchScheduleGrouping,
-    CveEnvironmentDisposition, CveEnvironmentTriageAction, CveFilters, FleetCveBatchDetailRequest,
-    FleetCveBatchTriageRequest, FleetCveInventorySection, FleetCveMutationDetailScope,
-    FleetCvePoamRequest, FleetCveTriageRequest, FleetCveTriageRollup,
-    SystemCveEffectiveDispositionSource, SystemCveInventoryParams, SystemCveTriageAction,
-    SystemCveTriageRequest, SystemCveTriageScopeChoice, SystemCveTriageScopeKind,
+    CveBatchDetailState, CveBatchDisposition, CveBatchExistingState, CveBatchPairIdentity,
+    CveBatchScheduleGrouping, CveBatchUnavailableReason, CveEnvironmentDisposition,
+    CveEnvironmentTriageAction, CveFilters, FleetCveBatchDetailRequest, FleetCveBatchTriageRequest,
+    FleetCveInventorySection, FleetCveMutationDetailScope, FleetCvePoamRequest,
+    FleetCveTriageRequest, FleetCveTriageRollup, SystemCveEffectiveDispositionSource,
+    SystemCveInventoryParams, SystemCveTriageAction, SystemCveTriageRequest,
+    SystemCveTriageScopeChoice, SystemCveTriageScopeKind,
 };
 use crystal_forge::auth::extractors::AuthenticatedUser;
 use crystal_forge::auth::session::{
@@ -19390,6 +19391,8 @@ async fn batch_detail_hydrates_severity_environments_and_existing_state_for_exac
         .find(|item| item.cve_id == pair1.0)
         .expect("pair1 hydrated");
     assert_eq!(item1.environments.len(), 1);
+    assert_eq!(item1.state, CveBatchDetailState::Actionable);
+    assert_eq!(item1.unavailable_reason, None);
     assert_eq!(item1.severity, "critical");
     assert_eq!(item1.cvss_v3_score, Some(9.7));
     assert_eq!(item1.environments[0].environment_id, environment_id);
@@ -19420,8 +19423,244 @@ async fn batch_detail_hydrates_severity_environments_and_existing_state_for_exac
         },
     )
     .await
-    .unwrap_err();
-    assert!(matches!(stale, PoamError::Conflict("batch_pair_stale", _)));
+    .unwrap();
+    assert_eq!(stale.items.len(), 2);
+    assert_eq!(stale.items[0].state, CveBatchDetailState::Actionable);
+    assert_eq!(stale.items[1].cve_id, "CVE-2027-99998");
+    assert_eq!(stale.items[1].state, CveBatchDetailState::Unavailable);
+    assert_eq!(
+        stale.items[1].unavailable_reason,
+        Some(CveBatchUnavailableReason::StaleOrInaccessible)
+    );
+    assert!(stale.items[1].environments.is_empty());
+    assert_eq!(stale.items[1].severity, "unknown");
+    assert_eq!(stale.items[1].cvss_v3_score, None);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn batch_detail_distinguishes_visible_inventory_from_hidden_and_stale(pool: PgPool) {
+    let current = assessment_fixture(&pool).await;
+    let historical = assessment_fixture(&pool).await;
+    let hidden = assessment_fixture(&pool).await;
+    let env = assign_environment(&pool, "batch-visible-inventory", &[&current, &historical]).await;
+    assign_environment(&pool, "batch-hidden-inventory", &[&hidden]).await;
+    sync_user_role(&pool, current.user_id, AuthRole::Operator)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO user_environment_memberships(user_id,environment_id) VALUES($1,$2)")
+        .bind(current.user_id)
+        .bind(env)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let actor = PoamActor {
+        user_id: current.user_id,
+        identifier: "scoped-operator".into(),
+        is_admin: false,
+        can_mutate: true,
+        environment_ids: vec![env],
+        request_origin: None,
+    };
+    let clock = FixedClock(Utc::now());
+    let good = batch_pair("CVE-2027-20501", "curl");
+    let old = batch_pair("CVE-2027-20502", "openssl");
+    let secret = batch_pair("CVE-2027-20503", "hidden-pkg");
+    seal_exact_cve_scan(
+        &pool,
+        &current,
+        clock.now(),
+        Some((&good.cve_id, &good.canonical_package_name, "1", false)),
+    )
+    .await;
+    let reference = seal_exact_cve_scan(
+        &pool,
+        &historical,
+        clock.now(),
+        Some((&old.cve_id, &old.canonical_package_name, "1", false)),
+    )
+    .await
+    .unwrap();
+    let package_id: i32 = sqlx::query_scalar("SELECT id FROM derivations WHERE derivation_path=$1")
+        .bind(&reference.occurrence_derivation_path)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO package_vulnerabilities(derivation_id,cve_id,is_whitelisted) VALUES($1,$2,false)")
+        .bind(package_id).bind(&old.cve_id).execute(&pool).await.unwrap();
+    // The retained scan stays in inventory, but its observed running target
+    // no longer authorizes Current triage.
+    sqlx::query("UPDATE system_states SET generation_matches_current_store_path=false WHERE hostname=(SELECT hostname FROM systems WHERE id=$1)")
+        .bind(historical.system_id).execute(&pool).await.unwrap();
+    seal_exact_cve_scan(
+        &pool,
+        &hidden,
+        clock.now(),
+        Some((&secret.cve_id, &secret.canonical_package_name, "1", false)),
+    )
+    .await;
+    let absent = batch_pair("CVE-2027-20504", "absent-pkg");
+    let result = poam_service::fleet_cve_batch_detail(
+        &pool,
+        &actor,
+        FleetCveBatchDetailRequest {
+            pairs: vec![good, old],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.items.len(), 2);
+    assert_eq!(result.items[0].state, CveBatchDetailState::Actionable);
+    assert_eq!(result.items[1].state, CveBatchDetailState::Unavailable);
+    assert_eq!(
+        result.items[1].unavailable_reason,
+        Some(CveBatchUnavailableReason::InventoryOnly)
+    );
+    assert!(result.items[1].environments.is_empty());
+    let hidden_and_absent = poam_service::fleet_cve_batch_detail(
+        &pool,
+        &actor,
+        FleetCveBatchDetailRequest {
+            pairs: vec![secret, absent],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(hidden_and_absent.items.len(), 2);
+    for item in &hidden_and_absent.items {
+        assert_eq!(
+            item.unavailable_reason,
+            Some(CveBatchUnavailableReason::StaleOrInaccessible)
+        );
+        assert!(item.environments.is_empty());
+        assert_eq!(item.severity, "unknown");
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn batch_entirely_unavailable_pair_fails_atomically_but_unpicked_current_pair_skips(
+    pool: PgPool,
+) {
+    let picked = assessment_fixture(&pool).await;
+    let unpicked = assessment_fixture(&pool).await;
+    let actor = admin_actor(picked.user_id);
+    sync_user_role(&pool, actor.user_id, AuthRole::Admin)
+        .await
+        .unwrap();
+    let env = assign_environment(&pool, "batch-picked", &[&picked]).await;
+    assign_environment(&pool, "batch-unpicked", &[&unpicked]).await;
+    let clock = FixedClock(Utc::now());
+    let good = batch_pair("CVE-2027-20511", "curl");
+    let other = batch_pair("CVE-2027-20512", "openssl");
+    seal_exact_cve_scan(
+        &pool,
+        &picked,
+        clock.now(),
+        Some((&good.cve_id, &good.canonical_package_name, "1", false)),
+    )
+    .await;
+    seal_exact_cve_scan(
+        &pool,
+        &unpicked,
+        clock.now(),
+        Some((&other.cve_id, &other.canonical_package_name, "1", false)),
+    )
+    .await;
+    let pairs = vec![good.clone(), other.clone()];
+    let tokens = batch_tokens(&pool, &actor, &pairs, &[env]).await;
+    let request = |expected_tokens| FleetCveBatchTriageRequest {
+        pairs: pairs.clone(),
+        environment_ids: vec![env],
+        expected_tokens,
+        skip_existing: true,
+        disposition: CveBatchDisposition::AcceptRisk {
+            justification: "Accept only the picked exact current subject.".into(),
+            review_date: None,
+        },
+    };
+    // A still-current pair found only in an unpicked environment retains the 0296 skip contract.
+    let result =
+        poam_service::triage_fleet_cves_batch(&pool, &actor, request(tokens.clone()), &clock)
+            .await
+            .unwrap();
+    assert_eq!(result.applied.len(), 1);
+    assert_eq!(result.applied[0].pair, good);
+    assert_eq!(result.skipped, vec![other.clone()]);
+    assert!(
+        environment_disposition_row(&pool, &other.cve_id, &other.canonical_package_name, env)
+            .await
+            .is_none()
+    );
+
+    // Once its last visible Current subject disappears, the same valid zero-subject
+    // picked-environment token cannot authorize a direct POST of the mixed batch.
+    let tokens = batch_tokens(&pool, &actor, &pairs, &[env]).await;
+    seal_exact_cve_scan(&pool, &unpicked, clock.now() + TimeDelta::minutes(1), None).await;
+    let mut retry = request(tokens);
+    retry.skip_existing = false;
+    retry.disposition = CveBatchDisposition::AcceptRisk {
+        justification: "A new justification must not partially replace the old one.".into(),
+        review_date: None,
+    };
+    let (_, admin_session) = role_session(&pool, AuthRole::Admin).await;
+    let base = poam_http_server(pool.clone()).await;
+    let response = http_request(
+        &reqwest::Client::new(),
+        reqwest::Method::POST,
+        format!("{base}/api/v1/cves/batch-triage"),
+        &admin_session,
+        Some("batch-unavailable-direct-post"),
+    )
+    .json(&serde_json::json!({
+        "pairs": retry.pairs,
+        "environment_ids": retry.environment_ids,
+        "expected_tokens": retry.expected_tokens,
+        "skip_existing": retry.skip_existing,
+        "disposition": {
+            "action": "accept_risk",
+            "justification": "A new justification must not partially replace the old one.",
+            "review_date": null
+        }
+    }))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["error"], "batch_pair_unavailable");
+    let error = poam_service::triage_fleet_cves_batch(&pool, &actor, retry, &clock)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, PoamError::Conflict("batch_pair_unavailable", _)),
+        "{error:?}"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM cve_environment_dispositions WHERE canonical_cve_id=$1"
+        )
+        .bind(&good.cve_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        environment_disposition_row(&pool, &good.cve_id, &good.canonical_package_name, env)
+            .await
+            .unwrap()
+            .1
+            .as_deref(),
+        Some("Accept only the picked exact current subject.")
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM admin_audit_events WHERE action='fleet_cve_batch_triaged'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]

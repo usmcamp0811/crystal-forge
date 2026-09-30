@@ -529,6 +529,21 @@ pub struct CveInventoryPairPage {
     pub total: i64,
     /// Next offset, absent after the final pair.
     pub next_offset: Option<i64>,
+    /// Co-snapshot package unions, present only when the first page contains
+    /// the whole filtered pair set. Never combine with another page or request.
+    #[serde(default)]
+    pub package_host_unions: Vec<CveInventoryPackageHostUnion>,
+}
+
+/// Counts distinct visible affected systems for one package in a complete pair page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CveInventoryPackageHostUnion {
+    /// Gives the canonical package identity, if present.
+    pub package_name: Option<String>,
+    /// Counts filtered CVE/package pairs in this package.
+    pub pair_count: i64,
+    /// Counts the union of Current and scheduled-target hosts, excluding history-only hosts.
+    pub affected_system_count: i64,
 }
 
 /// CVE list item for table views.

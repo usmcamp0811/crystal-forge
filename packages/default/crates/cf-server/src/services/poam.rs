@@ -13,15 +13,16 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::api::models::{
-    CveAffectedEnvironment, CveAffectedSystemDetail, CveBatchAppliedPair, CveBatchDisposition,
-    CveBatchEnvironmentSummary, CveBatchExistingState, CveBatchPairIdentity,
-    CveBatchScheduleGrouping, CveDispositionActor, CveEnvironmentDisposition,
-    CveEnvironmentTriageAction, CveTriageConflictSubject, FleetCveBatchDetailItem,
-    FleetCveBatchDetailRequest, FleetCveBatchDetailResponse, FleetCveBatchTriageRequest,
-    FleetCveBatchTriageResponse, FleetCveDetail, FleetCveInventorySection, FleetCvePoamRequest,
-    FleetCveTriageRequest, FleetCveTriageResponse, FleetCveTriageRollup, ScheduledPoamMetadata,
-    SystemCveEffectiveDispositionSource, SystemCveInventoryAuthority, SystemCveTriageAction,
-    SystemCveTriageDetail, SystemCveTriageRequest, SystemCveTriageResponse, SystemCveTriageScope,
+    CveAffectedEnvironment, CveAffectedSystemDetail, CveBatchAppliedPair, CveBatchDetailState,
+    CveBatchDisposition, CveBatchEnvironmentSummary, CveBatchExistingState, CveBatchPairIdentity,
+    CveBatchScheduleGrouping, CveBatchUnavailableReason, CveDispositionActor,
+    CveEnvironmentDisposition, CveEnvironmentTriageAction, CveTriageConflictSubject,
+    FleetCveBatchDetailItem, FleetCveBatchDetailRequest, FleetCveBatchDetailResponse,
+    FleetCveBatchTriageRequest, FleetCveBatchTriageResponse, FleetCveDetail,
+    FleetCveInventorySection, FleetCvePoamRequest, FleetCveTriageRequest, FleetCveTriageResponse,
+    FleetCveTriageRollup, ScheduledPoamMetadata, SystemCveEffectiveDispositionSource,
+    SystemCveInventoryAuthority, SystemCveTriageAction, SystemCveTriageDetail,
+    SystemCveTriageRequest, SystemCveTriageResponse, SystemCveTriageScope,
     SystemCveTriageScopeChoice, SystemCveTriageScopeKind,
 };
 use crate::compliance::canonical::semantic_digest;
@@ -6012,6 +6013,8 @@ async fn renewal_source_tx(
 /// The source row is never edited except for retirement. The successor preserves
 /// its original approver, approval time, justification, and canonical scope.
 /// The same-transaction audit links both row UUIDs and the exact Current evidence.
+/// The audit also binds the successor to the predecessor's RA number. A fresh
+/// acceptance after terminal retirement receives its own RA number on insert.
 /// A retry returns that successor only while it remains the active decision;
 /// later triage of the same source is a stale-version conflict.
 ///
@@ -6287,6 +6290,19 @@ pub async fn renew_cve_acceptance(
     .bind(now)
     .execute(&mut *tx)
     .await?;
+    // INVARIANT: The audit event is the authoritative CVE renewal link.
+    // Rebind only after that event exists, under the same source locks and
+    // transaction. A retry returns the existing source without allocating.
+    sqlx::query("SELECT link_cve_risk_acceptance_id($1,$2,$3)")
+        .bind(if matches!(source, CveAcceptanceSource::Host(_)) {
+            "cve_host"
+        } else {
+            "cve_environment"
+        })
+        .bind(source.id())
+        .bind(successor_id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(CveAcceptanceRenewal {
         predecessor_id: source.id(),
@@ -7112,25 +7128,61 @@ fn batch_evidence_conflict(cve_id: &str, package_name: &str, environment_id: Uui
     )
 }
 
+// SECURITY: Inventory classification uses only active systems visible to the
+// reloaded actor. Neither the fallback reason nor its empty environment list
+// distinguishes nonexistent pairs from pairs in another operator's scope.
+async fn batch_visible_inventory_only_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: &PoamActor,
+    cve_id: &str,
+    package_name: &str,
+) -> Result<bool, PoamError> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        r#"SELECT EXISTS (
+             SELECT 1 FROM view_active_scheduled_exact_cve_occurrences occurrence
+             JOIN systems system ON system.id=occurrence.system_id AND system.is_active
+             WHERE occurrence.cve_id=$1 AND occurrence.package_name=$2
+               AND ($3 OR system.environment_id=ANY($4))
+           ) OR EXISTS (
+             SELECT 1 FROM view_system_vulnerabilities history
+             JOIN systems system ON system.hostname=history.hostname AND system.is_active
+             WHERE history.cve_id=$1
+               AND COALESCE(history.package_pname,history.package_name)=$2
+               AND ($3 OR system.environment_id=ANY($4))
+               AND NOT EXISTS (SELECT 1 FROM view_current_cve_authority current
+                               WHERE current.system_id=system.id)
+               AND NOT EXISTS (SELECT 1 FROM view_active_scheduled_cve_scan_targets scheduled
+                               WHERE scheduled.system_id=system.id)
+           )"#,
+    )
+    .bind(cve_id)
+    .bind(package_name)
+    .bind(actor.is_admin)
+    .bind(&actor.environment_ids)
+    .fetch_one(&mut **tx)
+    .await?)
+}
+
 /// Hydrates authoritative batch metadata for exact CVE/package identities.
 ///
 /// The browser's selection may reference identities from pages it has not
 /// loaded. This reads current exact evidence for exactly the named
 /// identities, independent of any visible table state, in one repeatable-read
-/// snapshot. If any requested pair lacks currently visible exact evidence,
-/// the entire hydration fails. The browser must not silently lose a selected
-/// identity merely because its current subject disappeared or became hidden.
-/// Each opaque token binds the exact subject set and the active environment
-/// disposition row ID (or its absence) in that same snapshot. A new or
-/// replaced decision requires hydration again before mutation.
+/// snapshot. Every requested identity is returned. A pair without visible
+/// Current evidence is unavailable and has no environment or host authority;
+/// visible inventory-only evidence is distinguished from absent or inaccessible
+/// evidence without disclosing which hidden scope contains the pair.
+/// Actionable items carry opaque tokens that bind each exact subject set and
+/// active environment disposition row ID (or its absence) in that same
+/// snapshot. Unavailable items carry no tokens, advisory metadata, or scope.
+/// A new or replaced decision requires hydration again before mutation.
 ///
 /// # Errors
 ///
 /// Returns a validation error when the pair list is empty, exceeds the
 /// bounded batch identity limit, or names a malformed identity; a forbidden
 /// error when the actor cannot read POA&M evidence; or a database error when
-/// evidence cannot be loaded, or a conflict if any selected identity no
-/// longer has a visible exact current subject.
+/// evidence cannot be loaded.
 pub async fn fleet_cve_batch_detail(
     pool: &PgPool,
     actor: &PoamActor,
@@ -7173,20 +7225,24 @@ pub async fn fleet_cve_batch_detail(
     let mut hydrated = Vec::with_capacity(pairs.len());
     for (cve_id, package_name) in pairs {
         let subjects = fleet_cve_subjects_tx(&mut tx, &actor, &cve_id, &package_name, None).await?;
-        if subjects.is_empty() {
-            // SECURITY: Do not reveal whether this pair is absent or hidden.
-            return Err(PoamError::Conflict(
-                "batch_pair_stale",
-                "A selected CVE/package pair is no longer actionable; refresh and retry".into(),
-            ));
-        }
-        hydrated.push((cve_id, package_name, subjects));
+        let unavailable_reason = if subjects.is_empty() {
+            Some(
+                if batch_visible_inventory_only_tx(&mut tx, &actor, &cve_id, &package_name).await? {
+                    CveBatchUnavailableReason::InventoryOnly
+                } else {
+                    CveBatchUnavailableReason::StaleOrInaccessible
+                },
+            )
+        } else {
+            None
+        };
+        hydrated.push((cve_id, package_name, subjects, unavailable_reason));
     }
     // A zero-subject token for another selected pair in the same environment
     // detects a newly affected pair/environment between hydration and submit.
     let environment_ids = hydrated
         .iter()
-        .flat_map(|(_, _, subjects)| subjects.iter().map(|subject| subject.environment_id))
+        .flat_map(|(_, _, subjects, _)| subjects.iter().map(|subject| subject.environment_id))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
@@ -7194,13 +7250,26 @@ pub async fn fleet_cve_batch_detail(
         &mut tx,
         &hydrated
             .iter()
-            .map(|(cve_id, package_name, _)| (cve_id.clone(), package_name.clone()))
+            .filter(|(_, _, subjects, _)| !subjects.is_empty())
+            .map(|(cve_id, package_name, _, _)| (cve_id.clone(), package_name.clone()))
             .collect::<Vec<_>>(),
         &environment_ids,
     )
     .await?;
     let mut items = Vec::with_capacity(hydrated.len());
-    for (cve_id, package_name, subjects) in hydrated {
+    for (cve_id, package_name, subjects, unavailable_reason) in hydrated {
+        if let Some(reason) = unavailable_reason {
+            items.push(FleetCveBatchDetailItem {
+                cve_id,
+                canonical_package_name: package_name,
+                state: CveBatchDetailState::Unavailable,
+                unavailable_reason: Some(reason),
+                severity: "unknown".into(),
+                cvss_v3_score: None,
+                environments: Vec::new(),
+            });
+            continue;
+        }
         let affected_environment_ids = subjects
             .iter()
             .map(|subject| subject.environment_id)
@@ -7256,6 +7325,8 @@ pub async fn fleet_cve_batch_detail(
         items.push(FleetCveBatchDetailItem {
             cve_id,
             canonical_package_name: package_name,
+            state: CveBatchDetailState::Actionable,
+            unavailable_reason: None,
             severity,
             cvss_v3_score,
             environments,
@@ -7616,6 +7687,20 @@ async fn triage_fleet_cves_batch_once(
                     *environment_id,
                 ));
             }
+        }
+        // SECURITY: An entirely unavailable pair must fail even if a caller
+        // supplies the valid zero-subject token for every picked environment.
+        // A visible pair present only in an unpicked environment may still be
+        // skipped under the existing batch contract.
+        if subjects.is_empty()
+            && fleet_cve_subjects_tx(&mut tx, &actor, cve_id, package_name, None)
+                .await?
+                .is_empty()
+        {
+            return Err(PoamError::Conflict(
+                "batch_pair_unavailable",
+                "A selected CVE/package pair is no longer actionable; refresh and retry".into(),
+            ));
         }
         // INVARIANT: A pair may be current only in an unpicked environment.
         // Its picked-environment zero-subject token still has to match, but

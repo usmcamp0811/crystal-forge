@@ -72,7 +72,7 @@ fn worksheet(bytes: &[u8]) -> Vec<Vec<String>> {
     loop {
         match reader.read_event().unwrap() {
             Event::Start(tag) if tag.name().as_ref() == b"row" => {
-                rows.push(vec![String::new(); 16])
+                rows.push(vec![String::new(); 17])
             }
             Event::Start(tag) if tag.name().as_ref() == b"c" => {
                 let reference = tag
@@ -80,11 +80,7 @@ fn worksheet(bytes: &[u8]) -> Vec<Vec<String>> {
                     .flatten()
                     .find(|a| a.key.as_ref() == b"r")
                     .unwrap();
-                column = if reference.value[0] == b'P' {
-                    15
-                } else {
-                    (reference.value[0] - b'A') as usize
-                };
+                column = (reference.value[0] - b'A') as usize;
                 is_shared = tag
                     .attributes()
                     .flatten()
@@ -171,6 +167,7 @@ fn evidence_and_acceptance_dates_have_equivalent_rows() {
         cve_id: None,
         source: Source::Acceptance {
             kind: AcceptanceKind::Policy,
+            human_id: Some("RA-0042".into()),
             review_deadline: Some(NaiveDate::from_ymd_opt(2026, 10, 1).unwrap()),
             authorization_expiry: Some(Utc.with_ymd_and_hms(2027, 1, 1, 0, 0, 0).unwrap()),
         },
@@ -184,13 +181,18 @@ fn evidence_and_acceptance_dates_have_equivalent_rows() {
     assert_eq!(rows[1][12], rows[2][12]);
     assert_ne!(rows[1][13], rows[2][13]);
     assert_eq!(rows[3][0], "policy decision");
-    assert_eq!(rows[3][10], "2026-10-01T00:00:00+00:00");
+    assert_eq!(rows[3][10], "2026-10-01");
     assert_eq!(rows[3][11], "2027-01-01T00:00:00+00:00");
     assert_eq!(rows[3][7], "host-7");
+    assert_eq!(rows[0][16], "Risk Acceptance ID");
+    assert_eq!(rows[3][1], Uuid::from_u128(2).to_string());
+    assert_eq!(rows[3][2], "DECISION-2");
+    assert_eq!(rows[3][16], "RA-0042");
     assert_eq!(rows[1][9], "2026-12-01");
     let cve = Entry {
         source: Source::Acceptance {
             kind: AcceptanceKind::Cve,
+            human_id: None,
             review_deadline: None,
             authorization_expiry: None,
         },
@@ -357,6 +359,7 @@ fn multiple_and_unspecified_scopes_round_trip_in_both_files() {
             kind: AcceptanceKind::Cve,
             review_deadline: None,
             authorization_expiry: None,
+            human_id: None,
         },
         ..record(4, "acceptance")
     };

@@ -11,13 +11,14 @@ use uuid::Uuid;
 
 use crate::api::models::{
     CveAffectedSystemDetail, CveDetail, CveFilters, CveFleetStats, CveInventoryGroup,
-    CveInventoryGroupPage, CveInventoryMember, CveInventoryMemberPage, CveInventoryPairPage,
-    CveInventoryProjectionParams, CveJustification, CveJustificationInput, CveListItem,
-    CvePackageGroup, ExactCveAuthorityFailureReason, FleetCveInventorySection,
-    SystemCveCurrentAuthorityState, SystemCveEvidenceRepresentation, SystemCveInventoryAttempt,
-    SystemCveInventoryAuthority, SystemCveInventoryCandidate, SystemCveInventoryMetadata,
-    SystemCveInventoryParams, SystemCveInventorySelection, SystemCveInventorySeverityCounts,
-    SystemCveInventorySource, SystemCveRunningTarget,
+    CveInventoryGroupPage, CveInventoryMember, CveInventoryMemberPage,
+    CveInventoryPackageHostUnion, CveInventoryPairPage, CveInventoryProjectionParams,
+    CveJustification, CveJustificationInput, CveListItem, CvePackageGroup,
+    ExactCveAuthorityFailureReason, FleetCveInventorySection, SystemCveCurrentAuthorityState,
+    SystemCveEvidenceRepresentation, SystemCveInventoryAttempt, SystemCveInventoryAuthority,
+    SystemCveInventoryCandidate, SystemCveInventoryMetadata, SystemCveInventoryParams,
+    SystemCveInventorySelection, SystemCveInventorySeverityCounts, SystemCveInventorySource,
+    SystemCveRunningTarget,
 };
 use crate::auth::extractors::AuthenticatedUser;
 
@@ -371,14 +372,18 @@ impl SystemCveInventoryPageRequest {
     }
 
     fn search_pattern(&self) -> Option<String> {
-        self.search.as_ref().map(|value| {
-            let escaped = value
-                .replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_");
-            format!("%{escaped}%")
-        })
+        self.search.as_deref().map(cve_substring_pattern)
     }
+}
+
+// INVARIANT: Every user-supplied fleet substring uses this pattern with an
+// explicit SQL ESCAPE '\' clause. Only the outer percent signs are wildcards.
+fn cve_substring_pattern(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%{escaped}%")
 }
 
 fn normalize_inventory_set(
@@ -1682,9 +1687,9 @@ const FLEET_INVENTORY_PROJECTION_CTE: &str = r#"
       OR ($4='pending' AND item.fix_status='open')
       OR ($4='exploited' AND item.exploited))
     AND ($5::text IS NULL OR LOWER(item.triage_status)=LOWER($5))
-    AND ($6::text IS NULL OR item.package_name ILIKE $6)
-    AND ($7::text IS NULL OR item.cve_id ILIKE $7
-      OR item.package_name ILIKE $7 OR item.title ILIKE $7)
+    AND ($6::text IS NULL OR item.package_name ILIKE $6 ESCAPE '\')
+    AND ($7::text IS NULL OR item.cve_id ILIKE $7 ESCAPE '\'
+      OR item.package_name ILIKE $7 ESCAPE '\' OR item.title ILIKE $7 ESCAPE '\')
 ), visible_members AS (
   SELECT subject.*,system.hostname,flake.name AS flake_name,
          status.deployment_status
@@ -1731,13 +1736,14 @@ fn projection_query<'a>(
         .bind(params.severity.as_ref().map(|s| s.to_uppercase()))
         .bind(params.fix_status.as_deref())
         .bind(params.triage_status.as_deref())
-        .bind(params.package.as_ref().map(|s| format!("%{s}%")))
-        .bind(params.search.as_ref().map(|s| format!("%{s}%")))
+        .bind(params.package.as_deref().map(cve_substring_pattern))
+        .bind(params.search.as_deref().map(cve_substring_pattern))
 }
 
 /// Returns a page of environment or host aggregates over the complete filtered
 /// scoped inventory. Severity, exploited and patchable counts each count one
 /// exact CVE/package pair per group, even across overlapping inventory sections.
+/// Package and search filters match case-insensitive literal substrings.
 /// `total_active_hosts` includes active hosts without findings for environments
 /// only. It does not establish scan coverage or clean hosts.
 ///
@@ -1838,6 +1844,7 @@ pub async fn fetch_cve_inventory_groups(
 /// Returns paged exact host/CVE/package memberships in one query per page.
 /// `group_id=None` selects unassigned environment hosts, never all groups.
 /// Historical memberships are read-only; no row asserts a clean scan.
+/// Package and search filters match case-insensitive literal substrings.
 ///
 /// # Errors
 ///
@@ -1912,8 +1919,11 @@ pub async fn fetch_cve_inventory_members(
 
 /// Returns a bounded CVE/package page and an untruncated filtered total.
 /// Scope and the optional environment filter apply before pair aggregation.
+/// Package and search filters match case-insensitive literal substrings.
 /// The stable order matches [`fetch_cve_list`]. Separate page requests may
 /// observe different snapshots if inventory changes between requests.
+/// Package host unions are available only for a complete first page and use
+/// the same read-only repeatable-read snapshot as its count and pair rows.
 ///
 /// # Errors
 ///
@@ -1952,6 +1962,17 @@ pub async fn fetch_cve_inventory_pairs(
              cve_id COLLATE "C" ASC,package_name COLLATE "C" ASC
            OFFSET $9 LIMIT $10"#
     );
+    let union_sql = format!(
+        "{cte}{}",
+        r#"SELECT member.package_name,
+                  count(DISTINCT member.cve_id)::bigint AS pair_count,
+                  count(DISTINCT member.system_id) FILTER (
+                    WHERE member.inventory_section IN ('current','scheduled_deployment_target')
+                  )::bigint AS affected_system_count
+           FROM visible_members member
+           GROUP BY member.package_name
+           ORDER BY member.package_name COLLATE "C" NULLS FIRST"#
+    );
     // Both statements must see the same scoped inventory snapshot, including
     // an empty page requested past the end of the filtered pair set.
     let mut tx = pool.begin().await?;
@@ -1968,13 +1989,30 @@ pub async fn fetch_cve_inventory_pairs(
         .bind(params.severity.as_ref().map(|s| s.to_uppercase()))
         .bind(params.fix_status.as_deref())
         .bind(params.triage_status.as_deref())
-        .bind(params.package.as_ref().map(|s| format!("%{s}%")))
-        .bind(params.search.as_ref().map(|s| format!("%{s}%")))
+        .bind(params.package.as_deref().map(cve_substring_pattern))
+        .bind(params.search.as_deref().map(cve_substring_pattern))
         .bind(params.sort.as_deref().unwrap_or("severity"))
         .bind(offset)
         .bind(limit)
         .fetch_all(&mut *tx)
         .await?;
+    // INVARIANT: A package union cannot be reconstructed from pair counts:
+    // two pairs may share a host. Read membership only after proving that this
+    // first page contains the entire filtered pair set in this snapshot.
+    let package_host_unions = if offset == 0 && total <= limit && items.len() as i64 == total {
+        sqlx::query_as::<_, CveInventoryPackageHostUnion>(&union_sql)
+            .bind(scope.environment_ids())
+            .bind(params.environment_id)
+            .bind(params.severity.as_ref().map(|s| s.to_uppercase()))
+            .bind(params.fix_status.as_deref())
+            .bind(params.triage_status.as_deref())
+            .bind(params.package.as_deref().map(cve_substring_pattern))
+            .bind(params.search.as_deref().map(cve_substring_pattern))
+            .fetch_all(&mut *tx)
+            .await?
+    } else {
+        Vec::new()
+    };
     tx.commit().await?;
     let next_offset =
         (offset + (items.len() as i64) < total).then_some(offset + items.len() as i64);
@@ -1982,6 +2020,7 @@ pub async fn fetch_cve_inventory_pairs(
         items,
         total,
         next_offset,
+        package_host_unions,
     })
 }
 
@@ -2008,6 +2047,7 @@ struct CvePackageStatsRow {
 /// Fetches a bounded CVE/package list from the caller's visible occurrences.
 ///
 /// Filters are AND combined. Search matches the CVE ID, package name, or title.
+/// Package and search filters match case-insensitive literal substrings.
 /// The query applies [`CveReadScope`] before every count and status rollup.
 ///
 /// # Errors
@@ -2057,8 +2097,8 @@ async fn fetch_cve_rows(
     let severity_param = filters.severity.as_ref().map(|s| s.to_uppercase());
     let fix_status_param = filters.fix_status.clone();
     let triage_status_param = filters.triage_status.clone();
-    let package_param = filters.package.as_ref().map(|p| format!("%{p}%"));
-    let search_param = filters.search.as_ref().map(|s| format!("%{s}%"));
+    let package_param = filters.package.as_deref().map(cve_substring_pattern);
+    let search_param = filters.search.as_deref().map(cve_substring_pattern);
     let sort_param = filters.sort.as_deref().unwrap_or("severity");
 
     let sql = format!(
@@ -2097,12 +2137,12 @@ async fn fetch_cve_rows(
                 OR ($3 = 'exploited' AND exploited = TRUE)
             )
             AND ($4::text IS NULL OR LOWER(triage_status) = LOWER($4))
-            AND ($5::text IS NULL OR package_name ILIKE $5)
+            AND ($5::text IS NULL OR package_name ILIKE $5 ESCAPE '\')
             AND (
                 $6::text IS NULL
-                OR cve_id ILIKE $6
-                OR package_name ILIKE $6
-                OR title ILIKE $6
+                OR cve_id ILIKE $6 ESCAPE '\'
+                OR package_name ILIKE $6 ESCAPE '\'
+                OR title ILIKE $6 ESCAPE '\'
             )
         ORDER BY
             CASE
@@ -2143,6 +2183,7 @@ async fn fetch_cve_rows(
 /// Fetches CVEs grouped by package from the caller's visible occurrences.
 ///
 /// Package system totals count distinct systems after all active filters.
+/// Package and search filters match case-insensitive literal substrings.
 ///
 /// # Errors
 ///
@@ -2155,8 +2196,8 @@ pub async fn fetch_cve_packages_grouped(
     let severity_param = filters.severity.as_ref().map(|s| s.to_uppercase());
     let fix_status_param = filters.fix_status.clone();
     let triage_status_param = filters.triage_status.clone();
-    let package_param = filters.package.as_ref().map(|p| format!("%{p}%"));
-    let search_param = filters.search.as_ref().map(|s| format!("%{s}%"));
+    let package_param = filters.package.as_deref().map(cve_substring_pattern);
+    let search_param = filters.search.as_deref().map(cve_substring_pattern);
 
     // 1) Aggregate package cards over the full filtered dataset (no list-row cap).
     let package_sql = format!(
@@ -2185,12 +2226,12 @@ pub async fn fetch_cve_packages_grouped(
                     OR ($3 = 'exploited' AND exploited = TRUE)
                 )
                 AND ($4::text IS NULL OR LOWER(triage_status) = LOWER($4))
-                AND ($5::text IS NULL OR package_name ILIKE $5)
+                AND ($5::text IS NULL OR package_name ILIKE $5 ESCAPE '\')
                 AND (
                     $6::text IS NULL
-                    OR cve_id ILIKE $6
-                    OR package_name ILIKE $6
-                    OR title ILIKE $6
+                    OR cve_id ILIKE $6 ESCAPE '\'
+                    OR package_name ILIKE $6 ESCAPE '\'
+                    OR title ILIKE $6 ESCAPE '\'
                 )
                 AND package_name IS NOT NULL
         ),
@@ -2319,12 +2360,12 @@ pub async fn fetch_cve_packages_grouped(
                     OR ($3 = 'exploited' AND exploited = TRUE)
                 )
                 AND ($4::text IS NULL OR LOWER(triage_status) = LOWER($4))
-                AND ($5::text IS NULL OR package_name ILIKE $5)
+                AND ($5::text IS NULL OR package_name ILIKE $5 ESCAPE '\')
                 AND (
                     $6::text IS NULL
-                    OR cve_id ILIKE $6
-                    OR package_name ILIKE $6
-                    OR title ILIKE $6
+                    OR cve_id ILIKE $6 ESCAPE '\'
+                    OR package_name ILIKE $6 ESCAPE '\'
+                    OR title ILIKE $6 ESCAPE '\'
                 )
                 AND package_name = ANY($7::text[])
         ),

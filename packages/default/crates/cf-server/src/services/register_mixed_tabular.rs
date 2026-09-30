@@ -248,6 +248,7 @@ pub fn write_authorized(selection: &RegisterExportSelection) -> Result<tabular::
                 kind,
                 review_deadline: review,
                 authorization_expiry: row.expires_at,
+                human_id: Some(row.human_id.clone()),
             },
             evidence,
         });
@@ -290,6 +291,7 @@ pub fn write_authorized(selection: &RegisterExportSelection) -> Result<tabular::
                     kind,
                     review_deadline,
                     authorization_expiry,
+                    human_id,
                 } => Source::Acceptance {
                     kind: match kind {
                         AcceptanceKind::Policy => AcceptanceKind::Policy,
@@ -297,6 +299,7 @@ pub fn write_authorized(selection: &RegisterExportSelection) -> Result<tabular::
                     },
                     review_deadline: *review_deadline,
                     authorization_expiry: *authorization_expiry,
+                    human_id: human_id.clone(),
                 },
             },
             evidence,

@@ -55,7 +55,7 @@ fn worksheet(bytes: &[u8]) -> Vec<Vec<String>> {
     loop {
         match xml.read_event().unwrap() {
             Event::Start(tag) if tag.name().as_ref() == b"row" => {
-                rows.push(vec![String::new(); 16])
+                rows.push(vec![String::new(); 17])
             }
             Event::Start(tag) if tag.name().as_ref() == b"c" => {
                 let reference = tag
@@ -63,11 +63,7 @@ fn worksheet(bytes: &[u8]) -> Vec<Vec<String>> {
                     .flatten()
                     .find(|a| a.key.as_ref() == b"r")
                     .unwrap();
-                column = if reference.value[0] == b'P' {
-                    15
-                } else {
-                    (reference.value[0] - b'A') as usize
-                };
+                column = (reference.value[0] - b'A') as usize;
                 shared = tag
                     .attributes()
                     .flatten()

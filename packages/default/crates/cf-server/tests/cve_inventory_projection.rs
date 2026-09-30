@@ -4,7 +4,7 @@
 use crystal_forge::api::models::{CveFilters, CveInventoryProjectionParams};
 use crystal_forge::queries::cves::{
     CveReadScope, fetch_cve_inventory_groups, fetch_cve_inventory_members,
-    fetch_cve_inventory_pairs, fetch_cve_list,
+    fetch_cve_inventory_pairs, fetch_cve_list, fetch_cve_packages_grouped, fetch_cves_for_export,
 };
 use sqlx::PgPool;
 use std::collections::BTreeSet;
@@ -315,6 +315,10 @@ async fn scoped_groups_and_members_keep_all_sections_and_page_past_200(pool: PgP
         assert_eq!(first_page.total, 206);
         assert_eq!(first_page.items.len(), 200);
         assert_eq!(first_page.next_offset, Some(200));
+        assert!(
+            first_page.package_host_unions.is_empty(),
+            "incomplete first page"
+        );
         pairs_query.offset = first_page.next_offset;
         let last_page = fetch_cve_inventory_pairs(&pool, &scope, &pairs_query)
             .await
@@ -322,6 +326,10 @@ async fn scoped_groups_and_members_keep_all_sections_and_page_past_200(pool: PgP
         assert_eq!(last_page.total, 206);
         assert_eq!(last_page.items.len(), 6);
         assert_eq!(last_page.next_offset, None);
+        assert!(
+            last_page.package_host_unions.is_empty(),
+            "continuation page"
+        );
         let pairs: Vec<_> = first_page
             .items
             .into_iter()
@@ -385,6 +393,90 @@ async fn scoped_groups_and_members_keep_all_sections_and_page_past_200(pool: PgP
     assert_eq!(filtered_pairs.total, 1);
     assert_eq!(filtered_pairs.items[0].cve_id, "CVE-2099-0205");
     assert_eq!(filtered_pairs.next_offset, None);
+    assert_eq!(filtered_pairs.package_host_unions.len(), 1);
+    assert_eq!(filtered_pairs.package_host_unions[0].pair_count, 1);
+    assert_eq!(
+        filtered_pairs.package_host_unions[0].affected_system_count,
+        1
+    );
+    // Both searches yield one pkg pair. Their host unions differ: the first
+    // includes two Current hosts, one of which also has scheduled evidence;
+    // its historical-only host does not contribute.
+    pairs_query.search = Some("CVE-2099-0001".into());
+    pairs_query.limit = Some(2);
+    let overlapping = fetch_cve_inventory_pairs(&pool, &scope, &pairs_query)
+        .await
+        .expect("overlapping scoped package union");
+    assert_eq!(overlapping.total, 2);
+    let pkg = overlapping
+        .package_host_unions
+        .iter()
+        .find(|entry| entry.package_name.as_deref() == Some("pkg"))
+        .expect("pkg union");
+    assert_eq!((pkg.pair_count, pkg.affected_system_count), (1, 2));
+    let response = serde_json::to_value(&overlapping).expect("pair page JSON");
+    assert_eq!(
+        response["package_host_unions"][1]["affected_system_count"],
+        2
+    );
+    assert!(
+        response["package_host_unions"][1]
+            .get("system_id")
+            .is_none()
+    );
+    assert_eq!(overlapping.package_host_unions.len(), 2);
+    pairs_query.search = Some("CVE-2099-000".into());
+    pairs_query.limit = Some(10);
+    let multi_pair = fetch_cve_inventory_pairs(&pool, &scope, &pairs_query)
+        .await
+        .expect("complete multi-pair package union");
+    assert_eq!(multi_pair.total, 10);
+    let pkg = multi_pair
+        .package_host_unions
+        .iter()
+        .find(|entry| entry.package_name.as_deref() == Some("pkg"))
+        .expect("nine pairs share a package");
+    assert_eq!((pkg.pair_count, pkg.affected_system_count), (9, 2));
+    pairs_query.search = Some("CVE-2099-0001".into());
+    pairs_query.limit = Some(1);
+    assert!(
+        fetch_cve_inventory_pairs(&pool, &scope, &pairs_query)
+            .await
+            .expect("incomplete filtered page")
+            .package_host_unions
+            .is_empty()
+    );
+    pairs_query.offset = Some(1);
+    assert!(
+        fetch_cve_inventory_pairs(&pool, &scope, &pairs_query)
+            .await
+            .expect("filtered continuation")
+            .package_host_unions
+            .is_empty()
+    );
+    pairs_query.offset = None;
+    pairs_query.search = Some("CVE-2099-0002".into());
+    let other = fetch_cve_inventory_pairs(&pool, &scope, &pairs_query)
+        .await
+        .expect("same-count distinct host union");
+    assert_eq!(other.total, 1);
+    assert_eq!(other.package_host_unions.len(), 1);
+    assert_eq!(
+        (
+            other.package_host_unions[0].pair_count,
+            other.package_host_unions[0].affected_system_count
+        ),
+        (1, 1)
+    );
+    pairs_query.offset = Some(1);
+    assert!(
+        fetch_cve_inventory_pairs(&pool, &scope, &pairs_query)
+            .await
+            .expect("past-end page")
+            .package_host_unions
+            .is_empty()
+    );
+    pairs_query.offset = None;
     pairs_query.search = None;
     pairs_query.environment_id = Some(b);
     let admin_pairs = fetch_cve_inventory_pairs(&pool, &CveReadScope::All, &pairs_query)
@@ -393,6 +485,13 @@ async fn scoped_groups_and_members_keep_all_sections_and_page_past_200(pool: PgP
     assert_eq!(admin_pairs.total, 1);
     assert_eq!(admin_pairs.items[0].current_affected_count, 1);
     assert_eq!(admin_pairs.items[0].affected_count, 1);
+    assert_eq!(admin_pairs.package_host_unions.len(), 1);
+    assert_eq!(admin_pairs.package_host_unions[0].affected_system_count, 1);
+    let denied_union = fetch_cve_inventory_pairs(&pool, &scope, &pairs_query)
+        .await
+        .expect("environment B hidden from A reader");
+    assert_eq!(denied_union.total, 0);
+    assert!(denied_union.package_host_unions.is_empty());
 
     let mut query = params("environment");
     let groups = fetch_cve_inventory_groups(&pool, &scope, &query)
@@ -555,4 +654,185 @@ async fn scoped_groups_and_members_keep_all_sections_and_page_past_200(pool: PgP
     assert_eq!(high.items[0].exploited_pair_count, 0);
     assert_eq!(high.items[0].patchable_pair_count, 0);
     assert_eq!(high.items[0].total_active_hosts, Some(5));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires an explicitly verified disposable DATABASE_URL"]
+async fn fleet_substrings_are_literal_across_list_export_groups_and_pages(pool: PgPool) {
+    let suffix = Uuid::new_v4().simple().to_string();
+    let environment: Uuid =
+        sqlx::query_scalar("INSERT INTO environments(name) VALUES($1) RETURNING id")
+            .bind(format!("literal-{suffix}"))
+            .fetch_one(&pool)
+            .await
+            .expect("environment");
+    let (system_id, hostname, commit, _) = system(&pool, &suffix, environment).await;
+    let (derivation_id, store_path) = derivation(&pool, &hostname, commit, &suffix).await;
+    sqlx::query(
+        "INSERT INTO system_states(hostname,change_reason,store_path,generation, \
+         generation_matches_current_store_path) VALUES($1,'startup',$2,1,true)",
+    )
+    .bind(&hostname)
+    .bind(&store_path)
+    .execute(&pool)
+    .await
+    .expect("current state");
+    let scan_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO cve_scans(derivation_id,scanner_name,status) \
+         VALUES($1,'literal-test','in_progress') RETURNING id",
+    )
+    .bind(derivation_id)
+    .fetch_one(&pool)
+    .await
+    .expect("scan");
+    let cases = [
+        ("CVE-2099-1001", "lib_foo", "Ordinary title", 8.1),
+        ("CVE-2099-1002", "libXfoo", "Other title", 8.1),
+        ("CVE-2099-1003", "lib%foo", "MiXeD_%\\ TITLE", 9.7),
+        ("CVE-2099-1004", "lib\\foo", "Backslash title", 8.1),
+    ];
+    for (cve_id, package, title, cvss) in cases {
+        sqlx::query("INSERT INTO cves(id,cvss_v3_score,description,published_date) VALUES($1,$2,$3,'2099-01-01')")
+            .bind(cve_id)
+            .bind(cvss)
+            .bind(title)
+            .execute(&pool)
+            .await
+            .expect("CVE metadata");
+        sqlx::query(
+            "INSERT INTO cve_scan_vulnerability_observations( \
+             scan_id,canonical_cve_id,canonical_package_name,observed_package_name, \
+             observed_package_version,observed_derivation_path,is_whitelisted,detection_method) \
+             VALUES($1,$2,$3,$3,'1.0',$4,false,'literal-test')",
+        )
+        .bind(scan_id)
+        .bind(cve_id)
+        .bind(package)
+        .bind(format!("/nix/store/{suffix}-{cve_id}.drv"))
+        .execute(&pool)
+        .await
+        .expect("observation");
+    }
+    sqlx::query("UPDATE cve_scans SET status='completed',completed_at=now(),evidence_schema_version=1 WHERE id=$1")
+        .bind(scan_id)
+        .execute(&pool)
+        .await
+        .expect("sealed scan");
+
+    let scope = CveReadScope::Environments(vec![environment]);
+    for (term, expected) in [
+        ("lib_foo", "CVE-2099-1001"),
+        ("lib%foo", "CVE-2099-1003"),
+        ("lib\\foo", "CVE-2099-1004"),
+    ] {
+        let filters = CveFilters {
+            package: Some(term.into()),
+            ..CveFilters::default()
+        };
+        let list = fetch_cve_list(&pool, &scope, &filters).await.expect("list");
+        assert_eq!(list.len(), 1, "list package {term}");
+        assert_eq!(list[0].cve_id, expected);
+        let export = fetch_cves_for_export(&pool, &scope, &filters)
+            .await
+            .expect("export");
+        assert_eq!(export.len(), 1, "export package {term}");
+        assert_eq!(export[0].cve_id, expected);
+        let grouped = fetch_cve_packages_grouped(&pool, &scope, &filters)
+            .await
+            .expect("package groups");
+        assert_eq!(grouped.len(), 1, "package group {term}");
+        assert_eq!(grouped[0].package_name, term);
+
+        let mut query = params("environment");
+        query.package = Some(term.into());
+        query.limit = Some(1);
+        let pairs = fetch_cve_inventory_pairs(&pool, &scope, &query)
+            .await
+            .expect("paged pairs");
+        assert_eq!(pairs.total, 1, "pair total {term}");
+        assert_eq!(pairs.items[0].cve_id, expected);
+        assert_eq!(pairs.next_offset, None);
+        let groups = fetch_cve_inventory_groups(&pool, &scope, &query)
+            .await
+            .expect("environment groups");
+        assert_eq!(groups.total, 1);
+        assert_eq!(groups.items[0].cve_package_count, 1);
+        query.group_id = Some(environment);
+        let members = fetch_cve_inventory_members(&pool, &scope, &query)
+            .await
+            .expect("group members");
+        assert_eq!(members.total, 1);
+        assert_eq!(members.items[0].system_id, system_id);
+        assert_eq!(members.items[0].cve_id, expected);
+    }
+
+    // Search is case-insensitive, but punctuation in both titles and packages
+    // remains literal. The other package names would match unescaped _ or %.
+    for (term, expected) in [
+        ("mixed_%\\ title", "CVE-2099-1003"),
+        ("LIB_FOO", "CVE-2099-1001"),
+        ("lib%foo", "CVE-2099-1003"),
+    ] {
+        let filters = CveFilters {
+            search: Some(term.into()),
+            ..CveFilters::default()
+        };
+        let list = fetch_cve_list(&pool, &scope, &filters)
+            .await
+            .expect("search list");
+        assert_eq!(list.len(), 1, "search {term}");
+        assert_eq!(list[0].cve_id, expected);
+        let export = fetch_cves_for_export(&pool, &scope, &filters)
+            .await
+            .expect("search export");
+        assert_eq!(export.len(), 1);
+        assert_eq!(export[0].cve_id, expected);
+        let groups = fetch_cve_packages_grouped(&pool, &scope, &filters)
+            .await
+            .expect("search package groups");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            groups[0].cves.as_ref().expect("nested rows")[0].cve_id,
+            expected
+        );
+        let mut query = params("host");
+        query.search = Some(term.into());
+        query.group_id = Some(system_id);
+        let pairs = fetch_cve_inventory_pairs(&pool, &scope, &query)
+            .await
+            .expect("search pairs");
+        assert_eq!(pairs.total, 1);
+        assert_eq!(pairs.items[0].cve_id, expected);
+        let hosts = fetch_cve_inventory_groups(&pool, &scope, &query)
+            .await
+            .expect("search hosts");
+        assert_eq!(hosts.total, 1);
+        assert_eq!(hosts.items[0].cve_package_count, 1);
+        let members = fetch_cve_inventory_members(&pool, &scope, &query)
+            .await
+            .expect("search members");
+        assert_eq!(members.total, 1);
+        assert_eq!(members.items[0].cve_id, expected);
+    }
+
+    // Other exact filters and the authorized environment boundary still apply.
+    let mut query = params("environment");
+    query.package = Some("lib%foo".into());
+    query.severity = Some("high".into());
+    assert_eq!(
+        fetch_cve_inventory_pairs(&pool, &scope, &query)
+            .await
+            .expect("severity")
+            .total,
+        0
+    );
+    query.severity = None;
+    query.environment_id = Some(Uuid::new_v4());
+    assert_eq!(
+        fetch_cve_inventory_pairs(&pool, &scope, &query)
+            .await
+            .expect("hidden environment")
+            .total,
+        0
+    );
 }

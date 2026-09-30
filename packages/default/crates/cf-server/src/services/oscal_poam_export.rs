@@ -47,6 +47,8 @@ pub enum Source<'a> {
     },
     /// A source decision, including pending and retired decisions.
     Acceptance {
+        /// Operator-facing RA renewal chain, separate from typed source ID.
+        human_id: Option<&'a str>,
         /// Source table family; a pending waiver is not an approved risk.
         source_kind: &'a str,
         /// Persisted decision rationale; it is not a measured impact.
@@ -318,6 +320,7 @@ pub fn write_poam(document: &Document<'_>) -> Result<Encodings> {
             }
         }
         if let Source::Acceptance {
+            human_id,
             rationale,
             accepted_by,
             accepted_at,
@@ -332,6 +335,16 @@ pub fn write_poam(document: &Document<'_>) -> Result<Encodings> {
             ..
         } = &entry.source
         {
+            if let Some(human_id) = human_id {
+                ensure!(
+                    human_id.starts_with("RA-")
+                        && human_id[3..].len() >= 4
+                        && human_id[3..].bytes().all(|byte| byte.is_ascii_digit()),
+                    "acceptance {} has invalid RA ID",
+                    entry.uuid
+                );
+                props.push(("risk-acceptance-id", (*human_id).to_owned()));
+            }
             ensure!(
                 !rationale.trim().is_empty(),
                 "acceptance {} needs a decision rationale",

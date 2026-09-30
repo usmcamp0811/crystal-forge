@@ -45,6 +45,23 @@ pub struct AcceptanceExportQuery {
     pub offset: Option<i64>,
 }
 
+/// Contains the existing register filters and optional literal search text.
+#[derive(Deserialize)]
+pub struct AcceptanceSearchQuery {
+    /// Restricts the source family.
+    pub source: Option<acceptance_register::AcceptanceSource>,
+    /// Restricts the persisted decision status.
+    pub status: Option<String>,
+    /// Restricts the direct or currently authorized environment scope.
+    pub environment_id: Option<uuid::Uuid>,
+    /// Requests a page of 1 through 100 rows.
+    pub limit: Option<i64>,
+    /// Skips this many matching rows.
+    pub offset: Option<i64>,
+    /// Searches the authorized source labels before page count and pagination.
+    pub search: Option<String>,
+}
+
 /// Downloads every authorized acceptance matching the source filters.
 ///
 /// The endpoint ignores list pagination and caps the whole read-only snapshot.
@@ -209,6 +226,7 @@ pub async fn export(
                 },
                 review_deadline,
                 authorization_expiry: row.expires_at,
+                human_id: Some(row.human_id.clone()),
             },
             evidence: &evidence[index],
         });
@@ -274,12 +292,13 @@ pub struct ConvertAcceptanceRequest {
 
 /// Returns an authorized page of policy waivers and CVE disposition decisions.
 ///
-/// The decision's source type and UUID are stable identities, but the server
-/// must recheck source-specific permissions and evidence before any mutation.
+/// The RA number identifies a renewal chain; the typed source UUID and its
+/// optimistic revision identify the decision for mutations. The server
+/// rechecks source-specific permissions and evidence before any mutation.
 pub async fn list(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
-    query: Result<Query<AcceptanceListQuery>, QueryRejection>,
+    query: Result<Query<AcceptanceSearchQuery>, QueryRejection>,
 ) -> Response {
     let Query(query) = match query {
         Ok(query) => query,
@@ -291,7 +310,16 @@ pub async fn list(
                 .into_response();
         }
     };
-    match acceptance_register::list(&pool, user.user_id, &query).await {
+    let filters = AcceptanceListQuery {
+        source: query.source,
+        status: query.status,
+        environment_id: query.environment_id,
+        limit: query.limit,
+        offset: query.offset,
+    };
+    match acceptance_register::list_search(&pool, user.user_id, &filters, query.search.as_deref())
+        .await
+    {
         Ok(page) => Json(page).into_response(),
         Err(AcceptanceReadError::Validation(message)) => (
             StatusCode::BAD_REQUEST,
@@ -471,5 +499,22 @@ pub async fn convert(
             Json(json!({"error":"invalid_source","message":"Unknown acceptance source"})),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_query_decodes_search_and_existing_page_filters() {
+        let uri = "/api/v1/acceptances?search=RA-0102&limit=1&offset=100&status=accepted"
+            .parse()
+            .unwrap();
+        let Query(query) = Query::<AcceptanceSearchQuery>::try_from_uri(&uri).unwrap();
+        assert_eq!(query.search.as_deref(), Some("RA-0102"));
+        assert_eq!(query.limit, Some(1));
+        assert_eq!(query.offset, Some(100));
+        assert_eq!(query.status.as_deref(), Some("accepted"));
     }
 }

@@ -54,6 +54,9 @@ pub struct AcceptanceEntry {
     pub source: AcceptanceSource,
     /// Gives the unchanged source row UUID, including for retired decisions.
     pub source_id: Uuid,
+    /// Identifies the operator-facing renewal chain, shared by its source rows.
+    /// Mutation authority remains the typed source UUID and its source revision.
+    pub human_id: String,
     /// Gives the waiver's last status-change timestamp for optimistic checks.
     /// CVE decisions use the immutable `source_id` as their decision version.
     pub waiver_updated_at: Option<DateTime<Utc>>,
@@ -65,6 +68,8 @@ pub struct AcceptanceEntry {
     pub system_id: Option<Uuid>,
     /// Gives the actor-visible current hostname of a host-scoped decision.
     pub system_hostname: Option<String>,
+    /// Gives the current name of the decision's direct environment scope.
+    pub environment_name: Option<String>,
     /// Gives the original environment scope only for environment decisions.
     /// Host and waiver decisions do not store an original environment ID.
     pub environment_id: Option<Uuid>,
@@ -72,6 +77,10 @@ pub struct AcceptanceEntry {
     pub policy_lineage_id: Option<Uuid>,
     /// Gives the exact policy version on a waiver.
     pub policy_version_id: Option<Uuid>,
+    /// Gives the name on the waiver's exact policy version in its finding lineage.
+    pub policy_title: Option<String>,
+    /// Gives the first trusted requirement external ID on that exact version.
+    pub requirement_external_id: Option<String>,
     /// Gives the CVE's canonical ID on a CVE decision.
     pub canonical_cve_id: Option<String>,
     /// Gives the CVE's canonical package name on a CVE decision.
@@ -156,16 +165,21 @@ impl From<anyhow::Error> for AcceptanceReadError {
 #[derive(FromRow)]
 struct PageRow {
     total: i64,
+    missing_ids: i64,
     source: Option<String>,
     source_id: Option<Uuid>,
+    human_number: Option<i64>,
     waiver_updated_at: Option<DateTime<Utc>>,
     status: Option<String>,
     finding_id: Option<Uuid>,
     system_id: Option<Uuid>,
     system_hostname: Option<String>,
+    environment_name: Option<String>,
     environment_id: Option<Uuid>,
     policy_lineage_id: Option<Uuid>,
     policy_version_id: Option<Uuid>,
+    policy_title: Option<String>,
+    requirement_external_id: Option<String>,
     canonical_cve_id: Option<String>,
     canonical_package_name: Option<String>,
     justification: Option<String>,
@@ -202,12 +216,32 @@ pub async fn list(
     actor_id: Uuid,
     query: &AcceptanceListQuery,
 ) -> Result<AcceptancePage, AcceptanceReadError> {
+    list_search(pool, actor_id, query, None).await
+}
+
+/// Lists authorized decisions with a literal case-insensitive source-label search.
+///
+/// Search matches all scoped rows before COUNT and LIMIT. The unsearched reader
+/// remains available to snapshot export callers so a UI search cannot narrow an
+/// export by accident.
+///
+/// # Errors
+///
+/// Returns a validation error for search over 256 bytes, or the same authorization,
+/// projection and database errors as [`list`].
+pub async fn list_search(
+    pool: &PgPool,
+    actor_id: Uuid,
+    query: &AcceptanceListQuery,
+    search: Option<&str>,
+) -> Result<AcceptancePage, AcceptanceReadError> {
     let (limit, offset) = validate(query)?;
+    validate_search(search)?;
     let mut tx = pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .execute(&mut *tx)
         .await?;
-    let page = list_scoped_tx(&mut tx, actor_id, query, limit, offset).await?;
+    let page = list_scoped_tx(&mut tx, actor_id, query, limit, offset, search).await?;
     tx.commit().await?;
     Ok(page)
 }
@@ -231,7 +265,14 @@ pub async fn list_tx(
     query: &AcceptanceListQuery,
 ) -> Result<AcceptancePage, AcceptanceReadError> {
     let (limit, offset) = validate(query)?;
-    list_scoped_tx(tx, actor_id, query, limit, offset).await
+    list_scoped_tx(tx, actor_id, query, limit, offset, None).await
+}
+
+fn validate_search(search: Option<&str>) -> Result<(), AcceptanceReadError> {
+    if search.is_some_and(|search| search.len() > 256) {
+        return Err(AcceptanceReadError::Validation("search exceeds 256 bytes"));
+    }
+    Ok(())
 }
 
 fn validate(query: &AcceptanceListQuery) -> Result<(i64, i64), AcceptanceReadError> {
@@ -267,6 +308,7 @@ async fn list_scoped_tx(
     query: &AcceptanceListQuery,
     limit: i64,
     offset: i64,
+    search: Option<&str>,
 ) -> Result<AcceptancePage, AcceptanceReadError> {
     let roles: Vec<String> = sqlx::query_scalar(
         "SELECT role::text FROM user_role_assignments WHERE user_id=$1 AND EXISTS (SELECT 1 FROM users WHERE id=$1 AND is_active)",
@@ -359,13 +401,41 @@ async fn list_scoped_tx(
               OR ($4='accepted_or_converted' AND (d.retired_at IS NULL OR conversion.poam_id IS NOT NULL)))
             AND ($2 OR d.environment_id=ANY($1))
             AND ($5::uuid IS NULL OR d.environment_id=$5)
-        ), total AS (SELECT count(*) AS total FROM decisions),
-        page AS (SELECT * FROM decisions
-          ORDER BY recorded_at DESC,source COLLATE "C",source_id DESC
-          LIMIT $6 OFFSET $7)
-        SELECT total.total,page.*,scope_host.hostname AS system_hostname
+        ), mapped AS (SELECT decisions.*,identity.human_number,
+            scope_host.hostname AS system_hostname,scope_env.name AS environment_name,
+            policy_version.name AS policy_title, requirement.external_id AS requirement_external_id
+          FROM decisions
+          LEFT JOIN risk_acceptance_source_ids identity
+            ON identity.source_kind=decisions.source AND identity.source_id=decisions.source_id
+          LEFT JOIN systems scope_host ON scope_host.id=decisions.system_id
+          LEFT JOIN environments scope_env ON scope_env.id=decisions.environment_id
+          LEFT JOIN deployment_policy_versions policy_version
+            ON decisions.source='policy_waiver' AND policy_version.id=decisions.policy_version_id
+              AND policy_version.policy_id=decisions.policy_lineage_id
+          LEFT JOIN LATERAL (
+            SELECT requirement.external_id
+            FROM policy_requirement_mappings mapping
+            JOIN compliance_requirement_versions requirement ON requirement.id=mapping.requirement_version_id
+            WHERE mapping.policy_version_id=policy_version.id AND mapping.trust_state='trusted'
+            ORDER BY requirement.external_id COLLATE "C", requirement.id
+            LIMIT 1
+          ) requirement ON TRUE
+        ), filtered AS (
+          SELECT * FROM mapped
+          WHERE $8::text IS NULL OR $8='' OR
+            EXISTS (SELECT 1 FROM (VALUES
+              ('RA-' || lpad(human_number::text, 4, '0')),
+              (policy_title),(canonical_cve_id),(canonical_package_name),
+              (requirement_external_id),(system_hostname),(environment_name),
+              (justification)
+            ) AS labels(value) WHERE strpos(lower(labels.value), lower($8)) > 0)
+        ), total AS (SELECT count(*) AS total,
+          (SELECT count(*) FROM mapped WHERE human_number IS NULL) AS missing_ids FROM filtered),
+        page AS (SELECT * FROM filtered
+           ORDER BY recorded_at DESC,source COLLATE "C",source_id DESC
+           LIMIT $6 OFFSET $7)
+        SELECT total.total,total.missing_ids,page.*
         FROM total LEFT JOIN page ON TRUE
-        LEFT JOIN systems scope_host ON scope_host.id=page.system_id
         ORDER BY page.recorded_at DESC,page.source COLLATE "C",page.source_id DESC
     "#,
     )
@@ -376,8 +446,12 @@ async fn list_scoped_tx(
     .bind(query.environment_id)
     .bind(limit)
     .bind(offset)
+    .bind(search.map(str::trim).filter(|s| !s.is_empty()))
     .fetch_all(&mut **tx)
     .await?;
+    if rows.first().is_some_and(|row| row.missing_ids != 0) {
+        return Err(anyhow!("acceptance source has no RA identity").into());
+    }
     let total = rows.first().map_or(0, |row| row.total);
     let items = rows
         .into_iter()
@@ -393,6 +467,11 @@ async fn list_scoped_tx(
                 source_id: row
                     .source_id
                     .ok_or_else(|| anyhow!("decision missing ID"))?,
+                human_id: format!(
+                    "RA-{:04}",
+                    row.human_number
+                        .ok_or_else(|| anyhow!("decision missing RA identity"))?
+                ),
                 waiver_updated_at: row.waiver_updated_at,
                 status: row
                     .status
@@ -400,9 +479,12 @@ async fn list_scoped_tx(
                 finding_id: row.finding_id,
                 system_id: row.system_id,
                 system_hostname: row.system_hostname,
+                environment_name: row.environment_name,
                 environment_id: row.environment_id,
                 policy_lineage_id: row.policy_lineage_id,
                 policy_version_id: row.policy_version_id,
+                policy_title: row.policy_title,
+                requirement_external_id: row.requirement_external_id,
                 canonical_cve_id: row.canonical_cve_id,
                 canonical_package_name: row.canonical_package_name,
                 justification: row
@@ -516,6 +598,72 @@ mod tests {
         assert_eq!(last.total, 102);
         assert_eq!(last.items.len(), 2);
         assert!(!last.has_more);
+        let sought = last.items[1].human_id.clone();
+        let searched = list_search(
+            &pool,
+            viewer,
+            &AcceptanceListQuery {
+                source: Some(AcceptanceSource::CveEnvironment),
+                limit: Some(1),
+                ..Default::default()
+            },
+            Some(&sought),
+        )
+        .await
+        .unwrap();
+        assert_eq!(searched.total, 1);
+        assert_eq!(searched.items[0].human_id, sought);
+        assert!(!searched.has_more);
+        for literal in ["%", "_"] {
+            assert_eq!(
+                list_search(
+                    &pool,
+                    viewer,
+                    &AcceptanceListQuery::default(),
+                    Some(literal)
+                )
+                .await
+                .unwrap()
+                .total,
+                0
+            );
+        }
+        let name: String = sqlx::query_scalar("SELECT name FROM environments WHERE id=$1")
+            .bind(a)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let named = list_search(
+            &pool,
+            viewer,
+            &AcceptanceListQuery {
+                source: Some(AcceptanceSource::CveEnvironment),
+                limit: Some(1),
+                ..Default::default()
+            },
+            Some(&name),
+        )
+        .await
+        .unwrap();
+        assert_eq!(named.total, 102);
+        assert_eq!(named.items.len(), 1);
+        assert!(named.has_more);
+        assert_eq!(
+            named.items[0].environment_name.as_deref(),
+            Some(name.as_str())
+        );
+        assert_eq!(
+            list_search(
+                &pool,
+                viewer,
+                &AcceptanceListQuery::default(),
+                Some("hidden")
+            )
+            .await
+            .unwrap()
+            .total,
+            0
+        );
         let host_page = list_tx(
             &mut tx,
             viewer,
@@ -673,6 +821,7 @@ mod tests {
         assert_eq!(page.total, 2);
         assert_eq!(page.items.len(), 1);
         assert!(page.has_more);
+        assert!(page.items[0].human_id.starts_with("RA-"));
         let next = list(
             &pool,
             viewer,
@@ -692,8 +841,25 @@ mod tests {
         );
         assert_eq!(next.items[0].system_id, Some(host));
         assert_eq!(next.items[0].environment_id, None);
+        assert_ne!(page.items[0].human_id, next.items[0].human_id);
         assert!(next.items[0].expires_at.is_none());
         assert!(next.items[0].review_date.is_none());
+        for (needle, expected) in [("accept-host-", 1), ("cve-2099-12345", 2), ("openssl", 2)] {
+            let found = list_search(
+                &pool,
+                viewer,
+                &AcceptanceListQuery {
+                    limit: Some(1),
+                    ..Default::default()
+                },
+                Some(needle),
+            )
+            .await
+            .unwrap();
+            assert_eq!(found.total, expected, "search {needle}");
+            assert_eq!(found.items.len(), 1);
+            assert_eq!(found.has_more, expected > 1);
+        }
         let admin_page = list(&pool, admin, &AcceptanceListQuery::default())
             .await
             .unwrap();
@@ -711,9 +877,37 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
+        let version: Uuid = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM deployment_policies WHERE id=$1",
+        )
+        .bind(policy)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE deployment_policy_versions SET name='Exact scoped policy' WHERE id=$1")
+            .bind(version)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let framework: Uuid = sqlx::query_scalar("INSERT INTO compliance_frameworks(name,canonical_source_key) VALUES('Search test',$1) RETURNING id")
+            .bind(format!("search-{}", Uuid::new_v4())).fetch_one(&pool).await.unwrap();
+        let release: Uuid = sqlx::query_scalar("INSERT INTO compliance_framework_versions(framework_id,version,canonical_release_key) VALUES($1,'v1','v1') RETURNING id")
+            .bind(framework).fetch_one(&pool).await.unwrap();
+        let requirement: Uuid = sqlx::query_scalar("INSERT INTO compliance_requirements(framework_id,canonical_requirement_key) VALUES($1,'REQ-41') RETURNING id")
+            .bind(framework).fetch_one(&pool).await.unwrap();
+        let requirement_version: Uuid = sqlx::query_scalar("INSERT INTO compliance_requirement_versions(requirement_id,framework_version_id,external_id,kind) VALUES($1,$2,'REQ-41','control') RETURNING id")
+            .bind(requirement).bind(release).fetch_one(&pool).await.unwrap();
+        sqlx::query("INSERT INTO policy_requirement_mappings(policy_version_id,requirement_version_id,relationship,coverage,trust_state) VALUES($1,$2,'implements','full','trusted')")
+            .bind(version).bind(requirement_version).execute(&pool).await.unwrap();
+        let suggested: Uuid = sqlx::query_scalar("INSERT INTO compliance_requirements(framework_id,canonical_requirement_key) VALUES($1,'REQ-00') RETURNING id")
+            .bind(framework).fetch_one(&pool).await.unwrap();
+        let suggested_version: Uuid = sqlx::query_scalar("INSERT INTO compliance_requirement_versions(requirement_id,framework_version_id,external_id,kind) VALUES($1,$2,'REQ-00','control') RETURNING id")
+            .bind(suggested).bind(release).fetch_one(&pool).await.unwrap();
+        sqlx::query("INSERT INTO policy_requirement_mappings(policy_version_id,requirement_version_id,relationship,coverage,trust_state) VALUES($1,$2,'implements','full','suggested')")
+            .bind(version).bind(suggested_version).execute(&pool).await.unwrap();
         let waiver: Uuid = sqlx::query_scalar(
             "INSERT INTO finding_waivers(finding_id,justification,policy_version_id,observation_token,observation_snapshot,created_by) VALUES($1,'Approved only after review',$2,'test-observation','{}',$3) RETURNING id",
-        ).bind(finding).bind(Uuid::new_v4()).bind(admin).fetch_one(&pool).await.unwrap();
+        ).bind(finding).bind(version).bind(admin).fetch_one(&pool).await.unwrap();
         sqlx::query("UPDATE finding_waivers SET status='accepted',accepted_by=$1,accepted_at=now(),expires_at=now()+interval '60 days' WHERE id=$2")
             .bind(admin).bind(waiver).execute(&pool).await.unwrap();
         let policy_page = list(
@@ -730,6 +924,53 @@ mod tests {
         .unwrap();
         assert_eq!(policy_page.total, 1);
         assert_eq!(policy_page.items[0].source_id, waiver);
+        assert_eq!(
+            policy_page.items[0].policy_title.as_deref(),
+            Some("Exact scoped policy")
+        );
+        assert_eq!(
+            policy_page.items[0].requirement_external_id.as_deref(),
+            Some("REQ-41")
+        );
+        assert_eq!(
+            list_search(
+                &pool,
+                admin,
+                &AcceptanceListQuery {
+                    source: Some(AcceptanceSource::PolicyWaiver),
+                    ..Default::default()
+                },
+                Some("REQ-00")
+            )
+            .await
+            .unwrap()
+            .total,
+            0
+        );
+        for needle in ["scoped policy", "req-41"] {
+            let matched = list_search(
+                &pool,
+                admin,
+                &AcceptanceListQuery {
+                    source: Some(AcceptanceSource::PolicyWaiver),
+                    limit: Some(1),
+                    ..Default::default()
+                },
+                Some(needle),
+            )
+            .await
+            .unwrap();
+            assert_eq!(matched.total, 1);
+            assert_eq!(matched.items[0].source_id, waiver);
+            assert_eq!(
+                list_search(&pool, viewer, &AcceptanceListQuery::default(), Some(needle))
+                    .await
+                    .unwrap()
+                    .total,
+                0
+            );
+        }
+        assert_ne!(policy_page.items[0].human_id, page.items[0].human_id);
         assert_eq!(policy_page.items[0].system_id, Some(host));
         assert!(policy_page.items[0].review_date.is_none());
         assert!(policy_page.items[0].expires_at.is_some());
@@ -763,6 +1004,65 @@ mod tests {
         .await
         .unwrap();
         assert!(after_move.items.is_empty());
+
+        // Direct SQL writers receive identities before first visibility. The
+        // waiver FK and CVE renewal transaction bind only proven successors.
+        let waiver_revision: DateTime<Utc> =
+            sqlx::query_scalar("SELECT updated_at FROM finding_waivers WHERE id=$1")
+                .bind(waiver)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let successor: Uuid = sqlx::query_scalar("INSERT INTO finding_waivers(finding_id,justification,policy_version_id,observation_token,observation_snapshot,created_by,predecessor_id,predecessor_updated_at,review_due_at) VALUES($1,'reviewed',$2,'test-observation','{}',$3,$4,$5,current_date+90) RETURNING id")
+            .bind(finding).bind(Uuid::new_v4()).bind(admin).bind(waiver).bind(waiver_revision)
+            .fetch_one(&pool).await.unwrap();
+        let waiver_chain: Vec<(Uuid, i64)> = sqlx::query_as("SELECT source_id,human_number FROM risk_acceptance_source_ids WHERE source_kind='policy_waiver' AND source_id=ANY($1) ORDER BY source_id")
+            .bind(&[waiver,successor][..]).fetch_all(&pool).await.unwrap();
+        assert_eq!(waiver_chain.len(), 2);
+        assert_eq!(waiver_chain[0].1, waiver_chain[1].1);
+
+        for (kind, predecessor) in [("cve_host", host_id), ("cve_environment", env_id)] {
+            let table = if kind == "cve_host" {
+                "cve_system_dispositions"
+            } else {
+                "cve_environment_dispositions"
+            };
+            let scope = if kind == "cve_host" {
+                "system_id"
+            } else {
+                "environment_id"
+            };
+            let scope_id = if kind == "cve_host" { host } else { a };
+            let mut transaction = pool.begin().await.unwrap();
+            sqlx::query(&format!("UPDATE {table} SET retired_at=now(),retired_by=$1,retirement_reason='renewed' WHERE id=$2"))
+                .bind(admin).bind(predecessor).execute(&mut *transaction).await.unwrap();
+            let fresh: Uuid = sqlx::query_scalar(&format!("INSERT INTO {table}(canonical_cve_id,canonical_package_name,{scope},state,justification,accepted_by,accepted_at) VALUES($1,'openssl',$2,'accepted','renewed',$3,now()) RETURNING id"))
+                .bind(cve).bind(scope_id).bind(admin).fetch_one(&mut *transaction).await.unwrap();
+            let temporary: i64 = sqlx::query_scalar("SELECT human_number FROM risk_acceptance_source_ids WHERE source_kind=$1 AND source_id=$2")
+                .bind(kind).bind(fresh).fetch_one(&mut *transaction).await.unwrap();
+            let original: i64 = sqlx::query_scalar("SELECT human_number FROM risk_acceptance_source_ids WHERE source_kind=$1 AND source_id=$2")
+                .bind(kind).bind(predecessor).fetch_one(&mut *transaction).await.unwrap();
+            assert_ne!(temporary, original);
+            sqlx::query("INSERT INTO admin_audit_events(actor_user_id,action,target,metadata) VALUES($1,'cve_acceptance_renewed','test',$2)")
+                .bind(admin)
+                .bind(serde_json::json!({"source_type": if kind == "cve_host" { "host" } else { "environment" },
+                    "predecessor_id": predecessor, "successor_id": fresh}))
+                .execute(&mut *transaction).await.unwrap();
+            sqlx::query("SELECT link_cve_risk_acceptance_id($1,$2,$3)")
+                .bind(kind)
+                .bind(predecessor)
+                .bind(fresh)
+                .execute(&mut *transaction)
+                .await
+                .unwrap();
+            let linked: i64 = sqlx::query_scalar("SELECT human_number FROM risk_acceptance_source_ids WHERE source_kind=$1 AND source_id=$2")
+                .bind(kind).bind(fresh).fetch_one(&mut *transaction).await.unwrap();
+            assert_eq!(linked, original);
+            transaction.rollback().await.unwrap();
+            let absent: i64 = sqlx::query_scalar("SELECT count(*) FROM risk_acceptance_source_ids WHERE source_kind=$1 AND source_id=$2")
+                .bind(kind).bind(fresh).fetch_one(&pool).await.unwrap();
+            assert_eq!(absent, 0);
+        }
 
         // Pagination applies after scope and source filtering, not before it.
         for index in 0..102 {
@@ -800,6 +1100,57 @@ mod tests {
         assert_eq!(last.total, 103);
         assert_eq!(last.items.len(), 3);
         assert!(!last.has_more);
+        let previous_number: i64 = sqlx::query_scalar("SELECT human_number FROM risk_acceptance_source_ids WHERE source_kind='cve_host' AND source_id=$1")
+            .bind(host_id).fetch_one(&pool).await.unwrap();
+        sqlx::query("UPDATE cve_system_dispositions SET retired_at=now(),retired_by=$1,retirement_reason='revoked' WHERE id=$2")
+            .bind(admin).bind(host_id).execute(&pool).await.unwrap();
+        let fresh_id: Uuid = sqlx::query_scalar("INSERT INTO cve_system_dispositions(canonical_cve_id,canonical_package_name,system_id,state,justification,accepted_by,accepted_at) VALUES($1,'openssl',$2,'accepted','new approval',$3,now()) RETURNING id")
+            .bind(cve).bind(host).bind(admin).fetch_one(&pool).await.unwrap();
+        let new_number: i64 = sqlx::query_scalar("SELECT human_number FROM risk_acceptance_source_ids WHERE source_kind='cve_host' AND source_id=$1")
+            .bind(fresh_id).fetch_one(&pool).await.unwrap();
+        assert_ne!(previous_number, new_number);
+        let new_page = list(
+            &pool,
+            admin,
+            &AcceptanceListQuery {
+                source: Some(AcceptanceSource::CveHost),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_ne!(
+            new_page
+                .items
+                .iter()
+                .find(|row| row.source_id == host_id)
+                .unwrap()
+                .human_id,
+            new_page
+                .items
+                .iter()
+                .find(|row| row.source_id == fresh_id)
+                .unwrap()
+                .human_id
+        );
+
+        // A missing identity anywhere in the authorized filtered set fails
+        // before pagination, even if the missing row is outside the page.
+        sqlx::query("DELETE FROM risk_acceptance_source_ids WHERE source_kind='cve_environment' AND source_id=$1")
+            .bind(env_id).execute(&pool).await.unwrap();
+        assert!(matches!(
+            list(
+                &pool,
+                viewer,
+                &AcceptanceListQuery {
+                    source: Some(AcceptanceSource::CveEnvironment),
+                    limit: Some(1),
+                    ..Default::default()
+                }
+            )
+            .await,
+            Err(AcceptanceReadError::Projection(_))
+        ));
         sqlx::query("UPDATE users SET is_active=false WHERE id=$1")
             .bind(viewer)
             .execute(&pool)

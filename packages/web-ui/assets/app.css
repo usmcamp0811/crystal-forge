@@ -7408,9 +7408,17 @@ tr.attention-flash {
 .poams-register .pv-main { padding: 0; overflow: visible; min-width: 0; container-type: inline-size; container-name: pvmain; }
 .poams-register .poams-scope { padding: 12px 14px; gap: 12px; }
 .poams-register .poams-toolbar { padding: 10px 14px; }
+.poams-register .poams-toolbar.pv-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.poams-register .rr-toolbar-primary, .poams-register .rr-toolbar-secondary { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.poams-register .rr-toolbar-primary { flex: 1 1 370px; }
+.poams-register .rr-toolbar-secondary { flex: 1 1 auto; }
 .poams-register .poams-toolbar .input { flex: 1 1 220px; max-width: 300px; }
 .poams-register .poams-pills { padding: 9px 14px; gap: 6px; }
 .poams-register .poams-pills .rr-pill { border-radius: 99px; padding: 5px 10px; font-size: 12px; }
+.poams-register .rr-scope-dot, .poams-register .rr-group-source-dot, .poams-register .rr-group-neutral-dot { display: inline-block; flex: 0 0 7px; width: 7px; height: 7px; border-radius: 50%; }
+.poams-register .rr-scope-dot { margin-right: 6px; }
+.poams-register .rr-group-neutral-dot { background: var(--cf-text-muted); }
+.poams-register .rr-host-only-summary { padding: 5px 10px; color: var(--cf-text-muted); font-size: 11px; }
 .poams-register .poams-group-toggle { padding: 2px 4px; background: transparent; }
 .poams-register .poams-group { border-top: 1px solid var(--cf-divider); }
 .poams-register .poams-table-wrap { min-width: 0; max-width: 100%; }
@@ -7437,6 +7445,8 @@ tr.attention-flash {
 .poams-register .pv-stack { display: flex; width: 110px; height: 6px; flex-shrink: 0; gap: 1px; overflow: hidden; border-radius: 99px; background: var(--cf-divider); }
 .poams-register .pv-stack > span { min-width: 0; }
 .poams-register .poams-acceptances .pv-group-head .pv-stack { margin-left: auto; }
+.poams-register .rr-group-review-soon { border-radius: 99px; padding: 2px 7px; color: #fbbf24; background: color-mix(in oklab, #fbbf24 12%, transparent); font-size: 10px; font-weight: 700; white-space: nowrap; }
+.poams-register .rr-acceptance-group-head .pv-stack { margin-left: 0; }
 .poams-register .pv-group-head:has(.pv-group-risk)::before,
 .poams-register .pv-group-head:has(.pv-group-late)::before { content: ""; flex: 0 0 7px; width: 7px; height: 7px; border-radius: 50%; background: #f87171; }
 .poams-register .pv-group-late,
@@ -7462,7 +7472,22 @@ tr.attention-flash {
 .poams-acceptance-warning { color: #fbbf24; background: color-mix(in oklab, #fbbf24 14%, transparent); }
 .poams-acceptance-retired { color: var(--cf-text-muted); background: var(--cf-subtle-bg); }
 .poams-acceptance-converted { color: #60a5fa; background: color-mix(in oklab, #60a5fa 14%, transparent); }
-.rr-acceptance-drawer { width: min(760px, 96vw); }
+.poams-register .rr-acceptances-table .rr-source-type { color: #a78bfa; font-weight: 600; }
+.poams-register .rr-acceptances-table .rr-no-risk { color: var(--cf-text-muted); font-size: 10px; }
+.poams-register .rr-review-cell { font-variant-numeric: tabular-nums; }
+.poams-register .rr-review-cell.expired, .poams-register .rr-review-cell.expired .rr-review-relative { color: #f87171; }
+.poams-register .rr-review-cell small { display: block; font-size: 10px; }
+.poams-register .rr-authorization-expiry { color: var(--cf-text-muted); }
+/* Acceptance-only omits plan risk because decision sources have no CAT field.
+   Keep its source-backed ID: the table still has six columns. */
+.poams-register .poams-table.rr-acceptances-only th:nth-child(1) { width: 15%; }
+.poams-register .poams-table.rr-acceptances-only th:nth-child(2) { width: 34%; }
+.poams-register .poams-table.rr-acceptances-only th:nth-child(3) { width: 17%; }
+.poams-register .poams-table.rr-acceptances-only th:nth-child(4) { width: 12%; }
+.poams-register .poams-table.rr-acceptances-only th:nth-child(5) { width: 10%; }
+.poams-register .poams-table.rr-acceptances-only th:nth-child(6) { width: 12%; }
+.poams-register .poams-table.rr-acceptances-only td:last-child { text-align: right; }
+.poam-tray.rr-acceptance-drawer { width: min(760px, 96vw); }
 .rr-acceptance-head { min-height: 74px; }
 .rr-acceptance-title { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; }
 .rr-acceptance-title > svg { flex: 0 0 auto; color: #a78bfa; }
@@ -7524,6 +7549,17 @@ tr.attention-flash {
   .poams-register .poams-table th:nth-child(7) { width: 10%; }
 }
 @container pvmain (max-width: 580px) { .poams-register .poams-table .pv-c-owner { display: none; } }
+@container pvmain (max-width: 720px) {
+  .poams-register .poams-table.rr-acceptances-only th:nth-child(1) { width: 19%; }
+  .poams-register .poams-table.rr-acceptances-only th:nth-child(2) { width: 40%; }
+  .poams-register .poams-table.rr-acceptances-only th:nth-child(3) { width: 22%; }
+  .poams-register .poams-table.rr-acceptances-only th:nth-child(6) { width: 19%; }
+}
+@container pvmain (max-width: 580px) {
+  .poams-register .poams-table.rr-acceptances-only th:nth-child(1) { width: 22%; }
+  .poams-register .poams-table.rr-acceptances-only th:nth-child(2) { width: 48%; }
+  .poams-register .poams-table.rr-acceptances-only th:nth-child(6) { width: 30%; }
+}
 .cf-policy-link { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; color: var(--cf-brand-purple); font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; padding: 3px 8px; border-radius: 6px; background: color-mix(in oklab, var(--cf-brand-purple) 10%, transparent); border: 1px solid color-mix(in oklab, var(--cf-brand-purple) 22%, transparent); }
 .cf-policy-link svg { flex-shrink: 0; }
 .cf-policy-link:hover { color: var(--cf-brand-purple-hover); background: color-mix(in oklab, var(--cf-brand-purple) 16%, transparent); border-color: color-mix(in oklab, var(--cf-brand-purple) 32%, transparent); }
@@ -8314,3 +8350,25 @@ html[data-theme="light"] .scanning-detail-callout-danger strong { color:#b91c1c;
 .cve-sel-chip.on { border-color: var(--cf-brand-purple); background: color-mix(in oklab, var(--cf-brand-purple) 12%, var(--cf-card-bg)); }
 .cve-batch-fields { display: flex; flex-direction: column; gap: 12px; padding: 13px; border: 1px solid var(--cf-divider); border-radius: 9px; }
 .cve-batch-summary { margin-right: auto; font-size: 12px; color: var(--cf-text-muted); }
+.cve-batch-modal { display: flex; flex-direction: column; }
+.cve-batch-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.cve-batch-head > div { min-width: 0; }
+.cve-batch-head p { color: var(--cf-text-secondary); font-size: 12px; margin: 6px 0 0; }
+.cve-batch-body { min-height: 0; }
+.cve-batch-pkg-name { font-size: 12px; }
+.cve-batch-id.skip { opacity: .6; }
+.cve-batch-reason { color: var(--cf-text-secondary); font-size: 10px; }
+.cve-batch-env-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.cve-batch-scope-help { margin: -6px 0 0; color: var(--cf-text-muted); font-size: 11.5px; }
+.cve-batch-fields { gap: 12px; padding: 12px 13px; }
+.cve-batch-poam { border-color: rgba(96,165,250,.3); background: rgba(96,165,250,.06); }
+.cve-batch-waiver { border-color: rgba(167,139,250,.3); background: rgba(167,139,250,.06); }
+.cve-batch-section-title { display: flex; align-items: center; gap: 7px; color: #60a5fa; font-size: 11.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+.cve-batch-waiver .cve-batch-section-title { color: #a78bfa; }
+.cve-batch-fields .field { margin-top: 0; min-width: 0; }
+.cve-batch-fields .input { width: 100%; }
+.cve-batch-two-col { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 12px; }
+.cve-batch-review { max-width: 240px; }
+.cve-batch-modal .modal-foot { gap: 10px; flex-wrap: wrap; }
+.cve-batch-modal .btn:disabled { opacity: .5; cursor: not-allowed; }
+@media (max-width: 560px) { .cve-batch-two-col { grid-template-columns: minmax(0,1fr); } .cve-batch-modal .modal-foot .cve-batch-summary { flex-basis: 100%; } .cve-batch-modal .seg { flex-wrap: wrap; } }

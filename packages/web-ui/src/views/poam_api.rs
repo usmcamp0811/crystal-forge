@@ -341,6 +341,26 @@ pub struct CveBatchEnvironmentSummary {
     pub evidence_token: String,
 }
 
+/// Identifies whether an exact selected pair is currently actionable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CveBatchDetailState {
+    /// Has current exact evidence for triage.
+    Actionable,
+    /// Cannot be triaged from current exact evidence.
+    Unavailable,
+}
+
+/// Explains why a selected pair cannot be mutated without revealing hidden evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CveBatchUnavailableReason {
+    /// Has only scheduled-target or historical inventory.
+    InventoryOnly,
+    /// Has no visible current inventory, or evidence is inaccessible.
+    StaleOrInaccessible,
+}
+
 /// Contains authoritative display metadata for one requested exact pair.
 #[derive(Debug, Clone, Deserialize)]
 pub struct FleetCveBatchDetailItem {
@@ -348,18 +368,22 @@ pub struct FleetCveBatchDetailItem {
     pub cve_id: String,
     /// Gives the canonical package name.
     pub canonical_package_name: String,
+    /// Indicates whether this pair can be included in an atomic batch write.
+    pub state: CveBatchDetailState,
+    /// Gives the reason for an unavailable pair; absent for actionable pairs.
+    pub unavailable_reason: Option<CveBatchUnavailableReason>,
     /// Gives advisory severity.
     pub severity: String,
     /// Gives the optional CVSS score.
     pub cvss_v3_score: Option<f32>,
-    /// Lists every environment in the batch, including zero-subject tokens.
+    /// Lists all zero-subject tokens for actionable pairs; unavailable pairs have none.
     pub environments: Vec<CveBatchEnvironmentSummary>,
 }
 
 /// Contains hydrated detail for the selected exact pairs.
 #[derive(Debug, Clone, Deserialize)]
 pub struct FleetCveBatchDetailResponse {
-    /// Lists the visible requested pairs.
+    /// Lists every requested pair, including those without actionable evidence.
     pub items: Vec<FleetCveBatchDetailItem>,
 }
 
@@ -1945,6 +1969,9 @@ impl AcceptanceSource {
 pub struct AcceptanceEntry {
     /// Names the owning decision family.
     pub source: AcceptanceSource,
+    /// Gives the source-assigned RA chain identifier for display and search.
+    /// Commands still use `source` and `source_id` to identify the exact revision.
+    pub human_id: String,
     /// Exact UUID of the source decision row.
     pub source_id: Uuid,
     /// Source waiver's status-change timestamp; CVE row UUIDs version decisions.
@@ -1958,12 +1985,21 @@ pub struct AcceptanceEntry {
     /// Contains the current hostname for an authorized host-scoped decision.
     #[serde(default)]
     pub system_hostname: Option<String>,
+    /// Current name of the direct environment scope, when resolved.
+    #[serde(default)]
+    pub environment_name: Option<String>,
     /// Original environment identity for an environment decision.
     pub environment_id: Option<Uuid>,
     /// Policy lineage identity for a policy waiver.
     pub policy_lineage_id: Option<Uuid>,
     /// Exact policy version covered by a waiver.
     pub policy_version_id: Option<Uuid>,
+    /// Exact policy-version name in the waiver's finding lineage.
+    #[serde(default)]
+    pub policy_title: Option<String>,
+    /// First trusted mapped requirement identifier for that exact version.
+    #[serde(default)]
+    pub requirement_external_id: Option<String>,
     /// Canonical CVE ID for a CVE decision.
     pub canonical_cve_id: Option<String>,
     /// Canonical package identity for a CVE decision.
@@ -2015,6 +2051,7 @@ pub struct AcceptancePage {
 pub async fn list_acceptances(
     offset: i64,
     environment_id: Option<Uuid>,
+    search: &str,
 ) -> Result<AcceptancePage, PoamApiError> {
     let mut url = format!(
         "{}/acceptances?status=accepted_or_converted&limit=100&offset={offset}",
@@ -2022,6 +2059,10 @@ pub async fn list_acceptances(
     );
     if let Some(id) = environment_id {
         url.push_str(&format!("&environment_id={id}"));
+    }
+    if !search.trim().is_empty() {
+        url.push_str("&search=");
+        url.push_str(&encode_uri_component(search.trim()));
     }
     let page: AcceptancePage = request("GET", &url, None::<&()>).await?;
     if page.limit != 100

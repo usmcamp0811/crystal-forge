@@ -16,7 +16,7 @@ pub const MAX_ITEMS: usize = 10_000;
 pub const MAX_ROWS: usize = 50_000;
 
 const MAX_CELL_CHARS: usize = 32_767;
-const HEADERS: [&str; 16] = [
+const HEADERS: [&str; 17] = [
     "Source type",
     "Source UUID",
     "Source ID",
@@ -33,6 +33,7 @@ const HEADERS: [&str; 16] = [
     "Scan UUID",
     "Evidence",
     "Description",
+    "Risk Acceptance ID",
 ];
 
 /// Distinguishes a system from an environment without inferring scope from its name.
@@ -63,6 +64,8 @@ pub enum Source {
         review_deadline: Option<NaiveDate>,
         /// Actual authorization expiry, if recorded by the source.
         authorization_expiry: Option<DateTime<Utc>>,
+        /// Operator-facing renewal-chain number; never replaces Source ID.
+        human_id: Option<String>,
     },
 }
 
@@ -88,7 +91,7 @@ pub struct Evidence<'a> {
 pub struct Entry<'a> {
     /// Source UUID, independent of any display grouping.
     pub uuid: Uuid,
-    /// Source's human-readable stable ID.
+    /// Exact source ID; acceptance callers keep the existing machine UUID here.
     pub source_id: &'a str,
     /// Source title.
     pub title: &'a str,
@@ -211,10 +214,11 @@ pub fn write_register(snapshot: &Snapshot<'_>) -> Result<Exports> {
     csv_row(&mut csv, &HEADERS);
     let mut index = 1u32;
     for entry in snapshot.entries {
-        let (kind, target, review, expiry) = match &entry.source {
+        let (kind, target, review, expiry, human_id) = match &entry.source {
             Source::Plan { target_date } => (
                 "plan",
                 target_date.map(|d| d.to_string()).unwrap_or_default(),
+                String::new(),
                 String::new(),
                 String::new(),
             ),
@@ -222,6 +226,7 @@ pub fn write_register(snapshot: &Snapshot<'_>) -> Result<Exports> {
                 kind,
                 review_deadline,
                 authorization_expiry,
+                human_id,
             } => (
                 match kind {
                     AcceptanceKind::Policy => "policy decision",
@@ -232,6 +237,7 @@ pub fn write_register(snapshot: &Snapshot<'_>) -> Result<Exports> {
                 authorization_expiry
                     .map(|d| d.to_rfc3339())
                     .unwrap_or_default(),
+                human_id.clone().unwrap_or_default(),
             ),
         };
         let (scope_kind, scope_id, scope_name) = scope_cells(&entry.scope)?;
@@ -264,6 +270,7 @@ pub fn write_register(snapshot: &Snapshot<'_>) -> Result<Exports> {
                     .unwrap_or_default(),
                 evidence.map(|e| e.description).unwrap_or("").to_owned(),
                 entry.description.to_owned(),
+                human_id.clone(),
             ];
             let safe = cells
                 .iter()

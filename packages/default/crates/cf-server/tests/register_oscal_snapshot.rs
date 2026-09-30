@@ -360,14 +360,18 @@ fn accepted_decision_with_justification_stays_a_decision() {
     rows.acceptances.push(AcceptanceEntry {
         source: AcceptanceSource::CveHost,
         source_id: Uuid::new_v4(),
+        human_id: "RA-0001".into(),
         waiver_updated_at: None,
         status: "accepted".into(),
         finding_id: None,
         system_id: Some(rows.poams[0].system_ids[0]),
         system_hostname: Some("host".into()),
+        environment_name: None,
         environment_id: None,
         policy_lineage_id: None,
         policy_version_id: None,
+        policy_title: None,
+        requirement_external_id: None,
         canonical_cve_id: Some("CVE-2099-12345".into()),
         canonical_package_name: Some("openssl".into()),
         justification: "Risk accepted".into(),
@@ -406,6 +410,18 @@ fn accepted_decision_with_justification_stays_a_decision() {
     assert_eq!(poam["poam-items"].as_array().unwrap().len(), 2);
     assert!(poam.get("risks").is_none());
     let props = poam["poam-items"][1]["props"].as_array().unwrap();
+    assert!(props.iter().any(|p| p["name"] == "source-id"
+        && p["value"] == format!("cve-host-decision:{}", rows.acceptances[0].source_id)));
+    assert!(
+        props
+            .iter()
+            .any(|p| p["name"] == "risk-acceptance-id" && p["value"] == "RA-0001")
+    );
+    assert!(
+        output
+            .xml
+            .contains("name=\"risk-acceptance-id\" value=\"RA-0001\"")
+    );
     assert!(props.iter().any(|p| p["name"] == "decision-rationale"));
     assert!(props.iter().any(|p| p["name"] == "accepted-by-user-id"));
     for (name, value) in [

@@ -1230,6 +1230,23 @@ pub struct CveInventoryPairPage {
     pub total: i64,
     /// Next offset, or `None` after the final pair.
     pub next_offset: Option<i64>,
+    /// Package host unions from this page's snapshot. Populated only when the
+    /// first page contains every filtered pair; empty on partial/offset pages.
+    /// An empty array on an empty complete page also means no affected hosts.
+    pub package_host_unions: Vec<CveInventoryPackageHostUnion>,
+}
+
+/// Counts distinct visible exact affected hosts across all filtered pairs in a package.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct CveInventoryPackageHostUnion {
+    /// Canonical package name, or `None` for a retained unnamed package.
+    pub package_name: Option<String>,
+    /// Distinct filtered CVE/package pairs for this package.
+    pub pair_count: i64,
+    /// Distinct hosts with Current or scheduled-target evidence for any pair.
+    /// A host in both sections or in multiple pairs contributes only once;
+    /// historical-only hosts do not contribute.
+    pub affected_system_count: i64,
 }
 
 /// CVE list item for table views.
@@ -1732,6 +1749,26 @@ pub struct CveBatchEnvironmentSummary {
     pub evidence_token: String,
 }
 
+/// Indicates whether an exact selected pair can be triaged from Current evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CveBatchDetailState {
+    /// At least one visible exact Current subject exists.
+    Actionable,
+    /// No visible exact Current subject exists; the pair cannot be submitted.
+    Unavailable,
+}
+
+/// Explains why a selected pair has no actionable Current evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CveBatchUnavailableReason {
+    /// Only visible scheduled-target or historical inventory exists for the pair.
+    InventoryOnly,
+    /// No visible inventory exists; absence and inaccessible evidence are indistinguishable.
+    StaleOrInaccessible,
+}
+
 /// Reports hydrated metadata for one exact batch CVE/package identity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FleetCveBatchDetailItem {
@@ -1739,19 +1776,23 @@ pub struct FleetCveBatchDetailItem {
     pub cve_id: String,
     /// Gives the canonical package identity.
     pub canonical_package_name: String,
+    /// Reports whether exact Current evidence authorizes triage of this pair.
+    pub state: CveBatchDetailState,
+    /// Explains unavailability without revealing hidden host or environment data.
+    pub unavailable_reason: Option<CveBatchUnavailableReason>,
     /// Gives the advisory severity label.
     pub severity: String,
     /// Gives the advisory CVSS v3 score when available.
     pub cvss_v3_score: Option<f32>,
-    /// Lists the union of visible batch environments, including zero-subject
-    /// entries needed to detect new pair/environment membership before submit.
+    /// Lists visible actionable environments, including zero-subject entries
+    /// needed to detect new membership; unavailable pairs have no environments.
     pub environments: Vec<CveBatchEnvironmentSummary>,
 }
 
 /// Reports hydrated batch detail for the requested exact identities.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FleetCveBatchDetailResponse {
-    /// Lists hydrated metadata for every visible requested pair.
+    /// Lists one item for every requested pair, including unavailable identities.
     pub items: Vec<FleetCveBatchDetailItem>,
 }
 
