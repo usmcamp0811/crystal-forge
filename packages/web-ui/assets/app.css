@@ -8248,7 +8248,8 @@ html[data-theme="light"] .scanning-detail-callout-danger strong { color:#b91c1c;
 .cve-host-name { font-weight: 600; }
 .cve-triage-backdrop { z-index: 200; }
 .cve-triage-modal { position: fixed; top: 50%; left: 50%; z-index: 201; width: min(720px, 95vw); max-height: 92vh; transform: translate(-50%, -50%); }
-.cve-triage-body { display: flex; flex-direction: column; gap: 14px; min-height: 0; overflow-y: auto; }
+.cve-triage-modal > .modal-head, .cve-triage-modal > .modal-foot { flex: 0 0 auto; }
+.cve-triage-body { display: flex; flex: 1 1 auto; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; }
 .cve-triage-modal .modal-head { align-items: flex-start; }
 .cve-triage-modal .modal-head h2 { margin-bottom: 3px; }
 .cve-triage-modal .modal-head p { margin: 0; color: var(--cf-text-secondary); font-size: 12px; }
@@ -8261,14 +8262,19 @@ html[data-theme="light"] .scanning-detail-callout-danger strong { color:#b91c1c;
 .cve-triage-context-grid strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .cve-triage-modal .field { margin-top: 0; }
 .cve-triage-scope > .seg { width: fit-content; }
+.cve-triage-scope h3 { margin: 0 0 7px; color: var(--cf-text-muted); font-size: 10.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; }
+.cve-triage-environments { display: flex; flex-direction: column; gap: 6px; }
 .cve-triage-decision-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; padding: 9px 11px; border: 1px solid var(--cf-divider); border-radius: 8px; background: var(--cf-card-bg); }
-.cve-triage-decision-row[data-choice="accepted"] { border-color: rgba(167,139,250,.3); background: rgba(167,139,250,.06); }
-.cve-triage-decision-row[data-choice="scheduled"] { border-color: rgba(96,165,250,.3); background: rgba(96,165,250,.06); }
-.cve-triage-decision-identity { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12.5px; }
+.cve-triage-decision-row[data-choice="accepted"] { border-color: rgba(167,139,250,.55); background: rgba(167,139,250,.08); }
+.cve-triage-decision-row[data-choice="scheduled"] { border-color: rgba(96,165,250,.55); background: rgba(96,165,250,.08); }
+.cve-triage-decision-identity { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 0 1 auto; font-size: 12.5px; }
 .cve-triage-decision-identity strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cve-triage-decision-identity small { color: var(--cf-text-muted); font: 11px var(--font-mono); }
 .cve-triage-decision-dot { width: 8px; height: 8px; flex-shrink: 0; border-radius: 99px; background: var(--cf-brand-purple); }
 .cve-triage-decision-row .seg { flex-shrink: 0; }
+.cve-triage-choice { margin-left: auto; }
+.cve-triage-choice button { padding: 5px 9px; font-size: 11px; }
+.cve-triage-open-warning { display: flex; align-items: center; gap: 6px; margin-top: 6px; color: #fbbf24; font-size: 11px; }
 .cve-triage-panel { display: flex; flex-direction: column; gap: 12px; min-width: 0; padding: 12px 13px; border: 1px solid; border-radius: 9px; }
 .cve-triage-waiver { border-color: rgba(167,139,250,.3); background: rgba(167,139,250,.06); }
 .cve-triage-poam { border-color: rgba(96,165,250,.3); background: rgba(96,165,250,.06); }
@@ -8292,8 +8298,10 @@ html[data-theme="light"] .scanning-detail-callout-danger strong { color:#b91c1c;
   .cve-fleet-host { grid-template-columns: minmax(120px, 1fr) minmax(90px, 1fr) auto auto auto; }
   .cve-fleet-host > :nth-child(3), .cve-fleet-host > :nth-child(4) { display: none; }
   .cve-triage-context-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .cve-triage-decision-row { align-items: flex-start; flex-direction: column; }
+  .cve-triage-decision-row { align-items: flex-start; flex-direction: column; gap: 7px; }
   .cve-triage-decision-row .seg { max-width: 100%; flex-wrap: wrap; }
+  .cve-triage-choice { width: 100%; }
+  .cve-triage-choice button { flex: 1 1 auto; }
   .cve-triage-modal { width: calc(100vw - 16px); max-height: calc(100vh - 16px); }
   .cve-triage-body { padding: 14px; }
   .cve-triage-poam-grid { grid-template-columns: 1fr; }

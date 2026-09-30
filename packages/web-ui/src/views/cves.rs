@@ -1235,6 +1235,19 @@ pub fn CvesView(query: String) -> Element {
                 ExactCveFleetDrawer {
                     key: "{selection.cve_id}|{selection.package}",
                     selection,
+                    environment_colors: environments
+                        .read()
+                        .as_ref()
+                        .and_then(|result| result.as_ref().ok())
+                        .map(|items| {
+                            items
+                                .iter()
+                                .map(|environment| {
+                                    (environment.id, environment.color_hex.clone())
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                     on_close: move |_| {
                         sync_cve_url_state(
                             severity_filter(), fix_status_filter(), triage_status_filter(),
@@ -3659,7 +3672,11 @@ fn fleet_risk_label(risk: poam_api::PoamRisk) -> &'static str {
 }
 
 #[component]
-fn ExactCveFleetDrawer(selection: ExactCveSelection, on_close: EventHandler<()>) -> Element {
+fn ExactCveFleetDrawer(
+    selection: ExactCveSelection,
+    environment_colors: BTreeMap<uuid::Uuid, String>,
+    on_close: EventHandler<()>,
+) -> Element {
     let app_state = use_context::<Signal<AppState>>();
     let can_triage = auth::is_operator_or_above(&app_state.read().auth);
     let navigator = navigator();
@@ -3819,6 +3836,7 @@ fn ExactCveFleetDrawer(selection: ExactCveSelection, on_close: EventHandler<()>)
                 FleetCveTriageDialog {
                     key: "{detail.cve.cve_id}|{detail.canonical_package_name}",
                     detail: detail.clone(),
+                    environment_colors: environment_colors.clone(),
                     on_close: move |_| triage_open.set(false),
                     on_success: move |response: poam_api::FleetCveTriageResponse| {
                         result_poam.set(response.poam_id.map(|id| (id, response.poam_reused)));
@@ -4079,6 +4097,7 @@ fn FleetHostRows(systems: Vec<crate::api::models::CveAffectedSystemDetail>) -> E
 #[component]
 fn FleetCveTriageDialog(
     detail: poam_api::FleetCveDetail,
+    environment_colors: BTreeMap<uuid::Uuid, String>,
     on_close: EventHandler<()>,
     on_success: EventHandler<poam_api::FleetCveTriageResponse>,
     on_conflict: EventHandler<String>,
@@ -4136,7 +4155,50 @@ fn FleetCveTriageDialog(
                 .map_or(0, |candidate| candidate.inventory_counts().0)
         })
         .sum::<i64>();
-    let open_count = detail.exact_mutation_target_count - accepted_count - scheduled_count;
+    let accepted_environments = draft
+        .read()
+        .environments
+        .iter()
+        .filter(|environment| environment.choice == EnvironmentTriageChoice::Accepted)
+        .cloned()
+        .collect::<Vec<_>>();
+    let scheduled_environments = draft
+        .read()
+        .environments
+        .iter()
+        .filter(|environment| environment.choice == EnvironmentTriageChoice::Scheduled)
+        .cloned()
+        .collect::<Vec<_>>();
+    let open_environments = draft
+        .read()
+        .environments
+        .iter()
+        .filter(|environment| environment.choice == EnvironmentTriageChoice::Open)
+        .cloned()
+        .collect::<Vec<_>>();
+    let accepted_environment_names = accepted_environments
+        .iter()
+        .map(|environment| environment.environment_name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let scheduled_environment_names = scheduled_environments
+        .iter()
+        .map(|environment| environment.environment_name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let open_environment_names = open_environments
+        .iter()
+        .map(|environment| environment.environment_name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let open_verb = if open_environments.len() == 1 {
+        "stays"
+    } else {
+        "stay"
+    };
+    let scheduled_host_suffix = if scheduled_count == 1 { "" } else { "s" };
+    let accepted_host_suffix = if accepted_count == 1 { "" } else { "s" };
+    let (shared_justification, shared_review_date) = draft.read().fleet_acceptance_fields();
     let cvss = detail
         .cve
         .cvss_v3_score
@@ -4147,6 +4209,32 @@ fn FleetCveTriageDialog(
         "Triage {} {}",
         detail.cve.cve_id, detail.canonical_package_name
     );
+    let mut summary = Vec::new();
+    if accepted_count > 0 {
+        summary.push(format!(
+            "1 waiver · {accepted_count} host{}",
+            if accepted_count == 1 { "" } else { "s" }
+        ));
+    }
+    if scheduled_count > 0 {
+        summary.push(format!(
+            "{} 1 POA&M · {scheduled_count} host{}",
+            if existing_poam_reuse {
+                "updates"
+            } else {
+                "creates"
+            },
+            if scheduled_count == 1 { "" } else { "s" }
+        ));
+    }
+    if (accepted_count > 0 || scheduled_count > 0) && !open_environments.is_empty() {
+        summary.push(format!("{} envs left open", open_environments.len()));
+    }
+    let summary = if summary.is_empty() {
+        "Nothing dispositioned yet".to_string()
+    } else {
+        summary.join(" · ")
+    };
     let submit_detail = detail.clone();
     let submit = move |_: MouseEvent| {
         let request = match draft
@@ -4191,43 +4279,51 @@ fn FleetCveTriageDialog(
         // to keep the nested modal keyboard-reachable and trapped.
         DialogInitialFocus { dialog_id: "cve-triage-dialog" }
         button { class: "modal-backdrop cve-triage-backdrop", aria_label: "Close {dialog_label}", tabindex: "-1", onclick: move |_| if !pending() { on_close.call(()) } }
-        div { id: "cve-triage-dialog", class: "modal cve-triage-modal", role: "dialog", aria_modal: "true", aria_label: "{dialog_label}", "data-testid": "cve-triage-dialog", tabindex: "-1", onkeydown: move |event| if event.key() == Key::Escape && !pending() { event.stop_propagation(); on_close.call(()); },
+        div { id: "cve-triage-dialog", class: "modal cve-triage-modal", style: "width:min(720px,95vw);max-height:92vh;", role: "dialog", aria_modal: "true", aria_label: "{dialog_label}", "data-testid": "cve-triage-dialog", tabindex: "-1", onkeydown: move |event| if event.key() == Key::Escape && !pending() { event.stop_propagation(); on_close.call(()); },
             DialogFocusSentinel { dialog_id: "cve-triage-dialog", boundary: DialogFocusBoundary::Last }
-            div { class: "modal-head", div { h2 { "Triage {detail.cve.cve_id}" } p { "Decide per environment. Historical inventory remains read-only." } } button { class: "btn-icon focus-ring", aria_label: "Close triage editor", autofocus: true, disabled: pending(), onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } } }
+            div { class: "modal-head", div { h2 { "Triage {detail.cve.cve_id}" } p { "Decide per environment. Hosts left open stay outstanding until someone dispositions them." } } button { class: "btn-icon focus-ring", aria_label: "Close triage editor", autofocus: true, disabled: pending(), onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } } }
             div { class: "modal-body cve-triage-body",
-                p { "Choose one intention for each environment with current exact exposure. Scheduled configuration and historical evidence remain read-only. The server recomputes current exact host scope when you submit." }
                 div { class: "cve-triage-context", "data-testid": "cve-triage-context",
-                    header { Icon { name: IconName::Shield, size: 12 } " Vulnerability" span { "Exact scope is carried over automatically" } }
+                    header { Icon { name: IconName::Shield, size: 12 } " Vulnerability" span { "Carried over automatically" } }
                     div { class: "cve-triage-context-grid",
                         div { span { "CVE" } strong { class: "mono", "{detail.cve.cve_id}" } }
                         div { span { "Package" } strong { class: "mono", "{detail.canonical_package_name}" } }
                         div { span { "CVSS" } strong { "{cvss} · {detail.cve.severity}" } }
-                        div { span { "Actionable hosts" } strong { "{detail.exact_mutation_target_count}" } }
+                        div { span { "Affected hosts" } strong { "{detail.exact_mutation_target_count}" } }
                         div { span { "Fix" } strong { class: "mono", "{fix}" } }
                         div { span { "Exploited" } strong { if detail.cve.exploited { "yes — in the wild" } else { "not observed" } } }
                     }
                 }
                 if let Some(message) = error() { div { class: "sd-callout sd-callout-danger", role: "alert", "{message}" } }
-                for environment in detail.environments.clone().into_iter().filter(|environment| environment_triage_eligible(environment)) {
-                    { let environment_id = environment.environment_id; let current = draft.read().environments.iter().find(|item| item.environment_id == environment_id).cloned(); rsx! {
-                        fieldset { class: "cve-triage-env", "data-testid": "cve-triage-environment",
-                            legend { "{environment.environment_name} · {environment.inventory_counts().0} current exact host(s)" }
-                            div { class: "seg", role: "group", aria_label: "Disposition for {environment.environment_name}",
-                                for (choice, label) in [(EnvironmentTriageChoice::Open, "Leave open"), (EnvironmentTriageChoice::Accepted, "Accept risk"), (EnvironmentTriageChoice::Scheduled, "Schedule patch through POA&M")] {
-                                    button { r#type: "button", class: if current.as_ref().map(|item| item.choice) == Some(choice) { "active" } else { "" }, aria_pressed: if current.as_ref().map(|item| item.choice) == Some(choice) { "true" } else { "false" }, "data-action": "{choice.value()}", onclick: move |_| draft.write().set_choice(environment_id, choice), "{label}" }
+                section { class: "cve-triage-scope", "data-testid": "cve-triage-dispositions",
+                    h3 { "Disposition by environment" }
+                    div { class: "cve-triage-environments",
+                        for environment in detail.environments.clone().into_iter().filter(|environment| environment_triage_eligible(environment)) {
+                            { let environment_id = environment.environment_id; let name = environment.environment_name.clone(); let current = draft.read().environments.iter().find(|item| item.environment_id == environment_id).cloned(); let choice_value = current.as_ref().map(|item| item.choice.value()).unwrap_or("open"); let host_count = environment.inventory_counts().0; let host_suffix = if host_count == 1 { "" } else { "s" }; let color = environment_colors.get(&environment_id).cloned().unwrap_or_else(|| "#9ca3af".into()); rsx! {
+                                div { class: "cve-triage-decision-row", "data-testid": "cve-triage-environment", "data-choice": "{choice_value}",
+                                    div { class: "cve-triage-decision-identity",
+                                        span { class: "cve-triage-decision-dot", style: "background:{color};" }
+                                        strong { "{name}" }
+                                        small { "{host_count} host{host_suffix}" }
+                                    }
+                                    div { class: "seg cve-triage-choice", role: "group", aria_label: "Disposition for {name}",
+                                        for (choice, label) in [(EnvironmentTriageChoice::Open, "Leave open"), (EnvironmentTriageChoice::Accepted, "Accept risk"), (EnvironmentTriageChoice::Scheduled, "Schedule patch")] {
+                                            button { r#type: "button", class: if current.as_ref().map(|item| item.choice) == Some(choice) { "active" } else { "" }, aria_pressed: if current.as_ref().map(|item| item.choice) == Some(choice) { "true" } else { "false" }, "data-action": "{choice.value()}", onclick: move |_| { draft.write().set_choice(environment_id, choice); error.set(None); }, "{label}" }
+                                        }
+                                    }
                                 }
-                            }
-                            if current.as_ref().map(|item| item.choice) == Some(EnvironmentTriageChoice::Accepted) {
-                                label { class: "field", span { "Justification · required" } textarea { value: "{current.as_ref().map(|item| item.justification.as_str()).unwrap_or_default()}", "data-testid": "cve-accept-justification", oninput: move |event| if let Some(item) = draft.write().environments.iter_mut().find(|item| item.environment_id == environment_id) { item.justification = event.value(); } } }
-                                label { class: "field", span { "Review date · optional" } input { r#type: "date", value: "{current.as_ref().map(|item| item.review_date.as_str()).unwrap_or_default()}", "data-testid": "cve-accept-review-date", oninput: move |event| if let Some(item) = draft.write().environments.iter_mut().find(|item| item.environment_id == environment_id) { item.review_date = event.value(); } } }
-                            }
+                            } }
                         }
-                    } }
+                    }
+                    if !open_environments.is_empty() {
+                        div { class: "cve-triage-open-warning", role: "note", Icon { name: IconName::Warn, size: 11 } "{open_environment_names} {open_verb} outstanding." }
+                    }
                 }
                 if scheduled {
-                    fieldset { class: "cve-triage-poam", legend { "Shared POA&M for scheduled environments" }
+                    div { class: "cve-triage-panel cve-triage-poam", "data-testid": "cve-triage-poam",
+                        div { class: "cve-triage-panel-title", Icon { name: IconName::Plus, size: 12 } " POA&M — {scheduled_environment_names} · {scheduled_count} host{scheduled_host_suffix}" }
                         if existing_poam_reuse {
-                            div { class: "sd-callout sd-callout-info", "This schedule will reuse the existing compatible POA&M. Its metadata and milestones are not changed. Verification and closure require a later exact scan that no longer reports this CVE and package." }
+                            div { class: "sd-callout sd-callout-info", "This schedule reuses the existing compatible POA&M. Its metadata and milestones stay unchanged." }
                         } else {
                             div { class: "sd-callout sd-callout-info", "The POA&M owns remediation for scheduled exact subjects. Verification and closure require a later exact scan that no longer reports this CVE and package." }
                         }
@@ -4246,7 +4342,7 @@ fn FleetCveTriageDialog(
                             }
                             label { class: "field", span { "Target completion" } input { r#type: "date", value: "{draft.read().target_date}", "data-testid": "cve-poam-target", readonly: existing_poam_reuse, oninput: move |event| draft.write().target_date = event.value() } }
                         }
-                        label { class: "field", span { "Remediation plan · optional now, expected before review" } textarea { value: "{draft.read().plan}", "data-testid": "cve-poam-plan", readonly: existing_poam_reuse, oninput: move |event| draft.write().plan = event.value() } }
+                        label { class: "field", span { "Remediation plan · optional now, expected before review" } textarea { value: "{draft.read().plan}", "data-testid": "cve-poam-plan", readonly: existing_poam_reuse, oninput: move |event| { draft.write().plan = event.value(); error.set(None); } } }
                         if existing_poam_reuse {
                             small { "Existing milestones remain unchanged." }
                         } else {
@@ -4254,9 +4350,22 @@ fn FleetCveTriageDialog(
                         }
                     }
                 }
+                if !accepted_environments.is_empty() {
+                    div { class: "cve-triage-panel cve-triage-waiver", "data-testid": "cve-triage-waiver",
+                        div { class: "cve-triage-panel-title", Icon { name: IconName::Check, size: 12 } " Waiver — {accepted_environment_names} · {accepted_count} host{accepted_host_suffix}" }
+                        label { class: "field", span { "Justification · required" } textarea { class: "input focus-ring", rows: "2", placeholder: "Why is this acceptable / what is the compensating control?", value: "{shared_justification}", "data-testid": "cve-accept-justification", oninput: move |event| { draft.write().set_fleet_acceptance_justification(event.value()); error.set(None); } } }
+                        div { class: "cve-triage-quick-fill",
+                            for justification in ["Mitigated by network segmentation; service is internal-only.", "Compensating control via WAF rule.", "Vulnerable code path not reachable in this deployment.", "False positive — upstream backport already applied."] {
+                                button { r#type: "button", class: "focus-ring", title: "{justification}", onclick: move |_| { draft.write().set_fleet_acceptance_justification(justification.to_string()); error.set(None); }, "{justification}" }
+                            }
+                        }
+                        if !shared_justification.is_empty() && shared_justification.trim().len() < 10 { small { class: "help", "Add a bit more detail (min 10 chars)." } }
+                        label { class: "field cve-triage-review-date", span { "Review date · optional" } input { class: "input focus-ring", r#type: "date", value: "{shared_review_date}", "data-testid": "cve-accept-review-date", oninput: move |event| { draft.write().set_fleet_acceptance_review_date(event.value()); error.set(None); } } small { class: "help", "An acceptance with no review date is what assessors flag most often." } }
+                    }
+                }
             }
             div { class: "modal-foot cve-triage-foot",
-                div { class: "cve-triage-outcome", "{accepted_count} accepted · {scheduled_count} scheduled · {open_count.max(0)} open" }
+                div { class: "cve-triage-outcome", role: "note", "{summary}" }
                 button { class: "btn btn-ghost focus-ring", disabled: pending(), onclick: move |_| on_close.call(()), "Cancel" }
                 button { class: "btn btn-primary focus-ring", "data-testid": "cve-triage-submit", disabled: pending() || (scheduled && draft.read().preservation_error.is_some()), onclick: submit, if pending() { "Applying..." } else { "Apply triage" } }
             }
@@ -5201,6 +5310,42 @@ mod tests {
         assert!(!serialized.contains("hostname"));
         assert!(!serialized.contains("actor"));
         assert!(!serialized.contains("evidence"));
+    }
+
+    #[test]
+    fn shared_fleet_acceptance_fields_cover_each_accepted_environment_only() {
+        let mut draft = triage_draft();
+        draft.set_fleet_acceptance_justification(
+            "Shared controls protect both accepted environments.".to_string(),
+        );
+        draft.set_fleet_acceptance_review_date("2026-12-01".to_string());
+        draft.set_choice(
+            draft.environments[2].environment_id,
+            EnvironmentTriageChoice::Accepted,
+        );
+
+        assert_eq!(
+            draft.environments[0].justification,
+            "Shared controls protect both accepted environments."
+        );
+        assert_eq!(
+            draft.environments[2].justification,
+            "Shared controls protect both accepted environments."
+        );
+        assert_eq!(
+            draft.environments[1].choice,
+            EnvironmentTriageChoice::Scheduled
+        );
+        assert!(draft.environments[1].justification.is_empty());
+
+        let serialized = serde_json::to_value(draft.fleet_request("openssl").unwrap()).unwrap();
+        assert_eq!(
+            serialized["actions"][0]["justification"],
+            serialized["actions"][2]["justification"]
+        );
+        assert_eq!(serialized["actions"][0]["review_date"], "2026-12-01");
+        assert_eq!(serialized["actions"][2]["review_date"], "2026-12-01");
+        assert_eq!(serialized["actions"][1]["action"], "schedule_patch");
     }
 
     #[test]

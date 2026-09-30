@@ -273,13 +273,79 @@ impl CveTriageDraft {
     }
 
     /// Replaces the disposition choice for one server-provided environment.
+    ///
+    /// When a fleet user adds another accepted environment, the shared
+    /// acceptance panel's current fields seed that environment so the UI does
+    /// not retain a hidden per-environment value that differs from the panel.
     pub(crate) fn set_choice(&mut self, environment_id: Uuid, choice: EnvironmentTriageChoice) {
+        let inherited_acceptance = (choice == EnvironmentTriageChoice::Accepted)
+            .then(|| {
+                self.environments
+                    .iter()
+                    .find(|environment| {
+                        environment.environment_id != environment_id
+                            && environment.choice == EnvironmentTriageChoice::Accepted
+                    })
+                    .map(|environment| {
+                        (
+                            environment.justification.clone(),
+                            environment.review_date.clone(),
+                        )
+                    })
+            })
+            .flatten();
         if let Some(environment) = self
             .environments
             .iter_mut()
             .find(|environment| environment.environment_id == environment_id)
         {
+            if environment.choice != EnvironmentTriageChoice::Accepted
+                && choice == EnvironmentTriageChoice::Accepted
+                && let Some((justification, review_date)) = inherited_acceptance
+            {
+                environment.justification = justification;
+                environment.review_date = review_date;
+            }
             environment.choice = choice;
+        }
+    }
+
+    /// Returns the shared fleet acceptance fields from the first accepted environment.
+    ///
+    /// The first accepted source row seeds the shared panel when existing
+    /// decisions differ. Editing either panel field then synchronizes all
+    /// currently accepted rows before the unchanged per-environment request is
+    /// built.
+    pub(crate) fn fleet_acceptance_fields(&self) -> (String, String) {
+        self.environments
+            .iter()
+            .find(|environment| environment.choice == EnvironmentTriageChoice::Accepted)
+            .map_or_else(
+                || (String::new(), String::new()),
+                |environment| {
+                    (
+                        environment.justification.clone(),
+                        environment.review_date.clone(),
+                    )
+                },
+            )
+    }
+
+    /// Applies one fleet acceptance justification to every accepted environment.
+    pub(crate) fn set_fleet_acceptance_justification(&mut self, justification: String) {
+        for environment in &mut self.environments {
+            if environment.choice == EnvironmentTriageChoice::Accepted {
+                environment.justification.clone_from(&justification);
+            }
+        }
+    }
+
+    /// Applies one optional fleet review date to every accepted environment.
+    pub(crate) fn set_fleet_acceptance_review_date(&mut self, review_date: String) {
+        for environment in &mut self.environments {
+            if environment.choice == EnvironmentTriageChoice::Accepted {
+                environment.review_date.clone_from(&review_date);
+            }
         }
     }
 
@@ -357,6 +423,15 @@ impl CveTriageDraft {
         package: &str,
     ) -> Result<poam_api::FleetCveTriageRequest, String> {
         let mut scheduled = false;
+        // Fleet UI exposes one acceptance panel, so every accepted action uses
+        // its shared fields while the API keeps its existing per-environment
+        // action shape.
+        let shared_acceptance = self
+            .environments
+            .iter()
+            .find(|environment| environment.choice == EnvironmentTriageChoice::Accepted)
+            .map(Self::action_fields)
+            .transpose()?;
         let actions = self
             .environments
             .iter()
@@ -367,11 +442,13 @@ impl CveTriageDraft {
                     })
                 }
                 EnvironmentTriageChoice::Accepted => {
-                    let (justification, review_date) = Self::action_fields(environment)?;
+                    let (justification, review_date) = shared_acceptance
+                        .as_ref()
+                        .ok_or_else(|| "Acceptance fields are unavailable.".to_string())?;
                     Ok(poam_api::CveEnvironmentTriageAction::AcceptRisk {
                         environment_id: environment.environment_id,
-                        justification,
-                        review_date,
+                        justification: justification.clone(),
+                        review_date: *review_date,
                     })
                 }
                 EnvironmentTriageChoice::Scheduled => {

@@ -12888,7 +12888,8 @@ const steps = [
         body: JSON.stringify(fleetDetail.environments.map((environment) => ({
           id: environment.environment_id,
           name: environment.environment_name,
-          color_hex: "#60a5fa",
+          color_hex: environment.environment_name === "Production" ? "#f87171" :
+            environment.environment_name === "Lab" ? "#a78bfa" : "#60a5fa",
           is_active: true,
           system_count: environment.affected_system_count,
         }))),
@@ -14332,7 +14333,7 @@ const steps = [
       await assertCount(triageDialog.getByTestId("cve-triage-scope-environment"), 0, "Fleet triage must not expose a System Detail environment scope selector");
       const assertTriageCapture = async () => {
         const context = triageDialog.getByTestId("cve-triage-context");
-        const firstEnvironment = triageDialog.locator(".cve-triage-env").first();
+        const firstEnvironment = triageDialog.getByTestId("cve-triage-environment").first();
         await assertVisible(context, "CVE triage capture must preserve vulnerability context");
         const [contextBox, environmentBox] = await Promise.all([context.boundingBox(), firstEnvironment.boundingBox()]);
         const contextOpacity = await context.evaluate((element) => getComputedStyle(element).opacity);
@@ -14377,9 +14378,23 @@ const steps = [
       await assertVisible(drawer, "Closing the nested triage editor should preserve fleet detail");
       await drawer.getByTestId("cve-triage-open").click();
       triageDialog = page.getByRole("dialog", { name: "Triage CVE-2024-1234 openssl" });
-      const developmentDraft = triageDialog.getByTestId("cve-triage-environment").filter({ hasText: "Development" });
       const productionDraft = triageDialog.getByTestId("cve-triage-environment").filter({ hasText: "Production" });
       const labDraft = triageDialog.getByTestId("cve-triage-environment").filter({ hasText: "Lab" });
+      await assertCount(triageDialog.getByTestId("cve-triage-environment"), 3, "Each actionable environment must use one disposition row");
+      await assertVisible(triageDialog.getByText("Disposition by environment", { exact: true }), "Fleet triage must label the environment disposition section");
+      await assertCount(triageDialog.getByTestId("cve-accept-justification"), 1, "One accepted environment must render one shared justification field");
+      await assertCount(triageDialog.getByTestId("cve-accept-review-date"), 1, "One accepted environment must render one shared review date");
+      await assertCount(triageDialog.getByTestId("cve-triage-poam"), 1, "One scheduled environment must render one shared POA&M panel");
+      for (const environmentRow of await triageDialog.getByTestId("cve-triage-environment").all()) {
+        await assertCount(environmentRow.getByTestId("cve-accept-justification"), 0, "Disposition rows must not own acceptance fields");
+        await assertCount(environmentRow.getByTestId("cve-accept-review-date"), 0, "Disposition rows must not own review-date fields");
+      }
+      for (const [name, color] of [["Development", "rgb(96, 165, 250)"], ["Production", "rgb(248, 113, 113)"], ["Lab", "rgb(167, 139, 250)"]]) {
+        const dotColor = await triageDialog.getByTestId("cve-triage-environment").filter({ hasText: name })
+          .locator(".cve-triage-decision-dot").evaluate((dot) => getComputedStyle(dot).backgroundColor);
+        if (dotColor !== color) throw new Error(`${name} disposition row must use its server environment color; expected ${color}, got ${dotColor}`);
+      }
+      await captureWorkflowViewportState(page, "16-cves", "triage-initial-one-accepted-one-scheduled", "desktop");
       await assertCount(
         triageDialog.getByTestId("cve-triage-environment").filter({ hasText: "Archive" }),
         0,
@@ -14390,22 +14405,23 @@ const steps = [
         0,
         "Scheduled-target-only environments must not enter the triage draft",
       );
-      await developmentDraft.getByTestId("cve-accept-justification").fill("");
+      const justification = triageDialog.getByTestId("cve-accept-justification");
+      await justification.fill("");
       await triageDialog.getByTestId("cve-triage-submit").click();
       await assertVisible(
         triageDialog.getByRole("alert").filter({ hasText: "Development" }),
-        "Missing environment-specific acceptance justification must fail before POST",
+        "Missing shared acceptance justification must fail before POST",
       );
       if (triageBodies.length !== 0) throw new Error("Acceptance validation sent a triage request");
-      await developmentDraft.getByTestId("cve-accept-justification").fill("too short");
+      await justification.fill("too short");
       await triageDialog.getByTestId("cve-triage-submit").click();
       await assertVisible(
         triageDialog.getByRole("alert").filter({ hasText: "10 to 2000 bytes for Development" }),
-        "Short environment-specific acceptance justification must fail before POST",
+        "Short shared acceptance justification must fail before POST",
       );
       if (triageBodies.length !== 0) throw new Error("Short acceptance validation sent a triage request");
-      await developmentDraft.getByTestId("cve-accept-justification").fill("Internal-only service behind network segmentation.");
-      const reviewDate = developmentDraft.getByTestId("cve-accept-review-date");
+      await justification.fill("Internal-only service behind network segmentation.");
+      const reviewDate = triageDialog.getByTestId("cve-accept-review-date");
       await reviewDate.evaluate((input) => {
         input.type = "text";
         input.value = "invalid-review-date";
@@ -14418,6 +14434,31 @@ const steps = [
       );
       if (triageBodies.length !== 0) throw new Error("Review-date validation sent a triage request");
       await reviewDate.fill("");
+      await productionDraft.getByRole("button", { name: "Leave open" }).click();
+      await assertCount(triageDialog.getByTestId("cve-triage-waiver"), 1, "One accepted environment must render one waiver panel");
+      await assertCount(triageDialog.getByTestId("cve-triage-poam"), 0, "An open environment must not retain an unused POA&M panel");
+      await captureWorkflowViewportState(page, "16-cves", "triage-one-accepted-environment", "desktop");
+      await labDraft.getByRole("button", { name: "Accept risk" }).click();
+      await assertCount(triageDialog.getByTestId("cve-accept-justification"), 1, "Two accepted environments must share one justification field");
+      await assertCount(triageDialog.getByTestId("cve-accept-review-date"), 1, "Two accepted environments must share one review date");
+      await captureWorkflowViewportState(page, "16-cves", "triage-multiple-accepted-environments", "desktop");
+      await productionDraft.getByRole("button", { name: "Schedule patch" }).click();
+      await assertCount(triageDialog.getByTestId("cve-triage-poam"), 1, "One scheduled environment must use one POA&M panel");
+      await captureWorkflowViewportState(page, "16-cves", "triage-one-scheduled-environment", "desktop");
+      await labDraft.getByRole("button", { name: "Schedule patch" }).click();
+      await assertCount(triageDialog.getByTestId("cve-triage-poam"), 1, "Two scheduled environments must share one POA&M panel");
+      await assertCount(triageDialog.getByTestId("cve-poam-assignee"), 1, "Two scheduled environments must share one owner field");
+      await assertCount(triageDialog.getByTestId("cve-poam-target"), 1, "Two scheduled environments must share one target date");
+      await assertCount(triageDialog.getByTestId("cve-poam-plan"), 1, "Two scheduled environments must share one remediation plan");
+      await labDraft.getByRole("button", { name: "Leave open" }).click();
+      await assertCount(triageDialog.getByTestId("cve-triage-environment"), 3, "Mixed environment intents retain all three rows");
+      await assertCount(triageDialog.getByTestId("cve-accept-justification"), 1, "Mixed acceptance and scheduling must not duplicate acceptance fields");
+      await assertCount(triageDialog.getByTestId("cve-accept-review-date"), 1, "Mixed acceptance and scheduling must not duplicate review dates");
+      await assertCount(triageDialog.getByTestId("cve-triage-poam"), 1, "Mixed acceptance and scheduling must keep one shared POA&M panel");
+      await captureWorkflowViewportState(page, "16-cves", "triage-mixed-environment-intents", "desktop");
+      await page.setViewportSize({ width: 900, height: 1000 });
+      await captureWorkflowViewportState(page, "16-cves", "triage-mixed-environment-intents", "narrowDesktop");
+      await page.setViewportSize(MANIFEST.settings.viewport);
       await assertCount(triageDialog.getByTestId("cve-poam-title"), 0, "CVE triage must not expose an editable POA&M title");
       if (await triageDialog.getByTestId("cve-poam-target").inputValue() !== "2026-10-15") {
         throw new Error("Scheduled POA&M target date did not initialize from fleet metadata");
