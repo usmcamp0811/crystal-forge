@@ -3671,6 +3671,17 @@ fn fleet_risk_label(risk: poam_api::PoamRisk) -> &'static str {
     }
 }
 
+fn fleet_cve_header_title(cve: &crate::api::models::CveDetail, package: &str) -> String {
+    let title = cve.title.trim();
+    if !title.is_empty() && !title.eq_ignore_ascii_case(&cve.cve_id) {
+        title.to_string()
+    } else {
+        // The API uses the CVE ID when the source has no description. Show the
+        // source-backed package instead of repeating the ID as a fake title.
+        format!("{package} · vulnerability title unavailable")
+    }
+}
+
 #[component]
 fn ExactCveFleetDrawer(
     selection: ExactCveSelection,
@@ -3728,6 +3739,12 @@ fn ExactCveFleetDrawer(
     });
 
     let dialog_label = format!("{} {} fleet inventory", selection.cve_id, selection.package);
+    let header_title = match &*state.read() {
+        FleetDetailState::Loaded(detail) => {
+            fleet_cve_header_title(&detail.cve, &detail.canonical_package_name)
+        }
+        _ => selection.package.clone(),
+    };
     let severity_color = match &*state.read() {
         FleetDetailState::Loaded(detail) => fleet_severity_color(&detail.cve.severity),
         _ => "#9ca3af",
@@ -3764,20 +3781,20 @@ fn ExactCveFleetDrawer(
                                 if detail.cve.exploited { span { class: "chip chip-critical", "exploited in the wild" } }
                             }
                         }
-                        if let FleetDetailState::Loaded(detail) = &*state.read() {
-                            div { class: "cve-fleet-title", title: "{detail.cve.title}", "{detail.cve.title}" }
+                        if let FleetDetailState::Loaded(_) = &*state.read() {
+                            div { class: "cve-fleet-title", title: "{header_title}", "{header_title}" }
                         } else {
                             div { class: "cve-fleet-title mono", "{selection.package}" }
                         }
                     }
                 }
-                div { class: "cve-fleet-actions",
+                div { class: "cve-fleet-actions", "data-testid": "cve-fleet-actions",
                     if let FleetDetailState::Loaded(detail) = &*state.read() {
                         a { class: "btn btn-ghost xs focus-ring", href: "https://nvd.nist.gov/vuln/detail/{detail.cve.cve_id}", target: "_blank", rel: "noopener noreferrer", title: "Open NVD advisory", "data-testid": "cve-advisory-link", Icon { name: IconName::Link, size: 11 } " Advisory" }
                         if can_triage {
                             button {
                                 class: if detail.exact_mutation_target_count == 0 {
-                                    "btn btn-primary xs focus-ring cve-triage-disabled"
+                                    "btn btn-ghost xs focus-ring cve-triage-disabled"
                                 } else if detail.rollup == poam_api::FleetCveTriageRollup::Outstanding {
                                     "btn btn-primary xs focus-ring"
                                 } else {
@@ -3826,7 +3843,11 @@ fn ExactCveFleetDrawer(
                     FleetDetailState::Empty => rsx! { div { class: "empty", h3 { "No current inventory findings" } p { "No visible active system currently reports this CVE and package." } } },
                     FleetDetailState::Unauthorized => rsx! { div { class: "empty", role: "alert", h3 { "Fleet detail unavailable" } p { "Your session cannot read this fleet inventory." } } },
                     FleetDetailState::Error(error) => rsx! { div { class: "empty", role: "alert", h3 { "Could not load fleet detail" } p { "{error}" } button { class: "btn btn-ghost focus-ring", onclick: move |_| { refreshing.set(true); let next = (*refresh_generation.peek()).wrapping_add(1); refresh_generation.set(next); }, "Retry" } } },
-                    FleetDetailState::Loaded(detail) => rsx! { FleetCveDetailBody { detail: detail.clone() } },
+                    FleetDetailState::Loaded(detail) => rsx! { FleetCveDetailBody {
+                        detail: detail.clone(),
+                        can_triage,
+                        on_triage: move |_| { mutation_error.set(None); triage_open.set(true); },
+                    } },
                 }
             }
             DialogFocusSentinel { dialog_id: "cve-fleet-drawer", boundary: DialogFocusBoundary::First }
@@ -3860,7 +3881,11 @@ fn ExactCveFleetDrawer(
 }
 
 #[component]
-fn FleetCveDetailBody(detail: poam_api::FleetCveDetail) -> Element {
+fn FleetCveDetailBody(
+    detail: poam_api::FleetCveDetail,
+    can_triage: bool,
+    on_triage: EventHandler<()>,
+) -> Element {
     let total = detail.affected_system_count;
     let (current_affected, scheduled_configuration, historical) = detail.inventory_counts();
     let legacy = detail.legacy_affected_system_count;
@@ -3905,10 +3930,10 @@ fn FleetCveDetailBody(detail: poam_api::FleetCveDetail) -> Element {
         .sum::<i64>();
     rsx! {
         div { class: "ed-stats cve-fleet-stats",
-            div { class: "ed-stat", div { class: "ed-stat-label", "CVSS" } div { class: "ed-stat-val", "{cvss}" } }
+            div { class: "ed-stat", div { class: "ed-stat-label", "CVSS" } div { class: "ed-stat-val", "data-testid": "cve-stat-cvss", style: "color:{fleet_severity_color(&detail.cve.severity)}", "{cvss}" } }
             div { class: "ed-stat", div { class: "ed-stat-label", "Package" } div { class: "ed-stat-val mono", "{detail.canonical_package_name}" } }
             div { class: "ed-stat", title: "Distinct current or scheduled configuration systems", div { class: "ed-stat-label", "Affected" } div { class: "ed-stat-val", "{total}" } }
-            div { class: "ed-stat", div { class: "ed-stat-label", "Fix" } div { class: "ed-stat-val mono cve-fix-value", "{fixed_version}" } }
+            div { class: "ed-stat", div { class: "ed-stat-label", "Fix" } div { class: if detail.cve.fixed_version.as_ref().is_some_and(|version| !version.trim().is_empty()) { "ed-stat-val mono cve-fix-value cve-fix-available" } else { "ed-stat-val mono cve-fix-value cve-fix-pending" }, "{fixed_version}" } }
             div { class: "ed-stat", div { class: "ed-stat-label", "Published" } div { class: "ed-stat-val cve-date-value", "{published}" } }
         }
         section { class: "cve-fleet-section cve-vector", "data-testid": "cve-cvss-vector",
@@ -3921,6 +3946,16 @@ fn FleetCveDetailBody(detail: poam_api::FleetCveDetail) -> Element {
                 if detail.exact_mutation_target_count > 0 {
                     span { "{dispositioned} of {detail.exact_mutation_target_count} current hosts dispositioned" }
                 }
+                if can_triage && detail.exact_mutation_target_count > 0 {
+                    button {
+                        class: if detail.rollup == poam_api::FleetCveTriageRollup::Outstanding { "btn btn-primary xs focus-ring" } else { "btn btn-ghost xs focus-ring" },
+                        "data-testid": "cve-triage-section-action",
+                        style: "margin-left:auto",
+                        onclick: move |_| on_triage.call(()),
+                        Icon { name: IconName::Shield, size: 10 }
+                        if detail.rollup == poam_api::FleetCveTriageRollup::Outstanding { " Triage" } else { " Edit" }
+                    }
+                }
             }
             p { class: "cve-fleet-truth", "Decisions apply to current exact findings. Accepting risk records rationale; it does not pass or remediate a result." }
             if detail.environments.is_empty() {
@@ -3928,9 +3963,6 @@ fn FleetCveDetailBody(detail: poam_api::FleetCveDetail) -> Element {
             }
             for environment in detail.environments.iter().filter(|environment| environment_triage_eligible(environment)).cloned() {
                 FleetEnvironmentCard { environment }
-            }
-            if detail.exact_mutation_target_count == 0 {
-                p { class: "cve-fleet-readonly-note", "No current exact scan findings are available for fleet triage." }
             }
         }
         section { class: "cve-fleet-section cve-remediation", "data-testid": "cve-remediation",
@@ -3968,6 +4000,9 @@ fn FleetCveDetailBody(detail: poam_api::FleetCveDetail) -> Element {
             }
             if no_scan > 0 {
                 p { "{no_scan} {no_scan_hosts} {no_scan_verb} no usable completed CVE scan. They are not counted as affected." }
+            }
+            if detail.exact_mutation_target_count == 0 {
+                p { "No current exact scan findings are available for fleet triage." }
             }
         }
         section { class: "cve-fleet-section", "data-testid": "cve-affected-systems",
@@ -4379,12 +4414,13 @@ mod tests {
     use super::{
         CveSeenState, FleetDetailState, QuickCveSelection, ToastLifecycle, authenticated_user_id,
         batch_tokens, complete_focus_package, deployment_dot, environment_triage_eligible,
-        fleet_error_state, fleet_fix_label, fleet_triage_draft, has_retained_package_evidence,
-        initially_expanded, inventory_section_label, is_canonical_cve_id, loaded_package_groups,
-        matches_pair_filters, ordered_package_groups, pair_metadata_for_member,
-        recently_observed_unseen, request_token_is_current, seen_for_user, seen_storage_key,
-        systems_in_inventory_section, toggle_quick_pairs, triage_status_presentation,
-        unique_retained_package_for_cve, unseen_new_pairs, validate_batch_detail,
+        fleet_cve_header_title, fleet_error_state, fleet_fix_label, fleet_triage_draft,
+        has_retained_package_evidence, initially_expanded, inventory_section_label,
+        is_canonical_cve_id, loaded_package_groups, matches_pair_filters, ordered_package_groups,
+        pair_metadata_for_member, recently_observed_unseen, request_token_is_current,
+        seen_for_user, seen_storage_key, systems_in_inventory_section, toggle_quick_pairs,
+        triage_status_presentation, unique_retained_package_for_cve, unseen_new_pairs,
+        validate_batch_detail,
     };
     use crate::api::models::{
         AuthContext, AuthMode, AuthUser, CveFilters, CveInventoryMember, CveInventoryPairPage,
@@ -5346,6 +5382,41 @@ mod tests {
         assert_eq!(serialized["actions"][0]["review_date"], "2026-12-01");
         assert_eq!(serialized["actions"][2]["review_date"], "2026-12-01");
         assert_eq!(serialized["actions"][1]["action"], "schedule_patch");
+    }
+
+    #[test]
+    fn fleet_drawer_never_repeats_cve_id_as_vulnerability_title() {
+        let with_title =
+            serde_json::from_value::<crate::api::models::CveDetail>(serde_json::json!({
+                "cve_id": "CVE-2019-11594",
+                "cvss_v3_score": 9.8,
+                "severity": "critical",
+                "title": "OpenSSL bounds check issue",
+                "cvss_vector": null,
+                "cwe_id": null,
+                "published_date": null,
+                "modified_date": null,
+                "exploited": false,
+                "package_name": "openssl",
+                "installed_version": "3.0.1",
+                "fixed_version": null,
+                "detection_method": null,
+                "fix_status": "pending"
+            }))
+            .unwrap();
+        assert_eq!(
+            fleet_cve_header_title(&with_title, "openssl"),
+            "OpenSSL bounds check issue"
+        );
+
+        let without_title = crate::api::models::CveDetail {
+            title: "CVE-2019-11594".into(),
+            ..with_title
+        };
+        assert_eq!(
+            fleet_cve_header_title(&without_title, "openssl"),
+            "openssl · vulnerability title unavailable"
+        );
     }
 
     #[test]

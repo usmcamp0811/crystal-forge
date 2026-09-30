@@ -13138,12 +13138,46 @@ const steps = [
       await page.route(inventoryRoute, serveInventory);
       let fleetDetailRequests = 0;
       let fleetDetailAfterMutation = null;
-      await page.route(/\/api\/v1\/cves\/CVE-2024-1234\/fleet\?package=openssl$/, async (route) => {
+      const noPatchFleetDetail = JSON.parse(JSON.stringify(fleetDetail));
+      noPatchFleetDetail.cve.cve_id = "CVE-2024-5678";
+      noPatchFleetDetail.cve.title = "OpenSSL vulnerability without an upstream patch";
+      noPatchFleetDetail.cve.fixed_version = null;
+      noPatchFleetDetail.cve.fix_status = "open";
+      noPatchFleetDetail.cve.exploited = false;
+      noPatchFleetDetail.canonical_package_name = "openssl";
+      const rolloutEvidence = JSON.parse(JSON.stringify(fleetDetail.environments.find((environment) => environment.environment_name === "Rollout target")));
+      rolloutEvidence.affected_system_count = 1;
+      rolloutEvidence.exact_affected_system_count = 1;
+      rolloutEvidence.legacy_affected_system_count = 0;
+      rolloutEvidence.current_affected_system_count = 0;
+      rolloutEvidence.scheduled_deployment_target_count = 1;
+      rolloutEvidence.historical_inventory_system_count = 0;
+      rolloutEvidence.disposition = null;
+      const archivedEvidence = JSON.parse(JSON.stringify(fleetDetail.environments.find((environment) => environment.environment_name === "Archive")));
+      archivedEvidence.affected_system_count = 1;
+      archivedEvidence.exact_affected_system_count = 0;
+      archivedEvidence.legacy_affected_system_count = 1;
+      archivedEvidence.current_affected_system_count = 0;
+      archivedEvidence.scheduled_deployment_target_count = 0;
+      archivedEvidence.historical_inventory_system_count = 1;
+      archivedEvidence.disposition = null;
+      noPatchFleetDetail.rollup = "outstanding";
+      noPatchFleetDetail.affected_system_count = 2;
+      noPatchFleetDetail.exact_affected_system_count = 1;
+      noPatchFleetDetail.exact_mutation_target_count = 0;
+      noPatchFleetDetail.legacy_affected_system_count = 1;
+      noPatchFleetDetail.current_affected_system_count = 0;
+      noPatchFleetDetail.scheduled_deployment_target_count = 1;
+      noPatchFleetDetail.historical_inventory_system_count = 1;
+      noPatchFleetDetail.environments = [rolloutEvidence, archivedEvidence];
+      await page.route(/\/api\/v1\/cves\/(CVE-2024-1234|CVE-2024-5678)\/fleet\?package=openssl$/, async (route) => {
         fleetDetailRequests += 1;
+        const cveId = new URL(route.request().url()).pathname.split("/").at(-2);
+        const response = cveId === "CVE-2024-5678" ? noPatchFleetDetail : fleetDetailAfterMutation ?? fleetDetail;
         await route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: JSON.stringify(fleetDetailAfterMutation ?? fleetDetail),
+          body: JSON.stringify(response),
         });
       });
       await page.route("**/api/v1/poams/assignees", async (route) => {
@@ -14226,13 +14260,18 @@ const steps = [
       const drawerCveId = drawer.locator(".mono:has-text('CVE-2024-1234')").first();
       await assertVisible(drawerCveId, "Expected CVE id in drawer header");
       await assertVisible(drawer.getByText("OpenSSL bounds check issue"), "Expected advisory title in drawer header");
+      await assertCount(drawer.locator(".cve-fleet-title").getByText("CVE-2024-1234", { exact: true }), 0, "Human vulnerability title must not repeat the CVE identifier");
       await assertVisible(drawer.getByText("exploited in the wild"), "Expected exploited status in drawer header");
       const advisoryLink = drawer.getByTestId("cve-advisory-link");
       await assertVisible(advisoryLink, "Expected advisory action in drawer header");
       await assertAttribute(advisoryLink, "target", "_blank", "Advisory should open separately");
        await assertAttribute(advisoryLink, "rel", "noopener noreferrer", "Advisory must not receive opener access");
        await assertVisible(drawer.getByRole("button", { name: "Maximize fleet inventory" }), "Drawer must support maximize");
-       await assertVisible(drawer.getByTestId("cve-cvss-vector").getByText(cveRowFixture.cvss_vector), "Expected CVSS vector section");
+        await assertVisible(drawer.getByTestId("cve-cvss-vector").getByText(cveRowFixture.cvss_vector), "Expected CVSS vector section");
+        const cvssStatColor = await drawer.getByTestId("cve-stat-cvss").evaluate((element) => getComputedStyle(element).color);
+        if (cvssStatColor !== "rgb(248, 113, 113)") {
+          throw new Error(`Critical CVSS summary should use the critical severity color, got ${cvssStatColor}`);
+        }
        for (const label of ["CVSS", "Package", "Affected", "Fix", "Published"]) {
          await assertVisible(drawer.locator(".cve-fleet-stats").getByText(label, { exact: true }), `Expected source-backed ${label} summary stat`);
        }
@@ -14240,6 +14279,7 @@ const steps = [
         await assertVisible(drawer.getByTestId("cve-authority-details"), "Expected exact and legacy authority summary");
         await assertVisible(drawer.getByTestId("cve-triage-open"), "Authorized operator must retain fleet triage action");
         await assertVisible(drawer.getByRole("button", { name: "Edit triage" }), "A previously dispositioned fleet must offer the edit action");
+        await assertVisible(drawer.getByTestId("cve-triage-section-action").getByText("Edit", { exact: true }), "Triage section must retain its local edit action");
        await assertVisible(drawer.getByTestId("cve-remediation").getByText("openssl-3.0.2"), "Expected prominent fixed-version remediation");
        await assertVisible(drawer.getByTestId("cve-remediation").getByText("3.0.1", { exact: true }), "Fixed-patch detail must retain the installed version");
        await assertVisible(drawer.getByTestId("cve-remediation").getByText("3.0.2", { exact: true }), "Fixed-patch detail must identify the upstream fixed version");
@@ -14307,9 +14347,20 @@ const steps = [
            authority.boundingBox(),
            drawer.getByTestId("cve-affected-systems").boundingBox(),
          ]);
-         if (!statsBox || !vectorBox || !triageBox || !remediationBox || !authorityBox || !inventoryBox || !(statsBox.y < vectorBox.y && vectorBox.y < triageBox.y && triageBox.y < remediationBox.y && remediationBox.y < authorityBox.y && authorityBox.y < inventoryBox.y)) {
-           throw new Error(`CVE drawer does not follow the approved information hierarchy: ${JSON.stringify({ statsBox, vectorBox, triageBox, remediationBox, authorityBox, inventoryBox })}`);
-         }
+          if (!statsBox || !vectorBox || !triageBox || !remediationBox || !authorityBox || !inventoryBox || !(statsBox.y < vectorBox.y && vectorBox.y < triageBox.y && triageBox.y < remediationBox.y && remediationBox.y < authorityBox.y && authorityBox.y < inventoryBox.y)) {
+            throw new Error(`CVE drawer does not follow the approved information hierarchy: ${JSON.stringify({ statsBox, vectorBox, triageBox, remediationBox, authorityBox, inventoryBox })}`);
+          }
+          const viewportWidth = await page.evaluate(() => window.innerWidth);
+          if (viewportWidth <= 700) {
+            const statsLast = await drawer.locator(".cve-fleet-stats > .ed-stat").last().boundingBox();
+            const [hostsOverflow, actions] = await Promise.all([
+              drawer.getByTestId("cve-fleet-host").evaluateAll((elements) => elements.some((element) => element.scrollWidth > element.clientWidth)),
+              drawer.getByTestId("cve-fleet-actions").boundingBox(),
+            ]);
+            if (!statsLast || !actions || statsLast.width + 2 < statsBox.width || hostsOverflow) {
+              throw new Error(`Narrow CVE drawer must use the full summary row and wrap host evidence without clipping: ${JSON.stringify({ statsLast, statsBox, actions, hostsOverflow })}`);
+            }
+          }
        };
         await captureWorkflowViewportState(page, "16-cves", "fixed-patch-detail", "desktop", assertFleetDetailCapture);
         await captureWorkflowViewportState(page, "16-cves", "mixed-fleet-detail", "desktop", assertFleetDetailCapture);
@@ -14784,12 +14835,66 @@ const steps = [
       await assertCount(page.getByTestId("cve-notification-focus"), 0, "Invalid focused CVE values must not display notification copy");
       await assertHidden(page.getByTestId("cve-fleet-drawer"), "Invalid focused CVE values must not open a package drawer");
 
+      await page.goto(`${baseUrl}/cves?view=flat`, { timeout: LOAD_TIMEOUT });
+      const noPatchRow = page.getByTestId("cve-row").filter({ hasText: "CVE-2024-5678" });
+      await assertVisible(noPatchRow, "The no-upstream-patch fixture must remain browseable");
+      await noPatchRow.click();
+      const noPatchDrawer = page.getByRole("dialog", { name: "CVE-2024-5678 openssl fleet inventory" });
+      await assertVisible(noPatchDrawer, "No-patch CVE must open its exact package drawer");
+      await assertVisible(noPatchDrawer.getByText("OpenSSL vulnerability without an upstream patch", { exact: true }), "Drawer header must use the source-backed human title");
+      await assertCount(noPatchDrawer.locator(".cve-fleet-title").getByText("CVE-2024-5678", { exact: true }), 0, "No-patch header must not repeat the CVE ID as a title");
+      await assertVisible(noPatchDrawer.getByTestId("cve-remediation").getByText(/No upstream patch is reported/), "No-patch remediation must show the truthful warning once");
+      await assertVisible(noPatchDrawer.getByTestId("cve-remediation").getByText("Observed version", { exact: true }), "No-patch drawer must retain its source-backed observed version label");
+      await assertVisible(noPatchDrawer.getByTestId("cve-remediation").getByText("nvd.nist.gov", { exact: true }), "No-patch drawer must retain its advisory reference");
+       await assertDisabled(noPatchDrawer.getByTestId("cve-triage-open"), "Scheduled and historical evidence must not enable current triage");
+       const unavailableTriageClass = await noPatchDrawer.getByTestId("cve-triage-open").getAttribute("class");
+       if (!unavailableTriageClass?.includes("btn-ghost") || unavailableTriageClass.includes("btn-primary")) {
+         throw new Error(`Unavailable triage must not be styled as the primary action: ${unavailableTriageClass}`);
+       }
+       await assertVisible(noPatchDrawer.getByTestId("cve-authority-details").locator("summary"), "Evidence authority must stay available as a disclosure");
+       await noPatchDrawer.getByTestId("cve-authority-details").locator("summary").click();
+       await assertVisible(noPatchDrawer.getByTestId("cve-authority-details").getByText("No current exact scan findings are available for fleet triage.", { exact: true }), "No-target triage explanation must remain available in secondary evidence detail");
+       await assertVisible(noPatchDrawer.getByTestId("cve-authority-details").getByText(/no usable completed CVE scan/), "No-usable-scan state must remain available in secondary evidence detail");
+       await noPatchDrawer.getByTestId("cve-authority-details").locator("summary").click();
+       await assertHidden(noPatchDrawer.getByTestId("cve-authority-details").getByText("No current exact scan findings are available for fleet triage.", { exact: true }), "No-target triage explanation must not dominate the collapsed drawer");
+      const noPatchOrder = async () => {
+        const [stats, vector, triage, remediation, authority, inventory] = await Promise.all([
+          noPatchDrawer.locator(".cve-fleet-stats").boundingBox(),
+          noPatchDrawer.getByTestId("cve-cvss-vector").boundingBox(),
+          noPatchDrawer.getByTestId("cve-triage-status").boundingBox(),
+          noPatchDrawer.getByTestId("cve-remediation").boundingBox(),
+          noPatchDrawer.getByTestId("cve-authority-details").boundingBox(),
+          noPatchDrawer.getByTestId("cve-affected-systems").boundingBox(),
+        ]);
+        if (![stats, vector, triage, remediation, authority, inventory].every(Boolean) ||
+            !(stats.y < vector.y && vector.y < triage.y && triage.y < remediation.y && remediation.y < authority.y && authority.y < inventory.y)) {
+          throw new Error(`No-patch drawer lost the approved information hierarchy: ${JSON.stringify({ stats, vector, triage, remediation, authority, inventory })}`);
+        }
+        const cvssStatColor = await noPatchDrawer.getByTestId("cve-stat-cvss").evaluate((element) => getComputedStyle(element).color);
+        const fixStatColor = await noPatchDrawer.locator(".cve-fix-value").evaluate((element) => getComputedStyle(element).color);
+        if (cvssStatColor !== "rgb(248, 113, 113)" || fixStatColor !== "rgb(251, 191, 36)") {
+          throw new Error(`Critical/no-patch summary colors must communicate severity and patch availability: ${JSON.stringify({ cvssStatColor, fixStatColor })}`);
+        }
+        if (await page.evaluate(() => window.innerWidth) <= 700) {
+          const statsLast = await noPatchDrawer.locator(".cve-fleet-stats > .ed-stat").last().boundingBox();
+          const statsBox = await noPatchDrawer.locator(".cve-fleet-stats").boundingBox();
+          const hostsOverflow = await noPatchDrawer.getByTestId("cve-fleet-host").evaluateAll((elements) => elements.some((element) => element.scrollWidth > element.clientWidth));
+          if (!statsLast || !statsBox || statsLast.width + 2 < statsBox.width || hostsOverflow) {
+            throw new Error(`Narrow no-patch drawer must not leave a blank summary cell or clip host evidence: ${JSON.stringify({ statsLast, statsBox, hostsOverflow })}`);
+          }
+        }
+      };
+      await captureWorkflowViewportState(page, "16-cves", "no-patch-drawer", "desktop", noPatchOrder);
+      await captureWorkflowViewportState(page, "16-cves", "no-patch-drawer", "narrowDesktop", noPatchOrder);
+      await noPatchDrawer.getByRole("button", { name: "Close fleet inventory" }).click();
+      await assertHidden(noPatchDrawer, "No-patch fleet detail should close normally");
+
       // Unroute after test.
       await page.unroute("**/api/v1/cves/stats*");
       await page.unroute("**/api/v1/cves/packages*");
       await page.unroute("**/api/v1/environments");
       await page.unroute(inventoryRoute);
-      await page.unroute(/\/api\/v1\/cves\/CVE-2024-1234\/fleet\?package=openssl$/);
+       await page.unroute(/\/api\/v1\/cves\/(CVE-2024-1234|CVE-2024-5678)\/fleet\?package=openssl$/);
       await page.unroute("**/api/v1/poams/assignees");
       await page.unroute(/\/api\/v1\/cves\/CVE-2024-1234\/triage$/);
       await page.unroute(/\/api\/v1\/cves\/export(?:\?.*)?$/);
