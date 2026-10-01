@@ -23,7 +23,10 @@
       "14d-task440-cross-surface-auth-navigation": { "category": "mock" },
       "16-cves": { "category": "mock" },
       "16d-scanning-recovery-mock": { "category": "mock" },
-      "16e-poam-register-design": { "category": "mock" }
+      "16e-poam-register-design": { "category": "mock" },
+      "06i-security-workflows-role-coach": { "category": "mock" },
+      "06j-security-coach-cve-evidence": { "category": "mock" },
+      "06k-security-coach-poam-acceptance": { "category": "mock" }
     },
     "visualThemes": [
       "dark",
@@ -57,6 +60,41 @@
       {
         "step": "06h-onboarding-coach-all-configured",
         "state": "completed-nine-step",
+        "viewports": ["desktop", "narrowDesktop", "mobile"]
+      },
+      {
+        "step": "06i-security-workflows-role-coach",
+        "state": "operator-security-home",
+        "viewports": ["desktop", "narrowDesktop", "mobile"]
+      },
+      {
+        "step": "06i-security-workflows-role-coach",
+        "state": "viewer-read-only-triage",
+        "viewports": ["desktop", "narrowDesktop", "mobile"]
+      },
+      {
+        "step": "06j-security-coach-cve-evidence",
+        "state": "current-evidence-relations",
+        "viewports": ["desktop", "narrowDesktop", "mobile"]
+      },
+      {
+        "step": "06j-security-coach-cve-evidence",
+        "state": "triage-modal-dock",
+        "viewports": ["desktop", "narrowDesktop", "mobile"]
+      },
+      {
+        "step": "06k-security-coach-poam-acceptance",
+        "state": "poam-verify-target",
+        "viewports": ["desktop", "narrowDesktop", "mobile"]
+      },
+      {
+        "step": "06k-security-coach-poam-acceptance",
+        "state": "risk-acceptance-truth",
+        "viewports": ["desktop", "narrowDesktop", "mobile"]
+      },
+      {
+        "step": "06k-security-coach-poam-acceptance",
+        "state": "risk-acceptance-source",
         "viewports": ["desktop", "narrowDesktop", "mobile"]
       },
       {
@@ -609,6 +647,39 @@
         "ci_fast",
         "full"
       ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06i-security-workflows-role-coach",
+      "description": "Guide and read-only security walkthroughs for Operator and Viewer without setup-progress requests or automatic security mutations",
+      "route": "/",
+      "designRef": "docs/design/CrystalForge/components/CoachTours.jsx",
+      "profiles": ["full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06j-security-coach-cve-evidence",
+      "description": "Current exact CVE evidence walkthrough, source-backed fleet drawer, triage modal dock, and mutation-free exit",
+      "route": "/",
+      "designRef": "docs/design/CrystalForge/components/CoachTours.jsx",
+      "profiles": ["full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "06k-security-coach-poam-acceptance",
+      "description": "POA&M detail and risk acceptance source walkthroughs spotlight lifecycle, verification, human RA identity, immutable source UUID, and mutation-free exit",
+      "route": "/",
+      "designRef": "docs/design/CrystalForge/components/CoachTours.jsx",
+      "profiles": ["full"],
       "semanticAssertions": true,
       "interactions": true,
       "mockedData": true,

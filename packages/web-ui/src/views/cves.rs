@@ -768,6 +768,7 @@ pub fn CvesView(query: String) -> Element {
             // Page Header
             div {
                 class: "page-head",
+                "data-coach-target": "cve-page-head",
                 div {
                     h1 { class: "page-title", "CVEs" }
                     if let Some(Ok(s)) = stats.read().as_ref() {
@@ -884,6 +885,7 @@ pub fn CvesView(query: String) -> Element {
             if let Some(Ok(fleet_stats)) = stats.read().as_ref() {
                 div {
                     class: "stat-strip",
+                    "data-coach-target": "cve-stats",
 
                     // Critical
                     div {
@@ -1895,7 +1897,7 @@ fn CveBatchTriageDialog(
         DialogFocusRestore {}
         DialogInitialFocus { dialog_id: "cve-batch-dialog" }
         button { class: "modal-backdrop cve-batch-backdrop", tabindex: "-1", aria_label: "Close batch triage", onclick: move |_| if !pending() { on_close.call(()) } }
-        div { id: "cve-batch-dialog", class: "modal cve-batch-modal", role: "dialog", aria_modal: "true", aria_label: "Batch triage", tabindex: "-1", "data-testid": "cve-batch-dialog", onkeydown: move |event| if event.key() == Key::Escape && !pending() { event.stop_propagation(); on_close.call(()); },
+        div { id: "cve-batch-dialog", class: "modal cve-batch-modal", role: "dialog", aria_modal: "true", aria_label: "Batch triage", tabindex: "-1", "data-testid": "cve-batch-dialog", "data-coach-target": "cve-batch-modal", onkeydown: move |event| if event.key() == Key::Escape && !pending() { event.stop_propagation(); on_close.call(()); },
             DialogFocusSentinel { dialog_id: "cve-batch-dialog", boundary: DialogFocusBoundary::Last }
             div { class: "modal-head cve-batch-head", div { h2 { "Triage {selected_count} CVEs together" } p { "One decision for the whole group. Each CVE still gets its own disposition record per environment, same as triaging it alone." } } button { class: "btn-icon focus-ring", aria_label: "Close batch triage", autofocus: true, disabled: pending(), onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } } }
             div { class: "modal-body cve-batch-body",
@@ -2432,7 +2434,7 @@ fn CvePairsView(
         }
     });
     rsx! {
-        div { class: "cve-selection-strip", role: "toolbar", aria_label: "CVE selection",
+        div { class: "cve-selection-strip", role: "toolbar", aria_label: "CVE selection", "data-coach-target": "cve-selection-strip",
             span { class: "cve-selection-label", "SELECT" }
             if let Some(stats) = fleet_stats.as_ref() {
                 for (kind, count) in [(QuickCveSelection::Critical, stats.critical), (QuickCveSelection::High, stats.high), (QuickCveSelection::Patchable, stats.fixable), (QuickCveSelection::Outstanding, stats.outstanding)] {
@@ -2441,7 +2443,8 @@ fn CvePairsView(
                           .is_some_and(|matches| !matches.is_empty() && matches.is_subset(&selected()));
                       rsx! { button {
                           class: if on { "cve-selection-chip focus-ring on" } else { "cve-selection-chip focus-ring" },
-                          "data-kind": "{kind.label().to_lowercase()}",
+                           "data-kind": "{kind.label().to_lowercase()}",
+                           "data-coach-open": match kind { QuickCveSelection::Critical => "cve-select-critical", QuickCveSelection::High => "cve-select-high", QuickCveSelection::Patchable => "cve-select-patchable", QuickCveSelection::Outstanding => "cve-select-outstanding" },
                           aria_pressed: on,
                           aria_busy: quick_pending() == Some(kind),
                            disabled: count == 0 || quick_pending().is_some() || package_pending().is_some(),
@@ -2584,11 +2587,11 @@ fn CvePairsView(
         }
         if !selected().is_empty() {
             { let count = selected().len(); let packages = selected().iter().map(|pair| pair.package.clone()).collect::<BTreeSet<_>>().len(); rsx! {
-                div { class: "bulk-bar cve-bulk-bar", role: "toolbar", aria_label: "Selected CVEs",
+                div { class: "bulk-bar cve-bulk-bar", role: "toolbar", aria_label: "Selected CVEs", "data-coach-target": "cve-bulk-bar",
                     span { class: "bulk-count", strong { "{count}" } " selected" }
                     span { class: "bulk-sep" }
                     span { class: "cve-bulk-packages", "{packages} package" if packages != 1 { "s" } }
-                    button { class: "btn btn-primary xs focus-ring", "data-testid": "cve-batch-open", disabled: !can_triage || count > MAX_CVE_BATCH_PAIRS || quick_pending().is_some() || package_pending().is_some(), title: if !can_triage { "Operator permission required" } else if count > MAX_CVE_BATCH_PAIRS { "Select at most 100 pairs for batch triage" } else { "Triage selected pairs together" }, onclick: move |_| batch_open.set(true), "Triage {count} together" }
+                    button { class: "btn btn-primary xs focus-ring", "data-testid": "cve-batch-open", "data-coach-open": "cve-batch-open", disabled: !can_triage || count > MAX_CVE_BATCH_PAIRS || quick_pending().is_some() || package_pending().is_some(), title: if !can_triage { "Operator permission required" } else if count > MAX_CVE_BATCH_PAIRS { "Select at most 100 pairs for batch triage" } else { "Triage selected pairs together" }, onclick: move |_| batch_open.set(true), "Triage {count} together" }
                     button { class: "btn btn-ghost xs focus-ring", onclick: move |_| {
                         quick_generation.set(quick_generation().wrapping_add(1));
                         package_generation.set(package_generation().wrapping_add(1));
@@ -3801,6 +3804,7 @@ fn ExactCveFleetDrawer(
                                     "btn btn-ghost xs focus-ring"
                                 },
                                 "data-testid": "cve-triage-open",
+                                "data-coach-open": "cve-triage-open",
                                 disabled: detail.exact_mutation_target_count == 0,
                                 title: if detail.exact_mutation_target_count == 0 {
                                     "Exact current scan evidence is required for fleet triage."
@@ -3929,7 +3933,7 @@ fn FleetCveDetailBody(
         .map(|environment| environment.inventory_counts().0)
         .sum::<i64>();
     rsx! {
-        div { class: "ed-stats cve-fleet-stats",
+        div { class: "ed-stats cve-fleet-stats", "data-coach-target": "cve-stat-band",
             div { class: "ed-stat", div { class: "ed-stat-label", "CVSS" } div { class: "ed-stat-val", "data-testid": "cve-stat-cvss", style: "color:{fleet_severity_color(&detail.cve.severity)}", "{cvss}" } }
             div { class: "ed-stat", div { class: "ed-stat-label", "Package" } div { class: "ed-stat-val mono", "{detail.canonical_package_name}" } }
             div { class: "ed-stat", title: "Distinct current or scheduled configuration systems", div { class: "ed-stat-label", "Affected" } div { class: "ed-stat-val", "{total}" } }
@@ -3940,7 +3944,7 @@ fn FleetCveDetailBody(
             h3 { "CVSS vector" }
             code { class: "mono", "{cvss_vector}" }
         }
-        section { class: "cve-fleet-section", "data-testid": "cve-triage-status",
+        section { class: "cve-fleet-section", "data-testid": "cve-triage-status", "data-coach-target": "cve-triage-status",
             div { class: "cve-section-head",
                 h3 { "Triage status" }
                 if detail.exact_mutation_target_count > 0 {
@@ -4005,7 +4009,7 @@ fn FleetCveDetailBody(
                 p { "No current exact scan findings are available for fleet triage." }
             }
         }
-        section { class: "cve-fleet-section", "data-testid": "cve-affected-systems",
+        section { class: "cve-fleet-section", "data-testid": "cve-affected-systems", "data-coach-target": "cve-relations",
             h3 { "Affected systems · {total} current or scheduled" }
             for (section, section_count, description) in [
                 (FleetCveInventorySection::Current, current_affected, "Exact current deployment findings. Environment-assigned exact subjects can be triaged."),
@@ -4314,7 +4318,7 @@ fn FleetCveTriageDialog(
         // to keep the nested modal keyboard-reachable and trapped.
         DialogInitialFocus { dialog_id: "cve-triage-dialog" }
         button { class: "modal-backdrop cve-triage-backdrop", aria_label: "Close {dialog_label}", tabindex: "-1", onclick: move |_| if !pending() { on_close.call(()) } }
-        div { id: "cve-triage-dialog", class: "modal cve-triage-modal", style: "width:min(720px,95vw);max-height:92vh;", role: "dialog", aria_modal: "true", aria_label: "{dialog_label}", "data-testid": "cve-triage-dialog", tabindex: "-1", onkeydown: move |event| if event.key() == Key::Escape && !pending() { event.stop_propagation(); on_close.call(()); },
+        div { id: "cve-triage-dialog", class: "modal cve-triage-modal", style: "width:min(720px,95vw);max-height:92vh;", role: "dialog", aria_modal: "true", aria_label: "{dialog_label}", "data-testid": "cve-triage-dialog", "data-coach-target": "cve-triage-modal", tabindex: "-1", onkeydown: move |event| if event.key() == Key::Escape && !pending() { event.stop_propagation(); on_close.call(()); },
             DialogFocusSentinel { dialog_id: "cve-triage-dialog", boundary: DialogFocusBoundary::Last }
             div { class: "modal-head", div { h2 { "Triage {detail.cve.cve_id}" } p { "Decide per environment. Hosts left open stay outstanding until someone dispositions them." } } button { class: "btn-icon focus-ring", aria_label: "Close triage editor", autofocus: true, disabled: pending(), onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } } }
             div { class: "modal-body cve-triage-body",
@@ -4343,7 +4347,7 @@ fn FleetCveTriageDialog(
                                     }
                                     div { class: "seg cve-triage-choice", role: "group", aria_label: "Disposition for {name}",
                                         for (choice, label) in [(EnvironmentTriageChoice::Open, "Leave open"), (EnvironmentTriageChoice::Accepted, "Accept risk"), (EnvironmentTriageChoice::Scheduled, "Schedule patch")] {
-                                            button { r#type: "button", class: if current.as_ref().map(|item| item.choice) == Some(choice) { "active" } else { "" }, aria_pressed: if current.as_ref().map(|item| item.choice) == Some(choice) { "true" } else { "false" }, "data-action": "{choice.value()}", onclick: move |_| { draft.write().set_choice(environment_id, choice); error.set(None); }, "{label}" }
+                                            button { r#type: "button", class: if current.as_ref().map(|item| item.choice) == Some(choice) { "active" } else { "" }, aria_pressed: if current.as_ref().map(|item| item.choice) == Some(choice) { "true" } else { "false" }, "data-action": "{choice.value()}", "data-coach-open": if choice == EnvironmentTriageChoice::Scheduled { "cve-triage-schedule" } else { "cve-triage-choice" }, onclick: move |_| { draft.write().set_choice(environment_id, choice); error.set(None); }, "{label}" }
                                         }
                                     }
                                 }

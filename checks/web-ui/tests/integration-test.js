@@ -795,6 +795,44 @@ async function captureWorkflowViewportState(page, stepName, stateName, viewportN
   }
 }
 
+async function assertCoachModalControlsUnoccluded(page) {
+  const dialog = page.getByTestId("cve-triage-dialog");
+  const coach = page.getByTestId("coach-tour-card");
+  const primary = dialog.getByTestId("cve-triage-submit");
+  await assertVisible(primary, "CVE triage primary action must remain visible under the coach");
+  await page.waitForFunction(() => document.querySelector("[data-testid='coach-tour-card']")?.classList.contains("coach-dock"), undefined, { timeout: 5000 });
+  await page.waitForFunction(() => document.querySelector("[data-testid='coach-tour-card']")?.getAttribute("data-status") === "found", undefined, { timeout: 5000 });
+  if ((page.viewportSize()?.width || 0) <= 720) {
+    await page.waitForFunction(() => document.querySelector("[data-testid='coach-tour-card']")?.getAttribute("data-coach-narrow") === "true", undefined, { timeout: 5000 });
+  }
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const [cardBox, primaryBox, viewportWidth, narrow] = await Promise.all([
+    coach.boundingBox(),
+    primary.boundingBox(),
+    page.evaluate(() => window.innerWidth),
+    page.evaluate(() => window.innerWidth <= 720),
+  ]);
+  if (!cardBox || !primaryBox) throw new Error("Coach dock and triage action must have measurable bounds");
+  if (narrow && !(await coach.getAttribute("class")).includes("coach-dock")) {
+    throw new Error("A modal on a narrow viewport must use the collision-aware dock, not the bottom sheet");
+  }
+  if (narrow && (cardBox.x < 0 || cardBox.x + cardBox.width > viewportWidth + 1)) {
+    throw new Error(`Narrow coach dock must stay inside the viewport: ${JSON.stringify({ cardBox, viewportWidth })}`);
+  }
+  const overlapWidth = Math.max(0, Math.min(cardBox.x + cardBox.width, primaryBox.x + primaryBox.width) - Math.max(cardBox.x, primaryBox.x));
+  const overlapHeight = Math.max(0, Math.min(cardBox.y + cardBox.height, primaryBox.y + primaryBox.height) - Math.max(cardBox.y, primaryBox.y));
+  if (overlapWidth * overlapHeight > 1) {
+    const details = await page.evaluate(() => ({
+      target: (() => { const rect = document.querySelector("[data-coach-target='cve-triage-modal']")?.getBoundingClientRect(); return rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null; })(),
+      cardClass: document.querySelector("[data-testid='coach-tour-card']")?.className,
+      cardStyle: document.querySelector("[data-testid='coach-tour-card']")?.getAttribute("style"),
+      dockMaxHeight: document.querySelector("[data-testid='coach-tour-card']")?.getAttribute("data-dock-max-height"),
+      viewport: { width: innerWidth, height: innerHeight, coachTop: getComputedStyle(document.documentElement).getPropertyValue("--coach-top") },
+    }));
+    throw new Error(`Coach dock overlaps the triage primary action: ${JSON.stringify({ cardBox, primaryBox, narrow, details })}`);
+  }
+}
+
 async function captureRequiredResponsiveArtifact(page, stepName, stateName) {
   const artifact = MANIFEST.settings.requiredResponsiveArtifacts.find(
     (candidate) => candidate.step === stepName && candidate.state === stateName,
@@ -804,6 +842,8 @@ async function captureRequiredResponsiveArtifact(page, stepName, stateName) {
     stepName.startsWith("06g-onboarding-coach-") ||
     stepName.startsWith("06h-onboarding-coach-")
     ? (viewportName, theme) => assertSetupCoachCaptureState(page, stepName, viewportName, theme)
+    : stepName === "06j-security-coach-cve-evidence" && stateName === "triage-modal-dock"
+      ? () => assertCoachModalControlsUnoccluded(page)
     : stepName === "06-dashboard"
       ? (viewportName, theme) => assertDashboardWatchlistCaptureState(page, stepName, viewportName, theme)
     : undefined;
@@ -854,7 +894,7 @@ async function assertSetupCoachCaptureState(page, stepName, viewportName, theme)
   }
   if (stepName === "06a-onboarding-coach-dashboard") {
     const currentStep = page.locator("[data-testid='onboarding-step-policy']");
-    if ((await currentStep.getAttribute("aria-current")) !== "step" || !(await currentStep.textContent()).includes("Current step")) {
+    if ((await currentStep.getAttribute("aria-current")) !== "step" || !(await currentStep.textContent()).includes("Create or import a policy")) {
       throw new Error(`${stepName} must preserve Create policy as the semantic current step at ${viewportName}/${theme}`);
     }
     if (!(await page.locator("[data-testid='onboarding-step-agent']").textContent()).includes("Acknowledged")) {
@@ -870,7 +910,7 @@ async function assertSetupCoachCaptureState(page, stepName, viewportName, theme)
     }
   } else if (stepName === "06h-onboarding-coach-all-configured") {
     for (const stepId of ["environment", "flake", "builder", "cache", "system", "policy", "bundle", "poam"]) {
-      if (!(await page.locator(`[data-testid='onboarding-step-${stepId}']`).textContent()).includes("Configured")) {
+      if (!(await page.locator(`[data-testid='onboarding-step-${stepId}']`).textContent()).includes("Reported complete")) {
         throw new Error(`${stepName} must preserve configured ${stepId} state at ${viewportName}/${theme}`);
       }
     }
@@ -907,6 +947,14 @@ async function assertSetupCoachCaptureState(page, stepName, viewportName, theme)
   }
 
   if (theme === "light") {
+    // The theme switch starts CSS color transitions. Sample the computed color
+    // only after they finish. Infinite animations such as the coach spotlight
+    // are not CSSTransition objects and must not block this wait.
+    await page.evaluate(() => Promise.all(
+      document.getAnimations()
+        .filter((animation) => animation instanceof CSSTransition)
+        .map((animation) => animation.finished.catch(() => undefined)),
+    ));
     const colors = await page.locator("[data-testid='sidebar-nav']").evaluate((element) => {
       const style = getComputedStyle(element);
       return { background: style.backgroundColor, color: style.color };
@@ -1026,8 +1074,8 @@ async function removeAllPolicyRules(page) {
 /**
  * Persist the onboarding coach in its collapsed state.
  *
- * The coach reads `cf.coach.collapsed` from localStorage on mount, so seeding
- * the key before the app boots keeps the drawer collapsed across every
+ * The coach reads `cf.coach.ui.v2` from localStorage on mount, so seeding
+ * the panel state before the app boots keeps the coach minimized across every
  * subsequent navigation and reload in the session. Clicking "Minimize" after
  * the fact races the drawer's async mount: the expanded <aside> covers the
  * content column and swallows pointer events, producing click timeouts that
@@ -1091,9 +1139,10 @@ async function filterPolicyCatalog(page, name) {
 async function suppressOnboardingCoach(page) {
   await page.context().addInitScript(() => {
     try {
-      if (window.localStorage.getItem("cf.coach.force_show") === "true") return;
-      window.localStorage.setItem("cf.coach.collapsed", "true");
-      window.localStorage.setItem("cf.coach.force_show", "false");
+      const raw = window.localStorage.getItem("cf.coach.ui.v2");
+      let state = {};
+      try { state = raw ? JSON.parse(raw) : {}; } catch (_) {}
+      window.localStorage.setItem("cf.coach.ui.v2", JSON.stringify({ ...state, panel: "minimized" }));
     } catch (_) {
       /* storage unavailable; the runtime fallback below still applies */
     }
@@ -1103,7 +1152,7 @@ async function suppressOnboardingCoach(page) {
 async function collapseOnboardingCoach(page) {
   // Best-effort runtime collapse for pages already loaded. Prefer
   // suppressOnboardingCoach() before the first navigation.
-  const expandedDrawer = () => page.locator("aside[data-testid='onboarding-coach-panel']");
+  const expandedDrawer = () => page.locator("[data-testid='onboarding-coach-panel'][role='complementary']");
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     if ((await expandedDrawer().count()) === 0) {
@@ -1121,7 +1170,7 @@ async function collapseOnboardingCoach(page) {
 
     await page
       .waitForFunction(
-        () => !document.querySelector("aside[data-testid='onboarding-coach-panel']"),
+        () => !document.querySelector("[data-testid='onboarding-coach-panel'][role='complementary']"),
         undefined,
         { timeout: 2000 },
       )
@@ -1439,13 +1488,18 @@ async function routeStandaloneUiBootstrap(page, role = "Admin") {
       return;
     }
 
+    if (path === "/api/v1/cves" && method === "GET") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      return;
+    }
+
     if (path === "/api/v1/cves/grouped" && method === "GET") {
       // The focused CVE workflow installs its exact group fixture afterward.
       await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
       return;
     }
 
-    if (path === "/api/v1/admin/setup-progress" && method === "GET") {
+    if (role === "Admin" && path === "/api/v1/admin/setup-progress" && method === "GET") {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -6662,11 +6716,13 @@ const steps = [
         });
       });
       await page.evaluate(() => {
-        localStorage.setItem("cf.coach.collapsed", "false");
-        localStorage.setItem("cf.coach.force_show", "true");
+        localStorage.setItem("cf.coach.ui.v2", JSON.stringify({ panel: "expanded", track: "setup", progress: {} }));
       });
       await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1500);
+      if (await page.locator("[data-coach-pill]").isVisible().catch(() => false)) {
+        await page.locator("[data-coach-pill]").click();
+      }
       await assertVisible(
         page.locator("[data-testid='onboarding-coach-panel']"),
         "Onboarding coach panel should be visible",
@@ -6681,11 +6737,42 @@ const steps = [
       if (!(await completedStep.textContent()).includes("Acknowledged")) {
         throw new Error("Expanded Setup Coach must include a deterministic completed prerequisite");
       }
-      if ((await currentStep.getAttribute("aria-current")) !== "step" || !(await currentStep.textContent()).includes("Current step")) {
+      if ((await currentStep.getAttribute("aria-current")) !== "step" || !(await currentStep.textContent()).includes("Create or import a policy")) {
         throw new Error("Expanded Setup Coach must select Create policy as the deterministic current step");
       }
       await captureRequiredResponsiveArtifact(page, "06a-onboarding-coach-dashboard", "expanded-nine-step-selected-current");
-      await page.evaluate(() => localStorage.setItem("cf.coach.force_show", "false"));
+      await page.evaluate(() => localStorage.setItem("cf.coach.ui.v2", JSON.stringify({ panel: "minimized", track: "setup", progress: {} })));
+
+      // Setup page callout. The design teaches an incomplete, unlocked step on
+      // its own page even when that step is not the current step. Nothing is
+      // complete here, so Create environment is current and the Flakes page
+      // must still teach Add flake.
+      await page.unroute("**/api/v1/admin/setup-progress*");
+      await page.route("**/api/v1/admin/setup-progress*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(mockSetupCoachProgress()),
+        });
+      });
+      await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+      const flakesCallout = page.locator("[data-testid='setup-coach-flakes-callout']");
+      await assertVisible(flakesCallout, "Flakes page must teach its incomplete setup step out of order");
+      if (!(await flakesCallout.textContent()).includes("Step 2 of 9")) {
+        throw new Error(`Flakes callout must use the Add flake step position, got: ${await flakesCallout.textContent()}`);
+      }
+      await flakesCallout.locator("[data-testid='onboarding-coach-callout-hide']").click();
+      await assertHidden(flakesCallout, "Hide must remove the page callout");
+      // Hide is local presentation state. It does not change server progress.
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+      const systemsCallout = page.locator("[data-testid='setup-coach-systems-callout']");
+      await assertVisible(systemsCallout, "Systems page must teach Register system while the Deploy agent step is locked");
+      const systemsCalloutText = await systemsCallout.textContent();
+      if (!systemsCalloutText.includes("Register system") || systemsCalloutText.includes("first signed report")) {
+        throw new Error(`Systems callout must teach Register system, not the locked agent step: ${systemsCalloutText}`);
+      }
     },
   },
   // ============================================================
@@ -6711,8 +6798,8 @@ const steps = [
         "Expected environments page guidance callout",
       );
       await assertVisible(
-        page.locator("[data-testid='setup-coach-environments-target-callout']"),
-        "Expected environments click-target callout",
+        page.locator("[data-coach-target='env']").first(),
+        "Expected the environments setup action to expose its coach target",
       );
     },
   },
@@ -6749,8 +6836,8 @@ const steps = [
       const envStep = page.locator("[data-testid='onboarding-step-environment']");
       await assertVisible(envStep, "Environment step should still be visible");
       const envStepText = await envStep.textContent();
-      if (!envStepText.includes("Configured")) {
-        throw new Error(`Expected environment step to show Configured, got: ${envStepText}`);
+      if (!envStepText.includes("Reported complete")) {
+        throw new Error(`Expected server-reported environment step, got: ${envStepText}`);
       }
     },
   },
@@ -6765,8 +6852,8 @@ const steps = [
         "Expected flakes page guidance callout",
       );
       await assertVisible(
-        page.locator("[data-testid='setup-coach-flakes-target-callout']"),
-        "Expected flakes click-target callout",
+        page.locator("[data-coach-target='flake']").first(),
+        "Expected the flakes setup action to expose its coach target",
       );
     },
   },
@@ -6870,8 +6957,8 @@ const steps = [
       const flakeStep = page.locator("[data-testid='onboarding-step-flake']");
       await assertVisible(flakeStep, "Flake step should be visible");
       const flakeStepText = await flakeStep.textContent();
-      if (!flakeStepText.includes("Configured")) {
-        throw new Error(`Expected flake step to show Configured, got: ${flakeStepText}`);
+      if (!flakeStepText.includes("Reported complete")) {
+        throw new Error(`Expected server-reported flake step, got: ${flakeStepText}`);
       }
     },
   },
@@ -6886,8 +6973,8 @@ const steps = [
         "Expected builders page guidance callout",
       );
       await assertVisible(
-        page.locator("[data-testid='setup-coach-builders-target-callout']"),
-        "Expected builders click-target callout",
+        page.locator("[data-coach-target='builder']").first(),
+        "Expected the builders setup action to expose its coach target",
       );
     },
   },
@@ -6949,8 +7036,8 @@ const steps = [
       const builderStep = page.locator("[data-testid='onboarding-step-builder']");
       await assertVisible(builderStep, "Builder step should be visible");
       const builderStepText = await builderStep.textContent();
-      if (!builderStepText.includes("Configured")) {
-        throw new Error(`Expected builder step to show Configured, got: ${builderStepText}`);
+      if (!builderStepText.includes("Reported complete")) {
+        throw new Error(`Expected server-reported builder step, got: ${builderStepText}`);
       }
     },
   },
@@ -6965,8 +7052,8 @@ const steps = [
         "Expected caches page guidance callout",
       );
       await assertVisible(
-        page.locator("[data-testid='setup-coach-caches-target-callout']"),
-        "Expected caches click-target callout",
+        page.locator("[data-coach-target='cache']").first(),
+        "Expected the caches setup action to expose its coach target",
       );
     },
   },
@@ -7025,8 +7112,8 @@ const steps = [
       const cacheStep = page.locator("[data-testid='onboarding-step-cache']");
       await assertVisible(cacheStep, "Cache step should be visible");
       const cacheStepText = await cacheStep.textContent();
-      if (!cacheStepText.includes("Configured")) {
-        throw new Error(`Expected cache step to show Configured, got: ${cacheStepText}`);
+      if (!cacheStepText.includes("Reported complete")) {
+        throw new Error(`Expected server-reported cache step, got: ${cacheStepText}`);
       }
     },
   },
@@ -7041,8 +7128,8 @@ const steps = [
         "Expected systems page guidance callout",
       );
       await assertVisible(
-        page.locator("[data-testid='setup-coach-systems-target-callout']"),
-        "Expected systems click-target callout",
+        page.locator("[data-coach-target='system']").first(),
+        "Expected the systems setup action to expose its coach target",
       );
     },
   },
@@ -7190,8 +7277,10 @@ const steps = [
   },
   {
     name: "06f4-onboarding-systems-create",
-    description: "Systems: submit, assert step and agent Configured",
+    description: "Systems: submit, prove first signed report and admin acknowledgement are separate setup states",
     action: async (page) => {
+      let signedReportSeen = false;
+      let agentAcknowledged = false;
       // Wait briefly to ensure the flake names resource has resolved from mock
       await page.waitForTimeout(1500);
 
@@ -7213,44 +7302,67 @@ const steps = [
         await page.waitForTimeout(600);
       }
 
-      // Mock setup-progress to show system + agent as complete for the screenshot
-      // (system creation may fail due to flake validation in test VM, so we verify
-      //  the flow reached this point and mock the final state)
+      // The test holds server-reported system completion constant and varies
+      // only the authenticated systems read and explicit acknowledgement.
+      // Creating the system must not acknowledge the agent setup step.
+      const setupProgress = {
+        ...mockSetupCoachProgress(),
+        environment: { complete: true, count: 1 },
+        flake: { complete: true, count: 1 },
+        builder: { complete: true, count: 1 },
+        cache: { complete: true, count: 1 },
+        system: { complete: true, count: 1 },
+      };
+      await page.route("**/api/v1/systems**", async (route) => {
+        if (route.request().method() !== "GET") return route.fallback();
+        const pageData = signedReportSeen
+          ? mockSystemsPopulatedPage()
+          : { items: [], total: 0, page: 1, per_page: 50 };
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(pageData) });
+      });
       await page.route("**/api/v1/admin/setup-progress*", async (route) => {
         await route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: JSON.stringify({
-            dismissed: false,
-            agent_acknowledged: true,
-            environment: { complete: true, count: 1 },
-            flake: { complete: true, count: 1 },
-            builder: { complete: true, count: 1 },
-            cache: { complete: true, count: 1 },
-            system: { complete: true, count: 1 },
-            all_required_complete: false,
-          }),
+          body: JSON.stringify({ ...setupProgress, agent_acknowledged: agentAcknowledged }),
         });
+      });
+      await page.route("**/api/v1/admin/setup-wizard/agent-acknowledge", async (route) => {
+        if (route.request().method() !== "POST") return route.fallback();
+        agentAcknowledged = true;
+        await route.fulfill({ status: 204, body: "" });
       });
 
       await page.locator("[data-testid='onboarding-coach-refresh']").click();
       await page.waitForTimeout(1500);
 
-      await page.unroute("**/api/v1/admin/setup-progress*");
-
       const systemStep = page.locator("[data-testid='onboarding-step-system']");
       await assertVisible(systemStep, "System step should be visible");
       const systemStepText = await systemStep.textContent();
-      if (!systemStepText.includes("Configured")) {
-        throw new Error(`Expected system step to show Configured, got: ${systemStepText}`);
+      if (!systemStepText.includes("Reported complete")) {
+        throw new Error(`Expected server-reported system completion, got: ${systemStepText}`);
       }
 
       const agentStep = page.locator("[data-testid='onboarding-step-agent']");
       await assertVisible(agentStep, "Agent step should be visible");
       const agentStepText = await agentStep.textContent();
-      if (!agentStepText.includes("Acknowledged")) {
-        throw new Error(`Expected agent step to show Acknowledged, got: ${agentStepText}`);
+      if (!agentStepText.includes("Waiting for the agent's first signed report") || await page.getByTestId("onboarding-agent-acknowledge").count() !== 0) {
+        throw new Error(`System registration must not acknowledge the agent step: ${agentStepText}`);
       }
+
+      signedReportSeen = true;
+      await page.locator("[data-testid='onboarding-coach-refresh']").click();
+      await assertVisible(page.getByTestId("onboarding-agent-acknowledge"), "The first signed report should enable explicit Admin acknowledgement");
+      await page.getByTestId("onboarding-agent-acknowledge").click();
+      await page.locator("[data-testid='onboarding-coach-refresh']").click();
+      await page.waitForTimeout(500);
+      const acknowledgedText = await agentStep.textContent();
+      if (!agentAcknowledged || !acknowledgedText.includes("Acknowledged")) {
+        throw new Error(`Agent setup must complete only after the server records Admin acknowledgement: ${acknowledgedText}`);
+      }
+      await page.unroute("**/api/v1/systems**");
+      await page.unroute("**/api/v1/admin/setup-progress*");
+      await page.unroute("**/api/v1/admin/setup-wizard/agent-acknowledge");
     },
   },
   {
@@ -7266,10 +7378,12 @@ const steps = [
         });
       });
       await page.evaluate(() => {
-        localStorage.setItem("cf.coach.collapsed", "false");
-        localStorage.setItem("cf.coach.force_show", "false");
+        localStorage.setItem("cf.coach.ui.v2", JSON.stringify({ panel: "expanded", track: "setup", progress: {} }));
       });
       await page.reload({ timeout: LOAD_TIMEOUT });
+      if (await page.locator("[data-coach-pill]").isVisible().catch(() => false)) {
+        await page.locator("[data-coach-pill]").click();
+      }
       const currentStep = page.locator("[data-testid='onboarding-step-policy']");
       await assertVisible(currentStep, "Create policy should be the selected current step before minimizing");
       if ((await currentStep.getAttribute("aria-current")) !== "step") {
@@ -7296,9 +7410,9 @@ const steps = [
   },
   {
     name: "06h-onboarding-coach-all-configured",
-    description: "Coach panel: expand from tab, all steps show Configured",
+    description: "Setup-complete card remains available after all nine server-reported steps",
     action: async (page) => {
-      await page.evaluate(() => localStorage.setItem("cf.coach.force_show", "true"));
+      await page.evaluate(() => localStorage.setItem("cf.coach.ui.v2", JSON.stringify({ panel: "expanded", track: "setup", progress: {} })));
       await page.unroute("**/api/v1/admin/setup-progress*");
       await page.route("**/api/v1/admin/setup-progress*", async (route) => {
         await route.fulfill({
@@ -7322,6 +7436,9 @@ const steps = [
       });
 
       await page.reload({ timeout: LOAD_TIMEOUT });
+      if (await page.locator("[data-coach-pill]").isVisible().catch(() => false)) {
+        await page.locator("[data-coach-pill]").click();
+      }
 
       await assertVisible(
         page.locator("[data-testid='onboarding-step-environment']"),
@@ -7332,8 +7449,8 @@ const steps = [
         const step = page.locator(`[data-testid='onboarding-step-${stepId}']`);
         await assertVisible(step, `Step ${stepId} should be visible`);
         const text = await step.textContent();
-        if (!text.includes("Configured")) {
-          throw new Error(`Expected step ${stepId} to show Configured, got: ${text}`);
+        if (!text.includes("Reported complete")) {
+          throw new Error(`Expected step ${stepId} to show server-reported completion, got: ${text}`);
         }
       }
 
@@ -7347,7 +7464,8 @@ const steps = [
       for (const [stepId, pathname] of [
         ["policy", "/deployment-policies"],
         ["bundle", "/compliance"],
-        ["poam", "/compliance"],
+        // The design's Track a POA&M step opens the dedicated POA&M register.
+        ["poam", "/poams"],
       ]) {
         await page.locator(`[data-testid='onboarding-step-${stepId}']`).click();
         await page.waitForURL((url) => url.pathname === pathname, { timeout: LOAD_TIMEOUT });
@@ -7363,10 +7481,393 @@ const steps = [
 
       await page.unroute("**/api/v1/admin/setup-progress*");
       await page.evaluate(() => {
-        localStorage.setItem("cf.coach.force_show", "false");
-        localStorage.setItem("cf.coach.collapsed", "true");
+        localStorage.setItem("cf.coach.ui.v2", JSON.stringify({ panel: "expanded", track: "setup", progress: {} }));
       });
       await collapseOnboardingCoach(page);
+    },
+  },
+  {
+    name: "06i-security-workflows-role-coach",
+    description: "Guide opens security walkthroughs for Operator and Viewer without setup-progress traffic or security mutations",
+    action: async (page) => {
+      const setupRequests = [];
+      const securityMutations = [];
+      const observe = (request) => {
+        const url = new URL(request.url());
+        if (url.pathname === "/api/v1/admin/setup-progress") setupRequests.push(request.method());
+        if (request.method() !== "GET" && /\/(?:cves\/.*(?:triage|batch)|poams|acceptances|scan-schedule|compliance\/.*assignments)/.test(url.pathname)) {
+          securityMutations.push(`${request.method()} ${url.pathname}`);
+        }
+      };
+      page.on("request", observe);
+
+      const openRoleGuide = async (role) => {
+        await page.unroute("**/api/**").catch(() => {});
+        await routeStandaloneUiBootstrap(page, role);
+        await page.evaluate(() => localStorage.setItem("cf.coach.ui.v2", JSON.stringify({ panel: "dismissed", track: "setup", progress: {} })));
+        await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+        const guide = page.getByTestId("coach-guide-button");
+        await assertVisible(guide, `${role} must have the top-bar Guide button`);
+        await guide.click();
+        await assertVisible(page.getByTestId("onboarding-coach-panel"), `${role} Guide must reopen the coach`);
+        await assertHidden(page.getByTestId("coach-tab-setup"), `${role} must not see authoritative Setup progress`);
+        await assertVisible(page.getByTestId("coach-tab-security"), `${role} must see Security workflows`);
+        await assertVisible(page.getByTestId("coach-module-B"), `${role} must see the triage walkthrough`);
+      };
+
+      await openRoleGuide("Operator");
+      await captureRequiredResponsiveArtifact(page, "06i-security-workflows-role-coach", "operator-security-home");
+      await page.getByTestId("coach-module-start-B").click();
+      const operatorTour = page.getByTestId("coach-tour-card");
+      await assertVisible(operatorTour, "Operator should start the vulnerability walkthrough");
+      await page.getByTestId("coach-tour-next").click();
+      await assertVisible(operatorTour, "Operator walkthrough should advance to per-environment triage");
+      if (await operatorTour.getByTestId("coach-gate").count() !== 0) {
+        throw new Error("Operator must not receive a Viewer permission gate for CVE triage");
+      }
+      await page.getByTestId("coach-tour-exit").click();
+
+      await openRoleGuide("Viewer");
+      await page.getByTestId("coach-module-start-B").click();
+      const viewerTour = page.getByTestId("coach-tour-card");
+      await assertVisible(viewerTour, "Viewer should start a read-only vulnerability walkthrough");
+      await page.getByTestId("coach-tour-next").click();
+      await assertVisible(viewerTour, "Viewer should progress to the explanatory triage stop");
+      await assertVisible(viewerTour.getByTestId("coach-gate"), "Viewer triage stop must explain the Operator permission requirement");
+      await assertVisible(viewerTour.getByText(/Triage requires Operator permission/), "Viewer stop must retain the design's read-only explanation");
+      await captureRequiredResponsiveArtifact(page, "06i-security-workflows-role-coach", "viewer-read-only-triage");
+      const localState = await page.evaluate(() => JSON.parse(localStorage.getItem("cf.coach.ui.v2") || "{}"));
+      if (!localState.progress?.B?.includes("B1") || localState.progress?.B?.includes("B2")) {
+        throw new Error(`The active stop must not count as viewed until the person advances: ${JSON.stringify(localState.progress)}`);
+      }
+      await page.getByTestId("coach-tour-next").click();
+      await assertVisible(viewerTour.getByText("Schedule patch opens a POA&M", { exact: true }), "Viewer should advance through the read-only triage explanation");
+      const advancedState = await page.evaluate(() => JSON.parse(localStorage.getItem("cf.coach.ui.v2") || "{}"));
+      if (!advancedState.progress?.B?.includes("B1") || !advancedState.progress?.B?.includes("B2")) {
+        throw new Error(`Viewer walkthrough progress must record only stops advanced past: ${JSON.stringify(advancedState.progress)}`);
+      }
+      if (setupRequests.length !== 0) {
+        throw new Error(`Operator or Viewer called the Administrator-only setup-progress endpoint: ${JSON.stringify(setupRequests)}`);
+      }
+      if (securityMutations.length !== 0) {
+        throw new Error(`Coach navigation submitted a security mutation: ${JSON.stringify(securityMutations)}`);
+      }
+      page.off("request", observe);
+      await page.unroute("**/api/**");
+    },
+  },
+  {
+    name: "06j-security-coach-cve-evidence",
+    description: "Admin Guide resumes the CVE evidence stop, opens exact fleet detail and triage presentation without submitting a disposition",
+    action: async (page) => {
+      await page.unroute("**/api/**").catch(() => {});
+      await routeStandaloneUiBootstrap(page, "Operator");
+      const cve = {
+        cve_id: "CVE-2026-8842",
+        cvss_v3_score: 9.1,
+        title: "OpenSSL signed-length overflow",
+        severity: "critical",
+        cvss_vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        published_date: "2026-09-01",
+        exploited: false,
+        package_name: "openssl",
+        installed_version: "3.0.1",
+        fixed_version: "3.0.2",
+        fix_status: "fix_available",
+        affected_count: 1,
+        exact_affected_count: 1,
+        legacy_affected_count: 0,
+        current_affected_count: 1,
+        scheduled_deployment_target_count: 0,
+        historical_inventory_count: 0,
+        affected_environments: ["Coach production"],
+        first_seen: "2026-09-20T00:00:00Z",
+        last_seen: "2026-09-30T00:00:00Z",
+        age_days: 10,
+        triage_status: "outstanding",
+      };
+      const environmentId = "00000000-0000-4000-8000-000000008842";
+      const fleet = {
+        cve: {
+          cve_id: cve.cve_id,
+          cvss_v3_score: cve.cvss_v3_score,
+          severity: cve.severity,
+          title: cve.title,
+          cvss_vector: cve.cvss_vector,
+          cwe_id: null,
+          published_date: cve.published_date,
+          modified_date: null,
+          exploited: false,
+          package_name: "openssl",
+          installed_version: "3.0.1",
+          fixed_version: "3.0.2",
+          detection_method: "vulnix",
+          fix_status: "fix_available",
+        },
+        canonical_package_name: "openssl",
+        rollup: "outstanding",
+        affected_system_count: 1,
+        exact_affected_system_count: 1,
+        exact_mutation_target_count: 1,
+        legacy_affected_system_count: 0,
+        current_affected_system_count: 1,
+        scheduled_deployment_target_count: 0,
+        historical_inventory_system_count: 0,
+        no_scan_system_count: 0,
+        unassigned_affected_system_count: 0,
+        unassigned_systems: [],
+        environments: [{
+          environment_id: environmentId,
+          environment_name: "Coach production",
+          affected_system_count: 1,
+          exact_affected_system_count: 1,
+          legacy_affected_system_count: 0,
+          current_affected_system_count: 1,
+          scheduled_deployment_target_count: 0,
+          historical_inventory_system_count: 0,
+          systems: [],
+          disposition: null,
+        }],
+      };
+      const mutationRequests = [];
+      const onRequest = (request) => {
+        const url = new URL(request.url());
+        if (request.method() !== "GET" && url.pathname.startsWith("/api/v1/cves/")) {
+          mutationRequests.push(`${request.method()} ${url.pathname}`);
+        }
+      };
+      page.on("request", onRequest);
+      await page.route("**/api/v1/cves**", async (route) => {
+        const request = route.request();
+        const url = new URL(request.url());
+        if (request.method() !== "GET") return route.fallback();
+        if (url.pathname === "/api/v1/cves/stats") {
+          return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+            total_cves: 1, critical: 1, high: 0, medium: 0, low: 0, exploited: 0,
+            fixable: 1, environments_affected: 1, systems_affected: 1, exact_systems_affected: 1,
+            legacy_systems_affected: 0, current_systems_affected: 1,
+            scheduled_deployment_target_systems: 0, historical_inventory_systems: 0,
+            no_scan_systems: 0, outstanding: 1, accepted: 0, scheduled: 0,
+          }) });
+        }
+        if (url.pathname === "/api/v1/cves/packages") {
+          return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(["openssl"]) });
+        }
+        if (url.pathname === "/api/v1/cves/inventory/pairs") {
+          return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items: [cve], total: 1, next_offset: null, package_host_unions: [] }) });
+        }
+        if (url.pathname === "/api/v1/cves" || url.pathname === "/api/v1/cves/grouped") {
+          return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([cve]) });
+        }
+        if (url.pathname === `/api/v1/cves/${cve.cve_id}/fleet`) {
+          return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(fleet) });
+        }
+        return route.fallback();
+      });
+      await page.route("**/api/v1/poams/assignees", async (route) => {
+        if (route.request().method() === "GET") {
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ people: [], groups: [] }) });
+        } else {
+          await route.fallback();
+        }
+      });
+      await page.evaluate(() => localStorage.setItem("cf.coach.ui.v2", JSON.stringify({
+        panel: "dismissed",
+        track: "security",
+        progress: { A: ["A1", "A2", "A3", "A4"] },
+      })));
+      await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+      await page.getByTestId("coach-guide-button").click();
+      await assertVisible(page.getByTestId("coach-module-A"), "Guide must reopen the security walkthrough home");
+      await page.getByTestId("coach-module-start-A").click();
+      const tour = page.getByTestId("coach-tour-card");
+      await assertVisible(tour, "Resume must start at the first unviewed CVE evidence stop");
+      await assertVisible(tour.getByText("Current, Scheduled, Historical", { exact: true }), "CVE evidence relations stop should be active");
+      const drawer = page.getByTestId("cve-fleet-drawer");
+      await assertVisible(drawer, "CVE stop must open the exact production fleet detail surface");
+      await assertVisible(drawer.getByText("OpenSSL signed-length overflow", { exact: true }), "CVE detail must display its source-backed title");
+      await assertVisible(drawer.locator("[data-coach-target='cve-relations']"), "CVE walkthrough must spotlight the distinct evidence tiers");
+      await assertVisible(page.getByTestId("coach-spot"), "CVE evidence stop must show the target spotlight");
+      await captureRequiredResponsiveArtifact(page, "06j-security-coach-cve-evidence", "current-evidence-relations");
+      await page.getByTestId("coach-tour-exit").click();
+      await page.getByRole("button", { name: "Close fleet inventory" }).click();
+      await assertVisible(page.getByTestId("coach-module-B"), "Closing the user-opened surfaces must reveal the Security Workflows home");
+      await page.getByTestId("coach-module-start-B").click();
+      await assertVisible(tour.getByText("Read the exact finding first", { exact: true }), "CVE triage module must advance to exact finding detail");
+      await assertVisible(drawer, "Exact finding stop must keep the drawer open");
+      await page.getByTestId("coach-tour-next").click();
+      await assertVisible(page.getByTestId("cve-triage-dialog"), "Operator triage stop must open the triage presentation");
+      await assertVisible(page.getByTestId("coach-spot"), "Triage stop must spotlight the open modal");
+      await captureRequiredResponsiveArtifact(page, "06j-security-coach-cve-evidence", "triage-modal-dock");
+      await page.getByTestId("coach-tour-exit").click();
+      await assertVisible(page.getByTestId("cve-triage-dialog"), "Exiting the walkthrough must leave the user-opened triage modal available");
+      await page.locator(".cve-triage-backdrop").evaluate((element) => element.click());
+      await assertHidden(page.getByTestId("cve-triage-dialog"), "User-initiated backdrop close must leave triage unapplied");
+      await page.getByRole("button", { name: "Close fleet inventory" }).click();
+      if (mutationRequests.length !== 0) {
+        throw new Error(`CVE walkthrough navigation submitted a triage request: ${JSON.stringify(mutationRequests)}`);
+      }
+      page.off("request", onRequest);
+      await page.unroute("**/api/v1/cves**");
+      await page.unroute("**/api/v1/poams/assignees");
+      await page.unroute("**/api/**");
+    },
+  },
+  {
+    name: "06k-security-coach-poam-acceptance",
+    description: "POA&M verification and risk acceptance walkthroughs navigate to authorized records and never verify, close, renew, or convert",
+    action: async (page) => {
+      await page.unroute("**/api/**").catch(() => {});
+      await routeStandaloneUiBootstrap(page, "Operator");
+      const ids = {
+        plan: "32000000-0000-4000-8000-000000000101",
+        host: "32000000-0000-4000-8000-000000000102",
+        acceptance: "32000000-0000-4000-8000-000000000103",
+        owner: "32000000-0000-4000-8000-000000000104",
+      };
+      const plan = {
+        id: ids.plan,
+        human_id: "POAM-0101",
+        title: "OpenSSL exact-evidence remediation",
+        plan: "Deploy the fixed package and verify the current scan.",
+        owner: "",
+        revision: 1,
+        assignee: { kind: "user", user_id: ids.owner, display: "Morgan Owner", available: true },
+        status: "awaiting_verification",
+        risk: "high",
+        target_date: "2026-10-15",
+        overdue: false,
+        finding_count: 1,
+        cve_finding_count: 1,
+        created_at: "2026-09-20T12:00:00Z",
+        updated_at: "2026-09-21T12:00:00Z",
+        closed_at: null,
+        closure_attempt_id: null,
+        environment_ids: [],
+        system_ids: [],
+        systems: [],
+        bundle_ids: [],
+        bundle_version_ids: [],
+        assignment_version_ids: [],
+        first_requirement: null,
+        first_cve: "CVE-2026-8842",
+        milestone_count: 0,
+        completed_milestone_count: 0,
+        last_activity_at: "2026-09-21T12:00:00Z",
+      };
+      const planDetail = {
+        ...plan,
+        findings: [],
+        cve_findings: [],
+        findings_has_more: false,
+        findings_next_cursor: null,
+        milestones: [],
+        assignment_references: [],
+        verification_attempts: [],
+        verification_has_more: false,
+        verification_next_cursor: null,
+        activity: [],
+        activity_has_more: false,
+        activity_next_cursor: null,
+      };
+      const acceptance = {
+        source: "cve_host",
+        human_id: "RA-0103",
+        source_id: ids.acceptance,
+        waiver_updated_at: null,
+        status: "accepted",
+        finding_id: null,
+        system_id: ids.host,
+        system_hostname: "coach-prod-01",
+        environment_id: null,
+        environment_name: null,
+        policy_lineage_id: null,
+        policy_version_id: null,
+        policy_title: null,
+        requirement_external_id: null,
+        canonical_cve_id: "CVE-2026-8842",
+        canonical_package_name: "openssl",
+        justification: "Reviewed exact host CVE risk.",
+        review_date: "2026-12-01",
+        review_due_at: null,
+        expires_at: null,
+        accepted_by: ids.owner,
+        accepted_at: "2026-09-20T12:00:00Z",
+        retired_at: null,
+        retired_by: null,
+        retirement_reason: null,
+        replacement_poam_id: null,
+        recorded_at: "2026-09-20T12:00:00Z",
+      };
+      const mutations = [];
+      const onRequest = (request) => {
+        const url = new URL(request.url());
+        if (request.method() !== "GET" && /\/api\/v1\/(?:poams|acceptances)/.test(url.pathname)) {
+          mutations.push(`${request.method()} ${url.pathname}`);
+        }
+      };
+      page.on("request", onRequest);
+      await page.route("**/api/v1/poams**", async (route) => {
+        const request = route.request();
+        if (request.method() !== "GET") return route.fallback();
+        const url = new URL(request.url());
+        if (url.pathname === "/api/v1/poams/dashboard") {
+          return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ total: 1, active: 1, overdue: 0, awaiting_verification: 1, completed: 0 }) });
+        }
+        if (url.pathname === "/api/v1/poams/assignees") {
+          return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ people: [], groups: [] }) });
+        }
+        const detailMatch = url.pathname.match(/\/api\/v1\/poams\/([0-9a-f-]+)$/);
+        if (detailMatch) {
+          if (detailMatch[1] !== ids.plan) throw new Error(`Unexpected POA&M detail ID ${detailMatch[1]}`);
+          return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(planDetail) });
+        }
+        const limit = Number(url.searchParams.get("limit") || 100);
+        const offset = Number(url.searchParams.get("offset") || 0);
+        return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items: [plan], limit, offset, has_more: false, next_offset: null }) });
+      });
+      await page.route("**/api/v1/acceptances**", async (route) => {
+        if (route.request().method() !== "GET") return route.fallback();
+        const url = new URL(route.request().url());
+        return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items: [acceptance], total: 1, limit: 100, offset: Number(url.searchParams.get("offset") || 0), has_more: false }) });
+      });
+      await page.evaluate(() => localStorage.setItem("cf.coach.ui.v2", JSON.stringify({
+        panel: "dismissed",
+        track: "security",
+        progress: { D: ["D1", "D2", "D3"], E: ["E1", "E2"] },
+      })));
+      await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+      await page.getByTestId("coach-guide-button").click();
+      await page.getByTestId("coach-module-start-D").click();
+      const tour = page.getByTestId("coach-tour-card");
+      await assertVisible(tour.getByText("Remediation plan detail", { exact: true }), "Register walkthrough must resume at plan detail");
+      await assertVisible(page.getByTestId("poam-detail"), "Walkthrough must open the exact plan detail route");
+      await page.getByTestId("coach-tour-next").click();
+      await assertVisible(tour.getByText("Lifecycle", { exact: true }), "POA&M lifecycle stop must be reachable");
+      await assertVisible(page.locator("[data-coach-target='poam-lifecycle']"), "Lifecycle stop must highlight the lifecycle control");
+      await page.getByTestId("coach-tour-next").click();
+      await assertVisible(tour.getByText("Verify now, then close", { exact: true }), "Verification stop must be reachable");
+      await assertVisible(page.locator("[data-coach-target='poam-verify']"), "Verification stop must highlight the exact-evidence check area");
+      await captureRequiredResponsiveArtifact(page, "06k-security-coach-poam-acceptance", "poam-verify-target");
+      await page.getByTestId("coach-tour-next").click();
+      await page.getByTestId("coach-tour-next").click();
+      await assertVisible(tour.getByText("Risk acceptance detail", { exact: true }), "Risk acceptance detail stop must open the accepted source record");
+      await assertVisible(page.locator("[data-coach-target='ra-truth']"), "Risk acceptance truth statement must be highlighted");
+      await captureRequiredResponsiveArtifact(page, "06k-security-coach-poam-acceptance", "risk-acceptance-truth");
+      await page.getByTestId("coach-tour-next").click();
+      await assertVisible(page.locator("[data-coach-target='ra-footer']"), "Renewal and conversion actions must remain explanatory targets");
+      await page.getByTestId("coach-tour-exit").click();
+      await page.getByRole("button", { name: "Close acceptance" }).click();
+      await assertVisible(page.getByTestId("coach-module-E"), "Closing the user-opened acceptance drawer must reveal the workflow home");
+      await page.getByTestId("coach-module-start-E").click();
+      await assertVisible(tour.getByText("Two identities per acceptance", { exact: true }), "Audit walkthrough must resume at acceptance source identity");
+      await assertVisible(page.locator("[data-coach-target='ra-source-toggle']"), "Audit stop must spotlight the immutable source identity disclosure");
+      await captureRequiredResponsiveArtifact(page, "06k-security-coach-poam-acceptance", "risk-acceptance-source");
+      if (mutations.length !== 0) throw new Error(`POA&M walkthrough submitted an action: ${JSON.stringify(mutations)}`);
+      page.off("request", onRequest);
+      await page.unroute("**/api/v1/poams**");
+      await page.unroute("**/api/v1/acceptances**");
+      await page.unroute("**/api/**");
     },
   },
   {
@@ -25199,7 +25700,7 @@ function runStaticHarnessContracts() {
     'routeStandaloneUiBootstrap(viewerPage, "Viewer")',
     'available — version pending',
     'filter({ hasText: "Historical inventory" })',
-    'getByTestId("system-cves-no-scan")',
+    'getByText("Running target unavailable", { exact: true })',
   ]) {
     assertContract(scenario12h.includes(contract), `12h System Detail triage workflow is missing ${contract}`);
   }
@@ -25320,11 +25821,11 @@ function runStaticHarnessContracts() {
     '"Build failed before scan"',
     '"Build cancelled before scan"',
     'must not offer a misleading scan retry',
-    'Failure preview was not bounded',
+    'Scan failure must show a concise primary-table reason',
     'includeArchived ? 0 : rows.filter',
     '.slice(0, requestedLimit)',
-    'Completed archived state leaked into By-system history',
-    "One system's archived state leaked into another system",
+    'Archived range scan ${scanId} must leave default Completed',
+    'Archived range scan ${scanId} must be visible for restore',
     'name: "Archived [6]"',
     // Request-bound keyset pagination for the Completed collection.
     'next_cursor: nextCursor',

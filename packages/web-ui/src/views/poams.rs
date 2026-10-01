@@ -1304,6 +1304,7 @@ fn AcceptanceTray(
         div { class: "poam-tray-backdrop", onclick: move |_| if !busy() { on_close.call(()); } }
         aside {
             class: "fl-tray poam-tray rr-acceptance-drawer",
+            "data-coach-target": "ra-drawer",
             role: "dialog",
             aria_modal: "true",
             aria_label: "Risk acceptance {human_id} · {label}",
@@ -1338,11 +1339,13 @@ fn AcceptanceTray(
                     }
                 }
                 details { class: "rr-acceptance-source-id",
-                    summary { "Source record identity" }
+                    summary { "data-coach-target": "ra-source-toggle", "Source record identity" }
+                    div { "data-coach-target": "ra-source-id",
                     code { "Decision {source}" }
                     if let Some(id) = replacement { code { "Replacement POA&M {id}" } }
                     if let Some(finding_id) = entry.finding_id { code { "Policy finding {finding_id}" } }
                     if let Some(version_id) = entry.policy_version_id { code { "Policy version {version_id}" } }
+                    }
                 }
                 section { class: "rr-acceptance-section",
                     h3 { "Justification" }
@@ -1358,7 +1361,7 @@ fn AcceptanceTray(
                             td { class: "mono", if let Some(package) = entry.canonical_package_name.as_deref() { "{package}" } else if entry.policy_version_id.is_some() { "Policy waiver" } else { "Not recorded" } }
                         } }
                     }
-                    p { class: "rr-acceptance-help", Icon { name: IconName::Shield, size: 12 } "Risk acceptance records a decision. It does not make a finding pass or mark it remediated." }
+                    p { class: "rr-acceptance-help", "data-coach-target": "ra-truth", Icon { name: IconName::Shield, size: 12 } "Risk acceptance records a decision. It does not make a finding pass or mark it remediated." }
                     if let Some(reason) = entry.retirement_reason.as_deref() {
                         p { class: "rr-acceptance-retirement", "Retirement reason: {reason}" }
                     }
@@ -1395,7 +1398,7 @@ fn AcceptanceTray(
                 }
                 if let Some(reason) = error() { p { role: "alert", "{human_id}: {reason}" } }
             }
-            footer { class: "rr-tray-foot rr-acceptance-footer",
+            footer { class: "rr-tray-foot rr-acceptance-footer", "data-coach-target": "ra-footer",
                 span { class: "rr-acceptance-footer-note", if can_renew || can_convert { "Source-owned actions · original decision remains in history" } else { "Read-only decision record" } }
                 div { class: "rr-acceptance-footer-actions",
                 if can_renew { button { r#type: "button", class: "btn btn-ghost focus-ring", disabled: busy(), onclick: move |_| { busy.set(true); error.set(None); let entry = entry_renew.clone(); spawn(async move {
@@ -1593,7 +1596,7 @@ fn AcceptanceRegister(
                     table { class: "sys-table compact sys-table-dense poams-table pv-table rr-acceptances-table rr-acceptances-only",
                         thead { tr { th { "ID" } th { "Title" } th { "Status" } th { class: if progress_column { "pv-c-ms rr-appr" } else { "pv-c-ms rr-appr poams-hidden" }, "Approved" } th { class: if owner_column { "pv-c-owner" } else { "pv-c-owner poams-hidden" }, "Approver" } th { "Review" } } }
                         tbody { for item in items {
-                             tr { key: "{item.source:?}:{item.source_id}", "data-source-id": "{item.source_id}", class: if chosen.contains(&acceptance_id(&item)) { "selectable row-checked" } else { "selectable" },
+                             tr { key: "{item.source:?}:{item.source_id}", "data-source-id": "{item.source_id}", "data-coach-open": "ra-row", "data-coach-key": "{item.source_id}", class: if chosen.contains(&acceptance_id(&item)) { "selectable row-checked" } else { "selectable" },
                                 aria_selected: if chosen.contains(&acceptance_id(&item)) { "true" } else { "false" }, tabindex: "0",
                                 onclick: { let item = item.clone(); move |e: MouseEvent| {
                                     let id = acceptance_id(&item);
@@ -2232,7 +2235,7 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
         let title = acceptance_row_title(item, &env_names);
         let source = acceptance_source_label(item.source);
         let approver = approver_label(item.accepted_by, catalog().as_ref());
-        rsx! { tr { key: "{item.source:?}:{item.source_id}", "data-source-id": "{item.source_id}", class: if checked { "selectable row-checked" } else { "selectable" }, aria_selected: if checked { "true" } else { "false" }, tabindex: "0", onclick: move |e: MouseEvent| {
+        rsx! { tr { key: "{item.source:?}:{item.source_id}", "data-source-id": "{item.source_id}", "data-coach-open": "ra-row", "data-coach-key": "{item.source_id}", class: if checked { "selectable row-checked" } else { "selectable" }, aria_selected: if checked { "true" } else { "false" }, tabindex: "0", onclick: move |e: MouseEvent| {
             if e.modifiers().ctrl() || e.modifiers().meta() {
                 let mut ids = mixed_selected(); if !ids.insert(id) { ids.remove(&id); } mixed_selected.set(ids);
             } else { mixed_open.set(Some(id)); }
@@ -2271,8 +2274,8 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
                 p { class: "page-subtitle", "Showing {open} open remediation plans · {active_acceptances} active risk decisions" }
             }
                 if export_enabled { div { class: "rr-export",
-                    button { r#type: "button", class: "btn btn-ghost focus-ring", aria_expanded: if export_open() { "true" } else { "false" }, onclick: move |_| export_open.set(!export_open()), "{export_label} ▾" }
-                    if export_open() { div { class: "rr-export-pop card", role: "menu", aria_label: "Export POA&Ms",
+                    button { r#type: "button", class: "btn btn-ghost focus-ring", "data-coach-open": "register-export", aria_expanded: if export_open() { "true" } else { "false" }, onclick: move |_| export_open.set(!export_open()), "{export_label} ▾" }
+                    if export_open() { div { class: "rr-export-pop card", role: "menu", aria_label: "Export POA&Ms", "data-coach-target": "register-export-menu",
                         div { class: "rr-export-title", "Export POA&Ms" }
                         for (format, label, description) in [("oscal-json", "OSCAL JSON", "Machine-readable POA&M"), ("xlsx", "Excel XLSX", "Spreadsheet for review"), ("csv", "CSV", "Flat data for import"), ("oscal-xml", "OSCAL XML", "Standards-compatible XML")] {
                             a { role: "menuitem", class: "rr-export-item focus-ring", href: "{mixed_export}{format}", onclick: move |_| export_open.set(false), span { class: "rr-export-item-l", "{label}" } span { class: "rr-export-item-sub", "{description}" } }
@@ -2280,7 +2283,7 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
                     } }
                 } } else { button { r#type: "button", class: "btn btn-ghost focus-ring", disabled: true, title: if location.scope.is_some() || location.queue.is_some() || mine() || !search().trim().is_empty() { "Clear local filters to export the complete scope" } else if status() == "closed" && export_family != "plans" { "Choose All statuses to export historical decisions" } else { "No records to export" }, "Export ▾" } }
             }
-            div { class: "rr-kinds", role: "tablist", aria_label: "Record type",
+            div { class: "rr-kinds", role: "tablist", aria_label: "Record type", "data-coach-target": "register-kinds",
                 for (kind, label, count) in [(Tab::Everything, "Everything", everything_tab_count), (Tab::Plans, "Remediation plans", plan_tab_count), (Tab::Acceptances, "Risk acceptances", acceptance_tab_count)] {
                     button { r#type: "button", role: "tab", class: if location.kind == kind { "rr-kind active focus-ring" } else { "rr-kind focus-ring" }, aria_selected: if location.kind == kind { "true" } else { "false" }, onclick: move |_| { export_open.set(false); columns_open.set(false); if kind == Tab::Acceptances { risk.set("all".into()); } nav.push(Route::PoamsView { query: RegisterLocation { kind, queue: None, poam: None, ..location }.query() }); },
                         if kind == Tab::Plans { span { class: "rr-kind-mark poams-plan-mark" } }
@@ -2290,7 +2293,7 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
                 }
                 span { class: "rr-kinds-note", "Plans fix a deficiency by a target date; acceptances record a decision to let it stand until review." }
             }
-            div { class: "pv-queues", role: "group", aria_label: "Work queues",
+            div { class: "pv-queues", role: "group", aria_label: "Work queues", "data-coach-target": "register-queues",
                 if location.kind == Tab::Everything {
                     for (queue, count) in [
                         (Queue::Overdue, loaded.iter().filter(|row| in_scope(row, location.scope) && Queue::Overdue.includes(row, today)).count()),
@@ -2316,8 +2319,8 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
                     }
                 }
             }
-            div { class: "card poams-main pv-main",
-                    div { class: "poams-scope",
+            div { class: "card poams-main pv-main", "data-coach-target": "register-main",
+                    div { class: "poams-scope", "data-coach-target": "register-scope",
                         div { class: "seg xs", role: "tablist", aria_label: "Browse by",
                             for (key, label) in [("environment", "Environment"), ("bundle", "Bundle"), ("owner", "Owner / Approver")] {
                                 button { r#type: "button", role: "tab", aria_selected: if location.dimension.key() == key { "true" } else { "false" }, class: if location.dimension.key() == key { "active" } else { "" }, onclick: move |_| { nav.push(Route::PoamsView { query: RegisterLocation { dimension: Dimension::parse(key), scope: None, poam: None, ..location }.query() }); }, "{label}" }

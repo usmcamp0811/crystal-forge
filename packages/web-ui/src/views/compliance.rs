@@ -775,7 +775,7 @@ pub fn ComplianceView(
     rsx! {
         div { class: "cf-compliance-view", style: "display:flex;flex-direction:column;gap:16px;",
             // ── Page head ──────────────────────────────────────────────────
-            div { class: "page-head cf-bundles-head",
+            div { class: "page-head cf-bundles-head", "data-coach-target": "compliance-head",
                 div { class: "cf-bundles-head-copy",
                     h1 { class: "page-title", "Compliance" }
                     p { class: "page-subtitle",
@@ -882,6 +882,7 @@ pub fn ComplianceView(
                         },
                     }
                     button {
+                        "data-coach-target": "compliance-export-evidence",
                         class: "btn btn-ghost focus-ring",
                         onclick: move |_| show_export.set(true),
                         Icon { name: IconName::Download, size: 14 }
@@ -889,6 +890,7 @@ pub fn ComplianceView(
                     }
                     if is_admin {
                         button {
+                            "data-coach-target": "bundle",
                             class: "btn btn-primary focus-ring",
                             onclick: move |_| show_new_bundle.set(true),
                             Icon { name: IconName::Plus, size: 14 }
@@ -1108,17 +1110,17 @@ pub fn ComplianceView(
                                     div { class: "sd-callout sd-callout-danger", style: "margin:12px 18px;", "Could not load authoritative POA&M roll-up: {error}" }
                                 }
                                 if let Some(err) = systems_error.read().as_ref() {
-                                    div { class: "card", "data-testid": "bundle-systems-card",
+                                    div { class: "card", "data-testid": "bundle-systems-card", "data-coach-target": "bundle-systems",
                                         h3 { style: "margin:0 0 8px;font-size:13px;font-weight:600;", "Systems" }
                                         div { class: "sd-callout sd-callout-danger", Icon { name: IconName::X, size: 13 }, div { "Failed to load systems: {err}" } }
                                     }
                                 } else if *systems_loading.read() {
-                                    div { class: "card", "data-testid": "bundle-systems-card",
+                                    div { class: "card", "data-testid": "bundle-systems-card", "data-coach-target": "bundle-systems",
                                         h3 { style: "margin:0 0 8px;font-size:13px;font-weight:600;", "Systems" }
                                         div { class: "sd-callout sd-callout-info", Icon { name: IconName::Shield, size: 13 }, div { "Loading systems rollup…" } }
                                     }
                                 } else if let Some(resp) = systems.read().as_ref() {
-                                    div { class: "card", "data-testid": "bundle-systems-card", style: "padding:0;overflow:hidden;",
+                                    div { class: "card", "data-testid": "bundle-systems-card", "data-coach-target": "bundle-systems", style: "padding:0;overflow:hidden;",
                                         SystemsMatrix {
                                             systems: resp.systems.clone(),
                                             selected_bundle_version_id: *selected_bundle_version_id.read(),

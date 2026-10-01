@@ -663,7 +663,7 @@ pub fn FindingPoamBar(props: FindingPoamBarProps) -> Element {
     }
 
     rsx! {
-        section { class: "poam-bar", aria_label: "Finding remediation", "data-testid": "finding-poam-remediation", "data-finding-id": "{props.context.finding_id}",
+        section { class: "poam-bar", aria_label: "Finding remediation", "data-testid": "finding-poam-remediation", "data-coach-target": "finding-poam", "data-finding-id": "{props.context.finding_id}",
             div { class: "poam-bar-label", Icon { name: IconName::Gear, size: 12 } "Remediation" }
             div { class: "poam-finding-result",
                 span { "Current result" }
@@ -678,7 +678,7 @@ pub fn FindingPoamBar(props: FindingPoamBarProps) -> Element {
                 }
             } else if can_start {
                 div { class: "poam-bar-actions",
-                    button { class: "btn btn-ghost xs focus-ring", disabled: props.viewer, onclick: move |_| create_open.set(true), Icon { name: IconName::Plus, size: 11 } "Create POA&M" }
+                    button { class: "btn btn-ghost xs focus-ring", "data-coach-open": "finding-poam-form", disabled: props.viewer, onclick: move |_| create_open.set(true), Icon { name: IconName::Plus, size: 11 } "Create POA&M" }
                     button { class: "btn btn-ghost xs focus-ring", disabled: props.viewer, onclick: move |_| link_open.set(true), Icon { name: IconName::Link, size: 11 } "Link existing" }
                     span { class: "poam-muted", "No active remediation plan. The finding remains FAIL." }
                 }
@@ -772,7 +772,7 @@ fn PoamCreateModal(props: PoamCreateModalProps) -> Element {
 
     rsx! {
         div { class: "modal-backdrop", onclick: move |_| if !pending() { close.call(()) },
-            div { id: "poam-create-dialog", class: "modal poam-modal", role: "dialog", aria_modal: "true", aria_labelledby: "poam-create-title", tabindex: "-1", onclick: |event| event.stop_propagation(), onkeydown: move |event| {
+            div { id: "poam-create-dialog", class: "modal poam-modal", role: "dialog", aria_modal: "true", aria_labelledby: "poam-create-title", tabindex: "-1", "data-coach-target": "poam-create-dialog", onclick: |event| event.stop_propagation(), onkeydown: move |event| {
                 event.stop_propagation();
                 if event.key() == Key::Escape && !pending() {
                     close.call(());
@@ -1590,7 +1590,7 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
 
     rsx! {
         div { class: "poam-tray-backdrop", onclick: move |_| if busy().is_none() { close.call(()) } }
-        aside { id: "poam-detail-dialog", class: if expanded() { "poam-tray poam-tray-expanded" } else { "poam-tray" }, role: "dialog", aria_modal: "true", aria_labelledby: "poam-detail-title", tabindex: "-1", "data-testid": "poam-detail", "data-poam-id": "{detail.poam.id}", "data-poam-revision": "{detail.poam.revision}", onkeydown: move |event| if event.key() == Key::Escape && busy().is_none() { close.call(()) },
+        aside { id: "poam-detail-dialog", class: if expanded() { "poam-tray poam-tray-expanded" } else { "poam-tray" }, role: "dialog", aria_modal: "true", aria_labelledby: "poam-detail-title", tabindex: "-1", "data-testid": "poam-detail", "data-coach-target": "poam-tray", "data-poam-id": "{detail.poam.id}", "data-poam-revision": "{detail.poam.revision}", onkeydown: move |event| if event.key() == Key::Escape && busy().is_none() { close.call(()) },
             DialogFocusRestore {}
             DialogFocusSentinel { dialog_id: "poam-detail-dialog".to_string(), boundary: DialogFocusBoundary::Last }
             header { class: "poam-tray-head",
@@ -1761,9 +1761,9 @@ fn LifecycleSection(props: LifecycleSectionProps) -> Element {
     let status = props.detail.poam.status;
     rsx! {
         section { class: "poam-tray-section",
-            header { h3 { "Remediation status" } div { class: "poam-lifecycle-actions", if status == PoamStatus::Completed { button { class: "btn btn-ghost xs focus-ring", disabled: props.readonly, onclick: move |_| props.on_reopen.call(()), Icon { name: IconName::Rollback, size: 11 } "Reopen" } } else { button { class: "btn btn-ghost xs focus-ring", disabled: props.readonly, onclick: move |_| props.on_verify.call(()), "Verify now" } if status == PoamStatus::AwaitingVerification { button { class: "btn btn-primary xs focus-ring", disabled: props.readonly, onclick: move |_| props.on_close.call(()), Icon { name: IconName::Check, size: 11 } "Authoritative close" } } } } }
+            header { h3 { "Remediation status" } div { class: "poam-lifecycle-actions", "data-coach-target": "poam-verify", if status == PoamStatus::Completed { button { class: "btn btn-ghost xs focus-ring", disabled: props.readonly, onclick: move |_| props.on_reopen.call(()), Icon { name: IconName::Rollback, size: 11 } "Reopen" } } else { button { class: "btn btn-ghost xs focus-ring", disabled: props.readonly, onclick: move |_| props.on_verify.call(()), "Verify now" } if status == PoamStatus::AwaitingVerification { button { class: "btn btn-primary xs focus-ring", disabled: props.readonly, onclick: move |_| props.on_close.call(()), Icon { name: IconName::Check, size: 11 } "Authoritative close" } } } } }
             if status != PoamStatus::Completed {
-                div { class: "seg poam-status-seg",
+                div { class: "seg poam-status-seg", "data-coach-target": "poam-lifecycle",
                     // The current state remains visible but cannot submit a
                     // no-op transition. This preserves the complete lifecycle
                     // context without permitting a forbidden server mutation.

@@ -341,19 +341,10 @@ pub fn CachesView() -> Element {
         div {
             class: "space-y-6",
 
-            if from_setup() {
-                div {
-                    "data-testid": "setup-coach-caches-callout",
-                    style: "background:rgba(30,58,138,0.22); border:1px solid rgba(96,165,250,0.55); border-radius:8px; padding:12px 16px;",
-                    p { style: "color:#dbeafe; font-size:12px; font-weight:700; margin:0; letter-spacing:0.03em; text-transform:uppercase;", "Setup Tour - Step 4 of 6" }
-                    p { style: "color:#dbeafe; font-size:14px; font-weight:600; margin:4px 0 0 0;", "Add a binary cache" }
-                    p { style: "color:#bfdbfe; font-size:13px; margin:4px 0 0 0;", "Create a cache destination and assign environments so outputs can be distributed." }
-                }
-            }
-
             // Page header matching mockup (JSX lines 23-33)
             div {
                 class: "page-head",
+                "data-coach-target": "cache-page-head",
                 div {
                     h1 { class: "page-title", "Caches" }
                     p {
@@ -374,6 +365,7 @@ pub fn CachesView() -> Element {
                 }
                 // + Add cache button (mockup lines 30-32)
                 button {
+                    "data-coach-target": "cache",
                     class: "btn btn-primary focus-ring",
                     onclick: move |_| {
                         show_add_modal.set(true);
@@ -527,14 +519,9 @@ fn CacheDestinationsList(
             form_save_error.set(None);
         }
     });
-    let mut dismiss_add_target_callout = use_signal(|| false);
 
     // Fetch available environments for assignment and cache-assignment display.
     let environments = use_resource(|| async move { client::fetch_environments().await });
-    let show_add_target_callout = show_onboarding_hint
-        && !dismiss_add_target_callout()
-        && !show_add_modal()
-        && matches!(&*destinations.read_unchecked(), Some(Ok(dests)) if dests.is_empty());
 
     {
         let maybe_dests = destinations.read().clone();
@@ -626,15 +613,6 @@ fn CacheDestinationsList(
                         },
                         _ => rsx! { "— caches" }
                     }
-                }
-            }
-
-            if show_add_target_callout {
-                div {
-                    "data-testid": "setup-coach-caches-target-callout",
-                    style: "position:relative; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; margin-bottom:16px;",
-                    p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
-                    p { style: "margin:2px 0 0 0;", "Click Add cache (in the page header above) to create your first cache endpoint." }
                 }
             }
 

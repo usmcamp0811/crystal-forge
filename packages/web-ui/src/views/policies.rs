@@ -671,6 +671,7 @@ pub fn PoliciesView() -> Element {
                             },
                         }
                         button {
+                            "data-coach-target": "policy",
                             class: "btn btn-primary focus-ring",
                             onclick: move |_| {
                                 editing_policy_id.set(None);
@@ -760,7 +761,7 @@ pub fn PoliciesView() -> Element {
                 }
             }
 
-            div { class: "pol-domain-tabs", role: "tablist", "aria-label": "Policy domain",
+            div { class: "pol-domain-tabs", role: "tablist", "aria-label": "Policy domain", "data-coach-target": "policy-domain-tabs",
                 for (domain_id, label, count, color, blurb) in [
                     ("platform", "Platform", all_policies.iter().filter(|policy| policy_domain(policy) == "platform").count(), "var(--cf-policy-blue)", "Deployment modes, pipeline gates, and rollout controls."),
                     ("security", "Security controls", all_policies.iter().filter(|policy| policy_domain(policy) == "security").count(), "var(--cf-policy-red)", "Framework-owned controls for security and compliance."),

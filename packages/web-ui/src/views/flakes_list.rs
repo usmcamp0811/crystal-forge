@@ -3642,6 +3642,7 @@ pub fn FlakesListViewNew(initial_query: String) -> Element {
                             " Sync all"
                         }
                         button {
+                            "data-coach-target": "flake",
                             class: "btn btn-primary focus-ring",
                             onclick: move |_| {
                                 show_add_form.set(true);

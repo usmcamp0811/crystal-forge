@@ -1315,7 +1315,7 @@ pub fn ScanningView() -> Element {
 
     rsx! {
         div { class: "scanning-view",
-            div { class: "page-head scanning-head",
+            div { class: "page-head scanning-head", "data-coach-target": "scan-page-head",
                 div {
                     h1 { class: "page-title", "Scanning" }
                     // Neither the schedule nor the fleet summary reports a
@@ -1325,6 +1325,8 @@ pub fn ScanningView() -> Element {
                 div { class: "scanning-head-actions",
                     span { class: "scanning-live", title: "Active scans and fleet totals refresh every 15 seconds", span { class: "scan-pulse" } "Live" }
                     button {
+                        "data-coach-open": "scan-schedule",
+                        "data-coach-target": "scan-schedule",
                         class: "btn btn-ghost focus-ring",
                         onclick: move |_| {
                             if let Some(policy) = schedule_for_button.clone() {
@@ -1358,13 +1360,14 @@ pub fn ScanningView() -> Element {
                 }
             }
 
-            div { class: "stat-strip scanning-stats",
+            div { class: "stat-strip scanning-stats", "data-coach-target": "scan-stats",
                 if let Some(Ok(summary)) = stats.read().as_ref() {
                     { stat_card("Scanning now", &summary.scanning.to_string(), Some(&format!("{} queued · {} awaiting", summary.queued, summary.awaiting_build + summary.awaiting_closure)), "#60a5fa") }
                     { stat_card("Stale", &summary.stale.to_string(), Some("past rescan interval"), "#fbbf24") }
                     { stat_card("Never scanned", &summary.never_scanned.to_string(), None, "#9ca3af") }
                     if summary.failed > 0 {
                         button {
+                            "data-coach-open": "scan-failed-tile",
                             class: "stat scanning-stat-button focus-ring",
                             aria_label: "Open the newest failed scan",
                             aria_busy: failed_lookup_pending(),
@@ -2154,6 +2157,7 @@ fn record_row(
             td { div { class: "row-actions scanning-row-actions",
                 button {
                     class: "btn-icon focus-ring",
+                    "data-coach-open": "scan-first-row",
                     aria_label: format!("Open details for scan {}", row.scan_id),
                     title: "View scan log",
                     onclick: move |event| {
@@ -2334,7 +2338,7 @@ fn ScanDetailDrawer(
 
     rsx! {
         div { class: "side-panel-backdrop scanning-log-backdrop", tabindex: "-1", onclick: move |_| close_scan_detail(selected, generation),
-            aside { id: "scan-diagnostics-dialog", class: "side-panel scanning-log-drawer", role: "dialog", aria_modal: "true", aria_labelledby: "scan-log-title", tabindex: "-1", onclick: move |event| event.stop_propagation(),
+            aside { id: "scan-diagnostics-dialog", class: "side-panel scanning-log-drawer", role: "dialog", aria_modal: "true", aria_labelledby: "scan-log-title", tabindex: "-1", "data-coach-target": "scan-diagnostics", onclick: move |event| event.stop_propagation(),
                 DialogFocusRestore {}
                 DialogInitialFocus { dialog_id: "scan-diagnostics-dialog".to_string() }
                 DialogFocusSentinel { dialog_id: "scan-diagnostics-dialog".to_string(), boundary: DialogFocusBoundary::Last }
@@ -2717,7 +2721,7 @@ fn schedule_modal(
     let mut retry = retry;
     rsx! {
         div { class: "modal-backdrop", onclick: move |_| open.set(false),
-            div { id: "scan-schedule-dialog", class: "modal scanning-schedule-modal", role: "dialog", aria_modal: "true", aria_labelledby: "scan-schedule-title", tabindex: "-1", onclick: move |event| event.stop_propagation(), onkeydown: move |event| if event.key() == Key::Escape && selected_scan.peek().is_none() { event.stop_propagation(); open.set(false); },
+            div { id: "scan-schedule-dialog", class: "modal scanning-schedule-modal", role: "dialog", aria_modal: "true", aria_labelledby: "scan-schedule-title", tabindex: "-1", "data-coach-target": "scan-schedule-modal", onclick: move |event| event.stop_propagation(), onkeydown: move |event| if event.key() == Key::Escape && selected_scan.peek().is_none() { event.stop_propagation(); open.set(false); },
                 DialogFocusRestore {}
                 DialogInitialFocus { dialog_id: "scan-schedule-dialog".to_string() }
                 DialogFocusSentinel { dialog_id: "scan-schedule-dialog".to_string(), boundary: DialogFocusBoundary::Last }

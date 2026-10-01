@@ -74,7 +74,7 @@ pub use layout::{AppShell, Card, SidebarNav, TopBar};
 pub use loading::{DashboardLoadingSpinner, ErrorMessage, LoadingSpinner};
 pub use modals::{ConfirmDialog, RollbackConfirmDialog, SyncConfirmDialog};
 pub use notifications::Toast;
-pub use onboarding::OnboardingCoachPanel;
+pub use onboarding::{CoachController, CoachGuideButton, CoachRole, CoachRoot};
 pub use stat_card::StatCard;
 pub use status_badge::{DeploymentBadge, HealthBadge};
 pub use system::{

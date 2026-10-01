@@ -2281,6 +2281,7 @@ pub fn SystemDetailView(
             // Tab navigation
             div {
                 "data-testid": "system-detail-tabs",
+                "data-coach-target": "system-tabs",
                 class: "sd-tabs",
                 role: "tablist",
                 "aria-label": "System detail sections",

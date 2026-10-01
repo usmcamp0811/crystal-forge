@@ -6,6 +6,7 @@ use crate::api::client::{
 };
 use crate::api::models::{NotificationCategory, UpdateUserPreferences, UserNotificationDto};
 use crate::components::layout::sidebar::{PreferencesContext, SidebarContext};
+use crate::components::onboarding::CoachGuideButton;
 use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::preferences;
@@ -1297,6 +1298,10 @@ pub fn TopBar(title: String) -> Element {
                     "⌘K"
                 }
             }
+
+            // Guide launcher for every authenticated role. It reopens the
+            // coach after setup completes or the coach was closed.
+            CoachGuideButton {}
 
             div {
                 class: "topbar-notifications-wrap",

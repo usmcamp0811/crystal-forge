@@ -16,6 +16,7 @@ use crate::api::models::{
     ServerRuntimeInfoResponse, UpdateAutomaticRetryPolicyRequest,
     UpdateClassificationBannerRequest,
 };
+use crate::components::onboarding::CoachController;
 use crate::components::{Icon, IconName};
 use crate::state::app_state::AppState;
 use crate::theme;
@@ -1669,7 +1670,8 @@ fn ServerTab(
     on_classification_dirty: EventHandler<()>,
     on_classification_retry: EventHandler<()>,
 ) -> Element {
-    let nav = navigator();
+    let coach = use_context::<CoachController>();
+    let coach_setup = (coach.setup)();
     let auth_mode_label = match auth_mode {
         AuthMode::Dev => "Dev",
         AuthMode::Local => "Local",
@@ -1802,24 +1804,26 @@ fn ServerTab(
                             }
                             "Onboarding"
                         }
-                        p { style: "margin:0;font-size:12px;color:var(--cf-text-muted);",
-                            "The Setup Coach walks admins through first-run configuration."
+                        p { style: "margin:0;font-size:12px;color:var(--cf-text-muted);max-width:72ch;line-height:1.5;",
+                            "data-testid": "admin-onboarding-copy",
+                            "Setup completion is reported by the server from saved resources"
+                            if coach_setup.progress().is_some() {
+                                " · {coach_setup.count()} of {coach_setup.total()} steps complete"
+                            }
+                            ". Security walkthroughs are open to every role from "
+                            strong { "Guide" }
+                            " in the top bar; their progress is kept per browser and only records what each person has viewed."
                         }
                     }
                     div { style: "display:flex;gap:8px;flex-wrap:wrap;",
                         button {
                             class: "btn btn-primary focus-ring",
+                            "data-testid": "admin-relaunch-setup-coach",
                             onclick: move |_| {
                                 spawn(async move {
+                                    // Relaunch also clears the server-side dismissal, as before.
                                     let _ = set_setup_wizard_dismissed(false).await;
-                                    if let Some(storage) = web_sys::window()
-                                        .and_then(|w| w.local_storage().ok())
-                                        .flatten()
-                                    {
-                                        let _ = storage.set_item("cf.coach.collapsed", "false");
-                                        let _ = storage.set_item("cf.coach.force_show", "true");
-                                    }
-                                    nav.push("/");
+                                    coach.relaunch();
                                 });
                             },
                             svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "margin-right:5px;vertical-align:text-bottom;",
@@ -1827,7 +1831,14 @@ fn ServerTab(
                             }
                             "Relaunch Setup Coach"
                         }
-                        button { class: "btn btn-ghost focus-ring", disabled: true, title: "Reset progress is not implemented yet", "Reset progress · unavailable" }
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            "data-testid": "admin-restart-walkthroughs",
+                            title: "Clears which walkthrough stops this browser has viewed. Does not touch setup or security records.",
+                            onclick: move |_| coach.restart_walkthroughs(),
+                            "Restart walkthroughs"
+                        }
+                        button { class: "btn btn-ghost focus-ring", disabled: true, title: "Setup completion is derived from persisted resources on the server and can't be erased from here.", "Reset progress · unavailable" }
                     }
                 }
             }

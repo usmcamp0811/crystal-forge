@@ -837,6 +837,7 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
         aside {
             id: "compliance-evidence-dialog",
             class: if expanded() { "fl-tray compliance-drawer-expanded" } else { "fl-tray" },
+            "data-coach-target": "evidence-drawer",
             role: "dialog",
             aria_modal: "true",
             aria_labelledby: "compliance-evidence-title",
