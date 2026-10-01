@@ -292,9 +292,18 @@ function RegisterGroup({ name, by, items, open, onToggleOpen, onFocus, ...rowPro
 }
 
 /* ── Risk acceptance tray ────────────────────────────────────────────────── */
+// Typed source identity for an acceptance. RA-#### is the human renewal chain; this is the
+// exact immutable decision the backend records (deterministic in the mock).
+function raSourceType(r) { return r.kind === "cve" ? "cve_risk_acceptance" : "policy_waiver"; }
+function raSourceUuid(r) {
+  let h = 2166136261; const s = r.id + (r.approvedAt || "");
+  const hex = []; for (let i = 0; i < 32; i++) { h ^= s.charCodeAt(i % s.length) + i; h = Math.imul(h, 16777619) >>> 0; hex.push((h & 15).toString(16)); }
+  const x = hex.join(""); return `${x.slice(0,8)}-${x.slice(8,12)}-4${x.slice(13,16)}-a${x.slice(17,20)}-${x.slice(20,32)}`;
+}
+window.raSourceUuid = raSourceUuid; window.raSourceType = raSourceType;
 function RiskAcceptanceTray({ r, onClose, onOpenSystem }) {
   usePoamStore();
-  const [confirmRevoke, setConfirmRevoke] = React.useState(false);
+  const [srcOpen, setSrcOpen] = React.useState(true);
   React.useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
@@ -339,6 +348,10 @@ function RiskAcceptanceTray({ r, onClose, onOpenSystem }) {
               <em style={{ color: expired ? "#f87171" : !r.reviewDate ? "#fbbf24" : "var(--cf-text-muted)" }}>{!r.reviewDate ? "assessors flag undated acceptances" : expired ? `expired ${-days}d ago` : `in ${days}d`}</em></div>
             <div><span>Covers</span><b>{rows.length} host{rows.length === 1 ? "" : "s"}</b><em style={{ color:"var(--cf-text-muted)" }}>{r.env}</em></div>
           </div>
+          <div className="ra-truth" data-coach-target="ra-truth">
+            <Icon name="info" size={13} style={{ color:"#a78bfa", flexShrink:0, marginTop:2 }}/>
+            <span><strong>Risk acceptance records a decision.</strong> It does not make a finding pass or mark it remediated.</span>
+          </div>
           {r.status === "converted" && r.poamId && (
             <div style={{ padding:"12px 18px 0" }}>
               <button type="button" className="poam-ref focus-ring" onClick={() => { onClose(); setTimeout(() => openPoamDetail(r.poamId), 40); }}>
@@ -359,6 +372,23 @@ function RiskAcceptanceTray({ r, onClose, onOpenSystem }) {
             </table>
             <div className="help" style={{ marginTop:8 }}>An acceptance does not change a result: these controls still report as waived, not passing.</div>
           </Section>
+          <section data-coach-target="ra-source" style={{ borderTop:"1px solid var(--cf-divider)", padding:"14px 18px" }}>
+            <button type="button" className="focus-ring" onClick={() => setSrcOpen(o => !o)} style={{ all:"unset", cursor:"pointer", display:"flex", alignItems:"center", gap:6, fontSize:10.5, textTransform:"uppercase", letterSpacing:"0.08em", color:"var(--cf-text-muted)", fontWeight:700 }}>
+              <Icon name={srcOpen ? "chevron-down" : "chevron-right"} size={11}/> Source record
+            </button>
+            {srcOpen && (
+              <>
+                <dl className="ra-src" style={{ margin:"10px 0 8px" }}>
+                  <dt>Acceptance</dt><dd className="mono" style={{ fontWeight:700 }}>{r.id}</dd>
+                  <dt>Source type</dt><dd className="mono">{raSourceType(r)}</dd>
+                  <dt>Source decision</dt><dd className="mono">{raSourceUuid(r)}</dd>
+                  <dt>Subject</dt><dd>{r.kind === "cve" ? (r.cveRefs[0] ? `${r.cveRefs[0].id} · ${r.cveRefs[0].pkg}` : "—") : r.title}</dd>
+                  <dt>Scope</dt><dd>{r.env ? <span className="mono">{r.env}</span> : <span style={{ color:"var(--cf-text-muted)" }}>host-only · no environment recorded</span>} · {rows.length} exact host{rows.length === 1 ? "" : "s"}</dd>
+                </dl>
+                <div className="help">{r.id} is the operator-facing renewal chain. The typed source and UUID are the immutable audit identity and export as OSCAL <span className="mono">source-id</span>. A renewal can create a new source decision under the same {r.id}.</div>
+              </>
+            )}
+          </section>
           <Section title="History">
             <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
               {[...r.history].reverse().map((h, i) => (
@@ -373,12 +403,7 @@ function RiskAcceptanceTray({ r, onClose, onOpenSystem }) {
         </div>
         {active && (
           <footer className="rr-tray-foot">
-            {confirmRevoke
-              ? <><span style={{ fontSize:12, color:"var(--cf-text-secondary)" }}>Findings return to outstanding.</span>
-                  <button type="button" className="btn btn-ghost xs focus-ring" onClick={() => setConfirmRevoke(false)}>Keep</button>
-                  <button type="button" className="btn btn-ghost xs focus-ring" style={{ color:"#f87171" }} onClick={() => raRevoke(r.id)}>Confirm revoke</button></>
-              : <button type="button" className="btn btn-ghost xs focus-ring" onClick={() => setConfirmRevoke(true)}>Revoke</button>}
-            <span style={{ flex:1 }}/>
+            <span style={{ flex:1, fontSize:11, color:"var(--cf-text-muted)", minWidth:0 }}>{r.kind === "cve" ? "Operator or Admin can renew or convert." : "Policy-waiver renewal and conversion can require Admin."}</span>
             <button type="button" className={`btn ${expired ? "btn-ghost" : "btn-primary"} focus-ring`} onClick={() => raRenew(r.id, 90)}><Icon name="clock" size={13}/> Re-review · renew 90 days</button>
             <button type="button" className={`btn ${expired ? "btn-primary" : "btn-ghost"} focus-ring`} onClick={convert}><Icon name="plus" size={13}/> Convert to POA&M</button>
           </footer>

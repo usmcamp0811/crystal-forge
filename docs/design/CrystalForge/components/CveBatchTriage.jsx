@@ -143,7 +143,7 @@ function CveBatchTriageModal({ cves, sys, envSystems, defaultEnvs, onClose, onSu
         <div className="modal-head" style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
           <div>
             <h2>Triage {cves.length} CVEs together</h2>
-            <p>One decision for the whole group. Each CVE still gets its own disposition record{fleet ? " per environment" : ""}, same as triaging it alone.</p>
+            <p>One decision for the whole group. Each CVE still gets its own disposition record{fleet ? " per environment" : ""}, same as triaging it alone. Up to 100 exact pairs per apply; the whole batch commits or none of it does.</p>
           </div>
           <button className="btn-icon focus-ring" onClick={onClose}><Icon name="x" size={16} /></button>
         </div>

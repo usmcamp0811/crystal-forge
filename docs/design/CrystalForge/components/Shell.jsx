@@ -539,7 +539,7 @@ function GlobalSearch({ onResult }) {
   );
 }
 
-function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult }) {
+function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult, guide }) {
   const [notifOpen, setNotifOpen] = React.useState(false);
   const bellRef = React.useRef(null);
 
@@ -639,6 +639,7 @@ function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult })
         <span className="crumb-current">{crumb?.current || "Systems"}</span>
       </div>
       <GlobalSearch onResult={onSearchResult} />
+      {guide}
       <div ref={bellRef} style={{ position:"relative" }}>
         <button className="btn-icon focus-ring topbar-bell" aria-label="Notifications"
           title="Notifications" onClick={() => setNotifOpen(o => !o)}>

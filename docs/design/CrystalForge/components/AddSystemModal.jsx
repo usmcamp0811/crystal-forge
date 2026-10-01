@@ -38,7 +38,7 @@ function AddSystemModal({ onClose, coach, prefill }) {
 
   const register = () => {
     if (!canRegister) return;
-    if (coach) coach.complete("system"); // ticks step 5, unlocks step 6 (deploy agent)
+    if (coach) coach.serverObserve("system"); // mock: server now sees the saved system → agent step waits for first report
     setPhase("registered");
   };
 
@@ -297,7 +297,7 @@ function AgentDeploySteps({ form, fingerprint, onClose }) {
           </div>
           <ol start={2} style={{ margin: "8px 0 0", paddingLeft: 18, lineHeight: 1.7, color: "var(--cf-text-secondary)" }}>
             <li>Apply on the target host: <span className="mono">sudo nixos-rebuild switch</span></li>
-            <li>The agent connects and sends its first signed heartbeat — this system flips to <span className="chip chip-healthy" style={{ fontSize: 10 }}>online</span> and the onboarding completes automatically.</li>
+            <li>The agent connects and sends its first signed heartbeat — this system flips to <span className="chip chip-healthy" style={{ fontSize: 10 }}>online</span>. An administrator then acknowledges the agent in the Setup Coach to finish the Deploy agent step.</li>
           </ol>
         </div>
         <div className="help" style={{ marginTop: 10 }}>

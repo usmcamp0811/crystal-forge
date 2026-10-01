@@ -44,6 +44,7 @@ function PoamsView({ focus, onClearFocus, onOpenSystem }) {
   React.useEffect(() => {
     if (!focus) return;
     if (focus.kind) setPref("kind", focus.kind);
+    if (focus.raId) setRaOpen(focus.raId);
     if (focus.queue) { setQueue(focus.queue); setStatus("open"); if (!focus.kind && !RR_QUEUES[kind].includes(focus.queue)) setPref("kind", "all"); }
     if (focus.scope) { setDimState(["bundle","owner"].includes(focus.scope.type) ? focus.scope.type : "env"); setScopeState(focus.scope); }
     onClearFocus?.();

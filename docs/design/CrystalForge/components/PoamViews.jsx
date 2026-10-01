@@ -409,6 +409,8 @@ function PoamLinkModal({ finding, onClose, onLinked }) {
 function PoamDetailTray({ poam, onClose, onOpenFinding }) {
   usePoamStore();
   const [noteDraft, setNoteDraft] = React.useState("");
+  // Result of the last "Verify now" check this session. Authoritative close is only offered after a pass.
+  const [verifyRun, setVerifyRun] = React.useState(null);
   const [msDraft, setMsDraft] = React.useState({ text:"", due:"" });
   const [linkOpen, setLinkOpen] = React.useState(false);
   const prog = poamMilestoneProgress(poam);
@@ -478,35 +480,54 @@ function PoamDetailTray({ poam, onClose, onOpenFinding }) {
             poam.status === "completed"
               ? <button className="btn btn-ghost focus-ring xs" onClick={()=>poamSetStatus(poam.id, "in_progress", "POA&M reopened.")}><Icon name="rollback" size={11}/> Reopen</button>
               : poam.status === "awaiting_verification"
-                ? <button className="btn btn-primary focus-ring xs" disabled={!ready}
-                    onClick={()=>{ poam.verification = { evalId:`eval-${9000 + POAMS.length}`, at:POAM_TODAY, result:"pass", note:"Closure verified against the latest passing evaluation for every linked finding." }; poamSetStatus(poam.id, "completed", "Closed — every linked finding now evaluates clean."); }}>
-                    <Icon name="check" size={11}/> Close POA&M
-                  </button>
+                ? null
                 : <button className="btn btn-ghost focus-ring xs" onClick={()=>poamSetStatus(poam.id, "awaiting_verification", "Remediation reported complete — awaiting verification.")}>
                     <Icon name="check" size={11}/> Mark remediation complete
                   </button>
           }>
-            <div className="seg" style={{ width:"fit-content", marginBottom:10 }}>
+            <div data-coach-target="poam-lifecycle">
+            <div className="seg" style={{ width:"fit-content", marginBottom:6 }}>
               {POAM_STATUS_ORDER.filter(s => s !== "completed").map(s => (
                 <button key={s} className={poam.status === s ? "active" : ""} onClick={()=>poamSetStatus(poam.id, s)}
                   title={POAM_STATUS[s].blurb}
                   style={poam.status === s ? { color:POAM_STATUS[s].color } : undefined}>{POAM_STATUS[s].label}</button>
               ))}
             </div>
+            <div className="help" style={{ marginBottom:10 }}>Status records where the work is. It is not verification: closing requires a passing check against current evidence.</div>
+            </div>
             {poam.status === "awaiting_verification" && (
-              ready ? (
-                <div className="sd-callout" style={{ background:"rgba(52,211,153,0.08)", borderColor:"rgba(52,211,153,0.25)" }}>
-                  <Icon name="check" size={13} style={{ color:"#34d399" }}/>
-                  <div style={{ fontSize:12 }}>Every linked finding now evaluates clean. Closing the POA&M records the passing evaluation as closure evidence.</div>
-                </div>
-              ) : (
-                <div className="sd-callout sd-callout-warn">
-                  <Icon name="warn" size={13}/>
+              <div className="poam-verify-box" data-coach-target="poam-verify">
+                <div className="sd-callout sd-callout-info">
+                  <Icon name="info" size={13}/>
                   <div style={{ fontSize:12 }}>
-                    <strong>Not verified yet.</strong> Remediation is reported complete, but Crystal Forge still evaluates {findingStates.filter(x=>x.status==="fail").length} linked finding{findingStates.filter(x=>x.status==="fail").length===1?"":"s"} as failing. The POA&M cannot be closed and the finding stays open.
+                    Remediation is reported complete. The linked finding{poam.findings.length + (poam.cveRefs || []).length === 1 ? " is" : "s are"} still judged independently:
+                    {(poam.cveRefs || []).length > 0
+                      ? " CVE findings need exact scan evidence newer than their baseline showing the package absent. Missing evidence, a justification or a scanner whitelist is not a pass."
+                      : " policy findings follow the current assessment evidence."}
                   </div>
                 </div>
-              )
+                {verifyRun && (verifyRun.pass ? (
+                  <div className="sd-callout" style={{ background:"rgba(52,211,153,0.08)", borderColor:"rgba(52,211,153,0.25)" }}>
+                    <Icon name="check" size={13} style={{ color:"#34d399" }}/>
+                    <div style={{ fontSize:12 }}><strong>Verification passed</strong> · checked {verifyRun.at}. Current authoritative evidence clears every linked finding.</div>
+                  </div>
+                ) : (
+                  <div className="sd-callout sd-callout-warn">
+                    <Icon name="warn" size={13}/>
+                    <div style={{ fontSize:12 }}><strong>Not verified</strong> · checked {verifyRun.at}. {verifyRun.failing} linked finding{verifyRun.failing === 1 ? " still fails" : "s still fail"} or lack{verifyRun.failing === 1 ? "s" : ""} sufficiently new evidence. The POA&M stays open.</div>
+                  </div>
+                ))}
+                <div className="poam-verify-actions">
+                  <button className="btn btn-ghost focus-ring xs" onClick={() => setVerifyRun({ at:new Date().toISOString().slice(11,16) + "Z", pass: ready, failing: findingStates.filter(x=>x.status==="fail").length || 1 })}>
+                    <Icon name="sync" size={11}/> Verify now
+                  </button>
+                  <button className="btn btn-primary focus-ring xs" disabled={!(verifyRun && verifyRun.pass)}
+                    title={verifyRun && verifyRun.pass ? "Close on the passing verification" : "Run Verify now first. Closure needs a passing check."}
+                    onClick={()=>{ poam.verification = { evalId:`eval-${9000 + POAMS.length}`, at:POAM_TODAY, result:"pass", note:"Closed on a passing verification against current authoritative evidence for every linked finding." }; poamSetStatus(poam.id, "completed", "Authoritative close — verification passed."); }}>
+                    <Icon name="check" size={11}/> Authoritative close
+                  </button>
+                </div>
+              </div>
             )}
             {poam.status === "completed" && poam.verification && (
               <div className="poam-verify">
@@ -878,7 +899,7 @@ function PoamDetailHost({ onOpenFinding }) {
   }, []);
   const poam = id ? poamById(id) : null;
   if (!poam) return null;
-  return <PoamDetailTray poam={poam} onClose={()=>setId(null)} onOpenFinding={(f)=>{ setId(null); onOpenFinding?.(f); }}/>;
+  return <PoamDetailTray key={poam.id} poam={poam} onClose={()=>setId(null)} onOpenFinding={(f)=>{ setId(null); onOpenFinding?.(f); }}/>;
 }
 
 Object.assign(window, {

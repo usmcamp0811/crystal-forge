@@ -875,6 +875,47 @@ function CveDrawer({ cve, onClose, onOpenSystem }) {
             </code>
           </section>
 
+          {/* Evidence relations — which exact evidence tier each host sits in */}
+          {(() => {
+            const relCurrent = affectedSystems;
+            const relScheduled = affectedSystems.filter(s => s.deploymentState === "behind" || s.pendingCommit);
+            const relHistorical = SYSTEMS.filter(s => !cve.affected.includes(s.id)).filter((s, i) => (i + cve.id.length) % 6 === 0).slice(0, 3);
+            const relMissing = SYSTEMS.filter(s => !cve.affected.includes(s.id) && affectedSystems.some(a => a.flake === s.flake) && (s.health === "offline" || s.health === "unknown"));
+            const Hosts = ({ list }) => list.length === 0
+              ? <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>none</span>
+              : <span style={{ display:"flex", gap:4, flexWrap:"wrap" }}>{list.slice(0, 4).map(s => <span key={s.id} className="mono cve-rel-host">{s.hostname}</span>)}{list.length > 4 && <span className="cve-rel-host">+{list.length - 4}</span>}</span>;
+            const tiers = [
+              { k:"current", c:"#34d399", l:"Current", d:"Exact evidence for the running configuration.", list:relCurrent, tag:"authorizes triage" },
+              { k:"scheduled", c:"#60a5fa", l:"Scheduled deployment target", d:"Exact evidence for a scheduled target configuration.", list:relScheduled, tag:"read-only" },
+              { k:"historical", c:"#9ca3af", l:"Historical", d:"Retained evidence with no current or scheduled authority.", list:relHistorical, tag:"read-only" },
+            ];
+            return (
+              <section data-coach-target="cve-relations">
+                <h3 style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--cf-text-muted)", margin: "0 0 8px", fontWeight: 600 }}>Exact evidence</h3>
+                <div className="cve-rel">
+                  {tiers.map(t => (
+                    <div key={t.k} className="cve-rel-row">
+                      <span className="cve-rel-dot" style={{ background:t.c }}/>
+                      <div style={{ minWidth:0, flex:1 }}>
+                        <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+                          <strong style={{ fontSize:12 }}>{t.l}</strong>
+                          <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{t.list.length} host{t.list.length === 1 ? "" : "s"}</span>
+                          <span className={`cve-rel-tag${t.k === "current" ? " on" : ""}`}>{t.tag}</span>
+                        </div>
+                        <div style={{ fontSize:11, color:"var(--cf-text-secondary)", margin:"2px 0 5px" }}>{t.d}</div>
+                        <Hosts list={t.list}/>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="help" style={{ marginTop:8, display:"flex", gap:6, alignItems:"flex-start" }}>
+                  <Icon name="warn" size={11} style={{ color:"#fbbf24", flexShrink:0, marginTop:2 }}/>
+                  <span><strong style={{ color:"var(--cf-text-primary)" }}>Missing evidence does not mean clean.</strong> {relMissing.length > 0 ? `${relMissing.length} host${relMissing.length === 1 ? "" : "s"} on the same flake ${relMissing.length === 1 ? "has" : "have"} no current exact scan.` : "Hosts without a current exact scan are not listed here and are not clean."} A host can appear in Current and Scheduled when both exact configurations contain this package.</span>
+                </div>
+              </section>
+            );
+          })()}
+
           {/* Triage / acceptance — per environment */}
           <section>
             <div style={{ display:"flex", alignItems:"center", gap:8, margin:"0 0 10px" }}>
