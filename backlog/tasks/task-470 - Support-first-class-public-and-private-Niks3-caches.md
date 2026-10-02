@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-02 22:39'
+updated_date: '2026-10-02 22:50'
 labels: []
 dependencies: []
 references:
@@ -51,6 +51,8 @@ Implement the user's Niks3 contract reviewed against MR !329. Niks3 has separate
 Initial static-token and mTLS scope is approved. External providers and Bearer/OIDC reads are not implemented in this task.
 
 Delegated execution scope: cf-builder crate and cf-server/src/derivations/{cache,utils}.rs only. Use PreparedNiks3Push for one CLI process per job with parallel_uploads; suppress child output and retain credential ownership through exit or timeout kill/reap. Map server-supplied Niks3 fields explicitly and return destination ID only after an actual successful push. Verify owned Rust files and targeted builder checks via nix develop; protocol/config/helper implementation is owned by another agent.
+
+Delegated API scope: packages/default/crates/cf-server/src/handlers/api/caches.rs and discovery route wiring in src/bin/server.rs only. Verify Niks3 v1.6.0 source GET /api/cache-config shape; add admin discovery; reuse private-target policy with pinned DNS, no proxy and no redirects; add structured non-mutating discovery/read tests using separate write/read TLS credentials and report write_auth_valid null because public cache-config cannot prove authorization. Explicitly redact Niks3 secrets after refreshing configured flags. Run focused handler tests and owned-file formatting through nix develop. No commits or services.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
