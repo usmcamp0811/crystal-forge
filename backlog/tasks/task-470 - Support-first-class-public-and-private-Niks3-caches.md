@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-02 22:23'
+updated_date: '2026-10-02 22:27'
 labels: []
 dependencies: []
 references:
@@ -36,6 +36,20 @@ Implement the user's Niks3 contract reviewed against MR !329. Niks3 has separate
 - [ ] #10 Focused unit tests and Niks3 VM tests cover remote builder plus agent public/private flows environment isolation CVE materialization and secret-log audits
 - [ ] #11 Packaging preserves evaluator Nix selection; required server builder Niks3 Attic S3 web-ui and flake verification passes before MR
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Preserve origin/dev baseline in dedicated TASK-470 worktree. Use current cf-config re-export rather than obsolete server config copies.
+2. Add additive protocol types CacheReadAuth (None/Mtls) and Niks3WriteAuth (Token/Mtls), redacted Debug and defaults. Add shared cf-config credential preparation owning protected temporary files through child completion; share it for push commands and Nix read URL/CA/key preparation.
+3. Add next-free migration and Niks3 model/DTO fields. Extend existing encryption/decryption/update layer with explicit clear flags and atomic mode-transition cleanup. API responses redact all private material and expose configured flags.
+4. Wire builder and server local pushes to one shared Niks3 command preparation; avoid AWS credentials and multiplied per-job concurrency. Extend destination ID completion and confidentiality checks; preserve server-side Nix readability verification.
+5. Wire agent heartbeat read-only auth with verified transport checks, deployment pull, and CVE materialization to the shared read helper.
+6. Add protected discovery and non-mutating structured connectivity checks; disable redirects or validate each hop using existing target policy.
+7. Start task-owned devenv preview with isolated DB and mock fixtures before UI changes. Update design plus create/edit/discovery/auth UI and behavior tests.
+8. Package CLI preserving evaluator Nix PATH; add focused Niks3 VM fixture/check covering all required flows and regressions. Prepare SQLx only against verified task DB. Review documentation and raw verification results before commit/push/MR.
+Initial static-token and mTLS scope is approved. External providers and Bearer/OIDC reads are not implemented in this task.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
