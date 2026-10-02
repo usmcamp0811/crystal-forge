@@ -166,3 +166,4 @@ data
 packages/slides/themes/slidev-theme-neversink
 design-shots/
 .tmp/
+test-results/

@@ -873,9 +873,7 @@ pub static SECURITY_MODULES: [SecurityModule; 5] = [
                 id: "D8",
                 title: "Risk acceptance detail",
                 why: "Source type, subject, approver, approval time, review deadline, exact scope and justification, plus the source-record identity.",
-                // PRODUCTION: the drawer heading names the source type. The
-                // exact decision UUID sits in the Source record identity block.
-                doing: "Open Source record identity to see the exact decision UUID behind this RA number.",
+                doing: "Review the Source record to see the exact typed source and decision UUID behind this RA number.",
                 important: Some(
                     "Risk acceptance records a decision. It does not make a finding pass or mark it remediated.",
                 ),

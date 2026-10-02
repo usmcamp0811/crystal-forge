@@ -7689,9 +7689,9 @@ tr.attention-flash {
 .rr-acceptance-source-toggle:hover { color: var(--cf-text-secondary); }
 .rr-acceptance-source-toggle > svg { flex: 0 0 auto; width: 9px; height: 9px; }
 .rr-acceptance-source-detail { padding: 12px 0; }
-.ra-src { display: grid; grid-template-columns: auto 1fr; gap: 5px 14px; }
-.ra-src dt { color: var(--cf-text-muted); font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; text-align: left; white-space: nowrap; }
-.ra-src dd { margin: 0; color: var(--cf-text-primary); font-size: 12px; overflow-wrap: break-word; }
+.ra-src { display: grid; grid-template-columns: auto 1fr; gap: 5px 14px; font-size: 12px; }
+.ra-src dt { color: var(--cf-text-muted); text-align: left; white-space: nowrap; }
+.ra-src dd { margin: 0; color: var(--cf-text-primary); overflow-wrap: anywhere; min-width: 0; }
 .rr-acceptance-source-help { margin-top: 10px; color: var(--cf-text-muted); font-size: 11px; line-height: 1.5; }
 .rr-acceptance-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .rr-acceptance-footer-note { color: var(--cf-text-muted); font-size: 10.5px; }

@@ -1325,6 +1325,25 @@ fn AcceptanceTray(
         })
         .unwrap_or_else(|| "Scope unavailable".into());
     let replacement = entry.replacement_poam_id;
+    let source_record_subject = if let Some(cve) = entry.canonical_cve_id.as_deref() {
+        if let Some(pkg) = entry.canonical_package_name.as_deref() {
+            format!("{} · {}", cve, pkg)
+        } else {
+            cve.to_string()
+        }
+    } else if entry.source == AcceptanceSource::PolicyWaiver {
+        match (
+            entry.policy_title.as_deref(),
+            entry.requirement_external_id.as_deref(),
+        ) {
+            (Some(title), Some(req_id)) => format!("{} · {}", title, req_id),
+            (Some(title), None) => title.to_string(),
+            (None, Some(req_id)) => req_id.to_string(),
+            _ => "—".to_string(),
+        }
+    } else {
+        "—".to_string()
+    };
     let conversion_owner = if entry.source == AcceptanceSource::PolicyWaiver {
         owner()
     } else {
@@ -1423,19 +1442,7 @@ fn AcceptanceTray(
                                 dt { "Acceptance" } dd { class: "mono", "{human_id}" }
                                 dt { "Source type" } dd { class: "mono", "{source_type_label(&entry)}" }
                                 dt { "Source decision" } dd { class: "mono", "{source}" }
-                                dt { "Subject" } dd {
-                                    if let Some(cve) = entry.canonical_cve_id.as_deref() {
-                                        if let Some(pkg) = entry.canonical_package_name.as_deref() {
-                                            "{cve} · {pkg}"
-                                        } else {
-                                            "{cve}"
-                                        }
-                                    } else if entry.finding_id.is_some() {
-                                        "Policy finding"
-                                    } else {
-                                        "—"
-                                    }
-                                }
+                                dt { "Subject" } dd { "{source_record_subject}" }
                                 dt { "Scope" } dd {
                                     if entry.source == AcceptanceSource::CveEnvironment {
                                         span { class: "mono", "{scope_label}" }
