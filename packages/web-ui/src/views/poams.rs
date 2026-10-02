@@ -1094,6 +1094,22 @@ fn acceptance_drawer_subject(item: &AcceptanceEntry) -> String {
     parts.join(" · ")
 }
 
+/// Renders the source type label for display in the Source record section.
+fn source_type_label(item: &AcceptanceEntry) -> &'static str {
+    match item.source {
+        AcceptanceSource::PolicyWaiver => "policy_waiver",
+        AcceptanceSource::CveHost => "cve_host",
+        AcceptanceSource::CveEnvironment => "cve_environment",
+    }
+}
+
+/// Computes relative days from today until review deadline, or days since deadline if expired.
+fn review_days_left(item: &AcceptanceEntry, today: NaiveDate) -> i64 {
+    review_deadline(item)
+        .map(|date| (date - today).num_days())
+        .unwrap_or(0)
+}
+
 fn acceptance_queue(item: &AcceptanceEntry, queue: Option<Queue>, today: NaiveDate) -> bool {
     let due = item.review_due_at.or(item.review_date);
     let active = item.status == "accepted"
@@ -1186,6 +1202,7 @@ fn AcceptanceTray(
     let mut risk = use_signal(String::new);
     let mut due = use_signal(String::new);
     let mut reuse = use_signal(String::new);
+    let mut src_open = use_signal(|| true);
     let nav = use_navigator();
     #[cfg(target_arch = "wasm32")]
     {
@@ -1272,6 +1289,8 @@ fn AcceptanceTray(
     let review_label = review_deadline
         .map(display_acceptance_date)
         .unwrap_or_else(|| "Not set".into());
+    let review_days_left = review_days_left(&entry, today);
+    let expired_days_ago = -review_days_left;
     let approved_by = approver_label(entry.accepted_by, catalog.as_ref());
     let approved_at = entry
         .accepted_at
@@ -1315,7 +1334,7 @@ fn AcceptanceTray(
                     Icon { name: IconName::Shield, size: 18 }
                     div { class: "rr-acceptance-title-copy",
                         div { class: "rr-acceptance-title-line",
-                            h2 { "{human_id} · {label}" }
+                            h2 { "{human_id}" }
                             span { class: "chip {status_class}", "{status}" }
                             if review_expired { span { class: "chip chip-critical", "review expired" } }
                         }
@@ -1327,24 +1346,38 @@ fn AcceptanceTray(
             div { class: "rr-acceptance-scroll",
                 div { class: "rr-acceptance-meta",
                     div { span { "Approved by" } strong { "{approved_by}" } }
-                    div { span { "Approved" } strong { "{approved_at}" } }
-                    div { span { "Review by" } strong { class: if review_expired { "poam-overdue" } else { "" }, "{review_label}" }
-                        if review_expired { small { class: "rr-acceptance-expired", "Review deadline passed" } }
-                        if review_deadline.is_none() { small { "No review date recorded" } }
-                    }
-                    div { span { "Scope" } strong { "{scope_label}" }
-                        if let Some(expiry) = entry.expires_at {
-                            small { "Policy authorization expires {display_acceptance_timestamp(expiry)}" }
+                    div { span { "Approved" } strong { class: "mono", "{approved_at}" } }
+                    div { span { "Review by" } strong { class: if review_expired { "poam-overdue mono" } else { "mono" }, "{review_label}" }
+                        if !review_deadline.is_none() {
+                            small { class: if review_expired { "rr-acceptance-expired" } else { "" }, 
+                                if review_expired { "expired {expired_days_ago}d ago" } else { "in {review_days_left}d" }
+                            }
                         }
+                        if review_deadline.is_none() { small { class: "rr-acceptance-undated", "not set · assessors flag undated acceptances" } }
+                    }
+                    div { span { "Scope" } strong {
+                        if entry.source == AcceptanceSource::CveEnvironment {
+                            "{scope_label} · environment decision"
+                        } else if entry.system_hostname.is_some() {
+                            "{scope_label} · host-only"
+                        } else {
+                            "{scope_label}"
+                        }
+                    } }
+                }
+                div { class: "ra-truth", "data-coach-target": "ra-truth",
+                    Icon { name: IconName::Info, size: 13 }
+                    span {
+                        strong { "Risk acceptance records a decision." }
+                        " It does not make a finding pass or mark it remediated."
                     }
                 }
-                details { class: "rr-acceptance-source-id",
-                    summary { "data-coach-target": "ra-source-toggle", "Source record identity" }
-                    div { "data-coach-target": "ra-source-id",
-                    code { "Decision {source}" }
-                    if let Some(id) = replacement { code { "Replacement POA&M {id}" } }
-                    if let Some(finding_id) = entry.finding_id { code { "Policy finding {finding_id}" } }
-                    if let Some(version_id) = entry.policy_version_id { code { "Policy version {version_id}" } }
+                if let Some(id) = replacement {
+                    div { class: "rr-acceptance-replacement",
+                        button { class: "poam-ref focus-ring", onclick: move |_| {
+                            on_close.call(());
+                            nav.push(Route::PoamsView { query: RegisterLocation { poam: Some(id), ..RegisterLocation::parse("") }.query() });
+                        }, Icon { name: IconName::Activity, size: 12 } " Superseded by " span { class: "mono", "{id}" } " " Icon { name: IconName::ArrowRight, size: 11 } }
                     }
                 }
                 section { class: "rr-acceptance-section",
@@ -1352,24 +1385,62 @@ fn AcceptanceTray(
                     p { "{entry.justification}" }
                 }
                 section { class: "rr-acceptance-section",
-                    header { h3 { "Decision scope and evidence" } }
+                    h3 { "Decision scope and evidence" }
                     table { class: "sys-table compact sys-table-dense rr-acceptance-evidence",
-                        thead { tr { th { "Host / scope" } th { "Finding" } th { "Package / policy" } } }
                         tbody { tr {
                             td { class: "mono", "{scope_label}" }
-                            td { class: "mono", if let Some(cve) = entry.canonical_cve_id.as_deref() { "{cve}" } else if entry.finding_id.is_some() { "Policy finding" } else { "Not recorded" } }
-                            td { class: "mono", if let Some(package) = entry.canonical_package_name.as_deref() { "{package}" } else if entry.policy_version_id.is_some() { "Policy waiver" } else { "Not recorded" } }
+                            td { class: "mono", if let Some(cve) = entry.canonical_cve_id.as_deref() { "{cve}" } else if entry.finding_id.is_some() { "Policy finding" } else { "—" } }
+                            td { class: "mono", if let Some(package) = entry.canonical_package_name.as_deref() { "{package}" } else if entry.policy_version_id.is_some() { "Policy waiver" } else { "—" } }
                         } }
                     }
-                    p { class: "rr-acceptance-help", "data-coach-target": "ra-truth", Icon { name: IconName::Shield, size: 12 } "Risk acceptance records a decision. It does not make a finding pass or mark it remediated." }
+                    p { class: "rr-acceptance-help", "An acceptance does not change a result: findings still report as they do." }
                     if let Some(reason) = entry.retirement_reason.as_deref() {
                         p { class: "rr-acceptance-retirement", "Retirement reason: {reason}" }
                     }
-                    if let Some(id) = replacement {
-                        button { class: "poam-ref focus-ring", onclick: move |_| {
-                            on_close.call(());
-                            nav.push(Route::PoamsView { query: RegisterLocation { poam: Some(id), ..RegisterLocation::parse("") }.query() });
-                        }, Icon { name: IconName::Activity, size: 12 } " Open replacement POA&M " Icon { name: IconName::ArrowRight, size: 11 } }
+                }
+                section { class: "rr-acceptance-section",
+                    button { class: "rr-acceptance-source-toggle focus-ring", "data-coach-target": "ra-source-toggle",
+                        r#type: "button", onclick: move |_| src_open.set(!src_open()),
+                        Icon { name: if src_open() { IconName::ChevronDown } else { IconName::ChevronRight }, size: 11 }
+                        " Source record"
+                    }
+                    if src_open() {
+                        div { class: "rr-acceptance-source-detail", "data-coach-target": "ra-source-id",
+                            dl { class: "ra-src",
+                                dt { "Acceptance" } dd { class: "mono", "{human_id}" }
+                                dt { "Source type" } dd { class: "mono", "{source_type_label(&entry)}" }
+                                dt { "Source decision" } dd { class: "mono", "{source}" }
+                                dt { "Subject" } dd {
+                                    if let Some(cve) = entry.canonical_cve_id.as_deref() {
+                                        if let Some(pkg) = entry.canonical_package_name.as_deref() {
+                                            "{cve} · {pkg}"
+                                        } else {
+                                            "{cve}"
+                                        }
+                                    } else if entry.finding_id.is_some() {
+                                        "Policy finding"
+                                    } else {
+                                        "—"
+                                    }
+                                }
+                                dt { "Scope" } dd {
+                                    if entry.source == AcceptanceSource::CveEnvironment {
+                                        span { class: "mono", "{scope_label}" }
+                                        " · environment decision"
+                                    } else if let Some(hostname) = entry.system_hostname.as_deref() {
+                                        span { class: "mono", "{hostname}" }
+                                        " · host-only"
+                                    } else {
+                                        "—"
+                                    }
+                                }
+                            }
+                            p { class: "rr-acceptance-source-help",
+                                "{human_id} is the operator-facing renewal chain. The typed source and UUID are the immutable audit identity and export as OSCAL "
+                                span { class: "mono", "source-id" }
+                                ". A renewal can create a new source decision under the same {human_id}."
+                            }
+                        }
                     }
                 }
                 if converting() && can_convert {
@@ -1399,13 +1470,31 @@ fn AcceptanceTray(
                 if let Some(reason) = error() { p { role: "alert", "{human_id}: {reason}" } }
             }
             footer { class: "rr-tray-foot rr-acceptance-footer", "data-coach-target": "ra-footer",
-                span { class: "rr-acceptance-footer-note", if can_renew || can_convert { "Source-owned actions · original decision remains in history" } else { "Read-only decision record" } }
+                span { class: "rr-acceptance-footer-note",
+                    if can_renew || can_convert {
+                        "Source-owned actions. The original decision remains in POAM history."
+                    } else if entry.accepted_by.is_some() && entry.replacement_poam_id.is_none() && entry.retired_at.is_none() {
+                        "Read-only decision record. Role authorization required to renew or convert."
+                    } else if entry.source == AcceptanceSource::PolicyWaiver {
+                        "Policy waiver record. Renewal or conversion requires administrative authorization."
+                    } else {
+                        "Read-only decision record"
+                    }
+                }
                 div { class: "rr-acceptance-footer-actions",
-                if can_renew { button { r#type: "button", class: "btn btn-ghost focus-ring", disabled: busy(), onclick: move |_| { busy.set(true); error.set(None); let entry = entry_renew.clone(); spawn(async move {
-                    match poam_api::renew_acceptance(&entry).await { Ok(_) => on_changed.call(()), Err(err) => error.set(Some(err.to_string())) }
-                    busy.set(false);
-                }); }, Icon { name: IconName::Clock, size: 13 } " Re-review · renew 90 days" } }
-                if can_convert && !converting() { button { r#type: "button", class: "btn btn-primary focus-ring", disabled: busy(), onclick: move |_| converting.set(true), Icon { name: IconName::Plus, size: 13 } " Convert to POA&M" } }
+                if review_expired && can_convert {
+                    button { r#type: "button", class: "btn btn-primary focus-ring", disabled: busy(), onclick: move |_| converting.set(true), Icon { name: IconName::Plus, size: 13 } " Convert to POA&M" }
+                    if can_renew { button { r#type: "button", class: "btn btn-ghost focus-ring", disabled: busy(), onclick: move |_| { busy.set(true); error.set(None); let entry = entry_renew.clone(); spawn(async move {
+                        match poam_api::renew_acceptance(&entry).await { Ok(_) => on_changed.call(()), Err(err) => error.set(Some(err.to_string())) }
+                        busy.set(false);
+                    }); }, Icon { name: IconName::Clock, size: 13 } " Re-review" } }
+                } else if can_renew || can_convert {
+                    if can_renew { button { r#type: "button", class: "btn btn-primary focus-ring", disabled: busy(), onclick: move |_| { busy.set(true); error.set(None); let entry = entry_renew.clone(); spawn(async move {
+                        match poam_api::renew_acceptance(&entry).await { Ok(_) => on_changed.call(()), Err(err) => error.set(Some(err.to_string())) }
+                        busy.set(false);
+                    }); }, Icon { name: IconName::Clock, size: 13 } " Re-review · renew 90 days" } }
+                    if can_convert && !converting() { button { r#type: "button", class: "btn btn-ghost focus-ring", disabled: busy(), onclick: move |_| converting.set(true), Icon { name: IconName::Plus, size: 13 } " Convert to POA&M" } }
+                }
                 if converting() { button { r#type: "button", class: "btn btn-ghost focus-ring", disabled: busy(), onclick: move |_| { converting.set(false); confirming.set(false); }, "Cancel" }
                     if !confirming() { button { r#type: "button", class: "btn btn-primary focus-ring", disabled: !valid || busy(), onclick: move |_| confirming.set(true), "Review conversion" } }
                     else { button { r#type: "button", class: "btn btn-primary focus-ring", disabled: !valid || busy(), onclick: move |_| {

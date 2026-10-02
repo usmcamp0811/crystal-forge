@@ -7668,19 +7668,31 @@ tr.attention-flash {
 .rr-acceptance-meta strong { display: block; overflow: hidden; margin-top: 3px; color: var(--cf-text-primary); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
 .rr-acceptance-meta small { display: block; margin-top: 3px; color: var(--cf-text-muted); font-size: 10.5px; }
 .rr-acceptance-meta .rr-acceptance-expired { color: #f87171; }
-.rr-acceptance-source-id { padding: 8px 18px; border-bottom: 1px solid var(--cf-divider); color: var(--cf-text-muted); font-size: 10.5px; }
-.rr-acceptance-source-id summary { width: fit-content; cursor: pointer; }
-.rr-acceptance-source-id code { display: block; margin-top: 6px; color: var(--cf-text-secondary); font-size: 10.5px; user-select: all; }
+.rr-acceptance-meta .rr-acceptance-undated { color: var(--cf-text-muted); }
+.ra-truth { display: flex; align-items: flex-start; gap: 10px; padding: 12px 18px; margin: 0; background: #6366f133; border-left: 3px solid #6366f1; color: var(--cf-text-primary); font-size: 12px; line-height: 1.5; }
+.ra-truth > svg { flex: 0 0 auto; margin-top: 2px; color: #6366f1; }
+.ra-truth strong { font-weight: 600; }
+.rr-acceptance-replacement { padding: 12px 18px; border-bottom: 1px solid var(--cf-divider); }
+.rr-acceptance-replacement .poam-ref { margin: 0; }
 .rr-acceptance-section { padding: 14px 18px; border-bottom: 1px solid var(--cf-divider); }
 .rr-acceptance-section h3 { margin: 0 0 9px; color: var(--cf-text-muted); font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
 .rr-acceptance-section > p { margin: 0; color: var(--cf-text-primary); font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
 .rr-acceptance-evidence { width: 100%; font-size: 12px; }
-.rr-acceptance-evidence th { color: var(--cf-text-muted); font-size: 9px; }
-.rr-acceptance-evidence td { overflow-wrap: anywhere; }
-.rr-acceptance-help { display: flex; align-items: flex-start; gap: 8px; margin-top: 10px !important; color: var(--cf-text-muted) !important; font-size: 11.5px !important; }
-.rr-acceptance-help > svg { flex: 0 0 auto; color: #a78bfa; }
+.rr-acceptance-evidence th { display: none; }
+.rr-acceptance-evidence tbody tr { display: grid; grid-template-columns: 1fr auto auto; gap: 12px; padding: 0; }
+.rr-acceptance-evidence td { padding: 0; overflow-wrap: anywhere; border: none; font-size: 12px; }
+.rr-acceptance-evidence td:first-child { font-weight: 500; }
+.rr-acceptance-help { margin: 10px 0 0; color: var(--cf-text-muted); font-size: 11.5px; }
 .rr-acceptance-retirement { margin-top: 10px !important; color: var(--cf-text-muted) !important; font-size: 11px !important; }
 .rr-acceptance-section .poam-ref { margin-top: 10px; }
+.rr-acceptance-source-toggle { display: flex; align-items: center; gap: 6px; padding: 0; margin: 0; background: none; border: none; color: var(--cf-text-primary); font-size: 13px; font-weight: 500; cursor: pointer; text-align: left; }
+.rr-acceptance-source-toggle:hover { color: var(--cf-text-secondary); }
+.rr-acceptance-source-toggle > svg { flex: 0 0 auto; }
+.rr-acceptance-source-detail { padding: 14px 0; }
+.ra-src { display: grid; grid-template-columns: auto 1fr; gap: 12px 16px; }
+.ra-src dt { color: var(--cf-text-muted); font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; text-align: right; white-space: nowrap; }
+.ra-src dd { margin: 0; color: var(--cf-text-primary); font-size: 12px; overflow-wrap: break-word; }
+.rr-acceptance-source-help { margin-top: 12px; color: var(--cf-text-muted); font-size: 11px; line-height: 1.5; }
 .rr-acceptance-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .rr-acceptance-footer-note { color: var(--cf-text-muted); font-size: 10.5px; }
 .rr-acceptance-footer-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
@@ -7690,6 +7702,7 @@ tr.attention-flash {
   .rr-acceptance-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .rr-acceptance-footer { align-items: stretch; flex-direction: column; }
   .rr-acceptance-footer-actions { justify-content: flex-end; }
+  .ra-src { grid-template-columns: auto 1fr; }
 }
 .poams-register .rr-export { position: relative; margin-left: auto; }
 .poams-register .rr-export-pop, .poams-register .rr-cols-pop { position: absolute; z-index: 40; top: calc(100% + 6px); right: 0; display: flex; flex-direction: column; gap: 2px; padding: 6px; box-shadow: 0 12px 32px #0005; }
