@@ -3964,19 +3964,21 @@ fn FleetCveDetailBody(
                     .filter(|s| s.inventory_authority == SystemCveInventoryAuthority::Exact)
                     .collect::<Vec<_>>();
                 let tiers = vec![
-                    ("Current", "#34d399", "Exact evidence for the running configuration.", current_systems, "authorizes triage", true),
-                    ("Scheduled deployment target", "#60a5fa", "Exact evidence for a scheduled target configuration.", scheduled_systems, "read-only", false),
-                    ("Historical", "#9ca3af", "Retained evidence with no current or scheduled authority.", historical_systems, "read-only", false),
+                    ("Current", "#34d399", "Exact evidence for the running configuration.", current_systems.clone(), "authorizes triage", true),
+                    ("Scheduled deployment target", "#60a5fa", "Exact evidence for a scheduled target configuration.", scheduled_systems.clone(), "read-only", false),
+                    ("Historical", "#9ca3af", "Retained evidence with no current or scheduled authority.", historical_systems.clone(), "read-only", false),
                 ];
                 rsx! {
                     div { class: "cve-rel",
                         for (tier_label, tier_color, tier_description, tier_systems, tier_tag, tier_active) in tiers {
-                            if !tier_systems.is_empty() {
-                                div { class: "cve-rel-row",
-                                    span { class: "cve-rel-dot", style: "background:{tier_color}" }
-                                    div { style: "min-width:0; flex:1",
-                                        div { style: "display:flex; align-items:center; gap:8px; flex-wrap:wrap",
-                                            strong { style: "font-size:12px", "{tier_label}" }
+                            div { class: "cve-rel-row",
+                                span { class: "cve-rel-dot", style: "background:{tier_color}" }
+                                div { style: "min-width:0; flex:1",
+                                    div { style: "display:flex; align-items:center; gap:8px; flex-wrap:wrap",
+                                        strong { style: "font-size:12px", "{tier_label}" }
+                                        if tier_systems.is_empty() {
+                                            span { style: "font-size:11px; color:var(--cf-text-muted)", "none" }
+                                        } else {
                                             span { style: "font-size:11px; color:var(--cf-text-muted)",
                                                 {
                                                     let count = tier_systems.len();
@@ -3984,9 +3986,11 @@ fn FleetCveDetailBody(
                                                     format!("{} host{}", count, plural)
                                                 }
                                             }
-                                            span { class: if tier_active {"cve-rel-tag on"} else {"cve-rel-tag"}, "{tier_tag}" }
                                         }
-                                        div { style: "font-size:11px; color:var(--cf-text-secondary); margin:2px 0 5px", "{tier_description}" }
+                                        span { class: if tier_active {"cve-rel-tag on"} else {"cve-rel-tag"}, "{tier_tag}" }
+                                    }
+                                    div { style: "font-size:11px; color:var(--cf-text-secondary); margin:2px 0 5px", "{tier_description}" }
+                                    if !tier_systems.is_empty() {
                                         div { style: "display:flex; gap:4px; flex-wrap:wrap",
                                             for system in tier_systems.iter().take(4) {
                                                 span { class: "mono cve-rel-host", "{system.hostname}" }
@@ -4014,6 +4018,25 @@ fn FleetCveDetailBody(
                             "A host can appear in Current and Scheduled when both exact configurations contain this package."
                         }
                     }
+                }
+            }
+        }
+        if legacy > 0 || no_scan > 0 {
+            details { class: "cve-evidence-diagnostics", "data-testid": "cve-evidence-diagnostics",
+                summary { "Evidence diagnostics" }
+                div { class: "cve-diagnostic-grid",
+                    if legacy > 0 {
+                        div { span { "Legacy evidence" } strong { "{legacy}" } }
+                    }
+                    if no_scan > 0 {
+                        div { span { "No-usable-scan hosts" } strong { "{no_scan}" } }
+                    }
+                }
+                if legacy > 0 {
+                    p { "Legacy evidence is read-only and does not authorize fleet triage." }
+                }
+                if no_scan > 0 {
+                    p { "{no_scan} {no_scan_hosts} {no_scan_verb} no usable completed CVE scan and are not counted as affected." }
                 }
             }
         }
