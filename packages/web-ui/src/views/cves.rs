@@ -5659,4 +5659,63 @@ mod tests {
             FleetDetailState::Error(_)
         ));
     }
+
+    #[test]
+    fn cve_exact_evidence_css_contract() {
+        // Regression test: verify CVE exact-evidence styling never reintroduces
+        // a late global `.help` override that would change application-wide help
+        // presentation. The exact-evidence warning must use a scoped
+        // `.cve-evidence-help` class.
+        let css = include_str!("../../assets/app.css");
+
+        // 1. Verify the shared global .help rule exists early (line ~6559)
+        let help_global = css.lines().find(|line| {
+            line.trim().starts_with(".help {")
+                && line.contains("font-size: 11px")
+                && line.contains("color: var(--cf-text-muted)")
+        });
+        assert!(
+            help_global.is_some(),
+            "global .help rule must define: font-size:11px; color:var(--cf-text-muted)"
+        );
+
+        // 2. Verify the CVE block uses .cve-evidence-help (line ~8373)
+        let cve_scoped = css.lines().find(|line| {
+            line.trim().starts_with(".cve-evidence-help {")
+                && line.contains("display: flex")
+                && line.contains("gap: 6px")
+                && line.contains("align-items: flex-start")
+        });
+        assert!(
+            cve_scoped.is_some(),
+            ".cve-evidence-help must define: display:flex; gap:6px; align-items:flex-start"
+        );
+
+        // 3. Verify no CVE-era global .help override exists (no late .help rule
+        // in CVE section containing flex/gap/align-items)
+        let cve_start = css
+            .find(".cve-rel {")
+            .expect("CVE section should exist");
+        let cve_section = &css[cve_start..];
+        let has_help_override =
+            cve_section.lines().any(|line| {
+                line.trim().starts_with(".help {")
+                    && (line.contains("display: flex")
+                        || line.contains("gap: 6px")
+                        || line.contains("align-items: flex-start"))
+            });
+        assert!(
+            !has_help_override,
+            "CVE block must not redefine global .help with display:flex; gap:6px; align-items:flex-start"
+        );
+
+        // 4. Verify cves.rs uses the scoped class for exact-evidence warning
+        let rs = include_str!("cves.rs");
+        let has_scoped_markup =
+            rs.contains(r#"class: "cve-evidence-help""#);
+        assert!(
+            has_scoped_markup,
+            "exact-evidence warning must use class=\"cve-evidence-help\""
+        );
+    }
 }
