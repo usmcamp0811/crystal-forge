@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-02 22:27'
+updated_date: '2026-10-02 22:29'
 labels: []
 dependencies: []
 references:
@@ -49,6 +49,8 @@ Implement the user's Niks3 contract reviewed against MR !329. Niks3 has separate
 7. Start task-owned devenv preview with isolated DB and mock fixtures before UI changes. Update design plus create/edit/discovery/auth UI and behavior tests.
 8. Package CLI preserving evaluator Nix PATH; add focused Niks3 VM fixture/check covering all required flows and regressions. Prepare SQLx only against verified task DB. Review documentation and raw verification results before commit/push/MR.
 Initial static-token and mTLS scope is approved. External providers and Bearer/OIDC reads are not implemented in this task.
+
+Delegated execution scope: cf-builder crate and cf-server/src/derivations/{cache,utils}.rs only. Use PreparedNiks3Push for one CLI process per job with parallel_uploads; suppress child output and retain credential ownership through exit or timeout kill/reap. Map server-supplied Niks3 fields explicitly and return destination ID only after an actual successful push. Verify owned Rust files and targeted builder checks via nix develop; protocol/config/helper implementation is owned by another agent.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
