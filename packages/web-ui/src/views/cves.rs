@@ -4004,7 +4004,7 @@ fn FleetCveDetailBody(
                             }
                         }
                     }
-                    div { class: "help", style: "margin-top:8px; display:flex; gap:6px; align-items:flex-start",
+                    div { class: "cve-evidence-help", style: "margin-top:8px",
                         span { style: "color:#fbbf24; flex-shrink:0; margin-top:2px",
                             Icon { name: IconName::Warn, size: 11 }
                         }
