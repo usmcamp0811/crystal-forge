@@ -3208,86 +3208,118 @@ mod tests {
             &row,
             Some(Scope::Environment(Uuid::from_u128(5)))
         ));
-         let today = NaiveDate::from_ymd_opt(2026, 9, 27).unwrap();
-         assert!(Queue::Unassigned.includes(&row, today));
-         assert!(!Queue::Soon.includes(&row, today));
-         assert!(!Queue::Quiet.includes(&row, today));
-     }
+        let today = NaiveDate::from_ymd_opt(2026, 9, 27).unwrap();
+        assert!(Queue::Unassigned.includes(&row, today));
+        assert!(!Queue::Soon.includes(&row, today));
+        assert!(!Queue::Quiet.includes(&row, today));
+    }
 
-     #[test]
-     fn policy_waiver_subject_includes_hostname_scope() {
-         // title + requirement + hostname
-         let entry_full: AcceptanceEntry = serde_json::from_value(serde_json::json!({
-             "source": "policy_waiver", "human_id": "RA-0010", "source_id": Uuid::from_u128(10),
-             "policy_title": "System hardening", "requirement_external_id": "REQ-42",
-             "system_hostname": "sledge", "system_id": Uuid::from_u128(8),
-             "status": "accepted", "waiver_updated_at": "2026-09-20T00:00:00Z",
-             "policy_version_id": Uuid::from_u128(100), "justification": "Reviewed",
-             "review_date": "2026-10-01", "canonical_cve_id": null, "canonical_package_name": null,
-             "finding_id": null, "environment_id": null, "review_due_at": null, "expires_at": null,
-             "accepted_by": null, "accepted_at": "2026-09-20T00:00:00Z", "retired_at": null,
-             "retired_by": null, "retirement_reason": null, "replacement_poam_id": null,
-             "policy_lineage_id": null, "environment_name": null, "policy_title_hash": null,
-             "recorded_at": "2026-09-20T00:00:00Z"
-         })).unwrap();
-         assert_eq!(
-             acceptance_drawer_subject(&entry_full),
-             "System hardening · REQ-42 on sledge"
-         );
+    #[test]
+    fn policy_waiver_subject_includes_hostname_scope() {
+        // title + requirement + hostname
+        let entry_full: AcceptanceEntry = serde_json::from_value(serde_json::json!({
+            "source": "policy_waiver", "human_id": "RA-0010", "source_id": Uuid::from_u128(10),
+            "policy_title": "System hardening", "requirement_external_id": "REQ-42",
+            "system_hostname": "sledge", "system_id": Uuid::from_u128(8),
+            "status": "accepted", "waiver_updated_at": "2026-09-20T00:00:00Z",
+            "policy_version_id": Uuid::from_u128(100), "justification": "Reviewed",
+            "review_date": "2026-10-01", "canonical_cve_id": null, "canonical_package_name": null,
+            "finding_id": null, "environment_id": null, "review_due_at": null, "expires_at": null,
+            "accepted_by": null, "accepted_at": "2026-09-20T00:00:00Z", "retired_at": null,
+            "retired_by": null, "retirement_reason": null, "replacement_poam_id": null,
+            "policy_lineage_id": null, "environment_name": null, "recorded_at": "2026-09-20T00:00:00Z"
+        })).unwrap();
+        assert_eq!(
+            acceptance_drawer_subject(&entry_full),
+            "System hardening · REQ-42 on sledge"
+        );
 
-         // title + requirement, no hostname
-         let entry_no_host: AcceptanceEntry = serde_json::from_value(serde_json::json!({
-             "source": "policy_waiver", "human_id": "RA-0011", "source_id": Uuid::from_u128(11),
-             "policy_title": "Access control", "requirement_external_id": "REQ-99",
-             "system_hostname": null, "system_id": null, "status": "accepted",
-             "waiver_updated_at": "2026-09-20T00:00:00Z", "policy_version_id": Uuid::from_u128(101),
-             "justification": "Reviewed", "review_date": "2026-10-01", "canonical_cve_id": null,
-             "canonical_package_name": null, "finding_id": null, "environment_id": null,
-             "review_due_at": null, "expires_at": null, "accepted_by": null,
-             "accepted_at": "2026-09-20T00:00:00Z", "retired_at": null, "retired_by": null,
-             "retirement_reason": null, "replacement_poam_id": null, "policy_lineage_id": null,
-             "environment_name": null, "policy_title_hash": null, "recorded_at": "2026-09-20T00:00:00Z"
-         })).unwrap();
-         assert_eq!(
-             acceptance_drawer_subject(&entry_no_host),
-             "Access control · REQ-99"
-         );
+        // title + requirement, no hostname
+        let entry_no_host: AcceptanceEntry = serde_json::from_value(serde_json::json!({
+            "source": "policy_waiver", "human_id": "RA-0011", "source_id": Uuid::from_u128(11),
+            "policy_title": "Access control", "requirement_external_id": "REQ-99",
+            "system_hostname": null, "system_id": null, "status": "accepted",
+            "waiver_updated_at": "2026-09-20T00:00:00Z", "policy_version_id": Uuid::from_u128(101),
+            "justification": "Reviewed", "review_date": "2026-10-01", "canonical_cve_id": null,
+            "canonical_package_name": null, "finding_id": null, "environment_id": null,
+            "review_due_at": null, "expires_at": null, "accepted_by": null,
+            "accepted_at": "2026-09-20T00:00:00Z", "retired_at": null, "retired_by": null,
+            "retirement_reason": null, "replacement_poam_id": null, "policy_lineage_id": null,
+            "environment_name": null, "recorded_at": "2026-09-20T00:00:00Z"
+        })).unwrap();
+        assert_eq!(
+            acceptance_drawer_subject(&entry_no_host),
+            "Access control · REQ-99"
+        );
 
-         // title + hostname, no requirement
-         let entry_no_req: AcceptanceEntry = serde_json::from_value(serde_json::json!({
-             "source": "policy_waiver", "human_id": "RA-0012", "source_id": Uuid::from_u128(12),
-             "policy_title": "Encryption mandate", "requirement_external_id": null,
-             "system_hostname": "prod-db-01", "system_id": Uuid::from_u128(9),
-             "status": "accepted", "waiver_updated_at": "2026-09-20T00:00:00Z",
-             "policy_version_id": Uuid::from_u128(102), "justification": "Reviewed",
-             "review_date": "2026-10-01", "canonical_cve_id": null, "canonical_package_name": null,
-             "finding_id": null, "environment_id": null, "review_due_at": null, "expires_at": null,
-             "accepted_by": null, "accepted_at": "2026-09-20T00:00:00Z", "retired_at": null,
-             "retired_by": null, "retirement_reason": null, "replacement_poam_id": null,
-             "policy_lineage_id": null, "environment_name": null, "policy_title_hash": null,
-             "recorded_at": "2026-09-20T00:00:00Z"
-         })).unwrap();
-         assert_eq!(
-             acceptance_drawer_subject(&entry_no_req),
-             "Encryption mandate on prod-db-01"
-         );
+        // title + hostname, no requirement
+        let entry_no_req: AcceptanceEntry = serde_json::from_value(serde_json::json!({
+            "source": "policy_waiver", "human_id": "RA-0012", "source_id": Uuid::from_u128(12),
+            "policy_title": "Encryption mandate", "requirement_external_id": null,
+            "system_hostname": "prod-db-01", "system_id": Uuid::from_u128(9),
+            "status": "accepted", "waiver_updated_at": "2026-09-20T00:00:00Z",
+            "policy_version_id": Uuid::from_u128(102), "justification": "Reviewed",
+            "review_date": "2026-10-01", "canonical_cve_id": null, "canonical_package_name": null,
+            "finding_id": null, "environment_id": null, "review_due_at": null, "expires_at": null,
+            "accepted_by": null, "accepted_at": "2026-09-20T00:00:00Z", "retired_at": null,
+            "retired_by": null, "retirement_reason": null, "replacement_poam_id": null,
+            "policy_lineage_id": null, "environment_name": null, "recorded_at": "2026-09-20T00:00:00Z"
+        })).unwrap();
+        assert_eq!(
+            acceptance_drawer_subject(&entry_no_req),
+            "Encryption mandate on prod-db-01"
+        );
 
-         // no identity should not invent environment
-         let entry_no_identity: AcceptanceEntry = serde_json::from_value(serde_json::json!({
-             "source": "policy_waiver", "human_id": "RA-0013", "source_id": Uuid::from_u128(13),
-             "policy_title": null, "requirement_external_id": null, "system_hostname": null,
-             "system_id": null, "status": "accepted", "waiver_updated_at": "2026-09-20T00:00:00Z",
-             "policy_version_id": Uuid::from_u128(103), "justification": "Reviewed",
-             "review_date": "2026-10-01", "canonical_cve_id": null, "canonical_package_name": null,
-             "finding_id": null, "environment_id": null, "review_due_at": null, "expires_at": null,
-             "accepted_by": null, "accepted_at": "2026-09-20T00:00:00Z", "retired_at": null,
-             "retired_by": null, "retirement_reason": null, "replacement_poam_id": null,
-             "policy_lineage_id": null, "environment_name": null, "policy_title_hash": null,
-             "recorded_at": "2026-09-20T00:00:00Z"
-         })).unwrap();
-         assert_eq!(
-             acceptance_drawer_subject(&entry_no_identity),
-             "Policy finding"
-         );
-     }
+        // no identity should not invent environment
+        let entry_no_identity: AcceptanceEntry = serde_json::from_value(serde_json::json!({
+            "source": "policy_waiver", "human_id": "RA-0013", "source_id": Uuid::from_u128(13),
+            "policy_title": null, "requirement_external_id": null, "system_hostname": null,
+            "system_id": null, "status": "accepted", "waiver_updated_at": "2026-09-20T00:00:00Z",
+            "policy_version_id": Uuid::from_u128(103), "justification": "Reviewed",
+            "review_date": "2026-10-01", "canonical_cve_id": null, "canonical_package_name": null,
+            "finding_id": null, "environment_id": null, "review_due_at": null, "expires_at": null,
+            "accepted_by": null, "accepted_at": "2026-09-20T00:00:00Z", "retired_at": null,
+            "retired_by": null, "retirement_reason": null, "replacement_poam_id": null,
+            "policy_lineage_id": null, "environment_name": null, "recorded_at": "2026-09-20T00:00:00Z"
+        })).unwrap();
+        assert_eq!(
+            acceptance_drawer_subject(&entry_no_identity),
+            "Policy finding"
+        );
+
+        // missing title fallback: requirement + hostname
+        let entry_missing_title: AcceptanceEntry = serde_json::from_value(serde_json::json!({
+            "source": "policy_waiver", "human_id": "RA-0014", "source_id": Uuid::from_u128(14),
+            "policy_title": null, "requirement_external_id": "REQ-42",
+            "system_hostname": "sledge", "system_id": Uuid::from_u128(8),
+            "status": "accepted", "waiver_updated_at": "2026-09-20T00:00:00Z",
+            "policy_version_id": Uuid::from_u128(104), "justification": "Reviewed",
+            "review_date": "2026-10-01", "canonical_cve_id": null, "canonical_package_name": null,
+            "finding_id": null, "environment_id": null, "review_due_at": null, "expires_at": null,
+            "accepted_by": null, "accepted_at": "2026-09-20T00:00:00Z", "retired_at": null,
+            "retired_by": null, "retirement_reason": null, "replacement_poam_id": null,
+            "policy_lineage_id": null, "environment_name": null, "recorded_at": "2026-09-20T00:00:00Z"
+        })).unwrap();
+        assert_eq!(
+            acceptance_drawer_subject(&entry_missing_title),
+            "REQ-42 on sledge"
+        );
+
+        // environment not used for policy scope
+        let entry_env_present: AcceptanceEntry = serde_json::from_value(serde_json::json!({
+            "source": "policy_waiver", "human_id": "RA-0015", "source_id": Uuid::from_u128(15),
+            "policy_title": "Access control", "requirement_external_id": "REQ-99",
+            "system_hostname": null, "system_id": null, "status": "accepted",
+            "waiver_updated_at": "2026-09-20T00:00:00Z", "policy_version_id": Uuid::from_u128(105),
+            "justification": "Reviewed", "review_date": "2026-10-01", "canonical_cve_id": null,
+            "canonical_package_name": null, "finding_id": null, "environment_id": Uuid::from_u128(2),
+            "review_due_at": null, "expires_at": null, "accepted_by": null,
+            "accepted_at": "2026-09-20T00:00:00Z", "retired_at": null, "retired_by": null,
+            "retirement_reason": null, "replacement_poam_id": null, "policy_lineage_id": null,
+            "environment_name": "LAN", "recorded_at": "2026-09-20T00:00:00Z"
+        })).unwrap();
+        let subject = acceptance_drawer_subject(&entry_env_present);
+        assert_eq!(subject, "Access control · REQ-99");
+        assert!(!subject.contains("LAN"));
+    }
 }
