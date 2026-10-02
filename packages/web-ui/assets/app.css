@@ -8364,13 +8364,13 @@ html[data-theme="light"] .scanning-detail-callout-danger strong { color:#b91c1c;
 .cve-section-head h3 { margin: 0; color: var(--cf-text-muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
 .cve-section-head span { color: var(--cf-text-muted); font-size: 11px; }
 .cve-vector code { align-self: flex-start; max-width: 100%; padding: 6px 10px; overflow-wrap: anywhere; border-radius: 6px; background: var(--cf-subtle-bg); color: var(--cf-text-primary); font-size: 12px; }
-.cve-authority-details { padding: 0; border: 1px solid var(--cf-divider); border-radius: 8px; background: var(--cf-subtle-bg); }
-.cve-authority-details > summary { padding: 8px 10px; color: var(--cf-text-secondary); cursor: pointer; font-size: 11px; font-weight: 600; }
-.cve-authority-detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); border-top: 1px solid var(--cf-divider); }
-.cve-authority-detail-grid > div { display: flex; justify-content: space-between; gap: 8px; min-width: 0; padding: 7px 10px; border-right: 1px solid var(--cf-divider); border-bottom: 1px solid var(--cf-divider); }
-.cve-authority-detail-grid span { color: var(--cf-text-muted); font-size: 9.5px; }
-.cve-authority-detail-grid strong { color: var(--cf-text-primary); font: 11px var(--cf-font-mono); }
-.cve-authority-details > p { margin: 0; padding: 7px 10px; border-top: 1px solid var(--cf-divider); color: var(--cf-text-muted); font-size: 10.5px; line-height: 1.4; }
+.cve-rel { display: flex; flex-direction: column; gap: 12px; }
+.cve-rel-row { display: flex; gap: 8px; align-items: flex-start; }
+.cve-rel-dot { display: flex; flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; margin-top: 4px; }
+.cve-rel-host { display: inline-block; padding: 4px 8px; border-radius: 4px; background: var(--cf-subtle-bg); color: var(--cf-text-primary); font-size: 11px; }
+.cve-rel-tag { display: inline-block; padding: 2px 6px; border-radius: 3px; background: var(--cf-subtle-bg); color: var(--cf-text-muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
+.cve-rel-tag.on { background: rgba(52, 211, 153, 0.15); color: #34d399; }
+.help { display: flex; gap: 6px; align-items: flex-start; font-size: 11px; color: var(--cf-text-secondary); line-height: 1.4; }
 .cve-authority-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); overflow: hidden; border: 1px solid var(--cf-divider); border-radius: 8px; background: var(--cf-subtle-bg); }
 .cve-authority-strip > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; padding: 8px 10px; border-right: 1px solid var(--cf-divider); }
 .cve-authority-strip > div:last-child { border-right: 0; }

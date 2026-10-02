@@ -3944,6 +3944,79 @@ fn FleetCveDetailBody(
             h3 { "CVSS vector" }
             code { class: "mono", "{cvss_vector}" }
         }
+        section { class: "cve-fleet-section", "data-testid": "cve-exact-evidence", "data-coach-target": "cve-relations",
+            h3 { "Exact evidence" }
+            {
+                let mut all_systems = detail.environments.iter()
+                    .flat_map(|env| env.systems.clone())
+                    .collect::<Vec<_>>();
+                all_systems.extend(detail.unassigned_systems.clone());
+                let current_systems = systems_in_inventory_section(&all_systems, FleetCveInventorySection::Current)
+                    .into_iter()
+                    .filter(|s| s.inventory_authority == SystemCveInventoryAuthority::Exact)
+                    .collect::<Vec<_>>();
+                let scheduled_systems = systems_in_inventory_section(&all_systems, FleetCveInventorySection::ScheduledDeploymentTarget)
+                    .into_iter()
+                    .filter(|s| s.inventory_authority == SystemCveInventoryAuthority::Exact)
+                    .collect::<Vec<_>>();
+                let historical_systems = systems_in_inventory_section(&all_systems, FleetCveInventorySection::Historical)
+                    .into_iter()
+                    .filter(|s| s.inventory_authority == SystemCveInventoryAuthority::Exact)
+                    .collect::<Vec<_>>();
+                let tiers = vec![
+                    ("Current", "#34d399", "Exact evidence for the running configuration.", current_systems, "authorizes triage", true),
+                    ("Scheduled deployment target", "#60a5fa", "Exact evidence for a scheduled target configuration.", scheduled_systems, "read-only", false),
+                    ("Historical", "#9ca3af", "Retained evidence with no current or scheduled authority.", historical_systems, "read-only", false),
+                ];
+                rsx! {
+                    div { class: "cve-rel",
+                        for (tier_label, tier_color, tier_description, tier_systems, tier_tag, tier_active) in tiers {
+                            if !tier_systems.is_empty() {
+                                div { class: "cve-rel-row",
+                                    span { class: "cve-rel-dot", style: "background:{tier_color}" }
+                                    div { style: "min-width:0; flex:1",
+                                        div { style: "display:flex; align-items:center; gap:8px; flex-wrap:wrap",
+                                            strong { style: "font-size:12px", "{tier_label}" }
+                                            span { style: "font-size:11px; color:var(--cf-text-muted)",
+                                                {
+                                                    let count = tier_systems.len();
+                                                    let plural = if count == 1 { "" } else { "s" };
+                                                    format!("{} host{}", count, plural)
+                                                }
+                                            }
+                                            span { class: if tier_active {"cve-rel-tag on"} else {"cve-rel-tag"}, "{tier_tag}" }
+                                        }
+                                        div { style: "font-size:11px; color:var(--cf-text-secondary); margin:2px 0 5px", "{tier_description}" }
+                                        div { style: "display:flex; gap:4px; flex-wrap:wrap",
+                                            for system in tier_systems.iter().take(4) {
+                                                span { class: "mono cve-rel-host", "{system.hostname}" }
+                                            }
+                                            if tier_systems.len() > 4 {
+                                                span { class: "cve-rel-host", "+{tier_systems.len() - 4}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    div { class: "help", style: "margin-top:8px; display:flex; gap:6px; align-items:flex-start",
+                        span { style: "color:#fbbf24; flex-shrink:0; margin-top:2px",
+                            Icon { name: IconName::Warn, size: 11 }
+                        }
+                        span {
+                            strong { style: "color:var(--cf-text-primary)", "Missing evidence does not mean clean." }
+                            if no_scan > 0 {
+                                " {no_scan} {no_scan_hosts} {no_scan_verb} no usable completed CVE scan. "
+                            } else {
+                                " Hosts without a current exact scan are not listed here and are not clean. "
+                            }
+                            "A host can appear in Current and Scheduled when both exact configurations contain this package."
+                        }
+                    }
+                }
+            }
+        }
         section { class: "cve-fleet-section", "data-testid": "cve-triage-status", "data-coach-target": "cve-triage-status",
             div { class: "cve-section-head",
                 h3 { "Triage status" }
@@ -3982,31 +4055,6 @@ fn FleetCveDetailBody(
                 dt { "Observed version" } dd { class: "mono", "{installed_version}" }
                 dt { "Fixed in" } dd { class: "mono", "{fixed_version}" }
                 dt { "Advisory" } dd { a { href: "{advisory_url}", target: "_blank", rel: "noopener noreferrer", "nvd.nist.gov" } }
-            }
-        }
-        details { class: "cve-authority-details", "data-testid": "cve-authority-details",
-            summary {
-                "Evidence authority · {current_affected} current · {scheduled_configuration} scheduled · {historical} historical"
-            }
-            div { class: "cve-authority-detail-grid",
-                div { span { "Current exact exposure" } strong { "{current_affected}" } }
-                div { span { "Scheduled target exposure" } strong { "{scheduled_configuration}" } }
-                div { span { "Historical retained evidence" } strong { "{historical}" } }
-                div { span { "Legacy evidence" } strong { "{legacy}" } }
-                div { span { "Actionable current hosts" } strong { "{detail.exact_mutation_target_count}" } }
-                div { span { "Triage rollup" } strong { class: "chip {fleet_rollup_class(detail.rollup)}", "{fleet_rollup_label(detail.rollup)}" } }
-            }
-            if historical > 0 || legacy > 0 {
-                p { "Historical and legacy evidence is read-only and cannot authorize fleet triage. {historical} {historical_hosts} have retained historical findings; {legacy} {legacy_hosts} are legacy-only evidence." }
-            }
-            if scheduled_configuration > 0 {
-                p { "Scheduled configuration findings describe deployment intent. They are not POA&M patch scheduling or fleet-triage targets." }
-            }
-            if no_scan > 0 {
-                p { "{no_scan} {no_scan_hosts} {no_scan_verb} no usable completed CVE scan. They are not counted as affected." }
-            }
-            if detail.exact_mutation_target_count == 0 {
-                p { "No current exact scan findings are available for fleet triage." }
             }
         }
         section { class: "cve-fleet-section", "data-testid": "cve-affected-systems", "data-coach-target": "cve-relations",
