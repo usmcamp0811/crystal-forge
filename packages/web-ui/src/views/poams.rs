@@ -1060,38 +1060,51 @@ fn review_is_expired(item: &AcceptanceEntry, today: NaiveDate) -> bool {
 }
 
 fn acceptance_drawer_subject(item: &AcceptanceEntry) -> String {
-    let mut parts = Vec::new();
-    if let Some(title) = item.policy_title.as_deref() {
-        parts.push(title.to_string());
-    }
-    if let Some(requirement) = item.requirement_external_id.as_deref() {
-        parts.push(requirement.to_string());
-    }
-    if let Some(cve) = item.canonical_cve_id.as_deref() {
-        parts.push(cve.to_string());
-    }
-    if let Some(package) = item.canonical_package_name.as_deref() {
-        parts.push(package.to_string());
-    }
-    if let Some(host) = item
-        .system_hostname
-        .as_deref()
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-    {
-        parts.push(host.to_string());
-    }
-    if let Some(environment) = item.environment_name.as_deref() {
-        parts.push(environment.to_string());
-    }
-    if parts.is_empty() {
-        match item.source {
-            AcceptanceSource::PolicyWaiver => parts.push("Policy finding".into()),
-            AcceptanceSource::CveHost => parts.push("Host scope unavailable".into()),
-            AcceptanceSource::CveEnvironment => parts.push("Environment scope unavailable".into()),
+    match item.source {
+        AcceptanceSource::CveEnvironment => {
+            // Format: CVE-2025-2588 — augeas in LAN
+            match (
+                item.canonical_cve_id.as_deref(),
+                item.canonical_package_name.as_deref(),
+                item.environment_name.as_deref(),
+            ) {
+                (Some(cve), Some(package), Some(env)) => format!("{} — {} in {}", cve, package, env),
+                (Some(cve), Some(package), None) => format!("{} — {}", cve, package),
+                (Some(cve), None, Some(env)) => format!("{} in {}", cve, env),
+                (Some(cve), None, None) => cve.to_string(),
+                _ => "Environment scope unavailable".into(),
+            }
+        }
+        AcceptanceSource::CveHost => {
+            // Format: CVE-XXXX-XXXX — package on hostname
+            match (
+                item.canonical_cve_id.as_deref(),
+                item.canonical_package_name.as_deref(),
+                item.system_hostname
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty()),
+            ) {
+                (Some(cve), Some(package), Some(host)) => format!("{} — {} on {}", cve, package, host),
+                (Some(cve), Some(package), None) => format!("{} — {}", cve, package),
+                (Some(cve), None, Some(host)) => format!("{} on {}", cve, host),
+                (Some(cve), None, None) => cve.to_string(),
+                _ => "Host scope unavailable".into(),
+            }
+        }
+        AcceptanceSource::PolicyWaiver => {
+            // Format: Policy requirement + scope
+            match (
+                item.policy_title.as_deref(),
+                item.requirement_external_id.as_deref(),
+            ) {
+                (Some(title), Some(req_id)) => format!("{} · {}", title, req_id),
+                (Some(title), None) => title.to_string(),
+                (None, Some(req_id)) => req_id.to_string(),
+                _ => "Policy finding".into(),
+            }
         }
     }
-    parts.join(" · ")
 }
 
 /// Renders the source type label for display in the Source record section.
@@ -1377,7 +1390,7 @@ fn AcceptanceTray(
                         button { class: "poam-ref focus-ring", onclick: move |_| {
                             on_close.call(());
                             nav.push(Route::PoamsView { query: RegisterLocation { poam: Some(id), ..RegisterLocation::parse("") }.query() });
-                        }, Icon { name: IconName::Activity, size: 12 } " Superseded by " span { class: "mono", "{id}" } " " Icon { name: IconName::ArrowRight, size: 11 } }
+                        }, Icon { name: IconName::Activity, size: 12 } " Open replacement POA&M " Icon { name: IconName::ArrowRight, size: 11 } }
                     }
                 }
                 section { class: "rr-acceptance-section",
@@ -1472,22 +1485,21 @@ fn AcceptanceTray(
             footer { class: "rr-tray-foot rr-acceptance-footer", "data-coach-target": "ra-footer",
                 span { class: "rr-acceptance-footer-note",
                     if can_renew || can_convert {
-                        "Source-owned actions. The original decision remains in POAM history."
-                    } else if entry.accepted_by.is_some() && entry.replacement_poam_id.is_none() && entry.retired_at.is_none() {
-                        "Read-only decision record. Role authorization required to renew or convert."
-                    } else if entry.source == AcceptanceSource::PolicyWaiver {
-                        "Policy waiver record. Renewal or conversion requires administrative authorization."
+                        match entry.source {
+                            AcceptanceSource::PolicyWaiver => "Policy-waiver renewal and conversion require Admin authorization.",
+                            AcceptanceSource::CveHost | AcceptanceSource::CveEnvironment => "Operator or Admin can renew or convert.",
+                        }
                     } else {
                         "Read-only decision record"
                     }
                 }
                 div { class: "rr-acceptance-footer-actions",
                 if review_expired && can_convert {
-                    button { r#type: "button", class: "btn btn-primary focus-ring", disabled: busy(), onclick: move |_| converting.set(true), Icon { name: IconName::Plus, size: 13 } " Convert to POA&M" }
                     if can_renew { button { r#type: "button", class: "btn btn-ghost focus-ring", disabled: busy(), onclick: move |_| { busy.set(true); error.set(None); let entry = entry_renew.clone(); spawn(async move {
                         match poam_api::renew_acceptance(&entry).await { Ok(_) => on_changed.call(()), Err(err) => error.set(Some(err.to_string())) }
                         busy.set(false);
-                    }); }, Icon { name: IconName::Clock, size: 13 } " Re-review" } }
+                    }); }, Icon { name: IconName::Clock, size: 13 } " Re-review · renew 90 days" } }
+                    button { r#type: "button", class: "btn btn-primary focus-ring", disabled: busy(), onclick: move |_| converting.set(true), Icon { name: IconName::Plus, size: 13 } " Convert to POA&M" }
                 } else if can_renew || can_convert {
                     if can_renew { button { r#type: "button", class: "btn btn-primary focus-ring", disabled: busy(), onclick: move |_| { busy.set(true); error.set(None); let entry = entry_renew.clone(); spawn(async move {
                         match poam_api::renew_acceptance(&entry).await { Ok(_) => on_changed.call(()), Err(err) => error.set(Some(err.to_string())) }
