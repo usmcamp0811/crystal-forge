@@ -1,9 +1,11 @@
 ---
 id: TASK-470
 title: Support first-class public and private Niks3 caches
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - openai-agent
 created_date: '2026-10-02 22:23'
+updated_date: '2026-10-02 22:23'
 labels: []
 dependencies: []
 references:
@@ -34,3 +36,11 @@ Implement the user's Niks3 contract reviewed against MR !329. Niks3 has separate
 - [ ] #10 Focused unit tests and Niks3 VM tests cover remote builder plus agent public/private flows environment isolation CVE materialization and secret-log audits
 - [ ] #11 Packaging preserves evaluator Nix selection; required server builder Niks3 Attic S3 web-ui and flake verification passes before MR
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: openai-agent on sledge in /home/mcamp/code/crystal-forge/TASK-470-niks3-cache-support
+
+Preflight: origin/dev fetched at 4fb7d960909bb7dc75d5f859af43e38f7a3c657e; reviewed MR !329 head 9dda346eaee14c3eb83ad47197ae768f3234cbfc is an ancestor. Dedicated clean branch TASK-470-niks3-cache-support. User explicitly permitted preserving untracked dev/session-ses_f927.md and proceeding without a registered main worktree. Risk: high due to credential transport and persistence. Impact: protocol/config/server/builder/agent/UI/Nix packaging/tests. No outstanding baseline dependency. Verification: targeted Rust/model/command/security tests via Nix shell; isolated SQLx metadata preparation; server builder niks3-cache attic-cache s3-cache web-ui checks; nix flake check --keep-going; VM public/private deployment tests and secret-log audit. No arbitrary token scripts, Bearer/OIDC read proxy, generic cache renaming, or priority refactor.
+<!-- SECTION:NOTES:END -->
