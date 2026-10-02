@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-02 22:29'
+updated_date: '2026-10-02 22:39'
 labels: []
 dependencies: []
 references:
@@ -59,4 +59,6 @@ Delegated execution scope: cf-builder crate and cf-server/src/derivations/{cache
 LOCK: openai-agent on sledge in /home/mcamp/code/crystal-forge/TASK-470-niks3-cache-support
 
 Preflight: origin/dev fetched at 4fb7d960909bb7dc75d5f859af43e38f7a3c657e; reviewed MR !329 head 9dda346eaee14c3eb83ad47197ae768f3234cbfc is an ancestor. Dedicated clean branch TASK-470-niks3-cache-support. User explicitly permitted preserving untracked dev/session-ses_f927.md and proceeding without a registered main worktree. Risk: high due to credential transport and persistence. Impact: protocol/config/server/builder/agent/UI/Nix packaging/tests. No outstanding baseline dependency. Verification: targeted Rust/model/command/security tests via Nix shell; isolated SQLx metadata preparation; server builder niks3-cache attic-cache s3-cache web-ui checks; nix flake check --keep-going; VM public/private deployment tests and secret-log audit. No arbitrary token scripts, Bearer/OIDC read proxy, generic cache renaming, or priority refactor.
+
+Delegated builder/local-execution implementation is present in cf-builder/src/{cache.rs,bin/builder.rs,builder/api_client.rs,derivations/cache.rs,derivations/utils.rs} and cf-server/src/derivations/{cache.rs,utils.rs}. Both Niks3 branches use PreparedNiks3Push before generic cache_command. One CLI process per attempt receives parallel_uploads once. Detached process ownership retains credentials through cancellation, kill, and reap; timeout cleanup completes before retry. Child output is discarded, failures retain exit status, and environment allowlisting plus task credential-directory HOME/XDG_CONFIG_HOME prevent AWS/Garage/Attic or ambient Niks3 token inheritance. Builder maps job-supplied write fields without local fallback and reports destination ID in signed completion only after actual publication; mock/no-push completion reports None. No commits or service stacks started. Verification: nix develop -c cargo check --manifest-path packages/default/Cargo.toml -p cf-builder --all-targets passed (exit 0); nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-builder niks3 passed (exit 0, 7 tests); nix develop -c rustfmt --edition 2024 --check on all seven owned changed files passed (exit 0). Fake CLI tests use shared helper preparation and cover flags, token/private-key absence, mTLS HOME isolation, output suppression, timeout kill/reap and cancellation cleanup. Signed HTTP completion test checks destination identity and None without push. Shared protocol/config/helper dependencies are now present and compile with builder. Full server/package/VM integration verification remains with task owner.
 <!-- SECTION:NOTES:END -->
