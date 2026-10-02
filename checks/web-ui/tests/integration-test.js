@@ -20032,9 +20032,9 @@ security.audit.enable = true;</fixtext>
         await assertCount(page.locator(`.poams-group tbody tr[data-source-id="${accepted[0].source_id}"]`), 1, "Everything search must match RA ID");
         await page.getByRole("textbox", { name: "Search register" }).fill("");
         await mixedDecision.click();
-        const mixedTray = page.getByRole("dialog", { name: "Risk acceptance RA-0001 · Host CVE" });
-        await assertVisible(mixedTray.getByText("Reviewed host risk"), "Mixed row must open the exact source decision without writing");
-        await assertVisible(mixedTray.getByRole("heading", { name: "RA-0001 · Host CVE" }), "Mixed drawer must retain the chain ID");
+         const mixedTray = page.getByRole("dialog", { name: "Risk acceptance RA-0001 · Host CVE" });
+         await assertVisible(mixedTray.getByText("Reviewed host risk"), "Mixed row must open the exact source decision without writing");
+         await assertVisible(mixedTray.getByRole("heading", { name: "RA-0001", exact: true }), "Mixed drawer must show human RA ID as the heading");
         await mixedTray.getByRole("button", { name: "Close acceptance" }).click();
         await mixedDecision.click({ modifiers: ["Control"] });
         await assertVisible(page.getByRole("group", { name: "Selected risk acceptances" }).getByText("1 source decisions selected"), "Mixed selection must preserve typed source identity");
@@ -20149,10 +20149,10 @@ security.audit.enable = true;</fixtext>
         const policyDecision = acceptanceTable.locator(`tbody tr[data-source-id="${accepted[1].source_id}"]`);
         await page.setViewportSize({ width: 1000, height: 1000 });
         await hostDecision.click();
-        const hostTray = page.getByRole("dialog", { name: "Risk acceptance RA-0001 · Host CVE" });
-        await assertVisible(hostTray.getByRole("heading", { name: "RA-0001 · Host CVE", exact: true }), "Drawer title must show the human RA ID, not a source UUID");
+         const hostTray = page.getByRole("dialog", { name: "Risk acceptance RA-0001 · Host CVE" });
+         await assertVisible(hostTray.getByRole("heading", { name: "RA-0001", exact: true }), "Drawer title must show only the human RA ID");
         await assertVisible(hostTray.getByText("Reviewed host risk"), "Tray must preserve original justification");
-        await assertVisible(hostTray.getByText("CVE-2024-1234 · openssl · prod-node-01", { exact: true }), "Drawer subject must use actual CVE, package and hostname");
+         await assertVisible(hostTray.getByText("CVE-2024-1234 — openssl on prod-node-01", { exact: true }), "Drawer subject must use source-aware CVE format with em dash");
         await assertVisible(hostTray.getByText("Morgan Owner", { exact: true }), "Approver must resolve through the authorized catalog");
         await assertVisible(hostTray.getByText("Sep 20, 2026", { exact: true }), "Approval time must render as a human-readable date");
         await assertVisible(hostTray.getByText("Sep 25, 2026", { exact: true }), "Review date must render as a human-readable date");

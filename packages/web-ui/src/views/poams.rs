@@ -1395,7 +1395,13 @@ fn AcceptanceTray(
                         } else {
                             "{scope_label}"
                         }
-                    } }
+                    }
+                        if entry.source == AcceptanceSource::PolicyWaiver {
+                            if let Some(expiry) = entry.expires_at {
+                                small { "Policy authorization expires {display_acceptance_timestamp(expiry)}" }
+                            }
+                        }
+                    }
                 }
                 div { class: "ra-truth", "data-coach-target": "ra-truth",
                     Icon { name: IconName::Info, size: 13 }
