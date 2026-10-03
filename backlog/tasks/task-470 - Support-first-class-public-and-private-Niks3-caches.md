@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-03 22:25'
+updated_date: '2026-10-03 22:30'
 labels: []
 dependencies: []
 references:
@@ -240,4 +240,6 @@ Review fixes implemented and committed: one create/update including environment_
 LOCK STATUS: awaiting exact-head CI and re-review; no active implementation subagents. Task remains In Progress until required exact-head verification is established. Persistent taskpreview supervised by task470-review-preview.service (oneshot RemainAfterExit) plus devenv native manager30464; PostgreSQL30524 API30552 Dioxus30753 observed. ReviewDB override command: nix develop .#devenv -c devenv -O env.CRYSTAL_FORGE__DATABASE__NAME:string crystal_forge_review up -d. UI8081/API3447/DB5432 under taskPGDATA. Do not restart without preserving reviewDBoverride and oldDBdata.
 
 Maintainer follow-up resumed. Fetched origin/dev and origin/TASK-470-niks3-cache-support; local/remote/live MR331 head all b52fbe671f4fc9cc89460364eb5ab51c4f858c83, clean worktree, target3b23d36f already ancestor. No rebase required; no newer remote work overwritten. Integrationdev only previously permitted session-ses_f927.md untracked. Existing previewreviewDB settings must be verified before reuse; oldcrystal_forge DB preserved. User requires localfocusedchecks and newblockingexact-headCI gates; prior immediatepush instruction superseded by this verification request.
+
+P2 CI owner progress: changed only .gitlab-ci.yml, checks/server-regressions/{default.nix,README.md}, checks/builder-evaluator-packaging/README.md and added CI membership section in checks/niks3-cache/README.md. Added blocking matrix entries niks3-cache and builder-evaluator-packaging. GitLab lint API dry_run=true ref=main include_jobs=true returned valid=true, no errors/warnings and exact jobs flake-check: [niks3-cache], flake-check: [builder-evaluator-packaging], flake-check: [server-regressions], all allow_failure=false with tag_list=[nix]. glab ci lint task-branch dry run reported empty pipeline under existing only MR/main rules; main dry run passed. All three nix eval .#checks.x86_64-linux.<name>.drvPath commands and evaluated server-regressions checkPhase | bash -n passed. Added 14 exact ignored tests plus 3 exact nonignored signed-capability/selection/preclaim tests, listed in server-regressions README. New runner requires named success line and summary exactly 1 passed, 0 failed, 0 ignored and retains Cargo status through pipefail; sandbox-only public encryption fixture key supplied. git diff --check on owned files passed. Packaging command nix build --no-link -L .#checks.x86_64-linux.builder-evaluator-packaging failed: cf-server-core compiler E0583 queries/mod.rs:11 cache_publication_reads absent from Git-backed source, dependency builder exit101. Publication owner now has that module untracked/in progress. Awaiting stable-source report and qualified NEW niks3_publication_* test names before final wiring/packaging rerun. No host DB, service startup, commits, pushes or pipelines created. No runner/KVM execution pass claimed.
 <!-- SECTION:NOTES:END -->
