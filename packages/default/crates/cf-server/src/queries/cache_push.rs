@@ -1,7 +1,7 @@
 use crate::builder::remove_gc_root;
 use crate::config::CacheConfig;
 use crate::models::cache_destination::CacheDestination;
-use crate::queries::cache_destinations::{filter_caches_by_environment, get_global_caches};
+use crate::queries::cache_destinations::eligible_cache_destinations_for_environment;
 use crate::queries::derivations::get_derivation_by_id;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -60,12 +60,49 @@ fn select_derivation_environment(matches: &[(uuid::Uuid, i32)]) -> Result<Option
     Ok(Some(*environment))
 }
 
+/// Resolves the canonical publication environment on the caller's connection.
+///
+/// Uses active systems in the commit's flake. Configuration-name matches take
+/// precedence over hostname matches. Equally preferred matches must identify
+/// one environment; no matches (including no commit) select global fallback.
+/// Transactions use this query and decision before reading cache credentials,
+/// so dispatch and completion cannot accept an ambiguity rejected by the pool.
+/// This helper does not acquire destination or assignment locks.
+///
+/// # Errors
+/// Returns an error for equally preferred cross-environment matches or a
+/// database query failure.
+pub(crate) async fn resolve_derivation_environment<'e, E>(
+    executor: E,
+    commit_id: Option<i32>,
+    derivation_name: &str,
+) -> Result<Option<uuid::Uuid>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let matches = sqlx::query_as::<_, (uuid::Uuid, i32)>(
+        r#"SELECT s.environment_id,
+                  CASE WHEN NULLIF(s.system_configuration_name, '') = $2 THEN 0 ELSE 1 END
+           FROM systems s JOIN commits c ON c.flake_id = s.flake_id
+           WHERE c.id = $1 AND s.environment_id IS NOT NULL AND s.is_active = TRUE
+             AND (s.hostname = $2 OR NULLIF(s.system_configuration_name, '') = $2)
+           ORDER BY 2"#,
+    )
+    .bind(commit_id)
+    .bind(derivation_name)
+    .fetch_all(executor)
+    .await?;
+    select_derivation_environment(&matches)
+}
+
 /// Returns current enabled destinations eligible for a derivation's environment.
 ///
 /// Uses active systems from the commit's flake, preferring configuration-name
 /// matches over hostname matches. Equally preferred cross-environment matches
 /// fail closed. Enabled environment assignments override global destinations;
 /// globals apply when there are no enabled assigned destinations.
+/// Uses [`eligible_cache_destinations_for_environment`] for the same stable
+/// destination ordering as agent reads and builder publication.
 ///
 /// # Errors
 /// Returns an error for ambiguous environments, database or decryption failures.
@@ -88,33 +125,10 @@ pub async fn eligible_cache_destinations_for_derivation(
     pool: &PgPool,
     derivation: &crate::derivations::Derivation,
 ) -> Result<Vec<CacheDestination>> {
-    let matches = if let Some(commit_id) = derivation.commit_id {
-        sqlx::query_as::<_, (uuid::Uuid, i32)>(
-            r#"SELECT s.environment_id,
-                      CASE WHEN NULLIF(s.system_configuration_name, '') = $2 THEN 0 ELSE 1 END
-               FROM systems s JOIN commits c ON c.flake_id = s.flake_id
-               WHERE c.id = $1 AND s.environment_id IS NOT NULL AND s.is_active = TRUE
-                 AND (s.hostname = $2 OR NULLIF(s.system_configuration_name, '') = $2)
-               ORDER BY 2"#,
-        )
-        .bind(commit_id)
-        .bind(&derivation.derivation_name)
-        .fetch_all(pool)
-        .await?
-    } else {
-        Vec::new()
-    };
-    let mut eligible = if let Some(environment) = select_derivation_environment(&matches)? {
-        filter_caches_by_environment(pool, Some(environment)).await?
-    } else {
-        Vec::new()
-    };
-    eligible.retain(|destination| destination.enabled);
-    if eligible.is_empty() {
-        eligible = get_global_caches(pool).await?;
-    }
-    eligible.retain(|destination| destination.enabled);
-    Ok(eligible)
+    let environment =
+        resolve_derivation_environment(pool, derivation.commit_id, &derivation.derivation_name)
+            .await?;
+    eligible_cache_destinations_for_environment(pool, environment).await
 }
 
 fn select_job_destination<'a>(
@@ -1121,7 +1135,9 @@ mod niks3_tests {
             cache_type: "Niks3".into(),
             push_to: Some(url.into()),
             niks3_server_url: Some(format!("https://write-{id}.example")),
-            niks3_public_keys: vec!["cache:key".into()],
+            niks3_public_keys: vec![crate::models::cache_destination::nix_public_key_fixture(
+                "cache",
+            )],
             niks3_write_auth_mode: Some("token".into()),
             niks3_auth_token: Some("current-token".into()),
             niks3_read_auth_mode: Some("none".into()),
@@ -1154,8 +1170,14 @@ mod niks3_tests {
             "INSERT INTO cache_destinations (name, cache_type, push_to, enabled, niks3_server_url,
                  niks3_public_keys, niks3_write_auth_mode, niks3_auth_token, niks3_read_auth_mode)
              VALUES ('added-after-dispatch', 'Niks3', 'https://new-read.example', TRUE,
-                 'https://new-write.example', ARRAY['cache:key'], 'token', 'test-token', 'none') RETURNING id",
-        ).fetch_one(&pool).await.unwrap();
+                 'https://new-write.example', $1, 'token', 'test-token', 'none') RETURNING id",
+        )
+        .bind(vec![
+            crate::models::cache_destination::nix_public_key_fixture("cache"),
+        ])
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         let static_config = CacheConfig {
             push_to: Some("s3://opportunistic-static".into()),
             push_after_build: true,
@@ -1571,8 +1593,14 @@ mod niks3_tests {
             "INSERT INTO cache_destinations (name, cache_type, push_to, enabled, niks3_server_url,
                  niks3_public_keys, niks3_write_auth_mode, niks3_auth_token, niks3_read_auth_mode)
              VALUES ('legacy-name', 'Niks3', 'https://shared-read.example', TRUE,
-                 'https://original-write.example', ARRAY['cache:key'], 'token', 'test-token', 'none') RETURNING id",
-        ).fetch_one(&pool).await.unwrap();
+                 'https://original-write.example', $1, 'token', 'test-token', 'none') RETURNING id",
+        )
+        .bind(vec![
+            crate::models::cache_destination::nix_public_key_fixture("cache"),
+        ])
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         let no_static = CacheConfig::default();
         let (a, b) = tokio::join!(
             enqueue_cache_push_for_derivation(&pool, local.id, &no_static),

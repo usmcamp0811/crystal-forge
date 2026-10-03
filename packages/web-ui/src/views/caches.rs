@@ -4,8 +4,8 @@
 //! contain replacements only; configured flags describe retained server secrets.
 //! Discovery populates public metadata without saving. Non-mutating probes cannot
 //! establish write permission, so absent authorization results remain untested.
-//! Saving a destination and assigning environments are separate API operations.
-//! An assignment failure retains the saved ID so retry cannot create a duplicate.
+//! Niks3 saves configuration and environment scope in one API transaction. A
+//! failed save retains the draft and does not publish a transient global cache.
 
 use dioxus::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -155,6 +155,11 @@ impl Niks3FormState {
     }
 
     fn validate(&self, retained: Option<&CacheDestination>) -> Result<(), String> {
+        self.validate_destination()?;
+        self.validate_credentials(retained)
+    }
+
+    fn validate_destination(&self) -> Result<(), String> {
         let req = self.request();
         if req.name.is_empty() {
             return Err("Enter a cache name in Destination.".into());
@@ -187,6 +192,11 @@ impl Niks3FormState {
                 "Enter at least one signing public key, one name:BASE64KEY per line.".into(),
             );
         }
+        Ok(())
+    }
+
+    fn validate_credentials(&self, retained: Option<&CacheDestination>) -> Result<(), String> {
+        let req = self.request();
         if self.write_mode == "token" {
             if req.niks3_auth_token.is_none()
                 && !retained.is_some_and(|d| {
@@ -308,19 +318,32 @@ fn Niks3TextField(
 #[component]
 fn Niks3CacheForm(
     destination: Option<CacheDestination>,
+    add_draft: Niks3FormState,
+    add_environment_ids: Vec<Uuid>,
     on_close: EventHandler<()>,
     on_saved: EventHandler<()>,
 ) -> Element {
     let initial = destination.clone();
-    let mut form = use_signal(move || Niks3FormState::from_destination(initial.as_ref()));
+    let mut form = use_signal(move || {
+        initial
+            .as_ref()
+            .map(|d| Niks3FormState::from_destination(Some(d)))
+            .unwrap_or(add_draft)
+    });
     let mut section = use_signal(|| "dest");
     let mut busy = use_signal(|| None::<&'static str>);
     let mut error = use_signal(|| None::<String>);
     let mut discovery_note = use_signal(|| None::<String>);
     let mut result = use_signal(|| None::<crate::api::models::CacheCredentialTestResult>);
-    let mut environment_ids = use_signal(Vec::<Uuid>::new);
+    let adding = destination.is_none();
+    let mut environment_ids = use_signal(move || {
+        if adding {
+            add_environment_ids
+        } else {
+            Vec::new()
+        }
+    });
     let mut environment_ready = use_signal(|| destination.is_none());
-    let mut saved_id = use_signal(|| None::<i32>);
     let environments = use_resource(|| async { client::fetch_environments().await });
     let editing_id = destination.as_ref().map(|d| d.id);
     use_future(move || async move {
@@ -343,14 +366,28 @@ fn Niks3CacheForm(
         div { class: "modal-backdrop", style: "padding:8px;", onclick: move |_| { if busy().is_none() { on_close.call(()); } },
             div { class: "pe-shell modal", style: "display:grid;grid-template-columns:132px minmax(0,1fr);grid-template-rows:auto minmax(0,1fr) auto;width:min(820px,calc(100vw - 16px));height:min(760px,92vh);max-height:92vh;overflow:hidden;", role: "dialog", aria_modal: "true", aria_label: "Niks3 cache destination", onclick: move |e| e.stop_propagation(),
                 header { class: "pe-head modal-head", style: "grid-column:1/-1;display:flex;justify-content:space-between;align-items:center;",
-                    div { span { class: "pe-head-title", if destination.is_some() { "Edit Niks3 cache" } else { "Add Niks3 cache" } }
-                        p { class: "pe-head-sub", "Separate write API and Nix read endpoints." }
+                    div { style: "min-width:0;",
+                        div { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+                            Icon { name: if destination.is_some() { IconName::Gear } else { IconName::Plus }, size: 15 }
+                            span { class: "pe-head-title", style: "font-weight:600;overflow-wrap:anywhere;", if form().name.trim().is_empty() { "Add cache destination" } else { "{form().name}" } }
+                            span { class: "chip chip-info", "Niks3" }
+                            span { class: "chip", if busy().is_some() { "Working" } else if error().is_some() { "Needs attention" } else { "Unsaved draft" } }
+                        }
+                        p { class: "pe-head-sub", if destination.is_some() { "Update binary cache destination." } else { "Register a new binary cache destination." } }
                     }
                     button { class: "btn-icon focus-ring", aria_label: "Close", disabled: busy().is_some(), onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } }
                 }
                 nav { class: "pe-rail", style: "display:flex;flex-direction:column;gap:8px;padding:16px 8px;border-right:1px solid var(--cf-card-border);background:var(--cf-subtle-bg);", aria_label: "Cache form sections",
-                    for (id, label) in [("dest", "Destination"), ("auth", "Credentials"), ("envs", "Environments")] {
-                        button { class: if section() == id { "pe-rail-item btn btn-ghost focus-ring active" } else { "pe-rail-item btn btn-ghost focus-ring" }, style: if section() == id { "justify-content:flex-start;color:var(--cf-brand-purple);background:var(--cf-card-bg);" } else { "justify-content:flex-start;" }, onclick: move |_| section.set(id), "{label}" }
+                    for (id, label, icon) in [("dest", "Destination", IconName::Download), ("auth", "Credentials", IconName::Key), ("envs", "Environments", IconName::Grid)] {
+                        button { aria_label: label, aria_current: if section() == id { "true" } else { "false" }, class: if section() == id { "pe-rail-item btn btn-ghost focus-ring active" } else { "pe-rail-item btn btn-ghost focus-ring" }, style: if section() == id { "justify-content:flex-start;flex-wrap:wrap;color:var(--cf-brand-purple);background:var(--cf-card-bg);" } else { "justify-content:flex-start;flex-wrap:wrap;" }, onclick: move |_| section.set(id),
+                            Icon { name: icon, size: 13 }
+                            span { class: "pe-rail-label", "{label}" }
+                            span { class: "pe-rail-badge", title: "Draft validation and scope; not connection verification",
+                                if id == "envs" { if environment_ready() { "{environment_ids().len()}" } else { "!" } }
+                                else if id == "dest" { if form().validate_destination().is_ok() { "Set" } else { "!" } }
+                                else { if form().validate_credentials(destination.as_ref()).is_ok() { "Set" } else { "Review" } }
+                            }
+                        }
                     }
                 }
                 div { class: "pe-body modal-body", style: "min-height:0;overflow-y:auto;",
@@ -360,7 +397,8 @@ fn Niks3CacheForm(
                     if section() == "dest" {
                         div { class: "pe-sec-head", h3 { "Destination" } p { "Discover public metadata, then review the populated values before saving." } }
                         Niks3TextField { label: "Name", field: "name", form, result, multiline: false, secret: false, hint: String::new() }
-                        div { class: "field", label { "Type" } span { class: "chip chip-info", "Niks3" } }
+                        div { class: "field", label { "Type" } span { class: "chip chip-info", "Niks3" } p { class: "help", "Type is fixed in this form. To choose another type, cancel and reopen Add cache." } }
+                        Niks3TextField { label: "Read / substituter URL", field: "read", form, result, multiline: false, secret: false, hint: "HTTPS endpoint used by Nix reads; independent of the write API.".to_string() }
                         Niks3TextField { label: "Write / API URL", field: "server", form, result, multiline: false, secret: false, hint: "HTTPS control endpoint used for publication.".to_string() }
                         button { class: "btn btn-ghost focus-ring", disabled: busy().is_some() || form().server_url.trim().is_empty(), onclick: move |_| {
                             busy.set(Some("discover")); error.set(None); discovery_note.set(None); result.set(None);
@@ -377,11 +415,15 @@ fn Niks3CacheForm(
                             });
                         }, if busy() == Some("discover") { "Discovering…" } else { "Discover configuration" } }
                         if let Some(note) = discovery_note() { p { class: "help", role: "status", "{note}" } }
-                        Niks3TextField { label: "Read / substituter URL", field: "read", form, result, multiline: false, secret: false, hint: "HTTPS endpoint used by Nix reads; independent of the write API.".to_string() }
                         Niks3TextField { label: "Signing public keys", field: "keys", form, result, multiline: true, secret: false, hint: "One name:BASE64KEY per line. Keep both keys during rotation.".to_string() }
                     }
                     if section() == "auth" {
                         div { class: "pe-sec-head", h3 { "Credentials" } p { "Write credentials stay on builders. Read credentials go only to assigned agents." } }
+                        div { class: "field", label { r#for: "niks3-read-mode", "Read authentication" }
+                            select { id: "niks3-read-mode", class: "input focus-ring", value: form().read_mode, onchange: move |e| { result.set(None); let mut state = form.write(); state.read_mode = e.value(); state.read_cert.clear(); state.read_key.clear(); state.read_ca.clear(); state.clear_read_ca = false; },
+                                option { value: "none", "Public (none)" } option { value: "mtls", "mTLS" }
+                            }
+                        }
                         div { class: "field", label { r#for: "niks3-write-mode", "Write authentication" }
                             select { id: "niks3-write-mode", class: "input focus-ring", value: form().write_mode, onchange: move |e| { result.set(None); let mut state = form.write(); state.write_mode = e.value(); state.token.clear(); state.write_cert.clear(); state.write_key.clear(); state.write_ca.clear(); state.clear_write_ca = false; },
                                 option { value: "token", "Static token" } option { value: "mtls", "mTLS" }
@@ -392,14 +434,9 @@ fn Niks3CacheForm(
                                 hint: if destination.as_ref().is_some_and(|d| d.niks3_write_token_configured) { "Token configured. Leave blank to retain; enter a new token to rotate.".to_string() } else { "Required for token writes.".to_string() }
                             }
                         }
-                        div { class: "field", label { r#for: "niks3-read-mode", "Read authentication" }
-                            select { id: "niks3-read-mode", class: "input focus-ring", value: form().read_mode, onchange: move |e| { result.set(None); let mut state = form.write(); state.read_mode = e.value(); state.read_cert.clear(); state.read_key.clear(); state.read_ca.clear(); state.clear_read_ca = false; },
-                                option { value: "none", "Public (none)" } option { value: "mtls", "mTLS" }
-                            }
-                        }
                         for (plane, cert_field, key_field, ca_field, configured, has_ca) in [
-                            ("Write", "write_cert", "write_key", "write_ca", destination.as_ref().is_some_and(|d| d.niks3_write_mtls_configured), destination.as_ref().is_some_and(|d| d.niks3_write_ca_cert.is_some())),
                             ("Read", "read_cert", "read_key", "read_ca", destination.as_ref().is_some_and(|d| d.niks3_read_mtls_configured), destination.as_ref().is_some_and(|d| d.niks3_read_ca_cert.is_some())),
+                            ("Write", "write_cert", "write_key", "write_ca", destination.as_ref().is_some_and(|d| d.niks3_write_mtls_configured), destination.as_ref().is_some_and(|d| d.niks3_write_ca_cert.is_some())),
                         ] {
                             if (plane == "Write" && form().write_mode == "mtls") || (plane == "Read" && form().read_mode == "mtls") {
                                 h4 { "{plane} mTLS identity" }
@@ -441,37 +478,31 @@ fn Niks3CacheForm(
                             None => rsx! { p { "Loading environments…" } },
                         }
                         if !environment_ready() { p { "Loading assigned environments…" } }
-                        p { class: "help", "Review environment assignments before saving." }
+                        p { class: "help", if !environment_ready() { "Scope is not loaded. Saving is disabled." } else if environment_ids().is_empty() { "No environments selected: this cache is global. Select environments to restrict its scope." } else { "Configuration and selected environments are saved together." } }
                     }
                     if let Some(message) = error() { p { role: "alert", style: "color:var(--cf-red);", "{message}" } }
                     }
                 }
                 footer { class: "pe-foot modal-foot", style: "grid-column:1/-1;display:flex;align-items:center;gap:8px;",
-                    span { class: "pe-foot-state", "Niks3 · {environment_ids().len()} environments" }
+                    span { class: "pe-foot-state", if !environment_ready() { "Niks3 · Scope not loaded" } else if environment_ids().is_empty() { "Niks3 · Global scope" } else { "Niks3 · {environment_ids().len()} selected" } }
                     button { class: "btn btn-ghost focus-ring", disabled: busy().is_some(), onclick: move |_| on_close.call(()), "Cancel" }
                     button { class: "btn btn-primary focus-ring", disabled: busy().is_some() || !environment_ready(), onclick: move |_| {
                         error.set(None);
                         if let Err(message) = form().validate(retained.as_ref()) { error.set(Some(format!("Save not run: {message}"))); return; }
-                        let req = form().request(); let state = form(); let ids = environment_ids(); busy.set(Some("save"));
-                        let existing_id = editing_id.or(saved_id());
+                        let mut req = form().request(); let state = form(); let ids = environment_ids(); req.environment_ids = Some(ids.clone()); busy.set(Some("save"));
                         spawn(async move {
-                            let saved = if let Some(id) = existing_id {
-                                let update = state.update_request();
+                            let saved = if let Some(id) = editing_id {
+                                let mut update = state.update_request();
+                                update.environment_ids = Some(ids);
                                 client::update_cache_destination(id, &update).await
                             } else { client::create_cache_destination(&req).await };
                             match saved {
-                                Ok(cache) => {
-                                    saved_id.set(Some(cache.id));
-                                    match client::assign_cache_environments(cache.id, ids).await {
-                                        Ok(_) => on_saved.call(()),
-                                        Err(_) => error.set(Some("Cache saved, but environment assignment failed. Retry Save changes to assign the selected environments; the cache will not be created twice.".into())),
-                                    }
-                                }
+                                Ok(_) => on_saved.call(()),
                                 Err(_) => error.set(Some("Cache save failed. Check values, credentials and permissions, then retry.".into())),
                             }
                             busy.set(None);
                         });
-                    }, if busy() == Some("save") { "Saving…" } else if destination.is_some() || saved_id().is_some() { "Save changes" } else { "Add cache" } }
+                    }, if busy() == Some("save") { "Saving…" } else if destination.is_some() { "Save changes" } else { "Add cache" } }
                 }
             }
         }
@@ -920,6 +951,8 @@ fn CacheDestinationsList(
     let mut view_mode = use_signal(|| CacheViewMode::Cards);
     let mut edit_destination = use_signal(|| None::<CacheDestination>);
     let mut show_niks3_add = use_signal(|| false);
+    let mut niks3_add_draft = use_signal(|| Niks3FormState::from_destination(None));
+    let mut niks3_add_environments = use_signal(Vec::<Uuid>::new);
     let mut view_destination = use_signal(|| None::<CacheDestination>);
     let focus_value = query_param("focus");
 
@@ -1184,6 +1217,8 @@ fn CacheDestinationsList(
             if show_niks3_add() || edit_destination().is_some_and(|d| d.cache_type.eq_ignore_ascii_case("niks3")) {
                 Niks3CacheForm {
                     destination: edit_destination(),
+                    add_draft: niks3_add_draft(),
+                    add_environment_ids: niks3_add_environments(),
                     on_close: move |_| { show_niks3_add.set(false); edit_destination.set(None); },
                     on_saved: move |_| { show_niks3_add.set(false); edit_destination.set(None); refresh_nonce.set(refresh_nonce() + 1); },
                 }
@@ -1220,7 +1255,13 @@ fn CacheDestinationsList(
                             }
                             div { class: "field", label { "Type" }
                                 div { class: "seg",
-                                    button { class: "focus-ring", onclick: move |_| { show_add_modal.set(false); show_niks3_add.set(true); }, "Niks3" }
+                                     button { class: "focus-ring", onclick: move |_| {
+                                         // Capture common values before closing the legacy Add form.
+                                         let mut draft = Niks3FormState::from_destination(None);
+                                         draft.name = form_name(); draft.read_url = form_url();
+                                         niks3_add_draft.set(draft); niks3_add_environments.set(form_environment_ids());
+                                         show_add_modal.set(false); show_niks3_add.set(true);
+                                     }, "Niks3" }
                                     for (val, label) in [("s3", "S3-compatible"), ("attic", "Attic"), ("nix", "Nix HTTPS")] {
                                         button {
                                             class: if form_type() == val { "active" } else { "" },

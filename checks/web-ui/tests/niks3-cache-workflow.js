@@ -32,14 +32,33 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
   const requests = [];
   let createdId;
   let discoveryCount = 0;
-  let partialFailure = true;
+  let failCreate = true;
+  let failUpdate = false;
   let failDiscovery = true;
   let failTest = true;
   let failEnvironmentRead = false;
-  let releaseDiscovery, releaseTest, releaseAssignment;
+  let releaseDiscovery, releaseTest, releaseSave;
   const discoveryGate = new Promise(resolve => { releaseDiscovery = resolve; });
   const testGate = new Promise(resolve => { releaseTest = resolve; });
-  const assignmentGate = new Promise(resolve => { releaseAssignment = resolve; });
+  const saveGate = new Promise(resolve => { releaseSave = resolve; });
+  const mutationRoute = /\/api\/v1\/caches(?:\/\d+)?$/;
+  // Change only the submitted scope, then forward to the real API. A failure
+  // must roll back configuration and assignments together, not merely display
+  // an intercepted error while leaving a global cache behind.
+  await page.route(mutationRoute, async route => {
+    const method = route.request().method();
+    if ((method === "POST" && failCreate) || (method === "PUT" && failUpdate)) {
+      if (method === "POST") { failCreate = false; await saveGate; }
+      else failUpdate = false;
+      const body = route.request().postDataJSON();
+      assert(body.environment_ids.length > 0, "scope belongs in the mutation body");
+      const response = await route.fetch({ postData: JSON.stringify({ ...body, environment_ids: ["ffffffff-ffff-4fff-8fff-ffffffffffff"] }) });
+      assert(response.status() >= 400, "real API rejects nonexistent environment");
+      console.log(`Real API rejected invalid-environment ${method}: HTTP ${response.status()}`);
+      return route.fulfill({ response });
+    }
+    await route.continue();
+  });
   const discoveryRoute = "**/api/v1/caches/niks3/discover";
   const testRoute = "**/api/v1/caches/test-credentials";
   const environmentsRoute = /\/api\/v1\/caches\/\d+\/environments$/;
@@ -68,11 +87,7 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
       failEnvironmentRead = false;
       return route.fulfill({ status: 503, json: { error: "fixture assignment read failure" } });
     }
-    if (route.request().method() === "PUT" && partialFailure) {
-      partialFailure = false;
-      await assignmentGate;
-      return route.fulfill({ status: 503, json: { error: "fixture assignment failure" } });
-    }
+    assert.notEqual(route.request().method(), "PUT", "Niks3 Save must not issue a second assignment operation");
     await route.continue();
   });
   const csrf = async () => {
@@ -112,12 +127,30 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     await expect(dialog).toBeHidden();
   };
   try {
+    // Keep the overlay out of this form workflow without changing server-side
+    // onboarding state. The harness owns this browser presentation record.
+    await page.evaluate(() => localStorage.setItem("cf.coach.ui.v2", JSON.stringify({ panel: "dismissed", track: "setup" })));
     await page.goto(`${baseUrl}/caches`);
+    const envBody = await (await api("GET", "/environments")).json();
+    const envs = Array.isArray(envBody) ? envBody : envBody.environments;
+    assert(envs.length > 0, "fixture requires an environment");
+    const selected = envs[0];
     await page.getByRole("button", { name: "Add cache", exact: true }).click();
+    await page.getByPlaceholder("e.g. crystal-forge-prod-cache").fill(name);
+    await page.getByRole("button", { name: "Nix HTTPS", exact: true }).click();
+    await page.getByPlaceholder("https://cache.nixos.org").fill("https://retained-read.example.com");
+    await page.getByRole("button", { name: selected.name, exact: true }).click();
     await page.getByRole("button", { name: "Niks3", exact: true }).click();
     let dialog = page.getByRole("dialog", { name: "Niks3 cache destination" });
     await expect(dialog).toBeVisible();
+    await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue(name);
+    await expect(dialog.getByLabel("Read / substituter URL", { exact: true })).toHaveValue("https://retained-read.example.com");
+    await expect(dialog.locator("header")).toContainText(name);
+    await expect(dialog.locator("header")).toContainText("Unsaved draft");
+    const destinationOrder = await dialog.locator("label").allTextContents();
+    assert(destinationOrder.indexOf("Read / substituter URL") < destinationOrder.indexOf("Write / API URL"), "Read precedes Write in Destination");
     for (const section of ["Destination", "Credentials", "Environments"]) await expect(dialog.getByRole("button", { name: section, exact: true })).toBeVisible();
+    await dialog.getByLabel("Name", { exact: true }).fill("");
     await dialog.getByRole("button", { name: "Add cache", exact: true }).click();
     await expect(dialog.getByRole("alert")).toContainText("Enter a cache name");
     await dialog.getByLabel("Name", { exact: true }).fill(name);
@@ -135,6 +168,8 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     // Discovery must not persist anything or transport any credentials.
     assert(!requests.some(r => r.method() === "POST" && /\/caches$/.test(r.url())));
     await dialog.getByRole("button", { name: "Credentials", exact: true }).click();
+    const credentialOrder = await dialog.locator("label").allTextContents();
+    assert(credentialOrder.indexOf("Read authentication") < credentialOrder.indexOf("Write authentication"), "Read precedes Write in Credentials");
     await dialog.getByLabel("Write token").fill(token);
     await dialog.getByRole("button", { name: "Test connection" }).click();
     await expect(dialog.getByRole("alert")).toContainText("Connection test failed");
@@ -149,22 +184,23 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     if (screenshot) await page.screenshot({ path: screenshot.replace(/\.png$/, "-credentials.png"), fullPage: true, animations: "disabled" });
     if (captureState) await captureState("niks3-credentials");
     await dialog.getByRole("button", { name: "Environments", exact: true }).click();
-    const envResponse = await api("GET", "/environments");
-    const envBody = await envResponse.json();
-    const envs = Array.isArray(envBody) ? envBody : envBody.environments;
-    assert(envs.length > 0, "fixture requires an environment");
-    const selected = envs[0];
-    await dialog.getByRole("button", { name: selected.name, exact: true }).click();
+    await expect(dialog.getByRole("button", { name: selected.name, exact: true })).toHaveAttribute("aria-pressed", "true");
     await dialog.getByRole("button", { name: "Add cache", exact: true }).click();
     await expect(dialog.getByRole("button", { name: "Saving…", exact: true })).toBeDisabled();
     await expect(dialog.getByRole("button", { name: selected.name, exact: true })).toBeDisabled();
-    releaseAssignment();
-    await expect(dialog.getByRole("alert")).toContainText("Cache saved, but environment assignment failed");
+    releaseSave();
+    await expect(dialog.getByRole("alert")).toContainText("Cache save failed");
     const list = await (await api("GET", "/caches")).json();
     const own = list.filter(c => c.name === name);
-    assert.equal(own.length, 1);
-    createdId = own[0].id;
-    await save(dialog);
+    assert.equal(own.length, 0, "failed scoped create leaves no global cache");
+    if (screenshot) await page.screenshot({ path: screenshot.replace(/\.png$/, "-create-rollback.png"), fullPage: true, animations: "disabled" });
+    const createResponse = page.waitForResponse(r => /\/api\/v1\/caches$/.test(r.url()) && r.request().method() === "POST");
+    await dialog.getByRole("button", { name: "Add cache", exact: true }).click();
+    createdId = (await (await createResponse).json()).id;
+    await expect(dialog).toBeHidden();
+    const creates = requests.filter(r => r.method() === "POST" && /\/caches$/.test(r.url()));
+    assert.equal(creates.length, 2, "one create request per Save attempt");
+    assert.deepEqual(creates[1].postDataJSON().environment_ids, [selected.id]);
     assert.deepEqual(await (await api("GET", `/caches/${createdId}/environments`)).json(), [selected.id]);
     let cache = await getRedacted();
     assert.equal(cache.niks3_write_token_configured, true);
@@ -175,8 +211,24 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     await expect(dialog.getByLabel("Write token")).toHaveValue("");
     await expect(dialog.getByText("Token configured.", { exact: false })).toBeVisible();
     await dialog.getByLabel("Write token").fill(rotatedToken);
+    const beforeFailedUpdate = await getRedacted();
+    await dialog.getByRole("button", { name: "Destination", exact: true }).click();
+    await dialog.getByLabel("Read / substituter URL", { exact: true }).fill("https://changed-read.example.com");
+    const beforeUpdateCount = requests.filter(r => r.method() === "PUT").length;
+    failUpdate = true;
+    await dialog.getByRole("button", { name: "Save changes", exact: true }).click();
+    await expect(dialog.getByRole("alert")).toContainText("Cache save failed");
+    assert.deepEqual(await getRedacted(), beforeFailedUpdate, "failed scoped update leaves configuration unchanged");
+    assert.deepEqual(await (await api("GET", `/caches/${createdId}/environments`)).json(), [selected.id], "failed update retains existing scope");
+    assert.equal(requests.filter(r => r.method() === "PUT").length, beforeUpdateCount + 1);
+    if (screenshot) await page.screenshot({ path: screenshot.replace(/\.png$/, "-update-rollback.png"), fullPage: true, animations: "disabled" });
+    await expect(dialog.getByLabel("Read / substituter URL", { exact: true })).toHaveValue("https://changed-read.example.com");
+    await dialog.getByLabel("Read / substituter URL", { exact: true }).fill("https://read.example.com");
     await save(dialog);
     assert(requests.some(r => r.method() === "PUT" && r.postDataJSON()?.niks3_auth_token === rotatedToken), "rotation sends the replacement token");
+    for (const request of requests.filter(r => r.method() === "PUT" && /\/caches\/\d+$/.test(r.url()))) {
+      assert.deepEqual(request.postDataJSON().environment_ids, [selected.id], "every update carries selected scope");
+    }
     cache = await getRedacted();
     assert(cache.niks3_write_token_configured);
     dialog = await openEdit();
@@ -237,8 +289,11 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     dialog = await openEdit();
     await expect(dialog.getByRole("alert")).toContainText("Environment assignments could not be loaded");
     await expect(dialog.getByRole("button", { name: "Save changes", exact: true })).toBeDisabled();
+    await expect(dialog.locator("footer")).toContainText("Scope not loaded");
+    await expect(dialog.locator("footer")).not.toContainText("Global scope");
     await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
     dialog = await openEdit();
+    await expect(dialog.getByRole("button", { name: "Save changes", exact: true })).toBeEnabled();
     if (captureState) await captureState("niks3-destination");
     if (screenshot) {
       await page.screenshot({ path: screenshot, fullPage: true, animations: "disabled" });
@@ -255,9 +310,10 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
       for (const secret of privateValues) assert(!url.includes(secret), "secrets never occur in URLs");
     }
     const visibleText = await page.locator("body").innerText();
+    assert(!requests.some(r => r.method() === "PUT" && /\/environments$/.test(r.url())), "no Save performs a second scope mutation");
     for (const secret of privateValues) assert(!visibleText.includes(secret), "secrets never occur in rendered text");
   } finally {
-    releaseDiscovery(); releaseTest(); releaseAssignment();
+    releaseDiscovery(); releaseTest(); releaseSave();
     // Recover the owned ID if a later assertion fails immediately after create.
     if (!createdId) {
       try {
@@ -270,6 +326,7 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     await page.unroute(discoveryRoute);
     await page.unroute(testRoute);
     await page.unroute(environmentsRoute);
+    await page.unroute(mutationRoute);
   }
 }
 
@@ -300,7 +357,7 @@ if (require.main === module) {
       await page.waitForURL(url => !url.pathname.includes("login"));
       const status = await page.request.get(`${apiBaseUrl}/status`);
       assert.equal(status.status(), 200);
-      await niks3CacheWorkflow(page, baseUrl, apiBaseUrl, path.join(outputDir, "task470-niks3-form.png"));
+      await niks3CacheWorkflow(page, baseUrl, apiBaseUrl, path.join(outputDir, "task470-review-ui.png"));
       result = { name: "task470-niks3-cache", ok: true };
       console.log("TASK-470 Niks3 browser workflow passed against", apiBaseUrl);
     } catch (error) {

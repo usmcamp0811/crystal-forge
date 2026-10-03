@@ -233,22 +233,11 @@ fn parse_niks3_config(body: &[u8]) -> Result<Niks3CacheConfig, String> {
 }
 
 fn validate_niks3_keys(config: &Niks3CacheConfig) -> Result<(), String> {
-    use base64::Engine;
     if config.public_keys.is_empty() {
         return Err("Niks3 discovery returned no signing keys".into());
     }
     for key in &config.public_keys {
-        let Some((name, encoded)) = key.split_once(':') else {
-            return Err("Niks3 discovery returned an invalid signing key".into());
-        };
-        if name.is_empty()
-            || name.chars().any(char::is_whitespace)
-            || base64::engine::general_purpose::STANDARD
-                .decode(encoded)
-                .map_or(true, |bytes| bytes.len() != 32)
-        {
-            return Err("Niks3 discovery returned an invalid signing key".into());
-        }
+        cf_protocol::cache::validate_nix_public_key(key).map_err(str::to_string)?;
     }
     Ok(())
 }
@@ -894,12 +883,159 @@ mod tests {
         normalize_test_url, sanitize_test_url_for_response, validate_cache_test_url,
         validate_cache_test_url_resolves_publicly, validate_resolved_addrs_public,
     };
+    use crate::models::cache_destination::nix_public_key_fixture;
     use std::net::{Ipv4Addr, SocketAddr};
     use url::Url;
 
+    async fn admin_headers(pool: &PgPool) -> HeaderMap {
+        use crate::auth::session::{SESSION_COOKIE_NAME, hash_token};
+        use crate::models::auth_identity::AuthRole;
+        use crate::queries::auth_identity::{create_user_session, sync_user_role};
+        let user = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, username, first_name, last_name, email, user_type) VALUES ($1, 'cache-key-admin', 'Cache', 'Admin', 'cache-key-admin@example.invalid', 'human')")
+            .bind(user).execute(pool).await.unwrap();
+        sync_user_role(pool, user, AuthRole::Admin).await.unwrap();
+        let token = "cache-key-admin-session";
+        create_user_session(
+            pool,
+            user,
+            hash_token(token),
+            chrono::Utc::now() + chrono::Duration::hours(1),
+            None,
+            None,
+            "local".into(),
+        )
+        .await
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            format!("{SESSION_COOKIE_NAME}={token}").parse().unwrap(),
+        );
+        headers
+    }
+
+    fn key_validation_create(write: &str, read: &str) -> CreateCacheDestination {
+        let mut create = CreateCacheDestination {
+            name: format!("key-validation-{write}-{read}"),
+            cache_type: "Niks3".into(),
+            push_to: Some("https://read.example/cache".into()),
+            niks3_server_url: Some("https://write.example/api".into()),
+            niks3_public_keys: vec![nix_public_key_fixture("cache-1")],
+            niks3_write_auth_mode: Some(write.into()),
+            niks3_read_auth_mode: Some(read.into()),
+            ..Default::default()
+        };
+        if write == "token" {
+            create.niks3_auth_token = Some("test-write-token".into());
+        } else {
+            create.niks3_write_client_cert =
+                Some(crate::security::cache_secrets::TEST_CERTIFICATE.into());
+            create.niks3_write_client_key = Some("test-write-key".into());
+        }
+        if read == "mtls" {
+            create.niks3_read_client_cert =
+                Some(crate::security::cache_secrets::TEST_CERTIFICATE.into());
+            create.niks3_read_client_key = Some("test-read-key".into());
+        }
+        create
+    }
+
+    fn malformed_keys() -> Vec<String> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        vec![
+            String::new(),
+            "cache:!not-base64!".into(),
+            format!("cache:{}", STANDARD.encode([0; 31])),
+            format!("cache:{}", STANDARD.encode([0; 33])),
+            nix_public_key_fixture("white space"),
+            nix_public_key_fixture(""),
+            format!("{}\n", nix_public_key_fixture("cache")),
+        ]
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified task PostgreSQL and ephemeral database creation"]
+    async fn niks3_api_create_rejects_malformed_keys_in_all_auth_modes(pool: PgPool) {
+        let headers = admin_headers(&pool).await;
+        for write in ["token", "mtls"] {
+            for read in ["none", "mtls"] {
+                let valid = key_validation_create(write, read);
+                valid.validate().unwrap();
+                for key in malformed_keys() {
+                    let mut create = valid.clone();
+                    create.niks3_public_keys = vec![nix_public_key_fixture("valid"), key.clone()];
+                    let discovery = Niks3CacheConfig {
+                        substituter_url: create.push_to.clone().unwrap(),
+                        public_keys: create.niks3_public_keys.clone(),
+                        oidc_audience: None,
+                    };
+                    assert!(validate_niks3_keys(&discovery).is_err());
+                    let response = create_cache_destination(
+                        State(pool.clone()),
+                        headers.clone(),
+                        Json(create),
+                    )
+                    .await
+                    .into_response();
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::BAD_REQUEST,
+                        "{write}/{read}: {key:?}"
+                    );
+                }
+            }
+        }
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM cache_destinations WHERE name LIKE 'key-validation-%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified task PostgreSQL and ephemeral database creation"]
+    async fn niks3_api_update_rejects_malformed_keys_in_all_auth_modes(pool: PgPool) {
+        let headers = admin_headers(&pool).await;
+        for write in ["token", "mtls"] {
+            for read in ["none", "mtls"] {
+                let create = key_validation_create(write, read);
+                let destination = cache_destinations::create_cache_destination(&pool, &create)
+                    .await
+                    .unwrap();
+                for key in malformed_keys() {
+                    let update = UpdateCacheDestination {
+                        niks3_public_keys: vec![nix_public_key_fixture("valid"), key.clone()],
+                        ..Default::default()
+                    };
+                    let response = update_cache_destination(
+                        State(pool.clone()),
+                        headers.clone(),
+                        Path(destination.id),
+                        Json(update),
+                    )
+                    .await
+                    .into_response();
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::BAD_REQUEST,
+                        "{write}/{read}: {key:?}"
+                    );
+                    let restored = cache_destinations::get_cache_destination(&pool, destination.id)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(restored.niks3_public_keys, create.niks3_public_keys);
+                }
+            }
+        }
+    }
+
     #[test]
     fn niks3_discovery_matches_v160_wire_shape() {
-        let key = "cache-1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        let key = nix_public_key_fixture("cache-1");
         let config = parse_niks3_config(
             format!(r#"{{"substituter_url":"https://cache.example.com","public_keys":["{key}"]}}"#)
                 .as_bytes(),
@@ -939,7 +1075,7 @@ mod tests {
 
     #[tokio::test]
     async fn niks3_discovery_failure_states_do_not_claim_later_stages() {
-        let key = "cache-1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        let key = nix_public_key_fixture("cache-1");
         for (body, keys_found, error) in [
             ("invalid".to_string(), false, "JSON"),
             (
@@ -1398,6 +1534,8 @@ pub async fn update_cache_destination(
             tracing::error!("Failed to update cache destination {}: {:#}", id, e);
             let message = e.to_string();
             let status = if message.contains("required for")
+                || message.starts_with("Invalid Nix public signing key:")
+                || message == "niks3_public_keys requires nonempty signing keys"
                 || message.contains("Invalid cache_type")
                 || message.contains("cannot be empty")
             {

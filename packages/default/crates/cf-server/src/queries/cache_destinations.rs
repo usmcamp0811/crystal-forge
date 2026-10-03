@@ -818,6 +818,57 @@ pub async fn get_cache_environments(pool: &PgPool, cache_id: i32) -> Result<Vec<
     Ok(environment_ids)
 }
 
+/// Returns enabled assigned destinations, or globals when none are enabled.
+///
+/// Preserves existing name ordering with ID as a stable tie breaker. Callers
+/// that consume one cache must use the first result before validating transport
+/// or read configuration, and must not fall back after that validation fails.
+/// Disabled assignments do not prevent global fallback. Decryption errors in
+/// the selected set fail closed rather than selecting a different destination.
+///
+/// # Errors
+/// Returns an error for database or selected-set secret decryption failures.
+///
+/// # Examples
+/// ```no_run
+/// # async fn selected(pool: &sqlx::PgPool, environment: uuid::Uuid)
+/// # -> anyhow::Result<()> {
+/// use crystal_forge::queries::cache_destinations::
+///     eligible_cache_destinations_for_environment;
+/// let destinations =
+///     eligible_cache_destinations_for_environment(pool, Some(environment)).await?;
+/// let selected = destinations.first();
+/// assert!(selected.is_none_or(|destination| destination.enabled));
+/// # Ok(()) }
+/// ```
+pub async fn eligible_cache_destinations_for_environment(
+    pool: &PgPool,
+    environment_id: Option<uuid::Uuid>,
+) -> Result<Vec<CacheDestination>> {
+    let destinations = sqlx::query_as::<_, CacheDestination>(
+        r#"WITH assigned AS (
+            SELECT cd.id FROM cache_destinations cd
+            JOIN cache_destination_environments cde ON cde.cache_destination_id = cd.id
+            WHERE cd.enabled = TRUE AND cde.environment_id = $1
+        )
+        SELECT cd.* FROM cache_destinations cd
+        WHERE cd.enabled = TRUE AND (
+            cd.id IN (SELECT id FROM assigned)
+            OR (NOT EXISTS (SELECT 1 FROM assigned) AND NOT EXISTS (
+                SELECT 1 FROM cache_destination_environments cde
+                WHERE cde.cache_destination_id = cd.id
+            ))
+        ) ORDER BY cd.name, cd.id"#,
+    )
+    .bind(environment_id)
+    .fetch_all(pool)
+    .await?;
+    destinations
+        .into_iter()
+        .map(decrypt_destination_secrets)
+        .collect()
+}
+
 /// Get cache destinations assigned to a specific environment (includes global caches)
 pub async fn get_caches_for_environment(
     pool: &PgPool,
@@ -882,6 +933,82 @@ mod tests {
     use super::*;
     use crate::security::cache_secrets::TEST_CERTIFICATE;
     use chrono::Utc;
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated test database creation privileges"]
+    async fn niks3_selection_assigned_first_disabled_fallback_and_stable_order(pool: PgPool) {
+        let environment: uuid::Uuid = sqlx::query_scalar("INSERT INTO environments (name, description, is_active) VALUES ('selection', 'test', TRUE) RETURNING id")
+            .fetch_one(&pool).await.unwrap();
+        let mut ids = Vec::new();
+        for (name, assigned) in [
+            ("a-global", false),
+            ("z-assigned", true),
+            ("b-assigned", true),
+        ] {
+            let destination = create_cache_destination(
+                &pool,
+                &CreateCacheDestination {
+                    name: name.into(),
+                    cache_type: "Nix".into(),
+                    push_to: Some("https://cache.example".into()),
+                    environment_ids: assigned.then_some(vec![environment]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            ids.push(destination.id);
+        }
+        let assigned = eligible_cache_destinations_for_environment(&pool, Some(environment))
+            .await
+            .unwrap();
+        assert_eq!(
+            assigned.iter().map(|d| d.id).collect::<Vec<_>>(),
+            vec![ids[2], ids[1]]
+        );
+        assert_eq!(
+            eligible_cache_destinations_for_environment(&pool, None)
+                .await
+                .unwrap()[0]
+                .id,
+            ids[0]
+        );
+        sqlx::query("UPDATE cache_destinations SET enabled = FALSE WHERE id = $1")
+            .bind(ids[2])
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            eligible_cache_destinations_for_environment(&pool, Some(environment))
+                .await
+                .unwrap()[0]
+                .id,
+            ids[1]
+        );
+        sqlx::query("UPDATE cache_destinations SET enabled = FALSE WHERE id = $1")
+            .bind(ids[1])
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            eligible_cache_destinations_for_environment(&pool, Some(environment))
+                .await
+                .unwrap()[0]
+                .id,
+            ids[0]
+        );
+        sqlx::query("UPDATE cache_destinations SET enabled = FALSE WHERE id = $1")
+            .bind(ids[0])
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            eligible_cache_destinations_for_environment(&pool, Some(environment))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires isolated test database creation privileges"]
@@ -1043,7 +1170,9 @@ mod tests {
             cache_type: "Niks3".into(),
             push_to: Some("https://read.example.com".into()),
             niks3_server_url: Some("https://write.example.com".into()),
-            niks3_public_keys: vec!["cache-1:key".into()],
+            niks3_public_keys: vec![crate::models::cache_destination::nix_public_key_fixture(
+                "cache-1",
+            )],
             niks3_write_auth_mode: Some("token".into()),
             niks3_auth_token: Some("old-token".into()),
             niks3_read_auth_mode: Some("mtls".into()),
@@ -1295,4 +1424,146 @@ pub async fn get_global_caches(pool: &PgPool) -> Result<Vec<CacheDestination>> {
 
     debug!("Found {} global cache destinations", caches.len());
     Ok(caches)
+}
+
+#[cfg(test)]
+mod atomic_scope_tests {
+    use super::*;
+    use crate::models::cache_destination::nix_public_key_fixture;
+    use crate::security::cache_secrets::TEST_CERTIFICATE;
+    use uuid::Uuid;
+
+    fn scoped_create(environment_ids: Vec<Uuid>) -> CreateCacheDestination {
+        CreateCacheDestination {
+            name: "atomic-scoped-niks3".into(),
+            cache_type: "Niks3".into(),
+            push_to: Some("https://read.example/cache".into()),
+            niks3_server_url: Some("https://write.example/api".into()),
+            niks3_public_keys: vec![nix_public_key_fixture("cache-1")],
+            niks3_write_auth_mode: Some("token".into()),
+            niks3_auth_token: Some("original-test-token".into()),
+            niks3_read_auth_mode: Some("mtls".into()),
+            niks3_read_client_cert: Some(TEST_CERTIFICATE.into()),
+            niks3_read_client_key: Some("original-test-read-key".into()),
+            environment_ids: Some(environment_ids),
+            ..Default::default()
+        }
+    }
+
+    async fn environment(pool: &PgPool, name: &str) -> Uuid {
+        sqlx::query_scalar("INSERT INTO environments (name) VALUES ($1) RETURNING id")
+            .bind(name)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    fn assert_scope_foreign_key_failure(error: &anyhow::Error) {
+        let database = error.downcast_ref::<sqlx::Error>().unwrap();
+        assert_eq!(
+            database.as_database_error().unwrap().code().as_deref(),
+            Some("23503")
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified task PostgreSQL and ephemeral database creation"]
+    async fn create_scope_failure_leaves_no_cache_credentials_or_global_fallback(pool: PgPool) {
+        let valid = environment(&pool, "atomic-create-valid").await;
+        // Assignment replacement sorts UUIDs. Insert the valid assignment before
+        // the missing one to prove rollback of partial assignment insertion too.
+        let missing = Uuid::from_u128(u128::MAX);
+        let create = scoped_create(vec![valid, missing]);
+        let before: i64 = sqlx::query_scalar("SELECT count(*) FROM cache_destinations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let error = create_cache_destination(&pool, &create).await.unwrap_err();
+        assert_scope_foreign_key_failure(&error);
+        let after: i64 = sqlx::query_scalar("SELECT count(*) FROM cache_destinations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(after, before);
+        assert!(
+            get_cache_destination_by_name(&pool, &create.name)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            get_global_caches(&pool)
+                .await
+                .unwrap()
+                .iter()
+                .all(|cache| cache.name != create.name)
+        );
+        let assignments: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM cache_destination_environments WHERE environment_id = $1",
+        )
+        .bind(valid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(assignments, 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified task PostgreSQL and ephemeral database creation"]
+    async fn update_scope_failure_preserves_entire_config_ciphertext_and_assignments(pool: PgPool) {
+        let original_scope = environment(&pool, "atomic-update-original").await;
+        let replacement_scope = environment(&pool, "atomic-update-replacement").await;
+        let create = scoped_create(vec![original_scope]);
+        let destination = create_cache_destination(&pool, &create).await.unwrap();
+        let snapshot = |pool: PgPool| async move {
+            sqlx::query_scalar::<_, serde_json::Value>(
+                "SELECT to_jsonb(cd) FROM cache_destinations cd WHERE id = $1",
+            )
+            .bind(destination.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        let before = snapshot(pool.clone()).await;
+        for field in ["niks3_auth_token", "niks3_read_client_key"] {
+            assert!(cache_secrets::is_encrypted(before[field].as_str().unwrap()));
+        }
+        let assignments_before = get_cache_environments(&pool, destination.id).await.unwrap();
+        assert_eq!(assignments_before, vec![original_scope]);
+        let update = UpdateCacheDestination {
+            name: Some("atomic-renamed-niks3".into()),
+            push_to: Some("https://replacement-read.example/cache".into()),
+            niks3_server_url: Some("https://replacement-write.example/api".into()),
+            niks3_public_keys: vec![nix_public_key_fixture("replacement-key")],
+            niks3_auth_token: Some("replacement-test-token".into()),
+            niks3_read_client_key: Some("replacement-test-read-key".into()),
+            parallel_uploads: Some(7),
+            environment_ids: Some(vec![replacement_scope, Uuid::from_u128(u128::MAX)]),
+            ..Default::default()
+        };
+        let error = update_cache_destination(&pool, destination.id, &update)
+            .await
+            .unwrap_err();
+        assert_scope_foreign_key_failure(&error);
+        // Raw row comparison includes every column and the exact randomized
+        // ciphertext. A decrypt-and-compare check alone could miss re-encryption.
+        assert_eq!(snapshot(pool.clone()).await, before);
+        assert_eq!(
+            get_cache_environments(&pool, destination.id).await.unwrap(),
+            assignments_before
+        );
+        let restored = get_cache_destination(&pool, destination.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.niks3_auth_token, create.niks3_auth_token);
+        assert_eq!(restored.niks3_read_client_key, create.niks3_read_client_key);
+        assert!(
+            get_global_caches(&pool)
+                .await
+                .unwrap()
+                .iter()
+                .all(|cache| cache.id != destination.id)
+        );
+    }
 }

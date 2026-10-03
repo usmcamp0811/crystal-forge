@@ -2,6 +2,39 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Validates a named Nix Ed25519 public signing key.
+///
+/// Accepts `name:encoded-key` with a nonempty name, no whitespace, and a
+/// standard padded Base64 payload that decodes to exactly 32 bytes. Validation
+/// checks the wire format, not ownership of the corresponding private key.
+/// Manual configuration and discovery must use this same contract.
+///
+/// # Errors
+/// Returns a static format error without including the supplied value when the
+/// name, delimiter, encoding, or decoded length is invalid.
+///
+/// # Examples
+/// ```
+/// use cf_protocol::cache::validate_nix_public_key;
+/// assert!(validate_nix_public_key(
+///     "cache-1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+/// ).is_ok());
+/// assert!(validate_nix_public_key("cache-1:YWJj").is_err());
+/// ```
+pub fn validate_nix_public_key(value: &str) -> Result<(), &'static str> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let invalid = "Invalid Nix public signing key: requires name:base64 with 32 decoded bytes and no whitespace";
+    let (name, encoded) = value.split_once(':').ok_or(invalid)?;
+    if name.is_empty() || value.chars().any(char::is_whitespace) {
+        return Err(invalid);
+    }
+    let decoded = STANDARD.decode(encoded).map_err(|_| invalid)?;
+    if decoded.len() != 32 {
+        return Err(invalid);
+    }
+    Ok(())
+}
+
 /// Type of cache destination.
 ///
 /// Used in `BuilderCachePushConfig` delivered from server to builder and in the
@@ -138,6 +171,34 @@ impl std::fmt::Debug for Niks3WriteAuth {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nix_public_key_enforces_named_standard_base64_ed25519_shape() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let payload = STANDARD.encode([255; 32]);
+        assert!(validate_nix_public_key(&format!("cache-1:{payload}")).is_ok());
+        for value in [
+            String::new(),
+            format!(":{payload}"),
+            payload.clone(),
+            format!("name:{payload}:extra"),
+            format!(" name:{payload}"),
+            format!("na\u{2003}me:{payload}"),
+            format!("name:{payload}\n"),
+            format!("name:{}", payload.replace('/', "_")),
+            format!("name:{}", payload.trim_end_matches('=')),
+            "name:not-base64!".into(),
+            "name:".into(),
+        ] {
+            assert!(validate_nix_public_key(&value).is_err(), "{value:?}");
+        }
+        for length in [0, 1, 31, 33, 64] {
+            assert!(
+                validate_nix_public_key(&format!("name:{}", STANDARD.encode(vec![0; length])))
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn cache_types_parse_known_names_and_reject_unknown_names() {

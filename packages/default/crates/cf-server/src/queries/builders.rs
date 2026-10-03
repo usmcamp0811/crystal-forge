@@ -1557,6 +1557,19 @@ async fn lock_eligible_cache_destination(
     crate::models::cache_destination::CacheDestination,
     Vec<Uuid>,
 )> {
+    let (commit_id, derivation_name): (Option<i32>, String) =
+        sqlx::query_as("SELECT commit_id, derivation_name FROM derivations WHERE id = $1")
+            .bind(derivation_id)
+            .fetch_one(&mut **tx)
+            .await?;
+    // SECURITY: Reject all equally preferred cross-environment candidates
+    // before decrypting credentials, using the pool resolver's same decision.
+    let environment = crate::queries::cache_push::resolve_derivation_environment(
+        &mut **tx,
+        commit_id,
+        &derivation_name,
+    )
+    .await?;
     // Lock before evaluating eligibility so assignment writers cannot commit
     // between the policy check and the canonical configuration snapshot.
     let snapshot =
@@ -1564,18 +1577,10 @@ async fn lock_eligible_cache_destination(
             .await?
             .context("Selected cache destination no longer exists")?;
     let eligible = sqlx::query_scalar::<_, bool>(
-        r#"WITH target_environment AS (
-            SELECT s.environment_id
-            FROM derivations d JOIN commits c ON c.id = d.commit_id
-            JOIN systems s ON s.flake_id = c.flake_id
-            WHERE d.id = $2 AND s.environment_id IS NOT NULL AND s.is_active = TRUE
-              AND (s.hostname = d.derivation_name OR NULLIF(s.system_configuration_name, '') = d.derivation_name)
-            ORDER BY CASE WHEN NULLIF(s.system_configuration_name, '') = d.derivation_name THEN 0 ELSE 1 END
-            LIMIT 1
-        ), enabled_assigned AS (
+        r#"WITH enabled_assigned AS (
             SELECT cd.id FROM cache_destinations cd
             JOIN cache_destination_environments cde ON cde.cache_destination_id = cd.id
-            WHERE cd.enabled = TRUE AND cde.environment_id = (SELECT environment_id FROM target_environment)
+            WHERE cd.enabled = TRUE AND cde.environment_id = $2
         )
         SELECT EXISTS (SELECT 1 FROM cache_destinations cd
         WHERE cd.id = $1 AND cd.enabled = TRUE
@@ -1583,7 +1588,7 @@ async fn lock_eligible_cache_destination(
             OR (NOT EXISTS (SELECT 1 FROM enabled_assigned)
               AND NOT EXISTS (SELECT 1 FROM cache_destination_environments cde WHERE cde.cache_destination_id = cd.id)))
         )"#,
-    ).bind(destination_id).bind(derivation_id).fetch_one(&mut **tx).await?;
+    ).bind(destination_id).bind(environment).fetch_one(&mut **tx).await?;
     if !eligible {
         bail!("Selected cache destination is disabled or ineligible");
     }
@@ -3819,6 +3824,218 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    async fn canonical_environment_fixture(
+        pool: &PgPool,
+    ) -> (
+        BuildJob,
+        Uuid,
+        crate::models::cache_destination::CacheDestination,
+        i32,
+        Uuid,
+    ) {
+        let now = Utc::now();
+        let job_id = create_queued_job(
+            pool,
+            "https://example.com/canonical-environment.git",
+            "canonical-environment",
+            &"a".repeat(40),
+            now,
+            "canonical-config",
+            1.0,
+            now,
+        )
+        .await;
+        let builder = create_active_test_builder(pool, "canonical-builder").await;
+        let job = claim_next_job_atomic(
+            pool,
+            &builder.id,
+            4,
+            &[],
+            RemoteBuildExecutionStrategy::ServerDerivation,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(job.id, job_id);
+        let flake_id: i32 = sqlx::query_scalar(
+            "SELECT c.flake_id FROM commits c JOIN derivations d ON d.commit_id = c.id WHERE d.id = $1",
+        )
+        .bind(job.derivation_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let preferred: Uuid = sqlx::query_scalar(
+            "INSERT INTO environments (name) VALUES ('preferred-environment') RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let other: Uuid = sqlx::query_scalar(
+            "INSERT INTO environments (name) VALUES ('other-environment') RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        // A lower-ranked hostname and an inactive configuration-name match must
+        // not make the active preferred configuration ambiguous.
+        sqlx::query(
+            "INSERT INTO systems (hostname, system_configuration_name, public_key, derivation, flake_id, environment_id, is_active)
+             VALUES ('preferred-host', 'canonical-config', 'test-key', '', $1, $2, TRUE),
+                    ('canonical-config', 'other-config', 'test-key', '', $1, $3, TRUE),
+                    ('inactive-host', 'canonical-config', 'test-key', '', $1, $3, FALSE)",
+        )
+        .bind(flake_id)
+        .bind(preferred)
+        .bind(other)
+        .execute(pool)
+        .await
+        .unwrap();
+        let destination =
+            create_public_niks3_test_cache(pool, "preferred-cache", "https://preferred.example")
+                .await;
+        crate::queries::cache_destinations::assign_environments_to_cache(
+            pool,
+            destination.id,
+            &[preferred],
+        )
+        .await
+        .unwrap();
+        (job, builder.id, destination, flake_id, other)
+    }
+
+    async fn insert_competing_preferred_environment(pool: &PgPool, flake: i32, environment: Uuid) {
+        sqlx::query(
+            "INSERT INTO systems (hostname, system_configuration_name, public_key, derivation, flake_id, environment_id, is_active)
+             VALUES ('competing-host', 'canonical-config', 'test-key', '', $1, $2, TRUE)",
+        )
+        .bind(flake)
+        .bind(environment)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified isolated database creation privileges"]
+    async fn niks3_canonical_environment_dispatch_rejects_ambiguity_before_credentials(
+        pool: PgPool,
+    ) {
+        let (job, builder, destination, flake, other) = canonical_environment_fixture(&pool).await;
+        insert_competing_preferred_environment(&pool, flake, other).await;
+        // An absent destination would fail at credential snapshot loading. The
+        // ambiguity error must take precedence even before that read occurs.
+        for id in [destination.id, i32::MAX] {
+            let error = record_job_cache_dispatch(&pool, &job.id, &builder, None, Some(id))
+                .await
+                .unwrap_err();
+            assert_eq!(error.to_string(), "Ambiguous derivation environment");
+        }
+        let unchanged = get_build_job_by_id(&pool, &job.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.status, "building");
+        assert!(unchanged.dispatched_cache_destination_id.is_none());
+        assert!(unchanged.cache_dispatch_recorded_at.is_none());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified isolated database creation privileges"]
+    async fn niks3_canonical_environment_completion_rejects_post_dispatch_ambiguity(pool: PgPool) {
+        let (job, builder, destination, flake, other) = canonical_environment_fixture(&pool).await;
+        let output = "/nix/store/canonical-output";
+        sqlx::query("UPDATE derivations SET expected_store_path = $2 WHERE id = $1")
+            .bind(job.derivation_id)
+            .bind(output)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let derivation =
+            crate::queries::derivations::get_derivation_by_id(&pool, job.derivation_id)
+                .await
+                .unwrap();
+        let eligible = crate::queries::cache_push::eligible_cache_destinations_for_derivation(
+            &pool,
+            &derivation,
+        )
+        .await
+        .unwrap();
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].id, destination.id);
+        record_job_cache_dispatch(&pool, &job.id, &builder, None, Some(destination.id))
+            .await
+            .unwrap();
+        let publication =
+            capture_cache_publication_configuration(&pool, job.derivation_id, &destination)
+                .await
+                .unwrap();
+        let before: (i32, Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+            "SELECT status_id, store_path, completed_at FROM derivations WHERE id = $1",
+        )
+        .bind(job.derivation_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        // Introduce the tie only after both dispatch and publication evidence.
+        // Destination settings and assignments remain unchanged.
+        insert_competing_preferred_environment(&pool, flake, other).await;
+        assert!(
+            crate::queries::cache_push::eligible_cache_destinations_for_derivation(
+                &pool,
+                &derivation
+            )
+            .await
+            .is_err()
+        );
+        for evidence in [Some(&publication), None] {
+            let error = complete_preverified_job_atomic_with_policy(
+                &pool,
+                &job.id,
+                &builder,
+                None,
+                Some(output),
+                evidence,
+                BuildCompletionPolicy {
+                    auto_hardening_scans: true,
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.to_string(), "Ambiguous derivation environment");
+            let unchanged = get_build_job_by_id(&pool, &job.id).await.unwrap().unwrap();
+            assert_eq!(unchanged.status, "building");
+            assert!(unchanged.completed_at.is_none());
+            assert_eq!(
+                unchanged.dispatched_cache_destination_id,
+                Some(destination.id)
+            );
+            let after: (i32, Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+                "SELECT status_id, store_path, completed_at FROM derivations WHERE id = $1",
+            )
+            .bind(job.derivation_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(after, before);
+            let publications: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM cache_push_jobs WHERE derivation_id = $1")
+                    .bind(job.derivation_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                publications, 0,
+                "no confirmed publication or no-push enqueue"
+            );
+            let hardening: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM hardening_scans WHERE derivation_id = $1")
+                    .bind(job.derivation_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(hardening, 0);
+        }
     }
 
     #[sqlx::test(migrations = "./migrations")]

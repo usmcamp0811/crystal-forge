@@ -1684,6 +1684,7 @@ async fn set_cve_status_idle() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::cache_destination::nix_public_key_fixture;
 
     fn completed_reference(source: &str, id: Option<i32>, name: &str) -> CompletedCacheReference {
         CompletedCacheReference {
@@ -1700,7 +1701,10 @@ mod tests {
             enabled: true,
             cache_type: "Niks3".into(),
             push_to: Some("https://read.example".into()),
-            niks3_public_keys: vec!["selected-one:key".into(), "selected-two:key".into()],
+            niks3_public_keys: vec![
+                nix_public_key_fixture("selected-one"),
+                nix_public_key_fixture("selected-two"),
+            ],
             niks3_read_auth_mode: Some("mtls".into()),
             niks3_read_client_cert: Some(crate::security::cache_secrets::TEST_CERTIFICATE.into()),
             niks3_read_client_key: Some("selected-read-key".into()),
@@ -1761,7 +1765,10 @@ mod tests {
             cache_type: CacheType::Niks3,
             push_to: Some("https://read.example".into()),
             push_after_build: true,
-            niks3_public_keys: vec!["static-one:key".into(), "static-two:key".into()],
+            niks3_public_keys: vec![
+                nix_public_key_fixture("static-one"),
+                nix_public_key_fixture("static-two"),
+            ],
             ..Default::default()
         };
         let source =
@@ -1827,8 +1834,12 @@ mod tests {
             "INSERT INTO cache_destinations (name, cache_type, push_to, enabled, niks3_server_url,
                 niks3_public_keys, niks3_read_auth_mode, niks3_write_auth_mode, niks3_auth_token)
              VALUES ('original', 'Niks3', 'https://read.example', TRUE, 'https://write.example',
-                ARRAY['database-one:key', 'database-two:key'], 'none', 'token', 'fixture-token') RETURNING id",
+                $1, 'none', 'token', 'fixture-token') RETURNING id",
         )
+        .bind(vec![
+            nix_public_key_fixture("database-one"),
+            nix_public_key_fixture("database-two"),
+        ])
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -1846,7 +1857,10 @@ mod tests {
             cache_type: CacheType::Niks3,
             push_to: Some("https://read.example".into()),
             push_after_build: true,
-            niks3_public_keys: vec!["static-one:key".into(), "static-two:key".into()],
+            niks3_public_keys: vec![
+                nix_public_key_fixture("static-one"),
+                nix_public_key_fixture("static-two"),
+            ],
             ..Default::default()
         };
         sqlx::query("UPDATE cache_destinations SET name = 'renamed' WHERE id = $1")
@@ -1861,7 +1875,10 @@ mod tests {
         assert_eq!(sources[0].label, "renamed");
         assert_eq!(
             sources[0].cache_config.as_ref().unwrap().niks3_public_keys,
-            ["database-one:key", "database-two:key"]
+            [
+                nix_public_key_fixture("database-one"),
+                nix_public_key_fixture("database-two")
+            ]
         );
         sqlx::query(
             "UPDATE cache_destinations SET niks3_read_auth_mode = 'mtls',
@@ -1879,7 +1896,10 @@ mod tests {
         let read_config = sources[0].cache_config.as_ref().unwrap();
         assert_eq!(
             read_config.niks3_public_keys,
-            ["database-one:key", "database-two:key"]
+            [
+                nix_public_key_fixture("database-one"),
+                nix_public_key_fixture("database-two")
+            ]
         );
         match &read_config.niks3_read_auth {
             cf_protocol::cache::CacheReadAuth::Mtls {
@@ -1963,8 +1983,8 @@ mod tests {
             "INSERT INTO cache_destinations (name, cache_type, push_to, enabled, niks3_server_url,
                 niks3_public_keys, niks3_read_auth_mode, niks3_write_auth_mode, niks3_auth_token)
              VALUES ('https://read.example', 'Niks3', 'https://other.example', TRUE, 'https://write.example',
-                ARRAY['collision:key'], 'none', 'token', 'fixture-token') RETURNING id",
-        ).fetch_one(&pool).await.unwrap();
+                $1, 'none', 'token', 'fixture-token') RETURNING id",
+        ).bind(vec![nix_public_key_fixture("collision")]).fetch_one(&pool).await.unwrap();
         assert!(
             completed_materialization_sources(&pool, &derivation, &static_config)
                 .await
@@ -2022,7 +2042,7 @@ mod tests {
             enabled: true,
             cache_type: "Niks3".into(),
             push_to: Some("https://read.example".into()),
-            niks3_public_keys: vec!["one:key".into(), "two:key".into()],
+            niks3_public_keys: vec![nix_public_key_fixture("one"), nix_public_key_fixture("two")],
             niks3_read_auth_mode: Some("mtls".into()),
             niks3_read_client_cert: Some(crate::security::cache_secrets::TEST_CERTIFICATE.into()),
             niks3_read_client_key: Some("read-key".into()),
@@ -2042,7 +2062,7 @@ set -eu
 test "$1" = copy
 test "$2" = --from
 case "$3" in https://read.example/*tls-certificate=*tls-private-key=*) ;; *) exit 11;; esac
-test "$6" = 'one:key two:key'
+test "$6" = '{}'
 test "$9" = true
 test -f "$NIX_SSL_CERT_FILE"
 case "$(cat "$NIX_SSL_CERT_FILE")" in *'-----BEGIN CERTIFICATE-----'*) ;; *) exit 12;; esac
@@ -2051,6 +2071,7 @@ test -z "${{NIKS3_AUTH_TOKEN_FILE:-}}"
 printf '%s' "$3" > '{}'
 touch '{}'
 "#,
+                destination.niks3_public_keys.join(" "),
                 dir.path().join("read-url").display(),
                 output.display()
             ),

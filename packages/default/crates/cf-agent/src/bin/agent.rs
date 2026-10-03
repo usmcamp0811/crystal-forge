@@ -164,8 +164,6 @@ fn create_signed_payload(
 
     let current_system_str = current_system.to_string_lossy();
     let payload = gather_system_state(&hostname, context, current_system_str.as_ref())?;
-    let payload_json = serde_json::to_string(&payload)?;
-
     let key_bytes = STANDARD
         .decode(fs::read_to_string(&client_cfg.private_key)?.trim())
         .context("failed to decode base64 private key")?;
@@ -176,10 +174,25 @@ fn create_signed_payload(
             .context("expected a 32-byte Ed25519 private key")?,
     );
 
-    let signature = signing_key.sign(payload_json.as_bytes());
-    let signature_b64 = STANDARD.encode(signature.to_bytes());
+    let (payload_json, signature_b64) = sign_current_system_payload(&payload, &signing_key)?;
 
     Ok((payload, payload_json, signature_b64))
+}
+
+// SECURITY: Both state and heartbeat POSTs send these exact signed bytes.
+// Capabilities must remain inside the signature, not in an unsigned header.
+fn sign_current_system_payload(
+    payload: &SystemState,
+    signing_key: &SigningKey,
+) -> Result<(String, String)> {
+    let payload_json = serde_json::to_string(&cf_protocol::agent::CurrentSystemRequest {
+        state: payload,
+        capabilities: cf_protocol::agent::AgentCapabilities {
+            supports_niks3: true,
+        },
+    })?;
+    let signature_b64 = STANDARD.encode(signing_key.sign(payload_json.as_bytes()).to_bytes());
+    Ok((payload_json, signature_b64))
 }
 
 /// Posts system state changes to the server (non-heartbeat, no retry).
@@ -642,6 +655,65 @@ pub async fn watch_system(agent_state: Arc<Mutex<AgentState>>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn niks3_exact_agent_request_body_advertises_capability_inside_signature() {
+        use ed25519_dalek::{Signature, Verifier};
+        let payload: SystemState = serde_json::from_value(serde_json::json!({
+            "hostname": "signed-agent", "change_reason": "startup",
+            "store_path": "/nix/store/current", "network_interfaces": "[]"
+        }))
+        .unwrap();
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let (body, signature) = sign_current_system_payload(&payload, &key).unwrap();
+        let decoded = STANDARD.decode(signature).unwrap();
+        let signature = Signature::from_slice(&decoded).unwrap();
+        key.verifying_key()
+            .verify(body.as_bytes(), &signature)
+            .unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            value["capabilities"],
+            serde_json::json!({"supports_niks3": true})
+        );
+        assert_eq!(value["hostname"], "signed-agent");
+        assert!(value.get("state").is_none());
+        let old_server: SystemState = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            serde_json::to_value(old_server).unwrap(),
+            serde_json::to_value(payload).unwrap()
+        );
+        value["capabilities"]["supports_niks3"] = serde_json::json!(false);
+        assert!(
+            key.verifying_key()
+                .verify(&serde_json::to_vec(&value).unwrap(), &signature)
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn niks3_withheld_target_cannot_trigger_explicit_static_agent_fallback() {
+        for cache_type in [
+            cf_config::config::CacheType::Nix,
+            cf_config::config::CacheType::Niks3,
+        ] {
+            let mut config = cf_config::config::deployment::DeploymentConfig::default();
+            config.cache_type = cache_type;
+            config.cache_url = Some("https://static-fallback.example".into());
+            config.post_agent_start_deployment_delay = Duration::ZERO;
+            let mut manager = AgentDeploymentManager::new(config);
+            let (result, interval) = manager
+                .process_heartbeat_response(LogResponse {
+                    desired_target: None,
+                    runtime_caches: Vec::new(),
+                    heartbeat_interval_secs: Some(30),
+                })
+                .await
+                .unwrap();
+            assert!(matches!(result, DeploymentResult::NoDeploymentNeeded));
+            assert_eq!(interval, Some(30));
+        }
+    }
 
     #[test]
     fn jittered_interval_is_at_least_base() {

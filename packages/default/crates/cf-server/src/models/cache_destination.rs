@@ -236,8 +236,13 @@ pub struct UpdateCacheDestination {
 impl CreateCacheDestination {
     /// Validates required fields and authentication for the selected cache type.
     ///
+    /// Niks3 requires at least one named Ed25519 public signing key accepted by
+    /// [`cf_protocol::cache::validate_nix_public_key`], in every auth mode.
+    /// Validation does not contact either cache endpoint.
+    ///
     /// # Errors
-    /// Returns an error for unknown types or incomplete type-specific settings.
+    /// Returns an error for unknown types, malformed keys, or incomplete
+    /// type-specific settings.
     pub fn validate(&self) -> Result<(), String> {
         // Validate cache type
         match self.cache_type.as_str() {
@@ -275,13 +280,11 @@ impl CreateCacheDestination {
             "Niks3" => {
                 validate_https(self.niks3_server_url.as_deref(), "niks3_server_url")?;
                 validate_https(self.push_to.as_deref(), "push_to")?;
-                if self.niks3_public_keys.is_empty()
-                    || self
-                        .niks3_public_keys
-                        .iter()
-                        .any(|key| key.trim().is_empty())
-                {
+                if self.niks3_public_keys.is_empty() {
                     return Err("niks3_public_keys requires nonempty signing keys".into());
+                }
+                for key in &self.niks3_public_keys {
+                    cf_protocol::cache::validate_nix_public_key(key).map_err(str::to_string)?;
                 }
                 validate_write_auth(
                     self.niks3_write_auth_mode.as_deref(),
@@ -689,7 +692,7 @@ impl CacheDestination {
     /// let destination = CacheDestination {
     ///     cache_type: "Niks3".into(),
     ///     push_to: Some("https://cache.example.com".into()),
-    ///     niks3_public_keys: vec!["cache-1:example-key".into()],
+    ///     niks3_public_keys: vec!["cache-1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into()],
     ///     niks3_read_auth_mode: Some("none".into()),
     ///     ..Default::default()
     /// };
@@ -718,13 +721,11 @@ impl CacheDestination {
             ));
         }
         validate_https(Some(&url), "push_to")?;
-        if self.niks3_public_keys.is_empty()
-            || self
-                .niks3_public_keys
-                .iter()
-                .any(|key| key.trim().is_empty())
-        {
+        if self.niks3_public_keys.is_empty() {
             return Err("niks3_public_keys requires nonempty signing keys".into());
+        }
+        for key in &self.niks3_public_keys {
+            cf_protocol::cache::validate_nix_public_key(key).map_err(str::to_string)?;
         }
         validate_read_auth(
             self.niks3_read_auth_mode.as_deref(),
@@ -751,6 +752,13 @@ impl CacheDestination {
     }
 }
 
+/// Returns a format-valid public key for named cache fixtures, without secrets.
+#[cfg(test)]
+pub(crate) fn nix_public_key_fixture(name: &str) -> String {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    format!("{name}:{}", STANDARD.encode([0; 32]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -762,7 +770,10 @@ mod tests {
             cache_type: "Niks3".into(),
             push_to: Some("https://read.example.com/cache".into()),
             niks3_server_url: Some("https://write.example.com/api".into()),
-            niks3_public_keys: vec!["cache-1:key-one".into(), "cache-2:key-two".into()],
+            niks3_public_keys: vec![
+                nix_public_key_fixture("cache-1"),
+                nix_public_key_fixture("cache-2"),
+            ],
             niks3_write_auth_mode: Some("token".into()),
             niks3_auth_token: Some("write-token-secret".into()),
             niks3_read_auth_mode: Some("none".into()),
@@ -840,7 +851,7 @@ mod tests {
             let read = CacheDestination {
                 cache_type: "Niks3".into(),
                 push_to: Some(raw),
-                niks3_public_keys: vec!["cache:key".into()],
+                niks3_public_keys: vec![nix_public_key_fixture("cache")],
                 niks3_read_auth_mode: Some("none".into()),
                 ..Default::default()
             };
@@ -959,7 +970,7 @@ mod tests {
         let mut destination = CacheDestination {
             cache_type: "Niks3".into(),
             push_to: Some("https://read.example.com/cache".into()),
-            niks3_public_keys: vec!["one:key".into(), "two:key".into()],
+            niks3_public_keys: vec![nix_public_key_fixture("one"), nix_public_key_fixture("two")],
             niks3_write_auth_mode: Some("token".into()),
             niks3_auth_token: Some("write-token".into()),
             niks3_read_auth_mode: Some("none".into()),

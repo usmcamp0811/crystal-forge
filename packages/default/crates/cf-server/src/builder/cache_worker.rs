@@ -649,11 +649,12 @@ mod niks3_tests {
 
     #[test]
     fn niks3_local_mapping_is_explicit_and_excludes_other_cache_secrets() {
+        use crate::models::cache_destination::nix_public_key_fixture;
         let mut destination = CacheDestination {
             cache_type: "Niks3".into(),
             push_to: Some("https://read.example".into()),
             niks3_server_url: Some("https://write.example".into()),
-            niks3_public_keys: vec!["one:key".into(), "two:key".into()],
+            niks3_public_keys: vec![nix_public_key_fixture("one"), nix_public_key_fixture("two")],
             niks3_write_auth_mode: Some("token".into()),
             niks3_auth_token: Some("write-token".into()),
             niks3_read_auth_mode: Some("none".into()),
@@ -667,7 +668,7 @@ mod niks3_tests {
             config.niks3_server_url.as_deref(),
             Some("https://write.example")
         );
-        assert_eq!(config.niks3_public_keys, ["one:key", "two:key"]);
+        assert_eq!(config.niks3_public_keys, destination.niks3_public_keys);
         assert!(config.niks3_write_auth.is_some());
         assert!(config.s3_secret_access_key.is_none());
         assert!(config.attic_token.is_none());
