@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-03 23:02'
+updated_date: '2026-10-03 23:06'
 labels: []
 dependencies: []
 references:
@@ -86,6 +86,8 @@ Remaining maintainer P1/P2 plan: preserve historical deployability/retained-line
 Delegated P2 CI ownership at b52fbe67: edit .gitlab-ci.yml, checks/server-regressions/{default.nix,README.md}, checks/builder-evaluator-packaging/README.md and only CI membership prose in checks/niks3-cache/README.md. Add blocking niks3-cache and builder-evaluator-packaging to existing nix-tag flake matrix. Add exact qualified rollback, signed capability, assigned-first selection and dispatch ambiguity lib tests with one-test execution protection in sandbox PostgreSQL; coordinate forthcoming niks3_publication_* names with publication owner before final membership. Verify flake drv attributes, read-only GitLab CI lint/dry run, packaging build and owned diff. No commits, host DB or services.
 
 VM publication-delivery regression delegation at b52fbe67: edit only checks/niks3-cache/default.nix and packages/cf-test-suite/cf_test/tests/cache/test_niks3_cache.py. Preserve five real remote-build/publication/auth/CVE/signature/log variants. Seed exact manual request commit/derivation identity; add later-created earlier assigned destination without publication and assert signed target delivery retains published ID/read URL through rename. Exercise disabled/reassigned/deleted source withholding without consuming pending delivery. Prove secondary failover only after real packaged CLI publication and independent signature-required server read probe of the same exact output. Start focused niks3-cache gate only after transaction publication helper is present/stable; retain raw logs and exact exit status. No host services/DB, Rust, README, CI, commits or pushes.
+
+Owner-approved final publication scope correction: resolve durable-ID and unambiguous legacy completed exact-output references first. Compute assigned-before-global precedence only among those enabled currently scoped publication identities, before read-config/capability/confidentiality gates. Remove the unrelated configured-assignment existence predicate. Add scope/gate regressions and update only the two explicitly authorized composite_policy tests: preserve historical Pass with withheld delivery and unchanged pending work; supply a valid public HTTP completed database publication for positive upgrade delivery. Run new unit/SQLx tests, all38 composite integration tests, offline all-targets, affected doctest, formatting and diff checks. No services or commits.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
