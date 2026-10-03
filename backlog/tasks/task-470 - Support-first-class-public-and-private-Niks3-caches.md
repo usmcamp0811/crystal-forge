@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-03 23:01'
+updated_date: '2026-10-03 23:02'
 labels: []
 dependencies: []
 references:
@@ -272,4 +272,6 @@ Secondary failover is real object-backed fixture evidence: token-public creates 
 Dedicated gate PASSED twice, actual exit 0. Final command: nix build --no-link -L path:.#checks.x86_64-linux.niks3-cache from clean tracked/non-ignored snapshot /tmp/opencode/task470-publication-vm-source-final including untracked production helper. Final raw log /tmp/opencode/task470-publication-vm-final-build.log; exit file /tmp/opencode/task470-publication-vm-final-build.exit contains 0; supervisor /tmp/opencode/task470-publication-vm-final-build.sh. Final VM drv ncwq6by3x8mlyfwbf55nfx9glddsvyjg-vm-test-run-crystal-forge-niks3-cache.drv; VM script 82.82s; four QEMU processes cleaned up. Core-server package lib tests: 1620 passed/0 failed/650 ignored. First pass log /tmp/opencode/task470-publication-vm-snapshot-build.log, VM 83.30s. Repeated because production owner moved publication resolution after policy authorization during first build. Later differences from final snapshot inspected: ignored SQLx test additions and test-only/source documentation changes; no changed delivery logic. Initial direct path:. evaluation timed out at120s, persistent retry interrupted with exit1 before build output because it copied development artifacts; clean snapshots avoided that problem without staging others' files.
 
 Final Python AST via nix develop and owned-path git diff --check passed exit0. Preserved all five original signature/read-mTLS/real agent pull/server-local CVE materialization/secret and presigned-URL service-log/persisted-diagnostic/credential-cleanup assertions. Limits: evaluation identities and manual request rows remain fixtures; secondary completion row is recorded after real CLI/probe evidence rather than CF writer API; no-op switch does not prove full NixOS activation/reboot; all real CVE scanner processes terminate failed due unavailable NVD, although missing outputs materialize. No README/CI/Rust/other fixture edits, host service/DB operations, staging, commits or pushes by VM owner. Local dedicated niks3-cache gate has passed for owner pre-push requirement.
+
+Database identity clarification: the verified current_user is exactly `mcamp`; the spaces in the preceding note are a transcription error. Final handlers::agent::heartbeat::tests run executed 16 tests with 16 passed and 0 failed.
 <!-- SECTION:NOTES:END -->
