@@ -17,7 +17,7 @@ use crate::queries::{
 use axum::response::Response;
 use axum::{
     body::Bytes,
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
@@ -29,19 +29,33 @@ use uuid::Uuid;
 //   use crystal_forge::handlers::agent::heartbeat::{LogResponse, RuntimeCacheConfig};
 pub use cf_protocol::agent::{LogResponse, RuntimeCacheConfig};
 
-fn destination_to_runtime_cache(destination: CacheDestination) -> Option<RuntimeCacheConfig> {
-    let cache_url = destination.push_to?;
+fn destination_to_runtime_cache(
+    destination: CacheDestination,
+    confidential: bool,
+) -> Option<RuntimeCacheConfig> {
+    if !destination.enabled {
+        return None;
+    }
+    let (cache_url, cache_public_keys, read_auth) = destination.read_config().ok()?;
+    // SECURITY: Agent signatures authenticate requests, not confidentiality.
+    // Never downgrade a private cache to a public read on insecure transport.
+    if !confidential && !matches!(read_auth, cf_protocol::cache::CacheReadAuth::None) {
+        return None;
+    }
     Some(RuntimeCacheConfig {
         cache_type: destination.cache_type,
         cache_url,
         cache_public_key: destination.attic_public_key,
         attic_cache_name: destination.attic_cache_name,
+        cache_public_keys,
+        read_auth,
     })
 }
 
 async fn load_runtime_caches_for_agent(
     pool: &PgPool,
     environment_id: Option<uuid::Uuid>,
+    confidential: bool,
 ) -> Vec<RuntimeCacheConfig> {
     let destinations = match environment_id {
         Some(env_id) => get_caches_for_environment(pool, env_id).await,
@@ -51,7 +65,7 @@ async fn load_runtime_caches_for_agent(
     match destinations {
         Ok(dests) => dests
             .into_iter()
-            .filter_map(destination_to_runtime_cache)
+            .filter_map(|destination| destination_to_runtime_cache(destination, confidential))
             .collect(),
         Err(e) => {
             debug!("❌ Failed to load runtime cache config for agent: {e:?}");
@@ -88,12 +102,15 @@ fn handle_duplicate_active_system_cleanup_result(
         }
     }
 }
-/// Handles the `/current-system` POST route.
+/// Handles the `/current-system` POST route and delivers read-only cache settings.
 /// Verifies the body signature using headers, parses the payload, and
 /// stores system state info in the database.
+/// Private cache credentials are omitted unless the direct peer is an explicitly
+/// trusted HTTPS proxy. Omission does not convert a private cache to public.
 pub async fn log(
     State(state): State<CFState>,
     State(pool): State<PgPool>,
+    peer: Option<ConnectInfo<std::net::SocketAddr>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -429,8 +446,14 @@ pub async fn log(
         }
     }
 
+    let confidential = crate::handlers::api::builders::builder_https_verified_by_trusted_proxy(
+        &state.server_config,
+        &headers,
+        peer.map(|peer| peer.0),
+    );
     let runtime_caches =
-        load_runtime_caches_for_agent(&pool, agent_request.system.environment_id).await;
+        load_runtime_caches_for_agent(&pool, agent_request.system.environment_id, confidential)
+            .await;
 
     // Resolve per-system heartbeat interval, falling back to server-config default.
     let heartbeat_interval_secs = {
@@ -585,6 +608,38 @@ async fn reconcile_system_health_attention(pool: &PgPool, system_id: Uuid, hostn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn niks3_heartbeat_is_read_only_and_private_reads_fail_closed() {
+        let mut destination = CacheDestination {
+            enabled: true,
+            cache_type: "Niks3".into(),
+            push_to: Some("https://read.example".into()),
+            niks3_public_keys: vec!["one:key".into(), "two:key".into()],
+            niks3_read_auth_mode: Some("mtls".into()),
+            niks3_read_client_cert: Some(crate::security::cache_secrets::TEST_CERTIFICATE.into()),
+            niks3_read_client_key: Some("read-key".into()),
+            niks3_auth_token: Some("write-token".into()),
+            s3_secret_access_key: Some("aws-secret".into()),
+            ..Default::default()
+        };
+        assert!(destination_to_runtime_cache(destination.clone(), false).is_none());
+        let cache = destination_to_runtime_cache(destination.clone(), true).unwrap();
+        assert_eq!(cache.cache_public_keys, ["one:key", "two:key"]);
+        let json = serde_json::to_string(&cache).unwrap();
+        assert!(json.contains("read-key"));
+        assert!(!json.contains("write-token"));
+        assert!(!json.contains("aws-secret"));
+        destination.niks3_read_auth_mode = Some("none".into());
+        destination.niks3_read_client_cert = None;
+        destination.niks3_read_client_key = None;
+        assert!(destination_to_runtime_cache(destination.clone(), false).is_some());
+        destination.enabled = false;
+        assert!(destination_to_runtime_cache(destination.clone(), true).is_none());
+        destination.enabled = true;
+        destination.cache_type = "unknown".into();
+        assert!(destination_to_runtime_cache(destination, true).is_none());
+    }
 
     // ─── classify_restart_type tests ───────────────────────────────────────
 

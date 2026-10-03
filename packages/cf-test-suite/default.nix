@@ -17,6 +17,7 @@
     ];
 
     propagatedBuildInputs = with pkgs.python3Packages; [
+      cryptography # Niks3 VM fixtures use the server's AES-GCM envelope format.
       pynacl
       pytest
       pytest-html # For HTML reports
@@ -200,6 +201,7 @@
   };
 
   python = pkgs.python3.withPackages (ps: [
+    ps.cryptography
     ps.pytest
     ps.pytest-html
     ps.pytest-xdist

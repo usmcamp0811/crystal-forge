@@ -56,6 +56,11 @@ pub async fn get_cache_destination_by_name(
 }
 
 fn decrypt_destination_secrets(mut destination: CacheDestination) -> Result<CacheDestination> {
+    // SECURITY: Legacy or directly written certificate fields can contain private
+    // PEM material. Fail closed before returning plaintext fields to API callers.
+    destination
+        .validate_niks3_certificates()
+        .map_err(anyhow::Error::msg)?;
     destination.attic_token = cache_secrets::decrypt_optional(destination.attic_token.as_deref())?;
     destination.s3_access_key_id =
         cache_secrets::decrypt_optional(destination.s3_access_key_id.as_deref())?;
@@ -63,13 +68,28 @@ fn decrypt_destination_secrets(mut destination: CacheDestination) -> Result<Cach
         cache_secrets::decrypt_optional(destination.s3_secret_access_key.as_deref())?;
     destination.s3_session_token =
         cache_secrets::decrypt_optional(destination.s3_session_token.as_deref())?;
+    destination.niks3_auth_token =
+        cache_secrets::decrypt_optional(destination.niks3_auth_token.as_deref())?;
+    destination.niks3_write_client_key =
+        cache_secrets::decrypt_optional(destination.niks3_write_client_key.as_deref())?;
+    destination.niks3_read_client_key =
+        cache_secrets::decrypt_optional(destination.niks3_read_client_key.as_deref())?;
+    destination.refresh_niks3_configured();
     Ok(destination)
 }
 
+/// Encrypts legacy plaintext cache credentials and returns the updated row count.
+///
+/// # Errors
+/// Returns an error if encryption or database access fails.
 pub async fn encrypt_plaintext_cache_secrets(pool: &PgPool) -> Result<u64> {
-    let destinations = sqlx::query_as::<_, CacheDestination>("SELECT * FROM cache_destinations")
-        .fetch_all(pool)
-        .await?;
+    // CONCURRENCY: Lock rows until encryption commits so startup backfill cannot
+    // overwrite a concurrent credential replacement with an older secret.
+    let mut tx = pool.begin().await?;
+    let destinations =
+        sqlx::query_as::<_, CacheDestination>("SELECT * FROM cache_destinations FOR UPDATE")
+            .fetch_all(&mut *tx)
+            .await?;
 
     let mut updated: u64 = 0;
     for destination in destinations {
@@ -77,11 +97,17 @@ pub async fn encrypt_plaintext_cache_secrets(pool: &PgPool) -> Result<u64> {
         let s3_access = destination.s3_access_key_id.as_deref();
         let s3_secret = destination.s3_secret_access_key.as_deref();
         let s3_session = destination.s3_session_token.as_deref();
+        let niks3_token = destination.niks3_auth_token.as_deref();
+        let niks3_write_key = destination.niks3_write_client_key.as_deref();
+        let niks3_read_key = destination.niks3_read_client_key.as_deref();
 
         let needs_update = attic.is_some_and(|v| !cache_secrets::is_encrypted(v))
             || s3_access.is_some_and(|v| !cache_secrets::is_encrypted(v))
             || s3_secret.is_some_and(|v| !cache_secrets::is_encrypted(v))
-            || s3_session.is_some_and(|v| !cache_secrets::is_encrypted(v));
+            || s3_session.is_some_and(|v| !cache_secrets::is_encrypted(v))
+            || niks3_token.is_some_and(|v| !cache_secrets::is_encrypted(v))
+            || niks3_write_key.is_some_and(|v| !cache_secrets::is_encrypted(v))
+            || niks3_read_key.is_some_and(|v| !cache_secrets::is_encrypted(v));
 
         if !needs_update {
             continue;
@@ -97,7 +123,10 @@ pub async fn encrypt_plaintext_cache_secrets(pool: &PgPool) -> Result<u64> {
              SET attic_token = $2,
                  s3_access_key_id = $3,
                  s3_secret_access_key = $4,
-                 s3_session_token = $5
+                  s3_session_token = $5,
+                  niks3_auth_token = $6,
+                  niks3_write_client_key = $7,
+                  niks3_read_client_key = $8
              WHERE id = $1",
         )
         .bind(destination.id)
@@ -105,16 +134,23 @@ pub async fn encrypt_plaintext_cache_secrets(pool: &PgPool) -> Result<u64> {
         .bind(encrypted_s3_access)
         .bind(encrypted_s3_secret)
         .bind(encrypted_s3_session)
-        .execute(pool)
+        .bind(cache_secrets::encrypt_optional(niks3_token)?)
+        .bind(cache_secrets::encrypt_optional(niks3_write_key)?)
+        .bind(cache_secrets::encrypt_optional(niks3_read_key)?)
+        .execute(&mut *tx)
         .await?;
 
         updated += 1;
     }
 
+    tx.commit().await?;
     Ok(updated)
 }
 
-/// Create a new cache destination
+/// Creates a validated cache destination and its environment assignments atomically.
+///
+/// # Errors
+/// Returns an error for invalid configuration, encryption failure, or DB failure.
 pub async fn create_cache_destination(
     pool: &PgPool,
     create: &CreateCacheDestination,
@@ -133,7 +169,7 @@ pub async fn create_cache_destination(
         cache_secrets::encrypt_optional(create.s3_session_token.as_deref())?;
     let encrypted_attic_token = cache_secrets::encrypt_optional(create.attic_token.as_deref())?;
 
-    let destination = sqlx::query_as::<_, CacheDestination>(
+    let mut destination = sqlx::query_as::<_, CacheDestination>(
         r#"
         INSERT INTO cache_destinations (
             name, cache_type, push_to, enabled, signing_key_path, compression,
@@ -141,9 +177,13 @@ pub async fn create_cache_destination(
             attic_token, attic_cache_name, attic_public_key,
             attic_ignore_upstream_cache_filter, attic_jobs,
             parallel_uploads, max_retries, retry_delay_seconds, push_timeout_seconds,
-            force_repush, require_sigs
+            force_repush, require_sigs,
+            niks3_server_url, niks3_public_keys, niks3_write_auth_mode, niks3_auth_token,
+            niks3_write_client_cert, niks3_write_client_key, niks3_write_ca_cert,
+            niks3_read_auth_mode, niks3_read_client_cert, niks3_read_client_key, niks3_read_ca_cert
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
+            $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34
         )
         RETURNING *
         "#,
@@ -171,21 +211,24 @@ pub async fn create_cache_destination(
     .bind(create.push_timeout_seconds)
     .bind(create.force_repush)
     .bind(create.require_sigs)
+    .bind(&create.niks3_server_url)
+    .bind(&create.niks3_public_keys)
+    .bind(&create.niks3_write_auth_mode)
+    .bind(cache_secrets::encrypt_optional(create.niks3_auth_token.as_deref())?)
+    .bind(&create.niks3_write_client_cert)
+    .bind(cache_secrets::encrypt_optional(create.niks3_write_client_key.as_deref())?)
+    .bind(&create.niks3_write_ca_cert)
+    .bind(&create.niks3_read_auth_mode)
+    .bind(&create.niks3_read_client_cert)
+    .bind(cache_secrets::encrypt_optional(create.niks3_read_client_key.as_deref())?)
+    .bind(&create.niks3_read_ca_cert)
     .fetch_one(&mut *tx)
     .await?;
 
     // Assign environments if provided
     if let Some(ref env_ids) = create.environment_ids {
-        for env_id in env_ids {
-            sqlx::query(
-                "INSERT INTO cache_destination_environments (cache_destination_id, environment_id) 
-                 VALUES ($1, $2)",
-            )
-            .bind(destination.id)
-            .bind(env_id)
-            .execute(&mut *tx)
-            .await?;
-        }
+        destination.updated_at =
+            replace_cache_environments_tx(&mut tx, destination.id, env_ids).await?;
     }
 
     tx.commit().await?;
@@ -204,17 +247,56 @@ pub async fn create_cache_destination(
     Ok(destination)
 }
 
-/// Update an existing cache destination
+/// Updates a destination and assignments atomically, preserving omitted secrets.
+///
+/// Authentication mode transitions clear the old mode's credentials before
+/// validation. Concurrent updates serialize on the destination row lock.
+///
+/// # Errors
+/// Returns an error for invalid resulting settings, encryption, or DB failure.
 pub async fn update_cache_destination(
     pool: &PgPool,
     id: i32,
     update: &UpdateCacheDestination,
 ) -> Result<Option<CacheDestination>> {
-    let Some(current) = get_cache_destination(pool, id).await? else {
+    // CONCURRENCY: Hold the row lock across read, merge, validation, credential
+    // replacement, and assignment updates to prevent lost credential changes.
+    let mut tx = pool.begin().await?;
+    let current = sqlx::query_as::<_, CacheDestination>(
+        "SELECT * FROM cache_destinations WHERE id = $1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(current) = current.map(decrypt_destination_secrets).transpose()? else {
         return Ok(None);
     };
 
     validate_update_shape(&current, update)?;
+    let niks3 = current
+        .merge_niks3_update(update)
+        .map_err(anyhow::Error::msg)?;
+    // Preserve stored ciphertext on unrelated updates. Write all Niks3 columns
+    // together only when that configuration or its cache type changes.
+    let update_niks3 = (current.cache_type == "Niks3"
+        && update.cache_type.as_deref().is_some_and(|ty| ty != "Niks3"))
+        || update.cache_type.as_deref() == Some("Niks3")
+        || update.niks3_server_url.is_some()
+        || !update.niks3_public_keys.is_empty()
+        || update.niks3_write_auth_mode.is_some()
+        || update.niks3_auth_token.is_some()
+        || update.niks3_write_client_cert.is_some()
+        || update.niks3_write_client_key.is_some()
+        || update.niks3_write_ca_cert.is_some()
+        || update.niks3_read_auth_mode.is_some()
+        || update.niks3_read_client_cert.is_some()
+        || update.niks3_read_client_key.is_some()
+        || update.niks3_read_ca_cert.is_some()
+        || update.clear_niks3_auth_token
+        || update.clear_niks3_write_client_key
+        || update.clear_niks3_read_client_key
+        || update.clear_niks3_write_ca_cert
+        || update.clear_niks3_read_ca_cert;
 
     // Build dynamic update query based on which fields are provided
     let mut query = String::from("UPDATE cache_destinations SET ");
@@ -229,7 +311,10 @@ pub async fn update_cache_destination(
         bind_count += 1;
     }
     if let Some(ref cache_type) = update.cache_type {
-        if !matches!(cache_type.as_str(), "S3" | "Attic" | "Http" | "Nix") {
+        if !matches!(
+            cache_type.as_str(),
+            "S3" | "Attic" | "Http" | "Nix" | "Niks3"
+        ) {
             return Err(anyhow::anyhow!("Invalid cache_type: {}", cache_type));
         }
         updates.push(format!("cache_type = ${}", bind_count));
@@ -323,15 +408,31 @@ pub async fn update_cache_destination(
         bind_count += 1;
     }
 
+    if update_niks3 {
+        for column in [
+            "niks3_server_url",
+            "niks3_public_keys",
+            "niks3_write_auth_mode",
+            "niks3_auth_token",
+            "niks3_write_client_cert",
+            "niks3_write_client_key",
+            "niks3_write_ca_cert",
+            "niks3_read_auth_mode",
+            "niks3_read_client_cert",
+            "niks3_read_client_key",
+            "niks3_read_ca_cert",
+        ] {
+            updates.push(format!("{column} = ${bind_count}"));
+            bind_count += 1;
+        }
+    }
+
     if updates.is_empty() && update.environment_ids.is_none() {
         // No fields to update, just return the existing record
         return Ok(Some(current));
     }
 
-    // Start transaction for update + environment assignment
-    let mut tx = pool.begin().await?;
-
-    let destination = if !updates.is_empty() {
+    let mut destination = if !updates.is_empty() {
         query.push_str(&updates.join(", "));
         query.push_str(&format!(" WHERE id = ${} RETURNING *", bind_count));
 
@@ -413,6 +514,27 @@ pub async fn update_cache_destination(
             q = q.bind(require_sigs);
         }
 
+        if update_niks3 {
+            q = q
+                .bind(&niks3.niks3_server_url)
+                .bind(&niks3.niks3_public_keys)
+                .bind(&niks3.niks3_write_auth_mode)
+                .bind(cache_secrets::encrypt_optional(
+                    niks3.niks3_auth_token.as_deref(),
+                )?)
+                .bind(&niks3.niks3_write_client_cert)
+                .bind(cache_secrets::encrypt_optional(
+                    niks3.niks3_write_client_key.as_deref(),
+                )?)
+                .bind(&niks3.niks3_write_ca_cert)
+                .bind(&niks3.niks3_read_auth_mode)
+                .bind(&niks3.niks3_read_client_cert)
+                .bind(cache_secrets::encrypt_optional(
+                    niks3.niks3_read_client_key.as_deref(),
+                )?)
+                .bind(&niks3.niks3_read_ca_cert);
+        }
+
         // Bind the ID for WHERE clause
         q = q.bind(id);
 
@@ -424,22 +546,9 @@ pub async fn update_cache_destination(
 
     // Update environment assignments if provided
     if let Some(ref env_ids) = update.environment_ids {
-        // Delete existing assignments
-        sqlx::query("DELETE FROM cache_destination_environments WHERE cache_destination_id = $1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-
-        // Insert new assignments
-        for env_id in env_ids {
-            sqlx::query(
-                "INSERT INTO cache_destination_environments (cache_destination_id, environment_id) 
-                 VALUES ($1, $2)",
-            )
-            .bind(id)
-            .bind(env_id)
-            .execute(&mut *tx)
-            .await?;
+        let revision = replace_cache_environments_tx(&mut tx, id, env_ids).await?;
+        if let Some(destination) = &mut destination {
+            destination.updated_at = revision;
         }
     }
 
@@ -458,6 +567,9 @@ fn validate_update_shape(
     current: &CacheDestination,
     update: &UpdateCacheDestination,
 ) -> Result<()> {
+    let niks3 = current
+        .merge_niks3_update(update)
+        .map_err(anyhow::Error::msg)?;
     let merged = CreateCacheDestination {
         name: update.name.clone().unwrap_or_else(|| current.name.clone()),
         cache_type: update
@@ -521,6 +633,17 @@ fn validate_update_shape(
         force_repush: update.force_repush.or(current.force_repush),
         require_sigs: update.require_sigs.or(current.require_sigs),
         environment_ids: None,
+        niks3_server_url: niks3.niks3_server_url,
+        niks3_public_keys: niks3.niks3_public_keys,
+        niks3_write_auth_mode: niks3.niks3_write_auth_mode,
+        niks3_auth_token: niks3.niks3_auth_token,
+        niks3_write_client_cert: niks3.niks3_write_client_cert,
+        niks3_write_client_key: niks3.niks3_write_client_key,
+        niks3_write_ca_cert: niks3.niks3_write_ca_cert,
+        niks3_read_auth_mode: niks3.niks3_read_auth_mode,
+        niks3_read_client_cert: niks3.niks3_read_client_cert,
+        niks3_read_client_key: niks3.niks3_read_client_key,
+        niks3_read_ca_cert: niks3.niks3_read_ca_cert,
     };
 
     merged.validate().map_err(|e| anyhow::anyhow!(e))
@@ -541,7 +664,13 @@ pub async fn delete_cache_destination(pool: &PgPool, id: i32) -> Result<bool> {
     Ok(deleted)
 }
 
-/// Update the last_used_at timestamp for a cache destination
+/// Records destination usage without changing publication configuration.
+///
+/// The existing timestamp trigger also advances `updated_at`. Publication
+/// evidence excludes both timestamps so usage does not invalidate a probe.
+///
+/// # Errors
+/// Returns an error when PostgreSQL cannot record destination usage.
 pub async fn update_cache_destination_last_used(pool: &PgPool, name: &str) -> Result<()> {
     sqlx::query("UPDATE cache_destinations SET last_used_at = NOW() WHERE name = $1")
         .bind(name)
@@ -556,7 +685,15 @@ pub async fn update_cache_destination_last_used(pool: &PgPool, name: &str) -> Re
 // Environment Assignment Queries
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Assign environments to a cache destination (replaces existing assignments)
+/// Replaces a destination's environment assignment set atomically.
+///
+/// Locks the destination before modifying assignments. The same lock serializes
+/// create/update assignment paths and conflicts with publication snapshots.
+/// Updates `updated_at` for configuration observers in the same transaction.
+///
+/// # Errors
+/// Returns an error for a missing destination, invalid environment IDs, or a
+/// database failure. An error leaves the previous assignment set unchanged.
 pub async fn assign_environments_to_cache(
     pool: &PgPool,
     cache_id: i32,
@@ -565,23 +702,7 @@ pub async fn assign_environments_to_cache(
     // Start transaction
     let mut tx = pool.begin().await?;
 
-    // Delete existing assignments
-    sqlx::query("DELETE FROM cache_destination_environments WHERE cache_destination_id = $1")
-        .bind(cache_id)
-        .execute(&mut *tx)
-        .await?;
-
-    // Insert new assignments
-    for env_id in environment_ids {
-        sqlx::query(
-            "INSERT INTO cache_destination_environments (cache_destination_id, environment_id) 
-             VALUES ($1, $2)",
-        )
-        .bind(cache_id)
-        .bind(env_id)
-        .execute(&mut *tx)
-        .await?;
-    }
+    replace_cache_environments_tx(&mut tx, cache_id, environment_ids).await?;
 
     tx.commit().await?;
 
@@ -591,6 +712,86 @@ pub async fn assign_environments_to_cache(
         cache_id
     );
     Ok(())
+}
+
+// CONCURRENCY: Every assignment writer takes the destination lock first,
+// including the create path (whose inserted row is already exclusively owned).
+// Publication takes FOR SHARE on the same row, preventing assignment mutation
+// between evidence comparison and successful completion. IDs form a set.
+async fn replace_cache_environments_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cache_id: i32,
+    environment_ids: &[uuid::Uuid],
+) -> Result<chrono::DateTime<chrono::Utc>> {
+    let exists =
+        sqlx::query_scalar::<_, i32>("SELECT id FROM cache_destinations WHERE id = $1 FOR UPDATE")
+            .bind(cache_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    if exists.is_none() {
+        anyhow::bail!("Cache destination not found");
+    }
+    sqlx::query("DELETE FROM cache_destination_environments WHERE cache_destination_id = $1")
+        .bind(cache_id)
+        .execute(&mut **tx)
+        .await?;
+    let mut ids = environment_ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    for id in ids {
+        sqlx::query("INSERT INTO cache_destination_environments (cache_destination_id, environment_id) VALUES ($1, $2)")
+            .bind(cache_id).bind(id).execute(&mut **tx).await?;
+    }
+    sqlx::query_scalar(
+        "UPDATE cache_destinations SET updated_at = NOW() WHERE id = $1 RETURNING updated_at",
+    )
+    .bind(cache_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(Into::into)
+}
+
+/// Reads decrypted publication settings and assignments under a shared lock.
+///
+/// Retains `FOR SHARE` on the destination until the caller ends the transaction.
+/// Configuration updates and every assignment writer must take the conflicting
+/// destination lock before making changes. Existing assignment rows are also
+/// locked so foreign-key cascade deletion cannot race the snapshot. The caller
+/// must not log or serialize the returned private credentials.
+///
+/// # Errors
+/// Returns an error for query, credential decryption, or certificate validation
+/// failure. Returns `None` when the destination does not exist.
+///
+/// # Examples
+/// ```no_run
+/// # async fn snapshot(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+/// use crystal_forge::queries::cache_destinations::{
+///     get_cache_publication_snapshot_tx,
+/// };
+/// let mut tx = pool.begin().await?;
+/// let snapshot = get_cache_publication_snapshot_tx(&mut tx, 42).await?;
+/// // Inspect private settings without logging them while tx retains the lock.
+/// tx.commit().await?;
+/// # Ok(()) }
+/// ```
+pub async fn get_cache_publication_snapshot_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cache_id: i32,
+) -> Result<Option<(CacheDestination, Vec<uuid::Uuid>)>> {
+    let destination = sqlx::query_as::<_, CacheDestination>(
+        "SELECT * FROM cache_destinations WHERE id = $1 FOR SHARE",
+    )
+    .bind(cache_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(destination) = destination else {
+        return Ok(None);
+    };
+    let ids = sqlx::query_scalar(
+        "SELECT environment_id FROM cache_destination_environments WHERE cache_destination_id = $1 ORDER BY environment_id FOR SHARE")
+        .bind(cache_id).fetch_all(&mut **tx).await?;
+    Ok(Some((decrypt_destination_secrets(destination)?, ids)))
 }
 
 pub async fn cache_destination_exists(pool: &PgPool, cache_id: i32) -> Result<bool> {
@@ -679,7 +880,100 @@ pub async fn filter_caches_by_environment(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security::cache_secrets::TEST_CERTIFICATE;
     use chrono::Utc;
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated test database creation privileges"]
+    async fn niks3_assignment_writers_wait_for_publication_snapshot(pool: PgPool) {
+        let first: uuid::Uuid = sqlx::query_scalar("INSERT INTO environments (name, description, is_active) VALUES ('assignment-first', 'test', TRUE) RETURNING id")
+            .fetch_one(&pool).await.unwrap();
+        let second: uuid::Uuid = sqlx::query_scalar("INSERT INTO environments (name, description, is_active) VALUES ('assignment-second', 'test', TRUE) RETURNING id")
+            .fetch_one(&pool).await.unwrap();
+        let destination = create_cache_destination(
+            &pool,
+            &CreateCacheDestination {
+                name: "assignment-lock".into(),
+                cache_type: "Nix".into(),
+                push_to: Some("https://cache.example".into()),
+                environment_ids: Some(vec![first]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            get_cache_environments(&pool, destination.id).await.unwrap(),
+            vec![first]
+        );
+        for use_update in [false, true] {
+            let mut reader = pool.begin().await.unwrap();
+            let reader_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *reader)
+                .await
+                .unwrap();
+            let (_, before) = get_cache_publication_snapshot_tx(&mut reader, destination.id)
+                .await
+                .unwrap()
+                .unwrap();
+            let writer_pool = pool.clone();
+            let id = destination.id;
+            let mut writer = tokio::spawn(async move {
+                if use_update {
+                    let mut update = empty_update();
+                    update.environment_ids = Some(vec![first]);
+                    update_cache_destination(&writer_pool, id, &update).await?;
+                } else {
+                    assign_environments_to_cache(&writer_pool, id, &[second]).await?;
+                }
+                Ok::<_, anyhow::Error>(())
+            });
+            // Observe an actual PostgreSQL lock wait, not a scheduling delay.
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid)))")
+                        .bind(reader_pid).fetch_one(&pool).await.unwrap();
+                    if waiting { break; }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            }).await.unwrap();
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(20), &mut writer)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(get_cache_environments(&pool, id).await.unwrap(), before);
+            reader.commit().await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), writer)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                get_cache_environments(&pool, id).await.unwrap(),
+                if use_update {
+                    vec![first]
+                } else {
+                    vec![second]
+                }
+            );
+        }
+        // Usage still advances the general timestamp, but leaves assignment
+        // and credential configuration intact for the fingerprint comparison.
+        update_cache_destination_last_used(&pool, "assignment-lock")
+            .await
+            .unwrap();
+        let used = get_cache_destination(&pool, destination.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(used.last_used_at.is_some());
+        assert!(used.updated_at >= destination.updated_at);
+        assert_eq!(
+            get_cache_environments(&pool, destination.id).await.unwrap(),
+            vec![first]
+        );
+    }
 
     fn empty_update() -> UpdateCacheDestination {
         UpdateCacheDestination {
@@ -707,6 +1001,7 @@ mod tests {
             force_repush: None,
             require_sigs: None,
             environment_ids: None,
+            ..Default::default()
         }
     }
 
@@ -739,6 +1034,216 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_used_at: None,
+            ..Default::default()
+        }
+    }
+
+    fn niks3_destination() -> CacheDestination {
+        CacheDestination {
+            cache_type: "Niks3".into(),
+            push_to: Some("https://read.example.com".into()),
+            niks3_server_url: Some("https://write.example.com".into()),
+            niks3_public_keys: vec!["cache-1:key".into()],
+            niks3_write_auth_mode: Some("token".into()),
+            niks3_auth_token: Some("old-token".into()),
+            niks3_read_auth_mode: Some("mtls".into()),
+            niks3_read_client_cert: Some(TEST_CERTIFICATE.into()),
+            niks3_read_client_key: Some("read-key".into()),
+            niks3_read_ca_cert: Some(TEST_CERTIFICATE.into()),
+            ..base_destination()
+        }
+    }
+
+    #[test]
+    fn niks3_unrelated_update_preserves_credentials() {
+        let current = niks3_destination();
+        let update = UpdateCacheDestination {
+            name: Some("renamed".into()),
+            ..empty_update()
+        };
+        validate_update_shape(&current, &update).unwrap();
+        let merged = current.merge_niks3_update(&update).unwrap();
+        assert_eq!(merged.niks3_auth_token, current.niks3_auth_token);
+        assert_eq!(merged.niks3_read_client_key, current.niks3_read_client_key);
+        assert_eq!(
+            merged.niks3_read_client_cert,
+            current.niks3_read_client_cert
+        );
+        assert_eq!(merged.niks3_read_ca_cert, current.niks3_read_ca_cert);
+    }
+
+    #[test]
+    fn niks3_mode_transitions_clear_complete_old_credential_sets() {
+        let current = niks3_destination();
+        let update = UpdateCacheDestination {
+            niks3_write_auth_mode: Some("mtls".into()),
+            niks3_write_client_cert: Some(TEST_CERTIFICATE.into()),
+            niks3_write_client_key: Some("write-key".into()),
+            niks3_write_ca_cert: Some(TEST_CERTIFICATE.into()),
+            niks3_read_auth_mode: Some("none".into()),
+            clear_niks3_auth_token: true,
+            clear_niks3_read_client_key: true,
+            ..empty_update()
+        };
+        validate_update_shape(&current, &update).unwrap();
+        let mtls = current.merge_niks3_update(&update).unwrap();
+        assert!(mtls.niks3_auth_token.is_none());
+        assert!(mtls.niks3_read_client_cert.is_none());
+        assert!(mtls.niks3_read_client_key.is_none());
+        assert!(mtls.niks3_read_ca_cert.is_none());
+        let update = UpdateCacheDestination {
+            niks3_write_auth_mode: Some("token".into()),
+            niks3_auth_token: Some("new-token".into()),
+            clear_niks3_write_client_key: true,
+            ..empty_update()
+        };
+        validate_update_shape(&mtls, &update).unwrap();
+        let token = mtls.merge_niks3_update(&update).unwrap();
+        assert_eq!(token.niks3_auth_token.as_deref(), Some("new-token"));
+        assert!(token.niks3_write_client_cert.is_none());
+        assert!(token.niks3_write_client_key.is_none());
+        assert!(token.niks3_write_ca_cert.is_none());
+    }
+
+    #[test]
+    fn niks3_rejects_incomplete_transitions_and_invalid_secret_clears() {
+        let current = niks3_destination();
+        for update in [
+            UpdateCacheDestination {
+                niks3_write_auth_mode: Some("mtls".into()),
+                ..empty_update()
+            },
+            UpdateCacheDestination {
+                clear_niks3_auth_token: true,
+                ..empty_update()
+            },
+            UpdateCacheDestination {
+                clear_niks3_read_client_key: true,
+                ..empty_update()
+            },
+            UpdateCacheDestination {
+                clear_niks3_auth_token: true,
+                niks3_auth_token: Some("replacement".into()),
+                ..empty_update()
+            },
+            UpdateCacheDestination {
+                clear_niks3_write_client_key: true,
+                niks3_write_client_key: Some("replacement".into()),
+                ..empty_update()
+            },
+            UpdateCacheDestination {
+                clear_niks3_read_client_key: true,
+                niks3_read_client_key: Some("replacement".into()),
+                ..empty_update()
+            },
+        ] {
+            assert!(validate_update_shape(&current, &update).is_err());
+            assert_eq!(current.niks3_auth_token.as_deref(), Some("old-token"));
+        }
+        let update = UpdateCacheDestination {
+            cache_type: Some("Nix".into()),
+            ..empty_update()
+        };
+        validate_update_shape(&current, &update).unwrap();
+        let merged = current.merge_niks3_update(&update).unwrap();
+        assert!(merged.niks3_auth_token.is_none());
+        assert!(merged.niks3_read_client_cert.is_none());
+        assert!(merged.niks3_read_client_key.is_none());
+        assert!(merged.niks3_read_ca_cert.is_none());
+    }
+
+    #[test]
+    fn ca_clears_preserve_modes_client_credentials_and_the_other_plane() {
+        let current = CacheDestination {
+            niks3_write_auth_mode: Some("mtls".into()),
+            niks3_auth_token: None,
+            niks3_write_client_cert: Some(TEST_CERTIFICATE.into()),
+            niks3_write_client_key: Some("write-key".into()),
+            niks3_write_ca_cert: Some(TEST_CERTIFICATE.into()),
+            ..niks3_destination()
+        };
+        for (write, read) in [(true, false), (false, true), (true, true)] {
+            let update = UpdateCacheDestination {
+                clear_niks3_write_ca_cert: write,
+                clear_niks3_read_ca_cert: read,
+                ..empty_update()
+            };
+            validate_update_shape(&current, &update).unwrap();
+            let merged = current.merge_niks3_update(&update).unwrap();
+            assert_eq!(merged.niks3_write_ca_cert.is_none(), write);
+            assert_eq!(merged.niks3_read_ca_cert.is_none(), read);
+            assert_eq!(merged.niks3_write_auth_mode, current.niks3_write_auth_mode);
+            assert_eq!(merged.niks3_read_auth_mode, current.niks3_read_auth_mode);
+            assert_eq!(
+                merged.niks3_write_client_cert,
+                current.niks3_write_client_cert
+            );
+            assert_eq!(
+                merged.niks3_write_client_key,
+                current.niks3_write_client_key
+            );
+            assert_eq!(
+                merged.niks3_read_client_cert,
+                current.niks3_read_client_cert
+            );
+            assert_eq!(merged.niks3_read_client_key, current.niks3_read_client_key);
+        }
+        for update in [
+            UpdateCacheDestination {
+                clear_niks3_write_ca_cert: true,
+                niks3_write_ca_cert: Some(TEST_CERTIFICATE.into()),
+                ..empty_update()
+            },
+            UpdateCacheDestination {
+                clear_niks3_read_ca_cert: true,
+                niks3_read_ca_cert: Some(TEST_CERTIFICATE.into()),
+                ..empty_update()
+            },
+        ] {
+            assert!(validate_update_shape(&current, &update).is_err());
+        }
+        let renamed = current
+            .merge_niks3_update(&UpdateCacheDestination {
+                name: Some("renamed".into()),
+                ..empty_update()
+            })
+            .unwrap();
+        assert_eq!(renamed.niks3_write_ca_cert, current.niks3_write_ca_cert);
+        assert_eq!(renamed.niks3_read_ca_cert, current.niks3_read_ca_cert);
+    }
+
+    #[test]
+    fn update_and_read_gate_reject_combined_certificate_private_key_fields() {
+        let current = CacheDestination {
+            niks3_write_auth_mode: Some("mtls".into()),
+            niks3_auth_token: None,
+            niks3_write_client_cert: Some(TEST_CERTIFICATE.into()),
+            niks3_write_client_key: Some("write-key".into()),
+            ..niks3_destination()
+        };
+        let combined = format!(
+            "{TEST_CERTIFICATE}-----BEGIN PRIVATE KEY-----\nAQID\n-----END PRIVATE KEY-----"
+        );
+        for field in [
+            "niks3_write_client_cert",
+            "niks3_write_ca_cert",
+            "niks3_read_client_cert",
+            "niks3_read_ca_cert",
+        ] {
+            let update: UpdateCacheDestination =
+                serde_json::from_value(serde_json::json!({ (field): combined })).unwrap();
+            assert!(
+                validate_update_shape(&current, &update)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(field)
+            );
+            let mut stored = serde_json::to_value(&current).unwrap();
+            stored[field] = serde_json::Value::String(combined.clone());
+            let stored: CacheDestination = serde_json::from_value(stored).unwrap();
+            let error = decrypt_destination_secrets(stored).unwrap_err().to_string();
+            assert!(error.contains(field));
+            assert!(!error.contains("AQID"));
         }
     }
 

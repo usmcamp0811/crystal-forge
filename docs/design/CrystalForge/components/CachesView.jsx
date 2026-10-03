@@ -352,6 +352,32 @@ function CacheFormModal({ mode, cache, onClose }) {
     environments: [],
   });
   const [testing, setTesting] = React.useState(null);
+  // Niks3 has independent write and read trust boundaries. Secrets start empty
+  // in edit mode; configured flags describe retained credentials, never values.
+  const [niks3, setNiks3] = React.useState({ serverUrl: cache?.niks3_server_url || "", keys: (cache?.niks3_public_keys || []).join("\n"), writeMode: cache?.niks3_write_auth_mode || "token", readMode: cache?.niks3_read_auth_mode || "none", token: "", writeCert: "", writeKey: "", writeCa: "", readCert: "", readKey: "", readCa: "", clearWriteCa: false, clearReadCa: false });
+  const [discovery, setDiscovery] = React.useState(null);
+  const [discovering, setDiscovering] = React.useState(false);
+  const setN = (key, value) => setNiks3(p => ({ ...p, [key]: value }));
+  const setNiks3Mode = (plane, value) => {
+    setTesting(null);
+    setNiks3(p => ({ ...p, [`${plane}Mode`]: value,
+      [`${plane}Cert`]: "", [`${plane}Key`]: "", [`${plane}Ca`]: "",
+      [plane === "write" ? "clearWriteCa" : "clearReadCa"]: false,
+      ...(plane === "write" ? { token: "" } : {}) }));
+  };
+  const discover = async () => {
+    setDiscovering(true);
+    setDiscovery("Discovering…");
+    try {
+      const response = await fetch("/api/v1/caches/niks3/discover", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ server_url: niks3.serverUrl }) });
+      if (!response.ok) throw new Error("Check the API URL and target policy.");
+      const values = await response.json();
+      setNiks3(p => ({ ...p, serverUrl: values.server_url, keys: values.public_keys.join("\n") }));
+      set("url", values.substituter_url);
+      setDiscovery("Review the discovered API URL, read URL and signing keys before saving. External providers are not offered.");
+    } catch { setDiscovery("Discovery failed. Check the API URL, HTTPS certificate and permitted target policy."); }
+    finally { setDiscovering(false); }
+  };
   const [addCredOpen, setAddCredOpen] = React.useState(false);
   const set = (k,v) => setForm(p => ({ ...p, [k]: v }));
   const toggleEnv = (env) => set("environments", form.environments.includes(env)
@@ -364,7 +390,7 @@ function CacheFormModal({ mode, cache, onClose }) {
     { id:"auth",  label:"Credentials",  icon:"key" },
     { id:"envs",  label:"Environments", icon:"grid" },
   ];
-  const typeLabel = form.type === "s3" ? "S3" : form.type === "attic" ? "Attic" : "Nix HTTPS";
+  const typeLabel = form.type === "niks3" ? "Niks3" : form.type === "s3" ? "S3" : form.type === "attic" ? "Attic" : "Nix HTTPS";
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -413,20 +439,42 @@ function CacheFormModal({ mode, cache, onClose }) {
                     { v:"s3",   l:"S3-compatible" },
                     { v:"attic",l:"Attic" },
                     { v:"nix",  l:"Nix HTTPS" },
+                    { v:"niks3", l:"Niks3" },
                   ].map(o => (
                     <button key={o.v} className={form.type === o.v ? "active" : ""} onClick={()=>set("type", o.v)}>{o.l}</button>
                   ))}
                 </div>
               </div>
               <div className="field">
-                <label>URL</label>
+                <label>{form.type === "niks3" ? "Read / substituter URL" : "URL"}</label>
                 <input className="input focus-ring mono" value={form.url} onChange={e=>set("url",e.target.value)} style={{ fontSize:12 }}
                   placeholder={form.type === "s3" ? "s3://bucket?region=us-east-1" : form.type === "attic" ? "attic://host/cache" : "https://cache.nixos.org"}/>
               </div>
+              {form.type === "niks3" && <>
+                <div className="field"><label>Write / API URL</label><input className="input focus-ring mono" disabled={discovering} value={niks3.serverUrl} onChange={e=>setN("serverUrl",e.target.value)} placeholder="https://niks3.example.com"/></div>
+                <button className="btn btn-ghost focus-ring" disabled={discovering || !niks3.serverUrl.trim()} onClick={discover}>{discovering ? "Discovering…" : "Discover configuration"}</button>
+                {discovery && <p className="help" role="status">{discovery}</p>}
+                <div className="field"><label>Signing public keys</label><textarea className="input focus-ring mono" rows={4} value={niks3.keys} onChange={e=>setN("keys",e.target.value)}/><div className="help">One Nix signing key per line. Keep both keys during rotation.</div></div>
+              </>}
             </>
           )}
 
-          {section === "auth" && (
+          {section === "auth" && form.type === "niks3" && <>
+            <div className="pe-sec-head"><h3>Credentials</h3><p>Write credentials stay on builders. Read credentials go only to assigned agents.</p></div>
+            <div className="field"><label>Write authentication</label><select className="input" value={niks3.writeMode} onChange={e=>setNiks3Mode("write",e.target.value)}><option value="token">Static token</option><option value="mtls">mTLS</option></select></div>
+            {niks3.writeMode === "token" && <div className="field"><label>Write token</label><input type="password" className="input" value={niks3.token} onChange={e=>setN("token",e.target.value)} placeholder={cache?.niks3_write_token_configured ? "Configured — leave blank to retain; enter a token to rotate" : "Required"}/></div>}
+            <div className="field"><label>Read authentication</label><select className="input" value={niks3.readMode} onChange={e=>setNiks3Mode("read",e.target.value)}><option value="none">Public (none)</option><option value="mtls">mTLS</option></select></div>
+            {["write", "read"].filter(plane=>niks3[`${plane}Mode`] === "mtls").map(plane=><React.Fragment key={plane}>
+              <h4>{plane === "write" ? "Write" : "Read"} mTLS identity</h4>
+              <p className="help">{cache?.[`niks3_${plane}_mtls_configured`] ? "Identity configured. Leave both identity fields blank to retain, or replace certificate and key together." : "Enter a client certificate and private key together."}</p>
+              {["Cert", "Key", "Ca"].map(part=><div className="field" key={part}><label>{plane} {part === "Cert" ? "client certificate" : part === "Key" ? "private key" : "CA certificate (optional)"}</label><textarea className="input mono" rows={3} value={niks3[`${plane}${part}`]} onChange={e=>setN(`${plane}${part}`,e.target.value)} autoComplete="off" style={part === "Key" ? { WebkitTextSecurity: "disc" } : undefined} placeholder="PEM; leave blank to retain configured material"/></div>)}
+              {cache?.[`niks3_${plane}_ca_cert`] && <label><input type="checkbox" checked={niks3[plane === "write" ? "clearWriteCa" : "clearReadCa"]} onChange={e=>setN(plane === "write" ? "clearWriteCa" : "clearReadCa", e.target.checked)}/> Remove {plane === "write" ? "Write" : "Read"} custom CA on save</label>}
+            </React.Fragment>)}
+            <p className="help">Changing modes clears the previous credentials on save. External credential providers are not offered.</p>
+            <button className="btn btn-ghost" onClick={()=>setTesting("untested")}>Test connection</button>
+            {testing && <p role="status">Write authorization: Untested. Discovery and read connectivity do not prove write permission.</p>}
+          </>}
+          {section === "auth" && form.type !== "niks3" && (
             <>
               <div className="pe-sec-head">
                 <h3>Credentials</h3>

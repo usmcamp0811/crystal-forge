@@ -1,10 +1,27 @@
 use super::duration_serde;
 pub use cf_protocol::cache::CacheType;
+use cf_protocol::cache::{CacheReadAuth, Niks3WriteAuth};
 use serde::Deserialize;
 use std::time::Duration;
 
+/// Configures publication and read-plane trust for one cache destination.
+///
+/// Niks3 write credentials and read credentials are independent. Consumers must
+/// use the prepared credential helpers to own files until child processes exit.
 #[derive(Clone, Debug, Deserialize)]
 pub struct CacheConfig {
+    /// Niks3 write API URL, distinct from the read/substituter URL.
+    #[serde(default)]
+    pub niks3_server_url: Option<String>,
+    /// Authentication for Niks3 writes over HTTPS.
+    #[serde(default)]
+    pub niks3_write_auth: Option<Niks3WriteAuth>,
+    /// Signing keys trusted for Niks3 cache reads.
+    #[serde(default)]
+    pub niks3_public_keys: Vec<String>,
+    /// Independent read-plane authentication; absent means public reads.
+    #[serde(default)]
+    pub niks3_read_auth: CacheReadAuth,
     #[serde(default)]
     pub cache_type: CacheType,
     pub push_to: Option<String>,
@@ -82,8 +99,12 @@ impl CacheConfig {
     }
 
     /// Returns the command and arguments for cache operations.
+    ///
+    /// Returns `None` for Niks3: a generic command cannot own authentication
+    /// files. Use [`crate::cache_credentials::PreparedNiks3Push`] instead.
     pub fn cache_command(&self, store_path: &str) -> Option<CacheCommand> {
         match self.cache_type {
+            CacheType::Niks3 => None,
             CacheType::S3 => self.s3_cache_command(store_path),
             CacheType::Attic => self.attic_cache_command(store_path),
             CacheType::Http | CacheType::Nix => self.nix_cache_command(store_path),
@@ -158,6 +179,10 @@ impl CacheConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
+            niks3_server_url: None,
+            niks3_write_auth: None,
+            niks3_public_keys: Vec::new(),
+            niks3_read_auth: CacheReadAuth::None,
             cache_type: CacheType::Nix,
             push_to: None,
             push_after_build: false,
@@ -182,6 +207,49 @@ impl Default for CacheConfig {
             push_timeout_seconds: Self::default_push_timeout_seconds(),
             force_repush: false,
             require_sigs: true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_cache_configuration_defaults_niks3_fields() {
+        let config: CacheConfig = serde_json::from_value(serde_json::json!({
+            "attic_ignore_upstream_cache_filter":true, "attic_jobs":5, "require_sigs":true
+        }))
+        .unwrap();
+        assert!(config.niks3_server_url.is_none());
+        assert!(config.niks3_write_auth.is_none());
+        assert!(config.niks3_public_keys.is_empty());
+        assert_eq!(config.niks3_read_auth, CacheReadAuth::None);
+        let default = CacheConfig::default();
+        assert!(default.niks3_server_url.is_none());
+        assert!(default.niks3_write_auth.is_none());
+        assert!(default.niks3_public_keys.is_empty());
+        assert_eq!(default.niks3_read_auth, CacheReadAuth::None);
+    }
+
+    #[test]
+    fn niks3_config_requires_prepared_command_and_redacts_auth() {
+        let config: CacheConfig = serde_json::from_value(serde_json::json!({
+            "cache_type":"Niks3", "push_to":"https://read.example",
+            "niks3_server_url":"https://write.example",
+            "niks3_write_auth":{"kind":"token", "token":"secret-token"},
+            "niks3_public_keys":["one:key", "two:key"],
+            "niks3_read_auth":{"kind":"mtls", "client_certificate":"secret-cert",
+                "client_private_key":"secret-key", "ca_certificate":"secret-ca"},
+            "attic_ignore_upstream_cache_filter":true, "attic_jobs":5, "require_sigs":true
+        }))
+        .unwrap();
+        assert_eq!(config.cache_type, CacheType::Niks3);
+        assert_eq!(config.niks3_public_keys, ["one:key", "two:key"]);
+        assert!(config.cache_command("/nix/store/abc-output").is_none());
+        assert!(config.copy_command_args("/nix/store/abc-output").is_none());
+        for secret in ["secret-token", "secret-key", "secret-cert", "secret-ca"] {
+            assert!(!format!("{config:?}").contains(secret));
         }
     }
 }

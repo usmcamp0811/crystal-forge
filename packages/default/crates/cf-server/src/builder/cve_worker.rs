@@ -36,7 +36,7 @@ use crate::derivations::utils::{
 };
 use crate::log::{WorkerState, WorkerStatus, get_cve_status};
 use crate::models::cache_destination::CacheDestination;
-use crate::queries::cache_destinations::get_cache_destination;
+use crate::queries::cache_push::eligible_cache_destinations_for_derivation;
 use crate::queries::cve_scan_leases::{
     expire_post_build_scan_obligations, reconcile_post_build_scan_prerequisites,
 };
@@ -59,7 +59,7 @@ use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::{Context, Result};
 use axum::async_trait;
 use chrono::Utc;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use tokio::fs;
 use tokio::process::Command as TokioCommand;
 use tokio::time::{sleep, timeout};
@@ -152,16 +152,26 @@ impl CveScanRunner for VulnixRunner {
     }
 }
 
-fn cache_destination_to_config(dest: &CacheDestination) -> CacheConfig {
+fn cache_destination_to_config(dest: &CacheDestination) -> Result<CacheConfig> {
+    if dest.cache_type == "Niks3" {
+        let (url, keys, auth) = dest.read_config().map_err(anyhow::Error::msg)?;
+        return Ok(CacheConfig {
+            cache_type: CacheType::Niks3,
+            push_to: Some(url),
+            niks3_public_keys: keys,
+            niks3_read_auth: auth,
+            ..CacheConfig::default()
+        });
+    }
     let cache_type = match dest.cache_type.as_str() {
         "S3" => CacheType::S3,
         "Attic" => CacheType::Attic,
         "Http" => CacheType::Http,
         "Nix" => CacheType::Nix,
-        _ => CacheType::Nix,
+        _ => anyhow::bail!("Unknown cache type"),
     };
 
-    CacheConfig {
+    Ok(CacheConfig {
         cache_type,
         push_to: dest.push_to.clone(),
         push_after_build: true,
@@ -186,7 +196,8 @@ fn cache_destination_to_config(dest: &CacheDestination) -> CacheConfig {
         push_timeout_seconds: dest.push_timeout_seconds.unwrap_or(3600) as u64,
         force_repush: dest.force_repush.unwrap_or(false),
         require_sigs: dest.require_sigs.unwrap_or(true),
-    }
+        ..CacheConfig::default()
+    })
 }
 
 fn materialization_from_url(cache: &CacheConfig) -> Option<String> {
@@ -203,7 +214,9 @@ fn materialization_from_url(cache: &CacheConfig) -> Option<String> {
                 cache_name
             ))
         }
-        CacheType::S3 | CacheType::Http | CacheType::Nix => cache.push_to.clone(),
+        CacheType::Niks3 | CacheType::S3 | CacheType::Http | CacheType::Nix => {
+            cache.push_to.clone()
+        }
     }
 }
 
@@ -1287,12 +1300,126 @@ async fn observe_scan_inputs(store_path: &str, derivation_path: &str) -> ScanInp
     }
 }
 
+#[derive(sqlx::FromRow)]
+struct CompletedCacheReference {
+    cache_destination: Option<String>,
+    cache_destination_id: Option<i32>,
+    cache_destination_source: String,
+}
+
+/// Resolves read settings without changing a completed publication record.
+///
+/// Database identity survives renames and never falls back after deletion.
+/// Legacy compatibility accepts exactly one current eligible name/URL match.
+/// Unlike the push resolver, reads must not pin uncertain historical records.
+fn materialization_source_for_reference(
+    reference: &CompletedCacheReference,
+    eligible: &[CacheDestination],
+    static_config: &CacheConfig,
+) -> Option<MaterializationSource> {
+    let destination = match reference.cache_destination_source.as_str() {
+        "database" => {
+            let id = reference.cache_destination_id?;
+            eligible.iter().find(|dest| dest.id == id && dest.enabled)?
+        }
+        "legacy" if reference.cache_destination_id.is_none() => {
+            let name_or_url = reference.cache_destination.as_deref()?;
+            let mut matches = eligible.iter().filter(|dest| {
+                dest.enabled
+                    && (dest.name == name_or_url || dest.push_to.as_deref() == Some(name_or_url))
+            });
+            let destination = matches.next()?;
+            if matches.next().is_some() {
+                return None;
+            }
+            destination
+        }
+        "static" if reference.cache_destination_id.is_none() => {
+            // SECURITY: Explicit static provenance alone permits static auth.
+            // A colliding database URL must never supply keys or credentials.
+            let url = reference.cache_destination.as_deref()?;
+            if !static_config.push_after_build
+                || url.trim().is_empty()
+                || static_config.push_to.as_deref() != Some(url)
+            {
+                return None;
+            }
+            return materialization_source_from_config(url, static_config.clone());
+        }
+        _ => return None,
+    };
+    materialization_source_from_config(
+        &destination.name,
+        cache_destination_to_config(destination).ok()?,
+    )
+}
+
+fn materialization_source_from_config(
+    label: &str,
+    cache_config: CacheConfig,
+) -> Option<MaterializationSource> {
+    let from_url = materialization_from_url(&cache_config)?;
+    if from_url.trim().is_empty() {
+        return None;
+    }
+    let trusted_public_key = cache_config.attic_public_key.clone();
+    let nix_config_lines =
+        materialization_nix_config_lines(&from_url, &cache_config, trusted_public_key.as_deref());
+    Some(MaterializationSource {
+        label: label.to_owned(),
+        from_url,
+        cache_config: Some(cache_config),
+        trusted_public_key,
+        nix_config_lines,
+    })
+}
+
+/// Loads completed publication references independently of destination names.
+///
+/// Uses the same current environment eligibility as publication. Static-only
+/// records do not query database destinations. Invalid references are skipped;
+/// query, environment ambiguity and credential-decryption errors fail closed.
+async fn completed_materialization_sources(
+    pool: &PgPool,
+    derivation: &crate::derivations::Derivation,
+    static_config: &CacheConfig,
+) -> Result<Vec<MaterializationSource>> {
+    let references = sqlx::query_as::<_, CompletedCacheReference>(
+        "SELECT cache_destination, cache_destination_id, cache_destination_source
+         FROM cache_push_jobs WHERE derivation_id = $1 AND status = 'completed'
+         ORDER BY id",
+    )
+    .bind(derivation.id)
+    .fetch_all(pool)
+    .await
+    .context("Failed to query completed publications for materialization")?;
+    let eligible = if references
+        .iter()
+        .any(|reference| reference.cache_destination_source != "static")
+    {
+        eligible_cache_destinations_for_derivation(pool, derivation).await?
+    } else {
+        Vec::new()
+    };
+    Ok(references
+        .iter()
+        .filter_map(|reference| {
+            materialization_source_for_reference(reference, &eligible, static_config)
+        })
+        .collect())
+}
+
 /// Ensures the output path and its recorded derivation are both available
 /// locally, restoring only what is missing from a configured cache.
 ///
-/// Queries completed `cache_push_jobs` for this derivation and resolves each
-/// cache destination's `push_to` URL, preserving that destination's
-/// authentication, signature, and `NIX_CONFIG` handling.
+/// Resolves completed publications by durable database ID and current
+/// environment eligibility, or by matching explicit static configuration.
+/// Legacy records require one eligible database name/URL match. Missing,
+/// disabled, ineligible or ambiguous destinations never use static fallback.
+/// Preserves the selected source's authentication and signature settings.
+/// Niks3 uses only independent read authentication and all configured signing
+/// keys. Niks3 copies always require signatures and never receive write tokens
+/// or AWS credentials. Private files remain owned until Nix exits or is reaped.
 ///
 /// # Behavior
 ///
@@ -1305,8 +1432,8 @@ async fn observe_scan_inputs(store_path: &str, derivation_path: &str) -> ScanInp
 ///
 /// # Errors
 ///
-/// Returns an error when the cache-destination query fails or a `nix` process
-/// cannot be spawned or awaited.
+/// Returns an error for database, environment-resolution or decryption failures,
+/// or when a `nix` process cannot be spawned or awaited.
 async fn materialize_store_path_from_cache(
     pool: &PgPool,
     derivation: &crate::derivations::Derivation,
@@ -1322,93 +1449,9 @@ async fn materialize_store_path_from_cache(
         debug!("Scan inputs for {store_path} are already present locally");
         return Ok(true);
     }
-    // Resolve completed cache pushes for this derivation. `cache_destination`
-    // may hold either a DB destination name or a legacy/server.toml URL, so we
-    // match on both `cd.name` and `cd.push_to`.
-    let cache_rows = sqlx::query(
-        r#"
-        SELECT DISTINCT
-            cpj.cache_destination,
-            cd.id AS cache_destination_id,
-            cd.name AS cache_destination_name
-        FROM cache_push_jobs cpj
-        LEFT JOIN cache_destinations cd
-            ON (cd.push_to = cpj.cache_destination OR cd.name = cpj.cache_destination)
-        WHERE cpj.derivation_id = $1
-          AND cpj.status = 'completed'
-          AND COALESCE(cd.push_to, cpj.cache_destination) IS NOT NULL
-        "#,
-    )
-    .bind(derivation.id)
-    .fetch_all(pool)
-    .await
-    .context("Failed to query cache destinations for materialization")?;
-
-    let mut sources = Vec::new();
-    for row in &cache_rows {
-        let raw_destination = row
-            .try_get::<String, _>("cache_destination")
-            .context("cache_destination row missing cache_destination")?;
-
-        if let Ok(cache_destination_id) = row.try_get::<i32, _>("cache_destination_id") {
-            let Some(destination) = get_cache_destination(pool, cache_destination_id)
-                .await
-                .with_context(|| {
-                    format!(
-                        "Failed to load cache destination {} for materialization",
-                        cache_destination_id
-                    )
-                })?
-            else {
-                continue;
-            };
-
-            let cache_config = cache_destination_to_config(&destination);
-            let Some(from_url) = materialization_from_url(&cache_config) else {
-                warn!(
-                    "Skipping cache destination {} for {}: missing usable materialization URL",
-                    destination.name, store_path
-                );
-                continue;
-            };
-            let nix_config_lines = materialization_nix_config_lines(
-                &from_url,
-                &cache_config,
-                destination.attic_public_key.as_deref(),
-            );
-
-            sources.push(MaterializationSource {
-                label: destination.name.clone(),
-                from_url,
-                cache_config: Some(cache_config),
-                trusted_public_key: destination.attic_public_key.clone(),
-                nix_config_lines,
-            });
-        } else if !raw_destination.trim().is_empty() {
-            let cfg = CrystalForgeConfig::load().unwrap_or_default();
-            let server_cache = cfg.get_cache_config().clone();
-            let cache_config = server_cache
-                .push_to
-                .as_deref()
-                .filter(|push_to| push_to.trim() == raw_destination.trim())
-                .map(|_| server_cache.clone());
-            let resolved_from_url = cache_config
-                .as_ref()
-                .and_then(materialization_from_url)
-                .unwrap_or_else(|| raw_destination.clone());
-            let nix_config_lines = cache_config
-                .as_ref()
-                .map(|cache| materialization_nix_config_lines(&resolved_from_url, cache, None))
-                .unwrap_or_default();
-            sources.push(MaterializationSource {
-                label: raw_destination.clone(),
-                from_url: resolved_from_url,
-                cache_config,
-                trusted_public_key: server_cache.attic_public_key.clone(),
-                nix_config_lines,
-            });
-        }
-    }
+    let cfg = CrystalForgeConfig::load().unwrap_or_default();
+    let sources =
+        completed_materialization_sources(pool, derivation, cfg.get_cache_config()).await?;
 
     if sources.is_empty() {
         debug!(
@@ -1484,6 +1527,70 @@ async fn copy_path_from_cache_with_program(
         source.from_url, store_path, source.label
     );
 
+    // CONCURRENCY: A detached owner retains temporary credentials through
+    // timeout kill/reap and through scan cancellation. No child output is logged.
+    if let Some(cache) = source
+        .cache_config
+        .as_ref()
+        .filter(|c| c.cache_type == CacheType::Niks3)
+    {
+        let cache = cache.clone();
+        let store_path = store_path.to_owned();
+        let nix_program = nix_program.to_owned();
+        let success = tokio::spawn(async move {
+            let read = cf_config::cache_credentials::PreparedCacheRead::new(
+                cache.push_to.as_deref().context("Missing Niks3 read URL")?,
+                &cache.niks3_public_keys,
+                &cache.niks3_read_auth,
+            )?;
+            let mut command = TokioCommand::new(nix_program);
+            // SECURITY: Read subprocesses must not inherit write-plane or AWS
+            // credentials, including ambient Nix access-token configuration.
+            command.env_clear();
+            for key in ["PATH", "NIX_REMOTE", "SSL_CERT_FILE", "SSL_CERT_DIR"] {
+                if let Some(value) = std::env::var_os(key) {
+                    command.env(key, value);
+                }
+            }
+            command.args([
+                "copy",
+                "--from",
+                &read.url,
+                "--option",
+                "extra-trusted-public-keys",
+                &read.trusted_public_keys,
+                "--option",
+                "require-sigs",
+                "true",
+                &store_path,
+            ]);
+            if let Some(ca) = &read.ca_certificate_path {
+                command.env("NIX_SSL_CERT_FILE", ca);
+            }
+            command
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            isolate(&mut command);
+            let mut child = ScannerProcessGroup::new(command.spawn()?, "Niks3 CVE copy")?;
+            let success = match timeout(copy_timeout, child.wait()).await {
+                Ok(Ok(status)) => status.success(),
+                Ok(Err(error)) => {
+                    child.terminate().await;
+                    return Err(error.into());
+                }
+                Err(_) => {
+                    child.terminate().await;
+                    return Ok(false);
+                }
+            };
+            child.disarm();
+            drop(read);
+            Ok::<_, anyhow::Error>(success && fs::try_exists(store_path).await?)
+        })
+        .await
+        .context("Niks3 materialization owner failed")??;
+        return Ok(success);
+    }
     let mut command = TokioCommand::new(nix_program);
     command.arg("copy").arg("--from").arg(&source.from_url);
 
@@ -1577,6 +1684,428 @@ async fn set_cve_status_idle() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn completed_reference(source: &str, id: Option<i32>, name: &str) -> CompletedCacheReference {
+        CompletedCacheReference {
+            cache_destination: Some(name.into()),
+            cache_destination_id: id,
+            cache_destination_source: source.into(),
+        }
+    }
+
+    fn materialization_destination(id: i32, name: &str) -> CacheDestination {
+        CacheDestination {
+            id,
+            name: name.into(),
+            enabled: true,
+            cache_type: "Niks3".into(),
+            push_to: Some("https://read.example".into()),
+            niks3_public_keys: vec!["selected-one:key".into(), "selected-two:key".into()],
+            niks3_read_auth_mode: Some("mtls".into()),
+            niks3_read_client_cert: Some(crate::security::cache_secrets::TEST_CERTIFICATE.into()),
+            niks3_read_client_key: Some("selected-read-key".into()),
+            niks3_auth_token: Some("excluded-write-token".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn materialization_database_identity_survives_rename_and_rejects_replacement() {
+        let reference = completed_reference("database", Some(7), "original-name");
+        let mut destination = materialization_destination(7, "renamed");
+        let static_config = CacheConfig {
+            cache_type: CacheType::Niks3,
+            push_to: destination.push_to.clone(),
+            push_after_build: true,
+            niks3_public_keys: vec!["wrong-static:key".into()],
+            ..Default::default()
+        };
+        let resolve = |eligible: &[CacheDestination]| {
+            materialization_source_for_reference(&reference, eligible, &static_config)
+        };
+        let source = resolve(&[destination.clone()]).unwrap();
+        assert_eq!(source.label, "renamed");
+        let config = source.cache_config.unwrap();
+        assert_eq!(config.niks3_public_keys, destination.niks3_public_keys);
+        match config.niks3_read_auth {
+            cf_protocol::cache::CacheReadAuth::Mtls {
+                client_private_key, ..
+            } => {
+                assert_eq!(client_private_key, "selected-read-key");
+            }
+            _ => panic!("selected read authentication lost"),
+        }
+        assert!(config.niks3_write_auth.is_none());
+        assert!(resolve(&[]).is_none());
+        destination.enabled = false;
+        assert!(resolve(&[destination.clone()]).is_none());
+        destination.enabled = true;
+        destination.id = 8;
+        destination.name = "original-name".into();
+        assert!(resolve(&[destination]).is_none());
+        assert!(
+            materialization_source_for_reference(
+                &completed_reference("database", None, "original-name"),
+                &[],
+                &static_config,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn materialization_static_url_collision_keeps_explicit_static_keys_and_auth() {
+        let reference = completed_reference("static", None, "https://read.example");
+        let destinations = [materialization_destination(7, "database")];
+        let mut config = CacheConfig {
+            cache_type: CacheType::Niks3,
+            push_to: Some("https://read.example".into()),
+            push_after_build: true,
+            niks3_public_keys: vec!["static-one:key".into(), "static-two:key".into()],
+            ..Default::default()
+        };
+        let source =
+            materialization_source_for_reference(&reference, &destinations, &config).unwrap();
+        let selected = source.cache_config.unwrap();
+        assert_eq!(selected.niks3_public_keys, config.niks3_public_keys);
+        assert!(matches!(
+            selected.niks3_read_auth,
+            cf_protocol::cache::CacheReadAuth::None
+        ));
+        config.push_after_build = false;
+        assert!(materialization_source_for_reference(&reference, &destinations, &config).is_none());
+        config.push_after_build = true;
+        config.push_to = Some("https://other.example".into());
+        assert!(materialization_source_for_reference(&reference, &destinations, &config).is_none());
+    }
+
+    #[test]
+    fn materialization_legacy_requires_one_eligible_match_and_never_static_fallback() {
+        let a = materialization_destination(7, "old-name");
+        let mut b = materialization_destination(8, "https://read.example");
+        b.push_to = Some("https://other.example".into());
+        let config = CacheConfig {
+            push_to: a.push_to.clone(),
+            push_after_build: true,
+            ..Default::default()
+        };
+        for name in ["old-name", "https://read.example"] {
+            let reference = completed_reference("legacy", None, name);
+            assert!(
+                materialization_source_for_reference(&reference, &[a.clone()], &config).is_some()
+            );
+            assert!(materialization_source_for_reference(&reference, &[], &config).is_none());
+        }
+        let reference = completed_reference("legacy", None, "https://read.example");
+        assert!(materialization_source_for_reference(&reference, &[a, b], &config).is_none());
+        for source in ["legacy", "static", "unknown"] {
+            assert!(
+                materialization_source_for_reference(
+                    &completed_reference(source, Some(7), "https://read.example"),
+                    &[],
+                    &config,
+                )
+                .is_none()
+            );
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified task PostgreSQL and ephemeral database creation privileges"]
+    async fn materialization_completed_provenance_identity_and_eligibility(pool: PgPool) {
+        let derivation = crate::queries::derivations::insert_derivation_with_target(
+            &pool,
+            None,
+            "materialization-identity",
+            "nixos",
+            Some("materialization-identity"),
+            Some(true),
+        )
+        .await
+        .unwrap();
+        let destination_id: i32 = sqlx::query_scalar(
+            "INSERT INTO cache_destinations (name, cache_type, push_to, enabled, niks3_server_url,
+                niks3_public_keys, niks3_read_auth_mode, niks3_write_auth_mode, niks3_auth_token)
+             VALUES ('original', 'Niks3', 'https://read.example', TRUE, 'https://write.example',
+                ARRAY['database-one:key', 'database-two:key'], 'none', 'token', 'fixture-token') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let job_id: i32 = sqlx::query_scalar(
+            "INSERT INTO cache_push_jobs (derivation_id, status, cache_destination,
+                cache_destination_id, cache_destination_source)
+             VALUES ($1, 'completed', 'original', $2, 'database') RETURNING id",
+        )
+        .bind(derivation.id)
+        .bind(destination_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let static_config = CacheConfig {
+            cache_type: CacheType::Niks3,
+            push_to: Some("https://read.example".into()),
+            push_after_build: true,
+            niks3_public_keys: vec!["static-one:key".into(), "static-two:key".into()],
+            ..Default::default()
+        };
+        sqlx::query("UPDATE cache_destinations SET name = 'renamed' WHERE id = $1")
+            .bind(destination_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let sources = completed_materialization_sources(&pool, &derivation, &static_config)
+            .await
+            .unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].label, "renamed");
+        assert_eq!(
+            sources[0].cache_config.as_ref().unwrap().niks3_public_keys,
+            ["database-one:key", "database-two:key"]
+        );
+        sqlx::query(
+            "UPDATE cache_destinations SET niks3_read_auth_mode = 'mtls',
+            niks3_read_client_cert = $2, niks3_read_client_key = 'database-read-key',
+            niks3_read_ca_cert = $2 WHERE id = $1",
+        )
+        .bind(destination_id)
+        .bind(crate::security::cache_secrets::TEST_CERTIFICATE)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let sources = completed_materialization_sources(&pool, &derivation, &static_config)
+            .await
+            .unwrap();
+        let read_config = sources[0].cache_config.as_ref().unwrap();
+        assert_eq!(
+            read_config.niks3_public_keys,
+            ["database-one:key", "database-two:key"]
+        );
+        match &read_config.niks3_read_auth {
+            cf_protocol::cache::CacheReadAuth::Mtls {
+                client_private_key,
+                ca_certificate,
+                ..
+            } => {
+                assert_eq!(client_private_key, "database-read-key");
+                assert_eq!(
+                    ca_certificate.as_deref(),
+                    Some(crate::security::cache_secrets::TEST_CERTIFICATE)
+                );
+            }
+            _ => panic!("database read authentication lost"),
+        }
+        assert!(read_config.niks3_write_auth.is_none());
+        sqlx::query("UPDATE cache_destinations SET enabled = FALSE WHERE id = $1")
+            .bind(destination_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            completed_materialization_sources(&pool, &derivation, &static_config)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        sqlx::query("DELETE FROM cache_destinations WHERE id = $1")
+            .bind(destination_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            completed_materialization_sources(&pool, &derivation, &static_config)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let replacement_id: i32 = sqlx::query_scalar(
+            "INSERT INTO cache_destinations (name, cache_type, push_to, enabled, niks3_server_url,
+                niks3_public_keys, niks3_read_auth_mode, niks3_write_auth_mode, niks3_auth_token)
+             VALUES ('original', 'Niks3', 'https://read.example', TRUE, 'https://write.example',
+                ARRAY['replacement:key'], 'none', 'token', 'fixture-token') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_ne!(destination_id, replacement_id);
+        assert!(
+            completed_materialization_sources(&pool, &derivation, &static_config)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        sqlx::query("UPDATE cache_push_jobs SET cache_destination_source = 'static', cache_destination_id = NULL,
+            cache_destination = 'https://read.example' WHERE id = $1")
+            .bind(job_id).execute(&pool).await.unwrap();
+        let sources = completed_materialization_sources(&pool, &derivation, &static_config)
+            .await
+            .unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(
+            sources[0].cache_config.as_ref().unwrap().niks3_public_keys,
+            static_config.niks3_public_keys
+        );
+
+        sqlx::query("UPDATE cache_push_jobs SET cache_destination_source = 'legacy' WHERE id = $1")
+            .bind(job_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            completed_materialization_sources(&pool, &derivation, &static_config)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        let collision_id: i32 = sqlx::query_scalar(
+            "INSERT INTO cache_destinations (name, cache_type, push_to, enabled, niks3_server_url,
+                niks3_public_keys, niks3_read_auth_mode, niks3_write_auth_mode, niks3_auth_token)
+             VALUES ('https://read.example', 'Niks3', 'https://other.example', TRUE, 'https://write.example',
+                ARRAY['collision:key'], 'none', 'token', 'fixture-token') RETURNING id",
+        ).fetch_one(&pool).await.unwrap();
+        assert!(
+            completed_materialization_sources(&pool, &derivation, &static_config)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        sqlx::query("UPDATE cache_destinations SET enabled = FALSE WHERE id = $1")
+            .bind(collision_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            completed_materialization_sources(&pool, &derivation, &static_config)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        // Reads cannot rewrite a historical completed row into pinned evidence.
+        let unchanged: (String, Option<i32>, String) = sqlx::query_as(
+            "SELECT cache_destination_source, cache_destination_id, status FROM cache_push_jobs WHERE id = $1",
+        ).bind(job_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(unchanged, ("legacy".into(), None, "completed".into()));
+        let environment: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO environments (name) VALUES ('unrelated-materialization') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO cache_destination_environments (cache_destination_id, environment_id) VALUES ($1, $2)")
+            .bind(replacement_id).bind(environment).execute(&pool).await.unwrap();
+        assert!(
+            completed_materialization_sources(&pool, &derivation, &static_config)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        sqlx::query("UPDATE cache_push_jobs SET cache_destination_source = 'database', cache_destination_id = $2 WHERE id = $1")
+            .bind(job_id).bind(replacement_id).execute(&pool).await.unwrap();
+        assert!(
+            completed_materialization_sources(&pool, &derivation, &static_config)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn niks3_materialization_uses_read_credentials_and_multiple_signing_keys() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("nix");
+        let output = dir.path().join("output");
+        let destination = CacheDestination {
+            enabled: true,
+            cache_type: "Niks3".into(),
+            push_to: Some("https://read.example".into()),
+            niks3_public_keys: vec!["one:key".into(), "two:key".into()],
+            niks3_read_auth_mode: Some("mtls".into()),
+            niks3_read_client_cert: Some(crate::security::cache_secrets::TEST_CERTIFICATE.into()),
+            niks3_read_client_key: Some("read-key".into()),
+            niks3_read_ca_cert: Some(crate::security::cache_secrets::TEST_CERTIFICATE.into()),
+            niks3_auth_token: Some("write-token".into()),
+            s3_secret_access_key: Some("aws-secret".into()),
+            ..Default::default()
+        };
+        let config = cache_destination_to_config(&destination).unwrap();
+        assert!(config.niks3_write_auth.is_none());
+        assert!(config.s3_secret_access_key.is_none());
+        std::fs::write(
+            &program,
+            format!(
+                r#"#!/bin/sh
+set -eu
+test "$1" = copy
+test "$2" = --from
+case "$3" in https://read.example/*tls-certificate=*tls-private-key=*) ;; *) exit 11;; esac
+test "$6" = 'one:key two:key'
+test "$9" = true
+test -f "$NIX_SSL_CERT_FILE"
+case "$(cat "$NIX_SSL_CERT_FILE")" in *'-----BEGIN CERTIFICATE-----'*) ;; *) exit 12;; esac
+test -z "${{AWS_SECRET_ACCESS_KEY:-}}"
+test -z "${{NIKS3_AUTH_TOKEN_FILE:-}}"
+printf '%s' "$3" > '{}'
+touch '{}'
+"#,
+                dir.path().join("read-url").display(),
+                output.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let source = MaterializationSource {
+            label: "niks3".into(),
+            from_url: "https://read.example".into(),
+            cache_config: Some(config),
+            trusted_public_key: None,
+            nix_config_lines: vec![],
+        };
+        assert!(
+            copy_path_from_cache_with_program(
+                &source,
+                &output.to_string_lossy(),
+                std::time::Duration::from_secs(5),
+                program.as_os_str()
+            )
+            .await
+            .unwrap()
+        );
+        let url = url::Url::parse(&std::fs::read_to_string(dir.path().join("read-url")).unwrap())
+            .unwrap();
+        for (_, path) in url.query_pairs() {
+            assert!(!std::path::Path::new(path.as_ref()).exists());
+        }
+        // A timeout must reap the process group before removing TLS files.
+        std::fs::remove_file(dir.path().join("read-url")).unwrap();
+        std::fs::write(
+            &program,
+            format!(
+                r#"#!/bin/sh
+set -eu
+printf '%s' "$NIX_SSL_CERT_FILE" > '{}'
+exec sleep 30
+"#,
+                dir.path().join("read-url").display()
+            ),
+        )
+        .unwrap();
+        assert!(
+            !copy_path_from_cache_with_program(
+                &source,
+                &output.to_string_lossy(),
+                std::time::Duration::from_millis(200),
+                program.as_os_str()
+            )
+            .await
+            .unwrap()
+        );
+        let ca = std::fs::read_to_string(dir.path().join("read-url")).unwrap();
+        assert!(!std::path::Path::new(&ca).exists());
+    }
     use crate::queries::derivations::{EvaluationStatus, insert_derivation};
     use crate::queries::scanning::ScanSchedulePolicyRow;
     use futures::FutureExt;
@@ -2366,13 +2895,12 @@ mod tests {
         }
     }
 
-    /// Confirms that `materialize_store_path_from_cache` compiles and handles
-    /// the no-cache-found case without panicking.  The function will return
-    /// `Ok(false)` because no real cache push jobs exist, verifying the cache
-    /// resolution path works end-to-end at the query level.
+    /// Confirms that an unavailable database fails publication resolution
+    /// without selecting an unverified cache or starting a copy process.
     #[tokio::test]
     async fn materialize_store_path_from_cache_handles_empty() {
         let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(100))
             .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
             .expect("lazy pool should construct without connecting");
 
@@ -2400,8 +2928,7 @@ mod tests {
             store_path: Some("/nix/store/00000000000000000000000000000000-test".into()),
         };
 
-        // With no real cache pushes, this should return Ok(false) without
-        // panicking or hanging due to the subprocess timeout.
+        // Database errors must remain errors, not an empty publication result.
         let result = materialize_store_path_from_cache(
             &pool,
             &derivation,
@@ -2419,7 +2946,7 @@ mod tests {
                 // acceptable — what matters is no panic and no hang.
                 let msg = format!("{e:#}");
                 assert!(
-                    msg.contains("Failed to query cache destinations"),
+                    msg.contains("Failed to query completed publications for materialization"),
                     "unexpected error: {msg}"
                 );
             }

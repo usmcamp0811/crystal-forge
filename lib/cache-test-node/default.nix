@@ -4,11 +4,168 @@
   system ? null,
   ...
 }: rec {
+  # These reproducible private keys are public test data, never production keys.
+  # Certificates are issued at build time so isolated VMs use valid TLS dates.
+  makeNiks3TestCredentials = {pkgs}: pkgs.runCommand "niks3-test-credentials" {
+    nativeBuildInputs = [pkgs.openssl (pkgs.python3.withPackages (p: [p.pynacl]))];
+  } ''
+    mkdir -p "$out"
+    export OUT="$out"
+    python - <<'PY'
+    import base64, os
+    from pathlib import Path
+    from nacl.signing import SigningKey
+    out = Path(os.environ["OUT"])
+    for index, name in enumerate(["ca", "server", "write", "read", "wrong"]):
+        seed = bytes([index + 1]) * 32
+        der = bytes.fromhex("302e020100300506032b657004220420") + seed
+        (out / f"{name}.key").write_text(
+            "-----BEGIN PRIVATE KEY-----\n" + base64.b64encode(der).decode()
+            + "\n-----END PRIVATE KEY-----\n")
+    for index in range(2):
+        key = SigningKey(bytes([index + 10]) * 32)
+        name = f"niks3-test-{index}"
+        (out / f"signing-{index}.key").write_text(
+            name + ":" + base64.b64encode(bytes(key) + bytes(key.verify_key)).decode() + "\n")
+        (out / f"signing-{index}.pub").write_text(
+            name + ":" + base64.b64encode(bytes(key.verify_key)).decode() + "\n")
+    PY
+    openssl req -new -x509 -key "$out/ca.key" -out "$out/ca.crt" \
+      -subj /CN=niks3-test-ca -days 3650 -set_serial 1
+    for name in server write read wrong; do
+      openssl req -new -key "$out/$name.key" -out "$name.csr" -subj "/CN=$name"
+      if [ "$name" = server ]; then
+        printf '%s\n' 'subjectAltName=DNS:cache,DNS:server,DNS:localhost,IP:127.0.0.1' 'extendedKeyUsage=serverAuth' > extensions
+      else
+        printf '%s\n' 'extendedKeyUsage=clientAuth' > extensions
+      fi
+      openssl x509 -req -in "$name.csr" -CA "$out/ca.crt" -CAkey "$out/ca.key" \
+        -set_serial "$(case "$name" in server) echo 2;; write) echo 3;; read) echo 4;; wrong) echo 5;; esac)" \
+        -days 3650 -extfile extensions -out "$out/$name.crt"
+    done
+  '';
+
+  # Owns all persistence inside one disposable NixOS VM. Garage's test-only
+  # backend credentials remain on this node; clients receive only presigned
+  # URLs from Niks3. Native TLS verifies separate read/write client subjects.
+  makeNiks3CacheNode = {
+    pkgs,
+    credentials ? makeNiks3TestCredentials {inherit pkgs;},
+    port ? 5751,
+    tlsReadProxy ? true,
+    enableFirewall ? false,
+    ...
+  }: {
+    imports = [(makeS3CacheNode {
+      inherit pkgs enableFirewall;
+      accessKey = "GK0123456789abcdef01234567";
+      importCredentials = true;
+    })];
+    # Garage's INFO access logs include presigned upload URLs. Keep those
+    # bearer capabilities out of fixture journals and test-driver output.
+    systemd.services.garage.environment.RUST_LOG = lib.mkForce "warn";
+    virtualisation.useNixStoreImage = true;
+    environment.systemPackages = [pkgs.crystal-forge.default.niks3 pkgs.curl pkgs.jq];
+    services.postgresql = {
+      enable = true;
+      ensureDatabases = ["niks3"];
+      ensureUsers = [{name = "niks3"; ensureDBOwnership = true;}];
+    };
+    users.users.niks3 = {isSystemUser = true; group = "niks3";};
+    users.groups.niks3 = {};
+    security.pki.certificateFiles = ["${credentials}/ca.crt"];
+    networking.firewall.allowedTCPPorts = lib.mkIf enableFirewall [port 5752 5753];
+    systemd.services.niks3-secrets = {
+      after = ["garage-setup.service"];
+      requires = ["garage-setup.service"];
+      requiredBy = ["niks3.service"];
+      before = ["niks3.service"];
+      path = [pkgs.garage pkgs.coreutils];
+      serviceConfig = {Type = "oneshot"; RemainAfterExit = true;};
+      script = ''
+        umask 077
+        install -d -o niks3 -g niks3 /run/niks3
+        printf '%s\n' GK0123456789abcdef01234567 > /run/niks3/access-key
+        printf '%s\n' 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef > /run/niks3/secret-key
+        printf '%s\n' 'niks3-nonproduction-static-token-470-00000000' > /run/niks3/token
+        cp ${credentials}/signing-*.key /run/niks3/
+        cp ${credentials}/server.key /run/niks3/server.key
+        chown -R niks3:niks3 /run/niks3
+      '';
+    };
+    systemd.services.niks3 = {
+      wantedBy = ["multi-user.target"];
+      after = ["postgresql.service" "niks3-secrets.service"];
+      requires = ["postgresql.service" "niks3-secrets.service"];
+      serviceConfig = {
+        User = "niks3";
+        Group = "niks3";
+        ExecStart = lib.concatStringsSep " " [
+          "${pkgs.crystal-forge.default.niks3}/bin/niks3-server"
+          "--db 'dbname=niks3 user=niks3 host=/run/postgresql'"
+          "--http-addr 0.0.0.0:${toString port}"
+          "--s3-endpoint cache:3900 --s3-use-ssl=false --s3-region garage"
+          "--s3-bucket nix-cache"
+          "--s3-access-key-path /run/niks3/access-key"
+          "--s3-secret-key-path /run/niks3/secret-key"
+          "--api-token-path /run/niks3/token"
+          "--sign-key-path /run/niks3/signing-0.key --sign-key-path /run/niks3/signing-1.key"
+          "--tls-cert ${credentials}/server.crt --tls-key /run/niks3/server.key"
+          "--tls-client-ca ${credentials}/ca.crt --mtls-bound-subject CN=write"
+          "--enable-read-proxy --cache-url https://cache:${toString port}"
+        ];
+      };
+    };
+    # Gate a distinct read URL with the read identity. Do not forward a caller's
+    # certificate-verification header to Niks3. The write API is unreachable
+    # through this read-only proxy, even with a valid read certificate.
+    services.nginx = lib.mkIf tlsReadProxy {
+      enable = true;
+      virtualHosts.private-read = {
+        addSSL = true;
+        listen = [{addr = "0.0.0.0"; port = 5752; ssl = true;}];
+        sslCertificate = "${credentials}/server.crt";
+        sslCertificateKey = "${credentials}/server.key";
+        extraConfig = ''
+          ssl_client_certificate ${credentials}/ca.crt;
+          ssl_verify_client on;
+          if ($ssl_client_s_dn != "CN=read") { return 403; }
+        '';
+        locations."/api/".return = "403";
+        locations."/" = {
+          proxyPass = "https://127.0.0.1:${toString port}";
+          extraConfig = ''
+            proxy_ssl_verify on;
+            proxy_ssl_trusted_certificate ${credentials}/ca.crt;
+            proxy_ssl_name localhost;
+            proxy_set_header X-SSL-Client-Verify "";
+          '';
+        };
+      };
+      virtualHosts.public-read = {
+        addSSL = true;
+        listen = [{addr = "0.0.0.0"; port = 5753; ssl = true;}];
+        sslCertificate = "${credentials}/server.crt";
+        sslCertificateKey = "${credentials}/server.key";
+        locations."/api/".return = "403";
+        locations."/" = {
+          proxyPass = "https://127.0.0.1:${toString port}";
+          extraConfig = ''
+            proxy_ssl_verify on;
+            proxy_ssl_trusted_certificate ${credentials}/ca.crt;
+            proxy_ssl_name localhost;
+          '';
+        };
+      };
+    };
+  };
+
   makeS3CacheNode = {
     pkgs,
     bucketName ? "nix-cache",
     accessKey ? "GK1234567890123456789",
     secretKey ? "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    importCredentials ? false,
     port ? 3900,
     enableFirewall ? false,
     extraConfig ? {},
@@ -101,8 +258,12 @@
             garage bucket create "${bucketName}"
 
           # Create API key
-          garage key info test-key >/dev/null 2>&1 || \
-            garage key create test-key
+          ${if importCredentials then ''
+            garage key import --yes -n test-key '${accessKey}' '${secretKey}' >/dev/null
+          '' else ''
+            garage key info test-key >/dev/null 2>&1 || \
+              garage key create test-key >/dev/null
+          ''}
 
           # Allow key to access bucket
           garage bucket allow --read --write "${bucketName}" --key test-key

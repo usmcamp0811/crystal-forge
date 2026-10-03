@@ -513,6 +513,12 @@ pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32)
 ///
 /// # Returns
 /// Optional job UUID if work is available
+///
+/// A legacy claim clears prior cache dispatch selection. API dispatch must
+/// record a new selection before Niks3 publication can be confirmed.
+///
+/// # Errors
+/// Returns an error when PostgreSQL cannot select or claim a build job.
 pub async fn get_next_job_for_builder(pool: &PgPool, builder_id: Uuid) -> Result<Option<Uuid>> {
     let job = sqlx::query_scalar::<_, Uuid>(
         r#"
@@ -548,6 +554,8 @@ pub async fn get_next_job_for_builder(pool: &PgPool, builder_id: Uuid) -> Result
         SET 
             status = 'building',
             builder_id = $1,
+            dispatched_cache_destination_id = NULL,
+            cache_dispatch_recorded_at = NULL,
             server_failure_code = NULL,
             started_at = NOW(),
             updated_at = NOW()

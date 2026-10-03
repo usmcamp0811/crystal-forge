@@ -2,6 +2,8 @@ use crate::build::Derivation;
 use crate::derivations::utils::*;
 use anyhow::bail;
 use anyhow::{Context, Result};
+use cf_config::cache_credentials::PreparedNiks3Push;
+use cf_config::config::CacheType;
 use cf_config::config::{BuildConfig, CacheConfig};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -34,6 +36,14 @@ fn format_command_for_log(command: &str, args: &[String]) -> String {
 }
 
 impl Derivation {
+    /// Pushes a store path with the configured attempt deadline and retry policy.
+    ///
+    /// Niks3 credentials remain owned until the child exits, including when the
+    /// attempt times out or the caller cancels the future.
+    ///
+    /// # Errors
+    ///
+    /// Returns the final push error or an exhausted-attempt timeout error.
     pub async fn push_to_cache_with_retry(
         &self,
         store_path: &str,
@@ -49,12 +59,19 @@ impl Derivation {
             // For large systems (40GB+), increase push_timeout_seconds to 3600 (1 hour) or more
             let timeout_duration = Duration::from_secs(cache_config.push_timeout_seconds);
 
-            match tokio::time::timeout(
-                timeout_duration,
-                self.push_to_cache(store_path, cache_config, build_config),
-            )
-            .await
-            {
+            // Niks3 owns its deadline so timeout cleanup finishes before retry.
+            let result = if matches!(cache_config.cache_type, CacheType::Niks3) {
+                Ok(self
+                    .push_to_cache(store_path, cache_config, build_config)
+                    .await)
+            } else {
+                tokio::time::timeout(
+                    timeout_duration,
+                    self.push_to_cache(store_path, cache_config, build_config),
+                )
+                .await
+            };
+            match result {
                 Ok(Ok(())) => return Ok(()),
                 Ok(Err(e)) if attempts < max_attempts - 1 => {
                     let err_msg = e.to_string();
@@ -104,10 +121,17 @@ impl Derivation {
         unreachable!()
     }
 
-    /// Push a store path to the configured cache. Includes robust Attic handling:
-    /// - resolves .drv -> output path
-    /// - ensures a fresh login every time
-    /// - retries once on 401 Unauthorized by redoing login
+    /// Pushes a store path, resolving a derivation to its output when necessary.
+    ///
+    /// Niks3 uses one CLI process with file-based write credentials and
+    /// `parallel_uploads` concurrency. Its output is suppressed because it can
+    /// contain presigned URLs. Attic retries authorization once after login.
+    /// Disabled or filtered pushes return success without running a command.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for resolution, invalid Niks3 configuration, process
+    /// execution, timeout, or unsuccessful publication.
     pub async fn push_to_cache(
         &self,
         path: &str,
@@ -128,6 +152,10 @@ impl Derivation {
         } else {
             path.to_string()
         };
+
+        if matches!(cache_config.cache_type, CacheType::Niks3) {
+            return run_niks3_push(&store_path, cache_config).await;
+        }
 
         // Get command and args from config
         let cache_cmd = match cache_config.cache_command(&store_path) {
@@ -339,9 +367,234 @@ impl Derivation {
     }
 }
 
+/// Runs one Niks3 upload without exposing credentials or presigned URLs.
+async fn run_niks3_push(store_path: &str, cache: &CacheConfig) -> Result<()> {
+    let server_url = cache
+        .niks3_server_url
+        .as_deref()
+        .context("Niks3 push requires niks3_server_url")?;
+    let auth = cache
+        .niks3_write_auth
+        .as_ref()
+        .context("Niks3 push requires niks3_write_auth")?;
+    let prepared = PreparedNiks3Push::new(server_url, auth, cache.parallel_uploads, store_path)
+        .map_err(|_| {
+            anyhow::anyhow!("Failed to prepare Niks3 push credentials or configuration")
+        })?;
+    run_prepared_niks3_push(prepared, Duration::from_secs(cache.push_timeout_seconds)).await
+}
+
+async fn run_prepared_niks3_push(prepared: PreparedNiks3Push, deadline: Duration) -> Result<()> {
+    let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+
+    // CONCURRENCY: This owner outlives cancellation of the calling future. The
+    // dropped sender requests kill/reap before protected files are removed.
+    let owner = tokio::spawn(async move {
+        let mut command = tokio::process::Command::new(&prepared.command);
+        command
+            .args(&prepared.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        // The shared helper owns all auth files in one protected directory.
+        let credential_directory = prepared
+            .args
+            .windows(2)
+            .find(|pair| matches!(pair[0].as_str(), "--auth-token-path" | "--client-key"))
+            .and_then(|pair| std::path::Path::new(&pair[1]).parent())
+            .context("Niks3 preparation did not supply a credential directory")?;
+        apply_niks3_env_to_command(&mut command, credential_directory);
+        let mut child = command.spawn().context("Failed to spawn Niks3 push")?;
+        let result = tokio::select! {
+            result = tokio::time::timeout(deadline, child.wait()) => match result {
+                Ok(Ok(status)) if status.success() => Ok(()),
+                Ok(Ok(status)) => Err(anyhow::anyhow!("Niks3 push failed with {status}; output suppressed")),
+                Ok(Err(error)) => Err(anyhow::Error::new(error).context("Failed to wait for Niks3 push")),
+                Err(_) => Err(anyhow::anyhow!("Niks3 push timed out after {}s", deadline.as_secs())),
+            },
+            _ = cancelled => Err(anyhow::anyhow!("Niks3 push cancelled")),
+        };
+        if child.id().is_some() {
+            child
+                .kill()
+                .await
+                .context("Failed to kill and reap Niks3 push")?;
+        }
+        // SECURITY: Keep temporary credentials until exit or confirmed kill.
+        drop(prepared);
+        result
+    });
+    let result = owner.await.context("Niks3 push owner failed")?;
+    drop(cancel);
+    result
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{attic_streaming_push_args, format_command_for_log};
+    use super::{attic_streaming_push_args, format_command_for_log, run_prepared_niks3_push};
+    use cf_config::cache_credentials::PreparedNiks3Push;
+    use cf_protocol::cache::Niks3WriteAuth;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    // Use the shared preparation helper; these tests cover process ownership
+    // and output suppression rather than reimplementing credential creation.
+    fn fake_niks3(body: &str) -> (tempfile::TempDir, PreparedNiks3Push, PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("niks3");
+        std::fs::write(&script, format!("#!/bin/sh\nset -eu\n{body}\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut prepared = PreparedNiks3Push::new(
+            "https://write.example.org",
+            &Niks3WriteAuth::Token {
+                token: "synthetic-private-token".into(),
+            },
+            3,
+            "/nix/store/00000000000000000000000000000000-output",
+        )
+        .unwrap();
+        let credential = PathBuf::from(
+            &prepared.args[prepared
+                .args
+                .iter()
+                .position(|arg| arg == "--auth-token-path")
+                .unwrap()
+                + 1],
+        );
+        prepared.command = script.to_str().unwrap().into();
+        (directory, prepared, credential)
+    }
+
+    #[tokio::test]
+    async fn niks3_process_receives_flags_without_token_and_cleans_credentials() {
+        let (_directory, prepared, credential) = fake_niks3(
+            r#"
+test "$1" = push
+test "$2" = --server-url
+test "$3" = https://write.example.org/
+test "$4" = --max-concurrent-uploads
+test "$5" = 3
+test "$6" = --auth-token-path
+test -f "$7"
+test "$HOME/token" = "$7"
+test "$XDG_CONFIG_HOME" = "$HOME"
+test "$8" = --
+test "$9" = /nix/store/00000000000000000000000000000000-output
+case "$*" in *synthetic-private-token*) exit 42;; esac
+test -z "${AWS_ACCESS_KEY_ID-}${AWS_SECRET_ACCESS_KEY-}${GARAGE_SECRET_KEY-}${ATTIC_TOKEN-}${NIKS3_AUTH_TOKEN_FILE-}"
+"#,
+        );
+        run_prepared_niks3_push(prepared, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(!credential.exists());
+        assert!(!credential.parent().unwrap().exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_mtls_uses_isolated_home_and_file_credentials() {
+        let (directory, token_prepared, _) = fake_niks3(
+            r#"
+test "$6" = --client-cert
+test -f "$7"
+test "$8" = --client-key
+test -f "$9"
+test "$HOME/client-key.pem" = "$9"
+test "$XDG_CONFIG_HOME" = "$HOME"
+test ! -e "$HOME/token"
+test -z "${NIKS3_AUTH_TOKEN_FILE-}"
+case "$*" in *synthetic-private-key*) exit 42;; esac
+"#,
+        );
+        drop(token_prepared);
+        let mut prepared = PreparedNiks3Push::new(
+            "https://write.example.org",
+            &Niks3WriteAuth::Mtls {
+                client_certificate: "synthetic-certificate".into(),
+                client_private_key: "synthetic-private-key".into(),
+                ca_certificate: None,
+            },
+            3,
+            "/nix/store/00000000000000000000000000000000-output",
+        )
+        .unwrap();
+        prepared.command = directory.path().join("niks3").to_str().unwrap().into();
+        let key = PathBuf::from(
+            &prepared.args[prepared
+                .args
+                .iter()
+                .position(|arg| arg == "--client-key")
+                .unwrap()
+                + 1],
+        );
+        run_prepared_niks3_push(prepared, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(!key.exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_failure_suppresses_sensitive_child_output() {
+        let (_directory, prepared, credential) = fake_niks3(
+            r#"
+printf '%s\n' 'https://object.example.org/?presigned=synthetic-secret'
+printf '%s\n' 'synthetic-private-token' >&2
+exit 23
+"#,
+        );
+        let error = run_prepared_niks3_push(prepared, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("23"));
+        assert!(message.contains("output suppressed"));
+        assert!(!message.contains("synthetic"));
+        assert!(!message.contains("https://"));
+        assert!(!credential.exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_timeout_reaps_child_before_credential_cleanup() {
+        let (directory, prepared, credential) =
+            fake_niks3("printf '%s' \"$$\" > \"${0%/*}/pid\"\nexec sleep 30");
+        let error = run_prepared_niks3_push(prepared, Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert!(!credential.exists());
+        let pid = std::fs::read_to_string(directory.path().join("pid")).unwrap();
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_cancellation_keeps_owner_until_child_cleanup() {
+        let (directory, prepared, credential) =
+            fake_niks3("printf '%s' \"$$\" > \"${0%/*}/pid\"\nexec sleep 30");
+        let task = tokio::spawn(run_prepared_niks3_push(prepared, Duration::from_secs(30)));
+        // Wait until the owner has started, then cancel only the caller.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !directory.path().join("pid").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let pid = std::fs::read_to_string(directory.path().join("pid")).unwrap();
+        assert!(credential.exists());
+        task.abort();
+        let _ = task.await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while credential.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+        drop(directory);
+    }
 
     #[test]
     fn attic_streaming_push_args_do_not_add_verbose_flags() {

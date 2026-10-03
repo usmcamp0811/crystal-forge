@@ -226,6 +226,12 @@ impl std::fmt::Display for SystemState {
 /// Cache configuration delivered to agents in heartbeat responses.
 #[derive(Serialize, Deserialize)]
 pub struct RuntimeCacheConfig {
+    /// Signing keys for the read endpoint; legacy keys remain available below.
+    #[serde(default)]
+    pub cache_public_keys: Vec<String>,
+    /// Read-only credentials scoped to the receiving agent's environment.
+    #[serde(default)]
+    pub read_auth: crate::cache::CacheReadAuth,
     pub cache_type: String,
     pub cache_url: String,
     pub cache_public_key: Option<String>,
