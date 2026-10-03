@@ -274,4 +274,6 @@ Dedicated gate PASSED twice, actual exit 0. Final command: nix build --no-link -
 Final Python AST via nix develop and owned-path git diff --check passed exit0. Preserved all five original signature/read-mTLS/real agent pull/server-local CVE materialization/secret and presigned-URL service-log/persisted-diagnostic/credential-cleanup assertions. Limits: evaluation identities and manual request rows remain fixtures; secondary completion row is recorded after real CLI/probe evidence rather than CF writer API; no-op switch does not prove full NixOS activation/reboot; all real CVE scanner processes terminate failed due unavailable NVD, although missing outputs materialize. No README/CI/Rust/other fixture edits, host service/DB operations, staging, commits or pushes by VM owner. Local dedicated niks3-cache gate has passed for owner pre-push requirement.
 
 Database identity clarification: the verified current_user is exactly `mcamp`; the spaces in the preceding note are a transcription error. Final handlers::agent::heartbeat::tests run executed 16 tests with 16 passed and 0 failed.
+
+Verified raw heartbeat log correction: /tmp/opencode/task470-publication-heartbeat-final.log lines171–190 reports 17 tests and `17 passed; 0 failed; 0 ignored`; this supersedes the preceding 16-test count.
 <!-- SECTION:NOTES:END -->
