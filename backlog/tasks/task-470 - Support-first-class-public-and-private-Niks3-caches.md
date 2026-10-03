@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-03 23:13'
+updated_date: '2026-10-03 23:21'
 labels: []
 dependencies: []
 references:
@@ -289,3 +289,12 @@ Commands through nix develop, SQLX_OFFLINE=true, packages/default/Cargo.toml, -p
 
 New CI-qualified SQLx test: queries::cache_publication_reads::tests::niks3_publication_assigned_gates_never_downgrade_to_proven_global. New ordinary unit test: queries::cache_publication_reads::tests::niks3_publication_read_plane_gates_and_redaction. The prior nine SQLx qualified names remain unchanged. No services, staging, or commits; owner retains broader VM/CI/documentation and staging responsibilities.
 <!-- SECTION:NOTES:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+created: 2026-10-03 23:21
+---
+P2 CI handoff dependency: all ten verified queries::cache_publication_reads::tests::niks3_publication_* names are wired with exact one-test checks (24 ignored +3 normal TASK470 selections total), and README matches. Please stage packages/default/crates/cf-server/src/queries/cache_publication_reads.rs now: git ls-files --error-unmatch still fails. Packaging supervisor PID19781 and server-regressions supervisor PID19782 wait up to10minutes for tracking, then run current Git flake nix build --no-link -L .#checks.x86_64-linux.<name>. Raw log/exit paths /tmp/opencode/task470-p2-builder-evaluator-packaging.{log,exit} and /tmp/opencode/task470-p2-server-regressions.{log,exit}. No builds have been started by these supervisors while module remains untracked. Local KVM readable/writable; exact GitLab jobs and tags were dry-run confirmed blocking, physical runner/KVM unknown until post-push jobs.
+---
+<!-- COMMENTS:END -->
