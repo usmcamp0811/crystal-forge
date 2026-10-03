@@ -11439,6 +11439,14 @@ mod tests {
         assert!(corrupt.declarations.is_empty());
     }
 
+    /// Joins the lines of an `EXPLAIN (FORMAT TEXT)` result into one string.
+    fn plan_text(rows: Vec<sqlx::postgres::PgRow>) -> String {
+        rows.into_iter()
+            .map(|row| row.get::<String, _>("QUERY PLAN"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
     async fn ac24_metrics_and_filtered_reconciliation_are_authoritative(pool: PgPool) {
@@ -11898,29 +11906,122 @@ mod tests {
         assert!(indexes.1.is_some());
 
         let mut plan_tx = pool.begin().await.expect("plan transaction should begin");
+        // PLAN CONTRACT: Every observation read must be indexed and bounded. A
+        // planner may satisfy a read with any suitable index, so this test does
+        // not require one index name in one joined plan. It checks each access
+        // path on its own, with sequential scans and sorts disabled so that the
+        // only way to meet the production ordering is an index that provides it.
         sqlx::query("SET LOCAL enable_seqscan = off")
             .execute(&mut *plan_tx)
             .await
             .expect("sequential scans should disable for plan assertion");
-        let plan = sqlx::query(
-            "EXPLAIN (FORMAT TEXT) \
-             SELECT heartbeat.timestamp, state.store_path \
-             FROM system_states state \
-             JOIN agent_heartbeats heartbeat ON heartbeat.system_state_id = state.id \
-             WHERE state.hostname = $1 \
-               AND heartbeat.timestamp >= now() - interval '7 days 90 minutes' \
-               AND heartbeat.timestamp <= now()",
-        )
-        .bind(&system.hostname)
-        .fetch_all(&mut *plan_tx)
-        .await
-        .expect("observation query should explain")
-        .into_iter()
-        .map(|row| row.get::<String, _>("QUERY PLAN"))
-        .collect::<Vec<_>>()
-        .join("\n");
-        assert!(plan.contains("idx_system_states_hostname_timestamp_id"));
-        assert!(plan.contains("idx_agent_heartbeats_system_state_timestamp"));
+        sqlx::query("SET LOCAL enable_sort = off")
+            .execute(&mut *plan_tx)
+            .await
+            .expect("sorts should disable for plan assertion");
+
+        // Latest state in the default (NULLS FIRST) order, as the generation
+        // snapshot queries read it. Only idx_system_states_hostname_timestamp_id
+        // provides this order. The covering index below is NULLS LAST, so it
+        // cannot replace it.
+        let default_order_plan = plan_text(
+            sqlx::query(
+                "EXPLAIN (FORMAT TEXT) \
+                 SELECT candidate.generation, candidate.store_path, candidate.timestamp \
+                 FROM system_states candidate WHERE candidate.hostname = $1 \
+                 ORDER BY candidate.timestamp DESC, candidate.id DESC LIMIT 1",
+            )
+            .bind(&system.hostname)
+            .fetch_all(&mut *plan_tx)
+            .await
+            .expect("default-order state lookup should explain"),
+        );
+        assert!(
+            default_order_plan.contains("idx_system_states_hostname_timestamp_id"),
+            "default-order latest-state lookup lost its index:\n{default_order_plan}"
+        );
+
+        // Latest state in the NULLS LAST order used by the scanning selector.
+        // Only system_states_scanning_lifecycle (migration 0273) provides it.
+        let nulls_last_plan = plan_text(
+            sqlx::query(
+                "EXPLAIN (FORMAT TEXT) \
+                 SELECT candidate.generation, candidate.store_path \
+                 FROM system_states candidate WHERE candidate.hostname = $1 \
+                 ORDER BY candidate.timestamp DESC NULLS LAST, candidate.id DESC LIMIT 1",
+            )
+            .bind(&system.hostname)
+            .fetch_all(&mut *plan_tx)
+            .await
+            .expect("NULLS LAST state lookup should explain"),
+        );
+        assert!(
+            nulls_last_plan.contains("system_states_scanning_lifecycle"),
+            "NULLS LAST latest-state lookup lost its index:\n{nulls_last_plan}"
+        );
+
+        // Heartbeats for one state inside the observation window must use the
+        // (system_state_id, timestamp) index with both time bounds applied.
+        let heartbeat_plan = plan_text(
+            sqlx::query(
+                "EXPLAIN (FORMAT TEXT) \
+                 SELECT heartbeat.timestamp FROM agent_heartbeats heartbeat \
+                 WHERE heartbeat.system_state_id = $1 \
+                   AND heartbeat.timestamp >= now() - interval '7 days 90 minutes' \
+                   AND heartbeat.timestamp <= now()",
+            )
+            .bind(state_id)
+            .fetch_all(&mut *plan_tx)
+            .await
+            .expect("heartbeat window lookup should explain"),
+        );
+        assert!(
+            heartbeat_plan.contains("idx_agent_heartbeats_system_state_timestamp"),
+            "heartbeat window lookup lost its index:\n{heartbeat_plan}"
+        );
+        assert!(
+            heartbeat_plan.contains("system_state_id =")
+                && heartbeat_plan.contains("\"timestamp\" >=")
+                && heartbeat_plan.contains("\"timestamp\" <="),
+            "heartbeat window lookup must be bounded by state and time:\n{heartbeat_plan}"
+        );
+
+        // The joined observation read must stay fully indexed and bounded by
+        // hostname. PostgreSQL may use either hostname index here: since
+        // migration 0273 the covering index returns store_path without a heap
+        // read, so it is the better choice for this select list.
+        let plan = plan_text(
+            sqlx::query(
+                "EXPLAIN (FORMAT TEXT) \
+                 SELECT heartbeat.timestamp, state.store_path \
+                 FROM system_states state \
+                 JOIN agent_heartbeats heartbeat ON heartbeat.system_state_id = state.id \
+                 WHERE state.hostname = $1 \
+                   AND heartbeat.timestamp >= now() - interval '7 days 90 minutes' \
+                   AND heartbeat.timestamp <= now()",
+            )
+            .bind(&system.hostname)
+            .fetch_all(&mut *plan_tx)
+            .await
+            .expect("observation query should explain"),
+        );
+        assert!(
+            plan.contains("idx_agent_heartbeats_system_state_timestamp"),
+            "joined observation read lost the heartbeat index:\n{plan}"
+        );
+        assert!(
+            plan.contains("idx_system_states_hostname_timestamp_id")
+                || plan.contains("system_states_scanning_lifecycle"),
+            "joined observation read must reach system_states through a hostname index:\n{plan}"
+        );
+        assert!(
+            plan.contains("Index Cond: (hostname ="),
+            "joined observation read must be bounded by hostname:\n{plan}"
+        );
+        assert!(
+            !plan.contains("Seq Scan"),
+            "joined observation read must not scan sequentially:\n{plan}"
+        );
         let fleet_plan = sqlx::query(
             "EXPLAIN (FORMAT TEXT) \
              SELECT id, hostname, \
