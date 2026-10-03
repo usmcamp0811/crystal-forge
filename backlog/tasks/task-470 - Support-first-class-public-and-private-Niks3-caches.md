@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-03 21:07'
+updated_date: '2026-10-03 21:09'
 labels: []
 dependencies: []
 references:
@@ -78,6 +78,8 @@ P1#2/#3 focused revision at rebased78b3dbc7: preserve SystemState wire/source sh
 Delegated review P2#4/P1#1: own cf-protocol/cache.rs shared validate_nix_public_key with narrow base64 dependency, model/API key-validation wiring, minimal valid public-key fixtures, and a new cache_destinations query test module only. Prove create scope FK failure leaves no credential-bearing destination; prove update config/token/scope FK failure preserves exact stored ciphertext/config/assignments. Run focused protocol/model/API/SQLx tests via Nix after verifying task PostgreSQL PID1651, data_directory, socket and CREATEDB role. No migrations, services or commits; shared selection functions remain with their owner.
 
 Focused VM review regression ownership: checks/niks3-cache/default.nix and README.md plus packages/cf-test-suite/cf_test/tests/cache/test_niks3_cache.py only. Adapt seeded scans to rebased lifecycle; add alphabetically earlier global fallback beside every assigned variant and assert exact builder dispatch/publication and agent runtime selection. Send genuine Ed25519-signed legacy current-system JSON without capabilities to assert no target/cache delivery and no pending-request claim, then run actual packaged capable agent. Run focused nix build --no-link -L .#checks.x86_64-linux.niks3-cache with retained raw logs and exact exit status; use persistent supervisor for long builds. No runtime/UI/host services or DB changes.
+
+Final narrow P1 canonical-selection correction: own only queries/builders.rs lock_eligible_cache_destination plus new regression tests and queries/cache_push.rs shared environment resolver. Reuse one executor-generic active-system/commit-flake/configuration-name-before-hostname candidate query and ambiguity decision in pool and transaction paths. Preserve destination/assignment locks, fingerprints and rebased auto_hardening completion policy. Add migration-backed dispatch ambiguity and post-dispatch ambiguity rollback tests for verified publication and no-push completion. Verify authorized task PostgreSQL data_directory/socket/admin role before ephemeral SQLx databases; run focused tests, offline server all-targets and query doctests through Nix. No migrations, handlers, UI, Nix tests, services or commits.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
