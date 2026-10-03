@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-03 05:29'
+updated_date: '2026-10-03 05:33'
 labels: []
 dependencies: []
 references:
@@ -65,6 +65,8 @@ Review correction scope: handlers/api/builders.rs and related builder job query/
 Second focused local-publication correction: own builder/cache_worker.rs, queries/cache_push.rs (CachePushJob model/query API), builder/worker.rs and next-free additive migration 0271 only. Persist cache_destination_id without FK and source database/static/legacy (default legacy). Keep legacy rows uncertain; resolve eligible names/URLs unambiguously and pin DB identity before attempting publication, never infer static provenance. Move canonical environment/current-destination resolution into cache_push shared helpers. Export enqueue_cache_push_for_derivation(pool, derivation_id, static_config)->Result<Option<i32>> and ID-specific enqueue helper for server-handler owner. DB-config-only local builds and periodic missing-job generation use canonical resolver, not a startup URL/name; local enqueue occurs after output persistence. Queue insertion serializes per derivation and never retargets existing jobs. Verify offline targeted tests for DB-only selection, remote missing-push queue path, durable deleted ID rejection, legacy name ambiguity, environment isolation and existing single CLI gate; no services/commits; 0269/0270 unchanged.
 
 Further publication review: own handlers/api/builders.rs and queries/builders.rs plus cache_destinations.rs assignment/last-used functions and related create/update assignment calls only. Replace general updated_at evidence with opaque SHA-256 over an explicitly serialized canonical publication configuration that intentionally includes decrypted read/write credentials and sorted environment assignments; exclude usage timestamps and execution-only settings. Read snapshots under destination FOR SHARE; all assignment writers acquire FOR UPDATE before delete/insert and update configuration-observer timestamp in the same transaction. Share assignment replacement helper across create/update/standalone paths. Permit legacy building completion with builder-provided canonical output when no server authority exists; Niks3 still requires server authority. Adapt no-push enqueue to local queue agent's upcoming persisted-ID/provenance transaction helper once available; never choose first enabled name. Add focused fingerprint/compatibility tests and isolated-DB concurrency tests (no services). No 0269/0271/UI/Nix-test/cache-worker edits or commits.
+
+Final local enqueue fix: retain Option<Option<i32>> for completed remote dispatch lookup. Recorded no-cache returns no queued job and rejects explicit destination override; absent dispatch retains canonical implicit selection; recorded ID remains authoritative. Add migration-backed regression covering that distinction. User authorizes SQLx ephemeral test DB creation only on verified task PostgreSQL PID20668/data_directory .devenv/state/postgres port5432 rolemcamp; existing runtime socket is /run/user/10000/devenv-536cdb3/postgres, not PGDATA. Read-only socket and TCP SQL confirmed exact task data_directory/port and CREATEDB role. Run targeted ignored SQLx tests against postgres control DB using that socket; no preview crystal_forge writes, migrations to preview, server startups/restarts or commits.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
