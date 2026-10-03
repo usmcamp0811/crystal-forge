@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-03 21:52'
+updated_date: '2026-10-03 22:21'
 labels: []
 dependencies: []
 references:
@@ -30,8 +30,8 @@ Implement the user's Niks3 contract reviewed against MR !329. Niks3 has separate
 - [x] #3 Tokens and private keys are encrypted and redacted; configured flags and atomic credential replacement and clearing are supported
 - [x] #4 Remote builder and local cache worker push through packaged Niks3 CLI with protected temporary files and no secrets in argv or logs
 - [ ] #5 Builder secrets and agent read secrets require verified confidential transport; agents receive only environment-scoped read credentials
-- [x] #6 Server independently verifies publication using the selected destination identity and authenticated Nix read configuration
-- [x] #7 Agent deployment and CVE materialization support public and mTLS reads with signature verification and credential cleanup
+- [ ] #6 Server independently verifies publication using the selected destination identity and authenticated Nix read configuration
+- [ ] #7 Agent deployment and CVE materialization support public and mTLS reads with signature verification and credential cleanup
 - [ ] #8 Discovery and structured non-mutating connection tests enforce existing SSRF and redirect policy
 - [ ] #9 Design and production UI support discovery and separate read/write authentication for create and edit with loading and failure states
 - [ ] #10 Focused unit tests and Niks3 VM tests cover remote builder plus agent public/private flows environment isolation CVE materialization and secret-log audits
@@ -80,6 +80,8 @@ Delegated review P2#4/P1#1: own cf-protocol/cache.rs shared validate_nix_public_
 Focused VM review regression ownership: checks/niks3-cache/default.nix and README.md plus packages/cf-test-suite/cf_test/tests/cache/test_niks3_cache.py only. Adapt seeded scans to rebased lifecycle; add alphabetically earlier global fallback beside every assigned variant and assert exact builder dispatch/publication and agent runtime selection. Send genuine Ed25519-signed legacy current-system JSON without capabilities to assert no target/cache delivery and no pending-request claim, then run actual packaged capable agent. Run focused nix build --no-link -L .#checks.x86_64-linux.niks3-cache with retained raw logs and exact exit status; use persistent supervisor for long builds. No runtime/UI/host services or DB changes.
 
 Final narrow P1 canonical-selection correction: own only queries/builders.rs lock_eligible_cache_destination plus new regression tests and queries/cache_push.rs shared environment resolver. Reuse one executor-generic active-system/commit-flake/configuration-name-before-hostname candidate query and ambiguity decision in pool and transaction paths. Preserve destination/assignment locks, fingerprints and rebased auto_hardening completion policy. Add migration-backed dispatch ambiguity and post-dispatch ambiguity rollback tests for verified publication and no-push completion. Verify authorized task PostgreSQL data_directory/socket/admin role before ephemeral SQLx databases; run focused tests, offline server all-targets and query doctests through Nix. No migrations, handlers, UI, Nix tests, services or commits.
+
+Remaining maintainer P1/P2 plan: preserve historical deployability/retained-lineage semantics and enforce current readability at final delivery. Resolve completed publication rows for exact authorized derivation and exact output path inside the existing SERIALIZABLE system/pending-claim authorization transaction. Use durable database ID first and eligible unambiguous legacy evidence only where compatible; no static/unpublished/name-only fallback. Reuse canonical current environment eligibility and destination/assignment locks, parse read-only config and capability/confidentiality, and return target+source together only after commit; unavailable sources cannot mutate delivery or consume legacy bridge. Deterministically inspect alternative completed evidence if a recorded destination is unusable. Share publication resolution concepts with CVE without coupling transport or workers; require exact output path in any shared publication query. Add discriminating PostgreSQL and VM regressions for reordered/new/renamed/disabled/reassigned/deleted destinations, secondary published source, assigned/global precedence, legacy capability/private transport and retryable pending work across auto/manual/pinned/rollback/retained flows. Add blocking niks3-cache and builder-evaluator-packaging flake matrix jobs plus explicitly named TASK470 ignored DB tests in server-regressions; update README/operatordocs without changing accepted baseline exceptions. Run changed Rust formatting/diffcheck, targeted protocol/config/agent/server/SQLx, packageVMgates before push; then inspect newexactheadCI including runner/KVM failure and report genuinelypendingitems. No migration edits or unrelatedbaselinechanges.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -232,4 +234,6 @@ User directed: 'just push the shit.. ci will run the checks'. Rebase completed o
 Review fixes implemented and committed: one create/update including environment_ids; signed agent capability defaultabsentfalse gates caches and target beforeclaim; shared enabledassignedfirst/globalfallback selection and transactionambiguityrejection; shared formal signingkeyvalidator; retained pre-switch Addcommonstate/designorder/status; wrongMR329docreferencecorrected. User explicitly authorized renumbering only featuremigrations afterdev0298, now0299/0300/0301 unchangedSQL. OldtaskDBcrystal_forgepreserved; separatetaskDBcrystal_forge_review migratedthrough0301. Seven newSQLxDB regressions and fivevariantVM check passed before finaltxambiguityfix. FinaltxambiguitySQLx test bodies and revisedauthoritativeUI rerun deferredtoCI on userinstruction. Worktreeclean; no furtherlocaltests scheduled.
 
 LOCK STATUS: awaiting exact-head CI and re-review; no active implementation subagents. Task remains In Progress until required exact-head verification is established. Persistent taskpreview supervised by task470-review-preview.service (oneshot RemainAfterExit) plus devenv native manager30464; PostgreSQL30524 API30552 Dioxus30753 observed. ReviewDB override command: nix develop .#devenv -c devenv -O env.CRYSTAL_FORGE__DATABASE__NAME:string crystal_forge_review up -d. UI8081/API3447/DB5432 under taskPGDATA. Do not restart without preserving reviewDBoverride and oldDBdata.
+
+Maintainer follow-up resumed. Fetched origin/dev and origin/TASK-470-niks3-cache-support; local/remote/live MR331 head all b52fbe671f4fc9cc89460364eb5ab51c4f858c83, clean worktree, target3b23d36f already ancestor. No rebase required; no newer remote work overwritten. Integrationdev only previously permitted session-ses_f927.md untracked. Existing previewreviewDB settings must be verified before reuse; oldcrystal_forge DB preserved. User requires localfocusedchecks and newblockingexact-headCI gates; prior immediatepush instruction superseded by this verification request.
 <!-- SECTION:NOTES:END -->
