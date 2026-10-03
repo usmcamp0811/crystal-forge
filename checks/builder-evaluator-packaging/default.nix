@@ -9,6 +9,7 @@
   packages = pkgs.crystal-forge.default;
   componentBuilder = packages.cf-builder-drv;
   publicBuilder = packages.builder;
+  niks3 = packages.niks3;
   moduleSystem = inputs.nixpkgs.lib.nixosSystem {
     inherit system;
     modules = [
@@ -33,8 +34,10 @@ in
   assert lib.elem evaluatorNix moduleConfig.systemd.services.crystal-forge-server.path;
   assert builtins.head moduleConfig.systemd.services.crystal-forge-builder.path == evaluatorNix;
   assert builtins.head moduleConfig.systemd.services.crystal-forge-server.path == evaluatorNix;
+  assert lib.elem niks3 moduleConfig.systemd.services.crystal-forge-builder.path;
+  assert lib.elem niks3 moduleConfig.systemd.services.crystal-forge-server.path;
     pkgs.runCommand "crystal-forge-builder-evaluator-packaging" {
-      nativeBuildInputs = [pkgs.coreutils pkgs.gnugrep pkgs.jq];
+      nativeBuildInputs = [pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.jq pkgs.bash];
     } ''
       export HOME="$TMPDIR/home"
       export XDG_CACHE_HOME="$TMPDIR/cache"
@@ -55,6 +58,36 @@ in
       grep -Fq "$evaluator_bin" "$public_wrapper"
       grep -Fq "$scanner_bin" "$public_wrapper"
       grep -Fq '${componentBuilder}/bin/builder' "$public_wrapper"
+      grep -Fq '${niks3}/bin' "$component_wrapper"
+      grep -Fq '${niks3}/bin' "$public_wrapper"
+
+      # Execute the generated wrapper's PATH setup without starting a worker.
+      # Also probe the core server wrapper: standalone packages must work
+      # without the NixOS module's service PATH.
+      for wrapper in "$component_wrapper" ${packages.cf-server-core-drv}/bin/server; do
+        sed '/^exec /,$d' "$wrapper" > probe
+        cat >> probe <<'PROBE'
+      test "$(command -v nix)" = '${evaluatorNix}/bin/nix'
+      test "$(command -v niks3)" = '${niks3}/bin/niks3'
+      niks3 --help >/dev/null 2>&1
+      PROBE
+        bash -e probe
+      done
+      sed '\|${componentBuilder}/bin/builder|,$d' "$public_wrapper" > probe
+      cat >> probe <<'PROBE'
+      test "$(command -v nix)" = '${evaluatorNix}/bin/nix'
+      test "$(command -v niks3)" = '${niks3}/bin/niks3'
+      niks3 --help >/dev/null 2>&1
+      PROBE
+      bash -e probe
+      grep -Fq '${evaluatorNix}/bin' ${niks3}/bin/niks3
+      sed '/^exec /,$d' ${niks3}/bin/niks3 > probe
+      printf '%s\n' 'test "$(command -v nix)" = "${evaluatorNix}/bin/nix"' >> probe
+      bash -e probe
+      env PATH=${lib.makeBinPath moduleConfig.systemd.services.crystal-forge-builder.path} \
+        ${pkgs.bash}/bin/bash -ec 'test "$(command -v nix)" = "${evaluatorNix}/bin/nix"; test "$(command -v niks3)" = "${niks3}/bin/niks3"; command -v niks3; niks3 --help >/dev/null 2>&1'
+      env PATH=${lib.makeBinPath moduleConfig.systemd.services.crystal-forge-server.path} \
+        ${pkgs.bash}/bin/bash -ec 'test "$(command -v nix)" = "${evaluatorNix}/bin/nix"; test "$(command -v niks3)" = "${niks3}/bin/niks3"; command -v niks3; niks3 --help >/dev/null 2>&1'
 
       if [ "$unrelated_nix_bin" != "$evaluator_bin" ]; then
         if grep -Fq "$unrelated_nix_bin" "$component_wrapper"; then

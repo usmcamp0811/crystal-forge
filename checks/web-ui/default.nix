@@ -352,6 +352,11 @@ in pkgs.testers.runNixOSTest {
 
       # Start with local auth
       systemd.services.crystal-forge-server.environment.AUTH_MODE = "local";
+      # SECURITY: This public deterministic key belongs only to the disposable
+      # Web UI VM fixture. Real cache mutations exercise encryption and redaction;
+      # this key MUST NOT protect credentials outside this test environment.
+      systemd.services.crystal-forge-server.environment.CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY =
+        "crystal-forge-web-ui-vm-test-only-cache-encryption-key";
       systemd.services.crystal-forge-config-inspector.environment.CRYSTAL_FORGE_CONFIG_INSPECTION_STAGE_DEADLINE_SECONDS = "600";
     };
   };

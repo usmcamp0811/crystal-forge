@@ -3,6 +3,8 @@ use super::utils::*;
 use crate::config::{BuildConfig, CacheConfig};
 use anyhow::bail;
 use anyhow::{Context, Result};
+use cf_config::cache_credentials::PreparedNiks3Push;
+use cf_config::config::CacheType;
 use sqlx::PgPool;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -10,6 +12,14 @@ use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
 
 impl Derivation {
+    /// Pushes a store path with the configured attempt deadline and retry policy.
+    ///
+    /// Niks3 credentials remain owned until the child exits, including when the
+    /// attempt times out or the caller cancels the future.
+    ///
+    /// # Errors
+    ///
+    /// Returns the final push error or an exhausted-attempt timeout error.
     pub async fn push_to_cache_with_retry(
         &self,
         store_path: &str,
@@ -25,12 +35,19 @@ impl Derivation {
             // For large systems (40GB+), increase push_timeout_seconds to 3600 (1 hour) or more
             let timeout_duration = Duration::from_secs(cache_config.push_timeout_seconds);
 
-            match tokio::time::timeout(
-                timeout_duration,
-                self.push_to_cache(store_path, cache_config, build_config),
-            )
-            .await
-            {
+            // Niks3 owns its deadline so timeout cleanup finishes before retry.
+            let result = if matches!(cache_config.cache_type, CacheType::Niks3) {
+                Ok(self
+                    .push_to_cache(store_path, cache_config, build_config)
+                    .await)
+            } else {
+                tokio::time::timeout(
+                    timeout_duration,
+                    self.push_to_cache(store_path, cache_config, build_config),
+                )
+                .await
+            };
+            match result {
                 Ok(Ok(())) => return Ok(()),
                 Ok(Err(e)) if attempts < max_attempts - 1 => {
                     let err_msg = e.to_string();
@@ -80,10 +97,17 @@ impl Derivation {
         unreachable!()
     }
 
-    /// Push a store path to the configured cache. Includes robust Attic handling:
-    /// - resolves .drv -> output path
-    /// - ensures a fresh login every time
-    /// - retries once on 401 Unauthorized by redoing login
+    /// Pushes a store path, resolving a derivation to its output when necessary.
+    ///
+    /// Niks3 uses one CLI process with file-based write credentials and
+    /// `parallel_uploads` concurrency. Its output is suppressed because it can
+    /// contain presigned URLs. Attic retries authorization once after login.
+    /// Disabled or filtered pushes return success without running a command.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for resolution, invalid Niks3 configuration, process
+    /// execution, timeout, or unsuccessful publication.
     pub async fn push_to_cache(
         &self,
         path: &str,
@@ -104,6 +128,10 @@ impl Derivation {
         } else {
             path.to_string()
         };
+
+        if matches!(cache_config.cache_type, CacheType::Niks3) {
+            return run_niks3_push(&store_path, cache_config).await;
+        }
 
         // Get command and args from config
         let cache_cmd = match cache_config.cache_command(&store_path) {
@@ -310,6 +338,69 @@ impl Derivation {
         info!("Successfully pushed {} to cache", store_path);
         Ok(())
     }
+}
+
+/// Runs one Niks3 upload without exposing credentials or presigned URLs.
+async fn run_niks3_push(store_path: &str, cache: &CacheConfig) -> Result<()> {
+    let server_url = cache
+        .niks3_server_url
+        .as_deref()
+        .context("Niks3 push requires niks3_server_url")?;
+    let auth = cache
+        .niks3_write_auth
+        .as_ref()
+        .context("Niks3 push requires niks3_write_auth")?;
+    let prepared = PreparedNiks3Push::new(server_url, auth, cache.parallel_uploads, store_path)
+        .map_err(|_| {
+            anyhow::anyhow!("Failed to prepare Niks3 push credentials or configuration")
+        })?;
+    run_prepared_niks3_push(prepared, Duration::from_secs(cache.push_timeout_seconds)).await
+}
+
+async fn run_prepared_niks3_push(prepared: PreparedNiks3Push, deadline: Duration) -> Result<()> {
+    let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+
+    // CONCURRENCY: This owner outlives cancellation of the calling future. The
+    // dropped sender requests kill/reap before protected files are removed.
+    let owner = tokio::spawn(async move {
+        let mut command = tokio::process::Command::new(&prepared.command);
+        command
+            .args(&prepared.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        // The shared helper owns all auth files in one protected directory.
+        let credential_directory = prepared
+            .args
+            .windows(2)
+            .find(|pair| matches!(pair[0].as_str(), "--auth-token-path" | "--client-key"))
+            .and_then(|pair| std::path::Path::new(&pair[1]).parent())
+            .context("Niks3 preparation did not supply a credential directory")?;
+        apply_niks3_env_to_command(&mut command, credential_directory);
+        let mut child = command.spawn().context("Failed to spawn Niks3 push")?;
+        let result = tokio::select! {
+            result = tokio::time::timeout(deadline, child.wait()) => match result {
+                Ok(Ok(status)) if status.success() => Ok(()),
+                Ok(Ok(status)) => Err(anyhow::anyhow!("Niks3 push failed with {status}; output suppressed")),
+                Ok(Err(error)) => Err(anyhow::Error::new(error).context("Failed to wait for Niks3 push")),
+                Err(_) => Err(anyhow::anyhow!("Niks3 push timed out after {}s", deadline.as_secs())),
+            },
+            _ = cancelled => Err(anyhow::anyhow!("Niks3 push cancelled")),
+        };
+        if child.id().is_some() {
+            child
+                .kill()
+                .await
+                .context("Failed to kill and reap Niks3 push")?;
+        }
+        // SECURITY: Keep temporary credentials until exit or confirmed kill.
+        drop(prepared);
+        result
+    });
+    let result = owner.await.context("Niks3 push owner failed")?;
+    drop(cancel);
+    result
 }
 
 /// Run a command and stream its output to debug logs

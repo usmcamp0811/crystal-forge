@@ -37,6 +37,8 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL: &str = r#"
     UPDATE build_jobs
     SET builder_id = $1,
         builder_session_id = $2,
+        dispatched_cache_destination_id = NULL,
+        cache_dispatch_recorded_at = NULL,
         status = 'building',
         server_failure_code = NULL,
         started_at = NOW(),
@@ -47,6 +49,7 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL: &str = r#"
         JOIN derivations d ON d.id = build_jobs.derivation_id
         WHERE build_jobs.status = 'queued'
             AND build_jobs.available_at <= NOW()
+          AND ($3::uuid IS NULL OR build_jobs.id = $3)
           AND d.cf_agent_enabled IS TRUE
           AND d.policy_requirements_met IS TRUE
         ORDER BY
@@ -68,6 +71,8 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL: &str = r#"
     UPDATE build_jobs
     SET builder_id = $1,
         builder_session_id = $3,
+        dispatched_cache_destination_id = NULL,
+        cache_dispatch_recorded_at = NULL,
         status = 'building',
         server_failure_code = NULL,
         started_at = NOW(),
@@ -78,6 +83,7 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL: &str = r#"
         JOIN derivations d ON d.id = build_jobs.derivation_id
         WHERE build_jobs.status = 'queued'
           AND build_jobs.available_at <= NOW()
+          AND ($4::uuid IS NULL OR build_jobs.id = $4)
           AND (build_jobs.environment_id = ANY($2) OR build_jobs.environment_id IS NULL)
           AND d.cf_agent_enabled IS TRUE
           AND d.policy_requirements_met IS TRUE
@@ -100,6 +106,8 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL: &str = r#"
     UPDATE build_jobs
     SET builder_id = $1,
         builder_session_id = $3,
+        dispatched_cache_destination_id = NULL,
+        cache_dispatch_recorded_at = NULL,
         status = 'building',
         server_failure_code = NULL,
         started_at = NOW(),
@@ -134,6 +142,8 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL: &str = r#"
     UPDATE build_jobs
     SET builder_id = $1,
         builder_session_id = $4,
+        dispatched_cache_destination_id = NULL,
+        cache_dispatch_recorded_at = NULL,
         status = 'building',
         server_failure_code = NULL,
         started_at = NOW(),
@@ -965,6 +975,30 @@ fn validate_verified_source_claim_preflight(
     Ok(())
 }
 
+/// Claims an eligible job with session fencing and atomic concurrency checks.
+///
+/// `preflight_job_id`, when supplied, restricts either strategy to that exact
+/// candidate. A lost or locked candidate returns `None`; the claim MUST NOT
+/// substitute unvalidated work. Verified-source claims require a candidate.
+/// Legacy internal server-derivation callers may omit the candidate.
+///
+/// # Errors
+/// Returns an error for database failures, a stale builder session, or a
+/// verified-source request without a preflight candidate.
+///
+/// # Examples
+/// ```no_run
+/// # async fn claim(pool: &sqlx::PgPool, builder: &uuid::Uuid, candidate: &uuid::Uuid)
+/// # -> anyhow::Result<()> {
+/// use crystal_forge::models::builders::RemoteBuildExecutionStrategy;
+/// // The caller has validated this candidate's cache capability.
+/// let job = crystal_forge::queries::builders::claim_next_job_atomic(
+///     pool, builder, 1, &[], RemoteBuildExecutionStrategy::ServerDerivation,
+///     None, Some(candidate),
+/// ).await?;
+/// assert!(job.as_ref().is_none_or(|job| job.id == *candidate));
+/// # Ok(()) }
+/// ```
 pub async fn claim_next_job_atomic(
     pool: &PgPool,
     builder_id: &Uuid,
@@ -972,11 +1006,11 @@ pub async fn claim_next_job_atomic(
     environment_ids: &[Uuid],
     execution_strategy: RemoteBuildExecutionStrategy,
     builder_session_id: Option<&Uuid>,
-    verified_source_job_id: Option<&Uuid>,
+    preflight_job_id: Option<&Uuid>,
 ) -> Result<Option<BuildJob>> {
     // The caller must finish canonical artifact validation before this function
     // can start a transaction or mutate a queued verified-source job.
-    validate_verified_source_claim_preflight(execution_strategy, verified_source_job_id)?;
+    validate_verified_source_claim_preflight(execution_strategy, preflight_job_id)?;
     // Start transaction for atomic count + claim
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
 
@@ -1048,12 +1082,13 @@ pub async fn claim_next_job_atomic(
                 sqlx::query_as::<_, BuildJobRow>(CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL)
                     .bind(builder_id)
                     .bind(builder_session_id)
+                    .bind(preflight_job_id)
                     .fetch_optional(&mut *tx)
                     .await
                     .context("Failed to claim job (wildcard server_derivation) in transaction")?
             }
             RemoteBuildExecutionStrategy::SourceReEvaluateVerified => {
-                let job_id = verified_source_job_id
+                let job_id = preflight_job_id
                     .context("verified-source claim requires a preflighted job ID")?;
                 sqlx::query_as::<_, BuildJobRow>(CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL)
                     .bind(builder_id)
@@ -1074,12 +1109,13 @@ pub async fn claim_next_job_atomic(
                     .bind(builder_id)
                     .bind(environment_ids)
                     .bind(builder_session_id)
+                    .bind(preflight_job_id)
                     .fetch_optional(&mut *tx)
                     .await
                     .context("Failed to claim job (filtered server_derivation) in transaction")?
             }
             RemoteBuildExecutionStrategy::SourceReEvaluateVerified => {
-                let job_id = verified_source_job_id
+                let job_id = preflight_job_id
                     .context("verified-source claim requires a preflighted job ID")?;
                 sqlx::query_as::<_, BuildJobRow>(CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL)
                     .bind(builder_id)
@@ -1099,6 +1135,45 @@ pub async fn claim_next_job_atomic(
     tx.commit().await.context("Failed to commit transaction")?;
 
     Ok(job)
+}
+
+/// Returns the next server-derivation candidate without claiming work.
+///
+/// Uses the same eligibility and ordering as the atomic claim. The caller MUST
+/// pass the returned job ID to [`claim_next_job_atomic`] after cache preflight.
+/// A concurrent claim can consume the candidate; it cannot authorize another
+/// job with a cache type that the polling builder does not understand.
+///
+/// # Errors
+/// Returns an error when PostgreSQL cannot select the candidate.
+pub async fn peek_next_server_derivation_job(
+    pool: &PgPool,
+    environment_ids: &[Uuid],
+) -> Result<Option<BuildJob>> {
+    sqlx::query_as::<_, BuildJobRow>(
+        r#"
+        SELECT build_jobs.*
+        FROM build_jobs
+        JOIN derivations d ON d.id = build_jobs.derivation_id
+        WHERE build_jobs.status = 'queued'
+          AND build_jobs.available_at <= NOW()
+          AND (cardinality($1::uuid[]) = 0
+               OR build_jobs.environment_id = ANY($1)
+               OR build_jobs.environment_id IS NULL)
+          AND d.cf_agent_enabled IS TRUE
+          AND d.policy_requirements_met IS TRUE
+        ORDER BY build_jobs.queue_position DESC NULLS LAST,
+                 build_jobs.priority_weight DESC,
+                 (SELECT c.commit_timestamp FROM commits c
+                  WHERE c.id = d.commit_id) DESC NULLS LAST,
+                 build_jobs.created_at ASC
+        LIMIT 1
+        "#,
+    )
+    .bind(environment_ids)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to select server-derivation claim candidate")
 }
 
 /// Identifies the next verified-source job before its atomic claim.
@@ -1244,6 +1319,8 @@ pub(crate) async fn assign_job_to_builder(
         UPDATE build_jobs
         SET builder_id = $2,
             builder_session_id = NULL,
+            dispatched_cache_destination_id = NULL,
+            cache_dispatch_recorded_at = NULL,
             status = 'building',
             server_failure_code = NULL,
             started_at = now(),
@@ -1388,15 +1465,477 @@ pub async fn complete_job_atomic_with_policy(
     store_path: Option<&str>,
     policy: BuildCompletionPolicy,
 ) -> Result<(BuildJob, bool)> {
+    complete_job_atomic_inner(
+        pool,
+        job_id,
+        builder_id,
+        builder_session_id,
+        store_path,
+        None,
+        false,
+        policy,
+    )
+    .await
+}
+
+/// Records immutable cache selection on the current claimed job/session.
+///
+/// Selection includes `None` for disabled publication. Repeated calls accept
+/// only the same selection. A new claim clears selection before dispatch.
+/// The builder-session lock precedes the job lock, matching claim ownership.
+///
+/// # Errors
+/// Returns an error for database failures, superseded sessions, non-building
+/// jobs, changed selections, or disabled/ineligible selected destinations.
+///
+/// # Examples
+/// ```no_run
+/// # async fn dispatch(
+/// #     pool: &sqlx::PgPool,
+/// #     job: &crystal_forge::models::builders::BuildJob,
+/// #     builder: &uuid::Uuid,
+/// # ) -> anyhow::Result<()> {
+/// use crystal_forge::queries::builders::record_job_cache_dispatch;
+/// record_job_cache_dispatch(pool, &job.id, builder,
+///     job.builder_session_id.as_ref(), Some(42)).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn record_job_cache_dispatch(
+    pool: &PgPool,
+    job_id: &Uuid,
+    builder_id: &Uuid,
+    builder_session_id: Option<&Uuid>,
+    destination_id: Option<i32>,
+) -> Result<BuildJob> {
+    let mut tx = pool.begin().await?;
+    let current: Option<Uuid> =
+        sqlx::query_scalar("SELECT current_session_id FROM builders WHERE id = $1 FOR UPDATE")
+            .bind(builder_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if current != builder_session_id.copied() {
+        bail!("Builder session mismatch");
+    }
+    let job = sqlx::query_as::<_, BuildJob>("SELECT * FROM build_jobs WHERE id = $1 FOR UPDATE")
+        .bind(job_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if job.builder_id != Some(*builder_id)
+        || job.builder_session_id != builder_session_id.copied()
+        || job.status != "building"
+    {
+        bail!("Build job claim changed before cache dispatch");
+    }
+    if job.cache_dispatch_recorded_at.is_some() {
+        if job.dispatched_cache_destination_id != destination_id {
+            bail!("Cache dispatch selection changed");
+        }
+    }
+    if let Some(id) = destination_id {
+        lock_eligible_cache_destination(&mut tx, id, job.derivation_id).await?;
+    }
+    if job.cache_dispatch_recorded_at.is_some() {
+        tx.commit().await?;
+        return Ok(job);
+    }
+    let job = sqlx::query_as::<_, BuildJob>(
+        "UPDATE build_jobs SET dispatched_cache_destination_id = $2, cache_dispatch_recorded_at = NOW(), updated_at = NOW() WHERE id = $1 RETURNING *")
+        .bind(job_id).bind(destination_id).fetch_one(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(job)
+}
+
+// SECURITY: Use the same active-system/environment resolution and enabled
+// assignment precedence as dispatch. Keep the selected destination locked so
+// disabling or editing it cannot race the completion transaction's decision.
+async fn lock_eligible_cache_destination(
+    tx: &mut Transaction<'_, Postgres>,
+    destination_id: i32,
+    derivation_id: i32,
+) -> Result<(
+    crate::models::cache_destination::CacheDestination,
+    Vec<Uuid>,
+)> {
+    // Lock before evaluating eligibility so assignment writers cannot commit
+    // between the policy check and the canonical configuration snapshot.
+    let snapshot =
+        crate::queries::cache_destinations::get_cache_publication_snapshot_tx(tx, destination_id)
+            .await?
+            .context("Selected cache destination no longer exists")?;
+    let eligible = sqlx::query_scalar::<_, bool>(
+        r#"WITH target_environment AS (
+            SELECT s.environment_id
+            FROM derivations d JOIN commits c ON c.id = d.commit_id
+            JOIN systems s ON s.flake_id = c.flake_id
+            WHERE d.id = $2 AND s.environment_id IS NOT NULL AND s.is_active = TRUE
+              AND (s.hostname = d.derivation_name OR NULLIF(s.system_configuration_name, '') = d.derivation_name)
+            ORDER BY CASE WHEN NULLIF(s.system_configuration_name, '') = d.derivation_name THEN 0 ELSE 1 END
+            LIMIT 1
+        ), enabled_assigned AS (
+            SELECT cd.id FROM cache_destinations cd
+            JOIN cache_destination_environments cde ON cde.cache_destination_id = cd.id
+            WHERE cd.enabled = TRUE AND cde.environment_id = (SELECT environment_id FROM target_environment)
+        )
+        SELECT EXISTS (SELECT 1 FROM cache_destinations cd
+        WHERE cd.id = $1 AND cd.enabled = TRUE
+          AND ((EXISTS (SELECT 1 FROM enabled_assigned) AND cd.id IN (SELECT id FROM enabled_assigned))
+            OR (NOT EXISTS (SELECT 1 FROM enabled_assigned)
+              AND NOT EXISTS (SELECT 1 FROM cache_destination_environments cde WHERE cde.cache_destination_id = cd.id)))
+        )"#,
+    ).bind(destination_id).bind(derivation_id).fetch_one(&mut **tx).await?;
+    if !eligible {
+        bail!("Selected cache destination is disabled or ineligible");
+    }
+    Ok(snapshot)
+}
+
+/// Binds publication to canonical settings without exposing private material.
+///
+/// The digest includes credential bytes, but has no serialization or debug
+/// representation. Keep it in memory only; do not persist or log the digest.
+#[derive(PartialEq, Eq)]
+pub struct CachePublicationFingerprint([u8; 32]);
+
+// SECURITY: CacheDestination serialization deliberately omits private fields.
+// Serialize these explicit borrowed fields to a hash sink instead. No plaintext
+// JSON buffer, digest, or credentials enter persistence or diagnostics. Field
+// order is fixed; keys and assignments are sets. Usage/cosmetic timestamps and
+// upload/retry limits do not change the verified publication configuration.
+fn publication_configuration_fingerprint(
+    destination: &crate::models::cache_destination::CacheDestination,
+    environment_ids: &[Uuid],
+) -> Result<CachePublicationFingerprint> {
+    use sha2::{Digest, Sha256};
+    #[derive(serde::Serialize)]
+    struct Configuration<'a> {
+        schema: u8,
+        id: i32,
+        cache_type: &'a str,
+        enabled: bool,
+        read_url: Option<&'a str>,
+        signing_key_path: Option<&'a str>,
+        compression: Option<&'a str>,
+        require_sigs: Option<bool>,
+        force_repush: Option<bool>,
+        s3_region: Option<&'a str>,
+        s3_profile: Option<&'a str>,
+        s3_access_key_id: Option<&'a str>,
+        s3_secret_access_key: Option<&'a str>,
+        s3_session_token: Option<&'a str>,
+        s3_endpoint_url: Option<&'a str>,
+        attic_token: Option<&'a str>,
+        attic_cache_name: Option<&'a str>,
+        attic_public_key: Option<&'a str>,
+        niks3_server_url: Option<&'a str>,
+        niks3_public_keys: &'a [String],
+        niks3_write_auth_mode: Option<&'a str>,
+        niks3_auth_token: Option<&'a str>,
+        niks3_write_client_cert: Option<&'a str>,
+        niks3_write_client_key: Option<&'a str>,
+        niks3_write_ca_cert: Option<&'a str>,
+        niks3_read_auth_mode: Option<&'a str>,
+        niks3_read_client_cert: Option<&'a str>,
+        niks3_read_client_key: Option<&'a str>,
+        niks3_read_ca_cert: Option<&'a str>,
+        environment_ids: &'a [Uuid],
+    }
+    struct HashSink(Sha256);
+    impl std::io::Write for HashSink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut keys = destination.niks3_public_keys.clone();
+    keys.sort_unstable();
+    keys.dedup();
+    let mut ids = environment_ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let config = Configuration {
+        schema: 1,
+        id: destination.id,
+        cache_type: &destination.cache_type,
+        enabled: destination.enabled,
+        read_url: destination.push_to.as_deref(),
+        signing_key_path: destination.signing_key_path.as_deref(),
+        compression: destination.compression.as_deref(),
+        require_sigs: destination.require_sigs,
+        force_repush: destination.force_repush,
+        s3_region: destination.s3_region.as_deref(),
+        s3_profile: destination.s3_profile.as_deref(),
+        s3_access_key_id: destination.s3_access_key_id.as_deref(),
+        s3_secret_access_key: destination.s3_secret_access_key.as_deref(),
+        s3_session_token: destination.s3_session_token.as_deref(),
+        s3_endpoint_url: destination.s3_endpoint_url.as_deref(),
+        attic_token: destination.attic_token.as_deref(),
+        attic_cache_name: destination.attic_cache_name.as_deref(),
+        attic_public_key: destination.attic_public_key.as_deref(),
+        niks3_server_url: destination.niks3_server_url.as_deref(),
+        niks3_public_keys: &keys,
+        niks3_write_auth_mode: destination.niks3_write_auth_mode.as_deref(),
+        niks3_auth_token: destination.niks3_auth_token.as_deref(),
+        niks3_write_client_cert: destination.niks3_write_client_cert.as_deref(),
+        niks3_write_client_key: destination.niks3_write_client_key.as_deref(),
+        niks3_write_ca_cert: destination.niks3_write_ca_cert.as_deref(),
+        niks3_read_auth_mode: destination.niks3_read_auth_mode.as_deref(),
+        niks3_read_client_cert: destination.niks3_read_client_cert.as_deref(),
+        niks3_read_client_key: destination.niks3_read_client_key.as_deref(),
+        niks3_read_ca_cert: destination.niks3_read_ca_cert.as_deref(),
+        environment_ids: &ids,
+    };
+    let mut sink = HashSink(Sha256::new());
+    serde_json::to_writer(&mut sink, &config)
+        .map_err(|_| anyhow::anyhow!("Could not fingerprint publication configuration"))?;
+    Ok(CachePublicationFingerprint(sink.0.finalize().into()))
+}
+
+/// Captures publication configuration under the assignment-writer lock.
+///
+/// Requires the supplied decrypted settings to match the current destination.
+/// The caller must use those settings for the probe and finish verification
+/// before passing the evidence to [`complete_preverified_job_atomic`]. Usage
+/// timestamp changes do not invalidate the evidence. Credentials and digests
+/// must not be logged or persisted. This function performs no network probe.
+///
+/// # Errors
+/// Returns an error for database/decryption failures, ineligible destinations,
+/// or publication settings that changed before capture.
+///
+/// # Examples
+/// ```no_run
+/// # async fn capture(
+/// #     pool: &sqlx::PgPool,
+/// #     destination: &crystal_forge::models::cache_destination::CacheDestination,
+/// # ) -> anyhow::Result<()> {
+/// use crystal_forge::queries::builders::{
+///     capture_cache_publication_configuration,
+/// };
+/// let evidence = capture_cache_publication_configuration(pool, 42, destination)
+///     .await?;
+/// // Probe with destination before using evidence to commit completion.
+/// # Ok(()) }
+/// ```
+pub async fn capture_cache_publication_configuration(
+    pool: &PgPool,
+    derivation_id: i32,
+    destination: &crate::models::cache_destination::CacheDestination,
+) -> Result<VerifiedCachePublication> {
+    let mut tx = pool.begin().await?;
+    let (current, assignments) =
+        lock_eligible_cache_destination(&mut tx, destination.id, derivation_id).await?;
+    let fingerprint = publication_configuration_fingerprint(&current, &assignments)?;
+    if fingerprint != publication_configuration_fingerprint(destination, &assignments)? {
+        bail!("Publication configuration changed before verification");
+    }
+    tx.commit().await?;
+    Ok(VerifiedCachePublication {
+        destination_id: destination.id,
+        configuration: fingerprint,
+        require_dispatch_identity: destination.cache_type == "Niks3",
+    })
+}
+
+/// Describes publication verified against canonical destination configuration.
+///
+/// The caller must finish the authenticated read/signature probe before passing
+/// this evidence to [`complete_preverified_job_atomic`]. This type does not
+/// perform network verification itself.
+pub struct VerifiedCachePublication {
+    /// Identifies the independently probed destination.
+    pub destination_id: i32,
+    /// Binds read/write/auth/signing settings and assignments, excluding usage.
+    pub configuration: CachePublicationFingerprint,
+    /// Requires immutable dispatch identity for Niks3; legacy jobs may omit it.
+    pub require_dispatch_identity: bool,
+}
+
+/// Validates an output against evaluated identity or idempotent persisted state.
+///
+/// Successful retries use the persisted output and ignore replacement request
+/// paths. Niks3 publication requires an authoritative evaluated/persisted output.
+/// Legacy completion can omit the output or supply a canonical path when the
+/// server has no evaluated identity.
+///
+/// # Errors
+/// Returns an error for an invalid path, missing authoritative publication
+/// output, or a new request that disagrees with the server's evaluated identity.
+///
+/// # Examples
+/// ```
+/// use crystal_forge::queries::builders::validated_completion_output;
+/// let path = "/nix/store/evaluated-output";
+/// assert_eq!(validated_completion_output("building", Some(path), Some(path),
+///     None, true)?.as_deref(), Some(path));
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+pub fn validated_completion_output(
+    status: &str,
+    requested: Option<&str>,
+    evaluated: Option<&str>,
+    persisted: Option<&str>,
+    require_authoritative: bool,
+) -> Result<Option<String>> {
+    let output = if status == "success" {
+        persisted
+    } else {
+        let authoritative = evaluated.or(persisted);
+        if let (Some(requested), Some(authoritative)) = (requested, authoritative) {
+            if requested != authoritative {
+                bail!("Build output does not match evaluated identity");
+            }
+        }
+        if require_authoritative {
+            Some(authoritative.context("Publication requires authoritative build output")?)
+        } else {
+            requested
+        }
+    };
+    if require_authoritative && output.is_none() {
+        bail!("Publication requires persisted build output");
+    }
+    if let Some(output) = output {
+        if !cf_protocol::builder::is_canonical_nix_store_path(output, false) {
+            bail!("Invalid build output path");
+        }
+    }
+    Ok(output.map(str::to_owned))
+}
+
+/// Commits completion only after caller-side publication verification succeeds.
+///
+/// Rechecks output and dispatch identity under the job/derivation locks, and
+/// rechecks the destination's eligibility and canonical configuration. Confirmed
+/// publication is recorded in the same transaction as build success and CVE
+/// provenance attachment. An error leaves all these writes rolled back. No probe
+/// runs here. Automatic hardening admission defaults to disabled; callers with
+/// deployment configuration use [`complete_preverified_job_atomic_with_policy`].
+///
+/// # Errors
+/// Returns an error for database failures, changed ownership, output, dispatch
+/// identity, destination eligibility, or changed publication configuration.
+///
+/// # Examples
+/// ```no_run
+/// # async fn finish(
+/// #     pool: &sqlx::PgPool,
+/// #     job: &crystal_forge::models::builders::BuildJob,
+/// #     builder: &uuid::Uuid,
+/// #     verified: &crystal_forge::queries::builders::VerifiedCachePublication,
+/// # ) -> anyhow::Result<()> {
+/// use crystal_forge::queries::builders::complete_preverified_job_atomic;
+/// // The caller has already verified this authoritative output and publication.
+/// complete_preverified_job_atomic(pool, &job.id, builder,
+///     job.builder_session_id.as_ref(), Some("/nix/store/evaluated-output"),
+///     Some(verified)).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn complete_preverified_job_atomic(
+    pool: &PgPool,
+    job_id: &Uuid,
+    builder_id: &Uuid,
+    builder_session_id: Option<&Uuid>,
+    store_path: Option<&str>,
+    publication: Option<&VerifiedCachePublication>,
+) -> Result<(BuildJob, bool)> {
+    complete_preverified_job_atomic_with_policy(
+        pool,
+        job_id,
+        builder_id,
+        builder_session_id,
+        store_path,
+        publication,
+        BuildCompletionPolicy::default(),
+    )
+    .await
+}
+
+/// Commits preverified publication and build completion under deployment policy.
+///
+/// Preserves the verification and ownership contract of
+/// [`complete_preverified_job_atomic`]. Automatic hardening admission follows
+/// [`complete_job_atomic_with_policy`] in the same transaction as publication,
+/// build success, and admission-time CVE provenance attachment. Idempotent
+/// retries do not reinterpret hardening admission under a new policy.
+///
+/// # Errors
+///
+/// Returns the errors from [`complete_preverified_job_atomic`], plus an error
+/// when hardening admission cannot be persisted. All transaction writes roll
+/// back together.
+///
+/// # Examples
+/// ```no_run
+/// # async fn finish(
+/// #     pool: &sqlx::PgPool,
+/// #     job: &crystal_forge::models::builders::BuildJob,
+/// #     builder: &uuid::Uuid,
+/// # ) -> anyhow::Result<()> {
+/// use crystal_forge::queries::builders::{
+///     BuildCompletionPolicy, complete_preverified_job_atomic_with_policy,
+/// };
+/// complete_preverified_job_atomic_with_policy(pool, &job.id, builder,
+///     job.builder_session_id.as_ref(), Some("/nix/store/evaluated-output"),
+///     None, BuildCompletionPolicy { auto_hardening_scans: true }).await?;
+/// # Ok(()) }
+/// ```
+pub async fn complete_preverified_job_atomic_with_policy(
+    pool: &PgPool,
+    job_id: &Uuid,
+    builder_id: &Uuid,
+    builder_session_id: Option<&Uuid>,
+    store_path: Option<&str>,
+    publication: Option<&VerifiedCachePublication>,
+    policy: BuildCompletionPolicy,
+) -> Result<(BuildJob, bool)> {
+    complete_job_atomic_inner(
+        pool,
+        job_id,
+        builder_id,
+        builder_session_id,
+        store_path,
+        publication,
+        true,
+        policy,
+    )
+    .await
+}
+
+async fn complete_job_atomic_inner(
+    pool: &PgPool,
+    job_id: &Uuid,
+    builder_id: &Uuid,
+    builder_session_id: Option<&Uuid>,
+    store_path: Option<&str>,
+    publication: Option<&VerifiedCachePublication>,
+    enforce_output: bool,
+    policy: BuildCompletionPolicy,
+) -> Result<(BuildJob, bool)> {
     let mut tx = pool
         .begin()
         .await
         .context("Failed to begin completion transaction")?;
 
     // Lock the job row and read all fields needed for ownership validation.
-    let row = sqlx::query_as::<_, (i32, String, Option<Uuid>, Option<Uuid>)>(
+    let row = sqlx::query_as::<
+        _,
+        (
+            i32,
+            String,
+            Option<Uuid>,
+            Option<Uuid>,
+            Option<i32>,
+            Option<DateTime<Utc>>,
+        ),
+    >(
         r#"
-        SELECT derivation_id, status, builder_id, builder_session_id
+        SELECT derivation_id, status, builder_id, builder_session_id,
+               dispatched_cache_destination_id, cache_dispatch_recorded_at
         FROM build_jobs
         WHERE id = $1
         FOR UPDATE
@@ -1408,7 +1947,14 @@ pub async fn complete_job_atomic_with_policy(
     .context("Failed to lock job for completion")?
     .ok_or_else(|| anyhow::anyhow!("Build job not found"))?;
 
-    let (derivation_id, status, job_builder_id, job_session_id) = row;
+    let (
+        derivation_id,
+        status,
+        job_builder_id,
+        job_session_id,
+        dispatched_id,
+        dispatch_recorded_at,
+    ) = row;
 
     // Validate builder ownership BEFORE any status check. This prevents a
     // superseded or unrelated builder from exploiting the idempotent path
@@ -1420,6 +1966,81 @@ pub async fn complete_job_atomic_with_policy(
         (None, None) => {}                  // legacy sessionless match
         (Some(j), Some(b)) if j == *b => {} // exact session match
         _ => bail!("Builder session mismatch"),
+    }
+
+    if enforce_output {
+        // CONCURRENCY: Freeze authoritative output after the external probe,
+        // before any successful transition or publication record is written.
+        let (evaluated, persisted): (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT expected_store_path, store_path FROM derivations WHERE id = $1 FOR UPDATE",
+        )
+        .bind(derivation_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let requires_authority = if let Some(publication) = publication {
+            publication.require_dispatch_identity
+        } else if let Some(destination_id) = dispatched_id {
+            lock_eligible_cache_destination(&mut tx, destination_id, derivation_id)
+                .await?
+                .0
+                .cache_type
+                == "Niks3"
+        } else {
+            false
+        };
+        let checked = validated_completion_output(
+            &status,
+            store_path,
+            evaluated.as_deref(),
+            persisted.as_deref(),
+            requires_authority,
+        )?;
+        if checked.as_deref() != store_path {
+            bail!("Authoritative output changed after verification");
+        }
+    }
+    if let Some(publication) = publication {
+        if (publication.require_dispatch_identity && dispatch_recorded_at.is_none())
+            || (dispatch_recorded_at.is_some() && dispatched_id != Some(publication.destination_id))
+        {
+            bail!("Publication destination does not match persisted dispatch");
+        }
+        let (destination, assignments) =
+            lock_eligible_cache_destination(&mut tx, publication.destination_id, derivation_id)
+                .await?;
+        if publication_configuration_fingerprint(&destination, &assignments)?
+            != publication.configuration
+        {
+            bail!("Cache configuration changed after verification");
+        }
+        let path = store_path.context("Verified publication requires output path")?;
+        // INVARIANT: The shared queue helper preserves durable ID/provenance
+        // and never relabels another destination's pending or active work.
+        let cache_job_id = crate::queries::cache_push::enqueue_cache_push_for_destination_tx(
+            &mut tx,
+            derivation_id,
+            path,
+            destination.id,
+            &destination.name,
+        )
+        .await?;
+        sqlx::query("UPDATE cache_push_jobs SET status = 'completed', completed_at = NOW(), error_message = NULL, retry_after = NULL WHERE id = $1")
+            .bind(cache_job_id).execute(&mut *tx).await?;
+    } else if enforce_output && let (Some(destination_id), Some(path)) = (dispatched_id, store_path)
+    {
+        // CONCURRENCY: Missing remote publication queues the exact dispatched
+        // ID with database provenance before success. No name/first-row lookup
+        // can reinterpret the selection after disable/delete/reassignment.
+        let (destination, _) =
+            lock_eligible_cache_destination(&mut tx, destination_id, derivation_id).await?;
+        crate::queries::cache_push::enqueue_cache_push_for_destination_tx(
+            &mut tx,
+            derivation_id,
+            path,
+            destination.id,
+            &destination.name,
+        )
+        .await?;
     }
 
     if status == "success" {
@@ -3054,6 +3675,743 @@ mod tests {
         .execute(pool)
         .await
         .expect("Failed to set test derivation path");
+    }
+
+    #[test]
+    fn niks3_completion_output_requires_authority_and_preserves_retry_identity() {
+        let evaluated = "/nix/store/evaluated-output";
+        let wrong = "/nix/store/unrelated-output";
+        assert!(
+            validated_completion_output("building", Some(wrong), Some(evaluated), None, true)
+                .is_err()
+        );
+        assert!(validated_completion_output("building", Some(wrong), None, None, true).is_err());
+        assert_eq!(
+            validated_completion_output("building", Some(wrong), None, None, false)
+                .unwrap()
+                .as_deref(),
+            Some(wrong)
+        );
+        assert_eq!(
+            validated_completion_output("building", None, Some(evaluated), None, true)
+                .unwrap()
+                .as_deref(),
+            Some(evaluated)
+        );
+        assert_eq!(
+            validated_completion_output("success", Some(wrong), Some(wrong), Some(evaluated), true)
+                .unwrap()
+                .as_deref(),
+            Some(evaluated)
+        );
+        assert!(validated_completion_output("success", None, None, None, true).is_err());
+        assert_eq!(
+            validated_completion_output("building", None, Some(evaluated), None, false).unwrap(),
+            None
+        );
+        assert!(
+            validated_completion_output("building", Some("/nix/store/../wrong"), None, None, false)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn niks3_publication_fingerprint_includes_secrets_policy_and_canonical_sets() {
+        use crate::models::cache_destination::CacheDestination;
+        let destination = CacheDestination {
+            id: 42,
+            name: "display-name".into(),
+            enabled: true,
+            cache_type: "Niks3".into(),
+            push_to: Some("https://read.example".into()),
+            niks3_server_url: Some("https://write.example".into()),
+            niks3_public_keys: vec!["two:key".into(), "one:key".into()],
+            niks3_write_auth_mode: Some("token".into()),
+            niks3_auth_token: Some("test-write-token".into()),
+            niks3_read_auth_mode: Some("mtls".into()),
+            niks3_read_client_key: Some("test-read-key".into()),
+            niks3_write_client_key: Some("test-write-key".into()),
+            ..Default::default()
+        };
+        let first = Uuid::from_u128(1);
+        let second = Uuid::from_u128(2);
+        let original =
+            publication_configuration_fingerprint(&destination, &[first, second]).unwrap();
+        let mut usage = destination.clone();
+        usage.updated_at = Utc::now();
+        usage.last_used_at = Some(Utc::now());
+        usage.created_at = Utc::now();
+        usage.name = "renamed-display".into();
+        usage.parallel_uploads = Some(91);
+        usage.max_retries = Some(100);
+        usage.niks3_public_keys.reverse();
+        usage.niks3_public_keys.push("one:key".into());
+        assert!(
+            original
+                == publication_configuration_fingerprint(&usage, &[second, first, first]).unwrap()
+        );
+        for field in [
+            "token",
+            "read-key",
+            "write-key",
+            "read-url",
+            "write-url",
+            "keys",
+            "read-mode",
+            "enabled",
+        ] {
+            let mut changed = destination.clone();
+            match field {
+                "token" => changed.niks3_auth_token = Some("rotated-token".into()),
+                "read-key" => changed.niks3_read_client_key = Some("rotated-read-key".into()),
+                "write-key" => changed.niks3_write_client_key = Some("rotated-write-key".into()),
+                "read-url" => changed.push_to = Some("https://other-read.example".into()),
+                "write-url" => {
+                    changed.niks3_server_url = Some("https://other-write.example".into())
+                }
+                "keys" => changed.niks3_public_keys = vec!["different:key".into()],
+                "read-mode" => changed.niks3_read_auth_mode = Some("none".into()),
+                "enabled" => changed.enabled = false,
+                _ => unreachable!(),
+            }
+            if matches!(field, "token" | "read-key" | "write-key") {
+                // Model serialization would miss these changes completely.
+                assert_eq!(
+                    serde_json::to_value(&changed).unwrap(),
+                    serde_json::to_value(&destination).unwrap()
+                );
+            }
+            assert!(
+                original
+                    != publication_configuration_fingerprint(&changed, &[first, second]).unwrap()
+            );
+        }
+        assert!(original != publication_configuration_fingerprint(&destination, &[first]).unwrap());
+        assert!(
+            publication_configuration_fingerprint(&destination, &[first]).unwrap()
+                != publication_configuration_fingerprint(&destination, &[first, second]).unwrap()
+        );
+    }
+
+    // Use the real validated/encrypted persistence path so migration constraints
+    // are exercised. The test runner supplies a nonproduction encryption key.
+    async fn create_public_niks3_test_cache(
+        pool: &PgPool,
+        name: &str,
+        read_url: &str,
+    ) -> crate::models::cache_destination::CacheDestination {
+        crate::queries::cache_destinations::create_cache_destination(
+            pool,
+            &crate::models::cache_destination::CreateCacheDestination {
+                name: name.into(),
+                cache_type: "Niks3".into(),
+                push_to: Some(read_url.into()),
+                enabled: Some(true),
+                niks3_server_url: Some("https://write.example".into()),
+                niks3_public_keys: vec![
+                    "cache:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
+                ],
+                niks3_write_auth_mode: Some("token".into()),
+                niks3_auth_token: Some("fixture-write-token".into()),
+                niks3_read_auth_mode: Some("none".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated test database creation privileges"]
+    async fn niks3_preclaim_handler_rejects_legacy_and_allows_capable_builder(pool: PgPool) {
+        use axum::{
+            body::Bytes,
+            extract::{ConnectInfo, Path, State},
+            http::{HeaderMap, Method, StatusCode},
+        };
+        use ed25519_dalek::Signer;
+
+        let now = Utc::now();
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/rolling.git",
+            "rolling",
+            &"a".repeat(40),
+            now,
+            "rolling",
+            1.0,
+            now,
+        )
+        .await;
+        let builder = create_active_test_builder(&pool, "rolling-builder").await;
+        let key = SigningKey::generate(&mut rand::thread_rng());
+        sqlx::query("UPDATE builders SET public_key = $2 WHERE id = $1")
+            .bind(builder.id)
+            .bind(BASE64.encode(key.verifying_key().to_bytes()))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let destination =
+            create_public_niks3_test_cache(&pool, "rolling-cache", "https://read.example").await;
+        let mut config = crate::config::ServerConfig::default();
+        config.trust_forwarded_builder_https = true;
+        config.trusted_proxy_cidrs = vec!["127.0.0.1/32".into()];
+        let state = crate::handlers::agent_request::CFState::new(
+            pool.clone(),
+            config,
+            std::sync::Arc::new(crate::queue::QueueNotifier::new()),
+            crate::server::jobs::BackgroundJobRegistry::new(),
+        );
+        let path = format!("/api/v1/builders/{}/next-job", builder.id);
+        for (method, body, capable) in [
+            (Method::GET, "", false),
+            (Method::POST, "{}", false),
+            (
+                Method::POST,
+                r#"{"capabilities":{"cve_scanning":true,"cve_scan_schema_version":1,"cve_scanner":{"name":"vulnix","version":"test"}}}"#,
+                false,
+            ),
+            (
+                Method::POST,
+                r#"{"capabilities":{"niks3_cache":true}}"#,
+                true,
+            ),
+        ] {
+            let timestamp = Utc::now().to_rfc3339();
+            let payload = format!("{method}\n{path}\n{timestamp}\n{body}");
+            let mut headers = HeaderMap::new();
+            headers.insert("X-Builder-ID", builder.id.to_string().parse().unwrap());
+            headers.insert("X-Timestamp", timestamp.parse().unwrap());
+            headers.insert(
+                "X-Signature",
+                BASE64
+                    .encode(key.sign(payload.as_bytes()).to_bytes())
+                    .parse()
+                    .unwrap(),
+            );
+            headers.insert("X-Forwarded-Proto", "https".parse().unwrap());
+            let response = crate::handlers::api::builders::get_next_job(
+                State(state.clone()),
+                Path(builder.id),
+                Some(ConnectInfo("127.0.0.1:47000".parse().unwrap())),
+                method,
+                headers,
+                Bytes::copy_from_slice(body.as_bytes()),
+            )
+            .await
+            .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let persisted = get_build_job_by_id(&pool, &job_id).await.unwrap().unwrap();
+            if capable {
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(value["derivation"]["cache_push"]["cache_type"], "Niks3");
+                assert_eq!(persisted.status, "building");
+                assert_eq!(
+                    persisted.dispatched_cache_destination_id,
+                    Some(destination.id)
+                );
+            } else {
+                assert_eq!(status, StatusCode::CONFLICT);
+                assert_eq!(
+                    value,
+                    serde_json::json!({"reason":"unsupported_cache_type"})
+                );
+                assert_eq!(persisted.status, "queued");
+                assert!(persisted.builder_id.is_none());
+                assert!(persisted.builder_session_id.is_none());
+                assert!(persisted.started_at.is_none());
+                assert!(persisted.cache_dispatch_recorded_at.is_none());
+                assert!(persisted.dispatched_cache_destination_id.is_none());
+                assert_eq!(persisted.retry_count, 0);
+            }
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated test database creation privileges"]
+    async fn niks3_exact_candidate_claim_never_substitutes_after_queue_races(pool: PgPool) {
+        for strategy in [
+            RemoteBuildExecutionStrategy::ServerDerivation,
+            RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+        ] {
+            for environments in [vec![], vec![Uuid::new_v4()]] {
+                let builder = create_active_test_builder(&pool, "race-builder").await;
+                let competitor = create_active_test_builder(&pool, "competing-builder").await;
+                let mut jobs = Vec::new();
+                for _ in 0..3 {
+                    let suffix = Uuid::new_v4().simple().to_string();
+                    let now = Utc::now();
+                    let job = create_queued_job(
+                        &pool,
+                        &format!("https://example.com/{suffix}.git"),
+                        &suffix,
+                        &format!("{suffix}00000000"),
+                        now,
+                        &suffix,
+                        1.0,
+                        now,
+                    )
+                    .await;
+                    set_job_derivation_path(&pool, job, &format!("/nix/store/{suffix}.drv")).await;
+                    jobs.push(job);
+                }
+                let candidate_id = match strategy {
+                    RemoteBuildExecutionStrategy::ServerDerivation => {
+                        peek_next_server_derivation_job(&pool, &environments)
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .id
+                    }
+                    RemoteBuildExecutionStrategy::SourceReEvaluateVerified => {
+                        peek_next_verified_source_job(&pool, &environments)
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .job_id
+                    }
+                };
+                assert_eq!(candidate_id, jobs[2]);
+                // A reordered queue head cannot replace the previewed job.
+                prioritize_build_job(&pool, &jobs[0]).await.unwrap();
+                // A competing transaction locks the exact candidate. SKIP
+                // LOCKED must return no work, even with another eligible head.
+                let mut tx = pool.begin().await.unwrap();
+                sqlx::query("SELECT id FROM build_jobs WHERE id = $1 FOR UPDATE")
+                    .bind(candidate_id)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+                let locked = claim_next_job_atomic(
+                    &pool,
+                    &builder.id,
+                    4,
+                    &environments,
+                    strategy,
+                    None,
+                    Some(&candidate_id),
+                )
+                .await
+                .unwrap();
+                assert!(locked.is_none());
+                tx.rollback().await.unwrap();
+                let won = claim_next_job_atomic(
+                    &pool,
+                    &competitor.id,
+                    4,
+                    &environments,
+                    strategy,
+                    None,
+                    Some(&candidate_id),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(won.id, candidate_id);
+                let lost = claim_next_job_atomic(
+                    &pool,
+                    &builder.id,
+                    4,
+                    &environments,
+                    strategy,
+                    None,
+                    Some(&candidate_id),
+                )
+                .await
+                .unwrap();
+                assert!(lost.is_none());
+                let exact = claim_next_job_atomic(
+                    &pool,
+                    &builder.id,
+                    4,
+                    &environments,
+                    strategy,
+                    None,
+                    Some(&jobs[1]),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(exact.id, jobs[1]);
+                let untouched = get_build_job_by_id(&pool, &jobs[0]).await.unwrap().unwrap();
+                assert_eq!(untouched.status, "queued");
+                assert!(untouched.builder_id.is_none());
+                set_build_job_status(&pool, jobs[0], "cancelled").await;
+            }
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated test database creation privileges"]
+    async fn niks3_dispatch_identity_and_completion_transaction_rechecks(pool: PgPool) {
+        let now = Utc::now();
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/cache-dispatch.git",
+            "cache-dispatch",
+            &"e".repeat(40),
+            now,
+            "cache-dispatch",
+            1.0,
+            now,
+        )
+        .await;
+        let builder = create_active_test_builder(&pool, "cache-dispatch-builder").await;
+        let job = claim_next_job_atomic(
+            &pool,
+            &builder.id,
+            4,
+            &[],
+            RemoteBuildExecutionStrategy::ServerDerivation,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(job.id, job_id);
+        let output = "/nix/store/evaluated-output";
+        sqlx::query(
+            "UPDATE derivations SET expected_store_path = $2, store_path = NULL WHERE id = $1",
+        )
+        .bind(job.derivation_id)
+        .bind(output)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let first = create_public_niks3_test_cache(&pool, "selected", "https://selected.example")
+            .await
+            .id;
+        let other =
+            create_public_niks3_test_cache(&pool, "other-eligible", "https://other.example")
+                .await
+                .id;
+        let stored_token: String =
+            sqlx::query_scalar("SELECT niks3_auth_token FROM cache_destinations WHERE id = $1")
+                .bind(first)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(crate::security::cache_secrets::is_encrypted(&stored_token));
+        let dispatched = record_job_cache_dispatch(&pool, &job_id, &builder.id, None, Some(first))
+            .await
+            .unwrap();
+        assert_eq!(dispatched.dispatched_cache_destination_id, Some(first));
+        assert!(dispatched.cache_dispatch_recorded_at.is_some());
+        assert!(
+            record_job_cache_dispatch(&pool, &job_id, &builder.id, None, Some(other))
+                .await
+                .is_err()
+        );
+        assert!(
+            record_job_cache_dispatch(
+                &pool,
+                &job_id,
+                &builder.id,
+                Some(&Uuid::new_v4()),
+                Some(first)
+            )
+            .await
+            .is_err()
+        );
+        let other_destination =
+            crate::queries::cache_destinations::get_cache_destination(&pool, other)
+                .await
+                .unwrap()
+                .unwrap();
+        let mismatch =
+            capture_cache_publication_configuration(&pool, job.derivation_id, &other_destination)
+                .await
+                .unwrap();
+        assert!(
+            complete_preverified_job_atomic(
+                &pool,
+                &job_id,
+                &builder.id,
+                None,
+                Some(output),
+                Some(&mismatch)
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            get_build_job_by_id(&pool, &job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "building"
+        );
+        let first_destination =
+            crate::queries::cache_destinations::get_cache_destination(&pool, first)
+                .await
+                .unwrap()
+                .unwrap();
+        let publication =
+            capture_cache_publication_configuration(&pool, job.derivation_id, &first_destination)
+                .await
+                .unwrap();
+        crate::queries::cache_destinations::update_cache_destination_last_used(&pool, "selected")
+            .await
+            .unwrap();
+        let mut snapshot_tx = pool.begin().await.unwrap();
+        let (used, assignments) =
+            lock_eligible_cache_destination(&mut snapshot_tx, first, job.derivation_id)
+                .await
+                .unwrap();
+        assert!(
+            publication.configuration
+                == publication_configuration_fingerprint(&used, &assignments).unwrap()
+        );
+        snapshot_tx.commit().await.unwrap();
+        sqlx::query("UPDATE cache_destinations SET enabled = FALSE WHERE id = $1")
+            .bind(first)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            complete_preverified_job_atomic(
+                &pool,
+                &job_id,
+                &builder.id,
+                None,
+                Some(output),
+                Some(&publication)
+            )
+            .await
+            .is_err()
+        );
+        sqlx::query("UPDATE cache_destinations SET enabled = TRUE WHERE id = $1")
+            .bind(first)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Usage or an equivalent restored configuration does not invalidate
+        // evidence; changed authentication does, even with public reads.
+        let rotated_token =
+            crate::security::cache_secrets::encrypt_secret("rotated-fixture-write-token").unwrap();
+        sqlx::query("UPDATE cache_destinations SET niks3_auth_token = $2 WHERE id = $1")
+            .bind(first)
+            .bind(rotated_token)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            complete_preverified_job_atomic(
+                &pool,
+                &job_id,
+                &builder.id,
+                None,
+                Some(output),
+                Some(&publication)
+            )
+            .await
+            .is_err()
+        );
+        let restored_token =
+            crate::security::cache_secrets::encrypt_secret("fixture-write-token").unwrap();
+        sqlx::query("UPDATE cache_destinations SET niks3_auth_token = $2 WHERE id = $1")
+            .bind(first)
+            .bind(restored_token)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let environment: Uuid = sqlx::query_scalar("INSERT INTO environments (name, description, is_active) VALUES ('unrelated-cache-env', 'test', TRUE) RETURNING id")
+            .fetch_one(&pool).await.unwrap();
+        crate::queries::cache_destinations::assign_environments_to_cache(
+            &pool,
+            first,
+            &[environment],
+        )
+        .await
+        .unwrap();
+        assert!(
+            complete_preverified_job_atomic(
+                &pool,
+                &job_id,
+                &builder.id,
+                None,
+                Some(output),
+                Some(&publication)
+            )
+            .await
+            .is_err()
+        );
+        crate::queries::cache_destinations::assign_environments_to_cache(&pool, first, &[])
+            .await
+            .unwrap();
+        assert!(
+            complete_preverified_job_atomic(
+                &pool,
+                &job_id,
+                &builder.id,
+                None,
+                Some("/nix/store/wrong-output"),
+                Some(&publication)
+            )
+            .await
+            .is_err()
+        );
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM cache_push_jobs WHERE derivation_id = $1")
+                .bind(job.derivation_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0);
+        let (persisted, completed): (Option<String>, Option<DateTime<Utc>>) =
+            sqlx::query_as("SELECT store_path, completed_at FROM derivations WHERE id = $1")
+                .bind(job.derivation_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(persisted.is_none());
+        assert!(completed.is_none());
+        assert_eq!(
+            get_build_job_by_id(&pool, &job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "building"
+        );
+        // A recovered claim must not inherit the preceding session's selection.
+        sqlx::query("UPDATE build_jobs SET status = 'queued', builder_id = NULL, builder_session_id = NULL WHERE id = $1")
+            .bind(job_id).execute(&pool).await.unwrap();
+        let reclaimed = claim_next_job_atomic(
+            &pool,
+            &builder.id,
+            4,
+            &[],
+            RemoteBuildExecutionStrategy::ServerDerivation,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(reclaimed.dispatched_cache_destination_id.is_none());
+        assert!(reclaimed.cache_dispatch_recorded_at.is_none());
+        record_job_cache_dispatch(&pool, &job_id, &builder.id, None, Some(first))
+            .await
+            .unwrap();
+        let (_, is_new) = complete_preverified_job_atomic(
+            &pool,
+            &job_id,
+            &builder.id,
+            None,
+            Some(output),
+            Some(&publication),
+        )
+        .await
+        .unwrap();
+        assert!(is_new);
+        let (_, is_new) = complete_preverified_job_atomic(
+            &pool,
+            &job_id,
+            &builder.id,
+            None,
+            Some(output),
+            Some(&publication),
+        )
+        .await
+        .unwrap();
+        assert!(!is_new);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cache_push_jobs WHERE derivation_id = $1 AND status = 'completed' AND cache_destination = 'selected'")
+            .bind(job.derivation_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated test database creation privileges"]
+    async fn niks3_missing_push_queues_exact_id_and_requires_authoritative_output(pool: PgPool) {
+        let now = Utc::now();
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/no-push.git",
+            "no-push",
+            &"f".repeat(40),
+            now,
+            "no-push",
+            1.0,
+            now,
+        )
+        .await;
+        let builder = create_active_test_builder(&pool, "no-push-builder").await;
+        let job = claim_next_job_atomic(
+            &pool,
+            &builder.id,
+            4,
+            &[],
+            RemoteBuildExecutionStrategy::ServerDerivation,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(job.id, job_id);
+        let other = create_public_niks3_test_cache(
+            &pool,
+            "a-first-but-not-dispatched",
+            "https://other.example",
+        )
+        .await
+        .id;
+        let selected =
+            create_public_niks3_test_cache(&pool, "z-dispatched", "https://selected.example")
+                .await
+                .id;
+        record_job_cache_dispatch(&pool, &job_id, &builder.id, None, Some(selected))
+            .await
+            .unwrap();
+        let output = "/nix/store/authoritative-output";
+        assert!(
+            complete_preverified_job_atomic(&pool, &job_id, &builder.id, None, Some(output), None)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            get_build_job_by_id(&pool, &job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "building"
+        );
+        sqlx::query("UPDATE derivations SET expected_store_path = $2 WHERE id = $1")
+            .bind(job.derivation_id)
+            .bind(output)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE cache_destinations SET enabled = FALSE WHERE id = $1")
+            .bind(selected)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            complete_preverified_job_atomic(&pool, &job_id, &builder.id, None, Some(output), None)
+                .await
+                .is_err()
+        );
+        sqlx::query("UPDATE cache_destinations SET enabled = TRUE WHERE id = $1")
+            .bind(selected)
+            .execute(&pool)
+            .await
+            .unwrap();
+        complete_preverified_job_atomic(&pool, &job_id, &builder.id, None, Some(output), None)
+            .await
+            .unwrap();
+        let queued: (i32, String, String) = sqlx::query_as("SELECT cache_destination_id, cache_destination_source, status FROM cache_push_jobs WHERE derivation_id = $1")
+            .bind(job.derivation_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(queued, (selected, "database".into(), "pending".into()));
+        assert_ne!(selected, other);
     }
 
     #[tokio::test]
@@ -4733,6 +6091,7 @@ mod tests {
             source_materialization_schema_version: VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
         };
         let mut request = NextJobRequest {
+            capabilities: Default::default(),
             protocol_version: 2,
             supported_execution_strategies: vec![
                 RemoteBuildExecutionStrategy::SourceReEvaluateVerified,

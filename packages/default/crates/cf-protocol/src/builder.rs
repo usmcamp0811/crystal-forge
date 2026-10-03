@@ -4,7 +4,7 @@
 //! remote build workers. No database, Axum, or server-internal types are
 //! permitted here.
 
-use crate::cache::CacheType;
+use crate::cache::{CacheType, Niks3WriteAuth};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
@@ -50,11 +50,18 @@ pub fn is_canonical_nix_store_path(value: &str, derivation: bool) -> bool {
 
 /// Describes optional work that a builder can execute.
 ///
-/// Missing capabilities deserialize to version `0`, which means incapable.
-/// This default lets old builder JSON remain valid during rolling upgrades.
+/// Missing booleans deserialize to `false` and versions to `0`, which mean
+/// incapable. Old builder JSON remains valid during rolling upgrades.
+/// Niks3 jobs require both an upgraded server and a builder that advertises
+/// Niks3 support in its signed poll; CVE support does not grant cache support.
+/// Authenticated Niks3 agent reads also require a Niks3-aware agent runtime.
+/// Capability advertisement does not change read/write authentication defaults.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BuilderCapabilities {
+    /// Whether this process can deserialize and execute Niks3 cache jobs.
+    #[serde(default)]
+    pub niks3_cache: bool,
     /// Whether this builder process accepts CVE scan leases.
     pub cve_scanning: bool,
     /// Structured CVE result schema supported by the builder, or `0` when CVE
@@ -69,6 +76,7 @@ impl BuilderCapabilities {
     /// Returns capabilities for a builder that supports the current CVE schema.
     pub fn current_cve_scanner(version: String) -> Self {
         Self {
+            niks3_cache: false,
             cve_scanning: true,
             cve_scan_schema_version: CVE_SCAN_SCHEMA_VERSION,
             cve_scanner: Some(CveScannerIdentity {
@@ -144,6 +152,8 @@ pub enum SourceInputDeliveryMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NextJobConflictReason {
+    /// The selected cache type requires a capability the builder did not advertise.
+    UnsupportedCacheType,
     /// The builder did not advertise the server's configured execution strategy.
     UnsupportedExecutionStrategy,
     /// The builder's evaluator fingerprint does not match the server evaluator.
@@ -255,6 +265,21 @@ pub struct EvaluatorFingerprint {
 /// Cache-push settings selected by the server for a remote builder job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuilderCachePushConfig {
+    /// Server-selected destination identity for publication verification.
+    #[serde(default)]
+    pub cache_destination_id: Option<i32>,
+    /// Niks3 write API URL, separate from the read/substituter URL.
+    #[serde(default)]
+    pub niks3_server_url: Option<String>,
+    /// Write-only credentials delivered over verified confidential transport.
+    #[serde(default)]
+    pub niks3_write_auth: Option<Niks3WriteAuth>,
+    /// Per-job concurrent upload cap, independent of Attic's job count.
+    ///
+    /// `None` retains the local legacy fallback. Niks3 consumers normalize the
+    /// selected cap to at least one and do not multiply it by concurrent jobs.
+    #[serde(default)]
+    pub parallel_uploads: Option<u32>,
     #[serde(default)]
     pub cache_type: CacheType,
     pub push_to: Option<String>,
@@ -292,8 +317,13 @@ fn default_push_timeout_seconds() -> u64 {
 }
 
 impl BuilderCachePushConfig {
+    /// Returns settings that disable builder-side publication.
     pub fn disabled() -> Self {
         Self {
+            cache_destination_id: None,
+            niks3_server_url: None,
+            niks3_write_auth: None,
+            parallel_uploads: None,
             cache_type: CacheType::Nix,
             push_to: None,
             push_after_build: false,
@@ -400,6 +430,12 @@ pub struct NextJobResponse {
 /// Signed request body for POST /api/v1/builders/:id/next-job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NextJobRequest {
+    /// Capabilities of the polling process, authenticated with the request body.
+    ///
+    /// Old POST payloads and legacy GET polls cannot receive Niks3 jobs. This
+    /// advertisement does not alter cache authentication or agent read defaults.
+    #[serde(default)]
+    pub capabilities: BuilderCapabilities,
     /// Builder polling protocol version.
     #[serde(default = "default_builder_protocol_version")]
     pub protocol_version: u32,
@@ -486,6 +522,23 @@ pub struct EstablishBuilderSessionResponse {
 // =============================================================================
 // BUILD PROGRESS / STATUS REPORTING
 // =============================================================================
+
+/// Reports completion of a build; publication remains subject to server checks.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CompleteJobRequest {
+    /// Built output path, if the builder resolved one.
+    #[serde(default)]
+    pub output_path: Option<String>,
+    /// Whether the builder reports a successful cache push.
+    #[serde(default)]
+    pub cache_pushed: bool,
+    /// Legacy destination reference retained for older builders.
+    #[serde(default)]
+    pub cache_reference: Option<String>,
+    /// Selected destination identity; the server must verify job authorization.
+    #[serde(default)]
+    pub cache_destination_id: Option<i32>,
+}
 
 /// Distinct pre-build/build failure phases reported by API builders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1122,6 +1175,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn niks3_capabilities_default_false_and_roundtrip_independently_of_cve() {
+        for json in ["{}", r#"{"cve_scanning":true,"cve_scan_schema_version":1}"#] {
+            let capabilities: BuilderCapabilities = serde_json::from_str(json).unwrap();
+            assert!(!capabilities.niks3_cache);
+        }
+        let legacy: NextJobRequest = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.capabilities.niks3_cache);
+        let current: NextJobRequest =
+            serde_json::from_str(r#"{"capabilities":{"niks3_cache":true}}"#).unwrap();
+        assert!(current.capabilities.niks3_cache);
+        assert!(!current.capabilities.supports_current_cve_schema());
+        let roundtrip: NextJobRequest =
+            serde_json::from_value(serde_json::to_value(current).unwrap()).unwrap();
+        assert!(roundtrip.capabilities.niks3_cache);
+        assert!(!BuilderCapabilities::current_cve_scanner("test".into()).niks3_cache);
+    }
+
+    #[test]
+    fn cache_push_upload_cap_defaults_for_legacy_payloads_and_roundtrips() {
+        let legacy: BuilderCachePushConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.parallel_uploads, None);
+        assert_eq!(BuilderCachePushConfig::disabled().parallel_uploads, None);
+        let configured: BuilderCachePushConfig =
+            serde_json::from_str(r#"{"cache_type":"Niks3","parallel_uploads":7,"attic_jobs":91}"#)
+                .unwrap();
+        assert_eq!(configured.parallel_uploads, Some(7));
+        let roundtrip: BuilderCachePushConfig =
+            serde_json::from_value(serde_json::to_value(configured).unwrap()).unwrap();
+        assert_eq!(roundtrip.parallel_uploads, Some(7));
+        assert_eq!(roundtrip.attic_jobs, 91);
+    }
+
+    #[test]
     fn build_job_derivation_defaults_to_server_derivation_strategy() {
         let json = r#"{
             "id": 42,
@@ -1168,6 +1254,10 @@ mod tests {
     #[test]
     fn next_job_conflict_reasons_have_stable_wire_names() {
         for (reason, expected) in [
+            (
+                NextJobConflictReason::UnsupportedCacheType,
+                "unsupported_cache_type",
+            ),
             (
                 NextJobConflictReason::UnsupportedExecutionStrategy,
                 "unsupported_execution_strategy",

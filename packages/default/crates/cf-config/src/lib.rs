@@ -1,7 +1,9 @@
-//! Crystal Forge configuration loading.
+//! Loads Crystal Forge configuration and prepares process-scoped cache access.
 //!
 //! This crate provides pure deserialization and loading of Crystal Forge
 //! configuration from TOML files and environment variables.
+//! The [`cache_credentials`] module owns protected temporary credential files;
+//! consumers retain those owners until their cache subprocesses exit.
 //!
 //! # Crate boundary rules
 //!
@@ -9,6 +11,7 @@
 //! - Only `cf-protocol` is permitted as a Crystal Forge workspace dependency.
 //! - Foundational crate; may not depend on `cf-server`, `cf-builder`, or `cf-agent`.
 
+pub mod cache_credentials;
 pub mod config;
 
 // Re-export everything from config module at the crate root for convenience.

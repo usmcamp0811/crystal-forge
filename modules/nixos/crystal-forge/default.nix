@@ -2524,6 +2524,7 @@ in {
       path = with pkgs;
         [
           evaluatorNix
+          pkgs.crystal-forge.default.niks3
           git
           gnutar
           gzip
@@ -2793,6 +2794,7 @@ in {
 
       path = with pkgs; [
         evaluatorNix
+        pkgs.crystal-forge.default.niks3
         git
         openssh
         nix-fast-build

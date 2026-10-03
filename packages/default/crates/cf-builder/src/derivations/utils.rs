@@ -86,6 +86,33 @@ pub fn debug_attic_environment() {
     debug!("=== End Attic Environment Debug ===");
 }
 
+/// Sets the Niks3 child environment without inheriting other cache credentials.
+///
+/// Preserves the selected Nix toolchain PATH and Nix daemon configuration.
+/// Authentication comes only from the prepared credential files. The caller
+/// supplies their protected directory as HOME and XDG_CONFIG_HOME so the CLI
+/// cannot select a persistent token instead of the authorized mTLS identity.
+pub fn apply_niks3_env_to_command(cmd: &mut Command, credential_directory: &std::path::Path) {
+    // SECURITY: An allowlist also excludes unknown AWS/Garage credential names.
+    cmd.env_clear();
+    for key in [
+        "PATH",
+        "NIX_CONFIG",
+        "NIX_REMOTE",
+        "NIX_SSL_CERT_FILE",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "NO_PROXY",
+        "no_proxy",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
+    cmd.env("HOME", credential_directory);
+    cmd.env("XDG_CONFIG_HOME", credential_directory);
+}
+
 pub fn apply_cache_env_to_command(cmd: &mut Command) {
     for &key in CACHE_ENV_ALLOWLIST {
         if let Ok(val) = std::env::var(key) {

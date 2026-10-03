@@ -1,4 +1,11 @@
 //! Cache management view - configure cache destinations and monitor push jobs.
+//!
+//! Niks3 keeps write API and Nix read authentication independent. Edit forms
+//! contain replacements only; configured flags describe retained server secrets.
+//! Discovery populates public metadata without saving. Non-mutating probes cannot
+//! establish write permission, so absent authorization results remain untested.
+//! Saving a destination and assigning environments are separate API operations.
+//! An assignment failure retains the saved ID so retry cannot create a duplicate.
 
 use dioxus::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -12,6 +19,464 @@ use crate::api::models::{
 use crate::components::icon::{Icon, IconName};
 use crate::routes::Route;
 use crate::theme;
+
+// INVARIANT: Edit state contains replacements only. Configured flags permit
+// retention on save, but never substitute redacted secrets in a connection probe.
+#[derive(Clone, PartialEq)]
+struct Niks3FormState {
+    name: String,
+    server_url: String,
+    read_url: String,
+    keys: String,
+    write_mode: String,
+    read_mode: String,
+    token: String,
+    write_cert: String,
+    write_key: String,
+    write_ca: String,
+    read_cert: String,
+    read_key: String,
+    read_ca: String,
+    clear_write_ca: bool,
+    clear_read_ca: bool,
+}
+
+impl Niks3FormState {
+    fn from_destination(destination: Option<&CacheDestination>) -> Self {
+        Self {
+            name: destination.map(|d| d.name.clone()).unwrap_or_default(),
+            server_url: destination
+                .and_then(|d| d.niks3_server_url.clone())
+                .unwrap_or_default(),
+            read_url: destination
+                .and_then(|d| d.push_to.clone())
+                .unwrap_or_default(),
+            keys: destination
+                .map(|d| d.niks3_public_keys.join("\n"))
+                .unwrap_or_default(),
+            write_mode: destination
+                .and_then(|d| d.niks3_write_auth_mode.clone())
+                .unwrap_or_else(|| "token".into()),
+            read_mode: destination
+                .and_then(|d| d.niks3_read_auth_mode.clone())
+                .unwrap_or_else(|| "none".into()),
+            token: String::new(),
+            write_cert: String::new(),
+            write_key: String::new(),
+            write_ca: String::new(),
+            read_cert: String::new(),
+            read_key: String::new(),
+            read_ca: String::new(),
+            clear_write_ca: false,
+            clear_read_ca: false,
+        }
+    }
+
+    fn request(&self) -> CreateCacheDestination {
+        let value = |s: &str| (!s.trim().is_empty()).then(|| s.trim().to_string());
+        let write_mtls = self.write_mode == "mtls";
+        let read_mtls = self.read_mode == "mtls";
+        CreateCacheDestination {
+            name: self.name.trim().into(),
+            cache_type: "Niks3".into(),
+            push_to: value(&self.read_url),
+            niks3_server_url: value(&self.server_url),
+            niks3_public_keys: self
+                .keys
+                .lines()
+                .map(str::trim)
+                .filter(|k| !k.is_empty())
+                .map(str::to_string)
+                .collect(),
+            niks3_write_auth_mode: Some(self.write_mode.clone()),
+            niks3_read_auth_mode: Some(self.read_mode.clone()),
+            niks3_auth_token: if write_mtls { None } else { value(&self.token) },
+            niks3_write_client_cert: if write_mtls {
+                value(&self.write_cert)
+            } else {
+                None
+            },
+            niks3_write_client_key: if write_mtls {
+                value(&self.write_key)
+            } else {
+                None
+            },
+            niks3_write_ca_cert: if write_mtls && !self.clear_write_ca {
+                value(&self.write_ca)
+            } else {
+                None
+            },
+            niks3_read_client_cert: if read_mtls {
+                value(&self.read_cert)
+            } else {
+                None
+            },
+            niks3_read_client_key: if read_mtls {
+                value(&self.read_key)
+            } else {
+                None
+            },
+            niks3_read_ca_cert: if read_mtls && !self.clear_read_ca {
+                value(&self.read_ca)
+            } else {
+                None
+            },
+            enabled: Some(true),
+            require_sigs: Some(true),
+            ..Default::default()
+        }
+    }
+
+    // INVARIANT: Empty replacements retain server-side identities. Clear flags
+    // remove only inactive credentials or a CA explicitly selected for removal.
+    fn update_request(&self) -> UpdateCacheDestination {
+        let req = self.request();
+        UpdateCacheDestination {
+            name: Some(req.name),
+            push_to: req.push_to,
+            niks3_server_url: req.niks3_server_url,
+            niks3_public_keys: req.niks3_public_keys,
+            niks3_write_auth_mode: req.niks3_write_auth_mode,
+            niks3_read_auth_mode: req.niks3_read_auth_mode,
+            niks3_auth_token: req.niks3_auth_token,
+            niks3_write_client_cert: req.niks3_write_client_cert,
+            niks3_write_client_key: req.niks3_write_client_key,
+            niks3_write_ca_cert: req.niks3_write_ca_cert,
+            niks3_read_client_cert: req.niks3_read_client_cert,
+            niks3_read_client_key: req.niks3_read_client_key,
+            niks3_read_ca_cert: req.niks3_read_ca_cert,
+            clear_niks3_auth_token: self.write_mode == "mtls",
+            clear_niks3_write_client_key: self.write_mode == "token",
+            clear_niks3_read_client_key: self.read_mode == "none",
+            clear_niks3_write_ca_cert: self.clear_write_ca,
+            clear_niks3_read_ca_cert: self.clear_read_ca,
+            ..Default::default()
+        }
+    }
+
+    fn validate(&self, retained: Option<&CacheDestination>) -> Result<(), String> {
+        let req = self.request();
+        if req.name.is_empty() {
+            return Err("Enter a cache name in Destination.".into());
+        }
+        for (label, url) in [
+            ("Write / API", &self.server_url),
+            ("Read / substituter", &self.read_url),
+        ] {
+            let valid = web_sys::Url::new(url.trim()).is_ok_and(|u| {
+                u.protocol() == "https:"
+                    && !u.hostname().is_empty()
+                    && u.username().is_empty()
+                    && u.password().is_empty()
+                    && u.search().is_empty()
+                    && u.hash().is_empty()
+            });
+            if !valid {
+                return Err(format!(
+                    "{label} URL must be HTTPS without credentials, query or fragment."
+                ));
+            }
+        }
+        if req.niks3_public_keys.is_empty()
+            || req
+                .niks3_public_keys
+                .iter()
+                .any(|k| !is_attic_public_key(k))
+        {
+            return Err(
+                "Enter at least one signing public key, one name:BASE64KEY per line.".into(),
+            );
+        }
+        if self.write_mode == "token" {
+            if req.niks3_auth_token.is_none()
+                && !retained.is_some_and(|d| {
+                    d.niks3_write_auth_mode.as_deref() == Some("token")
+                        && d.niks3_write_token_configured
+                })
+            {
+                return Err("Enter a write token in Credentials.".into());
+            }
+        } else if self.write_mode != "mtls" {
+            return Err("Select token or mTLS write authentication.".into());
+        }
+        for (plane, mode, cert, key, configured) in [
+            (
+                "Write",
+                self.write_mode.as_str(),
+                &self.write_cert,
+                &self.write_key,
+                retained.is_some_and(|d| {
+                    d.niks3_write_auth_mode.as_deref() == Some("mtls")
+                        && d.niks3_write_mtls_configured
+                }),
+            ),
+            (
+                "Read",
+                self.read_mode.as_str(),
+                &self.read_cert,
+                &self.read_key,
+                retained.is_some_and(|d| {
+                    d.niks3_read_auth_mode.as_deref() == Some("mtls")
+                        && d.niks3_read_mtls_configured
+                }),
+            ),
+        ] {
+            if mode == "mtls" {
+                // Replacement identities are atomic in the UI: both inputs or
+                // neither. Retained identities are never loaded into form values.
+                if (!configured && (cert.trim().is_empty() || key.trim().is_empty()))
+                    || (cert.trim().is_empty() != key.trim().is_empty())
+                {
+                    return Err(format!(
+                        "{plane} mTLS requires a client certificate and private key together."
+                    ));
+                }
+                if !cert.trim().is_empty()
+                    && (!cert.contains("-----BEGIN CERTIFICATE-----")
+                        || !key.contains("PRIVATE KEY-----"))
+                {
+                    return Err(format!(
+                        "{plane} mTLS identity must use PEM certificates and private keys."
+                    ));
+                }
+            }
+        }
+        if !matches!(self.read_mode.as_str(), "none" | "mtls") {
+            return Err("Select public or mTLS read authentication.".into());
+        }
+        for (plane, ca) in [("Write", &self.write_ca), ("Read", &self.read_ca)] {
+            if !ca.trim().is_empty() && !ca.contains("-----BEGIN CERTIFICATE-----") {
+                return Err(format!("{plane} CA certificate must use PEM."));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[component]
+fn Niks3TextField(
+    label: String,
+    field: String,
+    mut form: Signal<Niks3FormState>,
+    mut result: Signal<Option<crate::api::models::CacheCredentialTestResult>>,
+    multiline: bool,
+    secret: bool,
+    hint: String,
+) -> Element {
+    let value = match field.as_str() {
+        "name" => form().name,
+        "server" => form().server_url,
+        "read" => form().read_url,
+        "keys" => form().keys,
+        "token" => form().token,
+        "write_cert" => form().write_cert,
+        "write_key" => form().write_key,
+        "write_ca" => form().write_ca,
+        "read_cert" => form().read_cert,
+        "read_key" => form().read_key,
+        _ => form().read_ca,
+    };
+    let field_id = field.clone();
+    let change = move |evt: FormEvent| {
+        result.set(None);
+        let mut state = form.write();
+        let target = match field.as_str() {
+            "name" => &mut state.name,
+            "server" => &mut state.server_url,
+            "read" => &mut state.read_url,
+            "keys" => &mut state.keys,
+            "token" => &mut state.token,
+            "write_cert" => &mut state.write_cert,
+            "write_key" => &mut state.write_key,
+            "write_ca" => &mut state.write_ca,
+            "read_cert" => &mut state.read_cert,
+            "read_key" => &mut state.read_key,
+            _ => &mut state.read_ca,
+        };
+        *target = evt.value();
+    };
+    rsx! { div { class: "field",
+        label { r#for: "niks3-{field_id}", "{label}" }
+        if multiline { textarea { id: "niks3-{field_id}", class: "input focus-ring mono", rows: "3", value, oninput: change, autocomplete: "off", spellcheck: "false", style: if secret { "-webkit-text-security:disc;" } else { "" } } }
+        else { input { id: "niks3-{field_id}", class: "input focus-ring", r#type: if secret { "password" } else { "text" }, value, oninput: change, autocomplete: "off" } }
+        if !hint.is_empty() { div { class: "help", "{hint}" } }
+    } }
+}
+
+/// Renders Niks3 editing with independent discovery, credential and save states.
+/// Configured credentials remain server-side; empty replacements retain them.
+#[component]
+fn Niks3CacheForm(
+    destination: Option<CacheDestination>,
+    on_close: EventHandler<()>,
+    on_saved: EventHandler<()>,
+) -> Element {
+    let initial = destination.clone();
+    let mut form = use_signal(move || Niks3FormState::from_destination(initial.as_ref()));
+    let mut section = use_signal(|| "dest");
+    let mut busy = use_signal(|| None::<&'static str>);
+    let mut error = use_signal(|| None::<String>);
+    let mut discovery_note = use_signal(|| None::<String>);
+    let mut result = use_signal(|| None::<crate::api::models::CacheCredentialTestResult>);
+    let mut environment_ids = use_signal(Vec::<Uuid>::new);
+    let mut environment_ready = use_signal(|| destination.is_none());
+    let mut saved_id = use_signal(|| None::<i32>);
+    let environments = use_resource(|| async { client::fetch_environments().await });
+    let editing_id = destination.as_ref().map(|d| d.id);
+    use_future(move || async move {
+        if let Some(id) = editing_id {
+            match client::get_cache_environments(id).await {
+                Ok(ids) => {
+                    environment_ids.set(ids);
+                    environment_ready.set(true);
+                }
+                Err(_) => error.set(Some(
+                    "Environment assignments could not be loaded. Close and reopen before saving."
+                        .into(),
+                )),
+            }
+        }
+    });
+    let retained = destination.clone();
+    let testing_retained = destination.clone();
+    rsx! {
+        div { class: "modal-backdrop", style: "padding:8px;", onclick: move |_| { if busy().is_none() { on_close.call(()); } },
+            div { class: "pe-shell modal", style: "display:grid;grid-template-columns:132px minmax(0,1fr);grid-template-rows:auto minmax(0,1fr) auto;width:min(820px,calc(100vw - 16px));height:min(760px,92vh);max-height:92vh;overflow:hidden;", role: "dialog", aria_modal: "true", aria_label: "Niks3 cache destination", onclick: move |e| e.stop_propagation(),
+                header { class: "pe-head modal-head", style: "grid-column:1/-1;display:flex;justify-content:space-between;align-items:center;",
+                    div { span { class: "pe-head-title", if destination.is_some() { "Edit Niks3 cache" } else { "Add Niks3 cache" } }
+                        p { class: "pe-head-sub", "Separate write API and Nix read endpoints." }
+                    }
+                    button { class: "btn-icon focus-ring", aria_label: "Close", disabled: busy().is_some(), onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } }
+                }
+                nav { class: "pe-rail", style: "display:flex;flex-direction:column;gap:8px;padding:16px 8px;border-right:1px solid var(--cf-card-border);background:var(--cf-subtle-bg);", aria_label: "Cache form sections",
+                    for (id, label) in [("dest", "Destination"), ("auth", "Credentials"), ("envs", "Environments")] {
+                        button { class: if section() == id { "pe-rail-item btn btn-ghost focus-ring active" } else { "pe-rail-item btn btn-ghost focus-ring" }, style: if section() == id { "justify-content:flex-start;color:var(--cf-brand-purple);background:var(--cf-card-bg);" } else { "justify-content:flex-start;" }, onclick: move |_| section.set(id), "{label}" }
+                    }
+                }
+                div { class: "pe-body modal-body", style: "min-height:0;overflow-y:auto;",
+                    // Freeze the submitted snapshot until discovery, probe or
+                    // save completes, so responses cannot overwrite newer input.
+                    fieldset { disabled: busy().is_some(), style: "border:0;padding:0;margin:0;min-width:0;",
+                    if section() == "dest" {
+                        div { class: "pe-sec-head", h3 { "Destination" } p { "Discover public metadata, then review the populated values before saving." } }
+                        Niks3TextField { label: "Name", field: "name", form, result, multiline: false, secret: false, hint: String::new() }
+                        div { class: "field", label { "Type" } span { class: "chip chip-info", "Niks3" } }
+                        Niks3TextField { label: "Write / API URL", field: "server", form, result, multiline: false, secret: false, hint: "HTTPS control endpoint used for publication.".to_string() }
+                        button { class: "btn btn-ghost focus-ring", disabled: busy().is_some() || form().server_url.trim().is_empty(), onclick: move |_| {
+                            busy.set(Some("discover")); error.set(None); discovery_note.set(None); result.set(None);
+                            let url = form().server_url;
+                            spawn(async move {
+                                match client::discover_niks3(&url).await {
+                                    Ok(values) => {
+                                        let mut state = form.write(); state.server_url = values.server_url; state.read_url = values.substituter_url; state.keys = values.public_keys.join("\n");
+                                        discovery_note.set(Some(if values.oidc_audience.is_some() { "Configuration populated. Review URLs and all keys before saving. OIDC advertised; external providers are not offered." } else { "Configuration populated. Review URLs and all keys before saving." }.into()));
+                                    }
+                                    Err(_) => error.set(Some("Discovery failed. Check the API URL, HTTPS certificate and permitted target policy.".into())),
+                                }
+                                busy.set(None);
+                            });
+                        }, if busy() == Some("discover") { "Discovering…" } else { "Discover configuration" } }
+                        if let Some(note) = discovery_note() { p { class: "help", role: "status", "{note}" } }
+                        Niks3TextField { label: "Read / substituter URL", field: "read", form, result, multiline: false, secret: false, hint: "HTTPS endpoint used by Nix reads; independent of the write API.".to_string() }
+                        Niks3TextField { label: "Signing public keys", field: "keys", form, result, multiline: true, secret: false, hint: "One name:BASE64KEY per line. Keep both keys during rotation.".to_string() }
+                    }
+                    if section() == "auth" {
+                        div { class: "pe-sec-head", h3 { "Credentials" } p { "Write credentials stay on builders. Read credentials go only to assigned agents." } }
+                        div { class: "field", label { r#for: "niks3-write-mode", "Write authentication" }
+                            select { id: "niks3-write-mode", class: "input focus-ring", value: form().write_mode, onchange: move |e| { result.set(None); let mut state = form.write(); state.write_mode = e.value(); state.token.clear(); state.write_cert.clear(); state.write_key.clear(); state.write_ca.clear(); state.clear_write_ca = false; },
+                                option { value: "token", "Static token" } option { value: "mtls", "mTLS" }
+                            }
+                        }
+                        if form().write_mode == "token" {
+                            Niks3TextField { label: "Write token", field: "token", form, result, multiline: false, secret: true,
+                                hint: if destination.as_ref().is_some_and(|d| d.niks3_write_token_configured) { "Token configured. Leave blank to retain; enter a new token to rotate.".to_string() } else { "Required for token writes.".to_string() }
+                            }
+                        }
+                        div { class: "field", label { r#for: "niks3-read-mode", "Read authentication" }
+                            select { id: "niks3-read-mode", class: "input focus-ring", value: form().read_mode, onchange: move |e| { result.set(None); let mut state = form.write(); state.read_mode = e.value(); state.read_cert.clear(); state.read_key.clear(); state.read_ca.clear(); state.clear_read_ca = false; },
+                                option { value: "none", "Public (none)" } option { value: "mtls", "mTLS" }
+                            }
+                        }
+                        for (plane, cert_field, key_field, ca_field, configured, has_ca) in [
+                            ("Write", "write_cert", "write_key", "write_ca", destination.as_ref().is_some_and(|d| d.niks3_write_mtls_configured), destination.as_ref().is_some_and(|d| d.niks3_write_ca_cert.is_some())),
+                            ("Read", "read_cert", "read_key", "read_ca", destination.as_ref().is_some_and(|d| d.niks3_read_mtls_configured), destination.as_ref().is_some_and(|d| d.niks3_read_ca_cert.is_some())),
+                        ] {
+                            if (plane == "Write" && form().write_mode == "mtls") || (plane == "Read" && form().read_mode == "mtls") {
+                                h4 { "{plane} mTLS identity" }
+                                p { class: "help", if configured { "Identity configured. Leave both identity fields blank to retain, or replace certificate and key together." } else { "Enter a client certificate and private key together." } }
+                                Niks3TextField { label: if plane == "Write" { "Write client certificate" } else { "Read client certificate" }, field: cert_field, form, result, multiline: true, secret: false, hint: "PEM certificate.".to_string() }
+                                Niks3TextField { label: if plane == "Write" { "Write private key" } else { "Read private key" }, field: key_field, form, result, multiline: true, secret: true, hint: "PEM private key. Stored keys are never returned.".to_string() }
+                                Niks3TextField { label: if plane == "Write" { "Write CA certificate (optional)" } else { "Read CA certificate (optional)" }, field: ca_field, form, result, multiline: true, secret: false, hint: if has_ca { "Custom CA configured. Blank retains it.".to_string() } else { "Blank uses system trust.".to_string() } }
+                                if has_ca { label { input { r#type: "checkbox", checked: if plane == "Write" { form().clear_write_ca } else { form().clear_read_ca }, onchange: move |e| { result.set(None); if plane == "Write" { form.write().clear_write_ca = e.checked(); } else { form.write().clear_read_ca = e.checked(); } } } " Remove {plane} custom CA on save" } }
+                            }
+                        }
+                        p { class: "help", "Changing authentication modes clears previous credentials on save. External credential providers are not offered." }
+                        button { class: "btn btn-ghost focus-ring", disabled: busy().is_some(), onclick: move |_| {
+                            error.set(None); result.set(None);
+                            if let Err(message) = form().validate(None) {
+                                error.set(Some(if testing_retained.is_some() { format!("Test not run: {message} Stored secrets cannot be retrieved; supply a replacement identity for a non-mutating probe.") } else { format!("Test not run: {message}") })); return;
+                            }
+                            let req = form().request(); busy.set(Some("test"));
+                            spawn(async move { match client::test_cache_destination_credentials(&req).await {
+                                Ok(value) => result.set(Some(value)),
+                                Err(_) => error.set(Some("Connection test failed. Check endpoint policy and TLS credentials.".into())),
+                            } busy.set(None); });
+                        }, if busy() == Some("test") { "Testing…" } else { "Test connection" } }
+                        if let Some(test) = result() {
+                            div { role: "status", "data-testid": "niks3-test-result",
+                                for (label, value) in [("API reachable", test.server_reachable), ("Discovery valid", test.discovery_valid), ("Write authorization", test.write_auth_valid), ("Read endpoint reachable", test.read_endpoint_reachable), ("Signing keys found", test.signing_keys_found)] {
+                                    p { style: match value { Some(true) => "color:var(--cf-emerald);", Some(false) => "color:var(--cf-red);", None => "color:var(--cf-text-muted);" }, "{label}: ", match value { Some(true) => "Verified", Some(false) => "Failed", None => "Untested" } }
+                                }
+                                p { class: "help", "Discovery and read connectivity do not prove write permission. No upload was attempted." }
+                            }
+                        }
+                    }
+                    if section() == "envs" {
+                        div { class: "pe-sec-head", h3 { "Assigned environments" } p { "Crystal Forge pushes builds for systems in these environments to this cache." } }
+                        match environments.read().as_ref() {
+                            Some(Ok(envs)) => rsx! { div { style: "display:flex;flex-wrap:wrap;gap:8px;",
+                                for env in envs { button { class: "btn btn-ghost focus-ring", aria_pressed: environment_ids().contains(&env.id), disabled: !environment_ready(), onclick: { let id = env.id; move |_| { let mut ids = environment_ids.write(); if ids.contains(&id) { ids.retain(|v| *v != id); } else { ids.push(id); } } }, "{env.name}" } }
+                            } },
+                            Some(Err(_)) => rsx! { p { role: "alert", "Could not load environments. Close and reopen before assigning environments." } },
+                            None => rsx! { p { "Loading environments…" } },
+                        }
+                        if !environment_ready() { p { "Loading assigned environments…" } }
+                        p { class: "help", "Review environment assignments before saving." }
+                    }
+                    if let Some(message) = error() { p { role: "alert", style: "color:var(--cf-red);", "{message}" } }
+                    }
+                }
+                footer { class: "pe-foot modal-foot", style: "grid-column:1/-1;display:flex;align-items:center;gap:8px;",
+                    span { class: "pe-foot-state", "Niks3 · {environment_ids().len()} environments" }
+                    button { class: "btn btn-ghost focus-ring", disabled: busy().is_some(), onclick: move |_| on_close.call(()), "Cancel" }
+                    button { class: "btn btn-primary focus-ring", disabled: busy().is_some() || !environment_ready(), onclick: move |_| {
+                        error.set(None);
+                        if let Err(message) = form().validate(retained.as_ref()) { error.set(Some(format!("Save not run: {message}"))); return; }
+                        let req = form().request(); let state = form(); let ids = environment_ids(); busy.set(Some("save"));
+                        let existing_id = editing_id.or(saved_id());
+                        spawn(async move {
+                            let saved = if let Some(id) = existing_id {
+                                let update = state.update_request();
+                                client::update_cache_destination(id, &update).await
+                            } else { client::create_cache_destination(&req).await };
+                            match saved {
+                                Ok(cache) => {
+                                    saved_id.set(Some(cache.id));
+                                    match client::assign_cache_environments(cache.id, ids).await {
+                                        Ok(_) => on_saved.call(()),
+                                        Err(_) => error.set(Some("Cache saved, but environment assignment failed. Retry Save changes to assign the selected environments; the cache will not be created twice.".into())),
+                                    }
+                                }
+                                Err(_) => error.set(Some("Cache save failed. Check values, credentials and permissions, then retry.".into())),
+                            }
+                            busy.set(None);
+                        });
+                    }, if busy() == Some("save") { "Saving…" } else if destination.is_some() || saved_id().is_some() { "Save changes" } else { "Add cache" } }
+                }
+            }
+        }
+    }
+}
 
 fn is_http_url(value: &str) -> bool {
     let trimmed = value.trim();
@@ -454,6 +919,7 @@ fn CacheDestinationsList(
     let mut search_query = use_signal(String::new);
     let mut view_mode = use_signal(|| CacheViewMode::Cards);
     let mut edit_destination = use_signal(|| None::<CacheDestination>);
+    let mut show_niks3_add = use_signal(|| false);
     let mut view_destination = use_signal(|| None::<CacheDestination>);
     let focus_value = query_param("focus");
 
@@ -715,6 +1181,13 @@ fn CacheDestinationsList(
             }
 
             // Add modal - matching JSX mockup CacheFormModal (add mode)
+            if show_niks3_add() || edit_destination().is_some_and(|d| d.cache_type.eq_ignore_ascii_case("niks3")) {
+                Niks3CacheForm {
+                    destination: edit_destination(),
+                    on_close: move |_| { show_niks3_add.set(false); edit_destination.set(None); },
+                    on_saved: move |_| { show_niks3_add.set(false); edit_destination.set(None); refresh_nonce.set(refresh_nonce() + 1); },
+                }
+            }
             if show_add_modal() {
                 div {
                     class: "modal-backdrop",
@@ -747,6 +1220,7 @@ fn CacheDestinationsList(
                             }
                             div { class: "field", label { "Type" }
                                 div { class: "seg",
+                                    button { class: "focus-ring", onclick: move |_| { show_add_modal.set(false); show_niks3_add.set(true); }, "Niks3" }
                                     for (val, label) in [("s3", "S3-compatible"), ("attic", "Attic"), ("nix", "Nix HTTPS")] {
                                         button {
                                             class: if form_type() == val { "active" } else { "" },
@@ -950,7 +1424,7 @@ fn CacheDestinationsList(
             }
 
             // Edit modal - matching JSX mockup (lines 155-284)
-            if let Some(dest) = edit_destination() {
+            if let Some(dest) = edit_destination().filter(|d| !d.cache_type.eq_ignore_ascii_case("niks3")) {
                 div {
                     class: "modal-backdrop",
                     onclick: move |_| edit_destination.set(None),
@@ -2655,6 +3129,7 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                             } else {
                                                 Some(edit_selected_environments())
                                             },
+                                            ..Default::default()
                                         };
 
                                         match client::update_cache_destination(destination.id, &req).await {
@@ -2750,7 +3225,79 @@ fn s3_endpoint_url_from_form(cache_type: &str, url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CacheFormValidationInput, validate_cache_destination_form};
+    use super::{CacheFormValidationInput, Niks3FormState, validate_cache_destination_form};
+
+    #[test]
+    fn niks3_edit_never_prefills_credentials_from_destination() {
+        let destination = serde_json::from_value(serde_json::json!({
+            "id": 1, "name": "private", "cache_type": "Niks3", "enabled": true,
+            "created_at": "2026-10-02T00:00:00Z", "updated_at": "2026-10-02T00:00:00Z",
+            "niks3_write_auth_mode": "mtls", "niks3_read_auth_mode": "mtls",
+            "niks3_auth_token": "must-not-prefill", "niks3_write_client_key": "must-not-prefill",
+            "niks3_read_client_key": "must-not-prefill", "niks3_write_mtls_configured": true,
+            "niks3_read_mtls_configured": true
+        }))
+        .unwrap();
+        let state = Niks3FormState::from_destination(Some(&destination));
+        let request = state.update_request();
+        assert!(request.niks3_auth_token.is_none());
+        assert!(request.niks3_write_client_key.is_none());
+        assert!(request.niks3_read_client_key.is_none());
+        assert!(!request.clear_niks3_write_client_key);
+        assert!(!request.clear_niks3_read_client_key);
+        assert!(!request.clear_niks3_write_ca_cert);
+        assert!(!request.clear_niks3_read_ca_cert);
+    }
+
+    #[test]
+    fn niks3_mode_transition_excludes_inactive_credentials() {
+        let mut state = Niks3FormState::from_destination(None);
+        state.token = "replacement-token".into();
+        state.write_cert = "inactive-cert".into();
+        state.write_key = "inactive-key".into();
+        state.read_key = "inactive-read-key".into();
+        let request = state.update_request();
+        assert_eq!(
+            request.niks3_auth_token.as_deref(),
+            Some("replacement-token")
+        );
+        assert!(request.niks3_write_client_cert.is_none());
+        assert!(request.niks3_write_client_key.is_none());
+        assert!(request.niks3_read_client_key.is_none());
+        assert!(request.clear_niks3_write_client_key);
+        assert!(request.clear_niks3_read_client_key);
+        assert!(!request.clear_niks3_auth_token);
+        state.write_mode = "mtls".into();
+        let request = state.update_request();
+        assert!(request.niks3_auth_token.is_none());
+        assert!(request.clear_niks3_auth_token);
+        assert!(!request.clear_niks3_write_client_key);
+    }
+
+    #[test]
+    fn niks3_ca_removal_never_sends_a_conflicting_replacement() {
+        let mut state = Niks3FormState::from_destination(None);
+        state.write_mode = "mtls".into();
+        state.read_mode = "mtls".into();
+        state.write_ca = "new-write-ca".into();
+        state.read_ca = "new-read-ca".into();
+        state.clear_write_ca = true;
+        state.clear_read_ca = true;
+        let request = state.update_request();
+        assert!(request.clear_niks3_write_ca_cert);
+        assert!(request.clear_niks3_read_ca_cert);
+        assert!(request.niks3_write_ca_cert.is_none());
+        assert!(request.niks3_read_ca_cert.is_none());
+    }
+
+    #[test]
+    fn niks3_success_does_not_imply_write_authorization() {
+        let result: crate::api::models::CacheCredentialTestResult = serde_json::from_value(
+            serde_json::json!({ "success": true, "message": "Read checks passed", "write_auth_valid": null })
+        ).unwrap();
+        assert!(result.ok);
+        assert_eq!(result.write_auth_valid, None);
+    }
 
     fn base_input(cache_type: &str, push_to: &str) -> CacheFormValidationInput {
         CacheFormValidationInput {

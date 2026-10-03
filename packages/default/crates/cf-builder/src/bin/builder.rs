@@ -98,13 +98,32 @@ fn required_cache_push_reference(
         );
     }
 
-    if cache_config.cache_command(store_path).is_none() {
+    if !matches!(cache_config.cache_type, CacheType::Niks3)
+        && cache_config.cache_command(store_path).is_none()
+    {
         anyhow::bail!(
             "cache push is enabled for {target_name}, but no cache push command can be built from builder configuration"
         );
     }
 
     match cache_config.cache_type {
+        CacheType::Niks3 => {
+            cache_config
+                .niks3_server_url
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| anyhow::anyhow!("Niks3 cache push requires niks3_server_url"))?;
+            if cache_config.niks3_write_auth.is_none() {
+                anyhow::bail!("Niks3 cache push requires niks3_write_auth");
+            }
+            cache_config
+                .push_to
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Niks3 cache push requires a read cache reference in push_to")
+                })
+        }
         CacheType::Attic => cache_config
             .attic_cache_name
             .clone()
@@ -167,7 +186,7 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
         None
     };
 
-    let capabilities = detect_cve_capabilities(builder_config.cve_scanning_enabled).await;
+    let capabilities = runtime_capabilities(builder_config.cve_scanning_enabled).await;
     info!("Initializing API client...");
     let api_client =
         BuilderApiClient::new(builder_config, evaluator.clone(), capabilities.clone()).await?;
@@ -308,6 +327,15 @@ async fn probe_evaluator_fingerprint(
         allow_import_from_derivation,
         source_materialization_schema_version: VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
     })
+}
+
+// COMPATIBILITY: Niks3 support belongs to this runtime, even when the optional
+// CVE scanner is disabled or unavailable. Both session setup and polling use
+// this advertisement; cache read/write authentication defaults stay unchanged.
+async fn runtime_capabilities(cve_enabled: bool) -> BuilderCapabilities {
+    let mut capabilities = detect_cve_capabilities(cve_enabled).await;
+    capabilities.niks3_cache = true;
+    capabilities
 }
 
 /// Heartbeat loop - sends metrics to server periodically
@@ -1660,6 +1688,10 @@ async fn execute_build_job(
         job_id, derivation_payload.id
     );
 
+    let cache_destination_id = derivation_payload
+        .cache_push
+        .as_ref()
+        .and_then(|push| push.cache_destination_id);
     let cache_config = derivation_payload
         .cache_push
         .as_ref()
@@ -2178,7 +2210,16 @@ async fn execute_build_job(
             }
 
             if let Err(e) = client
-                .complete_job(job_id, &store_path, cache_reference.as_deref())
+                .complete_job(
+                    job_id,
+                    &store_path,
+                    cache_reference.as_deref(),
+                    if cache_reference.is_some() {
+                        cache_destination_id
+                    } else {
+                        None
+                    },
+                )
                 .await
             {
                 error!("❌ Failed to report job #{} completion: {}", job_id, e);
@@ -2712,6 +2753,12 @@ fn is_local_db_host(host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn niks3_runtime_advertisement_is_independent_of_disabled_cve() {
+        let capabilities = super::runtime_capabilities(false).await;
+        assert!(capabilities.niks3_cache);
+        assert!(!capabilities.supports_current_cve_schema());
+    }
     use super::{classify_nix_failure, source_download_failure};
     use cf_protocol::builder::BuildFailureClass;
 

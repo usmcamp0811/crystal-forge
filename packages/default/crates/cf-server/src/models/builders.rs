@@ -63,8 +63,11 @@ pub use cf_protocol::builder::NextJobResponse;
 /// The `disabled()` associated function is defined in `cf-protocol` directly on
 /// `BuilderCachePushConfig`, so it is NOT part of this trait.
 pub trait BuilderCachePushConfigExt {
-    /// Convert the builder-delivered cache-push configuration to the server's
-    /// local `CacheConfig`, filling in any missing fields from `local_fallback`.
+    /// Converts dispatched push settings without inheriting Niks3 credentials.
+    ///
+    /// Dispatched upload caps override the local legacy fallback. Niks3 caps
+    /// have a minimum of one and are independent of Attic's job count.
+    /// Local fallback supplies other execution settings, not a Niks3 identity.
     fn to_cache_config(&self, local_fallback: &CacheConfig) -> CacheConfig;
 }
 
@@ -74,9 +77,14 @@ impl BuilderCachePushConfigExt for BuilderCachePushConfig {
         let cache_type = match &self.cache_type {
             cf_protocol::cache::CacheType::S3 => CacheType::S3,
             cf_protocol::cache::CacheType::Attic => CacheType::Attic,
+            cf_protocol::cache::CacheType::Niks3 => CacheType::Niks3,
             cf_protocol::cache::CacheType::Http => CacheType::Http,
             cf_protocol::cache::CacheType::Nix => CacheType::Nix,
         };
+        let parallel_uploads = self
+            .parallel_uploads
+            .unwrap_or(local_fallback.parallel_uploads);
+        let is_niks3 = matches!(cache_type, CacheType::Niks3);
         CacheConfig {
             cache_type,
             push_to: self.push_to.clone(),
@@ -87,7 +95,11 @@ impl BuilderCachePushConfigExt for BuilderCachePushConfig {
                 .or_else(|| local_fallback.signing_key.clone()),
             compression: self.compression.clone(),
             push_filter: None,
-            parallel_uploads: local_fallback.parallel_uploads,
+            parallel_uploads: if is_niks3 {
+                parallel_uploads.max(1)
+            } else {
+                parallel_uploads
+            },
             s3_region: self.s3_region.clone(),
             s3_profile: self.s3_profile.clone(),
             s3_access_key_id: self.s3_access_key_id.clone(),
@@ -97,6 +109,10 @@ impl BuilderCachePushConfigExt for BuilderCachePushConfig {
             attic_token: self.attic_token.clone(),
             attic_cache_name: self.attic_cache_name.clone(),
             attic_public_key: self.attic_public_key.clone(),
+            niks3_server_url: self.niks3_server_url.clone(),
+            niks3_write_auth: self.niks3_write_auth.clone(),
+            niks3_public_keys: Vec::new(),
+            niks3_read_auth: cf_protocol::cache::CacheReadAuth::None,
             attic_ignore_upstream_cache_filter: self.attic_ignore_upstream_cache_filter,
             attic_jobs: if self.attic_jobs == 0 {
                 local_fallback.attic_jobs
@@ -124,6 +140,9 @@ impl BuilderCachePushConfigExt for BuilderCachePushConfig {
 /// `cf_protocol::builder::BuildJob` via `Into::into`.  The `cf-builder` crate
 /// (extracted in a later step) will use `cf_protocol::builder::BuildJob`
 /// directly and will never need `sqlx::FromRow`.
+///
+/// Cache selection is server-owned and immutable for one builder/session claim.
+/// A new claim clears the previous selection before the server dispatches it.
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct BuildJob {
     pub id: Uuid,
@@ -131,6 +150,18 @@ pub struct BuildJob {
     #[serde(default)]
     #[sqlx(default)]
     pub builder_session_id: Option<Uuid>,
+    /// Retains the cache identity selected for this exact builder/session claim.
+    /// Destination deletion does not erase the identity. A new claim resets it.
+    /// This server-owned field is not part of the builder job wire model.
+    #[serde(skip)]
+    #[sqlx(default)]
+    pub dispatched_cache_destination_id: Option<i32>,
+    /// Distinguishes undispatched legacy claims from recorded cache selection.
+    /// A recorded selection is immutable until the next claim, including `None`
+    /// when publication is disabled.
+    #[serde(skip)]
+    #[sqlx(default)]
+    pub cache_dispatch_recorded_at: Option<DateTime<Utc>>,
     pub derivation_id: i32,
     pub environment_id: Option<Uuid>,
     pub status: String,
@@ -422,6 +453,25 @@ pub struct KeypairRegeneratedResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn niks3_upload_cap_uses_dispatch_or_legacy_fallback_not_attic_jobs() {
+        let mut fallback = CacheConfig {
+            parallel_uploads: 3,
+            attic_jobs: 99,
+            ..CacheConfig::default()
+        };
+        let mut push = BuilderCachePushConfig::disabled();
+        push.cache_type = CacheType::Niks3;
+        push.attic_jobs = 91;
+        for (supplied, expected) in [(None, 3), (Some(7), 7), (Some(1), 1), (Some(0), 1)] {
+            push.parallel_uploads = supplied;
+            assert_eq!(push.to_cache_config(&fallback).parallel_uploads, expected);
+        }
+        push.parallel_uploads = None;
+        fallback.parallel_uploads = 0;
+        assert_eq!(push.to_cache_config(&fallback).parallel_uploads, 1);
+    }
 
     #[test]
     fn test_builder_status_serialization() {

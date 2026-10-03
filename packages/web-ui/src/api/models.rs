@@ -6397,6 +6397,38 @@ pub struct CacheDestination {
     pub attic_public_key: Option<String>,
     pub attic_ignore_upstream_cache_filter: Option<bool>,
     pub attic_jobs: Option<i32>,
+    /// HTTPS write API URL; `push_to` remains the independent read URL.
+    pub niks3_server_url: Option<String>,
+    /// Trusted Nix signing keys for reads, including rotation overlap.
+    #[serde(default)]
+    pub niks3_public_keys: Vec<String>,
+    /// Selected write authentication: `token` or `mtls`.
+    pub niks3_write_auth_mode: Option<String>,
+    /// Redacted write token; GET responses never populate this field.
+    pub niks3_auth_token: Option<String>,
+    /// Public PEM write client certificate.
+    pub niks3_write_client_cert: Option<String>,
+    /// Redacted write private key; GET responses never populate this field.
+    pub niks3_write_client_key: Option<String>,
+    /// Optional PEM trust anchor for the write server.
+    pub niks3_write_ca_cert: Option<String>,
+    /// Selected read authentication: `none` or `mtls`.
+    pub niks3_read_auth_mode: Option<String>,
+    /// Public PEM read client certificate.
+    pub niks3_read_client_cert: Option<String>,
+    /// Redacted read private key; GET responses never populate this field.
+    pub niks3_read_client_key: Option<String>,
+    /// Optional PEM trust anchor for the read server.
+    pub niks3_read_ca_cert: Option<String>,
+    /// Indicates an existing write token without exposing its value.
+    #[serde(default)]
+    pub niks3_write_token_configured: bool,
+    /// Indicates an existing complete write mTLS identity.
+    #[serde(default)]
+    pub niks3_write_mtls_configured: bool,
+    /// Indicates an existing complete read mTLS identity.
+    #[serde(default)]
+    pub niks3_read_mtls_configured: bool,
     pub parallel_uploads: Option<i32>,
     pub max_retries: Option<i32>,
     pub retry_delay_seconds: Option<i64>,
@@ -6435,6 +6467,29 @@ pub struct CreateCacheDestination {
     pub force_repush: Option<bool>,
     pub require_sigs: Option<bool>,
     pub environment_ids: Option<Vec<Uuid>>,
+    /// HTTPS write API URL, separate from the read URL in `push_to`.
+    pub niks3_server_url: Option<String>,
+    /// Nonempty trusted Nix signing keys.
+    #[serde(default)]
+    pub niks3_public_keys: Vec<String>,
+    /// Required Niks3 write mode: `token` or `mtls`.
+    pub niks3_write_auth_mode: Option<String>,
+    /// Plaintext replacement token, sent only in mutation/probe bodies.
+    pub niks3_auth_token: Option<String>,
+    /// PEM write client certificate.
+    pub niks3_write_client_cert: Option<String>,
+    /// PEM write private key, encrypted by the server on save.
+    pub niks3_write_client_key: Option<String>,
+    /// Optional PEM write server trust anchor.
+    pub niks3_write_ca_cert: Option<String>,
+    /// Required Niks3 read mode: `none` or `mtls`.
+    pub niks3_read_auth_mode: Option<String>,
+    /// PEM read client certificate.
+    pub niks3_read_client_cert: Option<String>,
+    /// PEM read private key, encrypted by the server on save.
+    pub niks3_read_client_key: Option<String>,
+    /// Optional PEM read server trust anchor.
+    pub niks3_read_ca_cert: Option<String>,
 }
 
 /// Update cache destination request
@@ -6464,14 +6519,81 @@ pub struct UpdateCacheDestination {
     pub force_repush: Option<bool>,
     pub require_sigs: Option<bool>,
     pub environment_ids: Option<Vec<Uuid>>,
+    /// Replaces the HTTPS write API URL.
+    pub niks3_server_url: Option<String>,
+    /// Replaces trusted signing keys when nonempty.
+    #[serde(default)]
+    pub niks3_public_keys: Vec<String>,
+    /// Selects write mode; mode changes clear the previous identity atomically.
+    pub niks3_write_auth_mode: Option<String>,
+    /// Replaces the token; omission preserves the configured token.
+    pub niks3_auth_token: Option<String>,
+    /// Replaces the write client certificate.
+    pub niks3_write_client_cert: Option<String>,
+    /// Replaces the write private key; omission preserves it.
+    pub niks3_write_client_key: Option<String>,
+    /// Replaces the write trust anchor; omission preserves it.
+    pub niks3_write_ca_cert: Option<String>,
+    /// Selects read mode; `none` clears the read identity atomically.
+    pub niks3_read_auth_mode: Option<String>,
+    /// Replaces the read client certificate.
+    pub niks3_read_client_cert: Option<String>,
+    /// Replaces the read private key; omission preserves it.
+    pub niks3_read_client_key: Option<String>,
+    /// Replaces the read trust anchor; omission preserves it.
+    pub niks3_read_ca_cert: Option<String>,
+    /// Explicitly clears the token; incompatible with a simultaneous replacement.
+    #[serde(default)]
+    pub clear_niks3_auth_token: bool,
+    /// Explicitly clears the write key when changing authentication mode.
+    #[serde(default)]
+    pub clear_niks3_write_client_key: bool,
+    /// Explicitly clears the read key when changing to public reads.
+    #[serde(default)]
+    pub clear_niks3_read_client_key: bool,
+    /// Removes the custom write CA and restores system trust.
+    #[serde(default)]
+    pub clear_niks3_write_ca_cert: bool,
+    /// Removes the custom read CA and restores system trust.
+    #[serde(default)]
+    pub clear_niks3_read_ca_cert: bool,
 }
 
+/// Reports non-mutating connectivity checks; absent authorization is untested.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CacheCredentialTestResult {
+    /// Legacy aggregate result; does not establish Niks3 write permission.
+    #[serde(alias = "success")]
     pub ok: bool,
+    /// Optional HTTP response code from the probe.
     pub status_code: Option<u16>,
+    /// Human-readable probe outcome.
     pub message: String,
+    /// Public endpoint used by the probe.
     pub tested_url: Option<String>,
+    /// Whether the Niks3 API responded.
+    pub server_reachable: Option<bool>,
+    /// Whether the public cache configuration passed validation.
+    pub discovery_valid: Option<bool>,
+    /// Whether write permission was proved; `None` MUST display as untested.
+    pub write_auth_valid: Option<bool>,
+    /// Whether the independently authenticated read endpoint responded.
+    pub read_endpoint_reachable: Option<bool>,
+    /// Whether trusted signing keys were found.
+    pub signing_keys_found: Option<bool>,
+}
+
+/// Contains public Niks3 discovery metadata; discovery does not save a cache.
+#[derive(Clone, Deserialize, PartialEq)]
+pub struct Niks3Discovery {
+    /// Canonical HTTPS write API URL.
+    pub server_url: String,
+    /// Independent HTTPS Nix read URL.
+    pub substituter_url: String,
+    /// Published trusted Nix signing keys.
+    pub public_keys: Vec<String>,
+    /// Advertised OIDC audience; external providers are not initially supported.
+    pub oidc_audience: Option<String>,
 }
 
 /// Cache push job status and details

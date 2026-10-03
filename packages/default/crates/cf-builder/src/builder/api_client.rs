@@ -118,6 +118,9 @@ fn append_logs_outcome_for_status(
 }
 
 const DEFAULT_API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+// The server can spend 300 seconds verifying a published closure. Allow one
+// further minute for process cleanup, the completion transaction, and transit.
+const BUILD_COMPLETION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(360);
 const DERIVATION_ARCHIVE_DOWNLOAD_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(30 * 60);
 
@@ -192,6 +195,9 @@ pub struct BuilderApiClient {
     supported_execution_strategies: Vec<RemoteBuildExecutionStrategy>,
     supported_evaluator_contract_versions: Vec<u32>,
     evaluator: Option<EvaluatorFingerprint>,
+    // The process advertisement is reused in every signed poll, independently
+    // of CVE lease selection and optional scanner availability.
+    capabilities: BuilderCapabilities,
 }
 
 impl BuilderApiClient {
@@ -250,7 +256,7 @@ impl BuilderApiClient {
                     config.resolve_retry_interval,
                     config.resolve_retry_max_interval,
                     config.resolve_max_attempts,
-                    capabilities,
+                    capabilities.clone(),
                 )
                 .await?;
                 builder_id
@@ -264,7 +270,7 @@ impl BuilderApiClient {
                     config.resolve_retry_interval,
                     config.resolve_retry_max_interval,
                     config.resolve_max_attempts,
-                    capabilities,
+                    capabilities.clone(),
                 )
                 .await?
             }
@@ -282,6 +288,7 @@ impl BuilderApiClient {
                 .map(|fingerprint| vec![fingerprint.contract_version])
                 .unwrap_or_default(),
             evaluator,
+            capabilities,
         })
     }
 
@@ -712,8 +719,15 @@ impl BuilderApiClient {
 
     /// Get the next available job from the server, including the embedded
     /// derivation build payload so the builder needs no database access.
+    /// Sends the process capabilities in the signed POST. An unsupported cache
+    /// conflict returns no work; the server leaves the candidate unclaimed.
+    ///
+    /// # Errors
+    /// Returns an error for serialization or transport failures, invalid job
+    /// responses, superseded sessions, or other server rejection statuses.
     pub async fn get_next_job(&self) -> Result<Option<NextJobResponse>> {
         let body = serde_json::to_vec(&NextJobRequest {
+            capabilities: self.capabilities.clone(),
             protocol_version: 2,
             supported_execution_strategies: self.supported_execution_strategies.clone(),
             supported_evaluator_contract_versions: self
@@ -793,6 +807,9 @@ impl BuilderApiClient {
             match serde_json::from_slice::<NextJobConflictResponse>(&body)
                 .map(|response| response.reason)
             {
+                Ok(NextJobConflictReason::UnsupportedCacheType) => warn!(
+                    "Selected cache requires a newer builder capability (409 Conflict); no job was claimed"
+                ),
                 Ok(NextJobConflictReason::UnsupportedExecutionStrategy) => warn!(
                     supported_strategies = ?self.supported_execution_strategies,
                     "Server's configured remote execution strategy is not supported by this builder (409 Conflict)"
@@ -1385,29 +1402,34 @@ impl BuilderApiClient {
         Ok(())
     }
 
-    /// Complete a job successfully
+    /// Reports successful build completion and the published destination identity.
+    ///
+    /// Callers must supply a cache reference and destination ID only after a
+    /// successful push. Without a push, the destination ID is omitted even if
+    /// the caller supplied one.
+    /// The request allows six minutes for server-side publication verification
+    /// and completion persistence; ordinary API requests retain their timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization, transport, or server acceptance fails.
     pub async fn complete_job(
         &self,
         job_id: uuid::Uuid,
         output_path: &str,
         cache_reference: Option<&str>,
+        cache_destination_id: Option<i32>,
     ) -> Result<()> {
-        #[derive(Serialize)]
-        struct CompleteRequest {
-            output_path: String,
-            cache_pushed: bool,
-            cache_reference: Option<String>,
-        }
-
         let path = format!(
             "/api/v1/builders/{}/jobs/{}/complete",
             self.builder_id, job_id
         );
         let url = format!("{}{}", self.server_url, path);
-        let request = CompleteRequest {
-            output_path: output_path.to_string(),
+        let request = cf_protocol::builder::CompleteJobRequest {
+            output_path: Some(output_path.to_string()),
             cache_pushed: cache_reference.is_some(),
             cache_reference: cache_reference.map(ToString::to_string),
+            cache_destination_id: cache_reference.and(cache_destination_id),
         };
         let body = serde_json::to_vec(&request)?;
         let (builder_id, signature, timestamp) = self.sign_request("POST", &path, &body);
@@ -1415,6 +1437,7 @@ impl BuilderApiClient {
         let response = self
             .client
             .post(&url)
+            .timeout(BUILD_COMPLETION_TIMEOUT)
             .header("Content-Type", "application/json")
             .header("X-Builder-ID", builder_id)
             .header("X-Builder-Session-ID", self.builder_session_id.to_string())
@@ -1778,6 +1801,181 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
+    #[tokio::test]
+    async fn niks3_next_job_poll_signs_runtime_capability_without_cve_support() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let key = SigningKey::generate(&mut rand::thread_rng());
+        let verifying_key = key.verifying_key();
+        let client = BuilderApiClient {
+            client: Client::builder().no_proxy().build().unwrap(),
+            server_url: format!("http://{address}"),
+            builder_id: Uuid::new_v4(),
+            builder_session_id: Uuid::new_v4(),
+            signing_key: key,
+            supported_execution_strategies: vec![RemoteBuildExecutionStrategy::ServerDerivation],
+            supported_evaluator_contract_versions: Vec::new(),
+            evaluator: None,
+            capabilities: BuilderCapabilities {
+                niks3_cache: true,
+                ..Default::default()
+            },
+        };
+        let path = format!("/api/v1/builders/{}/next-job", client.builder_id);
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let header_end = loop {
+                let mut chunk = [0; 1024];
+                let size = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(size, 0);
+                bytes.extend_from_slice(&chunk[..size]);
+                if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                    break end + 4;
+                }
+            };
+            let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+            assert!(headers.starts_with(&format!("POST {path} HTTP/1.1")));
+            let header = |name: &str| {
+                headers
+                    .lines()
+                    .find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        key.eq_ignore_ascii_case(name)
+                            .then(|| value.trim().to_owned())
+                    })
+                    .unwrap()
+            };
+            let length = header("content-length").parse::<usize>().unwrap();
+            while bytes.len() < header_end + length {
+                let mut chunk = [0; 1024];
+                let size = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(size, 0);
+                bytes.extend_from_slice(&chunk[..size]);
+            }
+            let body = &bytes[header_end..header_end + length];
+            let request: NextJobRequest = serde_json::from_slice(body).unwrap();
+            assert!(request.capabilities.niks3_cache);
+            assert!(!request.capabilities.supports_current_cve_schema());
+            let payload = BuilderApiClient::canonical_signature_payload(
+                "POST",
+                &path,
+                &header("x-timestamp"),
+                body,
+            );
+            let signature = ed25519_dalek::Signature::from_slice(
+                &base64::engine::general_purpose::STANDARD
+                    .decode(header("x-signature"))
+                    .unwrap(),
+            )
+            .unwrap();
+            verifying_key.verify_strict(&payload, &signature).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        assert!(client.get_next_job().await.unwrap().is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn niks3_completion_signs_destination_id_and_omits_it_without_push() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        let verifying_key = signing_key.verifying_key();
+        let job_id = Uuid::new_v4();
+        let client = BuilderApiClient {
+            capabilities: Default::default(),
+            client: Client::builder().no_proxy().build().unwrap(),
+            server_url: format!("http://{address}"),
+            builder_id: Uuid::new_v4(),
+            builder_session_id: Uuid::new_v4(),
+            signing_key,
+            supported_execution_strategies: Vec::new(),
+            supported_evaluator_contract_versions: Vec::new(),
+            evaluator: None,
+        };
+        let path = format!(
+            "/api/v1/builders/{}/jobs/{job_id}/complete",
+            client.builder_id
+        );
+        let server = tokio::spawn(async move {
+            for expected_id in [Some(470), None] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let header_end = loop {
+                    let mut chunk = [0; 1024];
+                    let size = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(size, 0);
+                    bytes.extend_from_slice(&chunk[..size]);
+                    if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                        break end + 4;
+                    }
+                };
+                let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+                assert!(headers.starts_with(&format!("POST {path} HTTP/1.1")));
+                let header = |name: &str| {
+                    headers
+                        .lines()
+                        .find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case(name).then_some(value.trim())
+                        })
+                        .unwrap()
+                };
+                let length: usize = header("content-length").parse().unwrap();
+                while bytes.len() < header_end + length {
+                    let mut chunk = [0; 1024];
+                    let size = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(size, 0);
+                    bytes.extend_from_slice(&chunk[..size]);
+                }
+                let body = &bytes[header_end..header_end + length];
+                let completion: cf_protocol::builder::CompleteJobRequest =
+                    serde_json::from_slice(body).unwrap();
+                assert_eq!(completion.cache_destination_id, expected_id);
+                assert_eq!(completion.cache_pushed, expected_id.is_some());
+                assert_eq!(completion.cache_reference.is_some(), expected_id.is_some());
+                let signature = base64::engine::general_purpose::STANDARD
+                    .decode(header("x-signature"))
+                    .unwrap();
+                verifying_key
+                    .verify_strict(
+                        &BuilderApiClient::canonical_signature_payload(
+                            "POST",
+                            &path,
+                            header("x-timestamp"),
+                            body,
+                        ),
+                        &Signature::from_slice(&signature).unwrap(),
+                    )
+                    .unwrap();
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+            }
+        });
+        client
+            .complete_job(
+                job_id,
+                "/nix/store/output",
+                Some("https://read.example.org"),
+                Some(470),
+            )
+            .await
+            .unwrap();
+        client
+            .complete_job(job_id, "/nix/store/output", None, Some(470))
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
     #[test]
     fn test_load_valid_private_key() {
         let key = SigningKey::generate(&mut rand::thread_rng());
@@ -1813,6 +2011,7 @@ mod tests {
         let builder_id = Uuid::new_v4();
 
         let client = BuilderApiClient {
+            capabilities: Default::default(),
             client: Client::new(),
             server_url: "http://localhost:8080".to_string(),
             builder_id,
@@ -1897,6 +2096,7 @@ mod tests {
         let client = BuilderApiClient {
             client: Client::new(),
             server_url: format!("http://{addr}"),
+            capabilities: Default::default(),
             builder_id: Uuid::new_v4(),
             builder_session_id: Uuid::new_v4(),
             signing_key: SigningKey::generate(&mut rand::thread_rng()),

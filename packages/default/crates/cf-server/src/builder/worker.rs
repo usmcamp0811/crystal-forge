@@ -8,7 +8,7 @@ use crate::config::{BuildConfig, CacheConfig};
 use crate::derivations::Derivation;
 use crate::log::WorkerState;
 use crate::queries::build_reservations;
-use crate::queries::cache_push::create_cache_push_job;
+use crate::queries::cache_push::enqueue_cache_push_for_derivation;
 use crate::queries::derivations::{handle_derivation_failure, mark_target_build_complete};
 use anyhow::Result;
 use sqlx::PgPool;
@@ -16,12 +16,13 @@ use tokio::process::Command;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
-/// Main build worker loop
+/// Builds claimed derivations and queues publication after output persistence.
 ///
-/// CRITICAL IMPROVEMENTS:
-/// 1. Timeout protection prevents workers from getting stuck for hours
-/// 2. Helper functions for task description and status updates
-/// 3. Better error handling and logging
+/// Real builds enqueue through the canonical environment-scoped cache policy,
+/// including database-only destinations. Publication resolution failures retain
+/// the completed output for periodic queue recovery. Mock builds do not enqueue
+/// publication. Each build has a bounded timeout and releases its reservation
+/// through the completion or failure path.
 ///
 /// # Parameters
 ///
@@ -151,28 +152,6 @@ pub(super) async fn build_worker(
                                 );
                                 // non-fatal - we can still push to cache unsigned
                             }
-
-                            // TODO: Include the name of the server that built the derivation
-                            if let Some(ref store_path) = derivation.store_path {
-                                if let Err(e) = create_cache_push_job(
-                                    &pool,
-                                    derivation.id,
-                                    store_path, // &String coerces to &str
-                                    cache_config.push_to.as_deref(), // Option<String> -> Option<&str>
-                                )
-                                .await
-                                {
-                                    warn!(
-                                        "⚠️ cache queue failed for {}, continuing anyway: {}",
-                                        task_description, e
-                                    );
-                                }
-                            } else {
-                                warn!(
-                                    "⚠️ skipping cache queue for {}: missing store_path on derivation {}",
-                                    task_description, derivation.id
-                                );
-                            }
                         }
 
                         if let Err(e) = mark_build_complete_and_release(
@@ -185,6 +164,24 @@ pub(super) async fn build_worker(
                         .await
                         {
                             error!("failed to mark build complete: {}", e);
+                        } else if !use_mock_build {
+                            // PERSISTENCE: Queue only after the authoritative
+                            // output is saved. DB-only cache configuration is
+                            // resolved by environment, independently of the
+                            // local static push_to used for legacy signing.
+                            if enqueue_cache_push_for_derivation(
+                                &pool,
+                                derivation.id,
+                                &cache_config,
+                            )
+                            .await
+                            .is_err()
+                            {
+                                warn!(
+                                    "Cache destination resolution failed for {}; built output retained for queue recovery",
+                                    task_description
+                                );
+                            }
                         }
                     }
 

@@ -2753,7 +2753,27 @@ pub async fn test_cache_destination_credentials(
     send_json_with_csrf("POST", &url, Some(data)).await
 }
 
-/// Update an existing cache destination
+/// Discovers public Niks3 endpoints and signing keys without saving changes.
+///
+/// # Errors
+/// Returns an error for authorization, target-policy, network, or metadata failures.
+pub async fn discover_niks3(server_url: &str) -> Result<Niks3Discovery, ApiClientError> {
+    let url = format!("{}/caches/niks3/discover", base_url());
+    send_json_with_csrf(
+        "POST",
+        &url,
+        Some(&serde_json::json!({ "server_url": server_url })),
+    )
+    .await
+}
+
+/// Updates a cache destination with replacements and explicit credential clears.
+///
+/// Omitted credentials retain server-side values. Authentication mode changes
+/// remove incompatible credentials atomically. The response redacts secrets.
+///
+/// # Errors
+/// Returns an error for authorization, validation, network, or persistence failures.
 pub async fn update_cache_destination(
     id: i32,
     data: &UpdateCacheDestination,
