@@ -229,87 +229,15 @@ async fn resolve_cache_destinations_for_derivation(
     pool: &sqlx::PgPool,
     derivation: &crate::derivations::Derivation,
 ) -> Result<Vec<crate::models::cache_destination::CacheDestination>, StatusCode> {
-    let environment_id = match derivation.commit_id {
-        Some(commit_id) => sqlx::query_scalar::<_, uuid::Uuid>(
-            r#"
-            SELECT s.environment_id
-            FROM systems s
-            JOIN commits c ON c.flake_id = s.flake_id
-            WHERE c.id = $1
-              AND s.environment_id IS NOT NULL
-              AND s.is_active = TRUE
-              AND (
-                    s.hostname = $2
-                    OR NULLIF(s.system_configuration_name, '') = $2
-                  )
-            ORDER BY CASE
-                WHEN NULLIF(s.system_configuration_name, '') = $2 THEN 0
-                ELSE 1
-            END
-            LIMIT 1
-            "#,
-        )
-        .bind(commit_id)
-        .bind(&derivation.derivation_name)
-        .fetch_optional(pool)
+    crate::queries::cache_push::eligible_cache_destinations_for_derivation(pool, derivation)
         .await
         .map_err(|e| {
             tracing::warn!(
                 derivation_id = derivation.id,
-                derivation_name = %derivation.derivation_name,
-                "failed to resolve derivation environment for cache selection: {e}"
+                "failed to resolve canonical cache destinations: {e}"
             );
             StatusCode::INTERNAL_SERVER_ERROR
-        })?,
-        None => None,
-    };
-
-    let mut destinations = if let Some(environment_id) = environment_id {
-        let assigned = crate::queries::cache_destinations::filter_caches_by_environment(
-            pool,
-            Some(environment_id),
-        )
-        .await
-        .map_err(|e| {
-            tracing::warn!(
-                derivation_id = derivation.id,
-                environment_id = %environment_id,
-                "failed to load environment cache destinations for derivation closure publish: {e}"
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .into_iter()
-        .filter(|destination| destination.enabled)
-        .collect::<Vec<_>>();
-
-        if assigned.is_empty() {
-            crate::queries::cache_destinations::get_global_caches(pool)
-                .await
-                .map_err(|e| {
-                    tracing::warn!(
-                        derivation_id = derivation.id,
-                        environment_id = %environment_id,
-                        "failed to load global cache destinations for derivation closure publish: {e}"
-                    );
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?
-        } else {
-            assigned
-        }
-    } else {
-        crate::queries::cache_destinations::get_global_caches(pool)
-            .await
-            .map_err(|e| {
-                tracing::warn!(
-                    derivation_id = derivation.id,
-                    "failed to load global cache destinations for derivation closure publish: {e}"
-                );
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?
-    };
-
-    destinations.retain(|destination| destination.enabled);
-    Ok(destinations)
+        })
 }
 
 fn cache_type_from_destination(value: &str) -> Result<cf_protocol::cache::CacheType, StatusCode> {
@@ -5012,6 +4940,67 @@ async fn record_build_stream_message(state: &CFState, job_id: Uuid, msg: &BuildS
 
 #[cfg(test)]
 mod tests {
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified isolated database and database creation privileges"]
+    async fn niks3_builder_and_agent_selection_share_assigned_first_policy(pool: sqlx::PgPool) {
+        let environment: uuid::Uuid = sqlx::query_scalar("INSERT INTO environments (name, description, is_active) VALUES ('builder-selection', 'test', TRUE) RETURNING id")
+            .fetch_one(&pool).await.unwrap();
+        let repo = "https://example.com/cache-selection.git";
+        let hash = "2".repeat(40);
+        crate::queries::flakes::insert_flake(&pool, "cache-selection", repo, "main", "all_configs")
+            .await
+            .unwrap();
+        crate::queries::commits::insert_commit_with_metadata(
+            &pool,
+            &hash,
+            repo,
+            chrono::Utc::now(),
+            Some("selection fixture"),
+            Some("test"),
+        )
+        .await
+        .unwrap();
+        let commit = crate::queries::commits::get_commit_by_hash(&pool, &hash)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO systems (hostname, system_configuration_name, environment_id, public_key, derivation, flake_id) VALUES ('selection-host', 'selection-config', $1, $2, '/nix/store/current', $3)")
+            .bind(environment).bind("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").bind(commit.flake_id).execute(&pool).await.unwrap();
+        let selected: i32 = sqlx::query_scalar("INSERT INTO cache_destinations (name, cache_type, enabled, push_to, niks3_server_url, niks3_write_auth_mode, niks3_auth_token, niks3_public_keys, niks3_read_auth_mode) VALUES ('z-assigned-niks3', 'Niks3', TRUE, 'https://selected.example', 'https://write.example', 'token', 'write-token', ARRAY['cache:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='], 'none') RETURNING id")
+            .fetch_one(&pool).await.unwrap();
+        sqlx::query("INSERT INTO cache_destination_environments (cache_destination_id, environment_id) VALUES ($1, $2)")
+            .bind(selected).bind(environment).execute(&pool).await.unwrap();
+        let global: i32 = sqlx::query_scalar("INSERT INTO cache_destinations (name, cache_type, enabled, push_to) VALUES ('a-global', 'Nix', TRUE, 'https://fallback.example') RETURNING id")
+            .fetch_one(&pool).await.unwrap();
+        let derivation = crate::test_utils::builders::DerivationBuilder::new()
+            .commit_id(Some(commit.id))
+            .name("selection-config")
+            .build();
+        for expected in [selected, global] {
+            let builder = super::resolve_cache_destinations_for_derivation(&pool, &derivation)
+                .await
+                .unwrap();
+            let agent =
+                crate::queries::cache_destinations::eligible_cache_destinations_for_environment(
+                    &pool,
+                    Some(environment),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                builder.iter().map(|d| d.id).collect::<Vec<_>>(),
+                vec![expected]
+            );
+            assert_eq!(
+                agent.iter().map(|d| d.id).collect::<Vec<_>>(),
+                vec![expected]
+            );
+            sqlx::query("UPDATE cache_destinations SET enabled = FALSE WHERE id = $1")
+                .bind(selected)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    }
     use anyhow::anyhow;
     use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
     use base64::engine::{Engine, general_purpose};
@@ -5921,7 +5910,10 @@ mod tests {
             cache_type: "Niks3".into(),
             push_to: Some("https://read.example".into()),
             niks3_server_url: Some("https://write.example".into()),
-            niks3_public_keys: vec!["one:key".into(), "two:key".into()],
+            niks3_public_keys: vec![
+                crate::models::cache_destination::nix_public_key_fixture("one"),
+                crate::models::cache_destination::nix_public_key_fixture("two"),
+            ],
             parallel_uploads: Some(7),
             attic_jobs: Some(91),
             niks3_write_auth_mode: Some("token".into()),
@@ -6042,7 +6034,7 @@ while test "$#" -gt 0; do
     --extra-experimental-features) test "$2" = nix-command; shift 2 ;;
     --option)
         case "$2" in
-        trusted-public-keys) test "$3" = 'one:key two:key'; keys=true ;;
+        trusted-public-keys) test "$3" = '{}'; keys=true ;;
         require-sigs) test "$3" = true; signatures=true ;;
         extra-trusted-public-keys|substituters) test -z "$3" ;;
         narinfo-cache-positive-ttl|narinfo-cache-negative-ttl) test "$3" = 0 ;;
@@ -6058,6 +6050,11 @@ test -z "${{AWS_SECRET_ACCESS_KEY:-}}"
 test -z "${{NIKS3_AUTH_TOKEN_FILE:-}}"
 printf '%s' "${{NIX_SSL_CERT_FILE%/*}}" > '{}'
 "#,
+                [
+                    crate::models::cache_destination::nix_public_key_fixture("one"),
+                    crate::models::cache_destination::nix_public_key_fixture("two")
+                ]
+                .join(" "),
                 dir.path().join("expected-ca").display(),
                 dir.path().join("credentials").display()
             ),
@@ -6068,7 +6065,10 @@ printf '%s' "${{NIX_SSL_CERT_FILE%/*}}" > '{}'
             cache_type: "Niks3".into(),
             push_to: Some("https://read.example".into()),
             niks3_server_url: Some("https://write.example".into()),
-            niks3_public_keys: vec!["one:key".into(), "two:key".into()],
+            niks3_public_keys: vec![
+                crate::models::cache_destination::nix_public_key_fixture("one"),
+                crate::models::cache_destination::nix_public_key_fixture("two"),
+            ],
             niks3_read_auth_mode: Some("mtls".into()),
             niks3_read_client_cert: Some(crate::security::cache_secrets::TEST_CERTIFICATE.into()),
             niks3_read_client_key: Some("read-key".into()),
@@ -6125,7 +6125,9 @@ exit 17
             let destination = crate::models::cache_destination::CacheDestination {
                 cache_type: "Niks3".into(),
                 push_to: Some("https://read.example".into()),
-                niks3_public_keys: vec!["one:key".into()],
+                niks3_public_keys: vec![crate::models::cache_destination::nix_public_key_fixture(
+                    "one",
+                )],
                 niks3_read_auth_mode: Some("none".into()),
                 ..Default::default()
             };
@@ -6197,7 +6199,9 @@ exec sleep 30
         let destination = crate::models::cache_destination::CacheDestination {
             cache_type: "Niks3".into(),
             push_to: Some("https://read.example".into()),
-            niks3_public_keys: vec!["one:key".into()],
+            niks3_public_keys: vec![crate::models::cache_destination::nix_public_key_fixture(
+                "one",
+            )],
             niks3_read_auth_mode: Some("mtls".into()),
             niks3_read_client_cert: Some(crate::security::cache_secrets::TEST_CERTIFICATE.into()),
             niks3_read_client_key: Some("read-key".into()),

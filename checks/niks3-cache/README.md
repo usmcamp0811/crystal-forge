@@ -33,6 +33,18 @@ publication. The real agent receives its read configuration over signed
 heartbeats through a verified HTTPS proxy and
 pulls an output that is absent from its local store.
 
+Every variant has an assigned Niks3 destination and an enabled public global
+`Http` destination named `a-global-public`. The global destination sorts first.
+Builder dispatch and completed publication must retain the assigned ID and
+database provenance. A signed capable heartbeat must return only the assigned
+read cache. Before starting the packaged agent, the fixture sends a genuinely
+legacy flat JSON body with no `capabilities` field, signed with the registered
+Ed25519 key. Spoofed capability headers do not change that body. The response
+must have a null desired target and empty runtime caches, with no global
+fallback, including for public Niks3. The pending request must remain unclaimed
+and the stored desired target must remain intact. The actual packaged agent
+then advertises support in its signed body, claims that request, and pulls.
+
 | Variant | Write authentication | Read endpoint |
 | --- | --- | --- |
 | `token-public` | Static token file | Public native Niks3 read proxy |
@@ -53,6 +65,10 @@ is disabled to prevent it from racing that local scan. A scan may fail after
 materialization because the VM has a synthetic target and no external
 vulnerability database. Such a failure does not establish successful CVE
 analysis. The assertion proves output restoration and terminal process cleanup.
+The rebased lifecycle can create an active post-build scan intent even when
+automatic scanning is disabled. The manual fixture request reuses that active
+identity under the active-scan unique index. It changes the request trigger to
+`manual` without fabricating scanner results or successful scan evidence.
 
 An unrelated environment has an enabled private cache with an unauthorized read
 identity. The agent must fail to pull the private target when moved into that

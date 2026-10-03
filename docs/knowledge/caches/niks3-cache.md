@@ -11,9 +11,10 @@ implementation_status: implemented
 
 # Niks3 Cache Operator Guide
 
-This guide describes TASK-470's implemented Niks3 support. The design references
-are the [reviewed cache contract in MR !329](https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/329)
-and the [Caches view design](../design/CrystalForge/components/CachesView.jsx).
+This guide describes TASK-470's implemented Niks3 support in
+[MR !331](https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/331).
+The UI reference is the
+[Caches view design](../design/CrystalForge/components/CachesView.jsx).
 The upstream protocol reference is [Niks3 v1.6.0](https://github.com/Mic92/niks3/tree/v1.6.0).
 
 ## Supported configuration
@@ -42,6 +43,18 @@ TLS/authentication override parameters. Credential fields contain values, not
 filesystem paths. Unknown cache types and incomplete or mixed auth modes fail
 closed.
 
+Manual create, update, and discovery use the shared authoritative
+`cf_protocol::cache::validate_nix_public_key` validator. Each key must have the
+form `name:encoded-key`, with a nonempty name, no whitespace, and a standard
+padded Base64 payload that decodes to exactly 32 bytes for an Ed25519 public key.
+Format validation does not prove ownership of the corresponding private key.
+
+Configuration, credentials, and `environment_ids` are saved in the same request
+and database transaction. A failed assignment write rolls back creation or the
+entire update; it does not leave a new global destination or partially changed
+credentials. On update, omitted `environment_ids` preserves scope; an explicit
+empty list makes the destination global.
+
 **Current CA limitation:** custom CA fields are supported only in mTLS modes.
 Static-token writes and public reads use the runtime's normal TLS trust store;
 there is no CA-only destination mode.
@@ -58,21 +71,42 @@ clients receive no S3 access keys, Garage secrets, or write signing private keys
 External credential providers and Bearer/OIDC **reads** are deferred. The supported
 static write token is a Niks3 API bearer token; it does not add OIDC support.
 
+### Caches form workflow
+
+Selecting **Niks3** in the common Add form retains the entered name, read URL,
+and selected environments. The Niks3 form has a header showing the destination
+name, type, and draft status, plus a **Destination**, **Credentials**, and
+**Environments** navigation rail. Destination fields show the read/substituter
+URL before the write/API URL; credential settings show read authentication
+before write authentication. Rail badges describe draft validation and scope,
+not verified connectivity.
+
+Discovery populates URLs and signing keys for review before saving. Editing
+loads existing environment assignments before enabling Save. If assignments
+cannot be loaded, close and reopen the form. Discovery, testing, and saving
+freeze the submitted draft while the request runs. A failed save retains the
+draft. Save sends configuration and scope together.
+
 ## Upgrade and confidential transport
 
-1. Apply the normal server migrations, including `0269` (destination fields),
-   `0270` (builder dispatch identity), and `0271` (local queue provenance), before
-   the updated server uses these fields.
+1. Apply the normal server migrations, including `0299` (destination fields),
+   `0300` (builder dispatch identity), and `0301` (local queue provenance), after
+   the rebased `dev` migrations through `0298` and before the updated server uses
+   these fields.
 2. Upgrade remote builders before dispatching Niks3 jobs. The updated builder
    advertises `capabilities.niks3_cache = true` in its signed next-job poll.
    A builder without this capability receives HTTP 409 `unsupported_cache_type`
-    before a Niks3 candidate is claimed. Legacy cache dispatch remains supported.
-    The capability is an authenticated advertisement, not executable attestation
-    or proof that write authentication works.
-3. Upgrade agents before enabling private read authentication. There is no
-   equivalent agent capability gate. Older agents cannot consume the new mTLS
-   read settings safely. Configure Niks3 deployment to require server-provided
-   runtime read settings rather than a static public-cache fallback.
+   before a Niks3 candidate is claimed. Legacy cache dispatch remains supported.
+   The capability is an authenticated advertisement, not executable attestation
+   or proof that write authentication works.
+3. Upgrade agents before using Niks3 for deployment, including public reads.
+   Updated agents advertise `capabilities.supports_niks3 = true` in the signed
+   `/current-system` JSON body. The server reads capabilities only from
+   `VerifiedAgentRequest.body` after authentication. An absent capabilities
+   object or flag defaults to false; version metadata and headers cannot grant
+   support. If the selected cache is Niks3, an incapable agent receives neither
+   that cache nor `desired_target`. Heartbeat ingestion continues, and the
+   pending deployment remains unclaimed and retryable.
 4. Verify the HTTPS proxy boundary for both builder polling and agent heartbeats.
 
 The server's current confidentiality gate requires all of the following:
@@ -88,15 +122,25 @@ the trusted backend path directly. The server checks the direct peer, not
 untrusted peers, duplicate headers, and protocol chains fail closed. Signed
 requests establish identity, not confidentiality.
 
-Builder secrets are withheld without verified transport. Private agent cache
-entries are omitted from heartbeats without verified transport; omission does
-not convert an mTLS cache to public reads. The updated agent replaces its runtime
-cache list on each heartbeat, rejects unknown types, and rejects static Niks3
-deployment when server-provided read settings are absent. Agents receive only
-enabled read URLs, signing keys, and read authentication. Agent heartbeats include
-both environment-assigned and global caches, ordered by name. The current agent
-uses the first returned cache. Publication selection instead gives assigned
-destinations precedence and uses globals when no enabled assigned cache applies.
+Builder secrets are withheld without verified transport. If the selected agent
+cache requires private reads, unverified transport suppresses both its cache
+settings and `desired_target` before the pending deployment is claimed. Omission
+does not convert an mTLS cache to public reads. Unreadable selected configuration,
+database or decryption failure, and missing Niks3 capability also suppress cache
+and target delivery, preserving the pending deployment for retry. The updated
+agent replaces its runtime cache list on each heartbeat, rejects unknown types,
+and rejects static Niks3 deployment when server-provided read settings are absent.
+Agents receive only enabled read URLs, signing keys, and read authentication.
+
+Builder publication, agent reads, local publication, and CVE materialization
+share canonical environment eligibility: use enabled destinations assigned to
+the environment first; use enabled global destinations only when no enabled
+assigned destination applies. Disabled assignments do not block global fallback.
+The eligible set is ordered by name, then ID. Agent heartbeats deliver only its
+first destination. A capability, transport, or read-configuration failure after
+selection cannot substitute another destination. Local jobs and completed CVE
+publication references retain their recorded destination identity and must still
+satisfy this eligibility policy.
 
 ## Secret storage and rotation
 

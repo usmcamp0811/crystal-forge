@@ -401,7 +401,7 @@ function CacheFormModal({ mode, cache, onClose }) {
               <Icon name={isEdit ? "gear" : "plus"} size={15} style={{ color:"var(--cf-brand-purple)", flexShrink:0 }}/>
               <span className="pe-head-title">{isEdit ? (form.name || cache.name) : (form.name || "Add cache destination")}</span>
               <span className="chip chip-info">{typeLabel}</span>
-              {form.requiresAuth && !form.credId && <span className="chip" title="Pick a credential or turn off authentication.">No credential</span>}
+              {form.type === "niks3" ? <span className="chip">Unsaved draft</span> : form.requiresAuth && !form.credId && <span className="chip" title="Pick a credential or turn off authentication.">No credential</span>}
               {!form.url.trim() && <span className="chip" title="A cache URL is required.">No URL</span>}
             </div>
             <span className="pe-head-sub">{isEdit ? "Update binary cache destination." : "Register a new binary cache destination."}</span>
@@ -414,8 +414,8 @@ function CacheFormModal({ mode, cache, onClose }) {
             <button key={s.id} className={`pe-rail-item focus-ring${section===s.id?" active":""}`} onClick={()=>setSection(s.id)}>
               <Icon name={s.icon} size={13}/>
               <span className="pe-rail-label">{s.label}</span>
-              {s.id === "dest" && !form.url.trim() && <span className="pe-rail-badge warn">!</span>}
-              {s.id === "auth" && <span className={`pe-rail-badge${form.requiresAuth && !form.credId ? " warn" : ""}`}>{form.requiresAuth ? (form.credId || "!") : "none"}</span>}
+              {s.id === "dest" && <span className={`pe-rail-badge${!form.url.trim() || (form.type === "niks3" && (!niks3.serverUrl.trim() || !niks3.keys.trim())) ? " warn" : ""}`} title="Draft fields; not connection verification">{!form.url.trim() || (form.type === "niks3" && (!niks3.serverUrl.trim() || !niks3.keys.trim())) ? "!" : "Set"}</span>}
+              {s.id === "auth" && <span className="pe-rail-badge" title="Credential configuration; not write authorization">{form.type === "niks3" ? (niks3.writeMode === "token" ? (niks3.token || cache?.niks3_write_token_configured ? "Set" : "Review") : (cache?.niks3_write_mtls_configured || (niks3.writeCert && niks3.writeKey) ? "Set" : "Review")) : form.requiresAuth ? (form.credId || "!") : "none"}</span>}
               {s.id === "envs" && <span className="pe-rail-badge">{form.environments.length}</span>}
             </button>
           ))}
@@ -441,9 +441,10 @@ function CacheFormModal({ mode, cache, onClose }) {
                     { v:"nix",  l:"Nix HTTPS" },
                     { v:"niks3", l:"Niks3" },
                   ].map(o => (
-                    <button key={o.v} className={form.type === o.v ? "active" : ""} onClick={()=>set("type", o.v)}>{o.l}</button>
+                    <button key={o.v} disabled={form.type === "niks3"} className={form.type === o.v ? "active" : ""} onClick={()=>set("type", o.v)}>{o.l}</button>
                   ))}
                 </div>
+                {form.type === "niks3" && <p className="help">Type is fixed in this form. To choose another type, cancel and reopen Add cache.</p>}
               </div>
               <div className="field">
                 <label>{form.type === "niks3" ? "Read / substituter URL" : "URL"}</label>
@@ -461,10 +462,10 @@ function CacheFormModal({ mode, cache, onClose }) {
 
           {section === "auth" && form.type === "niks3" && <>
             <div className="pe-sec-head"><h3>Credentials</h3><p>Write credentials stay on builders. Read credentials go only to assigned agents.</p></div>
+            <div className="field"><label>Read authentication</label><select className="input" value={niks3.readMode} onChange={e=>setNiks3Mode("read",e.target.value)}><option value="none">Public (none)</option><option value="mtls">mTLS</option></select></div>
             <div className="field"><label>Write authentication</label><select className="input" value={niks3.writeMode} onChange={e=>setNiks3Mode("write",e.target.value)}><option value="token">Static token</option><option value="mtls">mTLS</option></select></div>
             {niks3.writeMode === "token" && <div className="field"><label>Write token</label><input type="password" className="input" value={niks3.token} onChange={e=>setN("token",e.target.value)} placeholder={cache?.niks3_write_token_configured ? "Configured — leave blank to retain; enter a token to rotate" : "Required"}/></div>}
-            <div className="field"><label>Read authentication</label><select className="input" value={niks3.readMode} onChange={e=>setNiks3Mode("read",e.target.value)}><option value="none">Public (none)</option><option value="mtls">mTLS</option></select></div>
-            {["write", "read"].filter(plane=>niks3[`${plane}Mode`] === "mtls").map(plane=><React.Fragment key={plane}>
+            {["read", "write"].filter(plane=>niks3[`${plane}Mode`] === "mtls").map(plane=><React.Fragment key={plane}>
               <h4>{plane === "write" ? "Write" : "Read"} mTLS identity</h4>
               <p className="help">{cache?.[`niks3_${plane}_mtls_configured`] ? "Identity configured. Leave both identity fields blank to retain, or replace certificate and key together." : "Enter a client certificate and private key together."}</p>
               {["Cert", "Key", "Ca"].map(part=><div className="field" key={part}><label>{plane} {part === "Cert" ? "client certificate" : part === "Key" ? "private key" : "CA certificate (optional)"}</label><textarea className="input mono" rows={3} value={niks3[`${plane}${part}`]} onChange={e=>setN(`${plane}${part}`,e.target.value)} autoComplete="off" style={part === "Key" ? { WebkitTextSecurity: "disc" } : undefined} placeholder="PEM; leave blank to retain configured material"/></div>)}

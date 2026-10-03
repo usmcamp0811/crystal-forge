@@ -202,6 +202,36 @@ impl FromRef<PgPool> for NixosOptionsMetadataProvider {
     }
 }
 
+/// Returns capabilities from the authenticated body only.
+///
+/// Missing flags default to false, including legacy V1 requests. The result is
+/// valid for this heartbeat only; version metadata and headers are not evidence.
+///
+/// # Errors
+/// Returns an error for malformed JSON or incorrectly typed capabilities.
+///
+/// # Examples
+/// ```no_run
+/// # fn inspect(request: &crystal_forge::handlers::agent_request::VerifiedAgentRequest)
+/// # -> anyhow::Result<()> {
+/// use crystal_forge::handlers::agent_request::deserialize_agent_capabilities;
+/// let capabilities = deserialize_agent_capabilities(request)?;
+/// if capabilities.supports_niks3 {
+///     // Read settings still require environment and transport checks.
+/// }
+/// # Ok(()) }
+/// ```
+pub fn deserialize_agent_capabilities(
+    agent_request: &VerifiedAgentRequest,
+) -> Result<cf_protocol::agent::AgentCapabilities> {
+    #[derive(serde::Deserialize)]
+    struct CapabilityBody {
+        #[serde(default)]
+        capabilities: cf_protocol::agent::AgentCapabilities,
+    }
+    Ok(serde_json::from_slice::<CapabilityBody>(&agent_request.body)?.capabilities)
+}
+
 pub fn deserialize_system_state_versioned(
     agent_request: &VerifiedAgentRequest,
 ) -> Result<(SystemState, bool)> {
@@ -343,6 +373,52 @@ mod tests {
         assert_eq!(verified.key_id, "test-host");
         assert_eq!(verified.system.hostname, "test-host");
         assert_eq!(verified.body, body);
+    }
+
+    #[tokio::test]
+    async fn niks3_capability_requires_authenticated_body_and_ignores_unsigned_headers() {
+        let (key, system) = create_test_system("test-host");
+        let lookup = MockSystemLookup::new(Some(system));
+        let state = SystemStateBuilder::new().hostname("test-host").build();
+        let mut legacy = serde_json::to_value(&state).unwrap();
+        // A seemingly new version is not a capability attestation.
+        legacy["agent_version"] = serde_json::json!("999.0.0");
+        legacy["agent_build_hash"] = serde_json::json!("current-hash");
+        let body = Bytes::from(serde_json::to_vec(&legacy).unwrap());
+        let mut headers = create_signed_headers("test-host", &body, &key);
+        headers.insert("x-agent-supports-niks3", "true".parse().unwrap());
+        headers.insert(
+            "x-agent-capabilities",
+            "{\"supports_niks3\":true}".parse().unwrap(),
+        );
+        let verified = authenticate_agent_request_with_lookup(&headers, body, &lookup)
+            .await
+            .unwrap();
+        assert!(
+            !deserialize_agent_capabilities(&verified)
+                .unwrap()
+                .supports_niks3
+        );
+        assert!(deserialize_system_state_versioned(&verified).unwrap().1);
+
+        legacy["capabilities"] = serde_json::json!({"supports_niks3": true});
+        let advertised = Bytes::from(serde_json::to_vec(&legacy).unwrap());
+        assert_eq!(
+            authenticate_agent_request_with_lookup(&headers, advertised.clone(), &lookup)
+                .await
+                .unwrap_err(),
+            StatusCode::UNAUTHORIZED,
+        );
+        let signed_headers = create_signed_headers("test-host", &advertised, &key);
+        let verified = authenticate_agent_request_with_lookup(&signed_headers, advertised, &lookup)
+            .await
+            .unwrap();
+        assert!(
+            deserialize_agent_capabilities(&verified)
+                .unwrap()
+                .supports_niks3
+        );
+        assert!(deserialize_system_state_versioned(&verified).unwrap().1);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -645,6 +721,11 @@ mod tests {
         assert!(result.is_ok());
         let (deserialized, version_compatible) = result.unwrap();
         assert!(!version_compatible); // V1 fallback returns false
+        assert!(
+            !deserialize_agent_capabilities(&request)
+                .unwrap()
+                .supports_niks3
+        );
         assert_eq!(deserialized.hostname, "legacy-host");
         // V1 'agent-startup' maps to 'startup'
         assert_eq!(deserialized.change_reason, "startup");

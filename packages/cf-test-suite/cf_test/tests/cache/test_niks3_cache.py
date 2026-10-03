@@ -10,11 +10,13 @@ pulls, not a complete NixOS generation switch.
 
 import base64
 import hashlib
+import json
 import shlex
 import time
 from pathlib import Path
 
 import psycopg2
+from nacl.signing import SigningKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
@@ -49,11 +51,35 @@ def run_matrix(machines, targets, builder_public_key, credentials):
     def request_target(target):
         # A fresh desired target and pending request are one queue operation.
         # The heartbeat handler still performs the real authorization/claim.
-        sql("""WITH requested AS (
+        return sql("""WITH requested AS (
             UPDATE systems SET desired_target=%s,desired_target_set_at=NOW()
             WHERE hostname='agent' RETURNING id
         ) INSERT INTO pending_system_deployments(system_id,target_store_path,source)
-          SELECT id,%s,'niks3-vm-fixture' FROM requested""", (target, target))
+          SELECT id,%s,'niks3-vm-fixture' FROM requested RETURNING id""", (target, target))[0][0]
+
+    def heartbeat(capable=False):
+        # Sign the exact legacy flat body, not a current packaged agent request.
+        # Spoofed capability headers must not override the signed absent flag.
+        state = {"hostname": "agent", "change_reason": "startup",
+                 "store_path": agent.succeed("readlink -f /run/current-system").strip()}
+        if capable:
+            state["capabilities"] = {"supports_niks3": True}
+        body = json.dumps(state, separators=(",", ":")).encode()
+        signature = base64.b64encode(SigningKey(base64.b64decode(
+            "+/GIbrjuyb3Hf2es5w+vWSlDUhEsAIojiyyfgskC7QA="
+        )).sign(body).signature).decode()
+        agent.succeed(f"umask 077; printf %s {shlex.quote(body.decode())} > /tmp/heartbeat.json")
+        agent.succeed("curl --fail --silent --show-error https://server/agent/heartbeat "
+                      "-H 'Content-Type: application/json' -H 'X-Key-ID: agent' "
+                      "-H 'X-Agent-Supports-Niks3: true' "
+                      "-H 'X-Agent-Capabilities: {\"supports_niks3\":true}' "
+                      f"-H {shlex.quote('X-Signature: ' + signature)} "
+                      "--data-binary @/tmp/heartbeat.json -o /tmp/heartbeat-response.json")
+        # Print only public selection fields; private read credentials stay in
+        # the protected VM-local response file until it is removed below.
+        response = json.loads(agent.succeed("jq '{desired_target, runtime_caches: [.runtime_caches[] | {cache_url, cache_type}]}' /tmp/heartbeat-response.json"))
+        agent.succeed("rm /tmp/heartbeat.json /tmp/heartbeat-response.json")
+        return response
 
     counter = 0
 
@@ -73,6 +99,13 @@ def run_matrix(machines, targets, builder_public_key, credentials):
     flake_id = sql("INSERT INTO flakes(name,repo_url) VALUES ('niks3-fixture','https://example.invalid/niks3') RETURNING id")[0][0]
     sql("UPDATE systems SET flake_id=%s WHERE hostname='agent'", (flake_id,))
     sql("UPDATE scan_schedule_policy SET on_build=false WHERE id=1")
+
+    # This usable public fallback sorts before every assigned destination. It
+    # must never replace an assigned Niks3 cache, even for an incapable agent.
+    global_id = sql("""INSERT INTO cache_destinations
+        (name,cache_type,enabled,push_to,attic_public_key,require_sigs)
+        VALUES ('a-global-public','Http',true,'https://cache:5753',%s,true)
+        RETURNING id""", (signing_keys[0],))[0][0]
 
     # An enabled private destination in another environment must never be
     # selected for these jobs or disclosed to this agent.
@@ -126,8 +159,9 @@ def run_matrix(machines, targets, builder_public_key, credentials):
         assert sql("SELECT status,builder_id FROM build_jobs WHERE id=%s", (job_id,))[0] == ("success", builder_id), f"{variant}: remote build failed"
         dispatch = sql("SELECT dispatched_cache_destination_id,cache_dispatch_recorded_at FROM build_jobs WHERE id=%s", (job_id,))[0]
         assert dispatch[0] == cache_id and dispatch[1] is not None, f"{variant}: dispatch identity was not bound"
-        publication = sql("SELECT status,cache_destination FROM cache_push_jobs WHERE derivation_id=%s", (derivation_id,))
-        assert publication and all(row == ("completed", variant) for row in publication), f"{variant}: server did not verify selected destination"
+        publication = sql("SELECT status,cache_destination,cache_destination_id,cache_destination_source FROM cache_push_jobs WHERE derivation_id=%s", (derivation_id,))
+        assert publication and all(row == ("completed", variant, cache_id, "database") for row in publication), f"{variant}: server did not verify selected destination"
+        assert dispatch[0] != global_id
         print(f"Niks3 {variant}: remote completion, dispatch binding, and selected publication verified")
         builder.succeed(f"test -e {shlex.quote(target['out'])}")
         agent.fail(f"test -e {shlex.quote(target['out'])}")
@@ -148,7 +182,14 @@ def run_matrix(machines, targets, builder_public_key, credentials):
         # the VM has no external vulnerability database and a synthetic target.
         server.succeed(f"if test -e {shlex.quote(target['out'])}; then nix-store --delete {shlex.quote(target['out'])}; fi")
         server.fail(f"test -e {shlex.quote(target['out'])}")
-        scan_id = sql("INSERT INTO cve_scans(derivation_id,scanner_name,status,attempts,source_trigger) VALUES (%s,'vulnix','pending',0,'manual') RETURNING id", (derivation_id,))[0][0]
+        # Rebased completion creates a durable post-build scan intent even when
+        # automatic scanning is disabled. Reuse that active identity for this
+        # explicit manual request instead of violating active-scan uniqueness.
+        scan_id = sql("""INSERT INTO cve_scans(derivation_id,scanner_name,status,attempts,source_trigger)
+            VALUES (%s,'vulnix','pending',0,'manual')
+            ON CONFLICT (derivation_id) WHERE status IN
+                ('awaiting_build','awaiting_closure','pending','in_progress')
+            DO UPDATE SET source_trigger='manual' RETURNING id""", (derivation_id,))[0][0]
         server.wait_until_succeeds(f"test -e {shlex.quote(target['out'])}", timeout=120)
         wait_row("SELECT status FROM cve_scans WHERE id=%s", (scan_id,),
                  lambda rows: rows and rows[0][0] in ("completed", "failed"), f"{variant} CVE materialization/process cleanup", timeout=120)
@@ -170,9 +211,18 @@ def run_matrix(machines, targets, builder_public_key, credentials):
 
         # The real agent obtains environment-scoped read configuration from a
         # signed heartbeat over verified TLS and pulls before its no-op switch.
-        request_target(target["out"])
+        selected = heartbeat(capable=True)
+        assert selected["runtime_caches"] == [{"cache_url": read_url, "cache_type": "Niks3"}], f"{variant}: agent did not select assigned cache exclusively"
+        pending_id = request_target(target["out"])
+        legacy = heartbeat()
+        assert legacy["desired_target"] is None and legacy["runtime_caches"] == [], f"{variant}: legacy body received Niks3 or global fallback"
+        assert sql("SELECT status,delivered_at,completed_at FROM pending_system_deployments WHERE id=%s", (pending_id,))[0] == ("pending", None, None), f"{variant}: incapable agent claimed deployment"
+        assert sql("SELECT desired_target FROM systems WHERE hostname='agent'")[0][0] == target["out"]
+        agent.fail(f"test -e {shlex.quote(target['out'])}")
+        print(f"Niks3 {variant}: assigned cache beats earlier global; signed capability-absent body preserves pending deployment")
         agent.succeed("systemctl restart crystal-forge-agent.service")
         agent.wait_until_succeeds(f"test -e {shlex.quote(target['out'])}", timeout=120)
+        assert sql("SELECT delivered_at IS NOT NULL FROM pending_system_deployments WHERE id=%s", (pending_id,))[0][0], f"{variant}: packaged agent did not claim deployment"
         print(f"Niks3 {variant}: real agent pulled previously absent output")
         agent.succeed("systemctl stop crystal-forge-agent.service")
         sql("UPDATE systems SET desired_target=NULL,desired_target_set_at=NULL WHERE hostname='agent'")
