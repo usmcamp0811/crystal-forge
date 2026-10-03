@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-03 23:50'
+updated_date: '2026-10-03 23:55'
 labels: []
 dependencies: []
 references:
@@ -36,6 +36,8 @@ Implement the user's Niks3 contract reviewed against MR !329. Niks3 has separate
 - [ ] #9 Design and production UI support discovery and separate read/write authentication for create and edit with loading and failure states
 - [ ] #10 Focused unit tests and Niks3 VM tests cover remote builder plus agent public/private flows environment isolation CVE materialization and secret-log audits
 - [ ] #11 Packaging preserves evaluator Nix selection; server and builder packages plus Niks3 integration and focused authoritative Web UI gates pass; full-suite and legacy-cache regression outcomes are recorded under the user's explicit review exceptions
+- [ ] #12 Add cache opens one coherent design-style modal immediately for S3-compatible Attic Nix HTTPS and Niks3; switching types retains common and applicable type-specific drafts in the same shell
+- [ ] #13 Authoritative browser workflows create representative configurations for all four types through the real fixture API and preserve all Niks3 security/scope regressions; inspected section-by-section and narrow screenshots prove accepted design parity
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -88,6 +90,8 @@ Delegated P2 CI ownership at b52fbe67: edit .gitlab-ci.yml, checks/server-regres
 VM publication-delivery regression delegation at b52fbe67: edit only checks/niks3-cache/default.nix and packages/cf-test-suite/cf_test/tests/cache/test_niks3_cache.py. Preserve five real remote-build/publication/auth/CVE/signature/log variants. Seed exact manual request commit/derivation identity; add later-created earlier assigned destination without publication and assert signed target delivery retains published ID/read URL through rename. Exercise disabled/reassigned/deleted source withholding without consuming pending delivery. Prove secondary failover only after real packaged CLI publication and independent signature-required server read probe of the same exact output. Start focused niks3-cache gate only after transaction publication helper is present/stable; retain raw logs and exact exit status. No host services/DB, Rust, README, CI, commits or pushes.
 
 Owner-approved final publication scope correction: resolve durable-ID and unambiguous legacy completed exact-output references first. Compute assigned-before-global precedence only among those enabled currently scoped publication identities, before read-config/capability/confidentiality gates. Remove the unrelated configured-assignment existence predicate. Add scope/gate regressions and update only the two explicitly authorized composite_policy tests: preserve historical Pass with withheld delivery and unchanged pending work; supply a valid public HTTP completed database publication for positive upgrade delivery. Run new unit/SQLx tests, all38 composite integration tests, offline all-targets, affected doctest, formatting and diff checks. No services or commits.
+
+Additional user-approved UI scope: preserve completed provenance/CI implementation; replace legacy Add->separateNiks3transition with one shared design-style Add shell containing common header/typebadge/status/subtitle/close, Destination/Credentials/Environments rail with icons/validation, common footer/scope/busylocks, and type-specific fields/retaineddrafts. Preserve all existing S3/Attic/Nix capabilities and secret editsemantics; use backend atomicenvironment_ids contract where supported, Niks3 never secondassignmentPUT. Prefer reuse shell forAdd/Edit if safe, no unrelatedcache-viewredesign. Reuse verified persistent taskpreview beforeUIedits; add authoritative realcreate workflowsforalltypes plus stable-dialog/state-retention/loading/error/rollback tests and desktop/narrowcaptures. LoadDioxus/design/Playwrightskills; explicit parityreview against CachesView.jsx informationarchitecture notcoloronly. UIrequiredgatebeforepush alongsidealreadycompletedtargetpublication andblockingCIgates; no acceptedverificationexception changes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
