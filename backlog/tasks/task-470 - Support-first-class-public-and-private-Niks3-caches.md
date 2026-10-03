@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-02 23:26'
+updated_date: '2026-10-03 00:39'
 labels: []
 dependencies: []
 references:
@@ -57,6 +57,8 @@ Delegated API scope: packages/default/crates/cf-server/src/handlers/api/caches.r
 Delegated Nix/test scope: preserve pinned pkgs.niks3 1.6.0; override its Nix dependency to evaluatorNix and add server/core-server/builder runtime packaging plus service PATH entries. Extend builder-evaluator-packaging probes. Add isolated PostgreSQL/Garage/Niks3 fixture with optional TLS/mTLS write/read proxies, dedicated niks3-cache VM auth matrix, cf-test-suite additions and documented focused commands. Evaluate and build targeted checks only; do not run broad flake check. Shared worktree and task lock remain owned by parent agent.
 
 Delegated server/agent scope: builders handler, agent heartbeat, local cache worker, CVE worker and cf-agent only; obsolete server deployment copy only for compile fixes. Reuse existing trusted_proxy_cidrs with actual ConnectInfo direct peer plus trust_forwarded_builder_https and a single HTTPS assertion; missing peer fails closed. Map Niks3 explicitly with independent read/write credentials; validate completion against derivation-eligible enabled destinations with mandatory Niks3 ID. Prepare shared read credentials inside process-owned async tasks through exit/timeout cleanup; pass multiple keys and child-local CA while preserving signatures. Add focused confidentiality/identity/read-process tests and run targeted cargo checks/tests through nix develop. No commits or service startups.
+
+Focused local-worker correction ownership: only cf-server/src/builder/cache_worker.rs (cache_push queries only if required). Resolve persisted cache_destination reference and derivation environment on every attempt using current enabled/decrypted rows and remote-builder eligibility rules. Reject ambiguous references/environments and mismatches; preserve static-only legacy jobs. Route batch attempts through the same resolution without stale in-process retries. Use a shared Niks3 execution gate across entry points and refresh after waiting. Restrict automatic legacy job creation to static-only configuration. Verify focused destination/current-config/concurrency tests and server cargo check through nix develop; no services or commits.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
