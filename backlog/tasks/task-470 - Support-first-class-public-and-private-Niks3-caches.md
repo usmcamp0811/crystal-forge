@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-03 06:05'
+updated_date: '2026-10-03 18:22'
 labels: []
 dependencies: []
 references:
@@ -34,7 +34,7 @@ Implement the user's Niks3 contract reviewed against MR !329. Niks3 has separate
 - [ ] #8 Discovery and structured non-mutating connection tests enforce existing SSRF and redirect policy
 - [ ] #9 Design and production UI support discovery and separate read/write authentication for create and edit with loading and failure states
 - [ ] #10 Focused unit tests and Niks3 VM tests cover remote builder plus agent public/private flows environment isolation CVE materialization and secret-log audits
-- [ ] #11 Packaging preserves evaluator Nix selection; required server builder Niks3 Attic S3 web-ui and flake verification passes before MR
+- [ ] #11 Packaging preserves evaluator Nix selection; server and builder packages plus Niks3 integration and focused authoritative Web UI gates pass; full-suite and legacy-cache regression outcomes are recorded under the user's explicit review exceptions
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -159,4 +159,14 @@ Rolling-upgrade compatibility correction implemented in cf-protocol/src/builder.
 Verification PASSED exit 0 through nix develop -c env SQLX_OFFLINE=true: cargo test --manifest-path packages/default/Cargo.toml -p cf-protocol --lib builder::tests --message-format short (20 passed); cargo test with -p cf-builder niks3 --message-format short (9 library plus 1 runtime binary test passed, including real signed HTTP poll advertisement without CVE); cargo test with -p cf-server --lib handlers::api::builders::tests --message-format short (67 passed); cargo check with -p cf-server -p cf-builder --all-targets --message-format short; cargo test with -p cf-server --doc queries::builders --message-format short (5 passed, including new exact-candidate claim compile example). Final seven-file rustfmt --edition 2024 --config skip_children=true --check through Nix and owned-path git diff --check passed. Inspected owned contracts/concurrency comments and preserved pre-existing shared edits.
 
 Authorized PostgreSQL read-only preflight confirmed PID20668, rolemcamp with CREATEDB, port5432 and data_directory /home/mcamp/code/crystal-forge/TASK-470-niks3-cache-support/.devenv/state/postgres via /run/user/10000/devenv-536cdb3/postgres. Only SQLx ephemeral test databases used; no preview database writes/migrations. Final database command prefix: nix develop -c env SQLX_OFFLINE=true DATABASE_URL=postgresql://mcamp@localhost/postgres?host=/run/user/10000/devenv-536cdb3/postgres cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib. niks3_preclaim --message-format short -- --include-ignored PASSED (2 tests: policy plus actual signed handler GET/old POST/CVE-only rejection and capable success; queued identity/timestamps/retry counters unchanged on rejection and exact 409 body excludes credentials). queries::builders::tests::niks3_exact_candidate_claim_never_substitutes_after_queue_races --message-format short -- --exact --ignored PASSED (1 matrix test covering both strategies, wildcard/filtered environments, reordered queue, competing row lock, candidate consumption and exact non-head claim). Initial attempts failed on a SQLx URL empty-host parse and duplicate fixture derivation path; both corrected and final tests passed. Full suite was not run. Parent task remains In Progress.
+
+User explicitly approved opening the MR with documented verification exceptions: (1) full Web UI/flake check remains failed only on baseline-reproduced non-Niks3 workflows and five TASK-433 strict visual differences; (2) existing Attic/S3 regression phases are blocked before test bodies by unchanged MinIO-vs-Garage fixture mismatch. TASK-475 tracks legacy regression repair. No failing tests or baselines were removed or relaxed.
+
+Final nix flake check --keep-going completed with exit1; only failed attribute checks.x86_64-linux.web-ui. Niks3 check and existing integration check passed. Final full browser105/139 passed34 failed; exact original4fb7d960 baseline104/139 passed35 failed. Niks3-containing25-caches-modal-attic now passes in full run and focused authoritative run exits0. Same5 strict visuals fail baseline. Evidence /tmp/opencode/task470-flake-check-final.log and task470-baseline-web-ui.log; screenshots uploaded to GitLab for MR.
+
+SQLx migrate applied0271 on verified task-owned .devenv/state/postgres only. cargo sqlx prepare --workspace -- --all-targets succeeded against task socket; six obsolete task-related cache_push metadata records removed and twelve unrelated cleanup deletions restored byte-for-byte. Offline workspace all-target check passed. Added real isolated SQLx tests for cache queue provenance, recorded nil dispatch, completion locking/auth changes, candidate capability race, and CVE provenance passed.
+
+Final preview refreshed through devenv processes down then up -d; browser ready http://127.0.0.1:8081/caches API3447 fixture admin/password mock mode. Supervisor1595 PostgreSQL1651 API1672 Dioxus1823; task DB5432 .devenv/state/postgres. Backend current cf-server-core output6j3djyq90w35bklf06c0l6rwv7jbm63c; runtime /run/user/10000/devenv-536cdb3 and process logs. Known baseline preview limitations: API listens0.0.0.0 despite configured loopback and dev banner hardcodes3445; automated browser blocks other origins. No user long-running DB or processes modified.
+
+Source documentation review closed P1 findings: CVE durable provenance and rejection/redaction of credential query URLs; all four queue API examples compile. Operator guide corrected agent assigned-plus-global ordering and queue-slot scope. No arbitrary auth scripts, Bearer/OIDC reads, Niks3 upgrade, generic URL rename or priority refactor.
 <!-- SECTION:NOTES:END -->
