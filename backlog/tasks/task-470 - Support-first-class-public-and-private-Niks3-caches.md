@@ -1,11 +1,11 @@
 ---
 id: TASK-470
 title: Support first-class public and private Niks3 caches
-status: Review
+status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-03 18:24'
+updated_date: '2026-10-03 19:31'
 labels: []
 dependencies: []
 references:
@@ -29,13 +29,13 @@ Implement the user's Niks3 contract reviewed against MR !329. Niks3 has separate
 - [x] #2 Separate write/API URL and read/substituter URL with multiple signing keys are persisted using a new migration
 - [x] #3 Tokens and private keys are encrypted and redacted; configured flags and atomic credential replacement and clearing are supported
 - [x] #4 Remote builder and local cache worker push through packaged Niks3 CLI with protected temporary files and no secrets in argv or logs
-- [x] #5 Builder secrets and agent read secrets require verified confidential transport; agents receive only environment-scoped read credentials
+- [ ] #5 Builder secrets and agent read secrets require verified confidential transport; agents receive only environment-scoped read credentials
 - [x] #6 Server independently verifies publication using the selected destination identity and authenticated Nix read configuration
 - [x] #7 Agent deployment and CVE materialization support public and mTLS reads with signature verification and credential cleanup
-- [x] #8 Discovery and structured non-mutating connection tests enforce existing SSRF and redirect policy
-- [x] #9 Design and production UI support discovery and separate read/write authentication for create and edit with loading and failure states
-- [x] #10 Focused unit tests and Niks3 VM tests cover remote builder plus agent public/private flows environment isolation CVE materialization and secret-log audits
-- [x] #11 Packaging preserves evaluator Nix selection; server and builder packages plus Niks3 integration and focused authoritative Web UI gates pass; full-suite and legacy-cache regression outcomes are recorded under the user's explicit review exceptions
+- [ ] #8 Discovery and structured non-mutating connection tests enforce existing SSRF and redirect policy
+- [ ] #9 Design and production UI support discovery and separate read/write authentication for create and edit with loading and failure states
+- [ ] #10 Focused unit tests and Niks3 VM tests cover remote builder plus agent public/private flows environment isolation CVE materialization and secret-log audits
+- [ ] #11 Packaging preserves evaluator Nix selection; server and builder packages plus Niks3 integration and focused authoritative Web UI gates pass; full-suite and legacy-cache regression outcomes are recorded under the user's explicit review exceptions
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -70,6 +70,8 @@ Further publication review: own handlers/api/builders.rs and queries/builders.rs
 Final local enqueue fix: retain Option<Option<i32>> for completed remote dispatch lookup. Recorded no-cache returns no queued job and rejects explicit destination override; absent dispatch retains canonical implicit selection; recorded ID remains authoritative. Add migration-backed regression covering that distinction. User authorizes SQLx ephemeral test DB creation only on verified task PostgreSQL PID20668/data_directory .devenv/state/postgres port5432 rolemcamp; existing runtime socket is /run/user/10000/devenv-536cdb3/postgres, not PGDATA. Read-only socket and TCP SQL confirmed exact task data_directory/port and CREATEDB role. Run targeted ignored SQLx tests against postgres control DB using that socket; no preview crystal_forge writes, migrations to preview, server startups/restarts or commits.
 
 Rolling-upgrade correction ownership approved: protocol builder capabilities/next-job request; builder runtime advertisement and signed API request wiring; handler preclaim cache gate; query exact-candidate claim for both strategies; minimal compile initializer edits. Preview the eligible candidate with existing queue policy/order, resolve cache configuration before claim, reject Niks3 without advertised capability using additive 409 unsupported_cache_type, and dispatch the preflight configuration only to that exact candidate. Preserve legacy cache dispatch and auth defaults. Verify focused protocol/builder/server tests plus offline server all-targets through Nix; no services or commits. User permits existing task PostgreSQL PID20668 only for ephemeral SQLx test databases after socket/data_directory verification.
+
+Review revision: first resolve rebase onto origin/dev3b23d36f and verify both scanning/CVE and cache semantics. Then fix P1 scope atomically by putting selected environment_ids in create/update requests and removing second Save assignment request; prove transaction rollback. Add authenticated default-absent agent Niks3 capability and fence deployment for legacy/incapable agents. Share assigned-before-global selection with builder publication and send only selected read cache; test global name sorting first. Share authoritative Ed25519 public-key validation across manual create/update/discovery. Preserve common Add-form state on Niks3 switch and align design interaction/order/header/rail. Correct erroneous MR329 contract link, add durable MR notes of prior user verification exceptions and current exact-head CI evidence. Reuse isolated task preview before UI edits; regression tests plus relevant VM checks/SQLx preparation. Applied0269–0271 remain immutable; add a new migration only if revised persistence needs it. Rebase rewrites published history; obtain explicit force-with-lease push authorization before updating remote branch.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -174,4 +176,6 @@ Source documentation review closed P1 findings: CVE durable provenance and rejec
 MR !331 opened for dev: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/331 . Commit56b732b1f85b8495327d604031a38056d78460b4 pushed to origin/TASK-470-niks3-cache-support. Dedicated task worktree is clean. MR includes authoritative VM screenshots, exact commands/outcomes, baseline comparison, upgrade limits and both user-approved verification exceptions. No CI pass claimed and no merge performed.
 
 LOCK STATUS: awaiting review. No implementation subagents remain active. Task preview retained: supervisor1595/API1672/Dioxus1823/PostgreSQL1651 verified task ownership; backend refreshed to current source. URL http://127.0.0.1:8081/caches on sledge; local fixture admin/password. Worktree remains until merged; do not remove or stop unrelated processes.
+
+LOCK: openai-agent on sledge in /home/mcamp/code/crystal-forge/TASK-470-niks3-cache-support (review corrections resumed by user). Original56b732b1 worktree clean; fetched origin/dev3b23d36f. Integration dev still contains only previously authorized untracked session-ses_f927.md; preserved. Rebase started; content conflicts in cve_worker.rs, builder/worker.rs, handlers/api/builders.rs, queries/builders.rs. Preserve merged scanning/CVE behavior and Niks3 invariants; no applied migration changes.
 <!-- SECTION:NOTES:END -->
