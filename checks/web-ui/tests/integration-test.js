@@ -14189,7 +14189,29 @@ const steps = [
       await completedPage.goto(`${baseUrl}/compliance?poam=${completedPoamId}`, { timeout: LOAD_TIMEOUT });
       const completedDetail = completedPage.getByTestId("poam-detail");
       await assertVisible(completedDetail, "Completed POA&M deep link should open exact detail");
+      // Design order: Deficiency precedes Vulnerability scope, which precedes the plan.
+      // A CVE-only POA&M may truthfully show no policy findings; the exact CVE
+      // links live under Vulnerability scope.
+      const completedHierarchy = await completedDetail.locator(".poam-tray-section > header h3").allTextContents();
+      const completedPosition = (prefix) => completedHierarchy.findIndex((heading) => heading.trim().startsWith(prefix));
+      for (const [earlier, later] of [
+        ["Remediation status", "Deficiency"],
+        ["Deficiency", "Vulnerability scope"],
+        ["Vulnerability scope", "Remediation plan"],
+      ]) {
+        if (completedPosition(earlier) < 0 || completedPosition(later) <= completedPosition(earlier)) {
+          throw new Error(`CVE-originated POA&M lost the design section order: ${JSON.stringify(completedHierarchy)}`);
+        }
+      }
+      await assertVisible(completedDetail.getByRole("heading", { name: "Deficiency · 0 findings" }), "A CVE-only POA&M must not fabricate policy findings");
+      await assertVisible(completedDetail.getByRole("heading", { name: "Vulnerability scope · 1 CVE · 1 host" }), "Vulnerability scope must count the exact CVE links");
+      await assertCount(completedDetail.getByRole("heading", { name: "POA&M metadata" }), 0, "The standalone POA&M metadata section must not exist");
       await assertVisible(completedDetail.getByText("Retired vulnerability history"), "Completed POA&M should expose retired exact-link history");
+      // Every link is retired here, so retired history is the recorded scope
+      // and opens by default. It stays an immutable, non-unlinkable disclosure.
+      if (!(await completedDetail.getByTestId("poam-retired-vulnerability-history").evaluate((node) => node.open))) {
+        throw new Error("Retired vulnerability history must be open when no link is active");
+      }
       const retiredExactLink = completedDetail.getByTestId("poam-retired-vulnerability");
       await assertVisible(retiredExactLink.getByText("CVE-2024-1234"), "Retired exact link should retain its CVE identity");
       await assertVisible(retiredExactLink.getByText("Generation 42"), "Retired exact link should retain its generation baseline");
@@ -22827,36 +22849,45 @@ security.audit.enable = true;</fixtext>
       await detail.waitFor({ state: "visible", timeout: 15000 });
       const hierarchy = await detail.locator(".poam-tray-section > header h3").allTextContents();
       const position = (prefix) => hierarchy.findIndex((heading) => heading.trim().startsWith(prefix));
+      // Design order after the metadata band: Remediation status, Deficiency,
+      // Vulnerability scope (only when exact CVE links exist), Remediation
+      // plan, Milestones, Activity. This policy-finding POA&M has no CVE links.
       for (const [earlier, later] of [
-        ["Remediation status", "Linked findings"],
-        ["Linked findings", "Remediation plan"],
+        ["Remediation status", "Deficiency"],
+        ["Deficiency", "Remediation plan"],
         ["Remediation plan", "Milestones"],
         ["Milestones", "Activity"],
-        ["Activity", "POA&M metadata"],
-        ["POA&M metadata", "Baseline assignment references"],
       ]) {
         if (position(earlier) < 0 || position(later) <= position(earlier)) {
           throw new Error(`POA&M tray lost its primary design hierarchy: ${JSON.stringify(hierarchy)}`);
         }
       }
-      await assertVisible(detail.getByRole("button", { name: "Save metadata", exact: true }), "Metadata remains editable through explicit save");
+      if (position("Vulnerability scope") >= 0) {
+        throw new Error(`A policy-finding POA&M must not fabricate a vulnerability scope: ${JSON.stringify(hierarchy)}`);
+      }
+      // There is exactly one metadata surface, at the top. The old trailing
+      // metadata section and the trailing assignment-reference section must be
+      // removed from the DOM, not merely hidden.
+      for (const removed of ["POA&M metadata", "Baseline assignment references", "Linked findings", "Linked vulnerabilities"]) {
+        if (position(removed) >= 0) throw new Error(`POA&M tray still renders the removed "${removed}" section: ${JSON.stringify(hierarchy)}`);
+      }
+      await assertCount(detail.getByRole("heading", { name: "POA&M metadata" }), 0, "The standalone POA&M metadata section must not exist");
+      await assertVisible(detail.getByRole("heading", { name: /^Deficiency · 1 finding$/ }), "Deficiency heading must carry the exact finding count");
       await assertVisible(detail.getByRole("button", { name: "Save plan", exact: true }), "Remediation text retains its independent save");
+      // Save metadata is part of the top metadata surface and appears only
+      // while a metadata draft differs from the saved POA&M.
+      await assertCount(detail.getByRole("button", { name: "Save metadata", exact: true }), 0, "Save metadata must stay hidden while no metadata draft changed");
       await assertVisible(detail.getByText(created.human_id, { exact: true }), "Expected returned human POA&M ID");
       await assertVisible(detail.getByText("Open", { exact: true }).first(), "Expected returned Open status");
-      await assertVisible(
-        detail.getByTestId("poam-metadata-summary").getByText(eligibleAssignee.label, { exact: true }),
-        "Expected returned typed assignee",
-      );
-      const metadataSummary = detail.getByTestId("poam-metadata-summary");
-      await metadataSummary.waitFor({ state: "visible", timeout: 15000 });
-      const returnedDueDate = metadataSummary
-        .locator(":scope > div")
-        .filter({ hasText: "Target completion" })
-        .locator("strong");
-      await returnedDueDate.waitFor({ state: "visible", timeout: 15000 });
-      if ((await returnedDueDate.textContent())?.trim() !== "2026-09-19") {
-        throw new Error(`Expected returned due date, got ${JSON.stringify(await returnedDueDate.textContent())}`);
-      }
+      const metaBand = detail.getByTestId("poam-meta");
+      await metaBand.waitFor({ state: "visible", timeout: 15000 });
+      await assertValue(metaBand.getByTestId("poam-assignee-select"), eligibleAssignee.value, "Expected returned typed assignee in the metadata band");
+      await assertValue(metaBand.getByLabel("Target completion"), "2026-09-19", "Expected returned due date in the metadata band");
+      await assertValue(detail.getByLabel("Title", { exact: true }), created.title, "Expected editable title in the header");
+      await assertValue(detail.getByLabel("Risk"), "High", "Expected the returned risk in the header chip control");
+      // Title and risk live in the header, not in the metadata band.
+      await assertCount(metaBand.getByLabel("Title", { exact: true }), 0, "Title belongs to the header");
+      await assertCount(metaBand.getByLabel("Risk"), 0, "Risk belongs to the header chip");
       if (!page.url().includes(`poam=${created.id}`)) throw new Error(`POA&M detail route omitted exact ID: ${page.url()}`);
       const savedDetailUrl = page.url();
       let unsavedPatches = 0;
@@ -22865,6 +22896,7 @@ security.audit.enable = true;</fixtext>
       };
       page.on("request", countUnsavedPatch);
       await detail.getByLabel("Title", { exact: true }).fill("Unsaved title must not persist");
+      await assertVisible(detail.getByRole("button", { name: "Save metadata", exact: true }), "Editing a metadata draft must reveal the explicit Save metadata action");
       await detail.getByPlaceholder("What will change, where, and how it will be verified").fill("Unsaved plan must not persist");
       await detail.getByRole("button", { name: "Close", exact: true }).click();
       await page.goto(savedDetailUrl, { waitUntil: "domcontentloaded", timeout: LOAD_TIMEOUT });
@@ -23004,12 +23036,18 @@ security.audit.enable = true;</fixtext>
       const metadataResponse = await metadataResponsePromise;
       const metadataRequest = metadataResponse.request().postDataJSON();
       const metadataDetail = await metadataResponse.json();
-      if (metadataResponse.status() !== 200 || metadataRequest.plan != null ||
+      if (metadataResponse.status() !== 200 || metadataRequest.plan != null || metadataRequest.owner != null ||
           metadataRequest.assignee?.kind !== "user" || metadataRequest.assignee.user_id !== metadataAssignee.id ||
           metadataDetail.assignee?.kind !== "user" || metadataDetail.assignee.user_id !== metadataAssignee.id) {
         throw new Error(`Metadata save must not implicitly persist the remediation plan: ${JSON.stringify(metadataRequest)}`);
       }
-      await assertVisible(detail.getByText(metadataAssignee.label, { exact: true }).first(), "Saved typed assignee must reconcile from server response");
+      // The header and metadata band edit one explicit payload: title, typed
+      // assignee, target date, and risk. The plan draft above must not ride along.
+      if (metadataRequest.title !== "Persisted remediation metadata" || metadataRequest.target_date !== "2026-11-12" || metadataRequest.risk !== "low") {
+        throw new Error(`Metadata save must carry the header and metadata-band drafts: ${JSON.stringify(metadataRequest)}`);
+      }
+      await assertValue(detail.getByTestId("poam-assignee-select"), metadataAssignee.value, "Saved typed assignee must reconcile from server response");
+      await assertHidden(detail.getByRole("button", { name: "Save metadata", exact: true }), "Save metadata must disappear once the saved POA&M matches the drafts");
       const planResponsePromise = page.waitForResponse(
         (response) => response.url().endsWith(`/api/v1/poams/${poam.id}`) && response.request().method() === "PATCH",
       );
@@ -23133,6 +23171,7 @@ security.audit.enable = true;</fixtext>
       if (staleResponse.status() !== 409) throw new Error(`Expected real stale revision 409, got ${staleResponse.status()}`);
       await assertVisible(reloaded.getByText(/changed before saving metadata/i), "Stale revision must have actionable presentation");
       await assertValue(reloaded.getByLabel("Title", { exact: true }), "Preserved stale draft title", "Stale refresh must preserve the exact Title draft");
+      await assertVisible(reloaded.getByRole("button", { name: "Save metadata", exact: true }), "A preserved stale draft must keep Save metadata available for retry");
     },
   },
   {
@@ -23534,9 +23573,17 @@ security.audit.enable = true;</fixtext>
 
       await page.goto(`${baseUrl}/compliance?bundle=${fixture.bundle.id}&version=${fixture.bundleVersionId}&view=poam&poam=${poam.id}`, { timeout: LOAD_TIMEOUT });
       await waitForPhase6Target(page, detail, "Canonical POA&M detail after rollup navigation");
+      // The server records verification only while a POA&M is awaiting
+      // verification (409 invalid_transition otherwise), so the UI must not
+      // offer Verify now or Authoritative close in any earlier state.
+      await assertCount(detail.getByRole("button", { name: "Verify now", exact: true }), 0, "Verify now must not be offered while the POA&M is not awaiting verification");
+      await assertCount(detail.getByRole("button", { name: "Authoritative close", exact: true }), 0, "Authoritative close must not be offered while the POA&M is not awaiting verification");
       await detail.getByRole("button", { name: "In Progress", exact: true }).click();
+      await assertCount(detail.getByRole("button", { name: "Verify now", exact: true }), 0, "Verify now must not be offered while In Progress");
       await detail.getByRole("button", { name: "Awaiting Verification", exact: true }).click();
       await assertVisible(detail.getByText("Awaiting verification.", { exact: true }), "Awaiting state must explain finding independence");
+      await assertVisible(detail.getByRole("button", { name: "Verify now", exact: true }), "Verify now must be offered while awaiting verification");
+      await assertVisible(detail.getByRole("button", { name: "Authoritative close", exact: true }), "Authoritative close must be offered while awaiting verification");
       const currentFailAssessment = await runTask433ProductionEvaluation(page, {
         systemId,
         commitId,
@@ -23627,6 +23674,8 @@ security.audit.enable = true;</fixtext>
         throw new Error(`Immediate close response omitted hydrated requirement metadata: ${JSON.stringify(successfulCloseDetail)}`);
       }
       await assertVisible(detail.getByText("Completed", { exact: true }).first(), "Successful authoritative closure must render Completed");
+      await assertVisible(detail.getByRole("button", { name: "Reopen", exact: true }), "A completed POA&M must offer Reopen");
+      await assertCount(detail.getByRole("button", { name: "Verify now", exact: true }), 0, "A completed POA&M must not offer Verify now");
       runFixtureSql(`
         UPDATE poams
         SET closed_at='2026-09-01T10:39:37Z'::timestamptz
@@ -23927,7 +23976,15 @@ security.audit.enable = true;</fixtext>
       await page.goto(`${baseUrl}/compliance?bundle=${fixture.bundle.id}&version=${fixture.bundleVersionId}&view=poam&poam=${poam.id}`, { timeout: LOAD_TIMEOUT });
       const viewerDetail = page.getByTestId("poam-detail");
       await viewerDetail.waitFor({ state: "visible", timeout: 15000 });
-      if (!(await viewerDetail.getByRole("button", { name: "Save metadata", exact: true }).isDisabled())) throw new Error("Viewer must not mutate POA&M metadata");
+      // A viewer gets plain read-only text in the single header/metadata
+      // surface: no editors and no Save metadata action to invoke at all.
+      await assertCount(viewerDetail.getByRole("button", { name: "Save metadata", exact: true }), 0, "Viewer must not be offered Save metadata");
+      await assertCount(viewerDetail.getByLabel("Title", { exact: true }), 0, "Viewer must not receive an editable title");
+      await assertCount(viewerDetail.getByLabel("Risk"), 0, "Viewer must not receive an editable risk");
+      await assertCount(viewerDetail.getByLabel("Target completion"), 0, "Viewer must not receive an editable target date");
+      await assertCount(viewerDetail.getByTestId("poam-assignee-select"), 0, "Viewer must not receive an assignee editor");
+      await assertVisible(viewerDetail.locator(".poam-tray-heading p"), "Viewer must still read the POA&M title");
+      await assertCount(viewerDetail.getByRole("heading", { name: "POA&M metadata" }), 0, "The standalone POA&M metadata section must not exist for a viewer either");
       if (!(await viewerDetail.getByRole("button", { name: "Save plan", exact: true }).isDisabled())) throw new Error("Viewer must not mutate the POA&M remediation plan");
       if (!(await viewerDetail.getByRole("button", { name: "Link finding", exact: true }).isDisabled())) throw new Error("Viewer must not mutate POA&M findings");
       await page.unroute("**/api/auth/whoami");
@@ -25675,6 +25732,20 @@ function runStaticHarnessContracts() {
   assertContract(!scenario16c.includes("/scanning/queue") && !scenario16c.includes("/scanning/deployed") && !scenario16c.includes("/scanning/activity") && !scenario16c.includes("/cves/rescan-fleet"), "16c must not mock obsolete scanning surfaces");
   assertContract(cveView.includes("request_token_is_current") && cveView.includes("load_generation.peek()"), "Exact fleet loads must use non-reactive newest-request tokens");
   assertContract(poamComponent.includes("Retired vulnerability history") && poamComponent.includes("Retired links are immutable audit evidence"), "POA&M detail must distinguish immutable retired exact links");
+  // The detail drawer has one metadata surface (header plus metadata band). The
+  // duplicate trailing section must be removed from the component, not hidden.
+  assertContract(
+    !poamComponent.includes('h3 { "POA&M metadata" }') && !poamComponent.includes("poam-tray-supplemental") && !poamComponent.includes('"Linked findings'),
+    "POA&M detail must not render a standalone trailing POA&M metadata section",
+  );
+  assertContract(
+    poamComponent.includes("fn build_metadata_request") && poamComponent.includes("fn build_plan_request") && poamComponent.includes("plan: None,") && poamComponent.includes("..UpdatePoamRequest::default()"),
+    "Save metadata and Save plan must keep their disjoint PATCH contracts",
+  );
+  assertContract(
+    poamComponent.includes("fn verification_actions_available") && poamComponent.includes("if verification_actions_available(status) {"),
+    "Verify now and Authoritative close must be offered only while awaiting verification",
+  );
   assertContract(
     poamApi.includes('request("POST", &format!("{}/poams/cves", base_url()), Some(body))'),
     "Exact-CVE creation must use the dedicated API route",
