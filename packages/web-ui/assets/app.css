@@ -8254,6 +8254,24 @@ select.poam-risk-select option { background: var(--cf-card-bg); color: var(--cf-
 .poam-ctx-head { display: flex; align-items: center; gap: 7px; margin: 0; padding: 8px 10px; border-bottom: 1px solid var(--cf-divider); color: var(--cf-text-muted); font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
 .poam-ctx-body { padding: 0 10px 8px; }
 /* Retired exact-CVE links stay available as audit evidence without leading the drawer. */
+/* Grouped exact-CVE scope: one card per CVE and package, compact host rows beneath. */
+.poam-cve-group { margin-top: 10px; overflow: hidden; border: 1px solid var(--cf-divider); border-radius: 8px; }
+.poam-cve-group-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px; background: var(--cf-subtle-bg); font-size: 12px; }
+.poam-cve-group-head > svg { flex-shrink: 0; color: var(--cf-brand-purple); }
+.poam-cve-group-count { margin-left: auto; color: var(--cf-text-muted); font-size: 11px; white-space: nowrap; }
+.poam-cve-host { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 7px 10px; border-top: 1px solid var(--cf-divider); font-size: 12px; }
+.poam-cve-host-name { flex: 1 1 140px; min-width: 0; overflow-wrap: anywhere; font-weight: 600; }
+.poam-cve-host-evidence { display: flex; flex: 2 1 160px; flex-direction: column; min-width: 0; }
+.poam-cve-host-evidence small { margin: 0; font-size: 10.5px; }
+.poam-cve-host .poam-row-actions { margin-left: auto; align-items: center; }
+/* Equal chip width keeps the evidence column aligned across PASS and FAIL rows. */
+.poam-cve-host .poam-chip { justify-content: center; min-width: 46px; }
+/* Retired links are secondary audit evidence, stacked so nothing scrolls sideways. */
+.poam-retired-row { padding: 8px 0; border-top: 1px solid var(--cf-divider); font-size: 11.5px; }
+.poam-retired-identity { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.poam-retired-identity .poam-cve-host-name { flex: 0 1 auto; }
+.poam-retired-evidence { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; min-width: 0; overflow-wrap: anywhere; }
+.poam-retired-evidence small { margin: 0; }
 .poam-retired-history { margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--cf-divider); }
 .poam-retired-history > summary { width: fit-content; color: var(--cf-text-muted); font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; cursor: pointer; }
 .poam-retired-history > summary:hover { color: var(--cf-text-secondary); }
@@ -8274,10 +8292,6 @@ select.poam-risk-select option { background: var(--cf-card-bg); color: var(--cf-
 .poam-table-wrap { max-width: 100%; overflow-x: auto; }
 .poam-table { min-width: 680px; }
 .poam-findings-table { min-width: 820px; }
-.poam-cve-findings-table { min-width: 940px; }
-.poam-cve-findings-table td strong,
-.poam-cve-findings-table td small { display: block; }
-.poam-cve-findings-table td small { margin-top: 3px; }
 .poam-cve-verification-item .poam-verification-identity { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 8px; }
 .poam-cve-verification-item .poam-verification-identity :is(span, code, strong) { margin: 0; min-width: 0; }
 .poam-requirement { max-width: 240px; font-size: 10.5px; white-space: normal !important; }
@@ -8298,27 +8312,28 @@ select.poam-risk-select option { background: var(--cf-card-bg); color: var(--cf-
 .poam-assignment-link .input, .poam-note-form .input, .poam-milestone-add .input:first-child { flex: 1; }
 .poam-plan { resize: vertical; font-size: 12px; line-height: 1.5; }
 
-.poam-milestones { display: flex; flex-direction: column; gap: 2px; }
-.poam-milestone { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 8px; min-width: 0; padding: 5px 0; }
-.poam-milestone-check { accent-color: var(--cf-brand-purple); }
-.poam-milestone-title { overflow: hidden; padding: 2px 0; border: 0; background: transparent; color: var(--cf-text-primary); font: inherit; text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
-.poam-milestone-title:is(:disabled, [aria-disabled="true"]) { border: 0 !important; background: transparent !important; color: var(--cf-text-primary) !important; cursor: default; }
+.poam-milestones { display: flex; flex-direction: column; }
+/* Milestone rows follow the design (.poam-ms): a label wraps checkbox and title, so the
+   whole label toggles completion. There is no inline editor. */
+.poam-ms { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 7px 0; border-bottom: 1px solid var(--cf-divider); font-size: 12.5px; }
+.poam-ms:last-child { border-bottom: 0; }
+.poam-ms-label { flex: 1; align-items: center; min-width: 0; color: var(--cf-text-primary); font-size: 12.5px; line-height: 1.5; cursor: pointer; }
+.poam-ms-label input { margin-top: 0; }
+.poam-ms-label:has(input:disabled) { cursor: default; }
+.poam-milestone-title { min-width: 0; overflow-wrap: anywhere; color: var(--cf-text-primary); }
 .poam-milestone-title.poam-milestone-completed { color: var(--cf-text-muted); text-decoration: line-through; }
-.poam-milestone-title.poam-milestone-completed:is(:disabled, [aria-disabled="true"]) { color: var(--cf-text-muted) !important; }
+.poam-milestone-check { accent-color: var(--cf-brand-purple); }
+.poam-milestone-title.poam-milestone-completed { color: var(--cf-text-muted); text-decoration: line-through; }
 .poam-milestone-date { color: var(--cf-text-muted); font-size: 11px; white-space: nowrap; }
-.poam-milestone-editor { display: grid; grid-column: 2 / -1; grid-template-columns: minmax(180px, 1fr) 150px auto auto; gap: 6px; }
-.poam-milestone-editor .input { font-size: 11.5px; }
+.poam-milestone-date.poam-overdue { color: var(--cf-red); }
 .poam-milestone-add .input[type="date"] { flex: 0 0 150px; }
 .poam-milestone-add-action { flex: 0 0 auto; }
 
 .poam-activity { display: flex; flex-direction: column; gap: 8px; }
-.poam-activity-row { display: grid; grid-template-columns: 92px 130px minmax(0, 1fr); gap: 10px; align-items: start; min-width: 0; font-size: 11px; }
+.poam-activity-row { display: grid; grid-template-columns: 78px 96px minmax(0, 1fr); gap: 10px; align-items: start; min-width: 0; font-size: 12px; }
 .poam-activity-date { color: var(--cf-text-muted); white-space: nowrap; }
 .poam-activity-actor { overflow: hidden; color: var(--cf-brand-purple); text-overflow: ellipsis; white-space: nowrap; }
 .poam-activity-message { min-width: 0; color: var(--cf-text-secondary); overflow-wrap: anywhere; }
-.poam-activity-diagnostics { grid-column: 3; min-width: 0; color: var(--cf-text-muted); }
-.poam-activity-diagnostics summary { width: fit-content; cursor: pointer; font-size: 10px; }
-.poam-activity-diagnostics pre { max-width: 100%; max-height: 160px; margin: 5px 0 0; overflow: auto; color: var(--cf-text-secondary); font: 10.5px/1.4 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .poam-count-strip { grid-template-columns: repeat(6, minmax(0, 1fr)) !important; border-top: 1px solid var(--cf-divider); border-bottom: 1px solid var(--cf-divider); }
 .poam-system-section { padding: 0; overflow: hidden; }
@@ -8347,11 +8362,8 @@ select.poam-risk-select option { background: var(--cf-card-bg); color: var(--cf-
   .poam-count-strip { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
   .poam-system-section > header, .poam-bundle-rollup { align-items: flex-start; flex-direction: column; }
   .poam-filter, .poam-rollup-counts { margin-left: 0; }
-  .poam-milestone { grid-template-columns: auto minmax(0, 1fr) auto auto; }
-  .poam-milestone-title { white-space: normal; overflow-wrap: anywhere; }
-  .poam-milestone-editor { grid-column: 1 / -1; grid-template-columns: minmax(0, 1fr) 130px auto auto; }
   .poam-activity-row { grid-template-columns: 92px minmax(0, 1fr); gap: 3px 8px; }
-  .poam-activity-message, .poam-activity-diagnostics { grid-column: 1 / -1; }
+  .poam-activity-message { grid-column: 1 / -1; }
   .poam-verification-head { align-items: flex-start; flex-direction: column; }
   .poam-verification-item { grid-template-columns: 1fr auto; }
   .poam-verification-item p, .poam-verification-basis { grid-column: 1 / -1; }
@@ -8364,8 +8376,6 @@ select.poam-risk-select option { background: var(--cf-card-bg); color: var(--cf-
   .poam-meta-grid > div { border-right: 0; border-bottom: 1px solid var(--cf-divider); }
   .poam-assignment-link, .poam-note-form, .poam-milestone-add { align-items: stretch; flex-direction: column; }
   .poam-milestone-add .input[type="date"] { flex-basis: auto; width: 100%; }
-  .poam-milestone-editor { grid-template-columns: 1fr 1fr; }
-  .poam-milestone-editor .input { grid-column: 1 / -1; }
 }
 .sd-callout-warn { background: rgba(251,191,36,0.08); border-color: rgba(251,191,36,0.28); color: var(--cf-text-primary); }
 .sd-callout-warn svg { color: #fbbf24; flex-shrink: 0; margin-top: 1px; }

@@ -14221,6 +14221,148 @@ const steps = [
         await completedContext.close().catch(() => {});
       }
 
+      // ── Grouped Vulnerability scope, milestones and activity (design parity) ──
+      // One card per CVE and package with compact host rows beneath it, so the
+      // CVE is not repeated per host and nothing needs horizontal scrolling.
+      const scopePoamId = "00000000-0000-0000-0000-0000000000e3";
+      const scopeUuid = (n) => `00000000-0000-0000-0000-${String(n).padStart(12, "0")}`;
+      const scopeLink = (n, cve, pkg, host, active, version, state) => ({
+        id: scopeUuid(5000 + n), system_id: scopeUuid(6000 + n), hostname: host, environment_id: scopeUuid(7000 + n),
+        canonical_cve_id: cve, canonical_package_name: pkg, link_id: scopeUuid(8000 + n),
+        linked_at: "2026-09-01T12:00:00Z", linked_by: scopeUuid(1), retired_at: active ? null : "2026-09-13T12:00:00Z",
+        retired_by: active ? null : scopeUuid(1), retirement_reason: active ? null : "replaced:exact baseline",
+        link_active: active, baseline_scan_id: scopeUuid(9000 + n), baseline_scan_completed_at: "2026-09-01T11:55:00Z",
+        baseline_generation: 7, baseline_target_store_path: "/nix/store/baseline-system", baseline_occurrence_derivation_path: "/nix/store/pkg.drv",
+        baseline_observed_package_version: "1.0.0", current_derivation_id: null, current_target_store_path: null,
+        current_scan_id: active ? scopeUuid(9500 + n) : null, current_occurrence_derivation_path: null,
+        current_observed_package_version: active ? version : null, resolution_state: state,
+      });
+      const scopeLinks = [
+        scopeLink(1, "CVE-2015-4082", "attic", "web-04", true, "0.1.3", "fail"),
+        scopeLink(2, "CVE-2015-4082", "attic", "web-01", true, "0.1.3", "fail"),
+        scopeLink(3, "CVE-2015-4082", "attic", "web-03", true, "0.1.4", "pass"),
+        scopeLink(4, "CVE-2015-4082", "attic", "web-02", true, "0.1.3", "fail"),
+        scopeLink(5, "CVE-2024-5678", "curl", "db-01", true, "8.4.0", "fail"),
+        scopeLink(6, "CVE-2023-0001", "zlib", "old-host", false, null, "resolved"),
+      ];
+      const scopeDetail = {
+        id: scopePoamId, human_id: "POAM-2026-0077", title: "Patch attic and curl", plan: "Roll the fixed packages.", owner: "",
+        assignee: { kind: "user", user_id: scopeUuid(1), display: "Morgan Reyes", available: true },
+        target_date: "2026-12-01", risk: "high", status: "in_progress", revision: 3, overdue: false, finding_count: 0, cve_finding_count: 5,
+        created_at: "2026-09-01T12:00:00Z", updated_at: "2026-09-13T12:00:00Z", closed_at: null, closure_attempt_id: null,
+        findings: [], cve_findings: scopeLinks, findings_has_more: false, findings_next_cursor: null,
+        milestones: [
+          { id: scopeUuid(1100), ordinal: 0, title: "Build fixed closure", target_date: "2026-01-05", completed_at: null, completed_by: null, created_by: scopeUuid(1), updated_by: scopeUuid(1), created_at: "2026-09-01T12:00:00Z", updated_at: "2026-09-01T12:00:00Z" },
+          { id: scopeUuid(1101), ordinal: 1, title: "Roll out to production", target_date: "2026-12-20", completed_at: "2026-09-10T12:00:00Z", completed_by: scopeUuid(1), created_by: scopeUuid(1), updated_by: scopeUuid(1), created_at: "2026-09-01T12:00:00Z", updated_at: "2026-09-10T12:00:00Z" },
+        ],
+        assignment_references: [], verification_attempts: [], verification_has_more: false, verification_next_cursor: null,
+        activity: [{ id: scopeUuid(1300), actor_user_id: scopeUuid(1), actor_display: "m.reyes", kind: "note", payload: { text: "Opened from scan", secret_marker: "RAW-PAYLOAD-MUST-NOT-RENDER" }, created_at: "2026-09-02T12:00:00Z" }],
+        activity_has_more: false, activity_next_cursor: null,
+      };
+      for (const [role, viewport] of [["Admin", VIEWPORTS.desktop], ["Admin", VIEWPORTS.narrowDesktop], ["Viewer", VIEWPORTS.desktop]]) {
+        const scopeContext = await browserInstance.newContext({ viewport });
+        const scopePage = await scopeContext.newPage();
+        const label = `${role} ${viewport.width}px`;
+        try {
+          await suppressOnboardingCoach(scopePage);
+          await routeStandaloneUiBootstrap(scopePage, role);
+          await scopePage.route(new RegExp(`/api/v1/poams/${scopePoamId}(?:\\?.*)?$`), async (route) => {
+            await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(scopeDetail) });
+          });
+          await scopePage.goto(`${baseUrl}/compliance?poam=${scopePoamId}`, { timeout: LOAD_TIMEOUT });
+          const scopeTray = scopePage.getByTestId("poam-detail");
+          await assertVisible(scopeTray, `${label}: scope POA&M must open`);
+          await assertVisible(scopeTray.getByRole("heading", { name: "Vulnerability scope · 2 CVEs · 5 hosts" }), `${label}: scope heading must count unique active CVEs and hosts`);
+          const groups = scopeTray.getByTestId("poam-cve-group");
+          await assertCount(groups, 2, `${label}: one card per unique CVE and package`);
+          const attic = scopePage.locator('[data-testid="poam-cve-group"][data-cve-id="CVE-2015-4082"][data-cve-package="attic"]');
+          await assertCount(attic.locator(".poam-cve-group-head").getByText("CVE-2015-4082", { exact: true }), 1, `${label}: CVE identity appears once in its card header`);
+          await assertVisible(attic.locator(".poam-cve-group-head").getByText("4 hosts", { exact: true }), `${label}: card header must show the host count`);
+          await assertCount(attic.getByTestId("poam-linked-vulnerability"), 4, `${label}: every attic host must appear under its CVE`);
+          await assertCount(attic.getByTestId("poam-linked-vulnerability").getByText("CVE-2015-4082"), 0, `${label}: host rows must not repeat the CVE identity`);
+          const hosts = await attic.getByTestId("poam-linked-vulnerability").locator(".poam-cve-host-name").allTextContents();
+          if (JSON.stringify(hosts) !== JSON.stringify(["web-01", "web-02", "web-03", "web-04"])) throw new Error(`${label}: hosts must sort by name, got ${JSON.stringify(hosts)}`);
+          const curl = scopePage.locator('[data-testid="poam-cve-group"][data-cve-id="CVE-2024-5678"][data-cve-package="curl"]');
+          await assertVisible(curl.getByText("1 host", { exact: true }), `${label}: a one-host card must say 1 host`);
+          await assertVisible(curl.getByTestId("poam-linked-vulnerability").getByText("db-01", { exact: true }), `${label}: curl host must sit under its CVE`);
+          // Source-backed evidence stays compact on each row.
+          const failing = attic.locator('[data-cve-finding-id]').filter({ hasText: "web-01" });
+          await assertVisible(failing.getByText("0.1.3", { exact: true }), `${label}: installed version must stay visible`);
+          await assertVisible(failing.getByText(/^scan 00000000$/), `${label}: a compact exact-scan reference must stay visible`);
+          const fullScan = await failing.locator("small[title]").getAttribute("title");
+          if (fullScan !== scopeUuid(9502)) throw new Error(`${label}: the full scan UUID must be in the title, got ${fullScan}`);
+          await assertVisible(failing.locator(".poam-chip", { hasText: "FAIL" }), `${label}: the resolution state chip must stay visible`);
+          await assertVisible(attic.locator('[data-cve-finding-id]').filter({ hasText: "web-03" }).locator(".poam-chip", { hasText: "PASS" }), `${label}: a cleared host must show PASS`);
+          // Nothing is invented: the detail response has no severity, CVSS, or fix version.
+          const scopeText = await scopeTray.getByTestId("poam-linked-vulnerabilities").innerText();
+          for (const forbidden of [/\bcritical\b/i, /\bCVSS\b/i, /\bfix pending\b/i, /Fixed:/]) {
+            if (forbidden.test(scopeText.replace(/Retired vulnerability history[\s\S]*$/, ""))) throw new Error(`${label}: scope must not fabricate ${forbidden}: ${scopeText}`);
+          }
+          await assertCount(scopeTray.getByTestId("poam-linked-vulnerabilities").locator("table"), 0, `${label}: the scope must not be a tabular grid`);
+          // No horizontal overflow anywhere in the scrollable drawer body.
+          const overflow = await scopeTray.locator(".poam-tray-scroll").evaluate((node) => ({ scroll: node.scrollWidth, client: node.clientWidth }));
+          if (overflow.scroll > overflow.client + 1) throw new Error(`${label}: drawer must not scroll horizontally (${JSON.stringify(overflow)})`);
+          const scopeOverflow = await scopeTray.getByTestId("poam-linked-vulnerabilities").evaluate((node) => ({ scroll: node.scrollWidth, client: node.clientWidth }));
+          if (scopeOverflow.scroll > scopeOverflow.client + 1) throw new Error(`${label}: the scope section must not overflow (${JSON.stringify(scopeOverflow)})`);
+          // Row actions stay on screen, including at the narrow width.
+          const drawerBox = await scopeTray.boundingBox();
+          const unlink = failing.getByRole("button", { name: /^Unlink vulnerability CVE-2015-4082 attic/ });
+          await assertVisible(unlink, `${label}: unlink action must be present`);
+          const unlinkBox = await unlink.boundingBox();
+          if (!unlinkBox || unlinkBox.x + unlinkBox.width > drawerBox.x + drawerBox.width + 1 || unlinkBox.x < drawerBox.x) throw new Error(`${label}: unlink action must stay inside the drawer (${JSON.stringify({ unlinkBox, drawerBox })})`);
+          if (role === "Viewer") {
+            if (!(await unlink.isDisabled())) throw new Error(`${label}: a viewer must not unlink a vulnerability`);
+          } else if (await unlink.isDisabled()) throw new Error(`${label}: an operator must be able to unlink`);
+          // Retired history is secondary: collapsed while active scope exists.
+          const retired = scopeTray.getByTestId("poam-retired-vulnerability-history");
+          await assertVisible(retired.locator("summary"), `${label}: retired history must stay reachable`);
+          if (await retired.evaluate((node) => node.open)) throw new Error(`${label}: retired history must be collapsed while active links exist`);
+          await retired.locator("summary").click();
+          const retiredRow = retired.getByTestId("poam-retired-vulnerability");
+          await assertVisible(retiredRow.getByText("Baseline 1.0.0", { exact: false }), `${label}: retired baseline version must remain`);
+          await assertVisible(retiredRow.getByText(`Scan ${scopeUuid(9006)}`, { exact: false }), `${label}: retired baseline scan must remain`);
+          await assertVisible(retiredRow.getByText("Generation 7", { exact: false }), `${label}: retired generation must remain`);
+          await assertVisible(retiredRow.getByText("replaced:exact baseline", { exact: false }), `${label}: retirement reason must remain`);
+          await assertCount(retiredRow.getByRole("button"), 0, `${label}: retired links must stay non-unlinkable`);
+          // Milestones follow the design: label-wrapped checkbox, date, remove; no editor.
+          const open = scopeTray.locator('[data-testid="poam-milestone"]').filter({ hasText: "Build fixed closure" });
+          const done = scopeTray.locator('[data-testid="poam-milestone"]').filter({ hasText: "Roll out to production" });
+          await assertVisible(open.getByText("due Jan 5", { exact: true }), `${label}: open milestone date must be visible`);
+          await assertVisible(done.getByText(/^done /), `${label}: completed milestone date must be visible`);
+          if (!(await open.locator(".poam-milestone-date").evaluate((node) => node.classList.contains("poam-overdue")))) throw new Error(`${label}: a late open milestone date must be marked overdue`);
+          if (await done.locator(".poam-milestone-date").evaluate((node) => node.classList.contains("poam-overdue"))) throw new Error(`${label}: a completed milestone must not be marked overdue`);
+          if (!(await done.locator(".poam-milestone-title").evaluate((node) => getComputedStyle(node).textDecorationLine.includes("line-through")))) throw new Error(`${label}: a completed milestone title must be struck through`);
+          await assertCount(open.getByRole("button", { name: /^Edit milestone/ }), 0, `${label}: a milestone must not be an edit button`);
+          await assertCount(open.locator("input:not([type='checkbox'])"), 0, `${label}: a milestone must have no inline editor`);
+          const checkbox = open.getByRole("checkbox", { name: "Mark Build fixed closure complete", exact: true });
+          const removeMilestone = open.getByRole("button", { name: "Remove milestone Build fixed closure", exact: true });
+          if (role === "Viewer") {
+            if (!(await checkbox.isDisabled()) || !(await removeMilestone.isDisabled())) throw new Error(`${label}: a viewer must not toggle or remove a milestone`);
+          } else {
+            const toggled = [];
+            await scopePage.route(new RegExp(`/api/v1/poams/${scopePoamId}/milestones/${scopeUuid(1100)}$`), async (route) => {
+              toggled.push(route.request().postDataJSON());
+              await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...scopeDetail, revision: 4, milestones: scopeDetail.milestones.map((item) => item.id === scopeUuid(1100) ? { ...item, completed_at: "2026-09-27T12:00:00Z" } : item) }) });
+            });
+            // Clicking the title text toggles completion because the label wraps it.
+            await open.locator(".poam-milestone-title").click();
+            await open.getByRole("checkbox", { name: "Reopen Build fixed closure", exact: true }).waitFor({ state: "visible", timeout: 15000 });
+            if (toggled.length !== 1 || toggled[0].completed !== true || toggled[0].title != null || toggled[0].target_date != null) throw new Error(`${label}: title click must send only completion: ${JSON.stringify(toggled)}`);
+            if (!(await open.locator(".poam-milestone-title").evaluate((node) => getComputedStyle(node).textDecorationLine.includes("line-through")))) throw new Error(`${label}: the reconciled milestone must be struck through`);
+          }
+          // Activity: date, actor, message; never a diagnostics disclosure or raw payload.
+          const activityRow = scopeTray.locator('[data-activity-kind="note"]');
+          await assertVisible(activityRow.locator(".poam-activity-date"), `${label}: activity date must be visible`);
+          await assertVisible(activityRow.locator(".poam-activity-actor").getByText("m.reyes", { exact: true }), `${label}: activity actor must be visible`);
+          await assertVisible(activityRow.getByText("Added note: Opened from scan", { exact: true }), `${label}: the human activity message must be visible`);
+          await assertCount(scopeTray.locator(".poam-activity-diagnostics, .poam-activity details, .poam-activity pre"), 0, `${label}: activity must not render diagnostics`);
+          if ((await scopeTray.innerText()).includes("RAW-PAYLOAD-MUST-NOT-RENDER")) throw new Error(`${label}: the raw activity payload must not be rendered`);
+        } finally {
+          await scopePage.unrouteAll({ behavior: "ignoreErrors" }).catch(() => {});
+          await scopeContext.close().catch(() => {});
+        }
+      }
+
       // Assert summary stat cards are rendered.
       const patchableCard = page.locator("main").getByText("Patchable now");
       await assertVisible(patchableCard, "Expected 'Patchable now' stat card");
@@ -23012,9 +23154,12 @@ security.audit.enable = true;</fixtext>
       const historyActivity = detail.locator(`[data-activity-kind="note"]`).filter({ hasText: "History note 100" });
       await assertVisible(historyActivity.locator(".poam-activity-actor").getByText(historyActorDisplay, { exact: true }), "Activity must identify its actor in a compact column");
       await assertVisible(historyActivity.locator("time"), "Activity must render its timestamp");
-      if (await historyActivity.getByText("Diagnostics", { exact: true }).locator("..").evaluate((node) => node.open)) {
-        throw new Error("Raw activity diagnostics must remain collapsed by default");
-      }
+      // The drawer shows date, actor, and the human message only, as the design
+      // does. The stored payload feeds the message but is never rendered raw.
+      await assertCount(detail.locator(".poam-activity-diagnostics"), 0, "Activity must not render a raw diagnostics disclosure");
+      await assertCount(detail.locator(".poam-activity").getByText("Diagnostics"), 0, "Activity must not show a Diagnostics label");
+      await assertCount(detail.locator(".poam-activity details, .poam-activity pre"), 0, "Activity must not contain disclosure or raw JSON elements");
+      await assertCount(historyActivity.locator(".poam-activity-date, .poam-activity-actor, .poam-activity-message"), 3, "Each activity row must be exactly date, actor, and message");
 
       const verificationPagePromise = page.waitForResponse((response) => {
         const url = new URL(response.url());
@@ -23090,35 +23235,19 @@ security.audit.enable = true;</fixtext>
       const milestone = detail.locator(`[data-testid="poam-milestone"][data-milestone-id="${addedMilestone.id}"]`);
       await assertVisible(milestone, "Added milestone must reconcile from server response");
       await assertVisible(milestone.getByText("due Oct 31", { exact: true }), "Open milestone must show its compact due date");
-      const milestoneTitleEditor = milestone.getByLabel("Milestone title for Browser release gate", { exact: true });
-      await assertHidden(milestoneTitleEditor, "Milestone editing controls must not be permanent row content");
-      await milestone.getByRole("button", { name: "Edit milestone Browser release gate", exact: true }).click();
-      await assertVisible(milestoneTitleEditor, "Compact title interaction must expose optional milestone editing");
-      await page.waitForFunction(
-        (label) => document.activeElement?.getAttribute("aria-label") === label,
-        "Milestone title for Browser release gate",
-        { timeout: 15000 },
-      );
-      if (!(await milestoneTitleEditor.evaluate((node) => node === document.activeElement))) {
-        throw new Error("Opening optional milestone editing must focus its title field");
-      }
-      await milestone.getByLabel("Milestone target date for Browser release gate", { exact: true }).fill("2026-11-01");
-      const updateMilestoneResponsePromise = page.waitForResponse(
-        (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/milestones/${addedMilestone.id}`) && response.request().method() === "PATCH",
-      );
-      await milestone.getByRole("button", { name: "Save", exact: true }).click();
-      if ((await updateMilestoneResponsePromise).status() !== 200) throw new Error("Milestone update failed");
-      await assertHidden(milestoneTitleEditor, "Saving milestone editing must restore compact checklist geometry");
-      await assertVisible(milestone.getByText("due Nov 1", { exact: true }), "Saved milestone must reconcile its updated date");
-      if (!(await milestone.getByRole("button", { name: "Edit milestone Browser release gate", exact: true }).evaluate((node) => node === document.activeElement))) {
-        throw new Error("Saving optional milestone editing must restore focus to its trigger after reconciliation");
-      }
-      await milestone.getByRole("button", { name: "Edit milestone Browser release gate", exact: true }).click();
-      await milestone.getByRole("button", { name: "Cancel", exact: true }).click();
-      await assertHidden(milestoneTitleEditor, "Cancelling milestone editing must restore compact checklist geometry");
-      if (!(await milestone.getByRole("button", { name: "Edit milestone Browser release gate", exact: true }).evaluate((node) => node === document.activeElement))) {
-        throw new Error("Closing optional milestone editing must restore focus to its trigger");
-      }
+      // Design behaviour: the row is checkbox, title, date, and remove. The title
+      // is plain label text, not an edit button, and no inline editor exists.
+      await assertCount(milestone.getByRole("button", { name: /^Edit milestone/ }), 0, "A milestone title must not be an edit button");
+      await assertCount(milestone.getByLabel(/^Milestone (title|target date) for /), 0, "A milestone row must not contain an inline editor");
+      await assertCount(milestone.locator("input:not([type='checkbox']), textarea, select"), 0, "A milestone row must contain only its checkbox as an input");
+      await assertCount(milestone.getByRole("button", { name: "Save", exact: true }), 0, "A milestone row must not offer Save");
+      await assertCount(milestone.getByRole("button", { name: "Cancel", exact: true }), 0, "A milestone row must not offer Cancel");
+      await assertCount(milestone.locator("label").filter({ hasText: "Browser release gate" }), 1, "Checkbox and title must share one label");
+      // Clicking the title text, not the editor, must be inert for editing.
+      const editorRequests = [];
+      const countMilestonePatch = (request) => {
+        if (request.method() === "PATCH" && request.url().includes("/milestones/")) editorRequests.push(request.postDataJSON());
+      };
       const completeResponsePromise = page.waitForResponse(
         (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/milestones/${addedMilestone.id}`) && response.request().method() === "PATCH",
       );
@@ -23135,12 +23264,19 @@ security.audit.enable = true;</fixtext>
       const reopenResponsePromise = page.waitForResponse(
         (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/milestones/${addedMilestone.id}`) && response.request().method() === "PATCH",
       );
-      await milestone.getByRole("checkbox", { name: "Reopen Browser release gate", exact: true }).click();
+      page.on("request", countMilestonePatch);
+      // The design label wraps the title, so clicking the title text toggles completion.
+      await milestone.locator(".poam-milestone-title").click();
       const reopenResponse = await reopenResponsePromise;
       if (reopenResponse.status() !== 200 || reopenResponse.request().postDataJSON().completed !== false) {
         throw new Error(`Milestone checkbox must send completed=false: ${reopenResponse.request().postData()}`);
       }
       await assertVisible(milestone.getByRole("checkbox", { name: "Mark Browser release gate complete", exact: true }), "Reopened milestone must persist");
+      page.off("request", countMilestonePatch);
+      if (editorRequests.length !== 1 || editorRequests[0].completed !== false || editorRequests[0].title != null || editorRequests[0].target_date != null) {
+        throw new Error(`Toggling a milestone must send only its completion: ${JSON.stringify(editorRequests)}`);
+      }
+      await assertVisible(milestone.getByText("due Oct 31", { exact: true }), "A milestone must keep its target date visible after toggling");
       await milestone.getByRole("button", { name: "Remove milestone Browser release gate", exact: true }).click();
       await assertHidden(detail.getByTestId("poam-milestone").filter({ hasText: "Browser release gate" }), "Removed milestone must disappear");
 
@@ -25741,6 +25877,20 @@ function runStaticHarnessContracts() {
   assertContract(
     poamComponent.includes("fn build_metadata_request") && poamComponent.includes("fn build_plan_request") && poamComponent.includes("plan: None,") && poamComponent.includes("..UpdatePoamRequest::default()"),
     "Save metadata and Save plan must keep their disjoint PATCH contracts",
+  );
+  // Design parity: milestones toggle through a label with no inline editor,
+  // activity shows no raw diagnostics, and the CVE scope is grouped, not a table.
+  assertContract(
+    !poamComponent.includes("Edit milestone") && !poamComponent.includes("poam-milestone-editor") && poamComponent.includes("label { class: \"poam-check poam-ms-label\""),
+    "POA&M milestones must toggle through a label and must not render an inline editor",
+  );
+  assertContract(
+    !poamComponent.includes("poam-activity-diagnostics") && !poamComponent.includes("summary { \"Diagnostics\" }"),
+    "POA&M activity must not render a raw diagnostics disclosure",
+  );
+  assertContract(
+    poamComponent.includes("fn group_cve_scope") && poamComponent.includes("poam-cve-group-head") && !poamComponent.includes("poam-cve-findings-table"),
+    "POA&M vulnerability scope must group hosts under one card per CVE and package",
   );
   assertContract(
     poamComponent.includes("fn verification_actions_available") && poamComponent.includes("if verification_actions_available(status) {"),

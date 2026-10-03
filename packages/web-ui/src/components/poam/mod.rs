@@ -3,7 +3,7 @@
 //! Finding identity always comes from server-issued IDs. The presentation
 //! fields carried alongside those IDs are read-only context, never identity.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use chrono::NaiveDate;
 use dioxus::prelude::*;
@@ -761,6 +761,67 @@ fn vulnerability_scope_title(active: &[CveFindingView], historical: &[CveFinding
     )
 }
 
+/// Groups the exact-CVE links of one POA&M by canonical CVE and package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CveScopeGroup {
+    cve_id: String,
+    package: String,
+    findings: Vec<CveFindingView>,
+}
+
+/// Groups exact-CVE links so each CVE and package is shown once.
+///
+/// The key is the canonical CVE ID plus the canonical package name, the same
+/// pair that identifies an exact finding. Groups sort by CVE and then package.
+/// Hosts inside a group sort by hostname, then system ID, then link ID, so the
+/// order never depends on server response order. The function adds no data: it
+/// never derives severity, CVSS, or a fixed version, because the POA&M detail
+/// response does not carry them.
+fn group_cve_scope(findings: &[CveFindingView]) -> Vec<CveScopeGroup> {
+    let mut groups: BTreeMap<(String, String), Vec<CveFindingView>> = BTreeMap::new();
+    for finding in findings {
+        groups
+            .entry((
+                finding.canonical_cve_id.clone(),
+                finding.canonical_package_name.clone(),
+            ))
+            .or_default()
+            .push(finding.clone());
+    }
+    groups
+        .into_iter()
+        .map(|((cve_id, package), mut findings)| {
+            findings.sort_by(|a, b| {
+                a.hostname
+                    .cmp(&b.hostname)
+                    .then(a.system_id.cmp(&b.system_id))
+                    .then(a.link_id.cmp(&b.link_id))
+            });
+            CveScopeGroup {
+                cve_id,
+                package,
+                findings,
+            }
+        })
+        .collect()
+}
+
+/// Returns a compact exact-scan reference for a host row.
+///
+/// The reference is the first eight characters of the scan UUID. The full
+/// UUID stays available in the element title. A missing scan is reported as
+/// `Unavailable`, never as a placeholder identifier.
+fn short_scan_ref(scan_id: Option<Uuid>) -> String {
+    scan_id
+        .map(|id| id.to_string().chars().take(8).collect())
+        .unwrap_or_else(|| "Unavailable".to_string())
+}
+
+/// Returns `1 host` or `N hosts`.
+fn host_count_label(count: usize) -> String {
+    format!("{count} host{}", if count == 1 { "" } else { "s" })
+}
+
 fn api_message(error: &PoamApiError) -> String {
     match error {
         PoamApiError::Server(server) => server.message.clone(),
@@ -1327,48 +1388,6 @@ enum DetailState {
     Loaded(PoamDetail),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MilestoneDraft {
-    title: String,
-    target: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MilestoneSaveFocus {
-    milestone_id: Uuid,
-    title: String,
-    target: String,
-}
-
-fn milestone_save_matches(
-    pending: &MilestoneSaveFocus,
-    milestone_id: Uuid,
-    title: &str,
-    target_date: NaiveDate,
-) -> bool {
-    pending.milestone_id == milestone_id
-        && pending.title == title
-        && pending.target == target_date.to_string()
-}
-
-fn milestone_save_reconciled(
-    pending: &MilestoneSaveFocus,
-    reconciled_save: Option<&MilestoneSaveFocus>,
-    mutation_busy: bool,
-    milestones: &[MilestoneView],
-) -> bool {
-    !mutation_busy
-        && reconciled_save == Some(pending)
-        && milestones.iter().any(|milestone| {
-            milestone_save_matches(
-                pending,
-                milestone.id,
-                &milestone.title,
-                milestone.target_date,
-            )
-        })
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HistoryPageKind {
     Findings,
@@ -1453,8 +1472,6 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
     let mut note = use_signal(String::new);
     let mut milestone_title = use_signal(String::new);
     let mut milestone_target = use_signal(String::new);
-    let mut milestone_drafts = use_signal(HashMap::<Uuid, MilestoneDraft>::new);
-    let mut reconciled_milestone_save = use_signal(|| None::<MilestoneSaveFocus>);
     let mut loaded_poam_id = use_signal(|| None::<Uuid>);
     let mut finding_picker = use_signal(|| false);
     let mut finding_query = use_signal(String::new);
@@ -1486,21 +1503,6 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                         );
                         risk.set(detail.poam.risk);
                         plan.set(detail.poam.plan.clone());
-                        milestone_drafts.set(
-                            detail
-                                .milestones
-                                .iter()
-                                .map(|item| {
-                                    (
-                                        item.id,
-                                        MilestoneDraft {
-                                            title: item.title.clone(),
-                                            target: item.target_date.to_string(),
-                                        },
-                                    )
-                                })
-                                .collect(),
-                        );
                     }
                     preserve_drafts_on_retry.set(false);
                     state.set(DetailState::Loaded(detail));
@@ -1679,6 +1681,7 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
     let deficiency_heading = deficiency_title(active_findings.len());
     let vulnerability_scope =
         vulnerability_scope_title(&active_cve_findings, &historical_cve_findings);
+    let active_cve_groups = group_cve_scope(&active_cve_findings);
     // Viewers never see metadata controls, so they never see the save action.
     // The save handler clones the loaded summary because it must outlive this
     // render and `detail.poam` is still read by later siblings in the tray.
@@ -1724,22 +1727,6 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
         if let Some(handler) = props.on_changed {
             handler.call(next.clone());
         }
-        let milestone_ids = next
-            .milestones
-            .iter()
-            .map(|milestone| milestone.id)
-            .collect::<HashSet<_>>();
-        let mut next_drafts = milestone_drafts.read().clone();
-        next_drafts.retain(|id, _| milestone_ids.contains(id));
-        for milestone in &next.milestones {
-            next_drafts
-                .entry(milestone.id)
-                .or_insert_with(|| MilestoneDraft {
-                    title: milestone.title.clone(),
-                    target: milestone.target_date.to_string(),
-                });
-        }
-        milestone_drafts.set(next_drafts);
         state.set(DetailState::Loaded(next));
         busy.set(None);
         message.set(None);
@@ -1909,43 +1896,77 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                 if !active_cve_findings.is_empty() || !historical_cve_findings.is_empty() {
                     section { class: "poam-tray-section", "data-testid": "poam-linked-vulnerabilities",
                         header { h3 { "{vulnerability_scope}" } }
-                        p { class: "poam-section-help", "Justification or whitelisting is not remediation. Only PASS from exact absence permits closure." }
-                    if !active_cve_findings.is_empty() {
-                        div { class: "poam-table-wrap", table { class: "sys-table compact sys-table-dense poam-cve-findings-table",
-                            thead { tr { th { "Host" } th { "CVE / package" } th { "Installed / fixed" } th { "Current exact scan" } th { "Result" } th { "Actions" } } }
-                            tbody { for finding in active_cve_findings.clone() { { let finding_id = finding.id; let finding_for_evidence = finding.clone(); let scan = finding.current_scan_id.map(|id| id.to_string()).unwrap_or_else(|| "Unavailable".to_string()); let installed = finding.current_observed_package_version.as_deref().or(finding.baseline_observed_package_version.as_deref()).unwrap_or("Unavailable"); let fixed = "Unavailable"; rsx! {
-                                tr { key: "{finding.link_id}", "data-testid": "poam-linked-vulnerability", "data-cve-finding-id": "{finding.id}",
-                                    td { class: "mono", "{finding.hostname}" }
-                                    td { strong { class: "mono", "{finding.canonical_cve_id}" } small { class: "mono poam-muted", "{finding.canonical_package_name}" } }
-                                    td { span { class: "mono", "{installed}" } small { class: "poam-muted", "Fixed: {fixed}" } }
-                                    td { class: "mono", title: "{scan}", "{scan}" }
-                                    td { span { class: "poam-chip {cve_result_class(&finding.resolution_state)}", "{cve_result_label(&finding.resolution_state)}" } }
-                                    td { class: "poam-row-actions",
-                                        if let Some(handler) = props.on_open_cve_finding { button { class: "btn btn-ghost xs focus-ring", onclick: move |_| handler.call(finding_for_evidence.clone()), "Evidence" } }
-                                        button { class: "btn-icon focus-ring", title: "Unlink vulnerability", aria_label: "Unlink vulnerability {finding.canonical_cve_id} {finding.canonical_package_name}", disabled: readonly, onclick: move |_| { busy.set(Some("Unlinking vulnerability".to_string())); spawn(async move { match poam_api::unlink_poam_cve_finding(props.poam_id, finding_id, revision).await { Ok(next) => reconcile(next), Err(err) => handle_error("unlinking vulnerability", err) } }); }, Icon { name: IconName::X, size: 12 } }
+                        p { class: "poam-section-help", "Scope is fixed at creation; a re-scan does not change the recorded links. Justification or whitelisting is not remediation. Closure still requires authoritative exact evidence to clear the finding." }
+                        for group in active_cve_groups.clone() {
+                            div { key: "{group.cve_id}-{group.package}", class: "poam-cve-group", "data-testid": "poam-cve-group", "data-cve-id": "{group.cve_id}", "data-cve-package": "{group.package}",
+                                div { class: "poam-cve-group-head",
+                                    Icon { name: IconName::Shield, size: 12 }
+                                    strong { class: "mono", "{group.cve_id}" }
+                                    span { class: "mono poam-muted", "{group.package}" }
+                                    span { class: "poam-cve-group-count", "{host_count_label(group.findings.len())}" }
+                                }
+                                for finding in group.findings.clone() {
+                                    {
+                                        let finding_id = finding.id;
+                                        let finding_for_evidence = finding.clone();
+                                        let scan_ref = short_scan_ref(finding.current_scan_id);
+                                        let scan_title = finding.current_scan_id.map(|id| id.to_string()).unwrap_or_else(|| "No current exact scan".to_string());
+                                        let installed = finding.current_observed_package_version.as_deref().or(finding.baseline_observed_package_version.as_deref()).unwrap_or("Unavailable");
+                                        rsx! {
+                                            div { key: "{finding.link_id}", class: "poam-cve-host", "data-testid": "poam-linked-vulnerability", "data-cve-finding-id": "{finding.id}",
+                                                span { class: "mono poam-cve-host-name", "{finding.hostname}" }
+                                                span { class: "poam-cve-host-evidence",
+                                                    span { class: "mono", title: "Installed version", "{installed}" }
+                                                    small { class: "mono poam-muted", title: "{scan_title}", "scan {scan_ref}" }
+                                                }
+                                                span { class: "poam-chip {cve_result_class(&finding.resolution_state)}", "{cve_result_label(&finding.resolution_state)}" }
+                                                span { class: "poam-row-actions",
+                                                    if let Some(handler) = props.on_open_cve_finding { button { class: "btn btn-ghost xs focus-ring", onclick: move |_| handler.call(finding_for_evidence.clone()), "Evidence" } }
+                                                    button { class: "btn-icon focus-ring", title: "Unlink vulnerability", aria_label: "Unlink vulnerability {finding.canonical_cve_id} {finding.canonical_package_name}", disabled: readonly, onclick: move |_| { busy.set(Some("Unlinking vulnerability".to_string())); spawn(async move { match poam_api::unlink_poam_cve_finding(props.poam_id, finding_id, revision).await { Ok(next) => reconcile(next), Err(err) => handle_error("unlinking vulnerability", err) } }); }, Icon { name: IconName::X, size: 12 } }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
-                            } } } }
-                        } }
-                    }
+                            }
+                        }
                         // Retired links are immutable audit evidence. They stay
                         // secondary while active links exist and open by
                         // default when none do, so a completed POA&M still
-                        // shows its recorded scope.
+                        // shows its recorded scope. Rows are stacked, not
+                        // tabular, so the baseline evidence never needs
+                        // horizontal scrolling.
                         if !historical_cve_findings.is_empty() {
                             details { class: "poam-retired-history", open: active_cve_findings.is_empty(), "data-testid": "poam-retired-vulnerability-history",
                                 summary { class: "focus-ring", "Retired vulnerability history · {historical_cve_findings.len()}" }
                                 p { class: "poam-section-help", "Retired links are immutable audit evidence and cannot be unlinked." }
-                        div { class: "poam-table-wrap", table { class: "sys-table compact sys-table-dense poam-cve-findings-table",
-                            thead { tr { th { "Host" } th { "CVE / package" } th { "Baseline version" } th { "Immutable baseline" } th { "Retired" } } }
-                            tbody { for finding in historical_cve_findings.clone() { { let baseline_version = finding.baseline_observed_package_version.as_deref().unwrap_or("Unavailable"); let baseline_scan = finding.baseline_scan_id.map(|id| id.to_string()).unwrap_or_else(|| "Unavailable".to_string()); let baseline_generation = finding.baseline_generation.map(|generation| generation.to_string()).unwrap_or_else(|| "Unavailable".to_string()); let baseline_store_path = finding.baseline_target_store_path.as_deref().unwrap_or("Unavailable"); let baseline_occurrence = finding.baseline_occurrence_derivation_path.as_deref().unwrap_or("Unavailable"); rsx! { tr { key: "history-{finding.link_id}", "data-testid": "poam-retired-vulnerability", "data-cve-finding-id": "{finding.id}",
-                                td { class: "mono", "{finding.hostname}" }
-                                td { strong { class: "mono", "{finding.canonical_cve_id}" } small { class: "mono poam-muted", "{finding.canonical_package_name}" } }
-                                td { class: "mono", "{baseline_version}" }
-                                td { small { class: "mono", "Scan {baseline_scan}" } small { class: "mono poam-muted", "Generation {baseline_generation} · {baseline_store_path}" } small { class: "mono poam-muted", "{baseline_occurrence}" } }
-                                td { span { class: "poam-chip", "RETIRED" } small { class: "poam-muted", "{finding.retired_at.map(|at| at.to_rfc3339()).unwrap_or_else(|| \"Unknown time\".to_string())}" } small { class: "poam-muted", "{finding.retirement_reason.as_deref().unwrap_or(\"No reason recorded\")}" } }
-                            } } } } }
-                        } }
+                                for finding in historical_cve_findings.clone() {
+                                    {
+                                        let baseline_version = finding.baseline_observed_package_version.as_deref().unwrap_or("Unavailable");
+                                        let baseline_scan = finding.baseline_scan_id.map(|id| id.to_string()).unwrap_or_else(|| "Unavailable".to_string());
+                                        let baseline_generation = finding.baseline_generation.map(|generation| generation.to_string()).unwrap_or_else(|| "Unavailable".to_string());
+                                        let baseline_store_path = finding.baseline_target_store_path.as_deref().unwrap_or("Unavailable");
+                                        let baseline_occurrence = finding.baseline_occurrence_derivation_path.as_deref().unwrap_or("Unavailable");
+                                        let retired_at = finding.retired_at.map(|at| at.to_rfc3339()).unwrap_or_else(|| "Unknown time".to_string());
+                                        let retired_reason = finding.retirement_reason.as_deref().unwrap_or("No reason recorded");
+                                        rsx! {
+                                            div { key: "history-{finding.link_id}", class: "poam-retired-row", "data-testid": "poam-retired-vulnerability", "data-cve-finding-id": "{finding.id}",
+                                                div { class: "poam-retired-identity",
+                                                    span { class: "mono poam-cve-host-name", "{finding.hostname}" }
+                                                    strong { class: "mono", "{finding.canonical_cve_id}" }
+                                                    span { class: "mono poam-muted", "{finding.canonical_package_name}" }
+                                                    span { class: "poam-chip", "RETIRED" }
+                                                }
+                                                div { class: "poam-retired-evidence",
+                                                    small { class: "mono", "Baseline {baseline_version} · Scan {baseline_scan}" }
+                                                    small { class: "mono poam-muted", "Generation {baseline_generation} · {baseline_store_path}" }
+                                                    small { class: "mono poam-muted", "{baseline_occurrence}" }
+                                                    small { class: "poam-muted", "{retired_at} · {retired_reason}" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1968,7 +1989,7 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                     }
                     textarea { class: "input focus-ring poam-plan", rows: "5", value: "{plan}", disabled: readonly, placeholder: "What will change, where, and how it will be verified", oninput: move |event| plan.set(event.value()) }
                 }
-                MilestonesSection { milestones: detail.milestones.clone(), drafts: milestone_drafts, new_title: milestone_title, new_target: milestone_target, readonly: props.viewer, mutation_busy: busy().is_some(), reconciled_save: reconciled_milestone_save.read().clone(), on_add: move |values: (String, String)| { let (new_title, new_target) = values; let Ok(target_date) = NaiveDate::parse_from_str(&new_target, "%Y-%m-%d") else { message.set(Some("Enter a valid milestone target date.".to_string())); return; }; let request = AddMilestoneRequest { revision, title: new_title, target_date }; busy.set(Some("Adding milestone".to_string())); spawn(async move { match poam_api::add_poam_milestone(props.poam_id, &request).await { Ok(next) => { milestone_title.set(String::new()); milestone_target.set(String::new()); reconcile(next); }, Err(err) => handle_error("adding milestone", err) } }); }, on_update: move |values: (Uuid, Option<MilestoneDraft>, Option<bool>)| { let (id, draft, completed) = values; let target_date = match draft.as_ref() { Some(draft) => { let Ok(target_date) = NaiveDate::parse_from_str(&draft.target, "%Y-%m-%d") else { message.set(Some("Enter a valid milestone target date.".to_string())); return; }; Some(target_date) }, None => None }; let submitted_save = draft.as_ref().map(|draft| MilestoneSaveFocus { milestone_id: id, title: draft.title.clone(), target: draft.target.clone() }); let request = UpdateMilestoneRequest { revision, title: draft.map(|value| value.title), target_date, completed }; reconciled_milestone_save.set(None); busy.set(Some("Updating milestone".to_string())); spawn(async move { match poam_api::update_poam_milestone(props.poam_id, id, &request).await { Ok(next) => { reconciled_milestone_save.set(submitted_save); reconcile(next); }, Err(err) => handle_error("updating milestone", err) } }); }, on_remove: move |id| { busy.set(Some("Removing milestone".to_string())); spawn(async move { match poam_api::remove_poam_milestone(props.poam_id, id, revision).await { Ok(next) => reconcile(next), Err(err) => handle_error("removing milestone", err) } }); } }
+                MilestonesSection { milestones: detail.milestones.clone(), new_title: milestone_title, new_target: milestone_target, readonly: props.viewer, mutation_busy: busy().is_some(), on_add: move |values: (String, String)| { let (new_title, new_target) = values; let Ok(target_date) = NaiveDate::parse_from_str(&new_target, "%Y-%m-%d") else { message.set(Some("Enter a valid milestone target date.".to_string())); return; }; let request = AddMilestoneRequest { revision, title: new_title, target_date }; busy.set(Some("Adding milestone".to_string())); spawn(async move { match poam_api::add_poam_milestone(props.poam_id, &request).await { Ok(next) => { milestone_title.set(String::new()); milestone_target.set(String::new()); reconcile(next); }, Err(err) => handle_error("adding milestone", err) } }); }, on_toggle: move |values: (Uuid, bool)| { let (id, completed) = values; let request = UpdateMilestoneRequest { revision, title: None, target_date: None, completed: Some(completed) }; busy.set(Some("Updating milestone".to_string())); spawn(async move { match poam_api::update_poam_milestone(props.poam_id, id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("updating milestone", err) } }); }, on_remove: move |id| { busy.set(Some("Removing milestone".to_string())); spawn(async move { match poam_api::remove_poam_milestone(props.poam_id, id, revision).await { Ok(next) => reconcile(next), Err(err) => handle_error("removing milestone", err) } }); } }
                 section { class: "poam-tray-section", header { h3 { "Activity" } } ActivityList { activity: detail.activity.clone() } if detail.activity_has_more { button { class: "btn btn-ghost focus-ring", "data-testid": "poam-load-more-activity", disabled: history_loading().is_some(), onclick: move |_| if let Some(query) = activity_page_query.clone() { load_more(HistoryPageKind::Activity, query); }, if history_loading() == Some(HistoryPageKind::Activity) { "Loading…" } else { "Load more activity" } } } div { class: "poam-note-form", input { class: "input focus-ring", aria_label: "Add a note", value: "{note}", placeholder: "Add a note...", disabled: readonly, oninput: move |event| note.set(event.value()), onkeydown: move |event| if event.key() == Key::Enter && !readonly && !note.read().trim().is_empty() { let request = AddNoteRequest { revision, text: note.read().trim().to_string() }; busy.set(Some("Adding note".to_string())); spawn(async move { match poam_api::add_poam_note(props.poam_id, &request).await { Ok(next) => { note.set(String::new()); reconcile(next); }, Err(err) => handle_error("adding note", err) } }); } } button { class: "btn btn-ghost focus-ring", disabled: readonly || note.read().trim().is_empty(), onclick: move |_| { let request = AddNoteRequest { revision, text: note.read().trim().to_string() }; busy.set(Some("Adding note".to_string())); spawn(async move { match poam_api::add_poam_note(props.poam_id, &request).await { Ok(next) => { note.set(String::new()); reconcile(next); }, Err(err) => handle_error("adding note", err) } }); }, "Add note" } } }
             }
             DialogFocusSentinel { dialog_id: "poam-detail-dialog".to_string(), boundary: DialogFocusBoundary::First }
@@ -2112,77 +2133,29 @@ fn LifecycleSection(props: LifecycleSectionProps) -> Element {
 #[derive(Props, Clone, PartialEq)]
 struct MilestonesSectionProps {
     milestones: Vec<MilestoneView>,
-    drafts: Signal<HashMap<Uuid, MilestoneDraft>>,
     new_title: Signal<String>,
     new_target: Signal<String>,
     readonly: bool,
     mutation_busy: bool,
-    reconciled_save: Option<MilestoneSaveFocus>,
     on_add: EventHandler<(String, String)>,
-    on_update: EventHandler<(Uuid, Option<MilestoneDraft>, Option<bool>)>,
+    on_toggle: EventHandler<(Uuid, bool)>,
     on_remove: EventHandler<Uuid>,
+}
+
+/// Returns whether an open milestone is past its target date.
+///
+/// A completed milestone is never late, whatever its target date was. The
+/// comparison uses the caller's date so tests do not depend on the clock.
+fn milestone_is_late(milestone: &MilestoneView, today: NaiveDate) -> bool {
+    milestone.completed_at.is_none() && milestone.target_date < today
 }
 
 #[component]
 fn MilestonesSection(props: MilestonesSectionProps) -> Element {
-    let mut drafts = props.drafts;
     let mut new_title = props.new_title;
     let mut new_target = props.new_target;
-    let mut editing = use_signal(|| None::<Uuid>);
-    let mut pending_save_focus = use_signal(|| None::<MilestoneSaveFocus>);
-    #[cfg(target_arch = "wasm32")]
-    use_effect(move || {
-        let Some(milestone_id) = editing() else {
-            return;
-        };
-        spawn(async move {
-            // ACCESSIBILITY: The editor is conditionally rendered. Wait one
-            // event-loop turn so its title input exists before moving focus.
-            TimeoutFuture::new(0).await;
-            if editing() == Some(milestone_id) {
-                focus_element_by_id(&format!("poam-milestone-title-input-{milestone_id}"));
-            }
-        });
-    });
-    let reconciled_milestones = props.milestones.clone();
-    let reconciled_save = props.reconciled_save.clone();
-    let mutation_busy = props.mutation_busy;
-    let readonly = props.readonly;
-    use_effect(use_reactive(
-        (
-            &reconciled_milestones,
-            &reconciled_save,
-            &mutation_busy,
-            &readonly,
-        ),
-        move |(reconciled_milestones, reconciled_save, mutation_busy, readonly)| {
-            let Some(pending) = pending_save_focus.read().clone() else {
-                return;
-            };
-            if !milestone_save_reconciled(
-                &pending,
-                reconciled_save.as_ref(),
-                mutation_busy,
-                &reconciled_milestones,
-            ) {
-                return;
-            }
-
-            // INVARIANT: Save closes the editor only after the successful
-            // response is rendered and the mutation lock has re-enabled the
-            // edit trigger.
-            pending_save_focus.set(None);
-            editing.set(None);
-            #[cfg(target_arch = "wasm32")]
-            spawn(async move {
-                TimeoutFuture::new(0).await;
-                if editing().is_none() && pending_save_focus.read().is_none() && !readonly {
-                    focus_element_by_id(&format!("poam-milestone-edit-{}", pending.milestone_id));
-                }
-            });
-        },
-    ));
     let controls_disabled = props.readonly || props.mutation_busy;
+    let today = chrono::Utc::now().date_naive();
     rsx! {
         section { class: "poam-tray-section",
             header { h3 { "Milestones · {props.milestones.iter().filter(|item| item.completed_at.is_some()).count()} of {props.milestones.len()} complete" } }
@@ -2190,6 +2163,7 @@ fn MilestonesSection(props: MilestonesSectionProps) -> Element {
                 for milestone in props.milestones.clone() {
                     {
                         let completed = milestone.completed_at.is_some();
+                        let late = milestone_is_late(&milestone, today);
                         let action_label = if completed {
                             format!("Reopen {}", milestone.title)
                         } else {
@@ -2199,29 +2173,18 @@ fn MilestonesSection(props: MilestonesSectionProps) -> Element {
                             .completed_at
                             .map(|at| format!("done {}", short_display_date(at.date_naive())))
                             .unwrap_or_else(|| format!("due {}", short_display_date(milestone.target_date)));
-                        let is_editing = editing() == Some(milestone.id);
-                        let editor_id = format!("poam-milestone-editor-{}", milestone.id);
-                        let edit_button_id = format!("poam-milestone-edit-{}", milestone.id);
-                        let title_input_id = format!("poam-milestone-title-input-{}", milestone.id);
-                        let cancel_focus_id = edit_button_id.clone();
-                        let reset_title = milestone.title.clone();
-                        let reset_target = milestone.target_date.to_string();
                         rsx! {
-                            div { class: "poam-milestone", "data-testid": "poam-milestone", "data-milestone-id": "{milestone.id}",
-                                input { class: "focus-ring poam-milestone-check", r#type: "checkbox", checked: completed, disabled: controls_disabled, aria_label: "{action_label}", onchange: move |_| props.on_update.call((milestone.id, None, Some(!completed))) }
-                                button { id: "{edit_button_id}", class: if completed { "poam-milestone-title poam-milestone-completed focus-ring" } else { "poam-milestone-title focus-ring" }, aria_disabled: controls_disabled, tabindex: if controls_disabled { "-1" } else { "0" }, title: "Edit milestone", aria_label: "Edit milestone {milestone.title}", aria_expanded: is_editing, aria_controls: "{editor_id}", onclick: move |_| if !controls_disabled { pending_save_focus.set(None); editing.set(Some(milestone.id)); }, "{milestone.title}" }
-                                span { class: "mono poam-milestone-date", "{date_label}" }
-                                button { class: "btn-icon focus-ring", title: "Remove milestone", aria_label: "Remove milestone {milestone.title}", disabled: controls_disabled, onclick: move |_| props.on_remove.call(milestone.id), Icon { name: IconName::Trash, size: 12 } }
-                                if is_editing {
-                                    if let Some(draft) = drafts.read().get(&milestone.id).cloned() {
-                                        div { id: "{editor_id}", class: "poam-milestone-editor", role: "group", aria_label: "Edit milestone {milestone.title}",
-                                            input { id: "{title_input_id}", class: "input focus-ring", aria_label: "Milestone title for {milestone.title}", autofocus: true, value: "{draft.title}", disabled: controls_disabled, oninput: move |event| { let mut next = drafts.read().clone(); if let Some(value) = next.get_mut(&milestone.id) { value.title = event.value(); } drafts.set(next); } }
-                                            input { class: "input focus-ring mono", aria_label: "Milestone target date for {milestone.title}", r#type: "date", value: "{draft.target}", disabled: controls_disabled, oninput: move |event| { let mut next = drafts.read().clone(); if let Some(value) = next.get_mut(&milestone.id) { value.target = event.value(); } drafts.set(next); } }
-                                            button { class: "btn btn-ghost xs focus-ring", disabled: controls_disabled || draft.title.trim().is_empty() || draft.target.is_empty(), onclick: move |_| { let pending = MilestoneSaveFocus { milestone_id: milestone.id, title: draft.title.trim().to_string(), target: draft.target.clone() }; props.on_update.call((milestone.id, Some(draft.clone()), None)); pending_save_focus.set(Some(pending)); }, "Save" }
-                                            button { class: "btn btn-ghost xs focus-ring", disabled: controls_disabled, onclick: move |_| { let mut next = drafts.read().clone(); next.insert(milestone.id, MilestoneDraft { title: reset_title.clone(), target: reset_target.clone() }); drafts.set(next); pending_save_focus.set(None); editing.set(None); focus_element_by_id(&cancel_focus_id); }, "Cancel" }
-                                        }
-                                    }
+                            // The row follows the design: a label wraps the
+                            // checkbox and the title, so clicking either
+                            // toggles completion. Existing milestones have no
+                            // title or date editor.
+                            div { class: "poam-ms", "data-testid": "poam-milestone", "data-milestone-id": "{milestone.id}",
+                                label { class: "poam-check poam-ms-label",
+                                    input { class: "focus-ring poam-milestone-check", r#type: "checkbox", checked: completed, disabled: controls_disabled, aria_label: "{action_label}", onchange: move |_| props.on_toggle.call((milestone.id, !completed)) }
+                                    span { class: if completed { "poam-milestone-title poam-milestone-completed" } else { "poam-milestone-title" }, "{milestone.title}" }
                                 }
+                                span { class: if late { "mono poam-milestone-date poam-overdue" } else { "mono poam-milestone-date" }, "{date_label}" }
+                                button { class: "btn-icon focus-ring", title: "Remove milestone", aria_label: "Remove milestone {milestone.title}", disabled: controls_disabled, onclick: move |_| props.on_remove.call(milestone.id), Icon { name: IconName::Trash, size: 12 } }
                             }
                         }
                     }
@@ -2238,30 +2201,32 @@ fn MilestonesSection(props: MilestonesSectionProps) -> Element {
 
 #[component]
 fn ActivityList(activity: Vec<ActivityView>) -> Element {
-    rsx! { div { class: "poam-activity", if activity.is_empty() { div { class: "poam-empty", "No durable activity has been recorded." } } for item in activity { { let payload = serde_json::to_string_pretty(&item.payload).unwrap_or_else(|_| "null".to_string()); let description = activity_description(&item); let actor = activity_actor(&item); let timestamp = item.created_at.to_rfc3339(); rsx! { div { class: "poam-activity-row", "data-activity-kind": "{item.kind}", time { class: "mono poam-activity-date", datetime: "{timestamp}", title: "{timestamp}", "{item.created_at.date_naive()}" } span { class: "mono poam-activity-actor", "{actor}" } span { class: "poam-activity-message", "{description}" } details { class: "poam-activity-diagnostics", summary { "Diagnostics" } pre { "{payload}" } } } } } } } }
+    rsx! {
+        div { class: "poam-activity",
+            if activity.is_empty() { div { class: "poam-empty", "No durable activity has been recorded." } }
+            for item in activity {
+                {
+                    // The stored payload feeds `activity_description`; the
+                    // drawer shows only the resulting message, as the design
+                    // does.
+                    let description = activity_description(&item);
+                    let actor = activity_actor(&item);
+                    let timestamp = item.created_at.to_rfc3339();
+                    rsx! {
+                        div { class: "poam-activity-row", "data-activity-kind": "{item.kind}",
+                            time { class: "mono poam-activity-date", datetime: "{timestamp}", title: "{timestamp}", "{item.created_at.date_naive()}" }
+                            span { class: "mono poam-activity-actor", title: "{actor}", "{actor}" }
+                            span { class: "poam-activity-message", "{description}" }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn short_display_date(date: NaiveDate) -> String {
     date.format("%b %-d").to_string()
-}
-
-fn focus_element_by_id(id: &str) {
-    #[cfg(target_arch = "wasm32")]
-    {
-        use wasm_bindgen::JsCast;
-
-        if let Some(element) = web_sys::window()
-            .and_then(|window| window.document())
-            .and_then(|document| document.get_element_by_id(id))
-            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
-        {
-            let _ = element.focus();
-        }
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = id;
-    }
 }
 
 fn activity_actor(activity: &ActivityView) -> String {
@@ -2810,7 +2775,13 @@ mod tests {
         assert!(source.contains("class: \"mono poam-activity-date\""));
         assert!(source.contains("class: \"mono poam-activity-actor\""));
         assert!(source.contains("class: \"poam-activity-message\""));
-        assert!(source.contains("class: \"poam-activity-diagnostics\""));
+        // The drawer shows the human message only. Needles are assembled at run
+        // time so this test does not match its own source.
+        let diagnostics_class = format!("poam-activity-{}", "diagnostics");
+        let diagnostics_summary = format!("summary {{ \"{}\" }}", "Diagnostics");
+        assert!(!source.contains(&diagnostics_class));
+        assert!(!source.contains(&diagnostics_summary));
+        assert!(!include_str!("../../../assets/app.css").contains(&diagnostics_class));
         let activity_component = source
             .split("fn ActivityList")
             .nth(1)
@@ -2822,80 +2793,70 @@ mod tests {
     }
 
     #[test]
-    fn milestone_default_surface_is_a_compact_accessible_checklist() {
+    fn milestone_row_is_a_label_wrapped_checklist_without_an_editor() {
         let source = include_str!("mod.rs");
-        assert!(source.contains("class: \"focus-ring poam-milestone-check\""));
-        assert!(source.contains("format!(\"Mark {} complete\", milestone.title)"));
-        assert!(source.contains("format!(\"Reopen {}\", milestone.title)"));
-        assert!(source.contains("props.on_update.call((milestone.id, None, Some(!completed)))"));
-        assert!(source.contains("poam-milestone-completed"));
-        assert!(source.contains(
+        let component = source
+            .split("fn MilestonesSection")
+            .nth(1)
+            .unwrap()
+            .split("fn ActivityList")
+            .next()
+            .unwrap();
+        assert!(component.contains("class: \"poam-ms\""));
+        assert!(component.contains("label { class: \"poam-check poam-ms-label\""));
+        assert!(component.contains("class: \"focus-ring poam-milestone-check\""));
+        assert!(component.contains("format!(\"Mark {} complete\", milestone.title)"));
+        assert!(component.contains("format!(\"Reopen {}\", milestone.title)"));
+        assert!(component.contains("props.on_toggle.call((milestone.id, !completed))"));
+        assert!(component.contains("poam-milestone-completed"));
+        assert!(component.contains(
             "title: \"Remove milestone\", aria_label: \"Remove milestone {milestone.title}\""
         ));
-        assert!(source.contains("aria_disabled: controls_disabled"));
-        assert!(source.contains("title: \"Add milestone\", aria_label: \"Add milestone\""));
-        assert!(source.contains("if is_editing"));
-        assert!(source.contains("poam-milestone-title-input-{milestone_id}"));
-        assert!(source.contains("TimeoutFuture::new(0).await"));
-        assert!(source.contains("mutation_busy: busy().is_some()"));
-        assert!(source.contains("pending_save_focus.set(Some(pending))"));
-        assert!(source.contains("reconciled_save.as_ref(),"));
-        assert!(source.contains("editing().is_none() && pending_save_focus.read().is_none()"));
-        assert!(source.contains("placeholder: \"Add a milestone...\""));
+        assert!(component.contains("title: \"Add milestone\", aria_label: \"Add milestone\""));
+        assert!(component.contains("placeholder: \"Add a milestone...\""));
         assert!(source.contains("placeholder: \"Add a note...\""));
+        // Existing milestones have no title or date editor. Needles are
+        // assembled at run time so this test does not match its own source.
+        for removed in [
+            format!("Edit {}", "milestone"),
+            format!("poam-milestone-{}", "editor"),
+            format!("Milestone title {}", "for"),
+            format!("Milestone target date {}", "for"),
+            format!("pending_save_{}", "focus"),
+            format!("Milestone{}", "Draft"),
+            format!("Milestone{}", "SaveFocus"),
+        ] {
+            assert!(!component.contains(&removed), "{removed} must be gone");
+            assert!(!source.contains(&format!("fn {}", removed.replace(' ', "_"))));
+        }
     }
 
-    #[test]
-    fn milestone_save_focus_requires_success_busy_completion_and_exact_values() {
-        let milestone_id = Uuid::from_u128(30);
-        let target = NaiveDate::from_ymd_opt(2026, 9, 30).unwrap();
-        let pending = MilestoneSaveFocus {
-            milestone_id,
-            title: "Deploy update".to_string(),
-            target: target.to_string(),
-        };
+    fn milestone(target: &str, completed: bool) -> MilestoneView {
         let timestamp = chrono::DateTime::parse_from_rfc3339("2026-09-14T12:00:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
-        let milestone = MilestoneView {
-            id: milestone_id,
+        MilestoneView {
+            id: Uuid::from_u128(30),
             ordinal: 0,
-            title: pending.title.clone(),
-            target_date: target,
-            completed_at: None,
-            completed_by: None,
+            title: "Deploy update".to_string(),
+            target_date: NaiveDate::parse_from_str(target, "%Y-%m-%d").unwrap(),
+            completed_at: completed.then_some(timestamp),
+            completed_by: completed.then_some(Uuid::from_u128(31)),
             created_by: Uuid::from_u128(31),
             updated_by: Uuid::from_u128(31),
             created_at: timestamp,
             updated_at: timestamp,
-        };
+        }
+    }
 
-        assert!(!milestone_save_reconciled(
-            &pending,
-            Some(&pending),
-            true,
-            std::slice::from_ref(&milestone),
-        ));
-        assert!(!milestone_save_reconciled(
-            &pending,
-            None,
-            false,
-            std::slice::from_ref(&milestone),
-        ));
-        assert!(milestone_save_reconciled(
-            &pending,
-            Some(&pending),
-            false,
-            std::slice::from_ref(&milestone),
-        ));
-        let mut mismatched = milestone;
-        mismatched.title = "Deploy later".to_string();
-        assert!(!milestone_save_reconciled(
-            &pending,
-            Some(&pending),
-            false,
-            &[mismatched],
-        ));
+    #[test]
+    fn only_an_open_milestone_past_its_target_is_late() {
+        let today = NaiveDate::from_ymd_opt(2026, 9, 27).unwrap();
+        assert!(milestone_is_late(&milestone("2026-09-26", false), today));
+        assert!(!milestone_is_late(&milestone("2026-09-27", false), today));
+        assert!(!milestone_is_late(&milestone("2026-10-01", false), today));
+        // A completed milestone is never late, whatever its target was.
+        assert!(!milestone_is_late(&milestone("2026-08-01", true), today));
     }
 
     #[test]
@@ -2907,8 +2868,9 @@ mod tests {
         assert!(css.contains("--cf-disabled-control-text: #4b5563"));
         assert!(css.contains(".poam-tray :is(button, input, select, textarea):disabled"));
         assert!(css.contains(".poam-milestone-title.poam-milestone-completed"));
-        assert!(css.contains(".poam-activity-diagnostics { grid-column: 3"));
-        assert!(css.contains(".poam-activity-message, .poam-activity-diagnostics"));
+        assert!(css.contains(".poam-ms { display: flex"));
+        assert!(css.contains(".poam-cve-host {"));
+        assert!(css.contains(".poam-cve-group-head"));
     }
 
     fn user_draft(id: u128, display: &str) -> PoamAssigneeDraft {
@@ -3230,5 +3192,102 @@ mod tests {
         // Retired exact-CVE evidence stays reachable and non-unlinkable.
         assert!(source.contains("Retired vulnerability history"));
         assert!(source.contains("Retired links are immutable audit evidence"));
+    }
+
+    fn cve_link_on(
+        cve: &str,
+        package: &str,
+        host: &str,
+        system: u128,
+        link: u128,
+    ) -> CveFindingView {
+        let mut finding = cve_link(cve, system, true);
+        finding.canonical_package_name = package.into();
+        finding.hostname = host.into();
+        finding.link_id = Uuid::from_u128(link);
+        finding
+    }
+
+    #[test]
+    fn scope_groups_hosts_under_one_card_per_cve_and_package() {
+        let findings = vec![
+            cve_link_on("CVE-2024-2", "openssl", "web-02", 2, 12),
+            cve_link_on("CVE-2024-1", "openssl", "web-03", 3, 13),
+            cve_link_on("CVE-2024-1", "openssl", "web-01", 1, 11),
+            cve_link_on("CVE-2024-1", "curl", "web-01", 1, 14),
+        ];
+        let groups = group_cve_scope(&findings);
+        let keys = groups
+            .iter()
+            .map(|group| {
+                (
+                    group.cve_id.as_str(),
+                    group.package.as_str(),
+                    group.findings.len(),
+                )
+            })
+            .collect::<Vec<_>>();
+        // Groups sort by CVE then package. The same CVE with two packages is
+        // two groups because the exact finding identity includes the package.
+        assert_eq!(
+            keys,
+            vec![
+                ("CVE-2024-1", "curl", 1),
+                ("CVE-2024-1", "openssl", 2),
+                ("CVE-2024-2", "openssl", 1),
+            ]
+        );
+        // Hosts sort by name, not by response order.
+        let hosts = groups[1]
+            .findings
+            .iter()
+            .map(|finding| finding.hostname.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(hosts, vec!["web-01", "web-03"]);
+        assert!(group_cve_scope(&[]).is_empty());
+    }
+
+    #[test]
+    fn scope_group_order_is_independent_of_response_order() {
+        let a = cve_link_on("CVE-2024-1", "openssl", "web-01", 1, 11);
+        let b = cve_link_on("CVE-2024-1", "openssl", "web-02", 2, 12);
+        assert_eq!(
+            group_cve_scope(&[a.clone(), b.clone()]),
+            group_cve_scope(&[b, a])
+        );
+    }
+
+    #[test]
+    fn scan_reference_is_compact_and_never_invented() {
+        let id = Uuid::parse_str("12345678-aaaa-bbbb-cccc-1234567890ab").unwrap();
+        assert_eq!(short_scan_ref(Some(id)), "12345678");
+        assert_eq!(short_scan_ref(None), "Unavailable");
+        assert_eq!(host_count_label(1), "1 host");
+        assert_eq!(host_count_label(4), "4 hosts");
+    }
+
+    #[test]
+    fn scope_markup_has_no_fabricated_severity_and_no_wide_table() {
+        let source = include_str!("mod.rs");
+        let scope = source
+            .split("poam-linked-vulnerabilities")
+            .nth(1)
+            .unwrap()
+            .split("\"Remediation plan\"")
+            .next()
+            .unwrap();
+        // The detail response carries no severity, CVSS, or fixed version, so
+        // the card header must not render any. Needles are assembled at run
+        // time.
+        for forbidden in [
+            format!("{}: Unavailable", "Fixed"),
+            format!("cvss{}", "_score"),
+            format!("poam-cve-findings-{}", "table"),
+            format!("th {{ \"{}\" }}", "Actions"),
+        ] {
+            assert!(!scope.contains(&forbidden), "{forbidden} must not render");
+        }
+        assert!(scope.contains("poam-cve-group-head"));
+        assert!(scope.contains("poam-cve-host"));
     }
 }
