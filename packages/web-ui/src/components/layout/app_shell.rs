@@ -21,7 +21,7 @@ use crate::components::layout::{
     BannerPlacement, DEV_MODE_BANNER_HEIGHT_PX, DevModeBanner, use_dev_mode_enabled,
 };
 use crate::components::notifications::{AlertBanner, AlertSeverity};
-use crate::components::onboarding::OnboardingCoachPanel;
+use crate::components::onboarding::{CoachCallout, CoachController, CoachRole, CoachRoot};
 use crate::routes::Route;
 use crate::state::app_state::{
     AppState, AuthFetchState, ConfigHealthFetchState, set_authenticated_context,
@@ -182,10 +182,14 @@ pub fn AppShell() -> Element {
         });
     });
 
+    // The overdue count belongs to this authenticated shell. It must not
+    // persist into another user's navigation after the shell unmounts.
+    let poam_overdue = use_signal(|| None::<i64>);
     // Provide sidebar context
     use_context_provider(|| SidebarContext {
         is_mobile_drawer_open,
         is_collapsed,
+        poam_overdue,
     });
 
     // Provide preferences context
@@ -247,6 +251,12 @@ pub fn AppShell() -> Element {
 
     let breadcrumb_override = use_signal(|| None::<(String, String)>);
     use_context_provider(|| breadcrumb_override);
+
+    // The coach role comes from the authenticated session and is never chosen
+    // in the browser. The controller is shared by the top bar Guide button, the
+    // coach itself and the Server Management onboarding card.
+    let coach_role = use_memo(move || CoachRole::from_auth(&app_state.read().auth));
+    use_context_provider(|| CoachController::new(coach_role));
 
     // Apply density immediately on load and whenever it changes
     use_effect(move || {
@@ -721,13 +731,17 @@ pub fn AppShell() -> Element {
                                 p { class: "text-sm text-amber-200/90", "This page requires an administrator role." }
                             }
                         } else {
+                            CoachCallout {}
                             Outlet::<Route> {}
                         }
                     }
                 }
 
-                if auth::is_admin(&auth_context) {
-                    OnboardingCoachPanel {}
+                // Every authenticated role gets the coach. Only Administrators
+                // load Setup progress, so other roles never call the
+                // Administrator-only setup-progress endpoint.
+                if is_authenticated {
+                    CoachRoot {}
                 }
             }
 

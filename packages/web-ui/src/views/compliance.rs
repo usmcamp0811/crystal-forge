@@ -476,34 +476,37 @@ pub fn ComplianceView(
         })
         .unwrap_or_else(|| "unnamed benchmark".to_string());
 
-    let mut on_select_bundle = move |bundle_id: uuid::Uuid| {
-        selected_bundle_id.set(Some(bundle_id));
-        coverage_expanded.set(false);
-        drawer_view.set(BundleDrawerView::Overview);
-        evidence.set(None);
-        evidence_route_system.set(None);
-        evidence_assignments.set(Vec::new());
-        evidence_assignments_error.set(None);
-        evidence_error.set(None);
-        // Bump evidence_gen so any in-flight evidence fetch for the old bundle
-        // is invalidated even though we already cleared `evidence`.
-        let eg = *evidence_gen.read() + 1;
-        evidence_gen.set(eg);
-        sys_filter.set("all".to_string());
-        let version_id = bundles
-            .read()
-            .iter()
-            .find(|bundle| bundle.id == bundle_id)
-            .and_then(|bundle| {
-                bundle
-                    .current_published_version_id
-                    .or(bundle.current_draft_version_id)
+    let mut on_select_bundle =
+        move |bundle_id: uuid::Uuid, selected_version: Option<uuid::Uuid>| {
+            selected_bundle_id.set(Some(bundle_id));
+            coverage_expanded.set(false);
+            drawer_view.set(BundleDrawerView::Overview);
+            evidence.set(None);
+            evidence_route_system.set(None);
+            evidence_assignments.set(Vec::new());
+            evidence_assignments_error.set(None);
+            evidence_error.set(None);
+            // Bump evidence_gen so any in-flight evidence fetch for the old bundle
+            // is invalidated even though we already cleared `evidence`.
+            let eg = *evidence_gen.read() + 1;
+            evidence_gen.set(eg);
+            sys_filter.set("all".to_string());
+            let version_id = selected_version.or_else(|| {
+                bundles
+                    .read()
+                    .iter()
+                    .find(|bundle| bundle.id == bundle_id)
+                    .and_then(|bundle| {
+                        bundle
+                            .current_published_version_id
+                            .or(bundle.current_draft_version_id)
+                    })
             });
-        selected_bundle_version_id.set(version_id);
-        start_systems_fetch(bundle_id, version_id);
-        bundle_poams.set(Vec::new());
-        bundle_poams_error.set(None);
-    };
+            selected_bundle_version_id.set(version_id);
+            start_systems_fetch(bundle_id, version_id);
+            bundle_poams.set(Vec::new());
+            bundle_poams_error.set(None);
+        };
 
     use_effect(move || {
         let bundle_id = *selected_bundle_id.read();
@@ -772,23 +775,14 @@ pub fn ComplianceView(
     rsx! {
         div { class: "cf-compliance-view", style: "display:flex;flex-direction:column;gap:16px;",
             // ── Page head ──────────────────────────────────────────────────
-            div { class: "page-head",
-                div {
+            div { class: "page-head cf-bundles-head", "data-coach-target": "compliance-head",
+                div { class: "cf-bundles-head-copy",
                     h1 { class: "page-title", "Compliance" }
                     p { class: "page-subtitle",
                         "Walk through compliance bundles, review per-control evidence, export for auditors."
                     }
                 }
-                div { style: "display:flex;gap:8px;align-items:center;",
-                    // Admin-only bundle management
-                    if is_admin {
-                        button {
-                            class: "btn btn-primary focus-ring",
-                            onclick: move |_| show_new_bundle.set(true),
-                            Icon { name: IconName::Plus, size: 14 }
-                            " New bundle"
-                        }
-                    }
+                div { class: "cf-bundles-head-actions",
                     // Shared Import / Export menu (AC #25)
                     IOMenu {
                         trigger_label: "Import / Export".to_string(),
@@ -840,10 +834,6 @@ pub fn ComplianceView(
                                     "Select a bundle first",
                                 )
                             });
-                            items.push(IOMenuItem::action_with_icon(
-                                "Export evidence report…",
-                                IconName::Download,
-                            ));
                             items
                         },
                         on_action: move |idx: usize| {
@@ -870,7 +860,6 @@ pub fn ComplianceView(
                                             }
                                         }
                                     }
-                                    3 => show_export.set(true),
                                     _ => {}
                                 }
                             } else {
@@ -887,11 +876,26 @@ pub fn ComplianceView(
                                             }
                                         }
                                     }
-                                    1 => show_export.set(true),
                                     _ => {}
                                 }
                             }
                         },
+                    }
+                    button {
+                        "data-coach-target": "compliance-export-evidence",
+                        class: "btn btn-ghost focus-ring",
+                        onclick: move |_| show_export.set(true),
+                        Icon { name: IconName::Download, size: 14 }
+                        " Export evidence package"
+                    }
+                    if is_admin {
+                        button {
+                            "data-coach-target": "bundle",
+                            class: "btn btn-primary focus-ring",
+                            onclick: move |_| show_new_bundle.set(true),
+                            Icon { name: IconName::Plus, size: 14 }
+                            " New bundle"
+                        }
                     }
                 }
             }
@@ -922,14 +926,16 @@ pub fn ComplianceView(
                 BundleCatalog {
                     bundles: bundles.read().clone(),
                     selected_id: *selected_bundle_id.read(),
-                    on_select: move |bundle_id| { on_select_bundle(bundle_id); drawer_view.set(BundleDrawerView::Overview); drawer_open.set(true); },
+                    on_select: move |bundle_id| { on_select_bundle(bundle_id, None); drawer_view.set(BundleDrawerView::Overview); drawer_open.set(true); },
                     selected_version_id: *selected_bundle_version_id.read(),
-                    poam_rollups: bundle_rollups.read().clone(),
-                    poam_rollups_loading: *bundle_rollups_loading.read(),
                     on_select_version: move |version_id| {
-                        selected_bundle_version_id.set(Some(version_id));
-                        drawer_open.set(true);
-                        if let Some(bundle_id) = *selected_bundle_id.read() { start_systems_fetch(bundle_id, Some(version_id)); }
+                        let bundle_id = bundles.read().iter().find(|bundle| bundle.versions.iter().any(|revision| revision.id == version_id)).map(|bundle| bundle.id);
+                        if let Some(bundle_id) = bundle_id {
+                            // A catalog revision opens its own immutable version, not
+                            // the lineage's current published/draft pointer.
+                            on_select_bundle(bundle_id, Some(version_id));
+                            drawer_open.set(true);
+                        }
                     },
                 }
                 if *drawer_open.read() && policy_drawer.read().is_none() {
@@ -993,6 +999,9 @@ pub fn ComplianceView(
                                             rollup: rollup.clone(),
                                             on_open_list: move |filter| poam_filter.set(filter),
                                         }
+                                        if !bundle.id.is_nil() {
+                                            Link { class: "btn btn-ghost xs focus-ring", to: Route::PoamsView { query: format!("dim=bundle&bundle={}", bundle.id) }, Icon { name: IconName::ArrowRight, size: 11 } " View in POA&M register" }
+                                        }
                                         div { class: "seg poam-filter", "data-testid": "bundle-poam-filters",
                                             for option in [PoamFilter::Open, PoamFilter::Overdue, PoamFilter::Awaiting, PoamFilter::Closed, PoamFilter::All] {
                                                 {
@@ -1028,22 +1037,15 @@ pub fn ComplianceView(
                                 }
                             } else {
                             div { style: "overflow:auto;flex:1;",
-                                div { style: "padding:14px 18px;", BundleHeader { bundle: bundle.clone(), on_edit: move |_| show_edit_bundle.set(true), is_admin, cardless: true } }
+                                div { style: "padding:14px 18px;", BundleHeader {
+                                    bundle: bundle.clone(),
+                                    selected_version: (*selected_bundle_version_id.read()).and_then(|id| bundle.versions.iter().find(|revision| revision.id == id).map(|revision| revision.version.clone())),
+                                    on_edit: move |_| show_edit_bundle.set(true),
+                                    is_admin,
+                                    cardless: true,
+                                } }
                                 if let Some(resp) = systems.read().as_ref() {
                                     ScoreStrip { totals: resp.totals.clone() }
-                                }
-                                if let Some(rollup) = bundle_rollups.read().iter().find(|rollup| rollup.scope_id == bundle.id).cloned() {
-                                    BundlePoamRollup {
-                                        bundle_name: bundle.name.clone(),
-                                        rollup,
-                                        on_open_list: move |filter| {
-                                            poam_filter.set(filter);
-                                            drawer_view.set(BundleDrawerView::Poam);
-                                            refresh_bundle_poams(bundle.id);
-                                        },
-                                    }
-                                } else if let Some(error) = bundle_rollups_error.read().as_ref() {
-                                    div { class: "sd-callout sd-callout-danger", style: "margin:12px 18px;", "Could not load authoritative POA&M roll-up: {error}" }
                                 }
                                 if bundle.versions.len() > 1 {
                                     {
@@ -1078,6 +1080,7 @@ pub fn ComplianceView(
                                     RequirementCoverageCard {
                                         report,
                                         expanded: coverage_expanded,
+                                        compact: true,
                                         on_open: move |_| { drawer_view.set(BundleDrawerView::Coverage); },
                                         on_open_policy,
                                     }
@@ -1087,18 +1090,37 @@ pub fn ComplianceView(
                                         div { class: "q-empty", "No requirement coverage is available for this revision." }
                                     }
                                 }
+                                if let Some(rollup) = bundle_rollups.read().iter().find(|rollup| rollup.scope_id == bundle.id).cloned() {
+                                    div { class: "cf-bundle-poam-overview",
+                                        BundlePoamRollup {
+                                            bundle_name: bundle.name.clone(),
+                                            rollup,
+                                            compact: true,
+                                            on_open_list: move |filter| {
+                                                poam_filter.set(filter);
+                                                drawer_view.set(BundleDrawerView::Poam);
+                                                refresh_bundle_poams(bundle.id);
+                                            },
+                                        }
+                                        if !bundle.id.is_nil() {
+                                            Link { class: "btn btn-ghost xs focus-ring", to: Route::PoamsView { query: format!("dim=bundle&bundle={}", bundle.id) }, Icon { name: IconName::ArrowRight, size: 11 } " Open in register" }
+                                        }
+                                    }
+                                } else if let Some(error) = bundle_rollups_error.read().as_ref() {
+                                    div { class: "sd-callout sd-callout-danger", style: "margin:12px 18px;", "Could not load authoritative POA&M roll-up: {error}" }
+                                }
                                 if let Some(err) = systems_error.read().as_ref() {
-                                    div { class: "card", "data-testid": "bundle-systems-card",
+                                    div { class: "card", "data-testid": "bundle-systems-card", "data-coach-target": "bundle-systems",
                                         h3 { style: "margin:0 0 8px;font-size:13px;font-weight:600;", "Systems" }
                                         div { class: "sd-callout sd-callout-danger", Icon { name: IconName::X, size: 13 }, div { "Failed to load systems: {err}" } }
                                     }
                                 } else if *systems_loading.read() {
-                                    div { class: "card", "data-testid": "bundle-systems-card",
+                                    div { class: "card", "data-testid": "bundle-systems-card", "data-coach-target": "bundle-systems",
                                         h3 { style: "margin:0 0 8px;font-size:13px;font-weight:600;", "Systems" }
                                         div { class: "sd-callout sd-callout-info", Icon { name: IconName::Shield, size: 13 }, div { "Loading systems rollup…" } }
                                     }
                                 } else if let Some(resp) = systems.read().as_ref() {
-                                    div { class: "card", "data-testid": "bundle-systems-card", style: "padding:0;overflow:hidden;",
+                                    div { class: "card", "data-testid": "bundle-systems-card", "data-coach-target": "bundle-systems", style: "padding:0;overflow:hidden;",
                                         SystemsMatrix {
                                             systems: resp.systems.clone(),
                                             selected_bundle_version_id: *selected_bundle_version_id.read(),
@@ -1107,7 +1129,7 @@ pub fn ComplianceView(
                                             filter: sys_filter.read().clone(),
                                             on_filter: move |filter| sys_filter.set(filter)
                                         }
-                                        div { style: "padding:12px 18px;border-top:1px solid var(--cf-divider);display:flex;flex-direction:column;gap:8px;",
+                                        if !resp.systems.is_empty() { div { style: "padding:12px 18px;border-top:1px solid var(--cf-divider);display:flex;flex-direction:column;gap:8px;",
                                             strong { style: "font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--cf-text-muted);", "Assignment POA&M references" }
                                             div { style: "display:flex;gap:6px;flex-wrap:wrap;",
                                                 for system in resp.systems.iter() {
@@ -1125,7 +1147,7 @@ pub fn ComplianceView(
                                                     }
                                                 }
                                             }
-                                        }
+                                        } }
                                     }
                                 }
                                 if let Some(system_id) = assignment_scope() {
@@ -1144,9 +1166,10 @@ pub fn ComplianceView(
                                         },
                                     }
                                 }
-                                XccdfVersionSelector { bundle: bundle.clone(), selected_version_id: *selected_bundle_version_id.read(), on_select: move |version_id| { selected_bundle_version_id.set(version_id); if let Some(bundle_id) = *selected_bundle_id.read() { start_systems_fetch(bundle_id, version_id); } } }
-                                if is_admin {
-                                    BundleVersionActions {
+                                details { class: "cf-bundle-version-tools",
+                                    summary { "Version management" }
+                                    XccdfVersionSelector { bundle: bundle.clone(), selected_version_id: *selected_bundle_version_id.read(), on_select: move |version_id| { selected_bundle_version_id.set(version_id); if let Some(bundle_id) = *selected_bundle_id.read() { start_systems_fetch(bundle_id, version_id); } } }
+                                    if is_admin { BundleVersionActions {
                                         bundle: bundle.clone(),
                                         selected_version_id: *selected_bundle_version_id.read(),
                                         busy: *version_action_busy.read(),
@@ -1207,7 +1230,7 @@ pub fn ComplianceView(
                                                 }
                                             });
                                         },
-                                    }
+                                    } }
                                 }
                             }
                             }
@@ -6092,13 +6115,14 @@ mod tests {
 
 /// Renders the requirement coverage card for a selected bundle version.
 ///
-/// Matches the design from commit 861fd877: three summary chips (full/partial/
-/// unmapped), expandable to show individual requirement rows grouped by parent.
+/// Keeps three coverage counts compact in the overview and offers source-backed
+/// requirement rows in the exact-version detail view.
 #[component]
 fn RequirementCoverageCard(
     report: BundleCoverageReport,
     expanded: Signal<bool>,
     #[props(default)] detail: bool,
+    #[props(default)] compact: bool,
     #[props(default)] on_open: EventHandler<()>,
     #[props(default)] on_open_policy: EventHandler<(uuid::Uuid, uuid::Uuid)>,
 ) -> Element {
@@ -6109,7 +6133,7 @@ fn RequirementCoverageCard(
     let partial = report.partial;
     let unmapped = report.unmapped;
     let recovery_required = report.recovery_required;
-    let show_details = detail || *expanded.read();
+    let show_details = detail || (!compact && *expanded.read());
     let framework_label = if report.frameworks.is_empty() {
         report
             .source_framework
@@ -6241,11 +6265,14 @@ fn RequirementCoverageCard(
     }
 
     rsx! {
-        div { class: "card", "data-testid": "requirement-coverage-card", style: "display:flex;flex-direction:column;gap:10px;",
+        div {
+            class: if compact { "cf-coverage-compact" } else { "card" },
+            "data-testid": "requirement-coverage-card",
+            style: if compact { "display:flex;align-items:center;gap:12px;padding:10px 16px;border-top:1px solid var(--cf-divider);flex-wrap:wrap;" } else { "display:flex;flex-direction:column;gap:10px;" },
             button {
                 class: "focus-ring",
                 "data-testid": "requirement-coverage-open",
-                style: "display:flex;align-items:center;justify-content:space-between;width:100%;padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer;",
+                style: if compact { "display:flex;align-items:center;justify-content:space-between;flex:1 1 280px;min-width:0;padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer;" } else { "display:flex;align-items:center;justify-content:space-between;width:100%;padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer;" },
                 onclick: move |_| {
                     if detail {
                         // Detail mode: no action on click
@@ -6267,15 +6294,15 @@ fn RequirementCoverageCard(
             div { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;",
                 div { style: "display:flex;align-items:center;gap:4px;",
                     span { class: "chip chip-success", "{full}" }
-                    span { style: "font-size:11px;color:var(--cf-text-muted);", "Fully covered" }
+                    span { style: "font-size:11px;color:var(--cf-text-muted);", if compact { "full" } else { "Fully covered" } }
                 }
                 div { style: "display:flex;align-items:center;gap:4px;",
                     span { class: "chip chip-warn", "{partial}" }
-                    span { style: "font-size:11px;color:var(--cf-text-muted);", "Partially covered" }
+                    span { style: "font-size:11px;color:var(--cf-text-muted);", if compact { "partial" } else { "Partially covered" } }
                 }
                 div { style: "display:flex;align-items:center;gap:4px;",
                     span { class: "chip chip-neutral", "{unmapped}" }
-                    span { style: "font-size:11px;color:var(--cf-text-muted);", "Unmapped" }
+                    span { style: "font-size:11px;color:var(--cf-text-muted);", if compact { "unmapped" } else { "Unmapped" } }
                 }
                 if recovery_required > 0 {
                     div { style: "display:flex;align-items:center;gap:4px;",
@@ -6283,12 +6310,16 @@ fn RequirementCoverageCard(
                         span { style: "font-size:11px;color:var(--cf-text-muted);", "Recovery required" }
                     }
                 }
-                div { style: "display:flex;align-items:center;gap:4px;margin-left:auto;",
+                if !compact { div { style: "display:flex;align-items:center;gap:4px;margin-left:auto;",
                     span { style: "font-size:11px;color:var(--cf-text-muted);", "{total} total" }
-                }
+                } }
             }
             if total == 0 {
-                if disa_invariant {
+                if compact {
+                    span { style: if disa_invariant { "font-size:11px;color:var(--cf-error);" } else { "font-size:11px;color:var(--cf-text-muted);" },
+                        if disa_invariant { "Requirement membership needs recovery." } else { "No requirement catalog modeled yet." }
+                    }
+                } else if disa_invariant {
                     div {
                         class: "q-empty",
                         "data-testid": "coverage-invariant-error",

@@ -5,15 +5,20 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{FromRow, PgPool, Postgres, Row, Transaction};
 use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
 
 use crate::api::models::{
-    CveAffectedSystemDetail, CveDetail, CveFilters, CveFleetStats, CveJustification,
-    CveJustificationInput, CveListItem, CvePackageGroup, ExactCveAuthorityFailureReason,
-    SystemCveInventoryAuthority, SystemCveInventoryMetadata, SystemCveInventoryParams,
-    SystemCveInventorySeverityCounts, SystemCveInventorySource,
+    CveAffectedSystemDetail, CveDetail, CveFilters, CveFleetStats, CveInventoryGroup,
+    CveInventoryGroupPage, CveInventoryMember, CveInventoryMemberPage,
+    CveInventoryPackageHostUnion, CveInventoryPairPage, CveInventoryProjectionParams,
+    CveJustification, CveJustificationInput, CveListItem, CvePackageGroup,
+    ExactCveAuthorityFailureReason, FleetCveInventorySection, SystemCveCurrentAuthorityState,
+    SystemCveEvidenceRepresentation, SystemCveInventoryAttempt, SystemCveInventoryAuthority,
+    SystemCveInventoryCandidate, SystemCveInventoryMetadata, SystemCveInventoryParams,
+    SystemCveInventorySelection, SystemCveInventorySeverityCounts, SystemCveInventorySource,
+    SystemCveRunningTarget,
 };
 use crate::auth::extractors::AuthenticatedUser;
 
@@ -142,8 +147,8 @@ pub fn is_system_cve_inventory_overflow(error: &anyhow::Error) -> bool {
     error.downcast_ref::<SystemCveInventoryOverflow>().is_some()
 }
 
-fn reject_inventory_overflow<T>(rows: Vec<T>) -> Result<Vec<T>> {
-    if rows.len() > MAX_FLEET_CVE_AFFECTED_SYSTEMS {
+fn reject_inventory_overflow<T>(rows: Vec<T>, distinct_system_count: i64) -> Result<Vec<T>> {
+    if distinct_system_count > MAX_FLEET_CVE_AFFECTED_SYSTEMS as i64 {
         return Err(CveInventoryOverflow.into());
     }
     Ok(rows)
@@ -158,6 +163,8 @@ pub enum SystemCveInventoryPageError {
     InvalidCursor,
     /// Reports that the cursor no longer names this source and filter scope.
     InventoryChanged,
+    /// Reports that a target is not authorized for the visible system.
+    TargetUnavailable,
 }
 
 impl std::fmt::Display for SystemCveInventoryPageError {
@@ -166,6 +173,9 @@ impl std::fmt::Display for SystemCveInventoryPageError {
             Self::InvalidRequest(message) => formatter.write_str(message),
             Self::InvalidCursor => formatter.write_str("invalid system CVE inventory cursor"),
             Self::InventoryChanged => formatter.write_str("system CVE inventory changed"),
+            Self::TargetUnavailable => {
+                formatter.write_str("system CVE inventory target unavailable")
+            }
         }
     }
 }
@@ -227,6 +237,18 @@ pub struct SystemCveInventoryQuery {
     pub exact_authority_failure: Option<ExactCveAuthorityFailureReason>,
     /// Gives real provenance for the selected completed scan.
     pub source: Option<SystemCveInventorySource>,
+    /// Gives the newest attempt for the validated target, independent of source.
+    pub attempt: Option<SystemCveInventoryAttempt>,
+    /// Reports the explicit current state. Historical selections leave it `None`.
+    pub current_state: Option<SystemCveCurrentAuthorityState>,
+    /// Identifies a unique scoped match to the latest reported output.
+    pub running_target: Option<SystemCveRunningTarget>,
+    /// Gives the normalized server-validated target identity.
+    pub selection: SystemCveInventorySelection,
+    /// Gives the selected scan representation when a scan exists.
+    pub evidence_representation: Option<SystemCveEvidenceRepresentation>,
+    /// Is true when the selected target cannot authorize current remediation.
+    pub read_only: bool,
     /// Contains rows from only the selected source.
     pub rows: Vec<ExactSystemVulnerabilityRow>,
     /// Gives complete totals over the active filter scope.
@@ -248,6 +270,7 @@ pub struct SystemCveInventoryPageRequest {
     search: Option<String>,
     severities: Vec<String>,
     statuses: Vec<String>,
+    selection: SystemCveInventorySelection,
 }
 
 impl Default for SystemCveInventoryPageRequest {
@@ -258,6 +281,7 @@ impl Default for SystemCveInventoryPageRequest {
             search: None,
             severities: Vec::new(),
             statuses: Vec::new(),
+            selection: SystemCveInventorySelection::Current,
         }
     }
 }
@@ -283,6 +307,8 @@ impl SystemCveInventoryPageRequest {
     /// outside 1 through 500, search exceeds 200 Unicode scalar values, or a
     /// severity or status is outside its documented domain.
     pub fn from_params(params: SystemCveInventoryParams) -> Result<Self> {
+        let selection =
+            parse_inventory_selection(params.target.as_deref(), params.target_id.as_deref())?;
         let limit = params
             .limit
             .unwrap_or(DEFAULT_SYSTEM_CVE_INVENTORY_PAGE_SIZE);
@@ -325,7 +351,14 @@ impl SystemCveInventoryPageRequest {
             search,
             severities,
             statuses,
+            selection,
         })
+    }
+
+    /// Returns the normalized server-validated inventory target.
+    #[must_use]
+    pub fn selection(&self) -> SystemCveInventorySelection {
+        self.selection
     }
 
     fn filter_fingerprint(&self) -> String {
@@ -339,14 +372,18 @@ impl SystemCveInventoryPageRequest {
     }
 
     fn search_pattern(&self) -> Option<String> {
-        self.search.as_ref().map(|value| {
-            let escaped = value
-                .replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_");
-            format!("%{escaped}%")
-        })
+        self.search.as_deref().map(cve_substring_pattern)
     }
+}
+
+// INVARIANT: Every user-supplied fleet substring uses this pattern with an
+// explicit SQL ESCAPE '\' clause. Only the outer percent signs are wildcards.
+fn cve_substring_pattern(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%{escaped}%")
 }
 
 fn normalize_inventory_set(
@@ -371,6 +408,25 @@ fn normalize_inventory_set(
     Ok(values.into_iter().collect())
 }
 
+fn parse_inventory_selection(
+    target: Option<&str>,
+    target_id: Option<&str>,
+) -> Result<SystemCveInventorySelection> {
+    SystemCveInventorySelection::from_target_params(target, target_id)
+        .map_err(|message| SystemCveInventoryPageError::InvalidRequest(message).into())
+}
+
+/// Identifies the wire shape of [`SystemCveInventoryCursor`].
+///
+/// COMPATIBILITY: A prior revision encoded this field as `1` but required `2`
+/// on decode, so every issued cursor was unconditionally rejected on the next
+/// page request. That defect predated Current-authority changes and made
+/// every multi-page System Detail CVE inventory browse fail after the first
+/// page. The encoder and decoder now share this single constant so they
+/// cannot diverge again. Increment it, and add explicit version handling,
+/// only when the cursor's field shape changes incompatibly.
+const SYSTEM_CVE_INVENTORY_CURSOR_VERSION: u8 = 1;
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SystemCveInventoryCursor {
@@ -378,6 +434,8 @@ struct SystemCveInventoryCursor {
     system_id: Uuid,
     authority: SystemCveInventoryAuthority,
     source_scan_id: Uuid,
+    selection: SystemCveInventorySelection,
+    evidence_representation: SystemCveEvidenceRepresentation,
     filter_fingerprint: String,
     inventory_revision: String,
     canonical_cve_id: String,
@@ -399,43 +457,113 @@ struct SystemCveInventoryMetadataRow {
 
 #[derive(Debug, sqlx::FromRow)]
 struct InventoryAuthorityRow {
-    failure_reason: Option<String>,
-    exact_scan_id: Option<Uuid>,
-    exact_completed_at: Option<DateTime<Utc>>,
-    exact_scanner_name: Option<String>,
+    exact_scan_id: Uuid,
+    exact_completed_at: DateTime<Utc>,
+    exact_scanner_name: String,
     exact_scanner_version: Option<String>,
 }
 
-fn parse_exact_authority_failure(value: &str) -> Result<ExactCveAuthorityFailureReason> {
-    match value {
-        "missing_current_generation" => {
-            Ok(ExactCveAuthorityFailureReason::MissingCurrentGeneration)
-        }
-        "current_store_mismatch" => Ok(ExactCveAuthorityFailureReason::CurrentStoreMismatch),
-        "retained_generation_unavailable" => {
-            Ok(ExactCveAuthorityFailureReason::RetainedGenerationUnavailable)
-        }
-        "retained_store_mismatch" => Ok(ExactCveAuthorityFailureReason::RetainedStoreMismatch),
-        "lineage_unverified" => Ok(ExactCveAuthorityFailureReason::LineageUnverified),
-        "snapshot_unavailable" => Ok(ExactCveAuthorityFailureReason::SnapshotUnavailable),
-        "snapshot_unsupported" => Ok(ExactCveAuthorityFailureReason::SnapshotUnsupported),
-        "exact_derivation_unavailable" => {
-            Ok(ExactCveAuthorityFailureReason::ExactDerivationUnavailable)
-        }
-        "no_schema1_current_scan" => Ok(ExactCveAuthorityFailureReason::NoSchema1CurrentScan),
-        _ => Err(anyhow::anyhow!(
-            "exact CVE authority returned unknown failure reason {value}"
-        )),
-    }
+#[derive(Debug, sqlx::FromRow)]
+struct RunningMappingRow {
+    state_present: bool,
+    store_path: Option<String>,
+    generation: Option<i32>,
+    generation_matches_current_store_path: Option<bool>,
+    reported_at: Option<DateTime<Utc>>,
+    match_count: i64,
+    derivation_id: Option<i32>,
+    commit_hash: Option<String>,
 }
 
-/// Fetches one read-only CVE inventory source for a system.
+// SECURITY: Select the most recent report BEFORE checking its fields. This
+// query counts every scoped derivation, not just the first 1,000 menu entries.
+// Neither a candidate flag nor a completed scan proves output-to-target identity.
+async fn resolve_running_inventory_target(
+    transaction: &mut Transaction<'_, Postgres>,
+    system_id: Uuid,
+) -> Result<(
+    SystemCveCurrentAuthorityState,
+    Option<SystemCveRunningTarget>,
+)> {
+    let row = sqlx::query_as::<_, RunningMappingRow>(
+        r#"WITH selected AS (
+             SELECT system.id,system.hostname,system.flake_id,
+                    COALESCE(NULLIF(BTRIM(system.system_configuration_name), ''),system.hostname)
+                      AS configuration_name
+             FROM systems system WHERE system.id=$1
+           ), observation AS (
+             SELECT selected.*,state.id AS state_id,state.generation,
+                    NULLIF(BTRIM(state.store_path), '') AS store_path,
+                    state.generation_matches_current_store_path,
+                    state.timestamp AS reported_at
+             FROM selected LEFT JOIN LATERAL (
+               SELECT candidate.id,candidate.generation,candidate.store_path,
+                      candidate.generation_matches_current_store_path,candidate.timestamp
+               FROM system_states candidate WHERE candidate.hostname=selected.hostname
+               ORDER BY candidate.timestamp DESC NULLS LAST,candidate.id DESC LIMIT 1
+             ) state ON TRUE
+           )
+           SELECT observation.state_id IS NOT NULL AS state_present,
+                  observation.store_path,observation.generation,
+                  observation.generation_matches_current_store_path,
+                  observation.reported_at,
+                   matches.match_count,matches.derivation_id,matches.commit_hash
+           FROM observation
+           CROSS JOIN LATERAL (
+             SELECT COUNT(*)::bigint AS match_count,MIN(derivation.id) AS derivation_id,
+                    MIN(commit.git_commit_hash) AS commit_hash
+             FROM derivations derivation
+             JOIN commits commit ON commit.id=derivation.commit_id
+               AND commit.flake_id=observation.flake_id
+             WHERE derivation.derivation_type='nixos'
+               AND derivation.derivation_name=observation.configuration_name
+               AND COALESCE(derivation.store_path,derivation.expected_store_path)=observation.store_path
+            ) matches"#,
+    )
+    .bind(system_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+
+    if !row.state_present {
+        return Ok((SystemCveCurrentAuthorityState::NoRunningReport, None));
+    }
+    if row.generation.is_none()
+        || row.store_path.is_none()
+        || row.generation_matches_current_store_path != Some(true)
+        || row.reported_at.is_none()
+    {
+        return Ok((SystemCveCurrentAuthorityState::InvalidRunningReport, None));
+    }
+    if row.match_count == 0 {
+        return Ok((SystemCveCurrentAuthorityState::UnmappedRunning, None));
+    }
+    if row.match_count != 1 {
+        return Ok((SystemCveCurrentAuthorityState::AmbiguousRunning, None));
+    }
+    let (Some(derivation_id), Some(commit_hash), Some(reported_at)) =
+        (row.derivation_id, row.commit_hash, row.reported_at)
+    else {
+        return Err(anyhow::anyhow!("unique running mapping omitted identity"));
+    };
+    Ok((
+        SystemCveCurrentAuthorityState::MappedRunningNoScan,
+        Some(SystemCveRunningTarget {
+            derivation_id,
+            generation: row.generation,
+            commit_hash,
+            reported_at,
+        }),
+    ))
+}
+
+/// Fetches one CVE inventory source for the latest reported running target.
 ///
-/// The function determines exact authority before it reads findings. Exact
-/// authority therefore wins for both vulnerable and clean scans. If exact
-/// authority is unavailable, the function uses the latest completed scan under
-/// the bounded `view_system_vulnerabilities` selection semantics. It never
-/// unions sources or infers immutable observations from legacy data.
+/// The function first resolves the latest reported running output to one
+/// scoped derivation. Its completed schema-1 scan permits exact Current CVE
+/// reads without depending on evaluation or retained-generation artifacts.
+/// Missing, invalid, ambiguous, or unmatched observations return typed empty
+/// states. It never unions sources or infers schema-1 observations from legacy
+/// scan data.
 ///
 /// All authority and row reads use one repeatable-read, read-only transaction.
 /// Legacy rows have no exact observation identity and cannot authorize a
@@ -564,85 +692,358 @@ pub(crate) async fn fetch_authorized_system_cve_inventory_tx(
     Ok(Some(inventory))
 }
 
+/// Lists server-owned current, retained-generation, and derivation candidates.
+///
+/// The query returns `None` when the user cannot see the system. Candidate
+/// identities are factual references, not authorization credentials; every
+/// later inventory read revalidates the selected identity.
+///
+/// # Errors
+///
+/// Returns an error when visibility or candidate metadata cannot be loaded.
+pub async fn fetch_authorized_system_cve_inventory_candidates(
+    pool: &PgPool,
+    system_id: Uuid,
+    user_id: Uuid,
+) -> Result<Option<Vec<SystemCveInventoryCandidate>>> {
+    let visible = sqlx::query_scalar::<_, bool>(
+        r#"SELECT EXISTS(
+             SELECT 1 FROM systems system
+             JOIN users actor ON actor.id=$2 AND actor.is_active
+             WHERE system.id=$1
+               AND EXISTS(SELECT 1 FROM user_role_assignments assignment
+                 WHERE assignment.user_id=actor.id
+                   AND assignment.role IN ('viewer','operator','admin'))
+               AND (EXISTS(SELECT 1 FROM user_role_assignments assignment
+                     WHERE assignment.user_id=actor.id AND assignment.role='admin')
+                 OR EXISTS(SELECT 1 FROM user_environment_memberships membership
+                     WHERE membership.user_id=actor.id
+                       AND membership.environment_id=system.environment_id)))"#,
+    )
+    .bind(system_id)
+    .bind(user_id)
+    .fetch_one(pool)
+    .await?;
+    if !visible {
+        return Ok(None);
+    }
+
+    let rows = sqlx::query(
+        r#"WITH selected_system AS (
+             SELECT system.id,system.hostname,system.flake_id,
+                    COALESCE(NULLIF(BTRIM(system.system_configuration_name), ''),system.hostname)
+                      AS configuration_name
+             FROM systems system WHERE system.id=$1
+           ), latest_state AS (
+             SELECT state.generation,state.store_path
+             FROM selected_system system
+             LEFT JOIN LATERAL (SELECT candidate.generation,candidate.store_path
+               FROM system_states candidate WHERE candidate.hostname=system.hostname
+               ORDER BY candidate.timestamp DESC NULLS LAST,candidate.id DESC LIMIT 1) state ON true
+           ), candidates AS (
+             SELECT 'current'::text AS kind,NULL::uuid AS generation_snapshot_id,
+                    state.generation,derivation.id AS derivation_id,
+                    commit.git_commit_hash,
+                    TRUE AS is_current,
+                    COALESCE(flake.snapshot_ready_at IS NOT NULL
+                      AND head.commit_id=commit.id,FALSE) AS is_latest_per_flake
+             FROM selected_system system CROSS JOIN latest_state state
+             LEFT JOIN derivations derivation ON derivation.store_path=state.store_path
+               AND derivation.derivation_name=system.configuration_name
+               AND derivation.derivation_type='nixos'
+             LEFT JOIN commits commit ON commit.id=derivation.commit_id
+               AND commit.flake_id=system.flake_id
+             LEFT JOIN flakes flake ON flake.id=system.flake_id
+             LEFT JOIN flake_branch_commit_snapshot head ON head.flake_id=flake.id
+               AND head.position=0
+             UNION ALL
+             SELECT 'retained_generation',retained.id,retained.generation,
+                    derivation.id,commit.git_commit_hash,FALSE,
+                    COALESCE(flake.snapshot_ready_at IS NOT NULL
+                      AND head.commit_id=commit.id,FALSE)
+             FROM selected_system system
+             JOIN evaluation_generation_snapshots retained ON retained.system_id=system.id
+             LEFT JOIN derivations derivation ON derivation.id=retained.derivation_id
+               AND derivation.derivation_name=system.configuration_name
+               AND derivation.derivation_type='nixos'
+             LEFT JOIN commits commit ON commit.id=derivation.commit_id
+               AND commit.flake_id=system.flake_id
+             LEFT JOIN flakes flake ON flake.id=system.flake_id
+             LEFT JOIN flake_branch_commit_snapshot head ON head.flake_id=flake.id
+               AND head.position=0
+             UNION ALL
+              SELECT 'exact_derivation',NULL::uuid,NULL::int,derivation.id,
+                     commit.git_commit_hash,
+                     COALESCE(
+                       state.store_path IS NOT NULL
+                         AND derivation.store_path=state.store_path,
+                       FALSE),
+                    COALESCE(flake.snapshot_ready_at IS NOT NULL
+                      AND head.commit_id=commit.id,FALSE)
+             FROM selected_system system CROSS JOIN latest_state state
+             JOIN commits commit ON commit.flake_id=system.flake_id
+             JOIN derivations derivation ON derivation.commit_id=commit.id
+               AND derivation.derivation_name=system.configuration_name
+               AND derivation.derivation_type='nixos'
+             LEFT JOIN flakes flake ON flake.id=system.flake_id
+             LEFT JOIN flake_branch_commit_snapshot head ON head.flake_id=flake.id
+               AND head.position=0
+           )
+           SELECT candidate.*,
+                  scan.id AS scan_id,scan.completed_at,scan.scanner_name,
+                  scan.scanner_version,scan.evidence_schema_version
+           FROM candidates candidate
+           LEFT JOIN LATERAL (SELECT item.id,item.completed_at,item.scanner_name,
+                 item.scanner_version,item.evidence_schema_version
+             FROM cve_scans item WHERE item.derivation_id=candidate.derivation_id
+               AND item.status='completed' AND item.completed_at IS NOT NULL
+             ORDER BY item.completed_at DESC,item.id DESC LIMIT 1) scan ON true
+           ORDER BY candidate.is_current DESC,candidate.generation DESC NULLS LAST,
+                    candidate.kind,candidate.derivation_id DESC NULLS LAST
+           LIMIT 1000"#,
+    )
+    .bind(system_id)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            let kind: String = row.get("kind");
+            let derivation_id: Option<i32> = row.get("derivation_id");
+            let selection = match kind.as_str() {
+                "current" => SystemCveInventorySelection::Current,
+                "retained_generation" => SystemCveInventorySelection::RetainedGeneration {
+                    generation_snapshot_id: row.get("generation_snapshot_id"),
+                },
+                "exact_derivation" => SystemCveInventorySelection::ExactDerivation {
+                    derivation_id: derivation_id.ok_or_else(|| {
+                        anyhow::anyhow!("exact derivation candidate omitted its identity")
+                    })?,
+                },
+                _ => return Err(anyhow::anyhow!("unknown inventory candidate kind {kind}")),
+            };
+            let scan_id: Option<Uuid> = row.get("scan_id");
+            let source = scan_id.map(|scan_id| SystemCveInventorySource {
+                scan_id,
+                scanner_name: row.get("scanner_name"),
+                scanner_version: row.get("scanner_version"),
+                completed_at: row.get("completed_at"),
+            });
+            let schema_version: Option<i32> = row.get("evidence_schema_version");
+            Ok(SystemCveInventoryCandidate {
+                selection,
+                generation: row.get("generation"),
+                commit_hash: row.get("git_commit_hash"),
+                derivation_id,
+                is_current: row.get("is_current"),
+                is_latest_per_flake: row.get("is_latest_per_flake"),
+                scan_available: source.is_some(),
+                source,
+                evidence_representation: schema_version.map(|version| {
+                    if version == 1 {
+                        SystemCveEvidenceRepresentation::Schema1Observations
+                    } else {
+                        SystemCveEvidenceRepresentation::Schema0Projection
+                    }
+                }),
+                read_only: kind != "current",
+            })
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
+
+// INVARIANT: The caller first validates derivation_id against the selected
+// system, flake, and configuration. This separate lifecycle query must never
+// select the completed source or infer mutation authority from an attempt.
+async fn newest_system_cve_attempt_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    derivation_id: i32,
+) -> Result<Option<SystemCveInventoryAttempt>> {
+    let row = sqlx::query_as::<_, (Uuid, i32, String, Option<DateTime<Utc>>)>(
+        r#"SELECT id,derivation_id,COALESCE(NULLIF(status,''),'unknown')::text,
+                  created_at
+           FROM cve_scans WHERE derivation_id=$1
+           ORDER BY COALESCE(created_at,scheduled_at) DESC NULLS LAST,id DESC
+           LIMIT 1"#,
+    )
+    .bind(derivation_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    Ok(row.map(
+        |(scan_id, derivation_id, status, created_at)| SystemCveInventoryAttempt {
+            scan_id,
+            derivation_id,
+            status,
+            created_at,
+        },
+    ))
+}
+
+async fn fetch_historical_system_cve_inventory_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    system_id: Uuid,
+    page: &SystemCveInventoryPageRequest,
+) -> Result<SystemCveInventoryQuery> {
+    // SECURITY: The browser supplies only a durable row identity. The server
+    // proves system, flake, and effective configuration membership before it
+    // resolves a derivation or scan. Store paths and commit hashes never grant
+    // inventory access.
+    let derivation_id = match page.selection {
+        SystemCveInventorySelection::Current => {
+            unreachable!("current target uses current resolver")
+        }
+        SystemCveInventorySelection::RetainedGeneration {
+            generation_snapshot_id,
+        } => {
+            sqlx::query_scalar::<_, i32>(
+                r#"SELECT derivation.id
+                   FROM evaluation_generation_snapshots retained
+                   JOIN systems system ON system.id=retained.system_id
+                   JOIN derivations derivation ON derivation.id=retained.derivation_id
+                     AND derivation.derivation_type='nixos'
+                     AND derivation.derivation_name=COALESCE(
+                       NULLIF(BTRIM(system.system_configuration_name), ''),system.hostname)
+                   JOIN commits commit ON commit.id=derivation.commit_id
+                     AND commit.flake_id=system.flake_id
+                   WHERE retained.id=$2 AND retained.system_id=$1"#,
+            )
+            .bind(system_id)
+            .bind(generation_snapshot_id)
+            .fetch_optional(&mut **transaction)
+            .await?
+        }
+        SystemCveInventorySelection::ExactDerivation { derivation_id } => {
+            sqlx::query_scalar::<_, i32>(
+                r#"SELECT derivation.id
+                   FROM systems system
+                   JOIN derivations derivation
+                     ON derivation.id=$2 AND derivation.derivation_type='nixos'
+                    AND derivation.derivation_name=COALESCE(
+                      NULLIF(BTRIM(system.system_configuration_name), ''),system.hostname)
+                   JOIN commits commit ON commit.id=derivation.commit_id
+                    AND commit.flake_id=system.flake_id
+                   WHERE system.id=$1"#,
+            )
+            .bind(system_id)
+            .bind(derivation_id)
+            .fetch_optional(&mut **transaction)
+            .await?
+        }
+    }
+    .ok_or(SystemCveInventoryPageError::TargetUnavailable)?;
+
+    let attempt = newest_system_cve_attempt_tx(transaction, derivation_id).await?;
+
+    let scan = sqlx::query_as::<_, (Uuid, DateTime<Utc>, String, Option<String>, i32)>(
+        r#"SELECT id,completed_at,scanner_name,scanner_version,evidence_schema_version
+           FROM cve_scans
+           WHERE derivation_id=$1 AND status='completed' AND completed_at IS NOT NULL
+           ORDER BY completed_at DESC,id DESC LIMIT 1"#,
+    )
+    .bind(derivation_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some((scan_id, completed_at, scanner_name, scanner_version, schema_version)) = scan else {
+        if let Some(cursor) = page.after.as_deref() {
+            decode_system_cve_inventory_cursor(cursor)?;
+            return Err(SystemCveInventoryPageError::InventoryChanged.into());
+        }
+        return Ok(SystemCveInventoryQuery {
+            authority: SystemCveInventoryAuthority::NoScan,
+            exact_authority_failure: None,
+            source: None,
+            attempt,
+            current_state: None,
+            running_target: None,
+            selection: page.selection,
+            evidence_representation: None,
+            read_only: true,
+            rows: Vec::new(),
+            metadata: SystemCveInventoryMetadata::default(),
+            inventory_revision: inventory_revision(&format!(
+                "{system_id}|{:?}|no_scan",
+                page.selection
+            )),
+            has_more: false,
+            next_cursor: None,
+        });
+    };
+    let evidence_representation = if schema_version == 1 {
+        SystemCveEvidenceRepresentation::Schema1Observations
+    } else {
+        SystemCveEvidenceRepresentation::Schema0Projection
+    };
+    fetch_inventory_page_for_source(
+        transaction,
+        system_id,
+        SystemCveInventoryAuthority::Legacy,
+        None,
+        SystemCveInventorySource {
+            scan_id,
+            scanner_name,
+            scanner_version,
+            completed_at,
+        },
+        attempt,
+        None,
+        page.selection,
+        evidence_representation,
+        true,
+        None,
+        page,
+    )
+    .await
+}
+
+/// Resolves one inventory page for the requested selection.
+///
+/// # Current authority rules
+///
+/// A `current` selection first checks the latest observation against every
+/// derivation in the registered flake and effective configuration. One match
+/// selects only that derivation's newest completed schema-1 scan by
+/// `completed_at DESC, id DESC`. That scan is exact Current CVE authority,
+/// independent of retained Config or deployment provenance. Missing or
+/// ambiguous mapping returns an explicit source-less state. This read does not
+/// repair retained records or grant Config or rollback authority.
 async fn fetch_system_cve_inventory_tx(
     transaction: &mut Transaction<'_, Postgres>,
     system_id: Uuid,
     page: &SystemCveInventoryPageRequest,
 ) -> Result<SystemCveInventoryQuery> {
-    // SECURITY: This prerequisite order mirrors exact-CVE authority without
-    // changing any writer predicate. The latest state is selected first, so an
-    // older matching state cannot authorize or describe the current deployment.
+    if page.selection != SystemCveInventorySelection::Current {
+        return fetch_historical_system_cve_inventory_tx(transaction, system_id, page).await;
+    }
+    let (mapping_state, running_target) =
+        resolve_running_inventory_target(transaction, system_id).await?;
+    if running_target.is_none() {
+        return empty_current_inventory(page, system_id, mapping_state, None, None, None);
+    }
+    let running_target = running_target
+        .ok_or_else(|| anyhow::anyhow!("mapped running state omitted its derivation identity"))?;
+    let attempt = newest_system_cve_attempt_tx(transaction, running_target.derivation_id).await?;
+    // SECURITY: The shared CVE-only authority view selects the latest state
+    // before validating generation/store agreement and counting all scoped
+    // output candidates. A retained evaluation artifact is supplemental here.
     let authority = sqlx::query_as::<_, InventoryAuthorityRow>(
-        r#"WITH latest_state AS (
-             SELECT state.store_path,state.generation,
-                    state.generation_matches_current_store_path
-             FROM systems system
-             LEFT JOIN LATERAL (
-               SELECT candidate.store_path,candidate.generation,
-                      candidate.generation_matches_current_store_path
-               FROM system_states candidate
-               WHERE candidate.hostname=system.hostname
-               ORDER BY candidate.timestamp DESC,candidate.id DESC LIMIT 1
-             ) state ON true
-             WHERE system.id=$1
-           )
-           SELECT CASE
-                    WHEN state.generation IS NULL OR state.store_path IS NULL
-                      OR btrim(state.store_path)='' THEN 'missing_current_generation'
-                    WHEN state.generation_matches_current_store_path IS NOT TRUE
-                      THEN 'current_store_mismatch'
-                    WHEN retained.id IS NULL THEN 'retained_generation_unavailable'
-                    WHEN retained.source_store_path<>state.store_path
-                      THEN 'retained_store_mismatch'
-                    WHEN retained.lineage_verified IS NOT TRUE THEN 'lineage_unverified'
-                    WHEN artifact.id IS NULL OR artifact.commit_id<>retained.commit_id
-                      OR artifact.configuration_name<>retained.configuration_name
-                      OR artifact.lifecycle<>'available' THEN 'snapshot_unavailable'
-                    WHEN artifact.integrity_version<>1 THEN 'snapshot_unsupported'
-                    WHEN derivation.id IS NULL OR derivation.commit_id<>retained.commit_id
-                      OR derivation.derivation_name<>retained.configuration_name
-                      OR derivation.derivation_type<>'nixos'
-                      OR COALESCE(derivation.store_path,derivation.expected_store_path)
-                         <>retained.source_store_path THEN 'exact_derivation_unavailable'
-                    WHEN scan.id IS NULL THEN 'no_schema1_current_scan'
-                    ELSE NULL
-                  END AS failure_reason,
-                  scan.id AS exact_scan_id,scan.completed_at AS exact_completed_at,
-                  scan.scanner_name AS exact_scanner_name,
-                  scan.scanner_version AS exact_scanner_version
-           FROM latest_state state
-           LEFT JOIN evaluation_generation_snapshots retained
-             ON retained.system_id=$1 AND retained.generation=state.generation
-           LEFT JOIN evaluation_snapshots artifact ON artifact.id=retained.snapshot_id
-           LEFT JOIN derivations derivation ON derivation.id=retained.derivation_id
-           LEFT JOIN LATERAL (
-             SELECT candidate.id,candidate.completed_at,candidate.scanner_name,
-                    candidate.scanner_version
-             FROM cve_scans candidate
-             WHERE candidate.derivation_id=derivation.id
-               AND candidate.status='completed'
-               AND candidate.completed_at IS NOT NULL
-               AND candidate.evidence_schema_version=1
-             ORDER BY candidate.completed_at DESC,candidate.id DESC LIMIT 1
-           ) scan ON true"#,
+        r#"SELECT scan_id AS exact_scan_id,
+                  scan_completed_at AS exact_completed_at,
+                  scanner_name AS exact_scanner_name,
+                  scanner_version AS exact_scanner_version
+           FROM view_current_cve_authority
+           WHERE system_id=$1 AND derivation_id=$2"#,
     )
     .bind(system_id)
-    .fetch_one(&mut **transaction)
+    .bind(running_target.derivation_id)
+    .fetch_optional(&mut **transaction)
     .await?;
-
-    if authority.failure_reason.is_none() {
-        let scan_id = authority
-            .exact_scan_id
-            .ok_or_else(|| anyhow::anyhow!("exact CVE authority omitted its scan identity"))?;
+    if let Some(authority) = authority {
         let source = SystemCveInventorySource {
-            scan_id,
-            scanner_name: authority
-                .exact_scanner_name
-                .ok_or_else(|| anyhow::anyhow!("exact CVE authority omitted its scanner name"))?,
+            scan_id: authority.exact_scan_id,
+            scanner_name: authority.exact_scanner_name,
             scanner_version: authority.exact_scanner_version,
-            completed_at: authority.exact_completed_at.ok_or_else(|| {
-                anyhow::anyhow!("exact CVE authority omitted its completion time")
-            })?,
+            completed_at: authority.exact_completed_at,
         };
         return fetch_inventory_page_for_source(
             transaction,
@@ -650,67 +1051,65 @@ async fn fetch_system_cve_inventory_tx(
             SystemCveInventoryAuthority::Exact,
             None,
             source,
+            attempt,
+            Some(SystemCveCurrentAuthorityState::ExactCurrentScan),
+            SystemCveInventorySelection::Current,
+            SystemCveEvidenceRepresentation::Schema1Observations,
+            false,
+            Some(running_target),
             page,
         )
         .await;
     }
 
-    let failure = authority
-        .failure_reason
-        .as_deref()
-        .map(parse_exact_authority_failure)
-        .transpose()?;
-    // COMPATIBILITY: The predicates and ordering mirror migration 0177's
-    // bounded view. Rows are then loaded by this scan ID so provenance cannot
-    // diverge from findings if the view definition changes.
-    let legacy_source = sqlx::query_as::<_, (Uuid, DateTime<Utc>, String, Option<String>)>(
-        r#"SELECT scan.id,scan.completed_at,scan.scanner_name,scan.scanner_version
-           FROM systems system
-           JOIN derivations derivation ON derivation.derivation_name=system.hostname
-              AND derivation.derivation_type='nixos'
-            JOIN derivation_statuses status ON status.id=derivation.status_id
-              AND status.name=ANY(ARRAY['build-complete','complete'])
-            JOIN commits commit ON commit.id=derivation.commit_id
-            JOIN flakes flake ON flake.id=commit.flake_id
-            JOIN cve_scans scan ON scan.derivation_id=derivation.id
-             AND scan.status='completed' AND scan.completed_at IS NOT NULL
-           WHERE system.id=$1
-           ORDER BY scan.completed_at DESC,scan.id DESC LIMIT 1"#,
-    )
-    .bind(system_id)
-    .fetch_optional(&mut **transaction)
-    .await?;
-
-    let Some((scan_id, completed_at, scanner_name, scanner_version)) = legacy_source else {
-        if let Some(cursor) = page.after.as_deref() {
-            decode_system_cve_inventory_cursor(cursor)?;
-            return Err(SystemCveInventoryPageError::InventoryChanged.into());
-        }
-        return Ok(SystemCveInventoryQuery {
-            authority: SystemCveInventoryAuthority::NoScan,
-            exact_authority_failure: failure,
-            source: None,
-            rows: Vec::new(),
-            metadata: SystemCveInventoryMetadata::default(),
-            inventory_revision: inventory_revision(&format!("{}|no_scan|{:?}", system_id, failure)),
-            has_more: false,
-            next_cursor: None,
-        });
-    };
-    fetch_inventory_page_for_source(
-        transaction,
-        system_id,
-        SystemCveInventoryAuthority::Legacy,
-        failure,
-        SystemCveInventorySource {
-            scan_id,
-            scanner_name,
-            scanner_version,
-            completed_at,
-        },
+    empty_current_inventory(
         page,
+        system_id,
+        SystemCveCurrentAuthorityState::NoCurrentScan,
+        Some(ExactCveAuthorityFailureReason::NoSchema1CurrentScan),
+        Some(running_target),
+        attempt,
     )
-    .await
+}
+
+fn empty_current_inventory(
+    page: &SystemCveInventoryPageRequest,
+    system_id: Uuid,
+    current_state: SystemCveCurrentAuthorityState,
+    failure: Option<ExactCveAuthorityFailureReason>,
+    running_target: Option<SystemCveRunningTarget>,
+    attempt: Option<SystemCveInventoryAttempt>,
+) -> Result<SystemCveInventoryQuery> {
+    // SECURITY: Current has no evidence fallback. Substituting another
+    // derivation's completed scan would present findings from a revision that
+    // the system does not run and would let a stale scan authorize triage or
+    // POA&M mutation. Both explicit states below are read-only, carry no
+    // source, and return no rows.
+    if let Some(cursor) = page.after.as_deref() {
+        // A cursor was issued against a source that this read no longer
+        // selects. Validate its encoding first so a malformed cursor keeps
+        // returning 400 rather than 409.
+        decode_system_cve_inventory_cursor(cursor)?;
+        return Err(SystemCveInventoryPageError::InventoryChanged.into());
+    }
+    Ok(SystemCveInventoryQuery {
+        authority: SystemCveInventoryAuthority::NoScan,
+        exact_authority_failure: failure,
+        source: None,
+        attempt,
+        current_state: Some(current_state),
+        running_target: running_target.clone(),
+        selection: SystemCveInventorySelection::Current,
+        evidence_representation: None,
+        read_only: true,
+        rows: Vec::new(),
+        metadata: SystemCveInventoryMetadata::default(),
+        inventory_revision: inventory_revision(&format!(
+            "{system_id}|current|{current_state:?}|{failure:?}|{running_target:?}"
+        )),
+        has_more: false,
+        next_cursor: None,
+    })
 }
 
 const EXACT_INVENTORY_CTE: &str = r#"WITH selected_observations AS (
@@ -774,11 +1173,8 @@ const LEGACY_INVENTORY_CTE: &str = r#"WITH selected_findings AS (
                     scan.completed_at AS first_seen,
                    CASE WHEN vulnerability.fixed_version IS NULL THEN 'open'
                         ELSE 'fix_available' END AS status
-            FROM systems system
-           JOIN derivations derivation ON derivation.derivation_name=system.hostname
-             AND derivation.derivation_type='nixos'
-            JOIN cve_scans scan ON scan.id=$1 AND scan.derivation_id=derivation.id
-           JOIN scan_packages scan_package ON scan_package.scan_id=scan.id
+             FROM cve_scans scan
+            JOIN scan_packages scan_package ON scan_package.scan_id=scan.id
            JOIN derivations package_derivation
              ON package_derivation.id=scan_package.derivation_id
              AND package_derivation.derivation_type='package'
@@ -786,7 +1182,7 @@ const LEGACY_INVENTORY_CTE: &str = r#"WITH selected_findings AS (
              ON vulnerability.derivation_id=package_derivation.id
              AND NOT vulnerability.is_whitelisted
            JOIN cves cve ON cve.id=vulnerability.cve_id
-             WHERE system.id=$2
+              WHERE scan.id=$1
              ORDER BY cve.id COLLATE "C",
                       COALESCE(package_derivation.pname,package_derivation.derivation_name) COLLATE "C",
                       package_derivation.derivation_path COLLATE "C"
@@ -808,6 +1204,12 @@ async fn fetch_inventory_page_for_source(
     authority: SystemCveInventoryAuthority,
     exact_authority_failure: Option<ExactCveAuthorityFailureReason>,
     source: SystemCveInventorySource,
+    attempt: Option<SystemCveInventoryAttempt>,
+    current_state: Option<SystemCveCurrentAuthorityState>,
+    selection: SystemCveInventorySelection,
+    evidence_representation: SystemCveEvidenceRepresentation,
+    read_only: bool,
+    running_target: Option<SystemCveRunningTarget>,
     page: &SystemCveInventoryPageRequest,
 ) -> Result<SystemCveInventoryQuery> {
     let fingerprint = page.filter_fingerprint();
@@ -820,6 +1222,8 @@ async fn fetch_inventory_page_for_source(
         cursor.system_id != system_id
             || cursor.authority != authority
             || cursor.source_scan_id != source.scan_id
+            || cursor.selection != selection
+            || cursor.evidence_representation != evidence_representation
             || cursor.filter_fingerprint != fingerprint
     }) {
         return Err(SystemCveInventoryPageError::InventoryChanged.into());
@@ -831,12 +1235,9 @@ async fn fetch_inventory_page_for_source(
         .as_ref()
         .map(|cursor| cursor.canonical_package_name.as_str());
     let search_pattern = page.search_pattern();
-    let cte = match authority {
-        SystemCveInventoryAuthority::Exact => EXACT_INVENTORY_CTE,
-        SystemCveInventoryAuthority::Legacy => LEGACY_INVENTORY_CTE,
-        SystemCveInventoryAuthority::NoScan => {
-            return Err(anyhow::anyhow!("no-scan inventory cannot have a source"));
-        }
+    let cte = match evidence_representation {
+        SystemCveEvidenceRepresentation::Schema1Observations => EXACT_INVENTORY_CTE,
+        SystemCveEvidenceRepresentation::Schema0Projection => LEGACY_INVENTORY_CTE,
     };
     let metadata_sql = inventory_metadata_sql(cte);
     let metadata = sqlx::query_as::<_, SystemCveInventoryMetadataRow>(&metadata_sql)
@@ -847,6 +1248,7 @@ async fn fetch_inventory_page_for_source(
         .bind(&page.statuses)
         .bind(match authority {
             SystemCveInventoryAuthority::Exact => "exact",
+            SystemCveInventoryAuthority::MappedRunning => "mapped_running",
             SystemCveInventoryAuthority::Legacy => "legacy",
             SystemCveInventoryAuthority::NoScan => "no_scan",
         })
@@ -879,10 +1281,12 @@ async fn fetch_inventory_page_for_source(
         rows.last()
             .map(|row| {
                 encode_system_cve_inventory_cursor(&SystemCveInventoryCursor {
-                    version: 1,
+                    version: SYSTEM_CVE_INVENTORY_CURSOR_VERSION,
                     system_id,
                     authority,
                     source_scan_id: source.scan_id,
+                    selection,
+                    evidence_representation,
                     filter_fingerprint: fingerprint,
                     inventory_revision: inventory_revision.clone(),
                     canonical_cve_id: row.cve_id.clone(),
@@ -897,6 +1301,12 @@ async fn fetch_inventory_page_for_source(
         authority,
         exact_authority_failure,
         source: Some(source),
+        attempt,
+        current_state,
+        running_target,
+        selection,
+        evidence_representation: Some(evidence_representation),
+        read_only,
         rows,
         metadata: SystemCveInventoryMetadata {
             total_findings: metadata.total_findings,
@@ -999,7 +1409,7 @@ fn decode_system_cve_inventory_cursor(value: &str) -> Result<SystemCveInventoryC
         .map_err(|_| SystemCveInventoryPageError::InvalidCursor)?;
     let cursor: SystemCveInventoryCursor =
         serde_json::from_slice(&bytes).map_err(|_| SystemCveInventoryPageError::InvalidCursor)?;
-    if cursor.version != 1
+    if cursor.version != SYSTEM_CVE_INVENTORY_CURSOR_VERSION
         || cursor.filter_fingerprint.len() != 64
         || cursor.inventory_revision.len() != 64
         || cursor.canonical_cve_id.is_empty()
@@ -1028,12 +1438,11 @@ fn inventory_revision(seed: &str) -> String {
     hex::encode(digest.finalize())
 }
 
-/// Fetches vulnerabilities from the latest exact scan for the deployed generation.
+/// Fetches vulnerabilities from the latest exact scan of the running output.
 ///
-/// The query returns no rows unless the system's current reported generation and
-/// store path have one verified retained snapshot with an available integrity-v1
-/// artifact. Row existence and installed versions come only from that retained
-/// derivation's latest completed evidence-schema-1 scan. One deterministic
+/// The shared Current CVE authority resolves the latest consistent observation,
+/// unique scoped NixOS derivation, and newest completed schema-1 scan. Retained
+/// evaluation-generation provenance is not required. One deterministic
 /// occurrence represents each stable CVE and canonical-package identity.
 ///
 /// # Errors
@@ -1046,47 +1455,8 @@ pub async fn fetch_exact_system_vulnerabilities(
 ) -> Result<Vec<ExactSystemVulnerabilityRow>> {
     let rows = sqlx::query_as::<_, ExactSystemVulnerabilityRow>(
         r#"WITH authoritative_scan AS (
-             SELECT system.id AS system_id,scan.id AS scan_id,
-                    scan.completed_at
-             FROM systems system
-              JOIN LATERAL (
-                 SELECT state.store_path,state.generation,
-                        state.generation_matches_current_store_path
-                FROM system_states state
-                WHERE state.hostname=system.hostname
-                ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
-              ) deployed ON deployed.store_path IS NOT NULL
-                AND deployed.generation IS NOT NULL
-                AND deployed.generation_matches_current_store_path IS TRUE
-                AND btrim(deployed.store_path)<>''
-             JOIN evaluation_generation_snapshots retained
-               ON retained.system_id=system.id
-              AND retained.generation=deployed.generation
-              AND retained.source_store_path=deployed.store_path
-              AND retained.lineage_verified
-             JOIN evaluation_snapshots artifact
-               ON artifact.id=retained.snapshot_id
-              AND artifact.commit_id=retained.commit_id
-              AND artifact.configuration_name=retained.configuration_name
-              AND artifact.lifecycle='available'
-              AND artifact.integrity_version=1
-             JOIN derivations derivation
-               ON derivation.id=retained.derivation_id
-              AND derivation.commit_id=retained.commit_id
-              AND derivation.derivation_name=retained.configuration_name
-              AND derivation.derivation_type='nixos'
-              AND COALESCE(derivation.store_path,derivation.expected_store_path)
-                  =retained.source_store_path
-             JOIN LATERAL (
-               SELECT candidate.id,candidate.completed_at
-               FROM cve_scans candidate
-               WHERE candidate.derivation_id=derivation.id
-                 AND candidate.status='completed'
-                 AND candidate.completed_at IS NOT NULL
-                 AND candidate.evidence_schema_version=1
-               ORDER BY candidate.completed_at DESC,candidate.id DESC LIMIT 1
-             ) scan ON true
-             WHERE system.id=$1
+              SELECT system_id,scan_id,scan_completed_at AS completed_at
+              FROM view_current_cve_authority WHERE system_id=$1
            ), selected_observations AS (
              SELECT DISTINCT ON (
                       observation.canonical_cve_id,
@@ -1168,6 +1538,9 @@ fn default_cve_fleet_stats() -> CveFleetStats {
         systems_affected: 0,
         exact_systems_affected: 0,
         legacy_systems_affected: 0,
+        current_systems_affected: 0,
+        scheduled_deployment_target_systems: 0,
+        historical_inventory_systems: 0,
         no_scan_systems: 0,
         outstanding: 0,
         accepted: 0,
@@ -1175,47 +1548,19 @@ fn default_cve_fleet_stats() -> CveFleetStats {
     }
 }
 
-// SECURITY: This read model annotates a bounded legacy-view row as exact only
-// when the latest deployed state resolves to the immutable scan that supplied
-// the same system and canonical CVE/package identity. Mutation code does not
-// use this CTE.
+// SECURITY: Scope current, scheduled-target, and historical authorities before
+// aggregation. Mutation and disposition code does not use this read CTE.
 const FLEET_INVENTORY_LIST_CTE: &str = r#"
 WITH exact_authority_systems AS (
-  SELECT system.id AS system_id,scan.scan_id
-  FROM systems system
-  JOIN LATERAL (
-    SELECT state.store_path,state.generation,state.generation_matches_current_store_path
-    FROM system_states state WHERE state.hostname=system.hostname
-    ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
-  ) current ON current.store_path IS NOT NULL AND current.generation IS NOT NULL
-    AND current.generation_matches_current_store_path IS TRUE
-    AND btrim(current.store_path)<>''
-  JOIN evaluation_generation_snapshots retained
-    ON retained.system_id=system.id AND retained.generation=current.generation
-   AND retained.source_store_path=current.store_path AND retained.lineage_verified
-  JOIN evaluation_snapshots artifact ON artifact.id=retained.snapshot_id
-   AND artifact.commit_id=retained.commit_id
-   AND artifact.configuration_name=retained.configuration_name
-   AND artifact.lifecycle='available' AND artifact.integrity_version=1
-  JOIN derivations derivation ON derivation.id=retained.derivation_id
-   AND derivation.commit_id=retained.commit_id
-   AND derivation.derivation_name=retained.configuration_name
-   AND derivation.derivation_type='nixos'
-   AND COALESCE(derivation.store_path,derivation.expected_store_path)
-       =retained.source_store_path
-  JOIN LATERAL (
-    SELECT scan.id AS scan_id FROM cve_scans scan WHERE scan.derivation_id=derivation.id
-      AND scan.status='completed' AND scan.completed_at IS NOT NULL
-      AND scan.evidence_schema_version=1
-    ORDER BY scan.completed_at DESC,scan.id DESC LIMIT 1
-  ) scan ON true
-  WHERE system.is_active
-    AND ($1::uuid[] IS NULL OR system.environment_id=ANY($1))
+  SELECT system_id,scan_id
+  FROM view_current_cve_authority
+  WHERE $1::uuid[] IS NULL OR environment_id=ANY($1)
 ), exact_subjects AS (
   SELECT DISTINCT ON (occurrence.system_id,occurrence.cve_id,occurrence.package_name)
          occurrence.system_id,occurrence.environment_id,occurrence.environment_name,
          occurrence.cve_id,occurrence.package_name,occurrence.installed_version,
-         package_metadata.fixed_version,occurrence.completed_at,'exact'::text AS authority
+         package_metadata.fixed_version,occurrence.completed_at,
+         'current'::text AS inventory_section
    FROM view_current_exact_cve_occurrences occurrence
    JOIN exact_authority_systems exact ON exact.system_id=occurrence.system_id
      AND exact.scan_id=occurrence.scan_id
@@ -1231,14 +1576,37 @@ WITH exact_authority_systems AS (
   WHERE $1::uuid[] IS NULL OR occurrence.environment_id=ANY($1)
   ORDER BY occurrence.system_id,occurrence.cve_id,occurrence.package_name,
            occurrence.observed_derivation_path
-), legacy_subjects AS (
+), scheduled_authority_systems AS (
+  SELECT target.system_id,target.scan_id
+  FROM view_active_scheduled_cve_scan_targets target
+  WHERE $1::uuid[] IS NULL OR target.environment_id=ANY($1)
+), scheduled_subjects AS (
+  SELECT DISTINCT ON (occurrence.system_id,occurrence.cve_id,occurrence.package_name)
+         occurrence.system_id,occurrence.environment_id,occurrence.environment_name,
+         occurrence.cve_id,occurrence.package_name,occurrence.installed_version,
+         package_metadata.fixed_version,occurrence.completed_at,
+         'scheduled_deployment_target'::text AS inventory_section
+  FROM view_active_scheduled_exact_cve_occurrences occurrence
+  LEFT JOIN LATERAL (
+    SELECT vulnerability.fixed_version
+    FROM derivations package_derivation
+    JOIN package_vulnerabilities vulnerability
+      ON vulnerability.derivation_id=package_derivation.id
+     AND vulnerability.cve_id=occurrence.cve_id
+    WHERE package_derivation.derivation_path=occurrence.observed_derivation_path
+    ORDER BY package_derivation.id DESC LIMIT 1
+  ) package_metadata ON true
+  WHERE $1::uuid[] IS NULL OR occurrence.environment_id=ANY($1)
+  ORDER BY occurrence.system_id,occurrence.cve_id,occurrence.package_name,
+           occurrence.observed_derivation_path
+), historical_subjects AS (
   SELECT DISTINCT ON (
            system.id,view.cve_id,COALESCE(view.package_pname,view.package_name))
          system.id AS system_id,system.environment_id,environment.name AS environment_name,
          view.cve_id,COALESCE(view.package_pname,view.package_name) AS package_name,
          COALESCE(view.package_version,'') AS installed_version,view.fixed_version,
          view.completed_at,
-         'legacy'::text AS authority
+          'historical'::text AS inventory_section
   FROM view_system_vulnerabilities view
   JOIN systems system ON system.hostname=view.hostname AND system.is_active
   LEFT JOIN environments environment ON environment.id=system.environment_id
@@ -1246,33 +1614,57 @@ WITH exact_authority_systems AS (
     AND NOT EXISTS(
       SELECT 1 FROM exact_authority_systems exact
       WHERE exact.system_id=system.id)
+    AND NOT EXISTS(
+      SELECT 1 FROM scheduled_authority_systems scheduled
+      WHERE scheduled.system_id=system.id)
   ORDER BY system.id,view.cve_id,COALESCE(view.package_pname,view.package_name),
            view.derivation_path
 ), inventory_subjects AS (
   SELECT * FROM exact_subjects
   UNION ALL
-  SELECT * FROM legacy_subjects
+  SELECT * FROM scheduled_subjects
+  UNION ALL
+  SELECT * FROM historical_subjects
 ), inventory_list AS (
   SELECT subject.cve_id,cve.cvss_v3_score,
          severity_from_cvss(cve.cvss_v3_score) AS severity,
          COALESCE(NULLIF(btrim(cve.description),''),cve.id) AS title,
          cve.vector AS cvss_vector,cve.published_date,cve.exploited,
-         subject.package_name,max(subject.installed_version) AS installed_version,
+          subject.package_name,COALESCE(
+            max(subject.installed_version) FILTER (WHERE subject.inventory_section='current'),
+            max(subject.installed_version) FILTER (
+              WHERE subject.inventory_section='scheduled_deployment_target'),
+            max(subject.installed_version)
+          ) AS installed_version,
          max(subject.fixed_version) AS fixed_version,
          CASE WHEN max(subject.fixed_version) IS NULL THEN 'open'
               ELSE 'fix_available' END AS fix_status,
-         count(DISTINCT subject.system_id)::bigint AS affected_count,
-         count(DISTINCT subject.system_id) FILTER (WHERE subject.authority='exact')::bigint
-           AS exact_affected_count,
-         count(DISTINCT subject.system_id) FILTER (WHERE subject.authority='legacy')::bigint
-           AS legacy_affected_count,
-         array_agg(DISTINCT subject.environment_name ORDER BY subject.environment_name)
-           FILTER (WHERE subject.environment_name IS NOT NULL) AS affected_environments,
+          count(DISTINCT subject.system_id) FILTER (
+            WHERE subject.inventory_section IN ('current','scheduled_deployment_target'))::bigint
+            AS affected_count,
+          count(DISTINCT subject.system_id) FILTER (
+            WHERE subject.inventory_section IN ('current','scheduled_deployment_target'))::bigint
+            AS exact_affected_count,
+          count(DISTINCT subject.system_id) FILTER (
+            WHERE subject.inventory_section='historical')::bigint
+            AS legacy_affected_count,
+          count(DISTINCT subject.system_id) FILTER (
+            WHERE subject.inventory_section='current')::bigint AS current_affected_count,
+          count(DISTINCT subject.system_id) FILTER (
+            WHERE subject.inventory_section='scheduled_deployment_target')::bigint
+            AS scheduled_deployment_target_count,
+          count(DISTINCT subject.system_id) FILTER (
+            WHERE subject.inventory_section='historical')::bigint
+            AS historical_inventory_count,
+          array_agg(DISTINCT subject.environment_name ORDER BY subject.environment_name)
+            FILTER (WHERE subject.environment_name IS NOT NULL
+              AND subject.inventory_section IN ('current','scheduled_deployment_target'))
+            AS affected_environments,
          min(subject.completed_at) AS first_seen,max(subject.completed_at) AS last_seen,
          COALESCE(EXTRACT(EPOCH FROM (now()-cve.published_date))/86400,0)::integer
            AS age_days,
-         CASE WHEN bool_or(subject.authority='legacy') THEN 'inventory_only'
-              ELSE COALESCE(max(exact_list.triage_status),'outstanding') END AS triage_status
+          CASE WHEN NOT bool_or(subject.inventory_section='current') THEN 'inventory_only'
+               ELSE COALESCE(max(exact_list.triage_status),'outstanding') END AS triage_status
   FROM inventory_subjects subject
   JOIN cves cve ON cve.id=subject.cve_id
   LEFT JOIN cve_list_for_environment_scope($1) exact_list
@@ -1282,6 +1674,355 @@ WITH exact_authority_systems AS (
            cve.published_date,cve.exploited,subject.package_name
 )
 "#;
+
+// SECURITY: Filter the already scoped CVE/package list before joining back to
+// scoped subject rows. A page limit here would silently omit host memberships.
+const FLEET_INVENTORY_PROJECTION_CTE: &str = r#"
+, filtered_pairs AS (
+  SELECT item.*
+  FROM inventory_list item
+  WHERE ($3::text IS NULL OR UPPER(item.severity)=$3)
+    AND ($4::text IS NULL
+      OR ($4='available' AND item.fix_status='fix_available')
+      OR ($4='pending' AND item.fix_status='open')
+      OR ($4='exploited' AND item.exploited))
+    AND ($5::text IS NULL OR LOWER(item.triage_status)=LOWER($5))
+    AND ($6::text IS NULL OR item.package_name ILIKE $6 ESCAPE '\')
+    AND ($7::text IS NULL OR item.cve_id ILIKE $7 ESCAPE '\'
+      OR item.package_name ILIKE $7 ESCAPE '\' OR item.title ILIKE $7 ESCAPE '\')
+), visible_members AS (
+  SELECT subject.*,system.hostname,flake.name AS flake_name,
+         status.deployment_status
+  FROM inventory_subjects subject
+  JOIN filtered_pairs pair ON pair.cve_id=subject.cve_id
+    AND pair.package_name IS NOT DISTINCT FROM subject.package_name
+  JOIN systems system ON system.id=subject.system_id AND system.is_active
+  LEFT JOIN flakes flake ON flake.id=system.flake_id
+  LEFT JOIN view_system_deployment_status status ON status.hostname=system.hostname
+  WHERE ($2::uuid IS NULL OR subject.environment_id=$2)
+)
+"#;
+
+fn projection_cte() -> String {
+    // SECURITY: Intersect the optional environment filter with the authorized
+    // scope *inside* each inventory authority, before pair status aggregation.
+    // An unauthorized ID becomes an empty scope, never an all-scope NULL.
+    FLEET_INVENTORY_LIST_CTE.replace(
+        "$1",
+        "(CASE WHEN $2::uuid IS NULL THEN $1::uuid[] \
+         WHEN $1::uuid[] IS NULL OR $2=ANY($1) THEN ARRAY[$2]::uuid[] \
+         ELSE ARRAY[]::uuid[] END)",
+    )
+}
+
+fn projection_page(params: &CveInventoryProjectionParams) -> Result<(i64, i64)> {
+    let offset = params.offset.unwrap_or(0);
+    let limit = params.limit.unwrap_or(100);
+    anyhow::ensure!(
+        (0..=i64::MAX - 200).contains(&offset) && (1..=200).contains(&limit),
+        "offset must be nonnegative and limit must be 1..200"
+    );
+    Ok((offset, limit))
+}
+
+fn projection_query<'a>(
+    sql: &'a str,
+    scope: &'a CveReadScope,
+    params: &'a CveInventoryProjectionParams,
+) -> sqlx::query::Query<'a, Postgres, sqlx::postgres::PgArguments> {
+    sqlx::query(sql)
+        .bind(scope.environment_ids())
+        .bind(params.environment_id)
+        .bind(params.severity.as_ref().map(|s| s.to_uppercase()))
+        .bind(params.fix_status.as_deref())
+        .bind(params.triage_status.as_deref())
+        .bind(params.package.as_deref().map(cve_substring_pattern))
+        .bind(params.search.as_deref().map(cve_substring_pattern))
+}
+
+/// Returns a page of environment or host aggregates over the complete filtered
+/// scoped inventory. Severity, exploited and patchable counts each count one
+/// exact CVE/package pair per group, even across overlapping inventory sections.
+/// Package and search filters match case-insensitive literal substrings.
+/// `total_active_hosts` includes active hosts without findings for environments
+/// only. It does not establish scan coverage or clean hosts.
+///
+/// # Errors
+///
+/// Returns a validation or database error when the page cannot be loaded.
+pub async fn fetch_cve_inventory_groups(
+    pool: &PgPool,
+    scope: &CveReadScope,
+    params: &CveInventoryProjectionParams,
+) -> Result<CveInventoryGroupPage> {
+    let (offset, limit) = projection_page(params)?;
+    anyhow::ensure!(
+        matches!(params.group_by.as_str(), "environment" | "host"),
+        "group_by must be environment or host"
+    );
+    let sql = format!(
+        "{}{FLEET_INVENTORY_PROJECTION_CTE}{}",
+        projection_cte(),
+        r#", grouped AS (
+          SELECT CASE WHEN $8='host' THEN member.system_id ELSE member.environment_id END AS group_id,
+                  CASE WHEN $8='host' THEN member.hostname
+                       ELSE COALESCE(environment.name,'Unassigned') END AS name,
+                  count(DISTINCT (pair.cve_id,pair.package_name))::bigint AS cve_package_count,
+                  count(DISTINCT pair.cve_id)::bigint AS cve_count,
+                  count(DISTINCT (pair.cve_id,pair.package_name)) FILTER (WHERE UPPER(pair.severity)='CRITICAL')::bigint AS critical_pair_count,
+                  count(DISTINCT (pair.cve_id,pair.package_name)) FILTER (WHERE UPPER(pair.severity)='HIGH')::bigint AS high_pair_count,
+                  count(DISTINCT (pair.cve_id,pair.package_name)) FILTER (WHERE UPPER(pair.severity)='MEDIUM')::bigint AS medium_pair_count,
+                  count(DISTINCT (pair.cve_id,pair.package_name)) FILTER (WHERE UPPER(pair.severity)='LOW')::bigint AS low_pair_count,
+                  count(DISTINCT (pair.cve_id,pair.package_name)) FILTER (WHERE UPPER(pair.severity) NOT IN ('CRITICAL','HIGH','MEDIUM','LOW'))::bigint AS unknown_pair_count,
+                  count(DISTINCT (pair.cve_id,pair.package_name)) FILTER (WHERE pair.exploited)::bigint AS exploited_pair_count,
+                  count(DISTINCT (pair.cve_id,pair.package_name)) FILTER (WHERE pair.fix_status='fix_available')::bigint AS patchable_pair_count,
+                 count(DISTINCT member.system_id)::bigint AS host_count,
+                 count(DISTINCT member.system_id) FILTER (WHERE member.inventory_section='current')::bigint AS current_host_count,
+                 count(DISTINCT member.system_id) FILTER (WHERE member.inventory_section='scheduled_deployment_target')::bigint AS scheduled_host_count,
+                 count(DISTINCT member.system_id) FILTER (WHERE member.inventory_section='historical')::bigint AS historical_host_count,
+                 CASE WHEN $8='host' THEN max(member.flake_name) END AS flake_name,
+                 CASE WHEN $8='host' THEN max(member.deployment_status) END AS deployment_status
+          FROM visible_members member
+          JOIN filtered_pairs pair ON pair.cve_id=member.cve_id
+            AND pair.package_name IS NOT DISTINCT FROM member.package_name
+          LEFT JOIN environments environment ON environment.id=member.environment_id
+          GROUP BY CASE WHEN $8='host' THEN member.system_id ELSE member.environment_id END,
+                   CASE WHEN $8='host' THEN member.hostname ELSE COALESCE(environment.name,'Unassigned') END
+        )
+        SELECT group_id,name,cve_package_count,cve_count,
+               critical_pair_count,high_pair_count,medium_pair_count,low_pair_count,
+               unknown_pair_count,exploited_pair_count,patchable_pair_count,
+               host_count,current_host_count,scheduled_host_count,historical_host_count,
+               CASE WHEN $8='environment' THEN (
+                 SELECT count(*)::bigint FROM systems active_host
+                 WHERE active_host.is_active
+                   AND active_host.environment_id IS NOT DISTINCT FROM grouped.group_id
+                   AND ($1::uuid[] IS NULL OR active_host.environment_id=ANY($1))
+                   AND ($2::uuid IS NULL OR active_host.environment_id=$2)
+               ) END AS total_active_hosts,
+               flake_name,deployment_status
+        FROM grouped ORDER BY name COLLATE "C",group_id NULLS FIRST
+        OFFSET $9 LIMIT $10"#
+    );
+    let count_sql = format!(
+        "{}{FLEET_INVENTORY_PROJECTION_CTE}{}",
+        projection_cte(),
+        r#"SELECT count(DISTINCT CASE WHEN $8='host' THEN system_id ELSE environment_id END)::bigint
+           + CASE WHEN $8='environment' AND COALESCE(bool_or(environment_id IS NULL),false) THEN 1 ELSE 0 END
+           FROM visible_members"#
+    );
+    // A transaction keeps the total and page on the same PostgreSQL snapshot.
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    let total: i64 = projection_query(&count_sql, scope, params)
+        .bind(&params.group_by)
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get(0)?;
+    let rows = projection_query(&sql, scope, params)
+        .bind(&params.group_by)
+        .bind(offset)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    let items = rows
+        .iter()
+        .map(CveInventoryGroup::from_row)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let next_offset =
+        (offset + (items.len() as i64) < total).then_some(offset + items.len() as i64);
+    Ok(CveInventoryGroupPage {
+        items,
+        total,
+        next_offset,
+    })
+}
+
+/// Returns paged exact host/CVE/package memberships in one query per page.
+/// `group_id=None` selects unassigned environment hosts, never all groups.
+/// Historical memberships are read-only; no row asserts a clean scan.
+/// Package and search filters match case-insensitive literal substrings.
+///
+/// # Errors
+///
+/// Returns a validation or database error when the page cannot be loaded.
+pub async fn fetch_cve_inventory_members(
+    pool: &PgPool,
+    scope: &CveReadScope,
+    params: &CveInventoryProjectionParams,
+) -> Result<CveInventoryMemberPage> {
+    let (offset, limit) = projection_page(params)?;
+    anyhow::ensure!(
+        matches!(params.group_by.as_str(), "environment" | "host"),
+        "group_by must be environment or host"
+    );
+    anyhow::ensure!(
+        params.group_by != "host" || params.group_id.is_some(),
+        "host membership requires group_id"
+    );
+    let sql = format!(
+        "{}{FLEET_INVENTORY_PROJECTION_CTE}{}",
+        projection_cte(),
+        r#", selected AS (
+          SELECT member.* FROM visible_members member
+          WHERE CASE WHEN $8='host' THEN member.system_id=$9
+                     ELSE member.environment_id IS NOT DISTINCT FROM $9 END
+        )
+        SELECT cve_id,package_name,system_id,environment_id,hostname,
+               inventory_section,installed_version,deployment_status,flake_name
+        FROM selected
+        ORDER BY cve_id COLLATE "C",package_name COLLATE "C",system_id,
+                 inventory_section COLLATE "C"
+        OFFSET $10 LIMIT $11"#
+    );
+    // A separate count is needed for an offset past the end of the result.
+    let count_sql = format!(
+        "{}{FLEET_INVENTORY_PROJECTION_CTE}{}",
+        projection_cte(),
+        r#"SELECT count(*)::bigint FROM visible_members member
+           WHERE CASE WHEN $8='host' THEN member.system_id=$9
+                      ELSE member.environment_id IS NOT DISTINCT FROM $9 END"#
+    );
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    let total: i64 = projection_query(&count_sql, scope, params)
+        .bind(&params.group_by)
+        .bind(params.group_id)
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get(0)?;
+    let rows = projection_query(&sql, scope, params)
+        .bind(&params.group_by)
+        .bind(params.group_id)
+        .bind(offset)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    let items = rows
+        .iter()
+        .map(CveInventoryMember::from_row)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let next_offset =
+        (offset + (items.len() as i64) < total).then_some(offset + items.len() as i64);
+    Ok(CveInventoryMemberPage {
+        items,
+        total,
+        next_offset,
+    })
+}
+
+/// Returns a bounded CVE/package page and an untruncated filtered total.
+/// Scope and the optional environment filter apply before pair aggregation.
+/// Package and search filters match case-insensitive literal substrings.
+/// The stable order matches [`fetch_cve_list`]. Separate page requests may
+/// observe different snapshots if inventory changes between requests.
+/// Package host unions are available only for a complete first page and use
+/// the same read-only repeatable-read snapshot as its count and pair rows.
+///
+/// # Errors
+///
+/// Returns an error for invalid paging or a failed database read.
+pub async fn fetch_cve_inventory_pairs(
+    pool: &PgPool,
+    scope: &CveReadScope,
+    params: &CveInventoryProjectionParams,
+) -> Result<CveInventoryPairPage> {
+    let (offset, limit) = projection_page(params)?;
+    let cte = format!("{}{FLEET_INVENTORY_PROJECTION_CTE}", projection_cte());
+    let count_sql = format!("{cte} SELECT count(*)::bigint FROM filtered_pairs");
+    let page_sql = format!(
+        "{cte}{}",
+        r#"SELECT cve_id,cvss_v3_score::real AS cvss_v3_score,
+                  UPPER(COALESCE(severity,'UNKNOWN')) AS severity,
+                  COALESCE(title,'') AS title,cvss_vector,published_date,
+                  COALESCE(exploited,false) AS exploited,package_name,
+                  installed_version,fixed_version,
+                  COALESCE(fix_status,'open') AS fix_status,
+                  COALESCE(affected_count,0)::bigint AS affected_count,
+                  exact_affected_count,legacy_affected_count,current_affected_count,
+                  scheduled_deployment_target_count,historical_inventory_count,
+                  affected_environments,first_seen,last_seen,
+                  COALESCE(age_days,0)::int AS age_days,
+                  LOWER(COALESCE(triage_status,'outstanding')) AS triage_status
+           FROM filtered_pairs
+           ORDER BY
+             CASE WHEN $8='severity' THEN CASE UPPER(severity)
+               WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2
+               WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 4 ELSE 5 END END ASC NULLS LAST,
+             CASE WHEN $8='severity' THEN cvss_v3_score END DESC NULLS LAST,
+             CASE WHEN $8='cvss' THEN cvss_v3_score END DESC NULLS LAST,
+             CASE WHEN $8='age' THEN age_days END ASC NULLS LAST,
+             CASE WHEN $8='affected' THEN affected_count END DESC NULLS LAST,
+             cve_id COLLATE "C" ASC,package_name COLLATE "C" ASC
+           OFFSET $9 LIMIT $10"#
+    );
+    let union_sql = format!(
+        "{cte}{}",
+        r#"SELECT member.package_name,
+                  count(DISTINCT member.cve_id)::bigint AS pair_count,
+                  count(DISTINCT member.system_id) FILTER (
+                    WHERE member.inventory_section IN ('current','scheduled_deployment_target')
+                  )::bigint AS affected_system_count
+           FROM visible_members member
+           GROUP BY member.package_name
+           ORDER BY member.package_name COLLATE "C" NULLS FIRST"#
+    );
+    // Both statements must see the same scoped inventory snapshot, including
+    // an empty page requested past the end of the filtered pair set.
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    let total: i64 = projection_query(&count_sql, scope, params)
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get(0)?;
+    let items = sqlx::query_as::<_, CveListItem>(&page_sql)
+        .bind(scope.environment_ids())
+        .bind(params.environment_id)
+        .bind(params.severity.as_ref().map(|s| s.to_uppercase()))
+        .bind(params.fix_status.as_deref())
+        .bind(params.triage_status.as_deref())
+        .bind(params.package.as_deref().map(cve_substring_pattern))
+        .bind(params.search.as_deref().map(cve_substring_pattern))
+        .bind(params.sort.as_deref().unwrap_or("severity"))
+        .bind(offset)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+    // INVARIANT: A package union cannot be reconstructed from pair counts:
+    // two pairs may share a host. Read membership only after proving that this
+    // first page contains the entire filtered pair set in this snapshot.
+    let package_host_unions = if offset == 0 && total <= limit && items.len() as i64 == total {
+        sqlx::query_as::<_, CveInventoryPackageHostUnion>(&union_sql)
+            .bind(scope.environment_ids())
+            .bind(params.environment_id)
+            .bind(params.severity.as_ref().map(|s| s.to_uppercase()))
+            .bind(params.fix_status.as_deref())
+            .bind(params.triage_status.as_deref())
+            .bind(params.package.as_deref().map(cve_substring_pattern))
+            .bind(params.search.as_deref().map(cve_substring_pattern))
+            .fetch_all(&mut *tx)
+            .await?
+    } else {
+        Vec::new()
+    };
+    tx.commit().await?;
+    let next_offset =
+        (offset + (items.len() as i64) < total).then_some(offset + items.len() as i64);
+    Ok(CveInventoryPairPage {
+        items,
+        total,
+        next_offset,
+        package_host_unions,
+    })
+}
 
 #[derive(sqlx::FromRow)]
 struct CvePackageStatsRow {
@@ -1293,6 +2034,9 @@ struct CvePackageStatsRow {
     low_count: i64,
     environments_count: i64,
     total_affected_systems: i64,
+    current_affected_systems: i64,
+    scheduled_deployment_target_systems: i64,
+    historical_inventory_systems: i64,
     fixable_count: i64,
     outstanding_count: i64,
     exploited_count: i64,
@@ -1303,6 +2047,7 @@ struct CvePackageStatsRow {
 /// Fetches a bounded CVE/package list from the caller's visible occurrences.
 ///
 /// Filters are AND combined. Search matches the CVE ID, package name, or title.
+/// Package and search filters match case-insensitive literal substrings.
 /// The query applies [`CveReadScope`] before every count and status rollup.
 ///
 /// # Errors
@@ -1352,8 +2097,8 @@ async fn fetch_cve_rows(
     let severity_param = filters.severity.as_ref().map(|s| s.to_uppercase());
     let fix_status_param = filters.fix_status.clone();
     let triage_status_param = filters.triage_status.clone();
-    let package_param = filters.package.as_ref().map(|p| format!("%{p}%"));
-    let search_param = filters.search.as_ref().map(|s| format!("%{s}%"));
+    let package_param = filters.package.as_deref().map(cve_substring_pattern);
+    let search_param = filters.search.as_deref().map(cve_substring_pattern);
     let sort_param = filters.sort.as_deref().unwrap_or("severity");
 
     let sql = format!(
@@ -1374,6 +2119,9 @@ async fn fetch_cve_rows(
             COALESCE(affected_count, 0)::bigint AS affected_count,
             exact_affected_count,
             legacy_affected_count,
+            current_affected_count,
+            scheduled_deployment_target_count,
+            historical_inventory_count,
             affected_environments,
             first_seen,
             last_seen,
@@ -1389,12 +2137,12 @@ async fn fetch_cve_rows(
                 OR ($3 = 'exploited' AND exploited = TRUE)
             )
             AND ($4::text IS NULL OR LOWER(triage_status) = LOWER($4))
-            AND ($5::text IS NULL OR package_name ILIKE $5)
+            AND ($5::text IS NULL OR package_name ILIKE $5 ESCAPE '\')
             AND (
                 $6::text IS NULL
-                OR cve_id ILIKE $6
-                OR package_name ILIKE $6
-                OR title ILIKE $6
+                OR cve_id ILIKE $6 ESCAPE '\'
+                OR package_name ILIKE $6 ESCAPE '\'
+                OR title ILIKE $6 ESCAPE '\'
             )
         ORDER BY
             CASE
@@ -1412,7 +2160,8 @@ async fn fetch_cve_rows(
             CASE WHEN $7 = 'cvss' THEN cvss_v3_score END DESC NULLS LAST,
             CASE WHEN $7 = 'age' THEN age_days END ASC NULLS LAST,
             CASE WHEN $7 = 'affected' THEN affected_count END DESC NULLS LAST,
-            cve_id ASC
+            cve_id COLLATE "C" ASC,
+            package_name COLLATE "C" ASC
         LIMIT $8
         "#
     );
@@ -1434,6 +2183,7 @@ async fn fetch_cve_rows(
 /// Fetches CVEs grouped by package from the caller's visible occurrences.
 ///
 /// Package system totals count distinct systems after all active filters.
+/// Package and search filters match case-insensitive literal substrings.
 ///
 /// # Errors
 ///
@@ -1446,8 +2196,8 @@ pub async fn fetch_cve_packages_grouped(
     let severity_param = filters.severity.as_ref().map(|s| s.to_uppercase());
     let fix_status_param = filters.fix_status.clone();
     let triage_status_param = filters.triage_status.clone();
-    let package_param = filters.package.as_ref().map(|p| format!("%{p}%"));
-    let search_param = filters.search.as_ref().map(|s| format!("%{s}%"));
+    let package_param = filters.package.as_deref().map(cve_substring_pattern);
+    let search_param = filters.search.as_deref().map(cve_substring_pattern);
 
     // 1) Aggregate package cards over the full filtered dataset (no list-row cap).
     let package_sql = format!(
@@ -1458,6 +2208,9 @@ pub async fn fetch_cve_packages_grouped(
                 package_name,
                 UPPER(COALESCE(severity, 'UNKNOWN')) AS severity,
                 COALESCE(affected_count, 0)::bigint AS affected_count,
+                current_affected_count,
+                scheduled_deployment_target_count,
+                historical_inventory_count,
                 COALESCE(fix_status, 'open') AS fix_status,
                 LOWER(COALESCE(triage_status, 'outstanding')) AS triage_status,
                 COALESCE(exploited, FALSE) AS exploited,
@@ -1473,12 +2226,12 @@ pub async fn fetch_cve_packages_grouped(
                     OR ($3 = 'exploited' AND exploited = TRUE)
                 )
                 AND ($4::text IS NULL OR LOWER(triage_status) = LOWER($4))
-                AND ($5::text IS NULL OR package_name ILIKE $5)
+                AND ($5::text IS NULL OR package_name ILIKE $5 ESCAPE '\')
                 AND (
                     $6::text IS NULL
-                    OR cve_id ILIKE $6
-                    OR package_name ILIKE $6
-                    OR title ILIKE $6
+                    OR cve_id ILIKE $6 ESCAPE '\'
+                    OR package_name ILIKE $6 ESCAPE '\'
+                    OR title ILIKE $6 ESCAPE '\'
                 )
                 AND package_name IS NOT NULL
         ),
@@ -1509,8 +2262,21 @@ pub async fn fetch_cve_packages_grouped(
         package_occurrence_counts AS (
             SELECT
                 f.package_name,
-                COUNT(DISTINCT subject.environment_id)::bigint as environments_count,
-                COUNT(DISTINCT subject.system_id)::bigint as total_affected_systems
+                COUNT(DISTINCT subject.environment_id) FILTER (
+                  WHERE subject.inventory_section IN ('current','scheduled_deployment_target'))::bigint
+                  as environments_count,
+                COUNT(DISTINCT subject.system_id) FILTER (
+                  WHERE subject.inventory_section IN ('current','scheduled_deployment_target'))::bigint
+                  as total_affected_systems,
+                COUNT(DISTINCT subject.system_id) FILTER (
+                  WHERE subject.inventory_section='current')::bigint
+                  as current_affected_systems,
+                COUNT(DISTINCT subject.system_id) FILTER (
+                  WHERE subject.inventory_section='scheduled_deployment_target')::bigint
+                  as scheduled_deployment_target_systems,
+                COUNT(DISTINCT subject.system_id) FILTER (
+                  WHERE subject.inventory_section='historical')::bigint
+                  as historical_inventory_systems
             FROM filtered f
             JOIN inventory_subjects subject
               ON subject.cve_id=f.cve_id
@@ -1526,6 +2292,11 @@ pub async fn fetch_cve_packages_grouped(
             pc.low_count,
             COALESCE(po.environments_count, 0)::bigint as environments_count,
             COALESCE(po.total_affected_systems, 0)::bigint as total_affected_systems,
+            COALESCE(po.current_affected_systems, 0)::bigint as current_affected_systems,
+            COALESCE(po.scheduled_deployment_target_systems, 0)::bigint
+              as scheduled_deployment_target_systems,
+            COALESCE(po.historical_inventory_systems, 0)::bigint
+              as historical_inventory_systems,
             pc.fixable_count,
             pc.outstanding_count,
             pc.exploited_count,
@@ -1571,6 +2342,9 @@ pub async fn fetch_cve_packages_grouped(
                 COALESCE(affected_count, 0)::bigint AS affected_count,
                 exact_affected_count,
                 legacy_affected_count,
+                current_affected_count,
+                scheduled_deployment_target_count,
+                historical_inventory_count,
                 affected_environments,
                 first_seen,
                 last_seen,
@@ -1586,12 +2360,12 @@ pub async fn fetch_cve_packages_grouped(
                     OR ($3 = 'exploited' AND exploited = TRUE)
                 )
                 AND ($4::text IS NULL OR LOWER(triage_status) = LOWER($4))
-                AND ($5::text IS NULL OR package_name ILIKE $5)
+                AND ($5::text IS NULL OR package_name ILIKE $5 ESCAPE '\')
                 AND (
                     $6::text IS NULL
-                    OR cve_id ILIKE $6
-                    OR package_name ILIKE $6
-                    OR title ILIKE $6
+                    OR cve_id ILIKE $6 ESCAPE '\'
+                    OR package_name ILIKE $6 ESCAPE '\'
+                    OR title ILIKE $6 ESCAPE '\'
                 )
                 AND package_name = ANY($7::text[])
         ),
@@ -1609,7 +2383,8 @@ pub async fn fetch_cve_packages_grouped(
                             ELSE 5
                         END,
                         cvss_v3_score DESC NULLS LAST,
-                        cve_id ASC
+                        cve_id COLLATE "C" ASC,
+                        package_name COLLATE "C" ASC
                 ) AS rn
             FROM filtered
         )
@@ -1617,6 +2392,8 @@ pub async fn fetch_cve_packages_grouped(
             cve_id,cvss_v3_score,severity,title,cvss_vector,published_date,
             exploited,package_name,installed_version,fixed_version,fix_status,
             affected_count,exact_affected_count,legacy_affected_count,
+            current_affected_count,scheduled_deployment_target_count,
+            historical_inventory_count,
             affected_environments,first_seen,last_seen,age_days,
             triage_status
         FROM ranked
@@ -1656,6 +2433,9 @@ pub async fn fetch_cve_packages_grouped(
             low_count: row.low_count,
             environments_count: row.environments_count,
             total_affected_systems: row.total_affected_systems,
+            current_affected_systems: row.current_affected_systems,
+            scheduled_deployment_target_systems: row.scheduled_deployment_target_systems,
+            historical_inventory_systems: row.historical_inventory_systems,
             fixable_count: row.fixable_count,
             outstanding_count: row.outstanding_count,
             exploited_count: row.exploited_count,
@@ -1710,6 +2490,47 @@ pub async fn fetch_cve_detail(
     Ok(detail)
 }
 
+/// Fetches detailed metadata for one visible CVE and package identity.
+///
+/// Unlike the compatibility CVE-only route, this query cannot select metadata
+/// from a different package that shares the same CVE.
+///
+/// # Errors
+///
+/// Returns `sqlx::Error::RowNotFound` when the package occurrence is not visible,
+/// or a database error when the scoped read fails.
+pub async fn fetch_cve_package_detail(
+    pool: &PgPool,
+    scope: &CveReadScope,
+    cve_id: &str,
+    package_name: &str,
+) -> Result<CveDetail> {
+    let sql = format!(
+        "{FLEET_INVENTORY_LIST_CTE}{}",
+        r#"
+        SELECT
+            v.cve_id,v.cvss_v3_score::real AS cvss_v3_score,
+            COALESCE(v.severity, 'UNKNOWN') AS severity,
+            COALESCE(v.title, '') AS title,v.cvss_vector,c.cwe_id,
+            v.published_date,c.modified_date,
+            COALESCE(v.exploited, FALSE) AS exploited,v.package_name,
+            v.installed_version,v.fixed_version,
+            NULL::text AS detection_method,
+            COALESCE(v.fix_status, 'open') AS fix_status
+        FROM inventory_list v
+        LEFT JOIN cves c ON c.id = v.cve_id
+        WHERE v.cve_id = $2 AND v.package_name = $3
+        LIMIT 1
+        "#
+    );
+    Ok(sqlx::query_as::<_, CveDetail>(&sql)
+        .bind(scope.environment_ids())
+        .bind(cve_id)
+        .bind(package_name)
+        .fetch_one(pool)
+        .await?)
+}
+
 #[derive(sqlx::FromRow)]
 struct FleetAffectedSystemRow {
     system_id: Uuid,
@@ -1723,6 +2544,8 @@ struct FleetAffectedSystemRow {
     deployment_policy: String,
     current_package_version: Option<String>,
     inventory_authority: String,
+    inventory_section: String,
+    bounded_system_count: i64,
 }
 
 /// Fetches detailed CVE metadata in the caller's transaction.
@@ -1777,8 +2600,9 @@ pub async fn fetch_cve_affected_systems(
 
 /// Fetches visible fleet inventory systems for one CVE and optional package.
 ///
-/// Exact rows are annotated from immutable current occurrences. All other rows
-/// come from the bounded legacy inventory view and are display-only.
+/// Current and scheduled-target rows use exact immutable observations.
+/// Historical rows come from the bounded compatibility inventory and are
+/// display-only. This function does not provide mutation subjects.
 ///
 /// # Errors
 ///
@@ -1792,13 +2616,23 @@ pub async fn fetch_cve_inventory_systems(
     let sql = format!(
         "{FLEET_INVENTORY_LIST_CTE}{}",
         r#"
-        -- Deduplicate package occurrences before the overflow probe so the
-        -- bound measures affected systems rather than inventory rows.
-        , selected_subjects AS (
-          SELECT DISTINCT ON (subject.system_id) subject.*
+        -- Bound distinct systems before section expansion. A system can appear
+        -- in both current and scheduled sections, and every accepted section
+        -- row must remain in the complete response.
+        , selected_systems AS (
+          SELECT subject.system_id
           FROM inventory_subjects subject
           WHERE subject.cve_id=$2 AND ($3::text IS NULL OR subject.package_name=$3)
-          ORDER BY subject.system_id,subject.package_name COLLATE "C",
+          GROUP BY subject.system_id
+          ORDER BY subject.system_id
+          LIMIT $4
+        ), selected_subjects AS (
+          SELECT DISTINCT ON (subject.system_id,subject.inventory_section) subject.*
+          FROM inventory_subjects subject
+          JOIN selected_systems selected ON selected.system_id=subject.system_id
+          WHERE subject.cve_id=$2 AND ($3::text IS NULL OR subject.package_name=$3)
+          ORDER BY subject.system_id,subject.inventory_section,
+                   subject.package_name COLLATE "C",
                    subject.installed_version COLLATE "C"
         )
         SELECT
@@ -1807,7 +2641,10 @@ pub async fn fetch_cve_inventory_systems(
             flake.name AS flake_name,flake.id AS flake_id,NULL::text AS commit_hash,
             system.deployment_policy,
             subject.installed_version AS current_package_version,
-            subject.authority AS inventory_authority
+             CASE WHEN subject.inventory_section='historical'
+                  THEN 'legacy' ELSE 'exact' END AS inventory_authority,
+             subject.inventory_section,
+             (SELECT count(*) FROM selected_systems)::bigint AS bounded_system_count
         FROM selected_subjects subject
         JOIN systems system ON system.id=subject.system_id
         LEFT JOIN environments environment ON environment.id=system.environment_id
@@ -1817,8 +2654,8 @@ pub async fn fetch_cve_inventory_systems(
           WHERE candidate.hostname=system.hostname
           ORDER BY candidate.timestamp DESC,candidate.id DESC LIMIT 1
         ) state ON true
-        ORDER BY environment.name NULLS LAST,system.hostname
-        LIMIT $4
+        ORDER BY environment.name NULLS LAST,system.hostname,system.id,
+                 subject.inventory_section
         "#
     );
     let systems = sqlx::query_as::<_, FleetAffectedSystemRow>(&sql)
@@ -1829,7 +2666,11 @@ pub async fn fetch_cve_inventory_systems(
         .fetch_all(pool)
         .await?;
 
-    let systems = reject_inventory_overflow(systems)?;
+    let distinct_system_count = systems
+        .first()
+        .map(|row| row.bounded_system_count)
+        .unwrap_or_default();
+    let systems = reject_inventory_overflow(systems, distinct_system_count)?;
 
     systems
         .into_iter()
@@ -1838,6 +2679,14 @@ pub async fn fetch_cve_inventory_systems(
                 "exact" => SystemCveInventoryAuthority::Exact,
                 "legacy" => SystemCveInventoryAuthority::Legacy,
                 value => anyhow::bail!("unknown fleet CVE inventory authority {value}"),
+            };
+            let inventory_section = match row.inventory_section.as_str() {
+                "current" => FleetCveInventorySection::Current,
+                "scheduled_deployment_target" => {
+                    FleetCveInventorySection::ScheduledDeploymentTarget
+                }
+                "historical" => FleetCveInventorySection::Historical,
+                value => anyhow::bail!("unknown fleet CVE inventory section {value}"),
             };
             Ok(CveAffectedSystemDetail {
                 system_id: row.system_id,
@@ -1851,6 +2700,7 @@ pub async fn fetch_cve_inventory_systems(
                 deployment_policy: row.deployment_policy,
                 current_package_version: row.current_package_version,
                 inventory_authority,
+                inventory_section,
             })
         })
         .collect()
@@ -2018,8 +2868,10 @@ pub async fn revoke_fleet_cve_justification(pool: &PgPool, cve_id: &str) -> Resu
 
 /// Fetches CVE inventory statistics in the caller's scope.
 ///
-/// CVE totals count exact and bounded legacy CVE/package rows. System and
-/// environment totals count distinct identities and never sum per-CVE rows.
+/// CVE totals count current, scheduled-target, and historical package rows.
+/// Compatibility affected totals count the distinct union of current and
+/// scheduled systems. Historical totals are explicit and never contribute to
+/// compatibility affected totals.
 ///
 /// # Errors
 ///
@@ -2029,15 +2881,21 @@ pub async fn fetch_cve_fleet_stats(pool: &PgPool, scope: &CveReadScope) -> Resul
         "{FLEET_INVENTORY_LIST_CTE}{}",
         r#", scoped_systems AS (
           SELECT system.id,system.environment_id,
-                 EXISTS(SELECT 1 FROM inventory_subjects subject
-                        WHERE subject.system_id=system.id AND subject.authority='exact')
-                   AS has_exact,
-                 EXISTS(SELECT 1 FROM inventory_subjects subject
-                        WHERE subject.system_id=system.id AND subject.authority='legacy')
-                   AS has_legacy,
-                  EXISTS(SELECT 1 FROM exact_authority_systems exact
-                         WHERE exact.system_id=system.id)
-                  OR EXISTS(
+                  EXISTS(SELECT 1 FROM inventory_subjects subject
+                         WHERE subject.system_id=system.id
+                           AND subject.inventory_section='current') AS has_current,
+                  EXISTS(SELECT 1 FROM inventory_subjects subject
+                         WHERE subject.system_id=system.id
+                           AND subject.inventory_section='scheduled_deployment_target')
+                   AS has_scheduled_target,
+                  EXISTS(SELECT 1 FROM inventory_subjects subject
+                         WHERE subject.system_id=system.id
+                           AND subject.inventory_section='historical') AS has_historical,
+                   EXISTS(SELECT 1 FROM exact_authority_systems exact
+                          WHERE exact.system_id=system.id)
+                   OR EXISTS(SELECT 1 FROM scheduled_authority_systems scheduled
+                             WHERE scheduled.system_id=system.id)
+                   OR EXISTS(
                     SELECT 1 FROM derivations derivation
                    JOIN derivation_statuses status ON status.id=derivation.status_id
                      AND status.name=ANY(ARRAY['build-complete','complete'])
@@ -2056,14 +2914,20 @@ pub async fn fetch_cve_fleet_stats(pool: &PgPool, scope: &CveReadScope) -> Resul
           COUNT(*) FILTER (WHERE exploited)::bigint AS exploited,
           COUNT(*) FILTER (WHERE fix_status='fix_available')::bigint AS fixable,
           (SELECT COUNT(DISTINCT environment_id) FROM scoped_systems
-           WHERE has_exact OR has_legacy)::bigint
+           WHERE has_current OR has_scheduled_target)::bigint
             AS environments_affected,
-          (SELECT COUNT(*) FROM scoped_systems WHERE has_exact OR has_legacy)::bigint
+          (SELECT COUNT(*) FROM scoped_systems WHERE has_current OR has_scheduled_target)::bigint
             AS systems_affected,
-          (SELECT COUNT(*) FROM scoped_systems WHERE has_exact)::bigint
+          (SELECT COUNT(*) FROM scoped_systems WHERE has_current OR has_scheduled_target)::bigint
             AS exact_systems_affected,
-          (SELECT COUNT(*) FROM scoped_systems WHERE has_legacy)::bigint
+          (SELECT COUNT(*) FROM scoped_systems WHERE has_historical)::bigint
             AS legacy_systems_affected,
+          (SELECT COUNT(*) FROM scoped_systems WHERE has_current)::bigint
+            AS current_systems_affected,
+          (SELECT COUNT(*) FROM scoped_systems WHERE has_scheduled_target)::bigint
+            AS scheduled_deployment_target_systems,
+          (SELECT COUNT(*) FROM scoped_systems WHERE has_historical)::bigint
+            AS historical_inventory_systems,
           (SELECT COUNT(*) FROM scoped_systems WHERE NOT has_scan)::bigint
             AS no_scan_systems,
           COUNT(*) FILTER (WHERE triage_status='outstanding')::bigint AS outstanding,
@@ -2118,6 +2982,49 @@ mod tests {
     use crate::queries::systems::insert_system;
 
     use super::*;
+
+    #[test]
+    fn projection_page_bounds_and_scope_intersection() {
+        let mut params = CveInventoryProjectionParams {
+            group_by: "environment".into(),
+            environment_id: None,
+            severity: None,
+            fix_status: None,
+            triage_status: None,
+            package: None,
+            search: None,
+            sort: None,
+            offset: None,
+            limit: None,
+            group_id: None,
+        };
+        assert_eq!(projection_page(&params).unwrap(), (0, 100));
+        params.limit = Some(201);
+        assert!(projection_page(&params).is_err());
+        params.limit = Some(200);
+        params.offset = Some(-1);
+        assert!(projection_page(&params).is_err());
+        params.offset = Some(201);
+        assert_eq!(projection_page(&params).unwrap(), (201, 200));
+        let sql = projection_cte();
+        assert!(sql.contains("ELSE ARRAY[]::uuid[] END"));
+        assert!(!sql.contains("environment_id=ANY($1)"));
+    }
+
+    #[test]
+    fn fleet_inventory_bound_counts_distinct_systems_not_section_rows() {
+        let section_rows = vec![(); MAX_FLEET_CVE_AFFECTED_SYSTEMS * 2];
+        assert_eq!(
+            reject_inventory_overflow(section_rows, MAX_FLEET_CVE_AFFECTED_SYSTEMS as i64)
+                .expect("overlapping section rows remain within the system bound")
+                .len(),
+            MAX_FLEET_CVE_AFFECTED_SYSTEMS * 2
+        );
+        assert!(is_cve_inventory_overflow(
+            &reject_inventory_overflow(Vec::<()>::new(), MAX_FLEET_CVE_AFFECTED_SYSTEMS as i64 + 1)
+                .expect_err("the distinct-system overflow probe must remain hard bounded")
+        ));
+    }
 
     async fn inventory_test_system(pool: &PgPool, suffix: &str) -> (System, i32) {
         let repo_url = format!("https://example.test/cve-inventory-{suffix}.git");
@@ -2254,6 +3161,618 @@ mod tests {
             .await
             .expect("inventory test role should persist");
         user_id
+    }
+
+    async fn attempt_test_derivation(
+        pool: &PgPool,
+        system: &System,
+        commit_id: i32,
+        suffix: &str,
+    ) -> i32 {
+        sqlx::query_scalar(
+            r#"INSERT INTO derivations(
+                 derivation_name,derivation_path,derivation_type,commit_id,status_id,
+                 completed_at,store_path)
+               VALUES($1,$2,'nixos',$3,
+                 (SELECT id FROM derivation_statuses WHERE name='build-complete' LIMIT 1),
+                 now(),$4) RETURNING id"#,
+        )
+        .bind(&system.hostname)
+        .bind(format!("/nix/store/{suffix}-attempt.drv"))
+        .bind(commit_id)
+        .bind(format!("/nix/store/{suffix}-attempt"))
+        .fetch_one(pool)
+        .await
+        .expect("attempt test derivation should persist")
+    }
+
+    async fn attempt_test_scan(
+        pool: &PgPool,
+        derivation_id: i32,
+        scan_id: Uuid,
+        status: &str,
+        created_at: &str,
+        completed_at: Option<&str>,
+    ) {
+        sqlx::query(
+            r#"INSERT INTO cve_scans(
+                 id,derivation_id,scanner_name,status,created_at,evidence_schema_version)
+               VALUES($1,$2,'sc1-attempt',$3,$4::timestamptz,0)"#,
+        )
+        .bind(scan_id)
+        .bind(derivation_id)
+        .bind(if completed_at.is_some() {
+            "in_progress"
+        } else {
+            status
+        })
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .expect("attempt test scan should persist");
+        if let Some(completed_at) = completed_at {
+            sqlx::query(
+                "UPDATE cve_scans SET status='completed',completed_at=$2::timestamptz,evidence_schema_version=1 WHERE id=$1",
+            )
+            .bind(scan_id)
+            .bind(completed_at)
+            .execute(pool)
+            .await
+            .expect("completed attempt should atomically seal its evidence");
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn newest_attempt_keeps_completed_evidence_after_failed_queued_and_scanning(
+        pool: PgPool,
+    ) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (system, commit_id) = inventory_test_system(&pool, &suffix).await;
+        let derivation_id = attempt_test_derivation(&pool, &system, commit_id, &suffix).await;
+        sqlx::query(
+            r#"INSERT INTO system_states(hostname,change_reason,store_path,generation,
+                 generation_matches_current_store_path,timestamp)
+               VALUES($1,'startup',$2,7,true,now())"#,
+        )
+        .bind(&system.hostname)
+        .bind(format!("/nix/store/{suffix}-attempt"))
+        .execute(&pool)
+        .await
+        .expect("running attempt test report should persist");
+
+        let source_id = Uuid::new_v4();
+        attempt_test_scan(
+            &pool,
+            derivation_id,
+            source_id,
+            "completed",
+            "2026-09-23T10:00:00Z",
+            Some("2026-09-23T10:01:00Z"),
+        )
+        .await;
+        for (status, created_at) in [
+            ("failed", "2026-09-23T10:02:00Z"),
+            ("pending", "2026-09-23T10:03:00Z"),
+            ("in_progress", "2026-09-23T10:04:00Z"),
+        ] {
+            let attempt_id = Uuid::new_v4();
+            attempt_test_scan(&pool, derivation_id, attempt_id, status, created_at, None).await;
+            let inventory = fetch_system_cve_inventory(&pool, system.id)
+                .await
+                .expect("the completed source and newest attempt should coexist");
+            assert_eq!(
+                inventory.source.as_ref().map(|source| source.scan_id),
+                Some(source_id)
+            );
+            assert_eq!(
+                inventory.attempt.as_ref().map(|attempt| attempt.scan_id),
+                Some(attempt_id)
+            );
+            assert_eq!(
+                inventory
+                    .attempt
+                    .as_ref()
+                    .map(|attempt| attempt.status.as_str()),
+                Some(status)
+            );
+            assert_eq!(
+                inventory
+                    .attempt
+                    .as_ref()
+                    .map(|attempt| attempt.derivation_id),
+                Some(derivation_id)
+            );
+            assert_eq!(
+                inventory.metadata.total_findings, 0,
+                "a completed clean source remains clean"
+            );
+            assert_eq!(
+                inventory.authority,
+                SystemCveInventoryAuthority::MappedRunning
+            );
+            assert!(inventory.read_only);
+            if status == "pending" {
+                sqlx::query("UPDATE cve_scans SET status='failed' WHERE id=$1")
+                    .bind(attempt_id)
+                    .execute(&pool)
+                    .await
+                    .expect("prior queued attempt must become terminal before a new active scan");
+            }
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn newest_attempt_without_source_is_target_bound_and_orders_timestamp_then_id(
+        pool: PgPool,
+    ) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (system, commit_id) = inventory_test_system(&pool, &suffix).await;
+        let a_id = attempt_test_derivation(&pool, &system, commit_id, &format!("{suffix}-a")).await;
+        let b_commit_id: i32 = sqlx::query_scalar(
+            r#"INSERT INTO commits(
+                 flake_id,git_commit_hash,commit_timestamp,message,author,
+                 evaluation_status,evaluation_completed_at)
+               SELECT flake_id,$1,now(),'attempt B','test','complete',now()
+               FROM commits WHERE id=$2 RETURNING id"#,
+        )
+        .bind(format!("{suffix:b<40}"))
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("second exact target commit should persist");
+        let b_id =
+            attempt_test_derivation(&pool, &system, b_commit_id, &format!("{suffix}-b")).await;
+        let source_id = Uuid::from_u128(0x80);
+        attempt_test_scan(
+            &pool,
+            a_id,
+            source_id,
+            "completed",
+            "2026-09-23T10:00:00Z",
+            Some("2026-09-23T10:01:00Z"),
+        )
+        .await;
+        let a_selection = SystemCveInventoryPageRequest::from_params(SystemCveInventoryParams {
+            target: Some("exact_derivation".to_string()),
+            target_id: Some(a_id.to_string()),
+            ..Default::default()
+        })
+        .expect("A selection should parse");
+        let b_selection = SystemCveInventoryPageRequest::from_params(SystemCveInventoryParams {
+            target: Some("exact_derivation".to_string()),
+            target_id: Some(b_id.to_string()),
+            ..Default::default()
+        })
+        .expect("B selection should parse");
+        for (status, created_at) in [
+            ("failed", "2026-09-23T10:05:00Z"),
+            ("in_progress", "2026-09-23T10:06:00Z"),
+        ] {
+            let attempt_id = Uuid::new_v4();
+            attempt_test_scan(&pool, b_id, attempt_id, status, created_at, None).await;
+            let b = fetch_system_cve_inventory_page(&pool, system.id, &b_selection)
+                .await
+                .expect("B must remain readable without a completed source");
+            assert!(b.source.is_none());
+            assert_eq!(
+                b.attempt.as_ref().map(|attempt| attempt.scan_id),
+                Some(attempt_id)
+            );
+            assert_eq!(
+                b.attempt.as_ref().map(|attempt| attempt.status.as_str()),
+                Some(status)
+            );
+            let a = fetch_system_cve_inventory_page(&pool, system.id, &a_selection)
+                .await
+                .expect("B's newer attempt must not affect A");
+            assert_eq!(
+                a.source.as_ref().map(|source| source.scan_id),
+                Some(source_id)
+            );
+            assert_eq!(
+                a.attempt.as_ref().map(|attempt| attempt.scan_id),
+                Some(source_id)
+            );
+        }
+
+        let earlier_id = Uuid::from_u128(0x91);
+        let later_id = Uuid::from_u128(0x92);
+        attempt_test_scan(
+            &pool,
+            a_id,
+            later_id,
+            "failed",
+            "2026-09-23T10:10:00Z",
+            None,
+        )
+        .await;
+        attempt_test_scan(
+            &pool,
+            a_id,
+            earlier_id,
+            "pending",
+            "2026-09-23T10:10:00Z",
+            None,
+        )
+        .await;
+        let a = fetch_system_cve_inventory_page(&pool, system.id, &a_selection)
+            .await
+            .expect("tie-breaking must be independent of insertion order");
+        assert_eq!(
+            a.source.as_ref().map(|source| source.scan_id),
+            Some(source_id)
+        );
+        assert_eq!(
+            a.attempt.as_ref().map(|attempt| attempt.scan_id),
+            Some(later_id)
+        );
+        assert_eq!(
+            a.attempt.as_ref().map(|attempt| attempt.status.as_str()),
+            Some("failed")
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn current_read_maps_latest_report_to_actionable_scoped_scan_without_artifact(
+        pool: PgPool,
+    ) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (system, commit_id) = inventory_test_system(&pool, &suffix).await;
+        let store_path = format!("/nix/store/{suffix}-running");
+        let derivation_id: i32 = sqlx::query_scalar(
+            r#"INSERT INTO derivations(
+                 derivation_name,derivation_path,derivation_type,commit_id,status_id,
+                 completed_at,store_path)
+               VALUES($1,$2,'nixos',$3,
+                 (SELECT id FROM derivation_statuses WHERE name='build-complete' LIMIT 1),
+                 now(),$4) RETURNING id"#,
+        )
+        .bind(&system.hostname)
+        .bind(format!("/nix/store/{suffix}-running.drv"))
+        .bind(commit_id)
+        .bind(&store_path)
+        .fetch_one(&pool)
+        .await
+        .expect("running derivation should persist");
+
+        let missing_report = fetch_system_cve_inventory(&pool, system.id)
+            .await
+            .expect("missing state should resolve");
+        assert_eq!(
+            missing_report.current_state,
+            Some(SystemCveCurrentAuthorityState::NoRunningReport)
+        );
+        sqlx::query(
+            r#"INSERT INTO system_states(hostname,change_reason,store_path,generation,
+                 generation_matches_current_store_path,timestamp)
+               VALUES($1,'startup',$2,4,true,now())"#,
+        )
+        .bind(&system.hostname)
+        .bind(&store_path)
+        .execute(&pool)
+        .await
+        .expect("reported local activation should persist");
+        let before_scan = fetch_system_cve_inventory(&pool, system.id)
+            .await
+            .expect("known but unscanned target should resolve");
+        assert_eq!(
+            before_scan.current_state,
+            Some(SystemCveCurrentAuthorityState::NoCurrentScan)
+        );
+        assert_eq!(
+            before_scan
+                .running_target
+                .as_ref()
+                .map(|target| target.derivation_id),
+            Some(derivation_id)
+        );
+        assert!(before_scan.source.is_none());
+        assert!(before_scan.read_only);
+
+        let scan_id: Uuid = sqlx::query_scalar(
+            r#"INSERT INTO cve_scans(derivation_id,scanner_name,status)
+               VALUES($1,'sc1-local','in_progress') RETURNING id"#,
+        )
+        .bind(derivation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("scan should persist");
+        sqlx::query(
+            "UPDATE cve_scans SET status='completed', completed_at=now(), evidence_schema_version=1 WHERE id=$1",
+        )
+        .bind(scan_id)
+        .execute(&pool)
+        .await
+        .expect("schema-1 scan should complete");
+        let mapped = fetch_system_cve_inventory(&pool, system.id)
+            .await
+            .expect("mapped scan should remain readable");
+        assert_eq!(mapped.authority, SystemCveInventoryAuthority::Exact);
+        assert_eq!(
+            mapped.current_state,
+            Some(SystemCveCurrentAuthorityState::ExactCurrentScan)
+        );
+        assert_eq!(mapped.exact_authority_failure, None);
+        assert_eq!(
+            mapped.source.as_ref().map(|source| source.scan_id),
+            Some(scan_id)
+        );
+        assert_eq!(
+            mapped
+                .running_target
+                .as_ref()
+                .map(|target| target.derivation_id),
+            Some(derivation_id)
+        );
+        assert!(!mapped.read_only);
+        assert!(
+            mapped.rows.is_empty(),
+            "a completed empty source is not an absent source"
+        );
+
+        let populated_scan_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO cve_scans(derivation_id,scanner_name,status) VALUES($1,'sc1-local','in_progress') RETURNING id",
+        )
+        .bind(derivation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("new mutable scan should persist");
+        for number in [1, 2] {
+            let cve_id = format!("CVE-2099-{number:04}");
+            sqlx::query(
+                "INSERT INTO cves(id,cvss_v3_score,description,published_date) VALUES($1,8.0,'SC1 scan evidence','2099-01-01')",
+            )
+            .bind(&cve_id)
+            .execute(&pool)
+            .await
+            .expect("CVE metadata should persist");
+            sqlx::query(
+                r#"INSERT INTO cve_scan_vulnerability_observations(
+                     scan_id,canonical_cve_id,canonical_package_name,
+                     observed_package_name,observed_package_version,
+                     observed_derivation_path,is_whitelisted,detection_method)
+                   VALUES($1,$2,$3,$3,'1.0',$4,false,'sc1-local')"#,
+            )
+            .bind(populated_scan_id)
+            .bind(&cve_id)
+            .bind(format!("sc1-package-{number}"))
+            .bind(format!("/nix/store/{suffix}-sc1-package-{number}.drv"))
+            .execute(&pool)
+            .await
+            .expect("schema-1 observation should persist");
+        }
+        sqlx::query("UPDATE cve_scans SET status='completed',completed_at=now()+interval '1 minute',evidence_schema_version=1 WHERE id=$1")
+            .bind(populated_scan_id)
+            .execute(&pool)
+            .await
+            .expect("populated scan should seal");
+        let first_request = SystemCveInventoryPageRequest::from_params(SystemCveInventoryParams {
+            limit: Some(1),
+            ..SystemCveInventoryParams::default()
+        })
+        .expect("bounded request should validate");
+        let first_page = fetch_system_cve_inventory_page(&pool, system.id, &first_request)
+            .await
+            .expect("first exact Current page should load");
+        assert_eq!(first_page.authority, SystemCveInventoryAuthority::Exact);
+        assert_eq!(
+            first_page.source.as_ref().map(|source| source.scan_id),
+            Some(populated_scan_id)
+        );
+        assert_eq!(
+            first_page
+                .running_target
+                .as_ref()
+                .map(|target| target.derivation_id),
+            Some(derivation_id)
+        );
+        assert_eq!(first_page.metadata.total_findings, 2);
+        assert_eq!(first_page.rows[0].cve_id, "CVE-2099-0001");
+        assert!(!first_page.read_only && first_page.has_more);
+        let cursor = first_page
+            .next_cursor
+            .clone()
+            .expect("second page should have a cursor");
+        let second_request = SystemCveInventoryPageRequest::from_params(SystemCveInventoryParams {
+            limit: Some(1),
+            after: Some(cursor.clone()),
+            ..SystemCveInventoryParams::default()
+        })
+        .expect("continuation request should validate");
+        let second_page = fetch_system_cve_inventory_page(&pool, system.id, &second_request)
+            .await
+            .expect("same-source continuation should load");
+        assert_eq!(second_page.rows[0].cve_id, "CVE-2099-0002");
+        assert_eq!(second_page.source, first_page.source);
+        assert_eq!(second_page.authority, first_page.authority);
+        assert!(!second_page.has_more);
+
+        let environment_id: Uuid =
+            sqlx::query_scalar("INSERT INTO environments(name) VALUES($1) RETURNING id")
+                .bind(format!("sc1-{suffix}"))
+                .fetch_one(&pool)
+                .await
+                .expect("triage test environment should persist");
+        sqlx::query("UPDATE systems SET environment_id=$2 WHERE id=$1")
+            .bind(system.id)
+            .bind(environment_id)
+            .execute(&pool)
+            .await
+            .expect("triage test system should join the environment");
+        let admin = inventory_test_user(&pool, "admin", true).await;
+        let actor = crate::services::poam::PoamActor {
+            user_id: admin,
+            identifier: admin.to_string(),
+            is_admin: true,
+            can_mutate: true,
+            environment_ids: vec![environment_id],
+            request_origin: None,
+        };
+        let detail = crate::services::poam::system_cve_triage_detail(
+            &pool,
+            &actor,
+            system.id,
+            "CVE-2099-0001",
+            "sc1-package-1",
+        )
+        .await;
+        assert!(
+            detail.is_ok(),
+            "exact Current triage needs no Config artifact"
+        );
+        let mutation = crate::services::poam::triage_system_cve(
+            &pool,
+            &actor,
+            system.id,
+            "CVE-2099-0001",
+            crate::api::models::SystemCveTriageRequest {
+                canonical_package_name: "sc1-package-1".into(),
+                scope: crate::api::models::SystemCveTriageScopeChoice::Host,
+                action: crate::api::models::SystemCveTriageAction::AcceptRisk {
+                    justification: "The risk is accepted for this test only.".into(),
+                    review_date: None,
+                },
+                poam: None,
+            },
+            &crate::services::poam::SystemClock,
+        )
+        .await;
+        assert!(mutation.is_ok(), "exact Current risk decision must save");
+
+        // A later failed scan cannot erase the earlier completed source.
+        let failed_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO cve_scans(derivation_id,scanner_name,status) VALUES($1,'sc1-local','in_progress') RETURNING id",
+        )
+        .bind(derivation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("retry should persist");
+        sqlx::query("UPDATE cve_scans SET status='failed',completed_at=now()+interval '1 minute' WHERE id=$1")
+            .bind(failed_id)
+            .execute(&pool)
+            .await
+            .expect("failed retry should persist");
+        let after_failure = fetch_system_cve_inventory(&pool, system.id)
+            .await
+            .expect("completed evidence must survive failure");
+        assert_eq!(
+            after_failure.source.as_ref().map(|source| source.scan_id),
+            Some(populated_scan_id)
+        );
+        assert_eq!(after_failure.rows.len(), 2);
+
+        let clean_replacement: Uuid = sqlx::query_scalar(
+            "INSERT INTO cve_scans(derivation_id,scanner_name,status) VALUES($1,'sc1-local','in_progress') RETURNING id",
+        )
+        .bind(derivation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("replacement scan should persist");
+        sqlx::query(
+            "UPDATE cve_scans SET status='completed',completed_at=now()+interval '2 minutes',evidence_schema_version=1 WHERE id=$1",
+        )
+        .bind(clean_replacement)
+        .execute(&pool)
+        .await
+        .expect("replacement scan should complete");
+        let changed = fetch_system_cve_inventory_page(&pool, system.id, &second_request)
+            .await
+            .expect_err("old cursor must not page a newer source");
+        assert!(matches!(
+            system_cve_inventory_page_error(&changed),
+            Some(SystemCveInventoryPageError::InventoryChanged)
+        ));
+
+        // An out-of-scope derivation with the same expected output is not a
+        // second authorized target and cannot supply Current evidence.
+        let foreign_suffix = Uuid::new_v4().simple().to_string();
+        let (_, foreign_commit_id) = inventory_test_system(&pool, &foreign_suffix).await;
+        sqlx::query(
+            r#"INSERT INTO derivations(derivation_name,derivation_path,derivation_type,
+                 commit_id,status_id,expected_store_path)
+               VALUES($1,$2,'nixos',$3,
+                 (SELECT id FROM derivation_statuses WHERE name='dry-run-pending' LIMIT 1),$4)"#,
+        )
+        .bind(&system.hostname)
+        .bind(format!("/nix/store/{suffix}-foreign.drv"))
+        .bind(foreign_commit_id)
+        .bind(&store_path)
+        .execute(&pool)
+        .await
+        .expect("foreign derivation should persist");
+        let scoped = fetch_system_cve_inventory(&pool, system.id)
+            .await
+            .expect("foreign flake must not affect Current mapping");
+        assert_eq!(
+            scoped
+                .running_target
+                .as_ref()
+                .map(|target| target.derivation_id),
+            Some(derivation_id)
+        );
+
+        let alternate_hash = "f".repeat(40);
+        let repo_url = format!("https://example.test/cve-inventory-{suffix}.git");
+        insert_commit_with_metadata(
+            &pool,
+            &alternate_hash,
+            &repo_url,
+            Utc::now(),
+            Some("test"),
+            Some("competing output"),
+        )
+        .await
+        .expect("second scoped commit should persist");
+        let alternate_id = get_commit_by_hash(&pool, &alternate_hash)
+            .await
+            .expect("second scoped commit should load")
+            .id;
+        sqlx::query(
+            r#"INSERT INTO derivations(derivation_name,derivation_path,derivation_type,
+                 commit_id,status_id,expected_store_path)
+               VALUES($1,$2,'nixos',$3,
+                 (SELECT id FROM derivation_statuses WHERE name='dry-run-pending' LIMIT 1),$4)"#,
+        )
+        .bind(&system.hostname)
+        .bind(format!("/nix/store/{suffix}-competing.drv"))
+        .bind(alternate_id)
+        .bind(&store_path)
+        .execute(&pool)
+        .await
+        .expect("second scoped derivation should persist");
+        let ambiguous = fetch_system_cve_inventory(&pool, system.id)
+            .await
+            .expect("multiple scoped targets must not select a scan");
+        assert_eq!(
+            ambiguous.current_state,
+            Some(SystemCveCurrentAuthorityState::AmbiguousRunning)
+        );
+        assert!(ambiguous.source.is_none());
+        assert!(ambiguous.running_target.is_none());
+
+        sqlx::query(
+            r#"INSERT INTO system_states(hostname,change_reason,store_path,generation,
+                 generation_matches_current_store_path,timestamp)
+               VALUES($1,'startup',$2,5,true,now()+interval '2 minutes')"#,
+        )
+        .bind(&system.hostname)
+        .bind(format!("/nix/store/{suffix}-unmapped"))
+        .execute(&pool)
+        .await
+        .expect("latest unmapped observation should persist");
+        let unmapped = fetch_system_cve_inventory(&pool, system.id)
+            .await
+            .expect("latest report must not fall back to earlier scan");
+        assert_eq!(
+            unmapped.current_state,
+            Some(SystemCveCurrentAuthorityState::UnmappedRunning)
+        );
+        assert_eq!(unmapped.authority, SystemCveInventoryAuthority::NoScan);
+        assert!(unmapped.source.is_none());
+        assert!(unmapped.running_target.is_none());
     }
 
     // ── Query builder unit tests (pure logic, no DB connection needed) ──
@@ -2487,6 +4006,14 @@ mod tests {
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
     async fn system_inventory_classifies_fallbacks_and_exact_precedence(pool: PgPool) {
         let suffix = Uuid::new_v4().simple().to_string();
+        // `inventory_test_system` reports no `system_states` row at all, so this
+        // system has never established exact current authority. Before the
+        // current-authority fix, `Current` fell back to the newest completed
+        // scan for ANY matching derivation and labeled it `Legacy`. That
+        // substitution is now removed: `Current` never renders a scan the
+        // system is not proven to be running, regardless of what compatibility
+        // evidence exists elsewhere for the same hostname. It must report the
+        // explicit unavailable state instead.
         let (legacy_system, legacy_commit_id) = inventory_test_system(&pool, &suffix).await;
         let legacy_scan = completed_legacy_scan(&pool, &legacy_system, legacy_commit_id).await;
         add_legacy_finding(&pool, legacy_scan, legacy_commit_id, &suffix).await;
@@ -2494,12 +4021,17 @@ mod tests {
         let legacy = fetch_system_cve_inventory(&pool, legacy_system.id)
             .await
             .expect("legacy inventory should load");
-        assert_eq!(legacy.authority, SystemCveInventoryAuthority::Legacy);
+        assert_eq!(legacy.authority, SystemCveInventoryAuthority::NoScan);
+        assert_eq!(legacy.exact_authority_failure, None);
         assert_eq!(
-            legacy.source.as_ref().map(|source| source.scan_id),
-            Some(legacy_scan)
+            legacy.current_state,
+            Some(SystemCveCurrentAuthorityState::NoRunningReport)
         );
-        assert_eq!(legacy.rows.len(), 1, "legacy findings must remain visible");
+        assert!(
+            legacy.source.is_none(),
+            "Current must never substitute a scan from an unproven revision"
+        );
+        assert!(legacy.rows.is_empty());
 
         let duplicate_package_id: i32 = sqlx::query_scalar(
             r#"INSERT INTO derivations(
@@ -2529,27 +4061,31 @@ mod tests {
         .execute(&pool)
         .await
         .expect("duplicate legacy vulnerability should persist");
-        let deduplicated = fetch_system_cve_inventory(&pool, legacy_system.id)
+        // Adding more legacy-only evidence must not change the outcome: with no
+        // proven current identity, Current stays explicitly unavailable rather
+        // than picking up (deduplicated or not) legacy findings.
+        let still_unavailable = fetch_system_cve_inventory(&pool, legacy_system.id)
             .await
-            .expect("deduplicated legacy inventory should load");
-        assert_eq!(deduplicated.rows.len(), 1);
+            .expect("still-unavailable inventory should load");
         assert_eq!(
-            deduplicated.rows[0].canonical_package_name,
-            "legacy-package"
+            still_unavailable.authority,
+            SystemCveInventoryAuthority::NoScan
         );
+        assert!(still_unavailable.source.is_none());
+        assert!(still_unavailable.rows.is_empty());
 
         let clean_suffix = Uuid::new_v4().simple().to_string();
         let (clean_system, clean_commit_id) = inventory_test_system(&pool, &clean_suffix).await;
         completed_legacy_scan(&pool, &clean_system, clean_commit_id).await;
         let clean = fetch_system_cve_inventory(&pool, clean_system.id)
             .await
-            .expect("legacy-clean inventory should load");
-        assert_eq!(clean.authority, SystemCveInventoryAuthority::Legacy);
-        assert!(clean.source.is_some());
+            .expect("clean-system inventory should load");
+        assert_eq!(clean.authority, SystemCveInventoryAuthority::NoScan);
         assert!(
-            clean.rows.is_empty(),
-            "completed scan with no findings is legacy-clean"
+            clean.source.is_none(),
+            "Current must not substitute a legacy scan even when it reports no findings"
         );
+        assert!(clean.rows.is_empty());
 
         let no_scan_suffix = Uuid::new_v4().simple().to_string();
         let (no_scan_system, _) = inventory_test_system(&pool, &no_scan_suffix).await;
@@ -2571,9 +4107,12 @@ mod tests {
         .await
         .expect("legacy fleet inventory should load");
         assert_eq!(legacy_list.len(), 1);
-        assert_eq!(legacy_list[0].affected_count, 1);
+        assert_eq!(legacy_list[0].affected_count, 0);
         assert_eq!(legacy_list[0].exact_affected_count, 0);
         assert_eq!(legacy_list[0].legacy_affected_count, 1);
+        assert_eq!(legacy_list[0].current_affected_count, 0);
+        assert_eq!(legacy_list[0].scheduled_deployment_target_count, 0);
+        assert_eq!(legacy_list[0].historical_inventory_count, 1);
         assert_eq!(legacy_list[0].triage_status, "inventory_only");
         let legacy_systems = fetch_cve_inventory_systems(
             &pool,
@@ -2591,9 +4130,10 @@ mod tests {
         let legacy_stats = fetch_cve_fleet_stats(&pool, &CveReadScope::All)
             .await
             .expect("legacy fleet stats should load");
-        assert_eq!(legacy_stats.systems_affected, 1);
+        assert_eq!(legacy_stats.systems_affected, 0);
         assert_eq!(legacy_stats.exact_systems_affected, 0);
         assert_eq!(legacy_stats.legacy_systems_affected, 1);
+        assert_eq!(legacy_stats.historical_inventory_systems, 1);
         assert_eq!(legacy_stats.no_scan_systems, 1);
 
         let commit = sqlx::query_as::<_, crate::models::commits::Commit>(
@@ -2796,7 +4336,43 @@ mod tests {
             r#"INSERT INTO system_states(
                  hostname,change_reason,store_path,generation,
                  generation_matches_current_store_path,timestamp)
-               VALUES($1,'startup',$2,8,false,now()+interval '1 minute')"#,
+               VALUES($1,'startup',$2,8,true,now()+interval '1 minute')"#,
+        )
+        .bind(&legacy_system.hostname)
+        .bind(&store_path)
+        .execute(&pool)
+        .await
+        .expect("unretained current state should persist");
+        // The reported output uniquely maps to the scanned derivation. Missing
+        // retained Config proof does not downgrade exact Current CVE authority.
+        let unretained = fetch_system_cve_inventory(&pool, legacy_system.id)
+            .await
+            .expect("unretained inventory should report an explicit state");
+        assert_eq!(unretained.authority, SystemCveInventoryAuthority::Exact);
+        assert_eq!(unretained.exact_authority_failure, None);
+        assert_eq!(
+            unretained.current_state,
+            Some(SystemCveCurrentAuthorityState::ExactCurrentScan)
+        );
+        assert_eq!(
+            unretained.source.as_ref().map(|source| source.scan_id),
+            Some(exact_clean_scan_id)
+        );
+        assert_eq!(
+            unretained
+                .running_target
+                .as_ref()
+                .map(|target| target.derivation_id),
+            Some(exact_derivation.id)
+        );
+        assert!(!unretained.read_only);
+        assert!(unretained.rows.is_empty());
+
+        sqlx::query(
+            r#"INSERT INTO system_states(
+                 hostname,change_reason,store_path,generation,
+                 generation_matches_current_store_path,timestamp)
+               VALUES($1,'startup',$2,9,false,now()+interval '2 minutes')"#,
         )
         .bind(&legacy_system.hostname)
         .bind(&store_path)
@@ -2805,15 +4381,16 @@ mod tests {
         .expect("mismatched current state should persist");
         let mismatch = fetch_system_cve_inventory(&pool, legacy_system.id)
             .await
-            .expect("mismatched inventory should fall back");
-        assert_eq!(mismatch.authority, SystemCveInventoryAuthority::Legacy);
+            .expect("mismatched inventory should report an explicit state");
+        assert_eq!(mismatch.authority, SystemCveInventoryAuthority::NoScan);
+        assert_eq!(mismatch.exact_authority_failure, None);
         assert_eq!(
-            mismatch.exact_authority_failure,
-            Some(ExactCveAuthorityFailureReason::CurrentStoreMismatch)
+            mismatch.current_state,
+            Some(SystemCveCurrentAuthorityState::InvalidRunningReport)
         );
-        assert_eq!(
-            mismatch.source.as_ref().map(|source| source.scan_id),
-            Some(exact_clean_scan_id)
+        assert!(
+            mismatch.source.is_none(),
+            "a generation/store mismatch must not fall back to older exact evidence"
         );
         assert!(mismatch.rows.is_empty());
         let mismatched_fleet = fetch_cve_list(
@@ -2849,7 +4426,7 @@ mod tests {
             r#"INSERT INTO evaluation_generation_snapshots(
                  system_id,generation,snapshot_id,derivation_id,commit_id,
                  source_store_path,configuration_name,lineage_verified)
-               VALUES($1,9,$2,$3,$4,$5,$6,false)"#,
+               VALUES($1,10,$2,$3,$4,$5,$6,false)"#,
         )
         .bind(legacy_system.id)
         .bind(snapshot_id)
@@ -2868,7 +4445,7 @@ mod tests {
             r#"INSERT INTO system_states(
                  hostname,change_reason,store_path,generation,
                  generation_matches_current_store_path,timestamp)
-               VALUES($1,'startup',$2,9,true,now()+interval '2 minutes')"#,
+               VALUES($1,'startup',$2,10,true,now()+interval '3 minutes')"#,
         )
         .bind(&legacy_system.hostname)
         .bind(&store_path)
@@ -2877,17 +4454,76 @@ mod tests {
         .expect("unverified-lineage current state should persist");
         let unverified = fetch_system_cve_inventory(&pool, legacy_system.id)
             .await
-            .expect("unverified lineage should fall back");
-        assert_eq!(unverified.authority, SystemCveInventoryAuthority::Legacy);
+            .expect("unverified lineage should report an explicit state");
+        assert_eq!(unverified.authority, SystemCveInventoryAuthority::Exact);
+        assert_eq!(unverified.exact_authority_failure, None);
         assert_eq!(
-            unverified.exact_authority_failure,
-            Some(ExactCveAuthorityFailureReason::LineageUnverified)
+            unverified.current_state,
+            Some(SystemCveCurrentAuthorityState::ExactCurrentScan)
         );
         assert_eq!(
             unverified.source.as_ref().map(|source| source.scan_id),
             Some(exact_clean_scan_id)
         );
+        assert!(!unverified.read_only);
         assert!(unverified.rows.is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "runs in the PostgreSQL server-regressions check"]
+    async fn inventory_candidates_treat_unbuilt_derivation_as_not_current(pool: PgPool) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (system, commit_id) = inventory_test_system(&pool, &suffix).await;
+        let derivation_id: i32 = sqlx::query_scalar(
+            r#"INSERT INTO derivations(
+                 derivation_name,derivation_path,derivation_type,commit_id,status_id)
+               VALUES($1,$2,'nixos',$3,
+                 (SELECT id FROM derivation_statuses WHERE name='dry-run-pending' LIMIT 1))
+               RETURNING id"#,
+        )
+        .bind(&system.hostname)
+        .bind(format!("/nix/store/{suffix}-unbuilt.drv"))
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("unbuilt derivation should persist");
+        sqlx::query(
+            r#"INSERT INTO system_states(
+                 hostname,change_reason,store_path,generation,
+                 generation_matches_current_store_path,timestamp)
+               VALUES($1,'startup',$2,7,true,now())"#,
+        )
+        .bind(&system.hostname)
+        .bind(format!("/nix/store/{suffix}-current"))
+        .execute(&pool)
+        .await
+        .expect("current system state should persist");
+        let admin_id = inventory_test_user(&pool, "admin", true).await;
+
+        let candidates =
+            fetch_authorized_system_cve_inventory_candidates(&pool, system.id, admin_id)
+                .await
+                .expect("candidate query should not decode a nullable boolean")
+                .expect("admin should see the system");
+        let exact = candidates
+            .iter()
+            .find(|candidate| {
+                candidate.selection
+                    == SystemCveInventorySelection::ExactDerivation { derivation_id }
+            })
+            .expect("unbuilt exact derivation candidate");
+
+        assert_eq!(exact.derivation_id, Some(derivation_id));
+        assert!(!exact.is_current);
+        assert!(exact.read_only);
+        assert!(!exact.scan_available);
+        assert!(exact.source.is_none());
+        assert!(exact.evidence_representation.is_none());
+        assert!(candidates.iter().any(|candidate| {
+            candidate.selection == SystemCveInventorySelection::Current
+                && candidate.is_current
+                && !candidate.read_only
+        }));
     }
 
     #[sqlx::test]
@@ -2976,9 +4612,28 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
     async fn system_inventory_paginates_1315_stable_findings(pool: PgPool) {
+        // This test exercises `LEGACY_INVENTORY_CTE` pagination, filtering, and
+        // query-plan shape through `Schema0Projection` evidence. That evidence
+        // representation remains a legitimate historical/`ExactDerivation`
+        // outcome; only the removed `Current`-selection substitution made it
+        // reachable from `Current`. The fixture therefore selects the legacy
+        // derivation directly by `ExactDerivation` instead of relying on
+        // `SystemCveInventoryPageRequest::default()`'s `Current` selection.
         let suffix = Uuid::new_v4().simple().to_string();
         let (system, commit_id) = inventory_test_system(&pool, &suffix).await;
         let scan_id = completed_legacy_scan(&pool, &system, commit_id).await;
+        let legacy_derivation_id: i32 =
+            sqlx::query_scalar("SELECT derivation_id FROM cve_scans WHERE id=$1")
+                .bind(scan_id)
+                .fetch_one(&pool)
+                .await
+                .expect("legacy scan derivation id should load");
+        let default_request = SystemCveInventoryPageRequest {
+            selection: SystemCveInventorySelection::ExactDerivation {
+                derivation_id: legacy_derivation_id,
+            },
+            ..SystemCveInventoryPageRequest::default()
+        };
         sqlx::query(
             r#"INSERT INTO cves(id,cvss_v3_score,description,published_date)
                SELECT 'CVE-2098-' || lpad(value::text,4,'0'),5.0,
@@ -3086,17 +4741,24 @@ mod tests {
             "representative inventory plans must each execute within 10 seconds"
         );
 
-        let legacy_error = fetch_system_cve_inventory(&pool, system.id)
-            .await
-            .expect_err("the complete compatibility response must retain its fixed bound");
+        let legacy_complete = fetch_system_cve_inventory_page(
+            &pool,
+            system.id,
+            &SystemCveInventoryPageRequest {
+                limit: MAX_SYSTEM_CVE_INVENTORY_ROWS,
+                ..default_request.clone()
+            },
+        )
+        .await
+        .expect("bounded complete page should load");
         assert!(
-            is_system_cve_inventory_overflow(&legacy_error),
-            "unexpected legacy inventory error: {legacy_error:#}"
+            legacy_complete.has_more,
+            "the complete compatibility response must retain its fixed bound"
         );
 
         let mut request = SystemCveInventoryPageRequest {
             limit: 500,
-            ..SystemCveInventoryPageRequest::default()
+            ..default_request.clone()
         };
         let mut identities = Vec::new();
         let mut page_count = 0;
@@ -3136,6 +4798,8 @@ mod tests {
                 q: Some("  CVE-2098-0001  ".into()),
                 severity: Some("critical,high".into()),
                 status: Some("fix_available".into()),
+                target: Some("exact_derivation".into()),
+                target_id: Some(legacy_derivation_id.to_string()),
                 ..SystemCveInventoryParams::default()
             })
             .expect("filters should validate"),
@@ -3154,7 +4818,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 limit: 1,
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3166,7 +4830,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 after: Some("not-a-cursor".into()),
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3184,7 +4848,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 after: Some(cursor.clone()),
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3206,7 +4870,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 after: Some(cursor.clone()),
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3225,7 +4889,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 after: Some(cursor),
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3240,7 +4904,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 limit: 1,
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3259,7 +4923,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 after: Some(cursor),
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3274,7 +4938,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 limit: 1,
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3290,7 +4954,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 after: Some(cursor),
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3305,7 +4969,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 limit: 1,
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3323,7 +4987,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 after: Some(cursor),
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3338,7 +5002,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 limit: 1,
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3351,7 +5015,7 @@ mod tests {
             &SystemCveInventoryPageRequest {
                 after: Some(cursor.clone()),
                 severities: vec!["critical".into()],
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
@@ -3367,14 +5031,21 @@ mod tests {
             other_system.id,
             &SystemCveInventoryPageRequest {
                 after: Some(cursor.clone()),
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await
         .expect_err("cross-system cursor must not be accepted");
+        // `default_request`'s `ExactDerivation` selection names a derivation
+        // whose `derivation_name` matches only the original system's
+        // configuration/hostname. For `other_system`, target resolution
+        // therefore fails closed before the cursor is even inspected. This is
+        // an equally non-disclosing rejection; the earlier `Current`-only test
+        // observed `InventoryChanged` instead because Current always resolves
+        // relative to the requesting system's own identity.
         assert_eq!(
             system_cve_inventory_page_error(&cross_system),
-            Some(&SystemCveInventoryPageError::InventoryChanged)
+            Some(&SystemCveInventoryPageError::TargetUnavailable)
         );
         sqlx::query(
             r#"INSERT INTO cve_scans(
@@ -3391,7 +5062,7 @@ mod tests {
             system.id,
             &SystemCveInventoryPageRequest {
                 after: Some(cursor),
-                ..SystemCveInventoryPageRequest::default()
+                ..default_request.clone()
             },
         )
         .await

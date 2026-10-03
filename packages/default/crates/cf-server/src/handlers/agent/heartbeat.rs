@@ -273,14 +273,16 @@ pub async fn log(
             debug!("❌ failed to insert reboot system state: {e:?}");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
-        if let Err(e) = crate::queries::evaluation_snapshots::retain_generation_snapshot_tx(
-            &mut tx,
-            &payload.hostname,
-            payload.generation,
-            payload.store_path.as_deref(),
-            payload.timestamp.unwrap_or_else(chrono::Utc::now),
-        )
-        .await
+        if let Err(e) =
+            crate::queries::evaluation_snapshots::retain_observed_generation_snapshot_tx(
+                &mut tx,
+                &payload.hostname,
+                Some(agent_request.system.id),
+                payload.generation,
+                payload.store_path.as_deref(),
+                payload.timestamp.unwrap_or_else(chrono::Utc::now),
+            )
+            .await
         {
             debug!("failed to retain reboot generation snapshot: {e:?}");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -316,14 +318,16 @@ pub async fn log(
                     debug!("❌ failed to insert system state: {e:?}");
                     return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                 }
-                if let Err(e) = crate::queries::evaluation_snapshots::retain_generation_snapshot_tx(
-                    &mut tx,
-                    &payload.hostname,
-                    payload.generation,
-                    payload.store_path.as_deref(),
-                    payload.timestamp.unwrap_or_else(chrono::Utc::now),
-                )
-                .await
+                if let Err(e) =
+                    crate::queries::evaluation_snapshots::retain_observed_generation_snapshot_tx(
+                        &mut tx,
+                        &payload.hostname,
+                        Some(agent_request.system.id),
+                        payload.generation,
+                        payload.store_path.as_deref(),
+                        payload.timestamp.unwrap_or_else(chrono::Utc::now),
+                    )
+                    .await
                 {
                     debug!("failed to retain generation snapshot: {e:?}");
                     return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -335,6 +339,15 @@ pub async fn log(
     if let Err(e) = tx.commit().await {
         debug!("❌ failed to commit heartbeat transaction: {e:?}");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    // Routine heartbeats do not change Current evidence. A full state row
+    // triggers best-effort membership repair only after its commit succeeds.
+    if force_full_state_for_reboot || heartbeat_or_state.is_err() {
+        crate::services::poam::schedule_scheduled_environment_cve_reconciliation_for_system(
+            &pool,
+            agent_request.system.id,
+        );
     }
 
     // Reconcile system health attention after the heartbeat/state change.

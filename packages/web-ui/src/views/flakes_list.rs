@@ -3642,6 +3642,7 @@ pub fn FlakesListViewNew(initial_query: String) -> Element {
                             " Sync all"
                         }
                         button {
+                            "data-coach-target": "flake",
                             class: "btn btn-primary focus-ring",
                             onclick: move |_| {
                                 show_add_form.set(true);
@@ -4172,7 +4173,9 @@ pub fn FlakesListViewNew(initial_query: String) -> Element {
                             },
                             on_open_build: move |focus: NavigationFocus| {
                                 navigation_focus.set(Some(focus));
-                                nav.push(Route::BuildsView {});
+                                nav.push(Route::BuildsView {
+                                    query: String::new(),
+                                });
                             },
                             on_open_systems: move |focus: NavigationFocus| {
                                 navigation_focus.set(Some(focus));

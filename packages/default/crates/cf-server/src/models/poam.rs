@@ -152,7 +152,7 @@ impl PoamRisk {
 /// Callers provide `assessment_id` for composite-assessment compatibility or
 /// provide `finding_id` and `observation` together for source-neutral evidence.
 /// Mixing or omitting these forms is invalid.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreatePoamRequest {
     /// Identifies a current composite assessment when using the compatibility API.
     #[serde(default)]
@@ -483,7 +483,8 @@ pub struct WaiverView {
 /// Filters, searches, and bounds a POA&M list query.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct PoamListQuery {
-    /// Filters by normalized lifecycle status.
+    /// Filters by normalized lifecycle status; `active` includes every
+    /// non-completed status without changing any persisted lifecycle value.
     pub status: Option<String>,
     /// Filters by normalized risk classification.
     pub risk: Option<String>,
@@ -582,6 +583,53 @@ pub struct PoamSummary {
     pub closed_at: Option<DateTime<Utc>>,
     /// Identifies the verification attempt that closed the POA&M.
     pub closure_attempt_id: Option<Uuid>,
+}
+
+/// Adds page-scoped register context to an existing POA&M summary.
+///
+/// Memberships reflect visible current contexts and immutable assignment
+/// references, not the current catalog version or retired moved-host links.
+#[derive(Debug, Serialize)]
+pub struct PoamRegisterSummary {
+    /// Retains the existing list summary contract.
+    #[serde(flatten)]
+    pub summary: PoamSummary,
+    /// Lists visible environments that own current contexts or schedules.
+    pub environment_ids: Vec<Uuid>,
+    /// Lists visible systems in current finding or assignment context.
+    pub system_ids: Vec<Uuid>,
+    /// Gives visible current host names and their current environment membership.
+    /// Does not include a moved host whose current scope is hidden from the actor.
+    pub systems: Vec<RegisterSystemScope>,
+    /// Lists explicitly linked bundle lineages.
+    pub bundle_ids: Vec<Uuid>,
+    /// Lists explicitly linked immutable bundle versions.
+    pub bundle_version_ids: Vec<Uuid>,
+    /// Lists exact immutable assignment versions, never catalog current versions.
+    pub assignment_version_ids: Vec<Uuid>,
+    /// Gives the first visible observed or closure policy requirement, if any.
+    /// An observation mapping is not proof that it remains current.
+    pub first_requirement: Option<String>,
+    /// Gives the first visible linked canonical CVE identifier, if any.
+    pub first_cve: Option<String>,
+    /// Counts all milestones attached to this visible POA&M.
+    pub milestone_count: i64,
+    /// Counts completed milestones.
+    pub completed_milestone_count: i64,
+    /// Records the latest scope-neutral activity time for non-admin readers.
+    /// Finding-specific activity is omitted rather than exposing hidden context.
+    pub last_activity_at: Option<DateTime<Utc>>,
+}
+
+/// Identifies one actor-visible system in a register page's current context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterSystemScope {
+    /// Identifies the system without using its hostname as an identity key.
+    pub system_id: Uuid,
+    /// Gives the current system hostname.
+    pub hostname: String,
+    /// Gives current environment membership, not historical link-time scope.
+    pub environment_id: Option<Uuid>,
 }
 
 /// Reports active and historical POA&M links for an exact CVE occurrence.
@@ -761,9 +809,11 @@ pub struct CveFindingView {
     pub baseline_scan_id: Uuid,
     /// Records when the immutable baseline scan completed.
     pub baseline_scan_completed_at: DateTime<Utc>,
-    /// Gives the retained deployed generation captured at link time.
+    /// Identifies supplemental retained lineage captured at link time, if available.
+    pub baseline_generation_snapshot_id: Option<Uuid>,
+    /// Gives the observed deployed generation captured at link time.
     pub baseline_generation: i32,
-    /// Gives the retained deployed store path captured at link time.
+    /// Gives the observed deployed store path captured at link time.
     pub baseline_target_store_path: String,
     /// Gives the exact immutable package occurrence captured at link time.
     pub baseline_occurrence_derivation_path: String,
@@ -775,6 +825,12 @@ pub struct CveFindingView {
     pub current_target_store_path: Option<String>,
     /// Identifies the latest completed schema-1 scan for that derivation.
     pub current_scan_id: Option<Uuid>,
+    /// Records when the current exact scan completed, if authority is available.
+    pub current_scan_completed_at: Option<DateTime<Utc>>,
+    /// Gives the observed current generation, if authority is available.
+    pub current_generation: Option<i32>,
+    /// Identifies supplemental retained lineage for Current, if available.
+    pub current_generation_snapshot_id: Option<Uuid>,
     /// Gives the current exact occurrence path when present.
     pub current_occurrence_derivation_path: Option<String>,
     /// Gives the current observed package version when present.
@@ -876,8 +932,8 @@ pub struct CveVerificationItemView {
     pub baseline_scan_derivation_id: i32,
     /// Records when the immutable baseline scan completed.
     pub baseline_scan_completed_at: DateTime<Utc>,
-    /// Identifies the retained generation row used at link time.
-    pub baseline_generation_snapshot_id: Uuid,
+    /// Identifies supplemental verified retained lineage, when available at link time.
+    pub baseline_generation_snapshot_id: Option<Uuid>,
     /// Gives the deployed generation number used at link time.
     pub baseline_generation: i32,
     /// Gives the deployed store path used at link time.
@@ -894,7 +950,7 @@ pub struct CveVerificationItemView {
     pub scan_derivation_id: Option<i32>,
     /// Records when the authoritative scan completed.
     pub scan_completed_at: Option<DateTime<Utc>>,
-    /// Identifies the retained generation row used for current verification.
+    /// Identifies supplemental verified retained lineage, if available for Current.
     pub generation_snapshot_id: Option<Uuid>,
     /// Gives the deployed generation number used for current verification.
     pub generation: Option<i32>,

@@ -1,6 +1,6 @@
 // Compliance view — bundle catalog + per-system control evidence + export
 
-function ComplianceView({ onOpenSystem, onOpenPolicy, selectedBundleId, selectedBundleView, onClearBundle, onClearBundleView, selectedFinding, onClearFinding, onReturn }) {
+function ComplianceView({ onOpenSystem, onOpenPolicy, selectedBundleId, selectedBundleView, onClearBundle, onClearBundleView, selectedFinding, onClearFinding, onReturn, onNavigate }) {
   usePoamStore();
   const [bundleId, setBundleId] = React.useState(null);
   const [focusPolicy, setFocusPolicy] = React.useState(null);
@@ -133,6 +133,7 @@ function ComplianceView({ onOpenSystem, onOpenPolicy, selectedBundleId, selected
           onOpenPolicy={setPolicyDrawerId}
           view={drawerView}
           setView={setDrawerView}
+          onNavigate={onNavigate}
         />
       )}
 
@@ -206,7 +207,8 @@ function scoreDotColor(score) {
 }
 
 function BundleListTable({ bundles, query, setQuery, activeFw, setActiveFw, selectedId, onSelect }) {
-  const [pickerFor, setPickerFor] = React.useState(null);
+  const [expanded, setExpanded] = React.useState(() => new Set());
+  const toggleExpand = (id) => setExpanded(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
   const frameworks = React.useMemo(() => {
     const counts = new Map();
@@ -243,11 +245,12 @@ function BundleListTable({ bundles, query, setQuery, activeFw, setActiveFw, sele
       ) : (
       <table className="sys-table sys-table-fixed">
         <colgroup>
-          <col style={{ width:"38%" }}/><col style={{ width:"16%" }}/><col style={{ width:"18%" }}/>
+          <col style={{ width:"16px" }}/><col style={{ width:"37%" }}/><col style={{ width:"15%" }}/><col style={{ width:"17%" }}/>
           <col style={{ width:"18%" }}/><col style={{ width:"10%" }}/>
         </colgroup>
         <thead>
           <tr>
+            <th></th>
             <th>Bundle</th>
             <th>Framework</th>
             <th>Version</th>
@@ -261,14 +264,24 @@ function BundleListTable({ bundles, query, setQuery, activeFw, setActiveFw, sele
             const multi = g.revisions.length > 1;
             const quick = bundleQuickStats(shown);
             const isSelected = g.revisions.some(r => r.id === selectedId);
+            const isOpen = expanded.has(g.lineageId);
             return (
-              <tr key={g.lineageId} className={isSelected ? "selected" : ""} onClick={() => onSelect(shown.id)}>
+              <React.Fragment key={g.lineageId}>
+              <tr className={isSelected ? "selected" : ""} onClick={() => onSelect(shown.id)}>
+                <td onClick={e => e.stopPropagation()} style={{ textAlign:"center" }}>
+                  {multi && (
+                    <button className="btn-icon focus-ring" style={{ padding:2 }} title={isOpen ? "Hide other versions" : `Show ${g.revisions.length - 1} other version${g.revisions.length - 1 === 1 ? "" : "s"}`}
+                      aria-expanded={isOpen} onClick={() => toggleExpand(g.lineageId)}>
+                      <Icon name={isOpen ? "chevron-down" : "chevron-right"} size={13} style={{ color:"var(--cf-text-muted)" }}/>
+                    </button>
+                  )}
+                </td>
                 <td>
                   <div style={{ display:"flex", alignItems:"center", gap:8, minWidth:0 }}>
                     <span style={{ width:7, height:7, borderRadius:"50%", flexShrink:0, background:scoreDotColor(quick.score) }}/>
                     <span style={{ fontWeight:600, fontSize:13, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", minWidth:0 }}>{g.lineageName}</span>
                   </div>
-                  <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:2 }}>{shown.policyIds.length} controls{multi ? ` · ${g.revisions.length} revisions` : ""}</div>
+                  <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:2 }}>{shown.policyIds.length} controls{multi ? ` · ${g.revisions.length} versions` : ""}</div>
                 </td>
                 <td><span className="chip chip-info">{shown.framework}</span></td>
                 <td>
@@ -277,7 +290,9 @@ function BundleListTable({ bundles, query, setQuery, activeFw, setActiveFw, sele
                 </td>
                 <td>
                   <span className="mono" style={{ fontSize:13, fontWeight:600, color:scoreDotColor(quick.score) }}>{quick.score != null ? `${quick.score}%` : "—"}</span>
-                  <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:2 }}>{quick.systemCount} system{quick.systemCount === 1 ? "" : "s"}</div>
+                  <div style={{ display:"flex", alignItems:"center", gap:4, fontSize:11, color:"var(--cf-text-muted)", marginTop:2 }}>
+                    <Icon name="server" size={10}/> {quick.systemCount} system{quick.systemCount === 1 ? "" : "s"}
+                  </div>
                 </td>
                 <td onClick={e=>e.stopPropagation()} style={{ textAlign:"right" }}>
                   <div className="row-actions" style={{ opacity:1, justifyContent:"flex-end" }}>
@@ -287,26 +302,47 @@ function BundleListTable({ bundles, query, setQuery, activeFw, setActiveFw, sele
                   </div>
                 </td>
               </tr>
+              {isOpen && g.revisions.filter(r => r.id !== shown.id).map(r => {
+                const rq = bundleQuickStats(r);
+                return (
+                  <tr key={r.id} className={`cf-rev-row${r.id === selectedId ? " selected" : ""}`} onClick={() => onSelect(r.id)}>
+                    <td/>
+                    <td>
+                      <div style={{ display:"flex", alignItems:"center", gap:8, minWidth:0, paddingLeft:18 }}>
+                        <Icon name="history" size={11} style={{ color:"var(--cf-text-disabled)", flexShrink:0 }}/>
+                        <span style={{ fontSize:12, color:"var(--cf-text-secondary)" }}>{r.version}</span>
+                      </div>
+                    </td>
+                    <td><span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{r.framework}</span></td>
+                    <td>
+                      <div style={{ marginTop:0 }}><PubStateChip state={r.publicationState}/></div>
+                      <div style={{ fontSize:10, color:"var(--cf-text-muted)", marginTop:3 }}>{r.publishedDate}</div>
+                    </td>
+                    <td>
+                      <span className="mono" style={{ fontSize:12, color:scoreDotColor(rq.score) }}>{rq.score != null ? `${rq.score}%` : "—"}</span>
+                      <div style={{ display:"flex", alignItems:"center", gap:4, fontSize:10.5, color:"var(--cf-text-muted)", marginTop:2 }}>
+                        <Icon name="server" size={9}/> {rq.systemCount} system{rq.systemCount === 1 ? "" : "s"}
+                      </div>
+                    </td>
+                    <td onClick={e=>e.stopPropagation()} style={{ textAlign:"right" }}>
+                      <button className="btn-icon focus-ring" title="View this version" onClick={() => onSelect(r.id)}>
+                        <Icon name="arrow-right" size={13}/>
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+              </React.Fragment>
             );
           })}
         </tbody>
       </table>
       )}
-      {pickerFor && (
-        <RevisionPickerModal
-          title={pickerFor.lineageName}
-          revisions={pickerFor.revisions}
-          currentId={pickerFor.current.id}
-          selectedId={selectedId}
-          onSelect={(id) => { onSelect(id); setPickerFor(null); }}
-          onClose={() => setPickerFor(null)}
-        />
-      )}
     </div>
   );
 }
 
-function BundleDetailDrawer({ bundle, stats, filter, setFilter, applicableSystems, onClose, onEdit, onSelectRevision, onOpenSystem, onOpenPolicy, view, setView }) {
+function BundleDetailDrawer({ bundle, stats, filter, setFilter, applicableSystems, onClose, onEdit, onSelectRevision, onOpenSystem, onOpenPolicy, view, setView, onNavigate }) {
   const lineage = React.useMemo(() => groupBundlesByLineage(COMPLIANCE_BUNDLES).find(g => g.revisions.some(r => r.id === bundle.id)), [bundle.id]);
   const [revisionsOpen, setRevisionsOpen] = React.useState(false);
   const [maximized, setMaximized] = React.useState(false);
@@ -414,7 +450,7 @@ function BundleDetailDrawer({ bundle, stats, filter, setFilter, applicableSystem
           </div>
 
           <div style={{ borderTop:"1px solid var(--cf-divider)" }}>
-            <BundlePoamRollup bundle={bundle} failCount={stats.fail} onOpenList={()=>setView("poam")}/>
+            <BundlePoamRollup bundle={bundle} failCount={stats.fail} onOpenList={()=>setView("poam")} onNavigate={onNavigate}/>
           </div>
 
           <div style={{ borderTop:"1px solid var(--cf-divider)" }}>

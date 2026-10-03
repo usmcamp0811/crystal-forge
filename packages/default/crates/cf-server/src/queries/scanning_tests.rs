@@ -4,9 +4,11 @@
 //! `DATABASE_URL=... cargo test -p crystal-forge --lib scanning_tests -- --ignored`
 
 use crate::queries::scanning::{
-    ScanSchedulePolicyRow, get_scan_activity, get_scan_deployed, get_scan_queue,
-    get_scan_queue_for_system, get_scan_schedule_policy, get_scan_stats, get_scan_systems,
-    update_scan_schedule_policy,
+    ScanRecordCollection, ScanRecordDirection, ScanRecordRequest, ScanRecordRevision,
+    ScanRecordSort, ScanRecordStatus, ScanSchedulePolicyRow, get_post_build_recovery_window,
+    get_scan_activity, get_scan_deployed, get_scan_queue, get_scan_queue_for_system,
+    get_scan_records, get_scan_schedule_policy, get_scan_stats, get_scan_systems,
+    set_scan_archive_state, update_scan_schedule_policy, update_scan_schedule_policy_with_recovery,
 };
 use futures::FutureExt;
 use serial_test::serial;
@@ -21,6 +23,22 @@ async fn test_pool_from_env() -> PgPool {
         .expect("failed to connect to DATABASE_URL")
 }
 
+fn completed_request(include_archived: bool, limit: u16) -> ScanRecordRequest {
+    ScanRecordRequest {
+        collection: ScanRecordCollection::Completed,
+        include_archived,
+        system_id: None,
+        limit,
+        search: None,
+        status: ScanRecordStatus::All,
+        revision: ScanRecordRevision::All,
+        latest_only: false,
+        sort: ScanRecordSort::Timestamp,
+        direction: ScanRecordDirection::Desc,
+        after: None,
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires live database connection"]
 #[serial(scan_schedule_policy)]
@@ -31,6 +49,9 @@ async fn schedule_policy_round_trips() {
     let original = get_scan_schedule_policy(&pool)
         .await
         .expect("should read existing policy");
+    let original_window = get_post_build_recovery_window(&pool)
+        .await
+        .expect("should read existing recovery window");
 
     let updated = ScanSchedulePolicyRow {
         on_build: !original.on_build,
@@ -43,9 +64,42 @@ async fn schedule_policy_round_trips() {
     };
 
     let assertions = std::panic::AssertUnwindSafe(async {
-        update_scan_schedule_policy(&pool, &updated)
+        update_scan_schedule_policy_with_recovery(&pool, &updated, Some("7d"))
             .await
             .expect("should update policy");
+        assert_eq!(get_post_build_recovery_window(&pool).await.unwrap(), "7d");
+
+        update_scan_schedule_policy(&pool, &updated)
+            .await
+            .expect("legacy update should preserve recovery window");
+        assert_eq!(get_post_build_recovery_window(&pool).await.unwrap(), "7d");
+
+        let (new_client, old_client) = tokio::join!(
+            update_scan_schedule_policy_with_recovery(&pool, &updated, Some("48h")),
+            update_scan_schedule_policy(&pool, &updated),
+        );
+        new_client.expect("new client update should succeed");
+        old_client.expect("concurrent old client update should succeed");
+        assert_eq!(get_post_build_recovery_window(&pool).await.unwrap(), "48h");
+
+        assert!(
+            update_scan_schedule_policy_with_recovery(&pool, &updated, Some("0h"))
+                .await
+                .is_err(),
+            "database should reject a zero recovery window"
+        );
+        assert!(
+            update_scan_schedule_policy_with_recovery(&pool, &updated, Some("never"))
+                .await
+                .is_err(),
+            "database should reject non-hour/day windows"
+        );
+        assert!(
+            update_scan_schedule_policy_with_recovery(&pool, &updated, Some("36501d"))
+                .await
+                .is_err(),
+            "database should reject intervals beyond the bounded range"
+        );
 
         let read_back = get_scan_schedule_policy(&pool)
             .await
@@ -72,7 +126,8 @@ async fn schedule_policy_round_trips() {
             archived_interval = $4,
             archived_enabled = $5,
             rebuild_to_scan = $6,
-            updated_at = $7
+            updated_at = $7,
+            post_build_recovery_window = $8
         WHERE id = 1
         "#,
     )
@@ -83,6 +138,7 @@ async fn schedule_policy_round_trips() {
     .bind(original.archived_enabled)
     .bind(original.rebuild_to_scan)
     .bind(original.updated_at)
+    .bind(&original_window)
     .execute(&pool)
     .await
     .expect("should restore exact original policy");
@@ -102,10 +158,1055 @@ async fn stats_aggregation_is_internally_consistent() {
     // All counts are non-negative and coverage is a percentage.
     assert!(stats.scanning >= 0);
     assert!(stats.queued >= 0);
+    assert!(stats.awaiting_build >= 0);
+    assert!(stats.awaiting_closure >= 0);
     assert!(stats.stale >= 0);
     assert!(stats.never_scanned >= 0);
     assert!(stats.failed >= 0);
     assert!((0..=100).contains(&stats.coverage_percent));
+}
+
+/// Proves that the operational denominator does not consume ancient history,
+/// and that archive state affects failures but not completed scan evidence.
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+async fn scan_stats_scope_recovery_archive_and_history(pool: PgPool) {
+    sqlx::query("UPDATE scan_schedule_policy SET on_build = TRUE, deployed_interval = '1d', post_build_recovery_window = '48h' WHERE id = 1")
+        .execute(&pool)
+        .await
+        .expect("test policy should persist");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let hostname = format!("stats-{suffix}");
+    let store_path = format!("/nix/store/{suffix}-current");
+    let flake_id: i32 = sqlx::query_scalar(
+        "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+    )
+    .bind(&hostname)
+    .bind(format!("https://example.test/{hostname}.git"))
+    .fetch_one(&pool)
+    .await
+    .expect("flake should persist");
+    let commit_id: i32 = sqlx::query_scalar(
+        "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, $2, NOW()) RETURNING id",
+    )
+    .bind(flake_id)
+    .bind(&suffix)
+    .fetch_one(&pool)
+    .await
+    .expect("commit should persist");
+    let mut derivations = Vec::new();
+    for (name, path) in [
+        (hostname.clone(), store_path.clone()),
+        (
+            format!("recent-{suffix}"),
+            format!("/nix/store/{suffix}-recent"),
+        ),
+        (
+            format!("ancient-{suffix}"),
+            format!("/nix/store/{suffix}-ancient"),
+        ),
+        (
+            format!("active-{suffix}"),
+            format!("/nix/store/{suffix}-active"),
+        ),
+    ] {
+        let id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (derivation_type, derivation_name, commit_id, store_path, status_id, attempt_count) VALUES ('nixos', $1, $2, $3, (SELECT id FROM derivation_statuses WHERE name = 'build-complete' LIMIT 1), 0) RETURNING id",
+        )
+        .bind(name)
+        .bind(commit_id)
+        .bind(path)
+        .fetch_one(&pool)
+        .await
+        .expect("derivation should persist");
+        derivations.push(id);
+    }
+    let [current, recent, ancient, active] =
+        <[i32; 4]>::try_from(derivations).expect("four derivations");
+    sqlx::query("INSERT INTO systems (hostname, is_active, public_key, derivation, system_configuration_name, deployment_policy, flake_id) VALUES ($1, TRUE, 'test-key', '', $1, 'manual', $2)")
+        .bind(&hostname)
+        .bind(flake_id)
+        .execute(&pool)
+        .await
+        .expect("current system should persist");
+    sqlx::query("INSERT INTO system_states (hostname, store_path, change_reason, timestamp) VALUES ($1, $2, 'config_change', NOW())")
+        .bind(&hostname)
+        .bind(&store_path)
+        .execute(&pool)
+        .await
+        .expect("latest state should persist");
+
+    // A failed attempt does not supersede a later successful build. Only the
+    // successful job completion time supplies the recovery clock.
+    sqlx::query("INSERT INTO build_jobs (derivation_id, status, created_at, completed_at) VALUES ($1, 'failed', NOW() - INTERVAL '2 days', NOW() - INTERVAL '2 days'), ($1, 'success', NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour')")
+        .bind(recent)
+        .execute(&pool)
+        .await
+        .expect("recovered build should persist");
+    sqlx::query("INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW() - INTERVAL '30 days')")
+        .bind(ancient)
+        .execute(&pool)
+        .await
+        .expect("ancient build should persist");
+    let recent_failure: Uuid = sqlx::query_scalar("INSERT INTO cve_scans (derivation_id, scanner_name, status, completed_at) VALUES ($1, 'vulnix', 'failed', NOW()) RETURNING id")
+        .bind(recent)
+        .fetch_one(&pool)
+        .await
+        .expect("recent failure should persist");
+    sqlx::query("INSERT INTO cve_scans (derivation_id, scanner_name, status, completed_at) VALUES ($1, 'vulnix', 'failed', NOW() - INTERVAL '29 days')")
+        .bind(ancient)
+        .execute(&pool)
+        .await
+        .expect("ancient failure should remain history");
+    sqlx::query("INSERT INTO cve_scans (derivation_id, scanner_name, status) VALUES ($1, 'vulnix', 'pending')")
+        .bind(active)
+        .execute(&pool)
+        .await
+        .expect("active scan should persist");
+    let initial = get_scan_stats(&pool)
+        .await
+        .expect("initial stats should load");
+    assert_eq!(
+        (
+            initial.never_scanned,
+            initial.failed,
+            initial.coverage_percent
+        ),
+        (3, 1, 0)
+    );
+    assert_eq!(initial.queued, 1);
+
+    let evidence: Uuid = sqlx::query_scalar("INSERT INTO cve_scans (derivation_id, scanner_name, status, completed_at) VALUES ($1, 'vulnix', 'completed', NOW() - INTERVAL '2 days') RETURNING id")
+        .bind(current)
+        .fetch_one(&pool)
+        .await
+        .expect("current completed evidence should persist");
+    let actor_id: Uuid = sqlx::query_scalar("INSERT INTO users (username, first_name, last_name, email) VALUES ($1, 'Scan', 'Admin', $2) RETURNING id")
+        .bind(format!("stats-admin-{suffix}"))
+        .bind(format!("stats-admin-{suffix}@example.test"))
+        .fetch_one(&pool)
+        .await
+        .expect("archive actor should persist");
+    assert_eq!(
+        set_scan_archive_state(&pool, &[recent_failure, evidence], true, actor_id)
+            .await
+            .expect("archive should succeed"),
+        2
+    );
+    let archived = get_scan_stats(&pool)
+        .await
+        .expect("archived stats should load");
+    assert_eq!(
+        (
+            archived.never_scanned,
+            archived.failed,
+            archived.coverage_percent,
+            archived.stale
+        ),
+        (2, 0, 33, 1)
+    );
+    sqlx::query("UPDATE scan_schedule_policy SET deployed_interval = 'never' WHERE id = 1")
+        .execute(&pool)
+        .await
+        .expect("disabled deployed freshness should persist");
+    assert_eq!(get_scan_stats(&pool).await.unwrap().stale, 0);
+
+    let later_failure: Uuid = sqlx::query_scalar("INSERT INTO cve_scans (derivation_id, scanner_name, status, completed_at) VALUES ($1, 'vulnix', 'failed', NOW()) RETURNING id")
+        .bind(current)
+        .fetch_one(&pool)
+        .await
+        .expect("later failed retry should persist");
+    let retry = get_scan_stats(&pool)
+        .await
+        .expect("retry stats should load");
+    assert_eq!(
+        (retry.never_scanned, retry.failed, retry.coverage_percent),
+        (2, 1, 33)
+    );
+    sqlx::query("UPDATE build_jobs SET completed_at = NOW() - INTERVAL '3 days' WHERE derivation_id = $1 AND status = 'success'")
+        .bind(recent)
+        .execute(&pool)
+        .await
+        .expect("recovery deadline should pass");
+    let expired = get_scan_stats(&pool)
+        .await
+        .expect("expired stats should load");
+    assert_eq!(
+        (
+            expired.never_scanned,
+            expired.failed,
+            expired.coverage_percent
+        ),
+        (1, 1, 50)
+    );
+    sqlx::query("INSERT INTO cve_scans (derivation_id, scanner_name, status, source_trigger, completed_at) VALUES ($1, 'vulnix', 'completed', 'manual', NOW())")
+        .bind(current)
+        .execute(&pool)
+        .await
+        .expect("later manual scan should complete");
+    sqlx::query("UPDATE cve_scans SET completed_at = NOW() + INTERVAL '1 minute' WHERE id = $1")
+        .bind(later_failure)
+        .execute(&pool)
+        .await
+        .expect("old failed obligation should terminalize after later success");
+    assert_eq!(
+        get_scan_stats(&pool).await.unwrap().failed,
+        0,
+        "late post-build terminalization cannot supersede newer manual evidence"
+    );
+    let reused_derivation: i32 = sqlx::query_scalar(
+        "INSERT INTO derivations (derivation_type, derivation_name, commit_id, store_path, status_id, attempt_count) VALUES ('nixos', $1, $2, $3, (SELECT id FROM derivation_statuses WHERE name = 'build-complete' LIMIT 1), 0) RETURNING id",
+    )
+    .bind(format!("reused-{suffix}"))
+    .bind(commit_id)
+    .bind(format!("/nix/store/{suffix}-reused"))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let old_job: Uuid = sqlx::query_scalar(
+        "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW() - INTERVAL '1 day') RETURNING id",
+    )
+    .bind(reused_derivation)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO cve_scans (derivation_id, scanner_name, status, source_trigger, completed_build_job_id, completed_at) VALUES ($1, 'vulnix', 'completed', 'post_build', $2, NOW() - INTERVAL '1 hour')")
+        .bind(reused_derivation)
+        .bind(old_job)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW())")
+        .bind(reused_derivation)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO cve_scans (derivation_id, scanner_name, status, source_trigger, completed_at) VALUES ($1, 'vulnix', 'failed', 'post_build', NOW())")
+        .bind(reused_derivation)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let replacement = get_scan_stats(&pool).await.unwrap();
+    assert_eq!(
+        (
+            replacement.failed,
+            replacement.never_scanned,
+            replacement.coverage_percent
+        ),
+        (1, 1, 67),
+        "a new build remains operational even when its predecessor has completed evidence"
+    );
+    let history = get_scan_records(&pool, &completed_request(true, 50))
+        .await
+        .expect("history should load");
+    assert!(
+        history
+            .rows
+            .iter()
+            .any(|row| row.scan_id == evidence && row.archived_at.is_some())
+    );
+    assert!(
+        history
+            .rows
+            .iter()
+            .any(|row| row.scan_id == recent_failure && row.archived_at.is_some())
+    );
+    assert!(history.rows.iter().any(|row| row.scan_id == later_failure));
+}
+
+/// Ensures exact prerequisites use build provenance, preserve trigger
+/// provenance, and never advance from a persisted output identity alone.
+#[tokio::test]
+#[ignore = "requires live database connection"]
+async fn waiting_scan_promotes_through_exact_prerequisites() {
+    use crate::queries::cve_scans::{
+        claim_queued_cve_scans, enqueue_exact_cve_scan, promote_waiting_cve_scans,
+        requeue_cve_scan_execution,
+    };
+
+    let pool = test_pool_from_env().await;
+    let suffix = Uuid::new_v4().simple().to_string();
+    let builder_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO builders (id, name, public_key, arch) VALUES ($1, $2, $3, 'x86_64-linux')",
+    )
+    .bind(builder_id)
+    .bind(format!("waiting-builder-{suffix}"))
+    .bind(format!("waiting-key-{suffix}"))
+    .execute(&pool)
+    .await
+    .expect("remote builder should be inserted");
+    let derivation_id: i32 = sqlx::query_scalar(
+        "INSERT INTO derivations (derivation_type, derivation_name, status_id, attempt_count) VALUES ('nixos', $1, 3, 0) RETURNING id",
+    )
+    .bind(format!("waiting-lifecycle-{suffix}"))
+    .fetch_one(&pool)
+    .await
+    .expect("waiting derivation should be inserted");
+    let outcome = enqueue_exact_cve_scan(&pool, derivation_id, "vulnix", None)
+        .await
+        .expect("exact waiting scan should enqueue")
+        .expect("NixOS derivation should be eligible");
+    let state: (String, Option<String>) =
+        sqlx::query_as("SELECT status, source_trigger FROM cve_scans WHERE id = $1")
+            .bind(outcome.scan_id)
+            .fetch_one(&pool)
+            .await
+            .expect("waiting scan state should load");
+    assert_eq!(
+        state,
+        ("awaiting_build".to_string(), Some("manual".to_string()))
+    );
+
+    sqlx::query("UPDATE derivations SET store_path = $2 WHERE id = $1")
+        .bind(derivation_id)
+        .bind(format!("/nix/store/{suffix}-system"))
+        .execute(&pool)
+        .await
+        .expect("output identity should become available without its derivation");
+    assert_eq!(
+        promote_waiting_cve_scans(&pool, 10)
+            .await
+            .expect("incomplete build identity should not promote"),
+        0
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM cve_scans WHERE id = $1")
+        .bind(outcome.scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("incomplete waiting state should load");
+    assert_eq!(status, "awaiting_build");
+
+    sqlx::query("UPDATE derivations SET derivation_path = $2 WHERE id = $1")
+        .bind(derivation_id)
+        .bind(format!("/nix/store/{suffix}.drv"))
+        .execute(&pool)
+        .await
+        .expect("recorded derivation identity should become available");
+    sqlx::query(
+        "INSERT INTO build_jobs (derivation_id, builder_id, status, completed_at) VALUES ($1, $2, 'success', NOW())",
+    )
+    .bind(derivation_id)
+    .bind(builder_id)
+    .execute(&pool)
+    .await
+    .expect("remote build provenance should be inserted");
+    assert_eq!(
+        promote_waiting_cve_scans(&pool, 10)
+            .await
+            .expect("remote build prerequisite should promote"),
+        1
+    );
+    let state: (String, Option<String>) =
+        sqlx::query_as("SELECT status, source_trigger FROM cve_scans WHERE id = $1")
+            .bind(outcome.scan_id)
+            .fetch_one(&pool)
+            .await
+            .expect("closure wait state should load");
+    assert_eq!(
+        state,
+        ("awaiting_closure".to_string(), Some("manual".to_string()))
+    );
+
+    let cache_name = format!("waiting-cache-{suffix}");
+    sqlx::query(
+        "INSERT INTO cache_destinations (name, cache_type, push_to) VALUES ($1, 'Nix', $2)",
+    )
+    .bind(&cache_name)
+    .bind(format!("https://cache.example.test/{suffix}"))
+    .execute(&pool)
+    .await
+    .expect("cache destination should be inserted");
+    sqlx::query(
+        "INSERT INTO cache_push_jobs (derivation_id, status, completed_at, cache_destination) VALUES ($1, 'completed', NOW(), $2)",
+    )
+    .bind(derivation_id)
+    .bind(&cache_name)
+    .execute(&pool)
+    .await
+    .expect("completed closure publication should be inserted");
+    let first_pool = pool.clone();
+    let second_pool = pool.clone();
+    let (first_promotion, second_promotion) = tokio::join!(
+        promote_waiting_cve_scans(&first_pool, 10),
+        promote_waiting_cve_scans(&second_pool, 10),
+    );
+    assert_eq!(
+        first_promotion.expect("first closure promoter should succeed")
+            + second_promotion.expect("second closure promoter should succeed"),
+        1,
+        "concurrent promoters must advance the waiting row exactly once"
+    );
+    sqlx::query("UPDATE cve_scans SET created_at = '1800-01-01'::timestamptz WHERE id = $1")
+        .bind(outcome.scan_id)
+        .execute(&pool)
+        .await
+        .expect("fixture should be first in the shared pending queue");
+    let claims = claim_queued_cve_scans(&pool, 1)
+        .await
+        .expect("runnable scan should be claimable");
+    let claim = claims
+        .into_iter()
+        .find(|claim| claim.scan_id == outcome.scan_id)
+        .expect("exact waiting scan should be claimed");
+    assert!(
+        requeue_cve_scan_execution(&pool, claim.scan_id, claim.execution_id, "test")
+            .await
+            .expect("owned scan should requeue")
+    );
+    let state: (String, Option<String>) =
+        sqlx::query_as("SELECT status, source_trigger FROM cve_scans WHERE id = $1")
+            .bind(outcome.scan_id)
+            .fetch_one(&pool)
+            .await
+            .expect("requeued scan state should load");
+    assert_eq!(state, ("pending".to_string(), Some("manual".to_string())));
+
+    sqlx::query("DELETE FROM cve_scans WHERE derivation_id = $1")
+        .bind(derivation_id)
+        .execute(&pool)
+        .await
+        .expect("scan fixture should be deleted");
+    sqlx::query("DELETE FROM cache_push_jobs WHERE derivation_id = $1")
+        .bind(derivation_id)
+        .execute(&pool)
+        .await
+        .expect("cache fixture should be deleted");
+    sqlx::query("DELETE FROM build_jobs WHERE derivation_id = $1")
+        .bind(derivation_id)
+        .execute(&pool)
+        .await
+        .expect("build job fixture should be deleted");
+    sqlx::query("DELETE FROM derivations WHERE id = $1")
+        .bind(derivation_id)
+        .execute(&pool)
+        .await
+        .expect("derivation fixture should be deleted");
+    sqlx::query("DELETE FROM cache_destinations WHERE name = $1")
+        .bind(&cache_name)
+        .execute(&pool)
+        .await
+        .expect("cache destination fixture should be deleted");
+    sqlx::query("DELETE FROM builders WHERE id = $1")
+        .bind(builder_id)
+        .execute(&pool)
+        .await
+        .expect("builder fixture should be deleted");
+}
+
+/// Ensures a server-local build is runnable before cache publication.
+#[tokio::test]
+#[ignore = "requires live database connection"]
+async fn local_build_without_cache_enqueues_as_pending() {
+    use crate::queries::cve_scans::enqueue_exact_cve_scan;
+
+    let pool = test_pool_from_env().await;
+    let suffix = Uuid::new_v4().simple().to_string();
+    let derivation_id: i32 = sqlx::query_scalar(
+        r#"
+        INSERT INTO derivations (
+            derivation_type, derivation_name, derivation_path, store_path,
+            status_id, completed_at, attempt_count
+        ) VALUES ('nixos', $1, $2, $3, 5, NOW(), 0)
+        RETURNING id
+        "#,
+    )
+    .bind(format!("local-scan-{suffix}"))
+    .bind(format!("/nix/store/{suffix}.drv"))
+    .bind(format!("/nix/store/{suffix}-system"))
+    .fetch_one(&pool)
+    .await
+    .expect("local derivation should be inserted");
+
+    let outcome = enqueue_exact_cve_scan(&pool, derivation_id, "vulnix", None)
+        .await
+        .expect("local scan should enqueue")
+        .expect("local NixOS derivation should be eligible");
+    let status: String = sqlx::query_scalar("SELECT status FROM cve_scans WHERE id = $1")
+        .bind(outcome.scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("local scan status should load");
+    assert_eq!(status, "pending");
+
+    sqlx::query("DELETE FROM cve_scans WHERE derivation_id = $1")
+        .bind(derivation_id)
+        .execute(&pool)
+        .await
+        .expect("local scan fixture should be deleted");
+    sqlx::query("DELETE FROM derivations WHERE id = $1")
+        .bind(derivation_id)
+        .execute(&pool)
+        .await
+        .expect("local derivation fixture should be deleted");
+}
+
+/// Ensures terminal archive state is separate, idempotent, and reflected in
+/// complete history metadata.
+#[tokio::test]
+#[ignore = "requires live database connection"]
+async fn terminal_archive_filters_and_restores_without_mutating_scan() {
+    let pool = test_pool_from_env().await;
+    let suffix = Uuid::new_v4().simple().to_string();
+    let actor_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (username, first_name, last_name, email) VALUES ($1, 'Scan', 'Admin', $2) RETURNING id",
+    )
+    .bind(format!("scan-admin-{suffix}"))
+    .bind(format!("scan-admin-{suffix}@example.test"))
+    .fetch_one(&pool)
+    .await
+    .expect("archive actor should be inserted");
+    let derivation_id: i32 = sqlx::query_scalar(
+        "INSERT INTO derivations (derivation_type, derivation_name, status_id, attempt_count) VALUES ('nixos', $1, 5, 0) RETURNING id",
+    )
+    .bind(format!("archive-scan-{suffix}"))
+    .fetch_one(&pool)
+    .await
+    .expect("archive derivation should be inserted");
+    let scan_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO cve_scans (derivation_id, scanner_name, status, source_trigger, completed_at, scan_metadata) VALUES ($1, 'vulnix', 'failed', $2, NOW(), jsonb_build_object('error', 'safe failure', 'execution_started_at', NOW() - INTERVAL '1 minute')) RETURNING id",
+    )
+    .bind(derivation_id)
+    .bind("future-trigger")
+    .fetch_one(&pool)
+    .await
+    .expect("terminal scan should be inserted");
+
+    assert_eq!(
+        set_scan_archive_state(&pool, &[scan_id], true, actor_id)
+            .await
+            .expect("terminal scan should archive"),
+        1
+    );
+    assert_eq!(
+        set_scan_archive_state(&pool, &[scan_id], true, actor_id)
+            .await
+            .expect("archive retry should be idempotent"),
+        0
+    );
+    let visible = get_scan_records(&pool, &completed_request(false, 500))
+        .await
+        .expect("visible completed records should load");
+    assert!(visible.rows.iter().all(|row| row.scan_id != scan_id));
+    assert!(visible.hidden_archived >= 1);
+    let all = get_scan_records(&pool, &completed_request(true, 500))
+        .await
+        .expect("archived completed records should load");
+    let archived = all
+        .rows
+        .iter()
+        .find(|row| row.scan_id == scan_id)
+        .expect("archived scan should be returned explicitly");
+    assert!(archived.archived_at.is_some());
+    assert_eq!(archived.source_trigger.as_deref(), Some("future-trigger"));
+    assert!(!archived.cancellable);
+    assert_eq!(archived.failure.as_deref(), Some("safe failure"));
+    assert!(archived.started_at.is_some());
+
+    assert_eq!(
+        set_scan_archive_state(&pool, &[scan_id], false, actor_id)
+            .await
+            .expect("terminal scan should restore"),
+        1
+    );
+    assert_eq!(
+        set_scan_archive_state(&pool, &[scan_id], false, actor_id)
+            .await
+            .expect("restore retry should be idempotent"),
+        0
+    );
+    let restored = get_scan_records(&pool, &completed_request(false, 500))
+        .await
+        .expect("restored completed records should load");
+    assert!(restored.rows.iter().any(|row| row.scan_id == scan_id));
+
+    sqlx::query("DELETE FROM cve_scans WHERE id = $1")
+        .bind(scan_id)
+        .execute(&pool)
+        .await
+        .expect("terminal scan fixture should be deleted");
+    sqlx::query("DELETE FROM derivations WHERE id = $1")
+        .bind(derivation_id)
+        .execute(&pool)
+        .await
+        .expect("archive derivation should be deleted");
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(actor_id)
+        .execute(&pool)
+        .await
+        .expect("archive actor should be deleted");
+}
+
+async fn walk_completed_pages(
+    pool: &PgPool,
+    mut request: ScanRecordRequest,
+) -> Vec<crate::queries::scanning::ScanRecordRow> {
+    let mut rows = Vec::new();
+    loop {
+        let page = get_scan_records(pool, &request)
+            .await
+            .expect("completed page should load");
+        rows.extend(page.rows);
+        if !page.has_more {
+            assert!(page.next_cursor.is_none());
+            break;
+        }
+        request.after = page.next_cursor;
+    }
+    rows
+}
+
+/// Proves production-scale terminal pagination, full-collection filters,
+/// archive coherence, cursor binding, and supporting index availability.
+#[sqlx::test]
+#[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+async fn completed_scan_pages_are_global_stable_and_filterable(pool: PgPool) {
+    let suffix = Uuid::new_v4().simple().to_string();
+    let flake_id: i32 = sqlx::query_scalar(
+        "INSERT INTO flakes (name, repo_url, branch, snapshot_ready_at) VALUES ($1, $2, 'main', NOW()) RETURNING id",
+    )
+    .bind(format!("pagination-flake-{suffix}"))
+    .bind(format!("https://example.test/pagination-{suffix}.git"))
+    .fetch_one(&pool)
+    .await
+    .expect("pagination flake should persist");
+    let latest_commit_id: i32 = sqlx::query_scalar(
+        "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, $2, NOW()) RETURNING id",
+    )
+    .bind(flake_id)
+    .bind(format!("latest-{suffix}"))
+    .fetch_one(&pool)
+    .await
+    .expect("latest commit should persist");
+    let old_commit_id: i32 = sqlx::query_scalar(
+        "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, $2, NOW() - INTERVAL '1 day') RETURNING id",
+    )
+    .bind(flake_id)
+    .bind(format!("superseded-{suffix}"))
+    .fetch_one(&pool)
+    .await
+    .expect("superseded commit should persist");
+    sqlx::query(
+        "INSERT INTO flake_branch_commit_snapshot (flake_id, commit_id, position) VALUES ($1, $2, 0)",
+    )
+    .bind(flake_id)
+    .bind(latest_commit_id)
+    .execute(&pool)
+    .await
+    .expect("latest snapshot should persist");
+
+    let deployed_name = format!("deployed-gray-{suffix}");
+    let recent_name = format!("recent-gray-{suffix}");
+    let superseded_name = format!("superseded-gray-{suffix}");
+    let deployed_path = format!("/nix/store/{suffix}-deployed-system");
+    let derivation_ids: Vec<i32> = sqlx::query_scalar(
+        r#"
+        INSERT INTO derivations (
+            derivation_type, derivation_name, derivation_path, commit_id,
+            store_path, status_id, completed_at, attempt_count
+        ) VALUES
+          ('nixos', $1, $2, $3, $4,
+           (SELECT id FROM derivation_statuses WHERE name='build-complete' LIMIT 1),
+           NOW(), 0),
+          ('nixos', $5, $6, $3, $7,
+           (SELECT id FROM derivation_statuses WHERE name='build-complete' LIMIT 1),
+           NOW(), 0),
+          ('nixos', $8, $9, $10, $11,
+           (SELECT id FROM derivation_statuses WHERE name='build-complete' LIMIT 1),
+           NOW(), 0)
+        RETURNING id
+        "#,
+    )
+    .bind(&deployed_name)
+    .bind(format!("/nix/store/{suffix}-deployed.drv"))
+    .bind(latest_commit_id)
+    .bind(&deployed_path)
+    .bind(&recent_name)
+    .bind(format!("/nix/store/{suffix}-recent.drv"))
+    .bind(format!("/nix/store/{suffix}-recent-system"))
+    .bind(&superseded_name)
+    .bind(format!("/nix/store/{suffix}-superseded.drv"))
+    .bind(old_commit_id)
+    .bind(format!("/nix/store/{suffix}-superseded-system"))
+    .fetch_all(&pool)
+    .await
+    .expect("pagination derivations should persist");
+    let deployed_id = derivation_ids[0];
+    let recent_id = derivation_ids[1];
+    let superseded_id = derivation_ids[2];
+
+    let system_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO systems (
+            id, hostname, is_active, public_key, derivation,
+            system_configuration_name, deployment_policy, flake_id
+        ) VALUES ($1, $2, TRUE, $3, '', $2, 'manual', $4)
+        "#,
+    )
+    .bind(system_id)
+    .bind(&deployed_name)
+    .bind(format!("pagination-key-{suffix}"))
+    .bind(flake_id)
+    .execute(&pool)
+    .await
+    .expect("deployed system should persist");
+    sqlx::query(
+        "INSERT INTO system_states (hostname, store_path, change_reason, timestamp) VALUES ($1, $2, 'config_change', NOW())",
+    )
+    .bind(&deployed_name)
+    .bind(&deployed_path)
+    .execute(&pool)
+    .await
+    .expect("deployed state should persist");
+
+    sqlx::query(
+        r#"
+        INSERT INTO cve_scans (
+            derivation_id, scanner_name, status, source_trigger, completed_at,
+            critical_count, high_count, medium_count, low_count
+        )
+        SELECT CASE value % 4
+                 WHEN 0 THEN $1 WHEN 1 THEN $2 ELSE $3
+               END,
+               'pagination-scanner',
+               CASE WHEN value % 3 = 0 THEN 'completed' ELSE 'failed' END,
+               'manual',
+               '2026-01-01 00:00:00+00'::timestamptz
+                 + ((value / 2)::text || ' seconds')::interval,
+               value % 7, value % 11, value % 13, value % 17
+        FROM generate_series(1, 701) value
+        "#,
+    )
+    .bind(deployed_id)
+    .bind(recent_id)
+    .bind(superseded_id)
+    .execute(&pool)
+    .await
+    .expect("701 interleaved terminal scans should persist");
+    let gray_scan_id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO cve_scans (
+            derivation_id, scanner_name, status, source_trigger, completed_at
+        ) VALUES ($1, 'pagination-scanner', 'completed', 'manual',
+                  '2026-01-01 00:10:00+00')
+        RETURNING id
+        "#,
+    )
+    .bind(recent_id)
+    .fetch_one(&pool)
+    .await
+    .expect("recent gray success should persist");
+
+    let failed_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cve_scans WHERE scanner_name='pagination-scanner' AND status='failed'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("failed fixture count should load");
+    let completed_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cve_scans WHERE scanner_name='pagination-scanner' AND status='completed'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("completed fixture count should load");
+    assert!(failed_count > 450);
+    assert!(completed_count > 200);
+
+    let mut request = completed_request(false, 50);
+    request.search = Some(format!("pagination-flake-{suffix}"));
+    let first = get_scan_records(&pool, &request)
+        .await
+        .expect("first completed page should load");
+    assert_eq!(first.rows.len(), 50);
+    assert_eq!(first.total, 702);
+    assert!(first.has_more);
+    assert!(first.next_cursor.is_some());
+    let first_cursor = first.next_cursor.clone();
+    for pair in first.rows.windows(2) {
+        assert!(
+            (pair[0].completed_at, pair[0].scan_id) > (pair[1].completed_at, pair[1].scan_id),
+            "terminal rows must use timestamp DESC then UUID DESC"
+        );
+    }
+
+    let newer_scan_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO cve_scans (derivation_id, scanner_name, status, completed_at) VALUES ($1, 'pagination-scanner', 'failed', '2027-01-01') RETURNING id",
+    )
+    .bind(deployed_id)
+    .fetch_one(&pool)
+    .await
+    .expect("newer terminal scan should persist");
+    let mut stable_rows = first.rows;
+    request.after = first.next_cursor;
+    loop {
+        let page = get_scan_records(&pool, &request)
+            .await
+            .expect("stable continuation should load");
+        assert_eq!(
+            page.total, 702,
+            "cursor total must retain its high-water set"
+        );
+        stable_rows.extend(page.rows);
+        if !page.has_more {
+            break;
+        }
+        request.after = page.next_cursor;
+    }
+    assert_eq!(stable_rows.len(), 702);
+    assert!(stable_rows.iter().all(|row| row.scan_id != newer_scan_id));
+    let stable_ids = stable_rows
+        .iter()
+        .map(|row| row.scan_id)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(stable_ids.len(), 702, "cursor walk must not duplicate rows");
+    for pair in stable_rows.windows(2) {
+        assert!((pair[0].completed_at, pair[0].scan_id) > (pair[1].completed_at, pair[1].scan_id));
+    }
+    assert!(
+        stable_rows
+            .windows(2)
+            .any(|pair| pair[0].completed_at == pair[1].completed_at),
+        "the full walk must exercise equal terminal timestamps"
+    );
+
+    for sort in [
+        ScanRecordSort::Configuration,
+        ScanRecordSort::Revision,
+        ScanRecordSort::Status,
+        ScanRecordSort::Severity,
+        ScanRecordSort::Timestamp,
+    ] {
+        for direction in [ScanRecordDirection::Asc, ScanRecordDirection::Desc] {
+            let mut sorted_request = ScanRecordRequest {
+                search: Some(format!("pagination-flake-{suffix}")),
+                sort,
+                direction,
+                limit: 37,
+                ..completed_request(false, 37)
+            };
+            let sorted_first = get_scan_records(&pool, &sorted_request)
+                .await
+                .expect("validated sort first page should load");
+            assert!(sorted_first.has_more);
+            sorted_request.after = sorted_first.next_cursor;
+            let sorted_second = get_scan_records(&pool, &sorted_request)
+                .await
+                .expect("validated sort second page should load");
+            assert!(
+                sorted_first.rows.iter().all(|first| sorted_second
+                    .rows
+                    .iter()
+                    .all(|second| first.scan_id != second.scan_id)),
+                "sort continuation pages must not overlap"
+            );
+        }
+    }
+
+    let second_request = ScanRecordRequest {
+        after: first_cursor,
+        ..completed_request(false, 50)
+    };
+    let rebound_error = get_scan_records(&pool, &second_request)
+        .await
+        .expect_err("cursor must reject a changed search request");
+    assert!(
+        rebound_error
+            .downcast_ref::<crate::queries::scanning::InvalidScanRecordCursor>()
+            .is_some()
+    );
+    let malformed_error = get_scan_records(
+        &pool,
+        &ScanRecordRequest {
+            after: Some("not-a-cursor".to_string()),
+            ..completed_request(false, 50)
+        },
+    )
+    .await
+    .expect_err("malformed cursor must fail");
+    assert!(
+        malformed_error
+            .downcast_ref::<crate::queries::scanning::InvalidScanRecordCursor>()
+            .is_some()
+    );
+
+    for (revision, expected_name) in [
+        (ScanRecordRevision::Deployed, &deployed_name),
+        (ScanRecordRevision::Recent, &recent_name),
+        (ScanRecordRevision::Superseded, &superseded_name),
+    ] {
+        let rows = walk_completed_pages(
+            &pool,
+            ScanRecordRequest {
+                search: Some(format!("pagination-flake-{suffix}")),
+                revision,
+                limit: 91,
+                ..completed_request(false, 91)
+            },
+        )
+        .await;
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|row| &row.hostname == expected_name));
+    }
+    let latest_rows = walk_completed_pages(
+        &pool,
+        ScanRecordRequest {
+            search: Some(format!("pagination-flake-{suffix}")),
+            latest_only: true,
+            ..completed_request(false, 137)
+        },
+    )
+    .await;
+    assert!(latest_rows.iter().any(|row| row.hostname == deployed_name));
+    assert!(latest_rows.iter().any(|row| row.hostname == recent_name));
+    assert!(
+        latest_rows
+            .iter()
+            .all(|row| row.hostname != superseded_name)
+    );
+
+    let failed_rows = walk_completed_pages(
+        &pool,
+        ScanRecordRequest {
+            search: Some(format!("pagination-flake-{suffix}")),
+            status: ScanRecordStatus::Failed,
+            ..completed_request(false, 113)
+        },
+    )
+    .await;
+    assert_eq!(failed_rows.len() as i64, failed_count + 1);
+    assert!(failed_rows.iter().all(|row| row.status == "failed"));
+    for search in [
+        gray_scan_id.to_string(),
+        recent_id.to_string(),
+        recent_name.clone(),
+        format!("latest-{suffix}"),
+        format!("pagination-flake-{suffix}"),
+        format!("{suffix}-recent.drv"),
+    ] {
+        let result = get_scan_records(
+            &pool,
+            &ScanRecordRequest {
+                search: Some(search),
+                ..completed_request(false, 500)
+            },
+        )
+        .await
+        .expect("full-collection search should load");
+        assert!(
+            result.rows.iter().any(|row| row.scan_id == gray_scan_id),
+            "search must find the recent gray success"
+        );
+    }
+
+    let actor_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (username, first_name, last_name, email) VALUES ($1, 'Page', 'Admin', $2) RETURNING id",
+    )
+    .bind(format!("page-admin-{suffix}"))
+    .bind(format!("page-admin-{suffix}@example.test"))
+    .fetch_one(&pool)
+    .await
+    .expect("archive actor should persist");
+    let archive_ids = stable_rows
+        .iter()
+        .take(3)
+        .map(|row| row.scan_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        set_scan_archive_state(&pool, &archive_ids, true, actor_id)
+            .await
+            .expect("exact scans should archive"),
+        3
+    );
+    let without_archived = get_scan_records(
+        &pool,
+        &ScanRecordRequest {
+            search: Some(format!("pagination-flake-{suffix}")),
+            ..completed_request(false, 50)
+        },
+    )
+    .await
+    .expect("archive-excluding page should load");
+    assert_eq!(without_archived.total, 703);
+    assert_eq!(without_archived.hidden_archived, 3);
+    assert!(
+        without_archived
+            .rows
+            .iter()
+            .all(|row| !archive_ids.contains(&row.scan_id))
+    );
+    let with_archived = get_scan_records(
+        &pool,
+        &ScanRecordRequest {
+            search: Some(format!("pagination-flake-{suffix}")),
+            include_archived: true,
+            ..completed_request(true, 500)
+        },
+    )
+    .await
+    .expect("archive-including page should load");
+    assert_eq!(with_archived.total, 703);
+    assert_eq!(with_archived.hidden_archived, 0);
+    assert!(
+        with_archived
+            .rows
+            .iter()
+            .any(|row| archive_ids.contains(&row.scan_id))
+    );
+    assert_eq!(
+        set_scan_archive_state(&pool, &archive_ids, false, actor_id)
+            .await
+            .expect("exact scans should restore"),
+        3
+    );
+    let restored = get_scan_records(
+        &pool,
+        &ScanRecordRequest {
+            search: Some(format!("pagination-flake-{suffix}")),
+            ..completed_request(false, 50)
+        },
+    )
+    .await
+    .expect("restored page should load");
+    assert_eq!(restored.hidden_archived, 0);
+
+    sqlx::query("ANALYZE cve_scans")
+        .execute(&pool)
+        .await
+        .expect("terminal fixture statistics should refresh");
+    sqlx::query("SET enable_seqscan=off")
+        .execute(&pool)
+        .await
+        .expect("plan assertion should prefer indexes");
+    let plan = sqlx::query_scalar::<_, String>(
+        r#"
+        EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
+        SELECT id, completed_at
+        FROM cve_scans
+        WHERE status IN ('completed', 'failed') AND completed_at IS NOT NULL
+        ORDER BY completed_at DESC, id DESC
+        LIMIT 50
+        "#,
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("terminal page plan should execute")
+    .join("\n");
+    assert!(
+        plan.contains("Index Scan"),
+        "terminal page must use an index:\n{plan}"
+    );
+    assert!(
+        !plan.contains("Seq Scan on cve_scans"),
+        "terminal page must not scan the lifecycle table:\n{plan}"
+    );
+    let terminal_index: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes WHERE schemaname='public' AND indexname='cve_scans_terminal_page'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("migration 0273 terminal index should exist");
+    assert!(terminal_index.contains("completed_at DESC, id DESC"));
 }
 
 #[tokio::test]
@@ -295,11 +1396,13 @@ async fn scan_stats_count_worker_eligible_waiting_targets() {
         update_scan_schedule_policy(&pool, &test_policy)
             .await
             .expect("should set test policy");
-        for (derivation_id, status, completed_at) in [
+        let lifecycle_fixtures: [(i32, &str, Option<&str>); 4] = [
             (pending_id, "pending", None),
-            (stale_id, "completed", Some("NOW() - INTERVAL '2 hours'")),
+            (initial_id, "awaiting_build", None),
+            (stale_id, "awaiting_closure", None),
             (active_id, "in_progress", None),
-        ] {
+        ];
+        for (derivation_id, status, completed_at) in lifecycle_fixtures {
             let completed_at_sql = completed_at.unwrap_or("NULL");
             sqlx::query(&format!(
                 "INSERT INTO cve_scans (derivation_id, scanner_name, status, completed_at) \
@@ -322,7 +1425,9 @@ async fn scan_stats_count_worker_eligible_waiting_targets() {
         }
 
         let stats = get_scan_stats(&pool).await.expect("should read scan stats");
-        assert!(stats.queued >= 3, "pending, initial, and stale targets must wait");
+        assert!(stats.queued >= 1, "the runnable pending target must be queued");
+        assert!(stats.awaiting_build >= 1);
+        assert!(stats.awaiting_closure >= 1);
         assert!(stats.scanning >= 1, "in-progress target must scan now");
 
         sqlx::query("UPDATE cve_scans SET status = 'in_progress' WHERE derivation_id = $1 AND status = 'pending'")
@@ -342,9 +1447,8 @@ async fn scan_stats_count_worker_eligible_waiting_targets() {
         let completed = get_scan_stats(&pool).await.expect("should update scan stats");
         assert_eq!(completed.scanning, stats.scanning);
 
-        // The failed target has five recent failures, and the active target has
-        // an active execution. Neither is eligible for the waiting backlog.
-        assert!(completed.queued >= 2);
+        assert!(completed.awaiting_build >= 1);
+        assert!(completed.awaiting_closure >= 1);
         assert_ne!(initial_id, stale_id);
     })
     .catch_unwind()
@@ -611,7 +1715,7 @@ async fn system_scan_scope_uses_exact_flake_configuration_and_current_store_path
     assert!(current.is_current);
     assert_eq!(current.source_trigger.as_deref(), Some("manual"));
     assert!(!history.is_current);
-    assert_eq!(history.source_trigger.as_deref(), Some("fleet"));
+    assert_eq!(history.source_trigger.as_deref(), Some("manual"));
     assert!(current.rescan_eligible);
     assert!(history.rescan_eligible);
     assert!(!unbuilt.rescan_eligible);
@@ -631,6 +1735,12 @@ async fn system_scan_scope_uses_exact_flake_configuration_and_current_store_path
         "an identical config/store path from another flake must be excluded"
     );
     assert_eq!(system.current_derivation_id, Some(current_id));
+    assert_eq!(
+        system.scanned + system.stale + system.needs_build + system.unscanned,
+        system.total_configs,
+        "fresh, stale, needs-build, and never-scanned buckets must be exclusive"
+    );
+    assert_eq!(system.current_scan_id, None);
 
     sqlx::query("DELETE FROM cve_scans WHERE derivation_id = ANY($1)")
         .bind(&[current_id, history_id][..])

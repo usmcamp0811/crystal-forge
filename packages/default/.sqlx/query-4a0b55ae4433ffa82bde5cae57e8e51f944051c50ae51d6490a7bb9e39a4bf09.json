@@ -1,0 +1,59 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH per_host AS (\n          SELECT\n            d.derivation_name AS hostname,\n            d.id              AS derivation_id,\n            d.store_path,\n            f.repo_url        AS repo_url,\n            c.git_commit_hash AS commit_hash,\n            c.flake_id,\n            c.commit_timestamp,\n            (SELECT MAX(cpj.completed_at)\n              FROM cache_push_jobs cpj\n              WHERE cpj.derivation_id = d.id\n                AND cpj.status = 'completed'\n                AND cpj.store_path = d.store_path) AS last_cache_completed_at,\n            ROW_NUMBER() OVER (\n              PARTITION BY d.derivation_name\n              ORDER BY c.commit_timestamp DESC,\n                       d.completed_at DESC NULLS LAST,\n                       d.id DESC\n            ) AS rn\n          FROM derivations d\n          JOIN commits c\n            ON d.commit_id = c.id\n          JOIN flakes f\n            ON c.flake_id = f.id\n          WHERE c.flake_id = $1\n            AND d.derivation_type = 'nixos'\n            AND d.derivation_name = ANY($2::text[])\n            AND d.store_path IS NOT NULL\n            AND BTRIM(d.store_path) <> ''\n            AND d.cf_agent_enabled IS TRUE\n            AND d.policy_requirements_met IS TRUE\n            AND d.error_message IS NULL\n            AND EXISTS (\n              SELECT 1 FROM cache_push_jobs cpj\n              WHERE cpj.derivation_id = d.id\n                AND cpj.status = 'completed'\n                AND cpj.store_path = d.store_path\n            )\n        )\n        SELECT\n          hostname,\n          derivation_id,\n          store_path,\n          last_cache_completed_at,\n          repo_url,\n          commit_hash,\n          EXISTS (\n            SELECT 1 FROM commits newer\n            WHERE newer.flake_id = per_host.flake_id\n              AND newer.commit_timestamp > per_host.commit_timestamp\n          ) AS \"newer_raw_commit_exists!\"\n        FROM per_host\n        WHERE rn = 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "hostname",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "derivation_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "store_path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "last_cache_completed_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 4,
+        "name": "repo_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "commit_hash",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "newer_raw_commit_exists!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      null,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "4a0b55ae4433ffa82bde5cae57e8e51f944051c50ae51d6490a7bb9e39a4bf09"
+}

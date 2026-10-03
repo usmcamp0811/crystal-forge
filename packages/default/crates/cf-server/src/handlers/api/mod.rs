@@ -1,3 +1,4 @@
+pub mod acceptance_register;
 pub mod admin;
 pub mod auth_dev;
 pub mod auth_local;
@@ -22,6 +23,7 @@ pub mod navigation;
 pub mod nixos_options;
 pub mod poam;
 pub mod rbac;
+pub mod register_export;
 pub mod scanning;
 pub mod setup_wizard;
 pub mod systems;

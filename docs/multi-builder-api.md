@@ -737,6 +737,31 @@ Mark job as successfully completed.
   does not replace its trigger provenance. Scan failure does not change build or
   cache status.
 
+The server also runs bounded post-build prerequisite maintenance at startup and
+on every CVE worker interval. This maintenance runs even when the local scan
+executor is disabled or Vulnix is unavailable. Under the build-derivation lock,
+the server binds an existing zero-attempt `awaiting_build` intent to the latest
+same-derivation build attempt. Active and successful replacements keep the
+intent alive. Only the exact latest failed or cancelled attempt makes the intent
+failed. If no authoritative attempt exists, the prerequisite fails as
+unavailable. The maintenance does not change manual, fleet, or periodic scans.
+It does not consult the current `on_build` policy when it repairs existing
+intent; the policy still controls creation of new post-build intent.
+
+Post-build scanning is an event-driven obligation with a bounded recovery
+window. Scheduled scanning is an independent freshness mechanism. The policy
+field `post_build_recovery_window` defaults to `168h`, counted from the
+authoritative successful `build_jobs.completed_at`, not a later scan attempt or
+server restart. The server retries unfinished exact post-build work only inside
+this window. At expiration it terminalizes persisted unresolved post-build
+intent once with `scan_metadata.terminal_reason =
+post_build_recovery_window_expired`; it does not manufacture expired scans for
+pre-contract historical builds without intent. A missed post-build obligation
+is never retried automatically through the post-build path after the window,
+but a periodic scan or explicit exact scan can produce later evidence. Existing
+execution tokens, lease fencing, and builder session requirements still govern
+work in progress; expiration does not revoke an active execution.
+
 #### POST /api/v1/builders/:id/cve-scans/claim
 
 Claim one schema-1 CVE scan through the authenticated builder session. Builders
@@ -773,7 +798,15 @@ terminated descendants because they are not direct Crystal Forge children.
 
 Renew the exact active CVE execution. The server returns `410 Gone` when the
 lease expired or a new builder session superseded it. Entry and observation
-progress above the claim limits also prevents renewal.
+progress above the claim limits also prevents renewal. Upgraded builders may
+include up to 16 new or retried single-line phase diagnostics in a heartbeat;
+older builders omit the field. The 64 KiB heartbeat body limit and per-message
+2,048-character limit bound this live channel. Accepted event types are attempt
+start, materialization start/completion, scanner start/completion, and evidence
+resolution start/completion. The server renews the fenced lease and appends the
+phase events in one transaction. A unique execution-and-event-type identity
+makes an uncertain heartbeat retry idempotent. The server acknowledges the
+heartbeat only after that transaction commits.
 
 #### POST /api/v1/builders/:id/cve-scans/complete
 
@@ -820,6 +853,9 @@ also bounded to 64 KiB of stderr and marks truncated output. Diagnostic rows are
 append-only and are fenced by the same execution, lease, builder, and current
 session checks as the terminal scan transition. A diagnostic failure does not
 change build or cache outcomes and diagnostic content never changes CVE evidence.
+The detail API orders events by attempt and server-assigned row identity. The
+builder-supplied observation time is informational and cannot reorder lifecycle
+events.
 
 Invalid evidence returns `422 Unprocessable Entity` and leaves the lease active.
 An expired or superseded execution returns `410 Gone`. A same-digest retry is

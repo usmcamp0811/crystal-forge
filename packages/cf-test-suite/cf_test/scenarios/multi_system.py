@@ -723,8 +723,23 @@ def scenario_progressive_system_updates(
     client: CFTestClient, base_hostname: str = "test-progressive"
 ) -> Dict[str, Any]:
     """
-    Simpler version: 3 systems that get updated at different paces,
-    creating a realistic deployment timeline where systems lag behind each other.
+    Three systems on a five-commit flake that run at different paces.
+
+    Every commit builds every system's configuration, as it does for a real
+    flake, and each build is a deployable artifact: a NixOS derivation with a
+    store path, `cf_agent_enabled`, `policy_requirements_met`, no error, and a
+    completed cache push for that exact store path. This is what
+    `view_system_deployment_status` requires before it will compare a running
+    system with a newest deployable target. Without it a system's status is
+    `unknown` even when its running path maps to a known commit, and views that
+    count only up_to_date/behind/ahead systems (such as
+    `view_config_timeline`) correctly count nothing.
+
+    The systems differ only in the build they currently run:
+
+    - fast: newest commit (idx 4), `up_to_date`
+    - medium: one commit behind (idx 3), `behind` by 1
+    - slow: three commits behind (idx 1), `behind` by 3
     """
 
     import time
@@ -783,22 +798,27 @@ def scenario_progressive_system_updates(
         current_commit_idx = len(commit_data) - 1 - commits_behind
         current_commit = commit_data[current_commit_idx]
 
-        # Create all derivations for this system up to its current commit
-        for commit_idx in range(current_commit_idx + 1):
-            commit = commit_data[commit_idx]
+        # Every commit builds this configuration, and each build is published
+        # to the cache, so a system on an older commit has a newer deployable
+        # build available. cache_push_jobs rows are removed with their
+        # derivation (ON DELETE CASCADE), so cleanup needs no extra pattern.
+        for commit in commit_data:
             deriv_path = f"/nix/store/{commit['hash']}-nixos-system-{hostname}.drv"
+            built_at = commit["time"] + timedelta(minutes=20)
 
             deriv_row = _one_row(
                 client,
                 """
                 INSERT INTO derivations (
                     commit_id, derivation_type, derivation_name, derivation_path, store_path,
-                    status_id, attempt_count, scheduled_at, completed_at
+                    status_id, attempt_count, scheduled_at, completed_at,
+                    cf_agent_enabled, policy_requirements_met
                 )
                 VALUES (
                     %s, 'nixos', %s, %s, %s,
                     (SELECT id FROM derivation_statuses WHERE name = 'build-complete'),
-                    0, %s, %s
+                    0, %s, %s,
+                    TRUE, TRUE
                 )
                 RETURNING id
                 """,
@@ -808,10 +828,22 @@ def scenario_progressive_system_updates(
                     deriv_path,
                     deriv_path,  # Use same path as store_path for tests
                     commit["time"] + timedelta(minutes=10),
-                    commit["time"] + timedelta(minutes=20),
+                    built_at,
                 ),
             )
             derivation_ids.append(deriv_row["id"])
+
+            # The exact store path must be published for the build to count as
+            # deployable; a completed push of any other path does not qualify.
+            _one_row(
+                client,
+                """
+                INSERT INTO cache_push_jobs (derivation_id, status, store_path, completed_at)
+                VALUES (%s, 'completed', %s, %s)
+                RETURNING id
+                """,
+                (deriv_row["id"], deriv_path, built_at),
+            )
 
         # Create system
         system_row = _one_row(
@@ -880,6 +912,7 @@ def scenario_progressive_system_updates(
         "hostnames": hostnames,
         "flake_id": flake_id,
         "commit_data": commit_data,
+        "derivation_ids": derivation_ids,
         "commit_hashes": [c["hash"] for c in commit_data],  # Add this line
         "cleanup": cleanup_patterns,
         "cleanup_fn": _cleanup_fn(client, cleanup_patterns),

@@ -33,7 +33,11 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(1);
 const STDERR_LIMIT: usize = 64 * 1024;
 const COMMAND_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
+const NIX_STORE_PATH_OUTPUT_LIMIT: usize = 4096;
 const DRV_QUERY_CHUNK: usize = 64;
+// PERFORMANCE: Each pathless output requires a separate `nix-store` process.
+// This limit and the shared deadline bound fallback work for the complete scan.
+const PATHLESS_OUTPUTS_PER_RESOLUTION: usize = 256;
 
 /// Failure produced while executing a CVE lease.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,20 +274,51 @@ async fn execute_claim_inner<A: CveLeaseApi>(
     }
     let entries = Arc::new(AtomicUsize::new(0));
     let observations = Arc::new(AtomicUsize::new(0));
-    let mut diagnostics = vec![scan_diagnostic(
+    let attempt_started = scan_diagnostic(
         "info",
         "builder",
         "attempt_started",
         "Remote CVE scan attempt started.",
         false,
-    )];
+    );
+    let mut diagnostics = vec![attempt_started.clone()];
+    persist_phase_diagnostic(
+        api,
+        claim,
+        &entries,
+        &observations,
+        attempt_started,
+        &diagnostics,
+    )
+    .await?;
 
+    let mut materialized_output = false;
     for output in &claim.derivation.outputs {
         validate_store_path(&output.store_path, false)?;
         if !tokio::fs::try_exists(&output.store_path)
             .await
             .unwrap_or(false)
         {
+            if !materialized_output {
+                let diagnostic = scan_diagnostic(
+                    "info",
+                    "nix",
+                    "materialization_started",
+                    "Materializing authorized scan outputs.",
+                    false,
+                );
+                diagnostics.push(diagnostic.clone());
+                persist_phase_diagnostic(
+                    api,
+                    claim,
+                    &entries,
+                    &observations,
+                    diagnostic,
+                    &diagnostics,
+                )
+                .await?;
+                materialized_output = true;
+            }
             let args = vec!["--realise".to_string(), output.store_path.clone()];
             let result = run_leased_command(
                 api,
@@ -320,6 +355,25 @@ async fn execute_claim_inner<A: CveLeaseApi>(
             }
         }
     }
+    if materialized_output {
+        let diagnostic = scan_diagnostic(
+            "info",
+            "nix",
+            "materialization_completed",
+            "Authorized scan outputs are available.",
+            false,
+        );
+        diagnostics.push(diagnostic.clone());
+        persist_phase_diagnostic(
+            api,
+            claim,
+            &entries,
+            &observations,
+            diagnostic,
+            &diagnostics,
+        )
+        .await?;
+    }
 
     let mut scanner_args = claim.policy.scanner_args.clone();
     scanner_args.extend(
@@ -330,6 +384,23 @@ async fn execute_claim_inner<A: CveLeaseApi>(
             .map(|output| output.store_path.clone()),
     );
     let timeout = Duration::from_secs(claim.policy.timeout_seconds.max(1));
+    let diagnostic = scan_diagnostic(
+        "info",
+        "vulnix",
+        "scanner_started",
+        "Vulnix scan started for the authorized outputs.",
+        false,
+    );
+    diagnostics.push(diagnostic.clone());
+    persist_phase_diagnostic(
+        api,
+        claim,
+        &entries,
+        &observations,
+        diagnostic,
+        &diagnostics,
+    )
+    .await?;
     let scan = run_leased_command(
         api,
         claim,
@@ -365,13 +436,75 @@ async fn execute_claim_inner<A: CveLeaseApi>(
     }
 
     entries.store(parsed.len(), Ordering::Relaxed);
-    let result = canonical_result(api, claim, parsed, entries, observations)
-        .await
-        .map_err(|error| error.with_diagnostics(diagnostics.clone()))?;
+    let diagnostic = scan_diagnostic(
+        "info",
+        "vulnix",
+        "scanner_completed",
+        &format!("Vulnix reported {} package entries.", parsed.len()),
+        false,
+    );
+    diagnostics.push(diagnostic.clone());
+    persist_phase_diagnostic(
+        api,
+        claim,
+        &entries,
+        &observations,
+        diagnostic,
+        &diagnostics,
+    )
+    .await?;
+    let diagnostic = scan_diagnostic(
+        "info",
+        "nix",
+        "evidence_resolution_started",
+        "Resolving exact package derivation and output evidence.",
+        false,
+    );
+    diagnostics.push(diagnostic.clone());
+    persist_phase_diagnostic(
+        api,
+        claim,
+        &entries,
+        &observations,
+        diagnostic,
+        &diagnostics,
+    )
+    .await?;
+    let result = canonical_result(
+        api,
+        claim,
+        parsed,
+        Arc::clone(&entries),
+        Arc::clone(&observations),
+    )
+    .await
+    .map_err(|error| error.with_diagnostics(diagnostics.clone()))?;
+    let diagnostic = scan_diagnostic(
+        "info",
+        "nix",
+        "evidence_resolution_completed",
+        &format!(
+            "Resolved {} package entries and {} CVE observations.",
+            result.entries.len(),
+            result.observations.len()
+        ),
+        false,
+    );
+    diagnostics.push(diagnostic.clone());
+    persist_phase_diagnostic(
+        api,
+        claim,
+        &entries,
+        &observations,
+        diagnostic,
+        &diagnostics,
+    )
+    .await?;
     let heartbeat = CveScanHeartbeatRequest {
         lease: claim.lease,
         entries_collected: result.entries.len(),
         observations_collected: result.observations.len(),
+        diagnostics: Vec::new(),
     };
     match api.heartbeat(&heartbeat).await {
         Ok(true) => Ok((result, diagnostics)),
@@ -385,6 +518,35 @@ async fn execute_claim_inner<A: CveLeaseApi>(
             "CVE scan heartbeat failed",
         )
         .with_diagnostics(diagnostics)),
+    }
+}
+
+async fn persist_phase_diagnostic<A: CveLeaseApi>(
+    api: &A,
+    claim: &CveScanClaim,
+    entries: &Arc<AtomicUsize>,
+    observations: &Arc<AtomicUsize>,
+    diagnostic: CveScanDiagnostic,
+    accumulated: &[CveScanDiagnostic],
+) -> Result<(), CveScanExecutionError> {
+    let request = CveScanHeartbeatRequest {
+        lease: claim.lease,
+        entries_collected: entries.load(Ordering::Relaxed),
+        observations_collected: observations.load(Ordering::Relaxed),
+        diagnostics: vec![diagnostic],
+    };
+    match api.heartbeat(&request).await {
+        Ok(true) => Ok(()),
+        Ok(false) | Err(CveApiError::Revoked) => Err(CveScanExecutionError::new(
+            CveScanFailureClass::Cancelled,
+            "CVE scan lease was revoked",
+        )
+        .with_diagnostics(accumulated.to_vec())),
+        Err(error) => Err(CveScanExecutionError::new(
+            error.failure_class(),
+            "CVE scan heartbeat failed while persisting phase diagnostics",
+        )
+        .with_diagnostics(accumulated.to_vec())),
     }
 }
 
@@ -589,6 +751,29 @@ async fn resolve_drv_outputs<A: CveLeaseApi>(
     entries: Arc<AtomicUsize>,
     observations: Arc<AtomicUsize>,
 ) -> Result<BTreeMap<String, Vec<CveDerivationOutput>>, CveScanExecutionError> {
+    resolve_drv_outputs_with_programs(
+        api,
+        claim,
+        drv_paths,
+        entries,
+        observations,
+        "nix",
+        "nix-store",
+    )
+    .await
+}
+
+async fn resolve_drv_outputs_with_programs<A: CveLeaseApi>(
+    api: &A,
+    claim: &CveScanClaim,
+    drv_paths: &[String],
+    entries: Arc<AtomicUsize>,
+    observations: Arc<AtomicUsize>,
+    nix_program: &str,
+    nix_store_program: &str,
+) -> Result<BTreeMap<String, Vec<CveDerivationOutput>>, CveScanExecutionError> {
+    let resolution_deadline = Instant::now() + NIX_QUERY_TIMEOUT;
+    let mut pathless_output_count = 0usize;
     let mut resolved = BTreeMap::new();
     for chunk in drv_paths.chunks(DRV_QUERY_CHUNK) {
         let mut args = vec!["derivation".to_string(), "show".to_string()];
@@ -596,9 +781,9 @@ async fn resolve_drv_outputs<A: CveLeaseApi>(
         let output = run_leased_command(
             api,
             claim,
-            "nix",
+            nix_program,
             &args,
-            NIX_QUERY_TIMEOUT,
+            remaining_resolution_time(resolution_deadline)?,
             COMMAND_OUTPUT_LIMIT,
             Arc::clone(&entries),
             Arc::clone(&observations),
@@ -610,56 +795,280 @@ async fn resolve_drv_outputs<A: CveLeaseApi>(
                 "Nix package-output resolution failed",
             ));
         }
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+        let parsed = normalize_derivation_show_output(&output.stdout, chunk)?;
+        pathless_output_count = add_pathless_output_count(pathless_output_count, &parsed)?;
+        resolved.extend(
+            resolve_missing_derivation_outputs(
+                api,
+                claim,
+                parsed,
+                entries.clone(),
+                observations.clone(),
+                nix_store_program,
+                resolution_deadline,
+            )
+            .await?,
+        );
+    }
+    Ok(resolved)
+}
+
+#[derive(Debug, Deserialize)]
+struct DerivationShowDocumentV4 {
+    version: u64,
+    derivations: BTreeMap<String, DerivationShowEntryV4>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DerivationShowEntryV4 {
+    version: u64,
+    outputs: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedDerivationOutput {
+    name: String,
+    store_path: Option<String>,
+}
+
+fn normalize_derivation_show_output(
+    stdout: &[u8],
+    requested: &[String],
+) -> Result<BTreeMap<String, Vec<ParsedDerivationOutput>>, CveScanExecutionError> {
+    if requested.len() > DRV_QUERY_CHUNK {
+        return Err(CveScanExecutionError::new(
+            CveScanFailureClass::Deterministic,
+            "Nix package-output resolution exceeded the derivation chunk limit",
+        ));
+    }
+    let mut requested_by_base_name = BTreeMap::new();
+    for drv_path in requested {
+        validate_store_path(drv_path, true)?;
+        let base_name = drv_path.strip_prefix("/nix/store/").ok_or_else(|| {
             CveScanExecutionError::new(
                 CveScanFailureClass::Deterministic,
-                "Nix package-output resolution returned malformed JSON",
+                "scanner returned an invalid Nix store path",
             )
         })?;
-        let object = value.as_object().ok_or_else(|| {
+        if requested_by_base_name
+            .insert(base_name.to_string(), drv_path.clone())
+            .is_some()
+        {
+            return Err(CveScanExecutionError::new(
+                CveScanFailureClass::Deterministic,
+                "Nix package-output resolution received duplicate derivations",
+            ));
+        }
+    }
+
+    let document: DerivationShowDocumentV4 = serde_json::from_slice(stdout).map_err(|_| {
+        CveScanExecutionError::new(
+            CveScanFailureClass::Deterministic,
+            "Nix package-output resolution returned malformed JSON",
+        )
+    })?;
+    if document.version != 4
+        || document
+            .derivations
+            .values()
+            .any(|derivation| derivation.version != 4)
+    {
+        return Err(CveScanExecutionError::new(
+            CveScanFailureClass::Deterministic,
+            "Nix package-output resolution returned an unsupported version",
+        ));
+    }
+    for base_name in document.derivations.keys() {
+        normalize_store_path_base_name(base_name, true)?;
+    }
+    let expected = requested_by_base_name.keys().collect::<BTreeSet<_>>();
+    let actual = document.derivations.keys().collect::<BTreeSet<_>>();
+    let missing = expected.difference(&actual).count();
+    let extra = actual.difference(&expected).count();
+    if missing != 0 || extra != 0 {
+        return Err(CveScanExecutionError::new(
+            CveScanFailureClass::Deterministic,
+            format!(
+                "Nix returned a mismatched derivation set (missing={missing}, extra={extra}, entries={}, requested={})",
+                document.derivations.len(),
+                requested.len()
+            ),
+        ));
+    }
+
+    let mut normalized = BTreeMap::new();
+    for (base_name, derivation) in document.derivations {
+        let drv_path = requested_by_base_name.remove(&base_name).ok_or_else(|| {
             CveScanExecutionError::new(
                 CveScanFailureClass::Deterministic,
-                "Nix package-output resolution returned an invalid shape",
+                "Nix returned a mismatched derivation set",
             )
         })?;
-        for drv_path in chunk {
-            let outputs = object
-                .get(drv_path)
-                .and_then(|drv| drv.get("outputs"))
-                .and_then(serde_json::Value::as_object)
-                .ok_or_else(|| {
-                    CveScanExecutionError::new(
-                        CveScanFailureClass::Deterministic,
-                        "Nix omitted a requested package derivation",
+        if derivation.outputs.is_empty() {
+            return Err(CveScanExecutionError::new(
+                CveScanFailureClass::Deterministic,
+                "package derivation has no outputs",
+            ));
+        }
+        let mut package_outputs = Vec::with_capacity(derivation.outputs.len());
+        for (name, output) in derivation.outputs {
+            let output = output.as_object().ok_or_else(|| {
+                CveScanExecutionError::new(
+                    CveScanFailureClass::Deterministic,
+                    "Nix package-output resolution returned a malformed output entry",
+                )
+            })?;
+            let store_path = match output.get("path") {
+                Some(path) => {
+                    let base_name = path.as_str().filter(|path| !path.is_empty()).ok_or_else(
+                        || {
+                            CveScanExecutionError::new(
+                                CveScanFailureClass::Deterministic,
+                                "Nix package-output resolution returned a malformed output path",
+                            )
+                        },
+                    )?;
+                    Some(normalize_store_path_base_name(base_name, false)?)
+                }
+                None => None,
+            };
+            package_outputs.push(ParsedDerivationOutput { name, store_path });
+        }
+        package_outputs.sort_by(|a, b| a.name.cmp(&b.name).then(a.store_path.cmp(&b.store_path)));
+        normalized.insert(drv_path, package_outputs);
+    }
+    Ok(normalized)
+}
+
+fn add_pathless_output_count(
+    current: usize,
+    parsed: &BTreeMap<String, Vec<ParsedDerivationOutput>>,
+) -> Result<usize, CveScanExecutionError> {
+    let additional = parsed
+        .values()
+        .flatten()
+        .filter(|output| output.store_path.is_none())
+        .count();
+    let total = current.checked_add(additional).ok_or_else(|| {
+        CveScanExecutionError::new(
+            CveScanFailureClass::Deterministic,
+            "Nix package-output resolution exceeded the pathless-output limit",
+        )
+    })?;
+    if total > PATHLESS_OUTPUTS_PER_RESOLUTION {
+        return Err(CveScanExecutionError::new(
+            CveScanFailureClass::Deterministic,
+            "Nix package-output resolution exceeded the pathless-output limit",
+        ));
+    }
+    Ok(total)
+}
+
+fn remaining_resolution_time(deadline: Instant) -> Result<Duration, CveScanExecutionError> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| {
+            CveScanExecutionError::new(
+                CveScanFailureClass::Transient,
+                "Nix package-output resolution exceeded its aggregate timeout",
+            )
+        })
+}
+
+fn normalize_store_path_base_name(
+    base_name: &str,
+    derivation: bool,
+) -> Result<String, CveScanExecutionError> {
+    if base_name.is_empty() || base_name.contains('/') {
+        return Err(CveScanExecutionError::new(
+            CveScanFailureClass::Deterministic,
+            "Nix package-output resolution returned an invalid store-path base name",
+        ));
+    }
+    let store_path = format!("/nix/store/{base_name}");
+    validate_store_path(&store_path, derivation)?;
+    Ok(store_path)
+}
+
+async fn resolve_missing_derivation_outputs<A: CveLeaseApi>(
+    api: &A,
+    claim: &CveScanClaim,
+    parsed: BTreeMap<String, Vec<ParsedDerivationOutput>>,
+    entries: Arc<AtomicUsize>,
+    observations: Arc<AtomicUsize>,
+    nix_store_program: &str,
+    resolution_deadline: Instant,
+) -> Result<BTreeMap<String, Vec<CveDerivationOutput>>, CveScanExecutionError> {
+    let mut resolved = BTreeMap::new();
+    for (drv_path, outputs) in parsed {
+        let mut package_outputs = Vec::with_capacity(outputs.len());
+        for output in outputs {
+            let store_path = match output.store_path {
+                Some(store_path) => store_path,
+                None => {
+                    let args = vec![
+                        "--query".to_string(),
+                        "--binding".to_string(),
+                        output.name.clone(),
+                        drv_path.clone(),
+                    ];
+                    let result = run_leased_command(
+                        api,
+                        claim,
+                        nix_store_program,
+                        &args,
+                        remaining_resolution_time(resolution_deadline)?,
+                        NIX_STORE_PATH_OUTPUT_LIMIT,
+                        entries.clone(),
+                        observations.clone(),
                     )
-                })?;
-            let mut package_outputs = Vec::with_capacity(outputs.len());
-            for (name, output) in outputs {
-                let store_path = output
-                    .get("path")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| {
+                    .await?;
+                    if result.status_code != Some(0) || result.stdout_overflow {
+                        return Err(CveScanExecutionError::new(
+                            CveScanFailureClass::Transient,
+                            "Nix package-output binding resolution failed",
+                        ));
+                    }
+                    let stdout = std::str::from_utf8(&result.stdout).map_err(|_| {
                         CveScanExecutionError::new(
                             CveScanFailureClass::Deterministic,
-                            "Nix returned an unresolved package output",
+                            "Nix package-output binding returned invalid text",
                         )
                     })?;
-                validate_store_path(store_path, false)?;
-                package_outputs.push(CveDerivationOutput {
-                    name: name.clone(),
-                    store_path: store_path.to_string(),
-                });
-            }
-            package_outputs
-                .sort_by(|a, b| a.name.cmp(&b.name).then(a.store_path.cmp(&b.store_path)));
-            if package_outputs.is_empty() {
-                return Err(CveScanExecutionError::new(
-                    CveScanFailureClass::Deterministic,
-                    "package derivation has no resolved outputs",
-                ));
-            }
-            resolved.insert(drv_path.clone(), package_outputs);
+                    let mut paths = stdout
+                        .lines()
+                        .map(str::trim)
+                        .filter(|path| !path.is_empty());
+                    let store_path = paths.next().ok_or_else(|| {
+                        CveScanExecutionError::new(
+                            CveScanFailureClass::Deterministic,
+                            "Nix package-output binding returned no store path",
+                        )
+                    })?;
+                    if paths.next().is_some() {
+                        return Err(CveScanExecutionError::new(
+                            CveScanFailureClass::Deterministic,
+                            "Nix package-output binding returned multiple store paths",
+                        ));
+                    }
+                    validate_store_path(store_path, false)?;
+                    store_path.to_string()
+                }
+            };
+            package_outputs.push(CveDerivationOutput {
+                name: output.name,
+                store_path,
+            });
         }
+        package_outputs.sort_by(|a, b| a.name.cmp(&b.name).then(a.store_path.cmp(&b.store_path)));
+        if package_outputs.is_empty() {
+            return Err(CveScanExecutionError::new(
+                CveScanFailureClass::Deterministic,
+                "package derivation has no resolved outputs",
+            ));
+        }
+        resolved.insert(drv_path, package_outputs);
     }
     Ok(resolved)
 }
@@ -872,6 +1281,7 @@ async fn run_leased_command<A: CveLeaseApi>(
             lease: claim.lease,
             entries_collected: entries.load(Ordering::Relaxed),
             observations_collected: observations.load(Ordering::Relaxed),
+            diagnostics: Vec::new(),
         };
         async move {
             match api.heartbeat(&heartbeat).await {
@@ -1157,6 +1567,323 @@ mod tests {
     }
 
     #[test]
+    fn derivation_output_normalizer_accepts_v4_and_sorts_outputs() {
+        let drv_path = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv";
+        let normalized = normalize_derivation_show_output(
+            br#"{
+                "version": 4,
+                "derivations": {
+                  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv": {
+                    "version": 4,
+                    "outputs": {
+                        "dev": {"path": "cccccccccccccccccccccccccccccccc-package-dev"},
+                        "out": {"path": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-package"}
+                    }
+                  }
+                }
+            }"#,
+            &[drv_path.to_string()],
+        )
+        .expect("canonical version 4 derivation output");
+
+        assert_eq!(
+            normalized[drv_path],
+            vec![
+                ParsedDerivationOutput {
+                    name: "dev".to_string(),
+                    store_path: Some(
+                        "/nix/store/cccccccccccccccccccccccccccccccc-package-dev".to_string(),
+                    ),
+                },
+                ParsedDerivationOutput {
+                    name: "out".to_string(),
+                    store_path: Some(
+                        "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-package".to_string(),
+                    ),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn derivation_output_normalizer_accepts_exact_multiple_derivation_set() {
+        let first = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv";
+        let second = "/nix/store/dddddddddddddddddddddddddddddddd-extra.drv";
+        let normalized = normalize_derivation_show_output(
+            br#"{
+                "version": 4,
+                "derivations": {
+                    "dddddddddddddddddddddddddddddddd-extra.drv": {
+                        "version": 4,
+                        "outputs": {"out": {"path": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-extra"}}
+                    },
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv": {
+                        "version": 4,
+                        "outputs": {"out": {"path": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-package"}}
+                    }
+                }
+            }"#,
+            &[second.to_string(), first.to_string()],
+        )
+        .expect("exact multi-derivation response");
+
+        assert_eq!(normalized.len(), 2);
+        assert!(normalized.contains_key(first));
+        assert!(normalized.contains_key(second));
+    }
+
+    #[test]
+    fn derivation_output_normalizer_requires_exact_requested_set() {
+        let requested = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv";
+        let error = normalize_derivation_show_output(
+            br#"{
+                "version": 4,
+                "derivations": {
+                    "dddddddddddddddddddddddddddddddd-package.drv": {
+                        "version": 4,
+                        "outputs": {"out": {"path": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-package"}}
+                    }
+                }
+            }"#,
+            &[requested.to_string()],
+        )
+        .expect_err("a different derivation must not satisfy the requested set");
+
+        assert_eq!(
+            error.message,
+            "Nix returned a mismatched derivation set (missing=1, extra=1, entries=1, requested=1)"
+        );
+        assert!(!error.message.contains("package.drv"));
+        assert!(!error.message.contains("/nix/store/"));
+    }
+
+    #[test]
+    fn derivation_output_normalizer_rejects_extra_derivation() {
+        let requested = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv";
+        let error = normalize_derivation_show_output(
+            br#"{
+                "version": 4,
+                "derivations": {
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv": {
+                        "version": 4,
+                        "outputs": {"out": {"path": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-package"}}
+                    },
+                    "dddddddddddddddddddddddddddddddd-extra.drv": {
+                        "version": 4,
+                        "outputs": {"out": {"path": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-extra"}}
+                    }
+                }
+            }"#,
+            &[requested.to_string()],
+        )
+        .expect_err("an extra derivation key must fail");
+
+        assert_eq!(
+            error.message,
+            "Nix returned a mismatched derivation set (missing=0, extra=1, entries=2, requested=1)"
+        );
+        assert!(!error.message.contains("extra.drv"));
+        assert!(!error.message.contains("/nix/store/"));
+    }
+
+    #[test]
+    fn derivation_output_normalizer_rejects_malformed_shape_and_version() {
+        let requested = vec!["/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv".to_string()];
+        let malformed = normalize_derivation_show_output(b"not-json", &requested)
+            .expect_err("malformed JSON must fail");
+        assert!(malformed.message.contains("malformed JSON"));
+
+        for unsupported in [
+            br#"[]"#.as_slice(),
+            br#"{"result":{"/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv":{"outputs":{}}}}"#.as_slice(),
+            br#"{"version":4,"derivations":[]}"#.as_slice(),
+        ] {
+            let error = normalize_derivation_show_output(unsupported, &requested)
+                .expect_err("unsupported derivation shape must fail");
+            assert!(error.message.contains("malformed JSON"));
+        }
+
+        for unsupported_version in [
+            br#"{"version":3,"derivations":{}}"#.as_slice(),
+            br#"{"version":4,"derivations":{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv":{"version":3,"outputs":{"out":{"path":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-package"}}}}}"#.as_slice(),
+        ] {
+            let error = normalize_derivation_show_output(unsupported_version, &requested)
+                .expect_err("unsupported version must fail");
+            assert!(error.message.contains("unsupported version"));
+        }
+    }
+
+    #[test]
+    fn derivation_output_normalizer_preserves_pathless_outputs_for_resolution() {
+        let requested = vec!["/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv".to_string()];
+        let normalized = normalize_derivation_show_output(
+            br#"{"version":4,"derivations":{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv":{"version":4,"outputs":{"out":{"hash":"sha256-example","method":"flat"}}}}}"#,
+            &requested,
+        )
+        .expect("a legitimate pathless output must be deferred");
+        assert_eq!(normalized[&requested[0]][0].store_path, None);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn pathless_derivation_output_resolves_by_exact_binding() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("binding fixture directory");
+        let script = directory.path().join("nix-store");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n\
+             test \"$1\" = --query || exit 11\n\
+             test \"$2\" = --binding || exit 12\n\
+             test \"$3\" = out || exit 13\n\
+             test \"$4\" = /nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv || exit 14\n\
+             printf '%s\\n' /nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-package\n",
+        )
+        .expect("binding fixture script");
+        let mut permissions = std::fs::metadata(&script)
+            .expect("binding fixture metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&script, permissions).expect("binding fixture permissions");
+
+        let drv_path = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv";
+        let resolved = resolve_missing_derivation_outputs(
+            &AcceptingApi,
+            &claim(),
+            BTreeMap::from([(
+                drv_path.to_string(),
+                vec![ParsedDerivationOutput {
+                    name: "out".to_string(),
+                    store_path: None,
+                }],
+            )]),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            script.to_str().expect("UTF-8 fixture path"),
+            Instant::now() + NIX_QUERY_TIMEOUT,
+        )
+        .await
+        .expect("exact output binding");
+
+        assert_eq!(
+            resolved[drv_path],
+            vec![CveDerivationOutput {
+                name: "out".to_string(),
+                store_path: "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-package".to_string(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn pathless_derivation_outputs_share_one_resolution_deadline() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("binding timeout fixture directory");
+        let script = directory.path().join("nix-store");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nsleep 0.15\nprintf '%s\\n' /nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-package\n",
+        )
+        .expect("binding timeout fixture script");
+        let mut permissions = std::fs::metadata(&script)
+            .expect("binding timeout fixture metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&script, permissions)
+            .expect("binding timeout fixture permissions");
+
+        let parsed = || {
+            BTreeMap::from([(
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv".to_string(),
+                vec![ParsedDerivationOutput {
+                    name: "out".to_string(),
+                    store_path: None,
+                }],
+            )])
+        };
+        let resolution_deadline = Instant::now() + Duration::from_millis(250);
+        resolve_missing_derivation_outputs(
+            &AcceptingApi,
+            &claim(),
+            parsed(),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            script.to_str().expect("UTF-8 fixture path"),
+            resolution_deadline,
+        )
+        .await
+        .expect("the first simulated chunk should fit the shared deadline");
+        let error = resolve_missing_derivation_outputs(
+            &AcceptingApi,
+            &claim(),
+            parsed(),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            script.to_str().expect("UTF-8 fixture path"),
+            resolution_deadline,
+        )
+        .await
+        .expect_err("a later simulated chunk must use the remaining shared budget");
+
+        assert_eq!(error.class, CveScanFailureClass::Transient);
+        assert!(error.message.contains("timed out"));
+    }
+
+    #[test]
+    fn pathless_output_limit_accumulates_across_chunks() {
+        let parsed = |count| {
+            BTreeMap::from([(
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv".to_string(),
+                (0..count)
+                    .map(|index| ParsedDerivationOutput {
+                        name: format!("output-{index}"),
+                        store_path: None,
+                    })
+                    .collect(),
+            )])
+        };
+        let first_count = add_pathless_output_count(0, &parsed(128))
+            .expect("the first chunk should fit the resolution limit");
+        let error = add_pathless_output_count(first_count, &parsed(129))
+            .expect_err("the cumulative pathless-output count must remain bounded");
+
+        assert_eq!(error.class, CveScanFailureClass::Deterministic);
+        assert!(error.message.contains("pathless-output limit"));
+    }
+
+    #[test]
+    fn derivation_output_normalizer_rejects_empty_or_malformed_outputs() {
+        let requested = vec!["/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv".to_string()];
+        let empty = normalize_derivation_show_output(
+            br#"{"version":4,"derivations":{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv":{"version":4,"outputs":{}}}}"#,
+            &requested,
+        )
+        .expect_err("an empty output set must fail");
+        assert!(empty.message.contains("no outputs"));
+
+        let null_path = normalize_derivation_show_output(
+            br#"{"version":4,"derivations":{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv":{"version":4,"outputs":{"out":{"path":null}}}}}"#,
+            &requested,
+        )
+        .expect_err("an explicit null path must be malformed");
+        assert!(null_path.message.contains("malformed output path"));
+    }
+
+    #[test]
+    fn derivation_output_normalizer_rejects_non_basename_output_path() {
+        let requested = vec!["/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv".to_string()];
+        let error = normalize_derivation_show_output(
+            br#"{"version":4,"derivations":{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv":{"version":4,"outputs":{"out":{"path":"/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-package"}}}}}"#,
+            &requested,
+        )
+        .expect_err("a version 4 output path must be a base name");
+
+        assert!(error.message.contains("invalid store-path base name"));
+    }
+
+    #[test]
     fn api_status_mapping_preserves_revocation_and_failure_classes() {
         assert_eq!(
             super::super::api_client::cve_api_error_for_status(reqwest::StatusCode::GONE),
@@ -1277,6 +2004,79 @@ mod tests {
                 );
             }
         }
+    }
+
+    struct AcceptingApi;
+
+    #[async_trait]
+    impl CveLeaseApi for AcceptingApi {
+        async fn heartbeat(&self, _request: &CveScanHeartbeatRequest) -> Result<bool, CveApiError> {
+            Ok(true)
+        }
+
+        async fn complete(&self, _request: &CveScanCompleteRequest) -> Result<(), CveApiError> {
+            Ok(())
+        }
+
+        async fn fail(&self, _request: &CveScanFailRequest) -> Result<(), CveApiError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct CapturingApi {
+        heartbeats: Mutex<Vec<CveScanHeartbeatRequest>>,
+    }
+
+    #[async_trait]
+    impl CveLeaseApi for CapturingApi {
+        async fn heartbeat(&self, request: &CveScanHeartbeatRequest) -> Result<bool, CveApiError> {
+            self.heartbeats
+                .lock()
+                .expect("heartbeat capture lock should remain available")
+                .push(request.clone());
+            Ok(true)
+        }
+
+        async fn complete(&self, _request: &CveScanCompleteRequest) -> Result<(), CveApiError> {
+            Ok(())
+        }
+
+        async fn fail(&self, _request: &CveScanFailRequest) -> Result<(), CveApiError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn phase_diagnostics_are_sent_before_terminal_reporting() {
+        let api = CapturingApi::default();
+        let claim = claim();
+        let diagnostic = scan_diagnostic(
+            "info",
+            "vulnix",
+            "scanner_started",
+            "Vulnix scan started for the authorized outputs.",
+            false,
+        );
+        persist_phase_diagnostic(
+            &api,
+            &claim,
+            &Arc::new(AtomicUsize::new(3)),
+            &Arc::new(AtomicUsize::new(5)),
+            diagnostic.clone(),
+            std::slice::from_ref(&diagnostic),
+        )
+        .await
+        .expect("phase heartbeat should be accepted");
+
+        let heartbeats = api
+            .heartbeats
+            .lock()
+            .expect("heartbeat capture lock should remain available");
+        assert_eq!(heartbeats.len(), 1);
+        assert_eq!(heartbeats[0].entries_collected, 3);
+        assert_eq!(heartbeats[0].observations_collected, 5);
+        assert_eq!(heartbeats[0].diagnostics, vec![diagnostic]);
     }
 
     struct RevokingApi;

@@ -83,6 +83,9 @@ pub async fn run_build_loop(pool: PgPool) {
     let build_config = cfg.get_build_config();
     let cache_config = cfg.get_cache_config();
     let use_mock_build = cfg.server.execution_mode.is_mock();
+    // Admission policy travels explicitly into each worker's build-success
+    // transaction. See `worker::mark_build_complete_and_release`.
+    let auto_hardening_scans = cfg.server.auto_hardening_scans;
     let num_workers = build_config.max_concurrent_derivations;
 
     info!("🏗 Starting {} continuous build workers...", num_workers);
@@ -129,6 +132,7 @@ pub async fn run_build_loop(pool: PgPool) {
                 build_config,
                 cache_config,
                 use_mock_build,
+                auto_hardening_scans,
             )
             .await;
         });

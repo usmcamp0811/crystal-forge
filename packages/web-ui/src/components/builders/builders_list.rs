@@ -73,17 +73,6 @@ pub fn BuildersList(show_onboarding_hint: bool) -> Element {
                             "➕ Add Builder"
                         }
                     }
-                    if can_manage_builders && show_onboarding_hint && !show_add_modal() && !dismiss_add_target_callout() {
-                        div {
-                            "data-testid": "setup-coach-builders-target-callout",
-                            style: "position:absolute; right:0; top:calc(100% + 10px); background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; width:220px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
-                            div {
-                                style: "position:absolute; top:-6px; right:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
-                            }
-                            p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
-                            p { style: "margin:2px 0 0 0;", "Click Add Builder to connect your first build worker." }
-                        }
-                    }
                 }
             }
 

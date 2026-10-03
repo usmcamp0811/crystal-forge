@@ -401,7 +401,7 @@ fn PolicyEnforcementSection(props: PolicyEnforcementSectionProps) -> Element {
                     let bundle_version = assignment.bundle_version.clone();
                     let framework = assignment.framework.clone();
                     rsx! {
-                        div { style: "display:flex; align-items:center; gap:8px; padding:8px 10px; border:1px solid var(--cf-divider); border-radius:8px; background:var(--cf-card-bg); margin-bottom:6px;",
+                        div { style: "display:flex; align-items:center; gap:8px; padding:8px 10px; border:1px solid var(--cf-divider); border-radius:8px; background:var(--cf-card-bg); margin-bottom:6px;", "data-coach-target": "env-bundle-assignment",
                             Icon { name: IconName::Shield, size: 13 }
                             div { style: "flex:1; min-width:0;",
                                 div { style: "font-size:13px; font-weight:600;", "{bundle_name}" }
@@ -413,6 +413,7 @@ fn PolicyEnforcementSection(props: PolicyEnforcementSectionProps) -> Element {
                                 }
                             }
                             select {
+                                "data-coach-target": "env-assignment-mode",
                                 class: "input focus-ring",
                                 style: "width:auto; font-size:12px; padding:3px 8px;",
                                 value: "{current_mode}",

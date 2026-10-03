@@ -1,0 +1,15 @@
+flowchart TB
+  Req["Bundle, optional exact version, system"] --> Auth["Evidence handler checks environment visibility"]
+  Auth --> Member["Select policies and current effective provenance"]
+  Member --> Target["Resolve deployment and policy context"]
+  Target --> Ids["Materialize stable policy finding IDs"]
+  Target --> Comp["Composite assessment candidates"]
+  Comp --> Exact["Digest and target matched detail"]
+  Comp --> Fallback["Latest evaluation-attempt rules in flake and configuration"]
+  Target --> Legacy["Nix result or CVE threshold scan counters"]
+  Exact --> Display["Evidence response"]
+  Fallback -->|"different authority; no deployed target binding"| Display
+  Legacy --> Display
+  Ids --> Display
+  Display --> Rel["Separate current POAM relationship read"]
+  Display -.->|"not itself mutation authorization"| Mutation["POAM service re-resolves current failure"]

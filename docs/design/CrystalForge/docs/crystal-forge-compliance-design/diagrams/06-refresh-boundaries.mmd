@@ -1,0 +1,14 @@
+flowchart TB
+  Create["Create or link finding"] --> Child["Evidence child reloads relationships"]
+  Create --> Detail["Open or update POAM drawer"]
+  Create --> Roll["Refresh bundle POAM rollups"]
+  Create --> List["Refresh selected bundle POAM list"]
+  Edit["Metadata milestone note or close"] --> Detail
+  Edit --> Roll
+  Edit --> List
+  Verify["Verify success"] --> Reload["Reload POAM detail with draft reset"]
+  Assign["Assignment save or deactivate"] --> Local["Local assignment list"]
+  Publish["Trust or publish"] --> Catalog["Reload bundle catalog"]
+  Detail -.-> Missing["No common cross-view invalidation event"]
+  Missing -.-> Matrix["Systems matrix and evidence snapshot"]
+  Missing -.-> Fleet["Fleet CVE rows and summaries"]

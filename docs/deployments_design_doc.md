@@ -1,5 +1,11 @@
 # Crystal Forge Agent Deployment Design Document
 
+> **Historical proposal:** This document predates the deployed agent protocol
+> and current auto-latest selector. For the implemented artifact eligibility,
+> exact cache-output requirement, and running-system status rules, use
+> [Eval, Build, and Deploy](eval-build-deploy-sequence.md) and
+> [System Deployment Status View](views/view_system_deployment_status.md).
+
 ## Overview
 
 This document outlines the design for adding bidirectional deployment capabilities to Crystal Forge, enabling the server to instruct agents which NixOS configuration they should be running.

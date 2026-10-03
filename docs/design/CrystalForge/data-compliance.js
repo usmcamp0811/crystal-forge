@@ -284,13 +284,17 @@ function evidenceForControl(bundle, policyId, sys) {
   }
   items.push({ type:"policy_eval",   at:"just now", source:"crystal-forge", ref:"gate evaluation", value: status === "pass" ? "allow" : status });
   if (policyId === "cve-gated") items.push({ type:"cve_scan", at:"1h ago", source:"vulnix", ref:"scan-2026-05-23", value:`${sys.cves?.critical ?? 0} crit / ${sys.cves?.high ?? 0} high` });
-  if (status === "waiver") items.unshift({ type:"policy_eval", at:"7d ago", source:"security-team", ref:"WAIVER-2026-" + (seed % 999), value:"Risk accepted until 2026-08-30 (compensating control: network isolation)", _waiver:true });
+  // Waiver evidence reads the risk-acceptance register when it is loaded, so the artifact and the POA&M view agree.
+  const _ra = status === "waiver" && typeof raForFinding === "function" ? raForFinding(sys.id, policyId) : null;
+  if (status === "waiver") items.unshift({ type:"policy_eval", at:"7d ago", source:"security-team", ref: _ra ? _ra.id : "WAIVER-2026-" + (seed % 999), value: _ra ? `Risk accepted${_ra.reviewDate ? " until " + _ra.reviewDate : " — no review date"}` : "Risk accepted until 2026-08-30 (compensating control: network isolation)", _waiver:true });
 
   // Attach the actual artifact body to each item
   items.forEach(it => {
     if (it._waiver) {
       it.artifact = { kind:"doc", title:it.ref + " · approved waiver", content:
-        `WAIVER ${it.ref}\nStatus:       APPROVED\nApprover:     security-team (M. Reyes)\nApproved:     2026-05-16\nExpires:      2026-08-30\nControl:      ${policy.name}\nSystem:       ${sys.hostname} (${sys.environment})\n\nCompensating control:\n  Host is network-isolated on VLAN 220 with no inbound\n  routes; access via bastion only. Reviewed quarterly.\n\nJustification:\n  Vendor patch pending upstream; risk accepted by AO.` };
+        _ra
+        ? `RISK ACCEPTANCE ${_ra.id}\nStatus:       ${_ra.status.toUpperCase()}\nApprover:     ${_ra.approver}\nApproved:     ${_ra.approvedAt}\nReview by:    ${_ra.reviewDate || "not set"}\nControl:      ${policy.name}\nSystem:       ${sys.hostname} (${sys.environment})\n\nCompensating control:\n  ${_ra.compensating}\n\nJustification:\n  ${_ra.justification}`
+        : `WAIVER ${it.ref}\nStatus:       APPROVED\nApprover:     security-team (M. Reyes)\nApproved:     2026-05-16\nExpires:      2026-08-30\nControl:      ${policy.name}\nSystem:       ${sys.hostname} (${sys.environment})\n\nCompensating control:\n  Host is network-isolated on VLAN 220 with no inbound\n  routes; access via bastion only. Reviewed quarterly.\n\nJustification:\n  Vendor patch pending upstream; risk accepted by AO.` };
     } else {
       it.artifact = _artifactFor(it.type === "banner" ? "banner" : it.type, policyId, policy.name, sys, status, seed);
     }

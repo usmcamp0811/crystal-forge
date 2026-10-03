@@ -1,0 +1,13 @@
+flowchart LR
+  Resolver["Server-owned source resolver"] --> Selection["Validated target and version selection"]
+  Resolver --> Evidence["Observation ID and representation"]
+  Resolver --> Fresh["Freshness, completeness and authority reason"]
+  Resolver --> Cap["Action capabilities by finding family"]
+  Selection --> Response["One scoped response contract"]
+  Evidence --> Response
+  Fresh --> Response
+  Cap --> Response
+  Response --> Systems["Systems presentation"]
+  Response --> CVEs["Fleet CVEs presentation"]
+  Response --> Compliance["Compliance presentation"]
+  Response --> Report["Export projection with same scope"]

@@ -135,6 +135,106 @@ pub async fn fetch_scanning_queue(
     fetch_json(&url).await
 }
 
+/// Fetches one bounded, server-filtered page of exact scan lifecycles.
+///
+/// The server owns search, status, revision, latest-revision, ordering, and
+/// archive visibility, so the returned counts and ordering describe the whole
+/// matching collection rather than the rows already loaded by the browser.
+/// Continuation requests pass the previous response's `next_cursor` in
+/// [`ScanningScanRecordQuery::after`].
+///
+/// This function sends [`ScanningScanRecordQuery::limit`] unchanged. It does
+/// not clamp the page size, because a silent clamp would let a caller believe
+/// it received a complete collection. The server answers a page size outside
+/// 1 through 500 with a validation error.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError::Status`] with code 400 when a parameter fails
+/// server validation or when the cursor does not belong to this exact request
+/// identity, 403 when the session is not an administrator, and the transport
+/// or decoding variants for any other failure.
+pub async fn fetch_scanning_scan_records(
+    query: &ScanningScanRecordQuery,
+) -> Result<ScanningScanRecordsResponse, ApiClientError> {
+    debug_assert!(
+        (1..=500).contains(&query.limit),
+        "scan-record page size must stay inside the server contract",
+    );
+    debug_assert!(
+        query.after.is_none() || query.collection.supports_cursor(),
+        "only the completed collection accepts a continuation cursor",
+    );
+    let url = scanning_scan_records_url(query);
+    fetch_json(&url).await
+}
+
+/// Fetches one scan-record page and aborts its browser request after a timeout.
+///
+/// This variant is for periodic live refreshes. Aborting the underlying browser
+/// request prevents stalled refreshes from accumulating across polling ticks.
+///
+/// # Errors
+///
+/// Returns the same errors as [`fetch_scanning_scan_records`]. A request that
+/// exceeds `timeout_ms` returns [`ApiClientError::Network`] after the browser
+/// aborts the fetch.
+pub async fn fetch_scanning_scan_records_with_timeout(
+    query: &ScanningScanRecordQuery,
+    timeout_ms: u32,
+) -> Result<ScanningScanRecordsResponse, ApiClientError> {
+    debug_assert!(
+        (1..=500).contains(&query.limit),
+        "scan-record page size must stay inside the server contract",
+    );
+    debug_assert!(
+        query.after.is_none() || query.collection.supports_cursor(),
+        "only the completed collection accepts a continuation cursor",
+    );
+    let url = scanning_scan_records_url(query);
+    fetch_json_with_timeout(&url, timeout_ms).await
+}
+
+fn scanning_scan_records_url(query: &ScanningScanRecordQuery) -> String {
+    let mut url = format!(
+        "{}/scanning/scans?collection={}&include_archived={}&limit={}&status={}&revision={}&latest_only={}&sort={}&direction={}",
+        base_url(),
+        query.collection.as_param(),
+        query.include_archived,
+        query.limit,
+        query.status.as_param(),
+        query.revision.as_param(),
+        query.latest_only,
+        query.sort.as_param(),
+        query.direction.as_param(),
+    );
+    if let Some(system_id) = query.system_id.as_ref() {
+        url.push_str(&format!("&system_id={system_id}"));
+    }
+    if let Some(search) = query
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        url.push_str(&format!("&q={}", js_sys::encode_uri_component(search)));
+    }
+    if let Some(cursor) = query.after.as_deref() {
+        url.push_str(&format!("&after={}", js_sys::encode_uri_component(cursor)));
+    }
+    url
+}
+
+/// Archives or restores exact terminal scan lifecycles.
+pub async fn update_scanning_archive_state(
+    scan_ids: Vec<Uuid>,
+    archived: bool,
+) -> Result<UpdateScanningArchiveResponse, ApiClientError> {
+    let url = format!("{}/scanning/scans", base_url());
+    let request = UpdateScanningArchiveRequest { scan_ids, archived };
+    send_json_with_csrf("PATCH", &url, Some(&request)).await
+}
+
 pub async fn fetch_scanning_scan_detail(
     scan_id: &Uuid,
 ) -> Result<ScanningScanDetailResponse, ApiClientError> {
@@ -477,6 +577,78 @@ fn cve_filter_query_parts(filters: &CveFilters) -> Vec<String> {
     }
 
     parts
+}
+
+fn cve_inventory_url(query: &CveInventoryQuery, members: bool) -> String {
+    let endpoint = if members { "members" } else { "groups" };
+    let mut parts = vec![
+        format!("group_by={}", query.group_by),
+        format!("offset={}", query.offset),
+        format!("limit={}", query.limit),
+    ];
+    if let Some(id) = query.environment_id {
+        parts.push(format!("environment_id={id}"));
+    }
+    if let Some(id) = query.group_id {
+        parts.push(format!("group_id={id}"));
+    }
+    parts.extend(cve_filter_query_parts(&CveFilters {
+        sort: None,
+        limit: None,
+        ..query.filters.clone()
+    }));
+    format!(
+        "{}/cves/inventory/{endpoint}?{}",
+        base_url(),
+        parts.join("&")
+    )
+}
+
+/// Fetches one server-ordered scoped aggregate page without inferring missing groups.
+///
+/// # Errors
+/// Returns transport, authorization, validation, or decoding errors unchanged.
+pub async fn fetch_cve_inventory_groups(
+    query: &CveInventoryQuery,
+) -> Result<CveInventoryGroupPage, ApiClientError> {
+    fetch_json(&cve_inventory_url(query, false)).await
+}
+
+/// Fetches one exact group's bounded membership page, including historical evidence.
+///
+/// # Errors
+/// Returns transport, authorization, validation, or decoding errors unchanged.
+pub async fn fetch_cve_inventory_members(
+    query: &CveInventoryQuery,
+) -> Result<CveInventoryMemberPage, ApiClientError> {
+    fetch_json(&cve_inventory_url(query, true)).await
+}
+
+/// Fetches one server-filtered CVE/package pair page for the authorized scope.
+/// The server applies the environment and CVE filters before paging.
+///
+/// # Errors
+/// Returns transport, authorization, validation, or decoding errors unchanged.
+pub async fn fetch_cve_inventory_pairs(
+    query: &CveInventoryQuery,
+) -> Result<CveInventoryPairPage, ApiClientError> {
+    let mut parts = vec![
+        format!("offset={}", query.offset),
+        format!("limit={}", query.limit),
+    ];
+    if let Some(id) = query.environment_id {
+        parts.push(format!("environment_id={id}"));
+    }
+    parts.extend(cve_filter_query_parts(&CveFilters {
+        limit: None,
+        ..query.filters.clone()
+    }));
+    fetch_json(&format!(
+        "{}/cves/inventory/pairs?{}",
+        base_url(),
+        parts.join("&")
+    ))
+    .await
 }
 
 /// Fetch CVE list with filters.
@@ -1019,16 +1191,37 @@ struct SystemCveInventoryPageQuery<'a> {
     limit: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     after: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_id: Option<&'a str>,
 }
 
 fn system_cve_inventory_url(
     base: &str,
     id: &Uuid,
     after: Option<&str>,
+    selection: SystemCveInventorySelection,
 ) -> Result<String, ApiClientError> {
+    let target_id = match selection {
+        SystemCveInventorySelection::Current => None,
+        SystemCveInventorySelection::RetainedGeneration {
+            generation_snapshot_id,
+        } => Some(generation_snapshot_id.to_string()),
+        SystemCveInventorySelection::ExactDerivation { derivation_id } => {
+            Some(derivation_id.to_string())
+        }
+    };
+    let target = match selection {
+        SystemCveInventorySelection::Current => None,
+        SystemCveInventorySelection::RetainedGeneration { .. } => Some("retained_generation"),
+        SystemCveInventorySelection::ExactDerivation { .. } => Some("exact_derivation"),
+    };
     let query = serde_urlencoded::to_string(SystemCveInventoryPageQuery {
         limit: SYSTEM_CVE_INVENTORY_PAGE_SIZE,
         after,
+        target,
+        target_id: target_id.as_deref(),
     })
     .map_err(|error| ApiClientError::Deserialize(error.to_string()))?;
     Ok(format!("{base}/systems/{id}/cve-inventory-page?{query}"))
@@ -1042,7 +1235,24 @@ pub async fn fetch_system_cve_inventory(
     id: &Uuid,
     after: Option<&str>,
 ) -> Result<SystemCveInventoryPageResponse, ApiClientError> {
-    let url = system_cve_inventory_url(&base_url(), id, after)?;
+    fetch_system_cve_inventory_for_target(id, after, SystemCveInventorySelection::Current).await
+}
+
+/// Fetches one source-bound page for a server-authorized inventory target.
+pub async fn fetch_system_cve_inventory_for_target(
+    id: &Uuid,
+    after: Option<&str>,
+    selection: SystemCveInventorySelection,
+) -> Result<SystemCveInventoryPageResponse, ApiClientError> {
+    let url = system_cve_inventory_url(&base_url(), id, after, selection)?;
+    fetch_json(&url).await
+}
+
+/// Fetches factual server-owned candidates for a future revision selector.
+pub async fn fetch_system_cve_inventory_candidates(
+    id: &Uuid,
+) -> Result<SystemCveInventoryCandidatesResponse, ApiClientError> {
+    let url = format!("{}/systems/{id}/cve-inventory-sources", base_url());
     fetch_json(&url).await
 }
 
@@ -1051,6 +1261,45 @@ pub async fn fetch_system_hardening(
 ) -> Result<Vec<HardeningServiceResultResponse>, ApiClientError> {
     let url = format!("{}/systems/{}/hardening", base_url(), id);
     fetch_json(&url).await
+}
+
+/// Fetches hardening evidence for one server-authorized revision target.
+///
+/// The browser sends only the opaque identity from
+/// [`SystemCveInventoryCandidatesResponse`]. It never submits a derivation path
+/// or derives a target identity from display metadata.
+pub async fn fetch_system_hardening_inventory_for_target(
+    id: &Uuid,
+    selection: SystemCveInventorySelection,
+) -> Result<SystemHardeningInventoryResponse, ApiClientError> {
+    let url = system_hardening_inventory_url(&base_url(), id, selection);
+    fetch_json(&url).await
+}
+
+fn system_hardening_inventory_url(
+    base: &str,
+    id: &Uuid,
+    selection: SystemCveInventorySelection,
+) -> String {
+    let target_id = match selection {
+        SystemCveInventorySelection::Current => None,
+        SystemCveInventorySelection::RetainedGeneration {
+            generation_snapshot_id,
+        } => Some(generation_snapshot_id.to_string()),
+        SystemCveInventorySelection::ExactDerivation { derivation_id } => {
+            Some(derivation_id.to_string())
+        }
+    };
+    let target = match selection {
+        SystemCveInventorySelection::Current => "current",
+        SystemCveInventorySelection::RetainedGeneration { .. } => "retained_generation",
+        SystemCveInventorySelection::ExactDerivation { .. } => "exact_derivation",
+    };
+    let mut url = format!("{base}/systems/{id}/hardening-inventory?target={target}");
+    if let Some(target_id) = target_id {
+        url.push_str(&format!("&target_id={target_id}"));
+    }
+    url
 }
 
 pub async fn fetch_system_hardening_justifications(
@@ -1458,6 +1707,20 @@ pub async fn fetch_build_queue_paginated(
     } else {
         format!("{}?{}", base, parts.join("&"))
     };
+    fetch_json(&url).await
+}
+
+/// Fetches one exact build attempt in the current user's visibility scope.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails, the server rejects the
+/// request, or the response cannot be decoded as
+/// [`crate::api::models::BuildAttemptLookupResponse`].
+pub async fn fetch_build_attempt(
+    attempt_id: &uuid::Uuid,
+) -> Result<crate::api::models::BuildAttemptLookupResponse, ApiClientError> {
+    let url = format!("{}/build-jobs/{}", base_url(), attempt_id);
     fetch_json(&url).await
 }
 
@@ -2828,6 +3091,15 @@ async fn send_request(
     url: &str,
     body: Option<&str>,
 ) -> Result<(u16, String), ApiClientError> {
+    send_request_with_signal(method, url, body, None).await
+}
+
+async fn send_request_with_signal(
+    method: &str,
+    url: &str,
+    body: Option<&str>,
+    signal: Option<&web_sys::AbortSignal>,
+) -> Result<(u16, String), ApiClientError> {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::JsValue;
     use wasm_bindgen_futures::JsFuture;
@@ -2851,6 +3123,7 @@ async fn send_request(
     if let Some(payload) = body {
         opts.set_body(&JsValue::from_str(payload));
     }
+    opts.set_signal(signal);
 
     let request = web_sys::Request::new_with_str_and_init(url, &opts)
         .map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
@@ -2885,6 +3158,28 @@ async fn send_request(
     let body = text.as_string().unwrap_or_default();
 
     Ok((status as u16, body))
+}
+
+async fn fetch_json_with_timeout<T: serde::de::DeserializeOwned>(
+    url: &str,
+    timeout_ms: u32,
+) -> Result<T, ApiClientError> {
+    let controller = web_sys::AbortController::new()
+        .map_err(|error| ApiClientError::Network(format!("{error:?}")))?;
+    let abort_controller = controller.clone();
+    let timeout = gloo_timers::callback::Timeout::new(timeout_ms, move || {
+        abort_controller.abort();
+    });
+    let result = send_request_with_signal("GET", url, None, Some(&controller.signal())).await;
+    timeout.cancel();
+    let (status, text) = result?;
+    if !(200..300).contains(&status) {
+        return Err(ApiClientError::Status {
+            code: status,
+            body: decode_api_error_message(&text),
+        });
+    }
+    serde_json::from_str(&text).map_err(|error| ApiClientError::Deserialize(error.to_string()))
 }
 
 fn decode_api_error_message(body: &str) -> String {
@@ -3345,19 +3640,69 @@ mod config_observation_tests {
     fn system_cve_inventory_url_bounds_pages_and_encodes_opaque_cursor() {
         let id = Uuid::from_u128(440);
         assert_eq!(
-            system_cve_inventory_url("https://example.test/api/v1", &id, None)
-                .expect("page URL should serialize"),
+            system_cve_inventory_url(
+                "https://example.test/api/v1",
+                &id,
+                None,
+                SystemCveInventorySelection::Current,
+            )
+            .expect("page URL should serialize"),
             format!("https://example.test/api/v1/systems/{id}/cve-inventory-page?limit=100")
         );
         assert_eq!(
             system_cve_inventory_url(
                 "https://example.test/api/v1",
                 &id,
-                Some("opaque+/= cursor&scope")
+                Some("opaque+/= cursor&scope"),
+                SystemCveInventorySelection::Current,
             )
             .expect("cursor URL should serialize"),
             format!(
                 "https://example.test/api/v1/systems/{id}/cve-inventory-page?limit=100&after=opaque%2B%2F%3D+cursor%26scope"
+            )
+        );
+
+        let generation_snapshot_id = Uuid::from_u128(441);
+        assert_eq!(
+            system_cve_inventory_url(
+                "https://example.test/api/v1",
+                &id,
+                None,
+                SystemCveInventorySelection::RetainedGeneration {
+                    generation_snapshot_id,
+                },
+            )
+            .expect("historical page URL should serialize"),
+            format!(
+                "https://example.test/api/v1/systems/{id}/cve-inventory-page?limit=100&target=retained_generation&target_id={generation_snapshot_id}"
+            )
+        );
+    }
+
+    #[test]
+    fn hardening_inventory_url_uses_only_server_issued_target_identity() {
+        let id = Uuid::from_u128(440);
+        let generation_snapshot_id = Uuid::from_u128(441);
+        assert_eq!(
+            system_hardening_inventory_url(
+                "https://example.test/api/v1",
+                &id,
+                SystemCveInventorySelection::RetainedGeneration {
+                    generation_snapshot_id,
+                },
+            ),
+            format!(
+                "https://example.test/api/v1/systems/{id}/hardening-inventory?target=retained_generation&target_id={generation_snapshot_id}"
+            )
+        );
+        assert_eq!(
+            system_hardening_inventory_url(
+                "https://example.test/api/v1",
+                &id,
+                SystemCveInventorySelection::ExactDerivation { derivation_id: 42 },
+            ),
+            format!(
+                "https://example.test/api/v1/systems/{id}/hardening-inventory?target=exact_derivation&target_id=42"
             )
         );
     }

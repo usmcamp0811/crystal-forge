@@ -1,0 +1,11 @@
+flowchart TD
+    A["Current exact CVE/package on a host"] --> B{"Active host override?"}
+    B -->|Yes| C["Effective host decision = host override"]
+    B -->|No| D{"Active coherent environment decision?"}
+    D -->|Yes| E["Effective host decision = environment default"]
+    D -->|No| F["Effective host decision = OPEN"]
+    C --> G["Host-owned subject; exclude from environment schedule ownership"]
+    E --> H["Environment-owned subject"]
+    F --> H
+    I["Current fleet rollup"] --> J["Aggregates environment decisions"]
+    J -.-> K["Not a full rollup of C, E, and F across hosts"]

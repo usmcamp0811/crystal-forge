@@ -1,0 +1,14 @@
+flowchart TB
+  BV["Selected bundle version"] --> Base["Selected requirement baseline"]
+  Base --> C["Coverage: full partial unmapped recovery-required"]
+  BV --> Policies["Selected policy versions"]
+  Policies --> Mapping["Trusted requirement mappings"]
+  Mapping --> C
+  Assignment["Effective assignment and overrides"] --> Eval["Host policy evaluation"]
+  Policies --> Eval
+  Eval --> O["Pass warn fail waiver not-checked not-applicable error"]
+  O --> F["Current stable finding"]
+  F --> Plan["POAM tracking"]
+  F --> W["Separate waiver decision"]
+  Plan -.->|"does not rewrite"| O
+  C -.->|"not evidence that a host passed"| O

@@ -1,0 +1,78 @@
+{
+  "count": 14,
+  "format": "Mermaid source",
+  "rendered": false,
+  "parser_validation_performed": false,
+  "entries": [
+    {
+      "file": "diagrams/01-surface-and-service-map.mmd",
+      "inline_in_main_document": true,
+      "sha256": "f07fa5db0036a2f2e6cd86cefda0aa70f4807a55451f06faee8961c6b576cc87"
+    },
+    {
+      "file": "diagrams/02-identities-and-relationships.mmd",
+      "inline_in_main_document": true,
+      "sha256": "b51bfadad80e7be9c93f9bad1a0429dc3a5157c0daf4ee2062173e09901d049c"
+    },
+    {
+      "file": "diagrams/03-evidence-selection.mmd",
+      "inline_in_main_document": true,
+      "sha256": "684f8be3d4e11117f7f64228be7a94791e2676f2ae6fbc37e7689cc4c42d6b36"
+    },
+    {
+      "file": "diagrams/04-authority-contracts.mmd",
+      "inline_in_main_document": true,
+      "sha256": "59171c95489530f0f810d5d508649bf0bee7b3ed018fdabff66b35ee41bd4b97"
+    },
+    {
+      "file": "diagrams/05-coverage-versus-outcome.mmd",
+      "inline_in_main_document": true,
+      "sha256": "c1bc1fae7fafd4579ab3035c92c22e9aeb53a87efc7326fe8cfd49eeb5231876"
+    },
+    {
+      "file": "diagrams/06-refresh-boundaries.mmd",
+      "inline_in_main_document": true,
+      "sha256": "5f6eb8086490f65242f31b790e115886088559a686b4aab1da0a2d70414d3e3b"
+    },
+    {
+      "file": "diagrams/07-finding-create-transaction.mmd",
+      "inline_in_main_document": true,
+      "sha256": "0e44f19580d4f862ccec1a62531fd33408a15da1775de8ee6fc8969a4f90773c"
+    },
+    {
+      "file": "diagrams/08-verification-and-closure.mmd",
+      "inline_in_main_document": true,
+      "sha256": "fd1837dd5a658f1058292b4956de51b5de9411f6bd60b461c21fef04e9f097f3"
+    },
+    {
+      "file": "diagrams/09-three-risk-and-remediation-concepts.mmd",
+      "inline_in_main_document": true,
+      "sha256": "640e78e6cb67d6ef05d4bf6b5378bfceda57babfc7ca25331adfe2989cae7732"
+    },
+    {
+      "file": "diagrams/10-export-as-built.mmd",
+      "inline_in_main_document": true,
+      "sha256": "c7bbd456bf0f676d8d7585124038f955ac807733cb0ac20cd703d486b49ae334"
+    },
+    {
+      "file": "diagrams/11-assignment-reference-separation.mmd",
+      "inline_in_main_document": true,
+      "sha256": "c9f0e1e405ab634348277800c18cae40eceadbe2d95500882c14915d4a1bbd91"
+    },
+    {
+      "file": "diagrams/12-cross-view-review-contract.mmd",
+      "inline_in_main_document": true,
+      "sha256": "25506c1b31a70e26ee86dac88051db70a7506397678af5afcfd44d76ec71b573"
+    },
+    {
+      "file": "diagrams/13-source-to-proof-plan.mmd",
+      "inline_in_main_document": true,
+      "sha256": "82b992853234fdb60c1f975fd59ad9ab1297ffd0763f3fe04593f13b4dabfff5"
+    },
+    {
+      "file": "diagrams/14-normalized-observation-proposal.mmd",
+      "inline_in_main_document": true,
+      "sha256": "d7d22c87ddb7eaa9cffb2f7d2eff87ca48e7163f32e73b4205cc28f60d15bd8b"
+    }
+  ]
+}

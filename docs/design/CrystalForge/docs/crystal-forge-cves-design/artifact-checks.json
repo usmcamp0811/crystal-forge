@@ -1,0 +1,328 @@
+{
+  "checked_at": "2026-09-23T15:05:15+00:00",
+  "application_sha": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+  "checks": [
+    {
+      "check": "Main document exists and is non-empty",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Source references resolve",
+      "status": "passed",
+      "detail": "[]"
+    },
+    {
+      "check": "Source definition IDs are unique",
+      "status": "passed",
+      "detail": "33"
+    },
+    {
+      "check": "Repository source URLs are commit-pinned",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "All 26 numbered sections exist in order",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Internal reading-map anchors resolve",
+      "status": "passed",
+      "detail": "set()"
+    },
+    {
+      "check": "Code fences are balanced",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "There are 12 indexed Mermaid blocks",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram file matches inline source: 01-surface-composition.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram type is declared: 01-surface-composition.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram double quotes are balanced: 01-surface-composition.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram file matches inline source: 02-persistence-relationships.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram type is declared: 02-persistence-relationships.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram double quotes are balanced: 02-persistence-relationships.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram file matches inline source: 03-producer-read-data-flow.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram type is declared: 03-producer-read-data-flow.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram double quotes are balanced: 03-producer-read-data-flow.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram file matches inline source: 04-inventory-selection.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram type is declared: 04-inventory-selection.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram double quotes are balanced: 04-inventory-selection.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram file matches inline source: 05-count-overlap.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram type is declared: 05-count-overlap.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram double quotes are balanced: 05-count-overlap.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram file matches inline source: 06-page-request-and-refresh.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram type is declared: 06-page-request-and-refresh.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram double quotes are balanced: 06-page-request-and-refresh.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram file matches inline source: 07-drawer-state-machine.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram type is declared: 07-drawer-state-machine.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram double quotes are balanced: 07-drawer-state-machine.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram file matches inline source: 08-host-override-precedence.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram type is declared: 08-host-override-precedence.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram double quotes are balanced: 08-host-override-precedence.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram file matches inline source: 09-triage-transaction.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram type is declared: 09-triage-transaction.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram double quotes are balanced: 09-triage-transaction.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram file matches inline source: 10-current-verification-rule.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram type is declared: 10-current-verification-rule.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram double quotes are balanced: 10-current-verification-rule.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram file matches inline source: 11-proposed-evidence-continuity.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram type is declared: 11-proposed-evidence-continuity.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram double quotes are balanced: 11-proposed-evidence-continuity.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram file matches inline source: 12-proposed-invalidation.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram type is declared: 12-proposed-invalidation.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Diagram double quotes are balanced: 12-proposed-invalidation.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "All 56 regression IDs are unique",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "All 20 gap IDs are unique",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "All 13 decision IDs are unique",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "All 5 architecture-conflict IDs are unique",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "README local link resolves: cves-view-design-v0.1.md",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "README local link resolves: diagrams/01-surface-composition.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "README local link resolves: diagrams/02-persistence-relationships.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "README local link resolves: diagrams/03-producer-read-data-flow.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "README local link resolves: diagrams/04-inventory-selection.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "README local link resolves: diagrams/05-count-overlap.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "README local link resolves: diagrams/06-page-request-and-refresh.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "README local link resolves: diagrams/07-drawer-state-machine.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "README local link resolves: diagrams/08-host-override-precedence.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "README local link resolves: diagrams/09-triage-transaction.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "README local link resolves: diagrams/10-current-verification-rule.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "README local link resolves: diagrams/11-proposed-evidence-continuity.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "README local link resolves: diagrams/12-proposed-invalidation.mmd",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Illustrative JSON request parses",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Markdown parser recognizes all Mermaid blocks",
+      "status": "passed",
+      "detail": ""
+    },
+    {
+      "check": "Markdown parser recognizes reference links",
+      "status": "passed",
+      "detail": ""
+    }
+  ],
+  "mermaid_compilation": "not_performed",
+  "application_tests": "not_performed"
+}

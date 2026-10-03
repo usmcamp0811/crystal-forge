@@ -73,7 +73,7 @@ fail closed.
 
 Legacy standalone policy types and their representations retain their existing
 behavior. Composite execution does not replace or weaken the unconditional
-Crystal Forge agent check or legacy CVE gates.
+Crystal Forge agent check.
 
 ## `custom_check`
 
@@ -127,6 +127,27 @@ Semantics:
 ## `require_cve_check`
 
 `require_cve_check` enforces vulnerability posture using the latest completed scan for the built derivation.
+
+### Applicability
+
+`deployment_policies.enabled = true` names a policy lineage as usable. It does
+not, by itself, make the policy apply to any system. Applicability comes only
+from the system's resolved effective policy set: a compliance bundle
+assignment (environment- or system-scope), a legacy direct
+environment/system policy addition, or a system-scope assignment that
+overrides an environment default for the same policy lineage. A `require_cve_check`
+policy that exists but is not part of any system's effective set never affects
+that system's `auto_latest` deployment.
+
+`auto_latest` evaluates `require_cve_check` for a given system using that
+system's effective config for the policy (assignment-level overrides applied),
+and only when the effective assignment mode is `enforce`:
+
+- **`enforce`**: a failing check blocks `desired_target` from advancing.
+- **`report_only`**: the same evaluation still runs elsewhere in the
+  compliance pipeline and can produce a `FAIL` finding, POA&M creation, and
+  waiver workflow, but it never blocks `auto_latest` delivery.
+- **Unassigned**: the policy has no effect on this system at all.
 
 Example config:
 

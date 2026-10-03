@@ -120,10 +120,15 @@ sequenceDiagram
 
 5. **Cache push is idempotent**: Pushing the same store path twice is safe - the cache backend returns "already exists" which we treat as success.
 
-6. **"Deployable" definition**: A derivation is deployable when:
-   - Build status = success
-   - Cache push status = completed (artifact in binary cache)
-   - (Implicit) Policy allows deployment to that host
+6. **Deployable system artifact**: For a host's registered flake and effective
+   configuration, an eligible artifact is a NixOS derivation with a nonblank
+   `store_path`, `cf_agent_enabled IS TRUE`, `policy_requirements_met IS TRUE`,
+   and no derivation error. A completed `cache_push_jobs` row must belong to
+   that derivation and have `store_path = derivations.store_path`. Auto-latest
+   considers retained built artifacts across commits, even if source archival
+   prevents a new explicit manual commit request. Runtime deployment policies
+   and final authorization are separate gates: an eligible artifact does not
+   authorize delivery to a host by itself.
 
 7. **GC root lifecycle**: Builder creates a GC root after successful build to prevent Nix from garbage-collecting the output before it reaches the cache. Cache worker removes the GC root only after successful push.
 

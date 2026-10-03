@@ -1,7 +1,9 @@
 //! Lightweight cross-view focus state for deep-link navigation.
 
+use crate::views::poam_api::FindingView;
 use dioxus::prelude::*;
 use std::collections::BTreeMap;
+use uuid::Uuid;
 
 /// A System Detail tab that can be represented in a deep link.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -410,11 +412,99 @@ pub fn provide_navigation_focus() {
     use_context_provider(|| Signal::new(None::<NavigationFocus>));
 }
 
+/// Identifies one linked finding whose exact compliance evidence the next System
+/// Detail view must open.
+///
+/// A POA&M register creates this value when a user chooses Evidence on a policy
+/// finding, and System Detail consumes it once. It is held in memory, not in the
+/// URL, because the destination cannot rebuild a finding from an ID alone: the
+/// finding may sit on a later page of the POA&M detail response.
+///
+/// INVARIANT: The value names the finding and its system, plus the bundle
+/// contexts the server linked to that finding. It never selects a bundle
+/// revision. The destination intersects these candidates with the bundles it
+/// loads for the current user, so a context the user cannot see is never opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindingEvidenceFocus {
+    /// Stable finding identity from the POA&M detail response.
+    pub finding_id: Uuid,
+    /// System that owns the finding. The destination must be this system.
+    pub system_id: Uuid,
+    /// Policy lineage whose control the evidence drawer must focus.
+    pub policy_lineage_id: Uuid,
+    /// Policy name shown if no exact evidence context can be opened.
+    pub policy_name: String,
+    /// Bundle lineages the server linked to the finding.
+    pub bundle_ids: Vec<Uuid>,
+    /// Exact bundle revisions the server linked to the finding.
+    pub bundle_version_ids: Vec<Uuid>,
+}
+
+impl From<&FindingView> for FindingEvidenceFocus {
+    fn from(finding: &FindingView) -> Self {
+        Self {
+            finding_id: finding.id,
+            system_id: finding.system_id,
+            policy_lineage_id: finding.policy_lineage_id,
+            policy_name: finding.policy_name.clone(),
+            bundle_ids: finding.bundle_ids.clone(),
+            bundle_version_ids: finding.bundle_version_ids.clone(),
+        }
+    }
+}
+
+impl FindingEvidenceFocus {
+    /// Returns the pending focus only when it belongs to `system_id`.
+    ///
+    /// The caller must clear the stored value whatever this returns. A focus for
+    /// another system is dropped instead of waiting, so it cannot open evidence
+    /// on a later, unrelated visit.
+    pub fn for_system(pending: Option<Self>, system_id: Uuid) -> Option<Self> {
+        pending.filter(|focus| focus.system_id == system_id)
+    }
+}
+
+/// Provide the one-shot finding evidence focus signal.
+pub fn provide_finding_evidence_focus() {
+    use_context_provider(|| Signal::new(None::<FindingEvidenceFocus>));
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigRevision, FlakeNavigation, FlakePane, SystemDetailNavigation, SystemDetailTab,
+        ConfigRevision, FindingEvidenceFocus, FlakeNavigation, FlakePane, SystemDetailNavigation,
+        SystemDetailTab,
     };
+    use uuid::Uuid;
+
+    fn evidence_focus(system: u128) -> FindingEvidenceFocus {
+        FindingEvidenceFocus {
+            finding_id: Uuid::from_u128(1),
+            system_id: Uuid::from_u128(system),
+            policy_lineage_id: Uuid::from_u128(3),
+            policy_name: "SSH hardening".into(),
+            bundle_ids: vec![Uuid::from_u128(4)],
+            bundle_version_ids: vec![Uuid::from_u128(5), Uuid::from_u128(6)],
+        }
+    }
+
+    #[test]
+    fn evidence_focus_is_taken_only_by_its_own_system() {
+        let focus = evidence_focus(2);
+        assert_eq!(
+            FindingEvidenceFocus::for_system(Some(focus.clone()), Uuid::from_u128(2)),
+            Some(focus.clone())
+        );
+        // Another system must not receive it, and an absent focus stays absent.
+        assert_eq!(
+            FindingEvidenceFocus::for_system(Some(focus), Uuid::from_u128(9)),
+            None
+        );
+        assert_eq!(
+            FindingEvidenceFocus::for_system(None, Uuid::from_u128(2)),
+            None
+        );
+    }
 
     #[test]
     fn system_detail_navigation_round_trips_exact_revision_and_clears_stale_fields() {

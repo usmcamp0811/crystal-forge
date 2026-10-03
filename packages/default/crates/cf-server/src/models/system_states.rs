@@ -402,7 +402,16 @@ impl SystemState {
 }
 
 fn current_system_generation_info(current_store_path: &str) -> (Option<i32>, Option<bool>) {
-    let profile_link_target = match fs::read_link("/nix/var/nix/profiles/system") {
+    current_system_generation_info_at("/nix/var/nix/profiles/system", current_store_path)
+}
+
+fn current_system_generation_info_at(
+    profile_path: impl AsRef<Path>,
+    current_store_path: impl AsRef<Path>,
+) -> (Option<i32>, Option<bool>) {
+    let profile_path = profile_path.as_ref();
+    let current_store_path = current_store_path.as_ref();
+    let profile_link_target = match fs::read_link(profile_path) {
         Ok(path) => path,
         Err(_) => return (None, None),
     };
@@ -411,15 +420,36 @@ fn current_system_generation_info(current_store_path: &str) -> (Option<i32>, Opt
         .file_name()
         .and_then(|name| parse_generation_from_profile_link_name(name.to_string_lossy().as_ref()));
 
-    let profile_resolved = fs::canonicalize("/nix/var/nix/profiles/system").ok();
-    let current_resolved = fs::canonicalize(current_store_path).ok();
-
-    let matches_current = match (profile_resolved, current_resolved) {
-        (Some(profile), Some(current)) => Some(profile == current),
-        _ => None,
-    };
+    let matches_current = nixos_system_paths_are_equivalent(profile_path, current_store_path);
 
     (generation, matches_current)
+}
+
+fn nixos_system_paths_are_equivalent(
+    profile_path: impl AsRef<Path>,
+    current_store_path: impl AsRef<Path>,
+) -> Option<bool> {
+    let profile_path = profile_path.as_ref();
+    let current_store_path = current_store_path.as_ref();
+    let profile_root = fs::canonicalize(profile_path).ok()?;
+    let current_root = fs::canonicalize(current_store_path).ok()?;
+    if profile_root == current_root {
+        return Some(true);
+    }
+
+    // INVARIANT: A deploy-rs activatable wrapper is equivalent only when
+    // multiple stable children resolve to the running NixOS toplevel's exact
+    // children. Wrapper names and activation markers do not prove identity.
+    const IDENTITY_SENTINELS: [&str; 3] = ["init", "system", "bin/switch-to-configuration"];
+    let sentinels_match = IDENTITY_SENTINELS.iter().all(|relative_path| {
+        let profile_sentinel = fs::canonicalize(profile_root.join(relative_path));
+        let current_sentinel = fs::canonicalize(current_root.join(relative_path));
+        matches!(
+            (profile_sentinel, current_sentinel),
+            (Ok(profile), Ok(current)) if profile == current
+        )
+    });
+    Some(sentinels_match)
 }
 
 fn parse_generation_from_profile_link_name(name: &str) -> Option<i32> {
@@ -429,7 +459,61 @@ fn parse_generation_from_profile_link_name(name: &str) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_generation_from_profile_link_name;
+    use super::{
+        current_system_generation_info_at, nixos_system_paths_are_equivalent,
+        parse_generation_from_profile_link_name,
+    };
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    struct FilesystemFixture {
+        root: PathBuf,
+    }
+
+    impl FilesystemFixture {
+        fn new() -> Self {
+            let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "cf-server-system-state-{}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&root).expect("create system-state fixture");
+            Self { root }
+        }
+
+        fn nixos_system(&self, name: &str, identity: &str) -> PathBuf {
+            let root = self.root.join(name);
+            fs::create_dir_all(root.join("bin")).expect("create NixOS fixture directories");
+            for relative_path in ["init", "system", "bin/switch-to-configuration"] {
+                fs::write(
+                    root.join(relative_path),
+                    format!("{identity}:{relative_path}"),
+                )
+                .expect("write NixOS identity sentinel");
+            }
+            root
+        }
+
+        fn activatable_wrapper(&self, name: &str, system: &Path) -> PathBuf {
+            let wrapper = self.root.join(name);
+            fs::create_dir_all(wrapper.join("bin")).expect("create wrapper directories");
+            for relative_path in ["init", "system", "bin/switch-to-configuration"] {
+                symlink(system.join(relative_path), wrapper.join(relative_path))
+                    .expect("link wrapper identity sentinel");
+            }
+            wrapper
+        }
+    }
+
+    impl Drop for FilesystemFixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.root).expect("remove system-state fixture");
+        }
+    }
 
     #[test]
     fn parses_generation_from_profile_link_name() {
@@ -453,6 +537,72 @@ mod tests {
         assert_eq!(
             parse_generation_from_profile_link_name("/nix/store/foo"),
             None
+        );
+    }
+
+    #[test]
+    fn direct_profile_target_matches_current_system() {
+        let fixture = FilesystemFixture::new();
+        let system = fixture.nixos_system("nixos-system-webb", "webb");
+        let generation_link = fixture.root.join("system-3079-link");
+        let profile = fixture.root.join("system");
+        symlink(&system, &generation_link).expect("link generation to system");
+        symlink("system-3079-link", &profile).expect("link profile to generation");
+
+        assert_eq!(
+            current_system_generation_info_at(&profile, &system),
+            (Some(3079), Some(true))
+        );
+    }
+
+    #[test]
+    fn activatable_generation_matches_through_stable_sentinels() {
+        let fixture = FilesystemFixture::new();
+        let system = fixture.nixos_system("nixos-system-webb", "webb");
+        let wrapper = fixture.activatable_wrapper("activatable-nixos-system-webb", &system);
+        let generation_link = fixture.root.join("system-3079-link");
+        let profile = fixture.root.join("system");
+        symlink(&wrapper, &generation_link).expect("link generation to wrapper");
+        symlink("system-3079-link", &profile).expect("link profile to generation");
+
+        assert_eq!(
+            current_system_generation_info_at(&profile, &system),
+            (Some(3079), Some(true))
+        );
+    }
+
+    #[test]
+    fn unrelated_nixos_systems_do_not_match() {
+        let fixture = FilesystemFixture::new();
+        let first = fixture.nixos_system("nixos-system-first", "first");
+        let second = fixture.nixos_system("nixos-system-second", "second");
+
+        assert_eq!(
+            nixos_system_paths_are_equivalent(&first, &second),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn activatable_name_without_filesystem_identity_does_not_match() {
+        let fixture = FilesystemFixture::new();
+        let system = fixture.nixos_system("nixos-system-webb", "webb");
+        let name_only_wrapper = fixture.nixos_system("activatable-nixos-system-webb", "different");
+
+        assert_eq!(
+            nixos_system_paths_are_equivalent(&name_only_wrapper, &system),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn missing_profile_preserves_unknown_generation_and_identity() {
+        let fixture = FilesystemFixture::new();
+        let system = fixture.nixos_system("nixos-system-webb", "webb");
+
+        assert_eq!(
+            current_system_generation_info_at(fixture.root.join("missing-profile"), system),
+            (None, None)
         );
     }
 }

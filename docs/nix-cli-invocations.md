@@ -102,12 +102,20 @@ The startup capability probe reads `builtins.nixVersion` and
 | 33 | List all store paths in a `.drv`'s recursive closure | `nix-store --query --requisites <drv>` | line 1748 |
 | 34 | Check which store paths are invalid in local store | `nix-store --check-validity --print-invalid <paths...>` (batched, 1024/chunk) | line 1793 |
 
+### `builder/cve_scanner.rs`
+
+| # | Purpose | Command | Source |
+|---|---------|---------|--------|
+| 35 | Scan the exact authorized realized outputs | `vulnix <server-issued-scanner-args> <output-path...>` (currently `--json`; never scan the top-level `.drv`) | `execute_claim_inner` |
+| 36 | Resolve exact package derivations to Nix derivation JSON version 4 | `nix derivation show <drv...>` (64 derivations per chunk; the complete resolution phase has one 120-second deadline) | `resolve_drv_outputs` |
+| 37 | Resolve a pathless version 4 output by its exact output name | `nix-store --query --binding <output-name> <drv>` (at most 256 pathless outputs; all fallback calls share the resolution deadline) | `resolve_missing_derivation_outputs` |
+
 ### `builder/api_client.rs`
 
 | # | Purpose | Command | Source |
 |---|---------|---------|--------|
-| 35 | Import full derivation archive from server | `nix-store --import` (stdin piped from HTTP response) | line 707 |
-| 36 | Import delta derivation archive from server | `nix-store --import` (stdin piped from HTTP response) | line 879 |
+| 38 | Import full derivation archive from server | `nix-store --import` (stdin piped from HTTP response) | line 707 |
+| 39 | Import delta derivation archive from server | `nix-store --import` (stdin piped from HTTP response) | line 879 |
 
 ---
 
@@ -117,24 +125,24 @@ The startup capability probe reads `builtins.nixVersion` and
 
 | # | Purpose | Command | Source |
 |---|---------|---------|--------|
-| 37 | Resolve store path → `.drv` (fast path) | `nix-store --query --deriver <path>` | line 90 |
-| 38 | Resolve store path → `.drv` (fallback) | `nix path-info --json <path>` (parses `"deriver"` field) | line 104 |
+| 39 | Resolve store path → `.drv` (fast path) | `nix-store --query --deriver <path>` | line 90 |
+| 40 | Resolve store path → `.drv` (fallback) | `nix path-info --json <path>` (parses `"deriver"` field) | line 104 |
 
 ### `deployment/agent.rs`
 
 | # | Purpose | Command | Source |
 |---|---------|---------|--------|
-| 39 | Pull system closure from binary cache | `nix copy --from <url> [--refresh] [<options...>] <store-path>` | line 462 |
-| 40 | Set new NixOS generation | `nix-env --profile /nix/var/nix/profiles/system --set <store-path>` | line 732 |
+| 41 | Pull system closure from binary cache | `nix copy --from <url> [--refresh] [<options...>] <store-path>` | line 462 |
+| 42 | Set new NixOS generation | `nix-env --profile /nix/var/nix/profiles/system --set <store-path>` | line 732 |
 
 ---
 
 ## Totals
 
-| Service | `nix` | `nix-store` | `nix-env` | `nix-eval-jobs` | Total |
-|---------|-------|-------------|-----------|-----------------|-------|
-| Server  | 10    | 17          | —         | 1               | 28    |
-| Builder | 1     | 4           | —         | —               | 5     |
-| Agent   | 2     | 1           | 1         | —               | 4     |
-| Shared  | —     | —           | —         | —               | (7 counted in both server+shared) |
-| **All** | **13**| **22**     | **1**     | **1**           | **37** |
+| Service | `nix` | `nix-store` | `nix-env` | `nix-eval-jobs` | `vulnix` | Total |
+|---------|-------|-------------|-----------|-----------------|----------|-------|
+| Server  | 10    | 17          | —         | 1               | —        | 28    |
+| Builder | 2     | 5           | —         | —               | 1        | 8     |
+| Agent   | 2     | 1           | 1         | —               | —        | 4     |
+| Shared  | —     | —           | —         | —               | —        | (7 counted in both server+shared) |
+| **All** | **14**| **23**      | **1**     | **1**           | **1**    | **40** |

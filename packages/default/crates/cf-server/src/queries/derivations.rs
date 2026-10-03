@@ -2514,17 +2514,35 @@ pub async fn clear_derivation_build_status(pool: &PgPool, derivation_id: i32) ->
     Ok(())
 }
 
+/// Holds the newest cache-published NixOS artifact for one requested configuration.
 #[derive(Debug, Clone)]
 pub struct HostLatestTarget {
+    /// Effective configuration name used to select this artifact.
     pub hostname: String,
+    /// Selected derivation for policy and CVE checks.
     pub derivation_id: i32,
+    /// Commit containing the selected derivation.
     pub commit_hash: String,
+    /// Agent target generated from the registered flake and selected commit.
     pub derivation_target: Option<String>,
+    /// Built store path that can be sent as the desired target.
     pub store_path: Option<String>,
+    /// Most recent completed cache push for the selected derivation.
     pub last_cache_completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Indicates that a newer flake commit exists but has not superseded this artifact.
+    pub newer_raw_commit_exists: bool,
 }
 
-// src/db/queries.rs
+/// Selects one newest deployable artifact per requested effective configuration.
+///
+/// The selection spans all commits of the registered flake. Source archival
+/// does not remove an existing cache-published, built artifact. Runtime
+/// approval, canary, time-window, CVE, and composite gates run after selection
+/// and do not change which artifact is deployable.
+///
+/// # Errors
+///
+/// Returns an error if PostgreSQL cannot read the candidate derivations.
 pub async fn get_latest_deployable_targets_for_flake_hosts(
     pool: &PgPool,
     flake_id: i32,
@@ -2534,61 +2552,65 @@ pub async fn get_latest_deployable_targets_for_flake_hosts(
         return Ok(vec![]);
     }
 
-    // NOTE: pass `hostnames` as a TEXT[] (Vec<String>) to $2
+    // INVARIANT: Match RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL: the flake,
+    // NixOS type, exact configuration, nonblank store path, agent/policy flags,
+    // no derivation error, and a completed cache push of that exact store path
+    // define artifact eligibility. A stored
+    // derivation_target and runtime gates are not prerequisites.
     let rows = sqlx::query!(
         r#"
-        WITH latest_commit AS (
-          SELECT id, flake_id, git_commit_hash
-          FROM commits
-          WHERE flake_id = $1
-          ORDER BY commit_timestamp DESC
-          LIMIT 1
-        ),
-        per_host AS (
+        WITH per_host AS (
           SELECT
             d.derivation_name AS hostname,
             d.id              AS derivation_id,
-            d.derivation_target,
             d.store_path,
             f.repo_url        AS repo_url,
-            lc.git_commit_hash AS commit_hash,
-            MAX(cpj.completed_at) AS last_cache_completed_at,
+            c.git_commit_hash AS commit_hash,
+            c.flake_id,
+            c.commit_timestamp,
+            (SELECT MAX(cpj.completed_at)
+              FROM cache_push_jobs cpj
+              WHERE cpj.derivation_id = d.id
+                AND cpj.status = 'completed'
+                AND cpj.store_path = d.store_path) AS last_cache_completed_at,
             ROW_NUMBER() OVER (
               PARTITION BY d.derivation_name
-              ORDER BY
-                MAX(cpj.completed_at) DESC NULLS LAST,
-                MAX(d.completed_at)   DESC NULLS LAST,
-                MAX(d.id)             DESC
+              ORDER BY c.commit_timestamp DESC,
+                       d.completed_at DESC NULLS LAST,
+                       d.id DESC
             ) AS rn
           FROM derivations d
-          JOIN latest_commit lc
-            ON d.commit_id = lc.id
+          JOIN commits c
+            ON d.commit_id = c.id
           JOIN flakes f
-            ON lc.flake_id = f.id
-          JOIN cache_push_jobs cpj
-            ON cpj.derivation_id = d.id
-           AND cpj.status = 'completed'
-          WHERE d.derivation_type = 'nixos'
-            AND d.derivation_target IS NOT NULL
+            ON c.flake_id = f.id
+          WHERE c.flake_id = $1
+            AND d.derivation_type = 'nixos'
             AND d.derivation_name = ANY($2::text[])
+            AND d.store_path IS NOT NULL
+            AND BTRIM(d.store_path) <> ''
             AND d.cf_agent_enabled IS TRUE
             AND d.policy_requirements_met IS TRUE
-          GROUP BY
-            d.derivation_name,
-            d.id,
-            d.derivation_target,
-            d.store_path,
-            f.repo_url,
-            lc.git_commit_hash
+            AND d.error_message IS NULL
+            AND EXISTS (
+              SELECT 1 FROM cache_push_jobs cpj
+              WHERE cpj.derivation_id = d.id
+                AND cpj.status = 'completed'
+                AND cpj.store_path = d.store_path
+            )
         )
         SELECT
           hostname,
           derivation_id,
-          derivation_target,
           store_path,
           last_cache_completed_at,
           repo_url,
-          commit_hash
+          commit_hash,
+          EXISTS (
+            SELECT 1 FROM commits newer
+            WHERE newer.flake_id = per_host.flake_id
+              AND newer.commit_timestamp > per_host.commit_timestamp
+          ) AS "newer_raw_commit_exists!"
         FROM per_host
         WHERE rn = 1
         "#,
@@ -2604,7 +2626,7 @@ pub async fn get_latest_deployable_targets_for_flake_hosts(
             let hostname = r.hostname.clone();
             let commit_hash = r.commit_hash.clone();
             HostLatestTarget {
-                hostname: hostname,
+                hostname,
                 derivation_id: r.derivation_id,
                 commit_hash,
                 store_path: r.store_path,
@@ -2614,6 +2636,7 @@ pub async fn get_latest_deployable_targets_for_flake_hosts(
                     &r.hostname,
                 )),
                 last_cache_completed_at: r.last_cache_completed_at,
+                newer_raw_commit_exists: r.newer_raw_commit_exists,
             }
         })
         .collect();

@@ -23,7 +23,7 @@ use dioxus::prelude::*;
 
 use routes::Route;
 use state::app_state::provide_app_state;
-use state::navigation_focus::provide_navigation_focus;
+use state::navigation_focus::{provide_finding_evidence_focus, provide_navigation_focus};
 use state::theme::{UiTheme, apply as apply_theme, persist as persist_theme};
 
 fn main() {
@@ -40,6 +40,7 @@ fn main() {
 fn app() -> Element {
     provide_app_state();
     provide_navigation_focus();
+    provide_finding_evidence_focus();
     let theme = use_context_provider(|| Signal::new(UiTheme::load()));
 
     use_effect(move || {

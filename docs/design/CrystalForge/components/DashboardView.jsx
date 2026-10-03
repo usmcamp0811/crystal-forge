@@ -754,7 +754,9 @@ function WGitGraph({ onNavigate }) {
             onClick={() => onNavigate("flakes")}>Open flakes →</button>
         </div>
 
-        <div style={{ display:"grid", gridTemplateColumns:`${graphWidth}px 1fr`, alignItems:"start", gap:10, overflow:"hidden" }}>
+        {/* Keep the intrinsic height so the widget body can scroll to the last commit —
+            as a flex child it would otherwise shrink and clip its own content. */}
+        <div style={{ display:"grid", gridTemplateColumns:`${graphWidth}px 1fr`, alignItems:"start", gap:10, overflowX:"hidden", flexShrink:0 }}>
           <svg width={graphWidth} height={height} style={{ flexShrink:0 }}>
             {collapsed ? (
               <>

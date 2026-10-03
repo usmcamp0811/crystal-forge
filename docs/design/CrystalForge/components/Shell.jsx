@@ -369,12 +369,17 @@ const NAV_OPS = [
   { key: "scanning", label: "Scanning",    icon: "shield", count: null, route: "scanning" },
 ];
 
+const _poamOverdue = (typeof POAMS !== "undefined" && typeof poamIsOverdue === "function") ? POAMS.filter(poamIsOverdue).length : 0;
+
 const NAV_COMPLIANCE = [
   { key: "cves",       label: "CVEs",       icon: "shield",
     count: _cveCritical || null, attention: _cveCritical > 0,
     countTitle: `${_cveCritical} critical CVEs open across the fleet`, route: "cves" },
   { key: "policies",   label: "Policies",   icon: "file",   route: "policies" },
-  { key: "compliance", label: "Compliance", icon: "check",  route: "compliance" },
+  { key: "compliance", label: "Bundles", icon: "check",  route: "compliance" },
+  { key: "poams",      label: "POA&M",   icon: "activity", route: "poams",
+    count: _poamOverdue || null, attention: _poamOverdue > 0,
+    countTitle: `${_poamOverdue} POA&M item${_poamOverdue === 1 ? "" : "s"} past target completion` },
 ];
 
 const NAV_SYS = [
@@ -534,7 +539,7 @@ function GlobalSearch({ onResult }) {
   );
 }
 
-function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult }) {
+function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult, guide }) {
   const [notifOpen, setNotifOpen] = React.useState(false);
   const bellRef = React.useRef(null);
 
@@ -564,18 +569,28 @@ function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult })
           at: timeAgoShort(r.lastObserved), route:"systems", unread:true });
       });
     }
-    if (typeof POAMS !== "undefined") {
-      POAMS.forEach(p => {
-        if (typeof poamIsOverdue === "function" && poamIsOverdue(p)) {
-          items.push({ id:`poam-overdue-${p.id}`, icon:"activity", color:"#f87171",
-            title:`${p.id} overdue: ${p.title}`, sub:`${p.owner} · was due ${p.due}`,
-            at:"—", route:"compliance", poamId:p.id, unread:true });
-        } else if (p.status === "awaiting_verification") {
-          items.push({ id:`poam-verify-${p.id}`, icon:"activity", color:"#a78bfa",
-            title:`${p.id} awaiting verification: ${p.title}`, sub:`${p.owner} · re-evaluate to confirm the fix`,
-            at:"—", route:"compliance", poamId:p.id, unread:true });
-        }
-      });
+    if (typeof POAMS !== "undefined" && typeof poamIsOverdue === "function") {
+      const od = POAMS.filter(poamIsOverdue);
+      const aw = POAMS.filter(p => p.status === "awaiting_verification");
+      if (od.length > 3) {
+        const cat1 = od.filter(p => p.severity === "high").length;
+        items.push({ id:"poam-overdue", icon:"activity", color:"#f87171",
+          title:`${od.length} POA&M items past target completion`, sub:`${cat1} CAT I · open the overdue queue`,
+          at:"—", route:"poams", focus:{ queue:"late" }, unread:true });
+      } else od.forEach(p => items.push({ id:`poam-overdue-${p.id}`, icon:"activity", color:"#f87171",
+          title:`${p.id} overdue: ${p.title}`, sub:`${p.owner} · was due ${p.due}`,
+          at:"—", route:"poams", poamId:p.id, unread:true }));
+      const ex = (typeof RISK_ACCEPTANCES !== "undefined" && typeof raIsExpired === "function") ? RISK_ACCEPTANCES.filter(raIsExpired) : [];
+      if (ex.length) items.push({ id:"ra-expired", icon:"shield", color:"#fb923c",
+        title:`${ex.length} risk acceptance${ex.length === 1 ? "" : "s"} past review date`, sub:"Renew or convert to a POA&M",
+        at:"—", route:"poams", focus:{ queue:"expired" }, unread:true });
+      if (aw.length > 3) {
+        items.push({ id:"poam-verify", icon:"activity", color:"#a78bfa",
+          title:`${aw.length} POA&M items awaiting verification`, sub:"Re-evaluate to confirm the fixes",
+          at:"—", route:"poams", focus:{ queue:"awaiting" }, unread:true });
+      } else aw.forEach(p => items.push({ id:`poam-verify-${p.id}`, icon:"activity", color:"#a78bfa",
+          title:`${p.id} awaiting verification: ${p.title}`, sub:`${p.owner} · re-evaluate to confirm the fix`,
+          at:"—", route:"poams", poamId:p.id, unread:true }));
     }
     // Demo notifications point at REAL fixture rows so clicking one lands on the
     // actual thing: the failed build's log drawer, that CVE's drawer, that eval.
@@ -624,6 +639,7 @@ function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult })
         <span className="crumb-current">{crumb?.current || "Systems"}</span>
       </div>
       <GlobalSearch onResult={onSearchResult} />
+      {guide}
       <div ref={bellRef} style={{ position:"relative" }}>
         <button className="btn-icon focus-ring topbar-bell" aria-label="Notifications"
           title="Notifications" onClick={() => setNotifOpen(o => !o)}>

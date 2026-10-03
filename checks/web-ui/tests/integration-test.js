@@ -795,6 +795,44 @@ async function captureWorkflowViewportState(page, stepName, stateName, viewportN
   }
 }
 
+async function assertCoachModalControlsUnoccluded(page) {
+  const dialog = page.getByTestId("cve-triage-dialog");
+  const coach = page.getByTestId("coach-tour-card");
+  const primary = dialog.getByTestId("cve-triage-submit");
+  await assertVisible(primary, "CVE triage primary action must remain visible under the coach");
+  await page.waitForFunction(() => document.querySelector("[data-testid='coach-tour-card']")?.classList.contains("coach-dock"), undefined, { timeout: 5000 });
+  await page.waitForFunction(() => document.querySelector("[data-testid='coach-tour-card']")?.getAttribute("data-status") === "found", undefined, { timeout: 5000 });
+  if ((page.viewportSize()?.width || 0) <= 720) {
+    await page.waitForFunction(() => document.querySelector("[data-testid='coach-tour-card']")?.getAttribute("data-coach-narrow") === "true", undefined, { timeout: 5000 });
+  }
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const [cardBox, primaryBox, viewportWidth, narrow] = await Promise.all([
+    coach.boundingBox(),
+    primary.boundingBox(),
+    page.evaluate(() => window.innerWidth),
+    page.evaluate(() => window.innerWidth <= 720),
+  ]);
+  if (!cardBox || !primaryBox) throw new Error("Coach dock and triage action must have measurable bounds");
+  if (narrow && !(await coach.getAttribute("class")).includes("coach-dock")) {
+    throw new Error("A modal on a narrow viewport must use the collision-aware dock, not the bottom sheet");
+  }
+  if (narrow && (cardBox.x < 0 || cardBox.x + cardBox.width > viewportWidth + 1)) {
+    throw new Error(`Narrow coach dock must stay inside the viewport: ${JSON.stringify({ cardBox, viewportWidth })}`);
+  }
+  const overlapWidth = Math.max(0, Math.min(cardBox.x + cardBox.width, primaryBox.x + primaryBox.width) - Math.max(cardBox.x, primaryBox.x));
+  const overlapHeight = Math.max(0, Math.min(cardBox.y + cardBox.height, primaryBox.y + primaryBox.height) - Math.max(cardBox.y, primaryBox.y));
+  if (overlapWidth * overlapHeight > 1) {
+    const details = await page.evaluate(() => ({
+      target: (() => { const rect = document.querySelector("[data-coach-target='cve-triage-modal']")?.getBoundingClientRect(); return rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null; })(),
+      cardClass: document.querySelector("[data-testid='coach-tour-card']")?.className,
+      cardStyle: document.querySelector("[data-testid='coach-tour-card']")?.getAttribute("style"),
+      dockMaxHeight: document.querySelector("[data-testid='coach-tour-card']")?.getAttribute("data-dock-max-height"),
+      viewport: { width: innerWidth, height: innerHeight, coachTop: getComputedStyle(document.documentElement).getPropertyValue("--coach-top") },
+    }));
+    throw new Error(`Coach dock overlaps the triage primary action: ${JSON.stringify({ cardBox, primaryBox, narrow, details })}`);
+  }
+}
+
 async function captureRequiredResponsiveArtifact(page, stepName, stateName) {
   const artifact = MANIFEST.settings.requiredResponsiveArtifacts.find(
     (candidate) => candidate.step === stepName && candidate.state === stateName,
@@ -804,6 +842,8 @@ async function captureRequiredResponsiveArtifact(page, stepName, stateName) {
     stepName.startsWith("06g-onboarding-coach-") ||
     stepName.startsWith("06h-onboarding-coach-")
     ? (viewportName, theme) => assertSetupCoachCaptureState(page, stepName, viewportName, theme)
+    : stepName === "06j-security-coach-cve-evidence" && stateName === "triage-modal-dock"
+      ? () => assertCoachModalControlsUnoccluded(page)
     : stepName === "06-dashboard"
       ? (viewportName, theme) => assertDashboardWatchlistCaptureState(page, stepName, viewportName, theme)
     : undefined;
@@ -854,7 +894,7 @@ async function assertSetupCoachCaptureState(page, stepName, viewportName, theme)
   }
   if (stepName === "06a-onboarding-coach-dashboard") {
     const currentStep = page.locator("[data-testid='onboarding-step-policy']");
-    if ((await currentStep.getAttribute("aria-current")) !== "step" || !(await currentStep.textContent()).includes("Current step")) {
+    if ((await currentStep.getAttribute("aria-current")) !== "step" || !(await currentStep.textContent()).includes("Create or import a policy")) {
       throw new Error(`${stepName} must preserve Create policy as the semantic current step at ${viewportName}/${theme}`);
     }
     if (!(await page.locator("[data-testid='onboarding-step-agent']").textContent()).includes("Acknowledged")) {
@@ -870,7 +910,7 @@ async function assertSetupCoachCaptureState(page, stepName, viewportName, theme)
     }
   } else if (stepName === "06h-onboarding-coach-all-configured") {
     for (const stepId of ["environment", "flake", "builder", "cache", "system", "policy", "bundle", "poam"]) {
-      if (!(await page.locator(`[data-testid='onboarding-step-${stepId}']`).textContent()).includes("Configured")) {
+      if (!(await page.locator(`[data-testid='onboarding-step-${stepId}']`).textContent()).includes("Reported complete")) {
         throw new Error(`${stepName} must preserve configured ${stepId} state at ${viewportName}/${theme}`);
       }
     }
@@ -907,6 +947,14 @@ async function assertSetupCoachCaptureState(page, stepName, viewportName, theme)
   }
 
   if (theme === "light") {
+    // The theme switch starts CSS color transitions. Sample the computed color
+    // only after they finish. Infinite animations such as the coach spotlight
+    // are not CSSTransition objects and must not block this wait.
+    await page.evaluate(() => Promise.all(
+      document.getAnimations()
+        .filter((animation) => animation instanceof CSSTransition)
+        .map((animation) => animation.finished.catch(() => undefined)),
+    ));
     const colors = await page.locator("[data-testid='sidebar-nav']").evaluate((element) => {
       const style = getComputedStyle(element);
       return { background: style.backgroundColor, color: style.color };
@@ -1026,8 +1074,8 @@ async function removeAllPolicyRules(page) {
 /**
  * Persist the onboarding coach in its collapsed state.
  *
- * The coach reads `cf.coach.collapsed` from localStorage on mount, so seeding
- * the key before the app boots keeps the drawer collapsed across every
+ * The coach reads `cf.coach.ui.v2` from localStorage on mount, so seeding
+ * the panel state before the app boots keeps the coach minimized across every
  * subsequent navigation and reload in the session. Clicking "Minimize" after
  * the fact races the drawer's async mount: the expanded <aside> covers the
  * content column and swallows pointer events, producing click timeouts that
@@ -1091,9 +1139,10 @@ async function filterPolicyCatalog(page, name) {
 async function suppressOnboardingCoach(page) {
   await page.context().addInitScript(() => {
     try {
-      if (window.localStorage.getItem("cf.coach.force_show") === "true") return;
-      window.localStorage.setItem("cf.coach.collapsed", "true");
-      window.localStorage.setItem("cf.coach.force_show", "false");
+      const raw = window.localStorage.getItem("cf.coach.ui.v2");
+      let state = {};
+      try { state = raw ? JSON.parse(raw) : {}; } catch (_) {}
+      window.localStorage.setItem("cf.coach.ui.v2", JSON.stringify({ ...state, panel: "minimized" }));
     } catch (_) {
       /* storage unavailable; the runtime fallback below still applies */
     }
@@ -1103,7 +1152,7 @@ async function suppressOnboardingCoach(page) {
 async function collapseOnboardingCoach(page) {
   // Best-effort runtime collapse for pages already loaded. Prefer
   // suppressOnboardingCoach() before the first navigation.
-  const expandedDrawer = () => page.locator("aside[data-testid='onboarding-coach-panel']");
+  const expandedDrawer = () => page.locator("[data-testid='onboarding-coach-panel'][role='complementary']");
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     if ((await expandedDrawer().count()) === 0) {
@@ -1121,7 +1170,7 @@ async function collapseOnboardingCoach(page) {
 
     await page
       .waitForFunction(
-        () => !document.querySelector("aside[data-testid='onboarding-coach-panel']"),
+        () => !document.querySelector("[data-testid='onboarding-coach-panel'][role='complementary']"),
         undefined,
         { timeout: 2000 },
       )
@@ -1430,7 +1479,27 @@ async function routeStandaloneUiBootstrap(page, role = "Admin") {
       return;
     }
 
-    if (path === "/api/v1/admin/setup-progress" && method === "GET") {
+    if (path === "/api/v1/poams/dashboard" && method === "GET") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ total: 0, active: 0, overdue: 0, awaiting_verification: 0, completed: 0 }),
+      });
+      return;
+    }
+
+    if (path === "/api/v1/cves" && method === "GET") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      return;
+    }
+
+    if (path === "/api/v1/cves/grouped" && method === "GET") {
+      // The focused CVE workflow installs its exact group fixture afterward.
+      await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      return;
+    }
+
+    if (role === "Admin" && path === "/api/v1/admin/setup-progress" && method === "GET") {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1560,11 +1629,24 @@ async function assertEnabled(locator, message) {
 }
 
 async function assertAttribute(locator, name, expected, message) {
-  await locator.waitFor({ state: "visible", timeout: 5000 });
-  const actual = await locator.getAttribute(name);
-  if (actual !== expected) {
-    throw new Error(`${message} (expected ${name}=${expected}, got ${actual})`);
+  const deadline = Date.now() + 5000;
+  let actual = null;
+  while (Date.now() < deadline) {
+    actual = await locator.getAttribute(name).catch(() => null);
+    if (actual === expected) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
   }
+  throw new Error(`${message} (expected ${name}=${expected}, got ${actual})`);
+}
+
+async function assertFocused(locator, message) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const focused = await locator.evaluate((element) => document.activeElement === element).catch(() => false);
+    if (focused) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(message);
 }
 
 async function assertAttachedAttribute(locator, name, expected, message) {
@@ -2912,6 +2994,7 @@ async function routeSystemsWarningData(page, options = {}) {
         body: JSON.stringify({
           ...detail,
           id: requestedId,
+          hostname: options.getHostname?.(requestedId) ?? detail.hostname,
           public_key_fingerprint: publicKeyFingerprint,
         }),
       });
@@ -5132,6 +5215,201 @@ async function phase6Api(page, requestPath, options = {}) {
   return result;
 }
 
+function createTask326CurrentCveAuthorityFixture({ retainCurrent = true } = {}) {
+  const suffix = crypto.randomUUID();
+  const systemId = crypto.randomUUID();
+  const currentScanId = crypto.randomUUID();
+  const historicalScanId = crypto.randomUUID();
+  const snapshotId = crypto.randomUUID();
+  const hostname = `lucas-current-authority-${suffix.slice(0, 8)}`;
+  const configurationName = hostname;
+  const currentStorePath = `/nix/store/11111111111111111111111111111111-${hostname}`;
+  const historicalStorePath = `/nix/store/22222222222222222222222222222222-${hostname}`;
+  const historicalRevision = createHash("sha1").update(`task326-history-${suffix}`).digest("hex");
+  const cveSeed = createHash("sha256").update(`task326-cves-${suffix}`).digest("hex");
+  const currentCveNumber = 10_000_000n + (BigInt(`0x${cveSeed.slice(0, 12)}`) % 89_999_999n);
+  let historicalCveNumber = 10_000_000n + (BigInt(`0x${cveSeed.slice(12, 24)}`) % 89_999_999n);
+  if (historicalCveNumber === currentCveNumber) historicalCveNumber += 1n;
+  const currentCveId = `CVE-2099-${currentCveNumber}`;
+  const historicalCveId = `CVE-2099-${historicalCveNumber}`;
+  const currentCompletedAt = "2026-09-21T10:00:00Z";
+  const historicalCompletedAt = "2026-09-22T10:00:00Z";
+  const fixture = {
+    systemId,
+    hostname,
+    configurationName,
+    historicalRevision,
+    currentDerivationId: null,
+    currentCommitId: null,
+    historicalDerivationId: null,
+    historicalCommitId: null,
+    currentScanId,
+    historicalScanId,
+    currentCveId,
+    historicalCveId,
+    currentCompletedAt,
+    historicalCompletedAt,
+    snapshotId,
+  };
+  try {
+    const target = runFixtureSql(`
+    WITH selected_environment AS (
+      SELECT id FROM environments ORDER BY created_at NULLS LAST, id LIMIT 1
+    ), selected_commit AS (
+      SELECT id, flake_id FROM commits ORDER BY id LIMIT 1
+    ), historical_commit AS (
+      INSERT INTO commits (
+        flake_id, git_commit_hash, commit_timestamp, message, author,
+        evaluation_status, evaluation_completed_at
+      )
+      SELECT flake_id, '${historicalRevision}', now(),
+             'TASK-326 historical authority exclusion fixture', 'Web UI test',
+             'complete', now()
+      FROM selected_commit
+      RETURNING id
+    ), current_derivation AS (
+      INSERT INTO derivations (
+        commit_id, derivation_type, derivation_name, derivation_path, store_path,
+        expected_store_path, status_id, attempt_count, completed_at, policy_results
+      )
+      SELECT id, 'nixos', $name$${configurationName}$name$,
+             $path$${currentStorePath}.drv$path$, $path$${currentStorePath}$path$,
+             $path$${currentStorePath}$path$, 10, 1, now(), '{}'::jsonb
+      FROM selected_commit
+      RETURNING id, commit_id
+    ), historical_derivation AS (
+      INSERT INTO derivations (
+        commit_id, derivation_type, derivation_name, derivation_path, store_path,
+        expected_store_path, status_id, attempt_count, completed_at, policy_results
+       )
+      SELECT id, 'nixos', $name$${configurationName}$name$,
+              $path$${historicalStorePath}.drv$path$, $path$${historicalStorePath}$path$,
+              $path$${historicalStorePath}$path$, 10, 1, now(), '{}'::jsonb
+      FROM historical_commit
+      RETURNING id
+    ), inserted_system AS (
+      INSERT INTO systems (
+        id, hostname, environment_id, flake_id, is_active, public_key,
+        derivation, system_configuration_name
+      )
+      SELECT '${systemId}'::uuid, $hostname$${hostname}$hostname$,
+             environment.id, commit.flake_id, true,
+             $key$ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITASK326${suffix}$key$,
+             $path$${currentStorePath}$path$, $name$${configurationName}$name$
+      FROM selected_environment environment CROSS JOIN selected_commit commit
+      RETURNING id
+    )
+    SELECT current_derivation.id, historical_derivation.id,
+           current_derivation.commit_id, historical_commit.id
+    FROM current_derivation CROSS JOIN historical_derivation
+    CROSS JOIN inserted_system CROSS JOIN historical_commit;
+    `).split("|");
+    if (target.length !== 4) {
+      throw new Error(`Could not create TASK-326 Current CVE authority fixture: ${JSON.stringify(target)}`);
+    }
+    const currentDerivationId = Number(target[0]);
+    const historicalDerivationId = Number(target[1]);
+    const commitId = Number(target[2]);
+    const historicalCommitId = Number(target[3]);
+    const currentCommitHash = runFixtureSql(`SELECT git_commit_hash FROM commits WHERE id=${commitId};`);
+    Object.assign(fixture, { currentDerivationId, currentCommitId: commitId, historicalDerivationId, historicalCommitId, currentCommitHash });
+    runFixtureSql(`
+      INSERT INTO evaluation_snapshots (
+        id, commit_id, configuration_name, schema_version, lifecycle, integrity_version,
+        option_count, module_count, content_bytes, completed_at
+      ) VALUES (
+        '${snapshotId}'::uuid, ${commitId}, $name$${configurationName}$name$, 1,
+        'available', 0, 0, 0, 0, now()
+      );
+    `);
+    const certified = Number(runFixtureSql(`
+    WITH updated AS (
+      UPDATE evaluation_snapshots SET integrity_version=1
+      WHERE id='${snapshotId}'::uuid RETURNING id
+    ) SELECT COUNT(*) FROM updated;
+    `));
+    if (certified !== 1) throw new Error(`Could not certify TASK-326 snapshot ${snapshotId}`);
+    runFixtureSql(`
+      BEGIN;
+    ${retainCurrent ? `INSERT INTO evaluation_generation_snapshots (
+      system_id, generation, snapshot_id, derivation_id, commit_id,
+      source_store_path, configuration_name, lineage_verified
+    ) VALUES (
+      '${systemId}'::uuid, 74, '${snapshotId}'::uuid, ${currentDerivationId}, ${commitId},
+      $path$${currentStorePath}$path$, $name$${configurationName}$name$, true
+    );` : ""}
+    INSERT INTO system_states (
+      hostname, change_reason, store_path, generation,
+      generation_matches_current_store_path, timestamp
+    ) VALUES (
+      $hostname$${hostname}$hostname$, 'startup', $path$${currentStorePath}$path$,
+      74, true, now()
+    );
+    COMMIT;
+
+    INSERT INTO cves (id, description, cvss_v3_score, published_date)
+    VALUES
+      ('${currentCveId}', 'Current generation authority marker', 8.4, '2026-09-01'),
+      ('${historicalCveId}', 'Historical generation exclusion marker', 9.9, '2026-08-01');
+
+    INSERT INTO cve_scans (
+      id, derivation_id, scanner_name, scanner_version, status,
+      evidence_schema_version, total_packages, total_vulnerabilities,
+      high_count, attempts, completed_at
+    ) VALUES (
+      '${currentScanId}'::uuid, ${currentDerivationId}, 'current-authority-scanner',
+      '2.6.0', 'in_progress', 0, 0, 0, 0, 1, NULL
+    ), (
+      '${historicalScanId}'::uuid, ${historicalDerivationId}, 'historical-authority-scanner',
+      '1.0.0', 'in_progress', 0, 0, 0, 0, 1, NULL
+    );
+
+    INSERT INTO cve_scan_vulnerability_observations (
+      scan_id, canonical_cve_id, canonical_package_name,
+      observed_package_name, observed_package_version,
+      observed_derivation_path, is_whitelisted, detection_method
+    ) VALUES (
+      '${currentScanId}'::uuid, '${currentCveId}', 'current-authority-package',
+      'current-authority-package', '3.2.1-current',
+      '/nix/store/current-authority-package.drv', false, 'current-authority-scanner'
+    ), (
+      '${historicalScanId}'::uuid, '${historicalCveId}', 'historical-only-package',
+      'historical-only-package', '0.9-historical',
+      '/nix/store/historical-only-package.drv', false, 'historical-authority-scanner'
+    );
+
+    UPDATE cve_scans
+    SET status='completed', evidence_schema_version=1,
+        total_packages=1, total_vulnerabilities=1,
+        high_count=CASE WHEN id='${currentScanId}'::uuid THEN 1 ELSE 0 END,
+        completed_at=CASE
+          WHEN id='${currentScanId}'::uuid THEN '${currentCompletedAt}'::timestamptz
+          ELSE '${historicalCompletedAt}'::timestamptz
+        END
+    WHERE id IN ('${currentScanId}'::uuid, '${historicalScanId}'::uuid);
+    `);
+    return fixture;
+  } catch (error) {
+    removeTask326CurrentCveAuthorityFixture(fixture);
+    throw error;
+  }
+}
+
+function removeTask326CurrentCveAuthorityFixture(fixture) {
+  runFixtureSql(`
+    BEGIN;
+    DELETE FROM system_states WHERE hostname=$hostname$${fixture.hostname}$hostname$;
+    DELETE FROM evaluation_generation_snapshots WHERE system_id='${fixture.systemId}'::uuid;
+    DELETE FROM systems WHERE id='${fixture.systemId}'::uuid;
+    DELETE FROM evaluation_snapshot_selections WHERE current_snapshot_id='${fixture.snapshotId}'::uuid;
+    DELETE FROM evaluation_snapshots WHERE id='${fixture.snapshotId}'::uuid;
+    DELETE FROM derivations WHERE derivation_name=$name$${fixture.configurationName}$name$;
+    DELETE FROM commits WHERE git_commit_hash='${fixture.historicalRevision}';
+    DELETE FROM cves WHERE id IN ('${fixture.currentCveId}', '${fixture.historicalCveId}');
+    COMMIT;
+  `);
+}
+
 async function loadTask433RequirementContext(page) {
   const frameworks = (await phase6Api(page, "/api/v1/compliance/frameworks")).body;
   const framework = frameworks.find((item) => item.canonical_source_key === "web-ui-mapping-roundtrip");
@@ -6438,11 +6716,13 @@ const steps = [
         });
       });
       await page.evaluate(() => {
-        localStorage.setItem("cf.coach.collapsed", "false");
-        localStorage.setItem("cf.coach.force_show", "true");
+        localStorage.setItem("cf.coach.ui.v2", JSON.stringify({ panel: "expanded", track: "setup", progress: {} }));
       });
       await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1500);
+      if (await page.locator("[data-coach-pill]").isVisible().catch(() => false)) {
+        await page.locator("[data-coach-pill]").click();
+      }
       await assertVisible(
         page.locator("[data-testid='onboarding-coach-panel']"),
         "Onboarding coach panel should be visible",
@@ -6457,11 +6737,42 @@ const steps = [
       if (!(await completedStep.textContent()).includes("Acknowledged")) {
         throw new Error("Expanded Setup Coach must include a deterministic completed prerequisite");
       }
-      if ((await currentStep.getAttribute("aria-current")) !== "step" || !(await currentStep.textContent()).includes("Current step")) {
+      if ((await currentStep.getAttribute("aria-current")) !== "step" || !(await currentStep.textContent()).includes("Create or import a policy")) {
         throw new Error("Expanded Setup Coach must select Create policy as the deterministic current step");
       }
       await captureRequiredResponsiveArtifact(page, "06a-onboarding-coach-dashboard", "expanded-nine-step-selected-current");
-      await page.evaluate(() => localStorage.setItem("cf.coach.force_show", "false"));
+      await page.evaluate(() => localStorage.setItem("cf.coach.ui.v2", JSON.stringify({ panel: "minimized", track: "setup", progress: {} })));
+
+      // Setup page callout. The design teaches an incomplete, unlocked step on
+      // its own page even when that step is not the current step. Nothing is
+      // complete here, so Create environment is current and the Flakes page
+      // must still teach Add flake.
+      await page.unroute("**/api/v1/admin/setup-progress*");
+      await page.route("**/api/v1/admin/setup-progress*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(mockSetupCoachProgress()),
+        });
+      });
+      await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+      const flakesCallout = page.locator("[data-testid='setup-coach-flakes-callout']");
+      await assertVisible(flakesCallout, "Flakes page must teach its incomplete setup step out of order");
+      if (!(await flakesCallout.textContent()).includes("Step 2 of 9")) {
+        throw new Error(`Flakes callout must use the Add flake step position, got: ${await flakesCallout.textContent()}`);
+      }
+      await flakesCallout.locator("[data-testid='onboarding-coach-callout-hide']").click();
+      await assertHidden(flakesCallout, "Hide must remove the page callout");
+      // Hide is local presentation state. It does not change server progress.
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+      const systemsCallout = page.locator("[data-testid='setup-coach-systems-callout']");
+      await assertVisible(systemsCallout, "Systems page must teach Register system while the Deploy agent step is locked");
+      const systemsCalloutText = await systemsCallout.textContent();
+      if (!systemsCalloutText.includes("Register system") || systemsCalloutText.includes("first signed report")) {
+        throw new Error(`Systems callout must teach Register system, not the locked agent step: ${systemsCalloutText}`);
+      }
     },
   },
   // ============================================================
@@ -6487,8 +6798,8 @@ const steps = [
         "Expected environments page guidance callout",
       );
       await assertVisible(
-        page.locator("[data-testid='setup-coach-environments-target-callout']"),
-        "Expected environments click-target callout",
+        page.locator("[data-coach-target='env']").first(),
+        "Expected the environments setup action to expose its coach target",
       );
     },
   },
@@ -6525,8 +6836,8 @@ const steps = [
       const envStep = page.locator("[data-testid='onboarding-step-environment']");
       await assertVisible(envStep, "Environment step should still be visible");
       const envStepText = await envStep.textContent();
-      if (!envStepText.includes("Configured")) {
-        throw new Error(`Expected environment step to show Configured, got: ${envStepText}`);
+      if (!envStepText.includes("Reported complete")) {
+        throw new Error(`Expected server-reported environment step, got: ${envStepText}`);
       }
     },
   },
@@ -6541,8 +6852,8 @@ const steps = [
         "Expected flakes page guidance callout",
       );
       await assertVisible(
-        page.locator("[data-testid='setup-coach-flakes-target-callout']"),
-        "Expected flakes click-target callout",
+        page.locator("[data-coach-target='flake']").first(),
+        "Expected the flakes setup action to expose its coach target",
       );
     },
   },
@@ -6646,8 +6957,8 @@ const steps = [
       const flakeStep = page.locator("[data-testid='onboarding-step-flake']");
       await assertVisible(flakeStep, "Flake step should be visible");
       const flakeStepText = await flakeStep.textContent();
-      if (!flakeStepText.includes("Configured")) {
-        throw new Error(`Expected flake step to show Configured, got: ${flakeStepText}`);
+      if (!flakeStepText.includes("Reported complete")) {
+        throw new Error(`Expected server-reported flake step, got: ${flakeStepText}`);
       }
     },
   },
@@ -6662,8 +6973,8 @@ const steps = [
         "Expected builders page guidance callout",
       );
       await assertVisible(
-        page.locator("[data-testid='setup-coach-builders-target-callout']"),
-        "Expected builders click-target callout",
+        page.locator("[data-coach-target='builder']").first(),
+        "Expected the builders setup action to expose its coach target",
       );
     },
   },
@@ -6725,8 +7036,8 @@ const steps = [
       const builderStep = page.locator("[data-testid='onboarding-step-builder']");
       await assertVisible(builderStep, "Builder step should be visible");
       const builderStepText = await builderStep.textContent();
-      if (!builderStepText.includes("Configured")) {
-        throw new Error(`Expected builder step to show Configured, got: ${builderStepText}`);
+      if (!builderStepText.includes("Reported complete")) {
+        throw new Error(`Expected server-reported builder step, got: ${builderStepText}`);
       }
     },
   },
@@ -6741,8 +7052,8 @@ const steps = [
         "Expected caches page guidance callout",
       );
       await assertVisible(
-        page.locator("[data-testid='setup-coach-caches-target-callout']"),
-        "Expected caches click-target callout",
+        page.locator("[data-coach-target='cache']").first(),
+        "Expected the caches setup action to expose its coach target",
       );
     },
   },
@@ -6801,8 +7112,8 @@ const steps = [
       const cacheStep = page.locator("[data-testid='onboarding-step-cache']");
       await assertVisible(cacheStep, "Cache step should be visible");
       const cacheStepText = await cacheStep.textContent();
-      if (!cacheStepText.includes("Configured")) {
-        throw new Error(`Expected cache step to show Configured, got: ${cacheStepText}`);
+      if (!cacheStepText.includes("Reported complete")) {
+        throw new Error(`Expected server-reported cache step, got: ${cacheStepText}`);
       }
     },
   },
@@ -6817,8 +7128,8 @@ const steps = [
         "Expected systems page guidance callout",
       );
       await assertVisible(
-        page.locator("[data-testid='setup-coach-systems-target-callout']"),
-        "Expected systems click-target callout",
+        page.locator("[data-coach-target='system']").first(),
+        "Expected the systems setup action to expose its coach target",
       );
     },
   },
@@ -6966,8 +7277,10 @@ const steps = [
   },
   {
     name: "06f4-onboarding-systems-create",
-    description: "Systems: submit, assert step and agent Configured",
+    description: "Systems: submit, prove first signed report and admin acknowledgement are separate setup states",
     action: async (page) => {
+      let signedReportSeen = false;
+      let agentAcknowledged = false;
       // Wait briefly to ensure the flake names resource has resolved from mock
       await page.waitForTimeout(1500);
 
@@ -6989,44 +7302,67 @@ const steps = [
         await page.waitForTimeout(600);
       }
 
-      // Mock setup-progress to show system + agent as complete for the screenshot
-      // (system creation may fail due to flake validation in test VM, so we verify
-      //  the flow reached this point and mock the final state)
+      // The test holds server-reported system completion constant and varies
+      // only the authenticated systems read and explicit acknowledgement.
+      // Creating the system must not acknowledge the agent setup step.
+      const setupProgress = {
+        ...mockSetupCoachProgress(),
+        environment: { complete: true, count: 1 },
+        flake: { complete: true, count: 1 },
+        builder: { complete: true, count: 1 },
+        cache: { complete: true, count: 1 },
+        system: { complete: true, count: 1 },
+      };
+      await page.route("**/api/v1/systems**", async (route) => {
+        if (route.request().method() !== "GET") return route.fallback();
+        const pageData = signedReportSeen
+          ? mockSystemsPopulatedPage()
+          : { items: [], total: 0, page: 1, per_page: 50 };
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(pageData) });
+      });
       await page.route("**/api/v1/admin/setup-progress*", async (route) => {
         await route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: JSON.stringify({
-            dismissed: false,
-            agent_acknowledged: true,
-            environment: { complete: true, count: 1 },
-            flake: { complete: true, count: 1 },
-            builder: { complete: true, count: 1 },
-            cache: { complete: true, count: 1 },
-            system: { complete: true, count: 1 },
-            all_required_complete: false,
-          }),
+          body: JSON.stringify({ ...setupProgress, agent_acknowledged: agentAcknowledged }),
         });
+      });
+      await page.route("**/api/v1/admin/setup-wizard/agent-acknowledge", async (route) => {
+        if (route.request().method() !== "POST") return route.fallback();
+        agentAcknowledged = true;
+        await route.fulfill({ status: 204, body: "" });
       });
 
       await page.locator("[data-testid='onboarding-coach-refresh']").click();
       await page.waitForTimeout(1500);
 
-      await page.unroute("**/api/v1/admin/setup-progress*");
-
       const systemStep = page.locator("[data-testid='onboarding-step-system']");
       await assertVisible(systemStep, "System step should be visible");
       const systemStepText = await systemStep.textContent();
-      if (!systemStepText.includes("Configured")) {
-        throw new Error(`Expected system step to show Configured, got: ${systemStepText}`);
+      if (!systemStepText.includes("Reported complete")) {
+        throw new Error(`Expected server-reported system completion, got: ${systemStepText}`);
       }
 
       const agentStep = page.locator("[data-testid='onboarding-step-agent']");
       await assertVisible(agentStep, "Agent step should be visible");
       const agentStepText = await agentStep.textContent();
-      if (!agentStepText.includes("Acknowledged")) {
-        throw new Error(`Expected agent step to show Acknowledged, got: ${agentStepText}`);
+      if (!agentStepText.includes("Waiting for the agent's first signed report") || await page.getByTestId("onboarding-agent-acknowledge").count() !== 0) {
+        throw new Error(`System registration must not acknowledge the agent step: ${agentStepText}`);
       }
+
+      signedReportSeen = true;
+      await page.locator("[data-testid='onboarding-coach-refresh']").click();
+      await assertVisible(page.getByTestId("onboarding-agent-acknowledge"), "The first signed report should enable explicit Admin acknowledgement");
+      await page.getByTestId("onboarding-agent-acknowledge").click();
+      await page.locator("[data-testid='onboarding-coach-refresh']").click();
+      await page.waitForTimeout(500);
+      const acknowledgedText = await agentStep.textContent();
+      if (!agentAcknowledged || !acknowledgedText.includes("Acknowledged")) {
+        throw new Error(`Agent setup must complete only after the server records Admin acknowledgement: ${acknowledgedText}`);
+      }
+      await page.unroute("**/api/v1/systems**");
+      await page.unroute("**/api/v1/admin/setup-progress*");
+      await page.unroute("**/api/v1/admin/setup-wizard/agent-acknowledge");
     },
   },
   {
@@ -7042,10 +7378,12 @@ const steps = [
         });
       });
       await page.evaluate(() => {
-        localStorage.setItem("cf.coach.collapsed", "false");
-        localStorage.setItem("cf.coach.force_show", "false");
+        localStorage.setItem("cf.coach.ui.v2", JSON.stringify({ panel: "expanded", track: "setup", progress: {} }));
       });
       await page.reload({ timeout: LOAD_TIMEOUT });
+      if (await page.locator("[data-coach-pill]").isVisible().catch(() => false)) {
+        await page.locator("[data-coach-pill]").click();
+      }
       const currentStep = page.locator("[data-testid='onboarding-step-policy']");
       await assertVisible(currentStep, "Create policy should be the selected current step before minimizing");
       if ((await currentStep.getAttribute("aria-current")) !== "step") {
@@ -7072,9 +7410,9 @@ const steps = [
   },
   {
     name: "06h-onboarding-coach-all-configured",
-    description: "Coach panel: expand from tab, all steps show Configured",
+    description: "Setup-complete card remains available after all nine server-reported steps",
     action: async (page) => {
-      await page.evaluate(() => localStorage.setItem("cf.coach.force_show", "true"));
+      await page.evaluate(() => localStorage.setItem("cf.coach.ui.v2", JSON.stringify({ panel: "expanded", track: "setup", progress: {} })));
       await page.unroute("**/api/v1/admin/setup-progress*");
       await page.route("**/api/v1/admin/setup-progress*", async (route) => {
         await route.fulfill({
@@ -7098,6 +7436,9 @@ const steps = [
       });
 
       await page.reload({ timeout: LOAD_TIMEOUT });
+      if (await page.locator("[data-coach-pill]").isVisible().catch(() => false)) {
+        await page.locator("[data-coach-pill]").click();
+      }
 
       await assertVisible(
         page.locator("[data-testid='onboarding-step-environment']"),
@@ -7108,8 +7449,8 @@ const steps = [
         const step = page.locator(`[data-testid='onboarding-step-${stepId}']`);
         await assertVisible(step, `Step ${stepId} should be visible`);
         const text = await step.textContent();
-        if (!text.includes("Configured")) {
-          throw new Error(`Expected step ${stepId} to show Configured, got: ${text}`);
+        if (!text.includes("Reported complete")) {
+          throw new Error(`Expected step ${stepId} to show server-reported completion, got: ${text}`);
         }
       }
 
@@ -7123,7 +7464,8 @@ const steps = [
       for (const [stepId, pathname] of [
         ["policy", "/deployment-policies"],
         ["bundle", "/compliance"],
-        ["poam", "/compliance"],
+        // The design's Track a POA&M step opens the dedicated POA&M register.
+        ["poam", "/poams"],
       ]) {
         await page.locator(`[data-testid='onboarding-step-${stepId}']`).click();
         await page.waitForURL((url) => url.pathname === pathname, { timeout: LOAD_TIMEOUT });
@@ -7139,10 +7481,393 @@ const steps = [
 
       await page.unroute("**/api/v1/admin/setup-progress*");
       await page.evaluate(() => {
-        localStorage.setItem("cf.coach.force_show", "false");
-        localStorage.setItem("cf.coach.collapsed", "true");
+        localStorage.setItem("cf.coach.ui.v2", JSON.stringify({ panel: "expanded", track: "setup", progress: {} }));
       });
       await collapseOnboardingCoach(page);
+    },
+  },
+  {
+    name: "06i-security-workflows-role-coach",
+    description: "Guide opens security walkthroughs for Operator and Viewer without setup-progress traffic or security mutations",
+    action: async (page) => {
+      const setupRequests = [];
+      const securityMutations = [];
+      const observe = (request) => {
+        const url = new URL(request.url());
+        if (url.pathname === "/api/v1/admin/setup-progress") setupRequests.push(request.method());
+        if (request.method() !== "GET" && /\/(?:cves\/.*(?:triage|batch)|poams|acceptances|scan-schedule|compliance\/.*assignments)/.test(url.pathname)) {
+          securityMutations.push(`${request.method()} ${url.pathname}`);
+        }
+      };
+      page.on("request", observe);
+
+      const openRoleGuide = async (role) => {
+        await page.unroute("**/api/**").catch(() => {});
+        await routeStandaloneUiBootstrap(page, role);
+        await page.evaluate(() => localStorage.setItem("cf.coach.ui.v2", JSON.stringify({ panel: "dismissed", track: "setup", progress: {} })));
+        await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+        const guide = page.getByTestId("coach-guide-button");
+        await assertVisible(guide, `${role} must have the top-bar Guide button`);
+        await guide.click();
+        await assertVisible(page.getByTestId("onboarding-coach-panel"), `${role} Guide must reopen the coach`);
+        await assertHidden(page.getByTestId("coach-tab-setup"), `${role} must not see authoritative Setup progress`);
+        await assertVisible(page.getByTestId("coach-tab-security"), `${role} must see Security workflows`);
+        await assertVisible(page.getByTestId("coach-module-B"), `${role} must see the triage walkthrough`);
+      };
+
+      await openRoleGuide("Operator");
+      await captureRequiredResponsiveArtifact(page, "06i-security-workflows-role-coach", "operator-security-home");
+      await page.getByTestId("coach-module-start-B").click();
+      const operatorTour = page.getByTestId("coach-tour-card");
+      await assertVisible(operatorTour, "Operator should start the vulnerability walkthrough");
+      await page.getByTestId("coach-tour-next").click();
+      await assertVisible(operatorTour, "Operator walkthrough should advance to per-environment triage");
+      if (await operatorTour.getByTestId("coach-gate").count() !== 0) {
+        throw new Error("Operator must not receive a Viewer permission gate for CVE triage");
+      }
+      await page.getByTestId("coach-tour-exit").click();
+
+      await openRoleGuide("Viewer");
+      await page.getByTestId("coach-module-start-B").click();
+      const viewerTour = page.getByTestId("coach-tour-card");
+      await assertVisible(viewerTour, "Viewer should start a read-only vulnerability walkthrough");
+      await page.getByTestId("coach-tour-next").click();
+      await assertVisible(viewerTour, "Viewer should progress to the explanatory triage stop");
+      await assertVisible(viewerTour.getByTestId("coach-gate"), "Viewer triage stop must explain the Operator permission requirement");
+      await assertVisible(viewerTour.getByText(/Triage requires Operator permission/), "Viewer stop must retain the design's read-only explanation");
+      await captureRequiredResponsiveArtifact(page, "06i-security-workflows-role-coach", "viewer-read-only-triage");
+      const localState = await page.evaluate(() => JSON.parse(localStorage.getItem("cf.coach.ui.v2") || "{}"));
+      if (!localState.progress?.B?.includes("B1") || localState.progress?.B?.includes("B2")) {
+        throw new Error(`The active stop must not count as viewed until the person advances: ${JSON.stringify(localState.progress)}`);
+      }
+      await page.getByTestId("coach-tour-next").click();
+      await assertVisible(viewerTour.getByText("Schedule patch opens a POA&M", { exact: true }), "Viewer should advance through the read-only triage explanation");
+      const advancedState = await page.evaluate(() => JSON.parse(localStorage.getItem("cf.coach.ui.v2") || "{}"));
+      if (!advancedState.progress?.B?.includes("B1") || !advancedState.progress?.B?.includes("B2")) {
+        throw new Error(`Viewer walkthrough progress must record only stops advanced past: ${JSON.stringify(advancedState.progress)}`);
+      }
+      if (setupRequests.length !== 0) {
+        throw new Error(`Operator or Viewer called the Administrator-only setup-progress endpoint: ${JSON.stringify(setupRequests)}`);
+      }
+      if (securityMutations.length !== 0) {
+        throw new Error(`Coach navigation submitted a security mutation: ${JSON.stringify(securityMutations)}`);
+      }
+      page.off("request", observe);
+      await page.unroute("**/api/**");
+    },
+  },
+  {
+    name: "06j-security-coach-cve-evidence",
+    description: "Admin Guide resumes the CVE evidence stop, opens exact fleet detail and triage presentation without submitting a disposition",
+    action: async (page) => {
+      await page.unroute("**/api/**").catch(() => {});
+      await routeStandaloneUiBootstrap(page, "Operator");
+      const cve = {
+        cve_id: "CVE-2026-8842",
+        cvss_v3_score: 9.1,
+        title: "OpenSSL signed-length overflow",
+        severity: "critical",
+        cvss_vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        published_date: "2026-09-01",
+        exploited: false,
+        package_name: "openssl",
+        installed_version: "3.0.1",
+        fixed_version: "3.0.2",
+        fix_status: "fix_available",
+        affected_count: 1,
+        exact_affected_count: 1,
+        legacy_affected_count: 0,
+        current_affected_count: 1,
+        scheduled_deployment_target_count: 0,
+        historical_inventory_count: 0,
+        affected_environments: ["Coach production"],
+        first_seen: "2026-09-20T00:00:00Z",
+        last_seen: "2026-09-30T00:00:00Z",
+        age_days: 10,
+        triage_status: "outstanding",
+      };
+      const environmentId = "00000000-0000-4000-8000-000000008842";
+      const fleet = {
+        cve: {
+          cve_id: cve.cve_id,
+          cvss_v3_score: cve.cvss_v3_score,
+          severity: cve.severity,
+          title: cve.title,
+          cvss_vector: cve.cvss_vector,
+          cwe_id: null,
+          published_date: cve.published_date,
+          modified_date: null,
+          exploited: false,
+          package_name: "openssl",
+          installed_version: "3.0.1",
+          fixed_version: "3.0.2",
+          detection_method: "vulnix",
+          fix_status: "fix_available",
+        },
+        canonical_package_name: "openssl",
+        rollup: "outstanding",
+        affected_system_count: 1,
+        exact_affected_system_count: 1,
+        exact_mutation_target_count: 1,
+        legacy_affected_system_count: 0,
+        current_affected_system_count: 1,
+        scheduled_deployment_target_count: 0,
+        historical_inventory_system_count: 0,
+        no_scan_system_count: 0,
+        unassigned_affected_system_count: 0,
+        unassigned_systems: [],
+        environments: [{
+          environment_id: environmentId,
+          environment_name: "Coach production",
+          affected_system_count: 1,
+          exact_affected_system_count: 1,
+          legacy_affected_system_count: 0,
+          current_affected_system_count: 1,
+          scheduled_deployment_target_count: 0,
+          historical_inventory_system_count: 0,
+          systems: [],
+          disposition: null,
+        }],
+      };
+      const mutationRequests = [];
+      const onRequest = (request) => {
+        const url = new URL(request.url());
+        if (request.method() !== "GET" && url.pathname.startsWith("/api/v1/cves/")) {
+          mutationRequests.push(`${request.method()} ${url.pathname}`);
+        }
+      };
+      page.on("request", onRequest);
+      await page.route("**/api/v1/cves**", async (route) => {
+        const request = route.request();
+        const url = new URL(request.url());
+        if (request.method() !== "GET") return route.fallback();
+        if (url.pathname === "/api/v1/cves/stats") {
+          return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+            total_cves: 1, critical: 1, high: 0, medium: 0, low: 0, exploited: 0,
+            fixable: 1, environments_affected: 1, systems_affected: 1, exact_systems_affected: 1,
+            legacy_systems_affected: 0, current_systems_affected: 1,
+            scheduled_deployment_target_systems: 0, historical_inventory_systems: 0,
+            no_scan_systems: 0, outstanding: 1, accepted: 0, scheduled: 0,
+          }) });
+        }
+        if (url.pathname === "/api/v1/cves/packages") {
+          return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(["openssl"]) });
+        }
+        if (url.pathname === "/api/v1/cves/inventory/pairs") {
+          return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items: [cve], total: 1, next_offset: null, package_host_unions: [] }) });
+        }
+        if (url.pathname === "/api/v1/cves" || url.pathname === "/api/v1/cves/grouped") {
+          return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([cve]) });
+        }
+        if (url.pathname === `/api/v1/cves/${cve.cve_id}/fleet`) {
+          return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(fleet) });
+        }
+        return route.fallback();
+      });
+      await page.route("**/api/v1/poams/assignees", async (route) => {
+        if (route.request().method() === "GET") {
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ people: [], groups: [] }) });
+        } else {
+          await route.fallback();
+        }
+      });
+      await page.evaluate(() => localStorage.setItem("cf.coach.ui.v2", JSON.stringify({
+        panel: "dismissed",
+        track: "security",
+        progress: { A: ["A1", "A2", "A3", "A4"] },
+      })));
+      await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+      await page.getByTestId("coach-guide-button").click();
+      await assertVisible(page.getByTestId("coach-module-A"), "Guide must reopen the security walkthrough home");
+      await page.getByTestId("coach-module-start-A").click();
+      const tour = page.getByTestId("coach-tour-card");
+      await assertVisible(tour, "Resume must start at the first unviewed CVE evidence stop");
+      await assertVisible(tour.getByText("Current, Scheduled, Historical", { exact: true }), "CVE evidence relations stop should be active");
+      const drawer = page.getByTestId("cve-fleet-drawer");
+      await assertVisible(drawer, "CVE stop must open the exact production fleet detail surface");
+      await assertVisible(drawer.getByText("OpenSSL signed-length overflow", { exact: true }), "CVE detail must display its source-backed title");
+      await assertVisible(drawer.locator("[data-coach-target='cve-relations']"), "CVE walkthrough must spotlight the distinct evidence tiers");
+      await assertVisible(page.getByTestId("coach-spot"), "CVE evidence stop must show the target spotlight");
+      await captureRequiredResponsiveArtifact(page, "06j-security-coach-cve-evidence", "current-evidence-relations");
+      await page.getByTestId("coach-tour-exit").click();
+      await page.getByRole("button", { name: "Close fleet inventory" }).click();
+      await assertVisible(page.getByTestId("coach-module-B"), "Closing the user-opened surfaces must reveal the Security Workflows home");
+      await page.getByTestId("coach-module-start-B").click();
+      await assertVisible(tour.getByText("Read the exact finding first", { exact: true }), "CVE triage module must advance to exact finding detail");
+      await assertVisible(drawer, "Exact finding stop must keep the drawer open");
+      await page.getByTestId("coach-tour-next").click();
+      await assertVisible(page.getByTestId("cve-triage-dialog"), "Operator triage stop must open the triage presentation");
+      await assertVisible(page.getByTestId("coach-spot"), "Triage stop must spotlight the open modal");
+      await captureRequiredResponsiveArtifact(page, "06j-security-coach-cve-evidence", "triage-modal-dock");
+      await page.getByTestId("coach-tour-exit").click();
+      await assertVisible(page.getByTestId("cve-triage-dialog"), "Exiting the walkthrough must leave the user-opened triage modal available");
+      await page.locator(".cve-triage-backdrop").evaluate((element) => element.click());
+      await assertHidden(page.getByTestId("cve-triage-dialog"), "User-initiated backdrop close must leave triage unapplied");
+      await page.getByRole("button", { name: "Close fleet inventory" }).click();
+      if (mutationRequests.length !== 0) {
+        throw new Error(`CVE walkthrough navigation submitted a triage request: ${JSON.stringify(mutationRequests)}`);
+      }
+      page.off("request", onRequest);
+      await page.unroute("**/api/v1/cves**");
+      await page.unroute("**/api/v1/poams/assignees");
+      await page.unroute("**/api/**");
+    },
+  },
+  {
+    name: "06k-security-coach-poam-acceptance",
+    description: "POA&M verification and risk acceptance walkthroughs navigate to authorized records and never verify, close, renew, or convert",
+    action: async (page) => {
+      await page.unroute("**/api/**").catch(() => {});
+      await routeStandaloneUiBootstrap(page, "Operator");
+      const ids = {
+        plan: "32000000-0000-4000-8000-000000000101",
+        host: "32000000-0000-4000-8000-000000000102",
+        acceptance: "32000000-0000-4000-8000-000000000103",
+        owner: "32000000-0000-4000-8000-000000000104",
+      };
+      const plan = {
+        id: ids.plan,
+        human_id: "POAM-0101",
+        title: "OpenSSL exact-evidence remediation",
+        plan: "Deploy the fixed package and verify the current scan.",
+        owner: "",
+        revision: 1,
+        assignee: { kind: "user", user_id: ids.owner, display: "Morgan Owner", available: true },
+        status: "awaiting_verification",
+        risk: "high",
+        target_date: "2026-10-15",
+        overdue: false,
+        finding_count: 1,
+        cve_finding_count: 1,
+        created_at: "2026-09-20T12:00:00Z",
+        updated_at: "2026-09-21T12:00:00Z",
+        closed_at: null,
+        closure_attempt_id: null,
+        environment_ids: [],
+        system_ids: [],
+        systems: [],
+        bundle_ids: [],
+        bundle_version_ids: [],
+        assignment_version_ids: [],
+        first_requirement: null,
+        first_cve: "CVE-2026-8842",
+        milestone_count: 0,
+        completed_milestone_count: 0,
+        last_activity_at: "2026-09-21T12:00:00Z",
+      };
+      const planDetail = {
+        ...plan,
+        findings: [],
+        cve_findings: [],
+        findings_has_more: false,
+        findings_next_cursor: null,
+        milestones: [],
+        assignment_references: [],
+        verification_attempts: [],
+        verification_has_more: false,
+        verification_next_cursor: null,
+        activity: [],
+        activity_has_more: false,
+        activity_next_cursor: null,
+      };
+      const acceptance = {
+        source: "cve_host",
+        human_id: "RA-0103",
+        source_id: ids.acceptance,
+        waiver_updated_at: null,
+        status: "accepted",
+        finding_id: null,
+        system_id: ids.host,
+        system_hostname: "coach-prod-01",
+        environment_id: null,
+        environment_name: null,
+        policy_lineage_id: null,
+        policy_version_id: null,
+        policy_title: null,
+        requirement_external_id: null,
+        canonical_cve_id: "CVE-2026-8842",
+        canonical_package_name: "openssl",
+        justification: "Reviewed exact host CVE risk.",
+        review_date: "2026-12-01",
+        review_due_at: null,
+        expires_at: null,
+        accepted_by: ids.owner,
+        accepted_at: "2026-09-20T12:00:00Z",
+        retired_at: null,
+        retired_by: null,
+        retirement_reason: null,
+        replacement_poam_id: null,
+        recorded_at: "2026-09-20T12:00:00Z",
+      };
+      const mutations = [];
+      const onRequest = (request) => {
+        const url = new URL(request.url());
+        if (request.method() !== "GET" && /\/api\/v1\/(?:poams|acceptances)/.test(url.pathname)) {
+          mutations.push(`${request.method()} ${url.pathname}`);
+        }
+      };
+      page.on("request", onRequest);
+      await page.route("**/api/v1/poams**", async (route) => {
+        const request = route.request();
+        if (request.method() !== "GET") return route.fallback();
+        const url = new URL(request.url());
+        if (url.pathname === "/api/v1/poams/dashboard") {
+          return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ total: 1, active: 1, overdue: 0, awaiting_verification: 1, completed: 0 }) });
+        }
+        if (url.pathname === "/api/v1/poams/assignees") {
+          return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ people: [], groups: [] }) });
+        }
+        const detailMatch = url.pathname.match(/\/api\/v1\/poams\/([0-9a-f-]+)$/);
+        if (detailMatch) {
+          if (detailMatch[1] !== ids.plan) throw new Error(`Unexpected POA&M detail ID ${detailMatch[1]}`);
+          return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(planDetail) });
+        }
+        const limit = Number(url.searchParams.get("limit") || 100);
+        const offset = Number(url.searchParams.get("offset") || 0);
+        return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items: [plan], limit, offset, has_more: false, next_offset: null }) });
+      });
+      await page.route("**/api/v1/acceptances**", async (route) => {
+        if (route.request().method() !== "GET") return route.fallback();
+        const url = new URL(route.request().url());
+        return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items: [acceptance], total: 1, limit: 100, offset: Number(url.searchParams.get("offset") || 0), has_more: false }) });
+      });
+      await page.evaluate(() => localStorage.setItem("cf.coach.ui.v2", JSON.stringify({
+        panel: "dismissed",
+        track: "security",
+        progress: { D: ["D1", "D2", "D3"], E: ["E1", "E2"] },
+      })));
+      await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+      await page.getByTestId("coach-guide-button").click();
+      await page.getByTestId("coach-module-start-D").click();
+      const tour = page.getByTestId("coach-tour-card");
+      await assertVisible(tour.getByText("Remediation plan detail", { exact: true }), "Register walkthrough must resume at plan detail");
+      await assertVisible(page.getByTestId("poam-detail"), "Walkthrough must open the exact plan detail route");
+      await page.getByTestId("coach-tour-next").click();
+      await assertVisible(tour.getByText("Lifecycle", { exact: true }), "POA&M lifecycle stop must be reachable");
+      await assertVisible(page.locator("[data-coach-target='poam-lifecycle']"), "Lifecycle stop must highlight the lifecycle control");
+      await page.getByTestId("coach-tour-next").click();
+      await assertVisible(tour.getByText("Verify now, then close", { exact: true }), "Verification stop must be reachable");
+      await assertVisible(page.locator("[data-coach-target='poam-verify']"), "Verification stop must highlight the exact-evidence check area");
+      await captureRequiredResponsiveArtifact(page, "06k-security-coach-poam-acceptance", "poam-verify-target");
+      await page.getByTestId("coach-tour-next").click();
+      await page.getByTestId("coach-tour-next").click();
+      await assertVisible(tour.getByText("Risk acceptance detail", { exact: true }), "Risk acceptance detail stop must open the accepted source record");
+      await assertVisible(page.locator("[data-coach-target='ra-truth']"), "Risk acceptance truth statement must be highlighted");
+      await captureRequiredResponsiveArtifact(page, "06k-security-coach-poam-acceptance", "risk-acceptance-truth");
+      await page.getByTestId("coach-tour-next").click();
+      await assertVisible(page.locator("[data-coach-target='ra-footer']"), "Renewal and conversion actions must remain explanatory targets");
+      await page.getByTestId("coach-tour-exit").click();
+      await page.getByRole("button", { name: "Close acceptance" }).click();
+      await assertVisible(page.getByTestId("coach-module-E"), "Closing the user-opened acceptance drawer must reveal the workflow home");
+      await page.getByTestId("coach-module-start-E").click();
+      await assertVisible(tour.getByText("Two identities per acceptance", { exact: true }), "Audit walkthrough must resume at acceptance source identity");
+      await assertVisible(page.locator("[data-coach-target='ra-source-toggle']"), "Audit stop must spotlight the immutable source identity disclosure");
+      await captureRequiredResponsiveArtifact(page, "06k-security-coach-poam-acceptance", "risk-acceptance-source");
+      if (mutations.length !== 0) throw new Error(`POA&M walkthrough submitted an action: ${JSON.stringify(mutations)}`);
+      page.off("request", onRequest);
+      await page.unroute("**/api/v1/poams**");
+      await page.unroute("**/api/v1/acceptances**");
+      await page.unroute("**/api/**");
     },
   },
   {
@@ -7631,6 +8356,7 @@ const steps = [
         page.locator("[data-testid='topbar-notifications-badge']"),
         "Expected notifications unread badge to clear after mark-all-read",
       );
+
     },
   },
   {
@@ -8418,6 +9144,7 @@ const steps = [
     action: async (page) => {
       await routeConfigHealth(page, mockConfigHealthResponse());
       await routeSystemsWarningData(page);
+
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
       const warningBanner = page.locator("[data-testid='systems-missing-flake-warning']").first();
@@ -9695,315 +10422,479 @@ const steps = [
   },
   {
     name: "12h-system-detail-cves-grouped-justification",
-    description: "System detail package-first CVEs preserve exact evidence for POA&M creation and keep justification distinct",
+    description: "System detail package-first CVEs use authoritative host and environment triage with typed POA&M assignment",
     action: async (page) => {
       await routeSystemsWarningData(page);
-
-      await page.route(
-        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-scan-eligibility*",
-        async (route) => {
-          await route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: JSON.stringify({
-              eligible: true,
-              reason: null,
-              derivation_id: 42,
-              config_name: "warning-system-01",
-              hostname: "warning-system-01",
-            }),
-          });
-        },
-      );
-
-      let justificationSaved = false;
-      let capturedJustificationRequest = null;
-      let capturedCvePoamRequest = null;
-
+      const systemId = "00000000-0000-0000-0000-0000000000a1";
+      const environmentId = "00000000-0000-0000-0000-0000000000e1";
+      const poamId = "00000000-0000-0000-0000-0000000000d1";
       const exactObservation = {
-        system_id: "00000000-0000-0000-0000-0000000000a1",
+        system_id: systemId,
         scan_id: "00000000-0000-0000-0000-000000000c01",
-        occurrence_derivation_path: "/nix/store/exact-openssl-occurrence",
+        occurrence_derivation_path: "/nix/store/exact-kernel-occurrence",
         canonical_cve_id: "CVE-2025-1111",
-        canonical_package_name: "linux-kernel",
+        canonical_package_name: "linuxPackages_6_10.kernel",
       };
-
-      await page.route("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-inventory*", async (route) => {
-        const vulnerabilities = [
-          {
-            cve_id: "CVE-2025-1111",
-            severity: "high",
-            cvss_score: 8.7,
-            description: "Kernel memory corruption under crafted input",
-            package_name: "linuxPackages_6_10.kernel",
-            installed_version: "6.10.12",
-            fixed_version: "6.10.14",
-            first_seen: "2026-04-10T09:00:00Z",
-            published_at: "2026-04-08T00:00:00Z",
-            status: "fix_available",
-            justification_category: justificationSaved ? "accepted_risk" : null,
-            justification_reason: justificationSaved
-              ? "Accepted risk until scheduled maintenance window"
-              : null,
-            justification_updated_at: justificationSaved ? "2026-04-12T12:00:00Z" : null,
-            remediation: {
-              cve_finding_id: null,
-              observation: exactObservation,
-              observed_package_name: "linuxPackages_6_10.kernel",
-              observed_package_version: "6.10.12",
-              is_whitelisted: false,
-              is_justified: justificationSaved,
-              active_poam: null,
-              historical_poams: [],
-              historical_has_more: false,
-              historical_next_offset: null,
-            },
-          },
-          {
-            cve_id: "CVE-2025-1111",
-            severity: "high",
-            cvss_score: 8.7,
-            description: "Kernel memory corruption under crafted input",
-            package_name: "linuxPackages_6_1.kernel",
-            installed_version: "6.1.93",
-            fixed_version: "6.1.95",
-            first_seen: "2026-04-10T09:00:00Z",
-            published_at: "2026-04-08T00:00:00Z",
-            status: "fix_available",
-            justification_category: justificationSaved ? "accepted_risk" : null,
-            justification_reason: justificationSaved
-              ? "Accepted risk until scheduled maintenance window"
-              : null,
-            justification_updated_at: justificationSaved ? "2026-04-12T12:00:00Z" : null,
-          },
-          {
-            cve_id: "CVE-2024-2222",
-            severity: "low",
-            cvss_score: 3.1,
-            description: "Minor issue in optional diagnostics package",
-            package_name: "diag-tools",
-            installed_version: "2.3.1",
-            fixed_version: null,
-            first_seen: "2026-04-10T09:00:00Z",
-            published_at: "2026-01-15T00:00:00Z",
-            status: "open",
-            justification_category: null,
-            justification_reason: null,
-            justification_updated_at: null,
-          },
-        ].map((vulnerability) => ({
-          ...vulnerability,
-          stable_identity: {
-            canonical_cve_id: vulnerability.cve_id,
-            canonical_package_name: vulnerability.package_name,
-          },
-          canonical_package_name: vulnerability.package_name,
-        }));
-
-        const payload = {
+      const inventoryRow = {
+        stable_identity: {
+          canonical_cve_id: "CVE-2025-1111",
+          canonical_package_name: "linuxPackages_6_10.kernel",
+        },
+        cve_id: "CVE-2025-1111",
+        canonical_package_name: "linuxPackages_6_10.kernel",
+        severity: "high",
+        cvss_score: 8.7,
+        description: "Kernel memory corruption under crafted input",
+        package_name: "linuxPackages_6_10.kernel",
+        installed_version: "6.10.12",
+        fixed_version: null,
+        first_seen: "2026-04-10T09:00:00Z",
+        published_at: "2026-04-08T00:00:00Z",
+        status: "fix_available",
+        justification_category: "accepted_risk",
+        justification_reason: "Ordinary inventory note, not a triage disposition",
+        justification_updated_at: "2026-04-11T12:00:00Z",
+        remediation: {
+          cve_finding_id: null,
+          observation: exactObservation,
+          observed_package_name: "linuxPackages_6_10.kernel",
+          observed_package_version: "6.10.12",
+          is_whitelisted: false,
+          is_justified: true,
+          active_poam: null,
+          historical_poams: [],
+          historical_has_more: false,
+          historical_next_offset: null,
+        },
+      };
+      await page.route(`**/api/v1/systems/${systemId}/cve-inventory*`, async (route) => {
+        if (new URL(route.request().url()).pathname.endsWith("/cve-inventory-sources")) {
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items: [] }) });
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+          system_id: systemId,
           authority: "exact",
           exact_authority_failure: null,
+          current_state: "exact_current_scan",
+          running_target: { derivation_id: 42, generation: 74, commit_hash: "1111111111111111111111111111111111111111", reported_at: "2026-04-07T08:10:00Z" },
+          selection: { kind: "current" },
+          evidence_representation: "schema1_observations",
+          read_only: false,
           source: {
             scan_id: exactObservation.scan_id,
             scanner_name: "vulnix",
             scanner_version: "1.10.1",
             completed_at: "2026-04-10T09:00:00Z",
           },
-          vulnerabilities,
+          vulnerabilities: [inventoryRow],
           metadata: {
-            total_findings: 3,
-            total_cves: 2,
-            total_packages: 3,
-            severity: { critical: 0, high: 2, medium: 0, low: 1, unknown: 0 },
+            total_findings: 1,
+            total_cves: 1,
+            total_packages: 1,
+            severity: { critical: 0, high: 1, medium: 0, low: 0, unknown: 0 },
           },
-          inventory_revision: justificationSaved ? "justified-revision" : "initial-revision",
+          inventory_revision: "authoritative-triage-revision",
           has_more: false,
           next_cursor: null,
-        };
-
+          }),
+        });
+      });
+      await page.route("**/api/v1/poams/assignees", async (route) => {
         await route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: JSON.stringify(payload),
+          body: JSON.stringify({
+            people: [{ user_id: "00000000-0000-0000-0000-0000000000f1", label: "Morgan Reyes" }],
+            groups: [{ group_name: "platform-operators" }],
+          }),
         });
       });
-
-      await page.route(
-        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cves/CVE-2025-1111/justification",
-        async (route) => {
-          capturedJustificationRequest = route.request().postDataJSON();
-          justificationSaved = true;
-          await route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: JSON.stringify({ status: "ok", message: "CVE justification saved" }),
-          });
+      const host = (id, hostname) => ({
+        system_id: id,
+        environment_id: environmentId,
+        hostname,
+        environment: "Production",
+        primary_ip_address: "10.0.0.10",
+        flake_name: "platform",
+        flake_id: 1,
+        commit_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        deployment_policy: "manual",
+        current_package_version: "6.10.12",
+        inventory_authority: "exact",
+      });
+      const poam = {
+        id: poamId,
+        human_id: "POAM-3262",
+        title: "Patch production kernels",
+        plan: "Deploy the fixed kernel and verify exact scan absence.",
+        target_date: "2026-10-20",
+        risk: "medium",
+        assignee: { kind: "oidc_group", group_name: "platform-operators", display: "Platform operators", available: true },
+      };
+      const environmentPoamId = "00000000-0000-0000-0000-0000000000d2";
+      const exactAffectedHosts = [
+        host(systemId, "warning-system-01"),
+        host("00000000-0000-0000-0000-0000000000a2", "warning-system-02"),
+      ];
+      let hostDisposition = null;
+      let environmentDisposition = null;
+      const scheduledPoamSubjects = [];
+      const triageRequests = [];
+      let triageReads = 0;
+      const actor = { user_id: "00000000-0000-0000-0000-0000000000f1", display: "Morgan Reyes" };
+      const acceptedDisposition = (body) => ({
+        state: "accepted",
+        justification: body.justification,
+        review_date: body.review_date,
+        actor,
+        accepted_at: "2026-09-20T12:00:00Z",
+      });
+      const scheduledDisposition = (body, id) => ({
+        state: "scheduled",
+        poam_id: id,
+        poam: {
+          id,
+          human_id: id === poamId ? "POAM-3262" : "POAM-3262-ENV",
+          ...body.poam,
+          assignee: body.poam.assignee.kind === "oidc_group"
+            ? { ...body.poam.assignee, display: "Platform operators", available: true }
+            : { ...body.poam.assignee, display: "Morgan Reyes", available: true },
         },
-      );
-
-      await page.route("**/api/v1/poams/cves", async (route) => {
-        capturedCvePoamRequest = route.request().postDataJSON();
+        actor,
+        scheduled_at: "2026-09-20T12:05:00Z",
+      });
+      const triageDetail = () => ({
+        canonical_cve_id: "CVE-2025-1111",
+        canonical_package_name: "linuxPackages_6_10.kernel",
+        scope: {
+          kind: "current_exact_affected_hosts_in_environment",
+          selected_system_id: systemId,
+          selected_system_hostname: "warning-system-01",
+          environment_id: environmentId,
+          environment_name: "Production",
+          exact_affected_system_count: exactAffectedHosts.length,
+        },
+        systems: exactAffectedHosts,
+        host_disposition: hostDisposition,
+        environment_disposition: environmentDisposition,
+        effective_disposition: hostDisposition ?? environmentDisposition,
+        effective_source: hostDisposition ? "host" : environmentDisposition ? "environment" : "none",
+        disposition: hostDisposition ?? environmentDisposition,
+      });
+      const triageRoute = new RegExp(`/api/v1/systems/${systemId}/cves/CVE-2025-1111/triage(?:\\?package=linuxPackages_6_10\\.kernel)?$`);
+      await page.route(triageRoute, async (route) => {
+        const request = route.request();
+        const url = new URL(request.url());
+        if (request.method() === "GET") {
+          triageReads += 1;
+          if (url.searchParams.get("package") !== "linuxPackages_6_10.kernel") {
+            throw new Error(`System triage GET lost exact package identity: ${url.search}`);
+          }
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(triageDetail()) });
+          return;
+        }
+        if (request.method() !== "POST" || url.search) {
+          throw new Error(`Unexpected system triage request ${request.method()} ${url.pathname}${url.search}`);
+        }
+        const body = request.postDataJSON();
+        triageRequests.push(body);
+        if (!new Set(["host", "environment"]).has(body.scope)) {
+          throw new Error(`System triage request used an invalid scope: ${JSON.stringify(body)}`);
+        }
+        if (/"(?:system|environment|host)(?:_ids?|names?)?"\s*:/i.test(JSON.stringify(body))) {
+          throw new Error(`System triage request serialized a server-owned identity: ${JSON.stringify(body)}`);
+        }
+        let nextDisposition = null;
+        if (body.action === "accept_risk") {
+          nextDisposition = acceptedDisposition(body);
+        } else if (body.action === "schedule_patch") {
+          const scheduledId = body.scope === "host" ? poamId : environmentPoamId;
+          nextDisposition = scheduledDisposition(body, scheduledId);
+          scheduledPoamSubjects.push({
+            scope: body.scope,
+            poamId: scheduledId,
+            systemIds: body.scope === "host"
+              ? [systemId]
+              : exactAffectedHosts.map((system) => system.system_id),
+          });
+        } else if (body.action !== "leave_open") {
+          throw new Error(`Unexpected system triage action: ${JSON.stringify(body)}`);
+        }
+        const previous = body.scope === "host" ? hostDisposition : environmentDisposition;
+        if (body.scope === "host") hostDisposition = nextDisposition;
+        else environmentDisposition = nextDisposition;
+        const responsePoamId = nextDisposition?.state === "scheduled" ? nextDisposition.poam_id : null;
         await route.fulfill({
-          status: 409,
+          status: 200,
           contentType: "application/json",
           body: JSON.stringify({
-            error: "finding_already_managed",
-            message: "Exact vulnerability already has an active remediation plan",
-            details: null,
+            detail: triageDetail(),
+            poam_id: responsePoamId,
+            poam_reused: previous?.state === "scheduled" && responsePoamId === previous.poam_id,
           }),
         });
       });
 
-      await page.route("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/commits*", async (route) => {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({ commits: [], current_commit: null }),
-        });
-      });
+      try {
+        const packageToggle = page.locator("button[aria-controls^='system-cve-package-']").filter({ hasText: "linuxPackages_6_10.kernel" }).first();
+        const showInventory = async () => {
+          await page.getByRole("tab", { name: "CVEs" }).first().click();
+          await assertVisible(page.getByRole("combobox", { name: "Scan target" }), "Expected selected Current CVE inventory target", 12000);
+          if ((await packageToggle.getAttribute("aria-expanded")) !== "true") await packageToggle.click();
+        };
+        const openTriage = async () => {
+          await page.getByTestId("system-cve-triage-open").click();
+          const opened = page.getByRole("dialog", { name: "Triage CVE-2025-1111 linuxPackages_6_10.kernel" });
+          await assertVisible(opened, "Expected unified system triage dialog");
+          return opened;
+        };
+        const assertTriageChip = async (label, title) => {
+          await showInventory();
+          const chip = page
+            .getByTestId("system-cve-triage-state")
+            .filter({ hasText: label });
+          await assertVisible(
+            chip,
+            `Expected triage state '${label}' after authoritative inventory refresh`,
+            12000,
+          );
+          const text = (await chip.textContent())?.replace(/\s+/g, " ").trim();
+          if (text !== label) throw new Error(`Expected triage chip '${label}', got '${text}'`);
+          await assertAttribute(chip, "title", title, `Expected ${label} scope tooltip`);
+        };
+        const fillScheduledPoam = async (dialog) => {
+          await assertCount(dialog.getByTestId("cve-poam-title"), 0, "Triage must generate the POA&M title internally");
+          await assertCount(dialog.getByTestId("cve-poam-risk"), 0, "Triage must derive risk internally");
+          await dialog.getByTestId("cve-poam-target").fill(poam.target_date);
+          await dialog.getByTestId("cve-poam-plan").fill(poam.plan);
+          await dialog.getByTestId("cve-poam-assignee").selectOption("group:platform-operators");
+        };
 
-      await page.goto(`${baseUrl}/systems/00000000-0000-0000-0000-0000000000a1`, {
-        timeout: LOAD_TIMEOUT,
-      });
-      await page.waitForTimeout(1200);
+        await page.goto(`${baseUrl}/systems/${systemId}`, { timeout: LOAD_TIMEOUT });
+        await showInventory();
+        await assertVisible(page.getByRole("columnheader", { name: "Triage" }), "Expected unified Triage column");
+        await assertCount(page.getByRole("button", { name: "Justify" }), 0, "Separate justification action must be absent");
+        await assertCount(page.getByRole("button", { name: "Create POA&M" }), 0, "Separate POA&M action must be absent");
+        await assertVisible(page.getByTestId("system-cve-triage-state").filter({ hasText: "Outstanding" }), "Ordinary justification must not infer accepted triage");
+        await assertVisible(page.getByText("available — version pending", { exact: true }), "Fix availability must not invent an exact version");
 
-      await page.getByRole("tab", { name: "CVEs" }).first().click();
-
-      await assertVisible(
-        page.getByTestId("system-cves-exact"),
-        "Expected typed exact CVE inventory state",
-        12000,
-      );
-
-      await assertVisible(
-        page.getByText("3 of 3 shown · 3 of 3 packages loaded").first(),
-        "Expected package-first CVE count to preserve distinct package instances",
-        12000,
-      );
-
-      await assertVisible(
-        page.getByText("6.10.12", { exact: true }).first(),
-        "Expected package group to preserve the installed version",
-      );
-
-      await page.locator("button", { hasText: "linuxPackages_6_10.kernel" }).first().click();
-
-      await assertVisible(
-        page.getByText("CVE-2025-1111", { exact: true }).first(),
-        "Expected expanded package to show the exact CVE",
-      );
-      await assertVisible(
-        page.getByText("available", { exact: true }).first(),
-        "Expected fixed-version evidence to retain patch availability",
-      );
-
-      await page.getByRole("button", { name: "Create POA&M" }).first().click();
-      const createDialog = page.getByTestId("cve-poam-create");
-      await assertVisible(
-        createDialog,
-        "Expected exact-CVE creation dialog",
-      );
-      await assertVisible(
-        createDialog.getByText("/nix/store/exact-openssl-occurrence", { exact: true }),
-        "Expected dialog to show immutable occurrence context",
-      );
-      await assertVisible(
-        createDialog.getByText(exactObservation.scan_id, { exact: true }),
-        "Expected dialog to show the authoritative scan identity",
-      );
-      await createDialog
-        .locator("textarea[placeholder*='exact CVE absence']")
-        .fill("Deploy the fixed kernel and run a new exact scan.");
-      await createDialog.getByRole("button", { name: "Create POA&M" }).click();
-      await assertVisible(
-        createDialog.getByText("This exact vulnerability already has an active remediation plan.", { exact: false }),
-        "Expected active-remediation conflict to remain in the dialog",
-      );
-      if (!capturedCvePoamRequest) {
-        throw new Error("Expected exact-CVE POA&M request to be captured");
-      }
-      if (JSON.stringify(capturedCvePoamRequest.observation) !== JSON.stringify(exactObservation)) {
-        throw new Error(`Exact-CVE request changed opaque observation context: ${JSON.stringify(capturedCvePoamRequest)}`);
-      }
-      for (const forbidden of ["finding_id", "assessment_id", "scan_derivation_id"]) {
-        if (Object.hasOwn(capturedCvePoamRequest, forbidden)) {
-          throw new Error(`Exact-CVE request must not synthesize ${forbidden}`);
+        const triageTrigger = page.getByTestId("system-cve-triage-open");
+        await assertAttribute(triageTrigger, "title", "Triage — accept the risk or schedule a patch", "A hydrated GET with no disposition must retain the shield action");
+        const noOpMutations = [];
+        const recordNoOpMutation = (request) => {
+          if (!["GET", "OPTIONS"].includes(request.method()) && new URL(request.url()).pathname.startsWith("/api/v1/")) {
+            noOpMutations.push(`${request.method()} ${new URL(request.url()).pathname}`);
+          }
+        };
+        page.on("request", recordNoOpMutation);
+        const noOpClose = async (name, close) => {
+          const readsBefore = triageReads;
+          const writesBefore = triageRequests.length;
+          const opened = await openTriage();
+          if (triageReads <= readsBefore) throw new Error(`${name}: opening did not GET authoritative triage detail`);
+          await assertAttribute(triageTrigger, "title", "Triage — accept the risk or schedule a patch", `${name}: GET alone must not imply saved triage`);
+          await close(opened);
+          await assertHidden(opened, `${name}: closing must unmount triage`);
+          if (triageRequests.length !== writesBefore) throw new Error(`${name}: no-op close sent a mutation request`);
+          if (noOpMutations.length) throw new Error(`${name}: no-op close sent API mutation(s): ${noOpMutations.join(", ")}`);
+          await assertAttribute(triageTrigger, "title", "Triage — accept the risk or schedule a patch", `${name}: closing must retain new-triage shield`);
+          await assertVisible(page.getByTestId("system-cve-triage-state").filter({ hasText: "Outstanding" }), `${name}: no disposition may appear`);
+        };
+        await noOpClose("X", (opened) => opened.getByRole("button", { name: "Close triage editor" }).click());
+        await noOpClose("Cancel", (opened) => opened.getByRole("button", { name: "Cancel" }).click());
+        await noOpClose("Backdrop", () => page.getByRole("button", { name: "Close Triage CVE-2025-1111 linuxPackages_6_10.kernel" }).click({ position: { x: 10, y: 10 } }));
+        let dialog = await openTriage();
+        await assertAttribute(dialog.getByTestId("cve-triage-scope-host"), "aria-checked", "true", "System Detail triage must default to host scope");
+        await assertVisible(dialog.getByText("warning-system-01 only", { exact: true }).first(), "Expected hostname-only default scope copy");
+        await assertVisible(dialog.getByText("Decide for this host alone, or for every host in its environment."), "Expected host/environment header copy");
+        await assertVisible(dialog.getByText("Production", { exact: true }).first(), "Expected server-derived environment");
+        await assertVisible(dialog.getByText("carried over automatically"), "Approved vulnerability context must be present");
+        await assertVisible(dialog.getByText("Nothing dispositioned yet"), "No disposition must use the approved footer summary");
+        await assertVisible(dialog.getByText("available — version pending", { exact: true }), "Dialog must preserve unavailable exact-version truth");
+        await page.keyboard.press("Escape");
+        await assertHidden(dialog, "Escape should close System Detail triage");
+        if (triageRequests.length !== 0) throw new Error("Escape no-op close sent a mutation request");
+        if (noOpMutations.length) throw new Error(`Escape no-op close sent API mutation(s): ${noOpMutations.join(", ")}`);
+        page.off("request", recordNoOpMutation);
+        await assertAttribute(triageTrigger, "title", "Triage — accept the risk or schedule a patch", "Escape must retain the new-triage shield");
+        if (!(await triageTrigger.evaluate((element) => element === document.activeElement))) {
+          throw new Error("Closing System Detail triage did not restore trigger focus");
         }
-      }
-      await createDialog.getByRole("button", { name: "Close" }).click();
 
-      const editJustificationButton = page.getByRole("button", { name: "Justify" }).first();
-      await assertVisible(
-        editJustificationButton,
-        "Expected exact CVE row to provide an independent justification action",
-      );
-      await editJustificationButton.click();
+        dialog = await openTriage();
+        await dialog.getByRole("button", { name: "Schedule patch" }).click();
+        const generatedPlan = await dialog.getByTestId("cve-poam-plan").inputValue();
+        if (generatedPlan !== "") {
+          throw new Error(`Approved optional remediation plan must start blank: ${generatedPlan}`);
+        }
+        await assertVisible(dialog.getByTestId("cve-triage-poam"), "Scheduled POA&M must use the blue design panel");
+        await assertVisible(dialog.getByText("creates 1 POA&M"), "Scheduled footer must summarize the mutation");
+        await dialog.getByRole("button", { name: "Accept risk" }).click();
+        await assertVisible(dialog.getByTestId("cve-triage-waiver"), "Accepted risk must use the purple waiver panel");
+        await assertVisible(dialog.getByText("1 waiver · 1 host"), "Accepted footer must summarize the mutation");
+        await dialog.getByTestId("cve-accept-justification").fill("Host draft must not cross scopes.");
+        await dialog.getByTestId("cve-triage-scope-environment").click();
+        await assertAttribute(dialog.getByTestId("cve-triage-scope-environment"), "aria-checked", "true", "Environment scope switch should be explicit");
+        await assertVisible(dialog.getByText("All of Production", { exact: true }).first(), "Expected environment scope copy");
+        await dialog.getByRole("button", { name: "Accept risk" }).click();
+        await dialog.getByTestId("cve-accept-justification").fill("Environment draft must not cross scopes.");
+        await dialog.getByTestId("cve-triage-scope-host").click();
+        await assertAttribute(dialog.getByTestId("cve-triage-scope-host"), "aria-checked", "true", "Host scope should be restorable");
+        if (await dialog.getByTestId("cve-accept-justification").count()) {
+          throw new Error("Switching scopes retained an unsaved host disposition draft instead of reseeding authoritative host state");
+        }
+        await dialog.getByRole("button", { name: "Accept risk" }).click();
+        await dialog.getByTestId("cve-accept-justification").fill("short");
+        await dialog.getByTestId("cve-triage-submit").click();
+        await assertVisible(dialog.getByRole("alert").filter({ hasText: "10 to 2000 bytes" }), "Expected accepted-risk justification validation");
+        if (triageRequests.length) throw new Error("Invalid accepted-risk justification reached the server");
+        await dialog.getByTestId("cve-accept-justification").fill("Network isolation limits exposure until the maintenance window.");
+        await dialog.getByTestId("cve-accept-review-date").fill("2026-10-01");
+        await captureWorkflowViewportState(page, "12h-system-detail-cves-grouped-justification", "accepted-triage-modal", "desktop");
+        await captureWorkflowViewportState(page, "12h-system-detail-cves-grouped-justification", "accepted-triage-modal", "narrowDesktop");
+        await dialog.getByTestId("cve-triage-submit").click();
+        await assertHidden(dialog, "Expected accepted triage submission to close the dialog");
+        await assertTriageChip("Accepted", "Risk accepted for this host (warning-system-01)");
+        await assertAttribute(triageTrigger, "title", "Edit triage", "Saved accepted risk must show the file action");
+        if (triageRequests[0].scope !== "host" || triageRequests[0].canonical_package_name !== "linuxPackages_6_10.kernel" || triageRequests[0].review_date !== "2026-10-01") {
+          throw new Error(`Accepted triage request lost package or review date: ${JSON.stringify(triageRequests[0])}`);
+        }
 
-      await page.locator("select").first().selectOption("accepted_risk");
-      const reasonInput = page.locator("textarea[placeholder='Document risk acceptance / mitigation rationale']").first();
-      const seededReason = await reasonInput.inputValue();
-      if (!seededReason.toLowerCase().includes("accepted risk")) {
-        throw new Error(`Expected preset selection to auto-populate justification reason, got: ${seededReason}`);
-      }
-
-      await reasonInput.fill("Accepted risk until scheduled maintenance window");
-
-      const justificationResponsePromise = page
-        .waitForResponse(
-          (response) =>
-            response.request().method() === "PUT" &&
-            response
-              .url()
-              .includes("/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cves/CVE-2025-1111/justification"),
-          { timeout: 15000 },
-        )
-        .catch(() => null);
-
-      await page.getByRole("button", { name: "Save" }).first().click();
-
-      const justificationResponse = await justificationResponsePromise;
-      if (!justificationResponse || !justificationResponse.ok()) {
-        throw new Error("Expected CVE justification save request to succeed");
-      }
-
-      if (!capturedJustificationRequest) {
-        throw new Error("Expected justification save payload to be captured");
-      }
-      if (capturedJustificationRequest.category !== "accepted_risk") {
-        throw new Error(
-          `Expected justification category accepted_risk, got ${capturedJustificationRequest.category}`,
+        dialog = await openTriage();
+        await dialog.getByRole("button", { name: "Schedule patch" }).click();
+        await fillScheduledPoam(dialog);
+        await assertVisible(dialog.getByText("Add the default vulnerability remediation milestones"), "Expected default milestone control");
+        await dialog.getByTestId("cve-triage-submit").click();
+        await page.waitForURL(
+          (url) =>
+            url.pathname === `/systems/${systemId}` &&
+            url.searchParams.get("poam") === poamId,
         );
-      }
-      if (
-        capturedJustificationRequest.reason !==
-        "Accepted risk until scheduled maintenance window"
-      ) {
-        throw new Error(
-          `Unexpected justification reason payload: ${capturedJustificationRequest.reason}`,
+        const scheduledRequest = triageRequests[1];
+        if (scheduledRequest.scope !== "host" || scheduledRequest.action !== "schedule_patch" || scheduledRequest.poam.assignee.kind !== "oidc_group" || scheduledRequest.poam.assignee.group_name !== "platform-operators" || scheduledRequest.poam.risk !== "high" || scheduledRequest.poam.default_milestones !== true) {
+          throw new Error(`Scheduled triage request changed owner, risk, or milestone intent: ${JSON.stringify(scheduledRequest)}`);
+        }
+        if (scheduledRequest.poam.title !== "CVE-2025-1111 - patch linuxPackages_6_10.kernel on warning-system-01" || scheduledRequest.poam.target_date !== poam.target_date || scheduledRequest.poam.plan !== poam.plan) {
+          throw new Error(`Scheduled triage request changed due date or plan: ${JSON.stringify(scheduledRequest.poam)}`);
+        }
+
+        await page.goto(`${baseUrl}/systems/${systemId}`, { timeout: LOAD_TIMEOUT });
+        await showInventory();
+        await assertTriageChip("Scheduled", "Patch scheduled for this host (warning-system-01)");
+
+        dialog = await openTriage();
+        await dialog.getByTestId("cve-triage-scope-environment").click();
+        await dialog.getByRole("button", { name: "Accept risk" }).click();
+        await dialog.getByTestId("cve-accept-justification").fill("Production compensating controls accept this shared risk.");
+        await dialog.getByTestId("cve-accept-review-date").fill("2026-10-05");
+        await dialog.getByTestId("cve-triage-submit").click();
+        if (triageRequests[2].scope !== "environment") throw new Error(`Environment acceptance used the wrong scope: ${JSON.stringify(triageRequests[2])}`);
+        await assertTriageChip("Scheduled", "Patch scheduled for this host (warning-system-01)");
+
+        dialog = await openTriage();
+        await dialog.getByRole("button", { name: "Use environment default" }).click();
+        await dialog.getByTestId("cve-triage-submit").click();
+        await assertTriageChip("Accepted · env", "Risk accepted for all of Production");
+        if (hostDisposition !== null || environmentDisposition?.state !== "accepted") {
+          throw new Error("Host OPEN changed the inherited accepted environment disposition");
+        }
+
+        dialog = await openTriage();
+        await dialog.getByTestId("cve-triage-scope-environment").click();
+        await dialog.getByRole("button", { name: "Schedule patch" }).click();
+        await fillScheduledPoam(dialog);
+        await dialog.getByTestId("cve-triage-submit").click();
+        await page.waitForURL((url) => url.searchParams.get("poam") === environmentPoamId);
+        await page.goto(`${baseUrl}/systems/${systemId}`, { timeout: LOAD_TIMEOUT });
+        await showInventory();
+        await assertTriageChip("Scheduled · env", "Patch scheduled for all of Production");
+        if (hostDisposition !== null || environmentDisposition?.state !== "scheduled") {
+          throw new Error("Host OPEN changed the inherited scheduled environment disposition");
+        }
+
+        dialog = await openTriage();
+        await dialog.getByTestId("cve-triage-scope-environment").click();
+        await assertVisible(dialog.getByText("reuse the existing compatible POA&M"), "Expected compatible environment POA&M reuse outcome");
+        await assertCount(dialog.getByTestId("cve-poam-risk"), 0, "Reused POA&M risk must remain server-authored without a triage control");
+        await captureWorkflowViewportState(page, "12h-system-detail-cves-grouped-justification", "scheduled-triage-modal", "narrowDesktop");
+        await dialog.getByTestId("cve-triage-submit").click();
+        await page.waitForURL(
+          (url) =>
+            url.pathname === `/systems/${systemId}` &&
+            url.searchParams.get("poam") === environmentPoamId,
         );
+        const reusedRequest = triageRequests.at(-1);
+        if (reusedRequest.poam.default_milestones !== false || reusedRequest.poam.assignee.group_name !== poam.assignee.group_name) {
+          throw new Error(`Compatible POA&M reuse changed immutable metadata: ${JSON.stringify(reusedRequest.poam)}`);
+        }
+        const hostSchedules = scheduledPoamSubjects.filter((fixture) => fixture.scope === "host");
+        if (!hostSchedules.length || hostSchedules.some((fixture) => fixture.systemIds.length !== 1 || fixture.systemIds[0] !== systemId)) {
+          throw new Error(`Host POA&M fixture escaped the selected host: ${JSON.stringify(hostSchedules)}`);
+        }
+        const expectedEnvironmentSubjects = exactAffectedHosts.map((system) => system.system_id).sort();
+        const environmentSchedules = scheduledPoamSubjects.filter((fixture) => fixture.scope === "environment");
+        if (!environmentSchedules.length || environmentSchedules.some((fixture) => fixture.systemIds.slice().sort().join(",") !== expectedEnvironmentSubjects.join(","))) {
+          throw new Error(`Environment POA&M fixture did not use current exact affected hosts: ${JSON.stringify(environmentSchedules)}`);
+        }
+
+        const browserInstance = page.context().browser();
+        if (!browserInstance) throw new Error("Viewer System Detail contract requires a browser instance");
+        const viewerContext = await browserInstance.newContext({ viewport: VIEWPORTS.desktop });
+        const viewerPage = await viewerContext.newPage();
+        let viewerMutations = 0;
+        try {
+          await suppressOnboardingCoach(viewerPage);
+          await routeStandaloneUiBootstrap(viewerPage, "Viewer");
+          await routeSystemsWarningData(viewerPage);
+          await viewerPage.route(`**/api/v1/systems/${systemId}/cve-inventory*`, async (route) => {
+            if (new URL(route.request().url()).pathname.endsWith("/cve-inventory-sources")) {
+              await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items: [] }) });
+              return;
+            }
+            await route.fulfill({
+              status: 200,
+              contentType: "application/json",
+              body: JSON.stringify({
+                system_id: systemId,
+                authority: "exact",
+                exact_authority_failure: null,
+                current_state: "exact_current_scan",
+                running_target: { derivation_id: 42, generation: 74, commit_hash: "1111111111111111111111111111111111111111", reported_at: "2026-04-07T08:10:00Z" },
+                selection: { kind: "current" },
+                evidence_representation: "schema1_observations",
+                read_only: false,
+                source: { scan_id: exactObservation.scan_id, scanner_name: "vulnix", scanner_version: "1.10.1", completed_at: "2026-04-10T09:00:00Z" },
+                vulnerabilities: [inventoryRow],
+                metadata: { total_findings: 1, total_cves: 1, total_packages: 1, severity: { critical: 0, high: 1, medium: 0, low: 0, unknown: 0 } },
+                inventory_revision: "viewer-authoritative-triage-revision",
+                has_more: false,
+                next_cursor: null,
+              }),
+            });
+          });
+          await viewerPage.route(triageRoute, async (route) => {
+            if (route.request().method() !== "GET") viewerMutations += 1;
+            await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(triageDetail()) });
+          });
+          await viewerPage.goto(`${baseUrl}/systems/${systemId}`, { timeout: LOAD_TIMEOUT });
+          await viewerPage.getByRole("tab", { name: "CVEs" }).first().click();
+          await viewerPage.locator("button[aria-controls^='system-cve-package-']").filter({ hasText: "linuxPackages_6_10.kernel" }).first().click();
+          await assertHidden(viewerPage.getByTestId("system-cve-triage-open"), "Viewer must not receive System Detail triage mutation controls");
+          if (viewerMutations !== 0) throw new Error(`Viewer issued ${viewerMutations} System Detail triage mutations`);
+        } finally {
+          await viewerPage.unrouteAll({ behavior: "ignoreErrors" }).catch(() => {});
+          await viewerContext.close().catch(() => {});
+        }
+      } finally {
+        await page.unroute(`**/api/v1/systems/${systemId}/cve-inventory*`);
+        await page.unroute("**/api/v1/poams/assignees");
+        await page.unroute(triageRoute);
+        await unrouteSystemsWarningData(page);
       }
-
-      await assertVisible(
-        page.getByText("Justification saved").first(),
-        "Expected UI acknowledgement after saving CVE justification",
-      );
-
-      await assertVisible(
-        page.getByText("Justified, not remediated", { exact: true }).first(),
-        "Expected justification to remain visibly distinct from remediation after reload",
-      );
-
-      await page.unroute(
-        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-scan-eligibility*",
-      );
-      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cves*");
-      await page.unroute(
-        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cves/CVE-2025-1111/justification",
-      );
-      await page.unroute("**/api/v1/poams/assignees");
-      await page.unroute("**/api/v1/poams/cves");
-      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/commits*");
-      await unrouteSystemsWarningData(page);
     },
   },
   {
@@ -10011,6 +10902,20 @@ const steps = [
     description: "System detail incrementally loads bounded CVE pages with authoritative totals and preserves exact, legacy, clean, and no-scan states",
     action: async (page) => {
       await routeSystemsWarningData(page);
+      const mockSystemId = "00000000-0000-0000-0000-0000000000a1";
+      const currentHash = "1111111111111111111111111111111111111111";
+      const historicalHash = "2222222222222222222222222222222222222222";
+      await page.route(`**/api/v1/systems/${mockSystemId}/commits*`, async (route) => route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          current_commit: currentHash,
+          commits: [
+            { sha: currentHash, short_sha: "11111111", message: "Running commit", author: "Operator", timestamp: "2026-04-07T08:10:00Z", config_inspectable: true, deployed_here: true },
+            { sha: historicalHash, short_sha: "22222222", message: "Older commit", author: "Operator", timestamp: "2026-04-06T22:00:00Z", config_inspectable: true, deployed_here: true },
+          ],
+        }),
+      }));
       let inventoryState = "exact-large";
       const firstCursor = "page-100";
       const inventoryRequests = [];
@@ -10037,7 +10942,24 @@ const steps = [
           justification_category: null,
           justification_reason: null,
           justification_updated_at: null,
-          remediation: null,
+          remediation: index === 0 ? {
+            cve_finding_id: null,
+            observation: {
+              system_id: "00000000-0000-0000-0000-0000000000a1",
+              scan_id: "00000000-0000-0000-0000-000000000c45",
+              occurrence_derivation_path: "/nix/store/package-0000-occurrence",
+              canonical_cve_id: "CVE-2026-0000",
+              canonical_package_name: "package-0000",
+            },
+            observed_package_name: "package-0000",
+            observed_package_version: "1.0.0",
+            is_whitelisted: false,
+            is_justified: false,
+            active_poam: null,
+            historical_poams: [],
+            historical_has_more: false,
+            historical_next_offset: null,
+          } : null,
         };
       });
       const metadata = (totalFindings, includesUnknown = false) => ({
@@ -10057,6 +10979,44 @@ const steps = [
         "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-inventory*",
         async (route) => {
           const requestUrl = new URL(route.request().url());
+          if (requestUrl.pathname.endsWith("/cve-inventory-sources")) {
+            const exactCandidate = inventoryState === "exact-large" || inventoryState === "exact-clean";
+            await route.fulfill({
+              status: 200,
+              contentType: "application/json",
+              body: JSON.stringify({
+                items: [{
+                  selection: { kind: "current" },
+                  generation: exactCandidate ? 74 : null,
+                  commit_hash: exactCandidate ? currentHash : null,
+                  derivation_id: exactCandidate ? 42 : null,
+                  is_current: true,
+                  is_latest_per_flake: exactCandidate,
+                  source: exactCandidate ? {
+                    scan_id: "00000000-0000-0000-0000-000000000c45",
+                    scanner_name: "vulnix",
+                    scanner_version: "1.10.1",
+                    completed_at: "2026-04-10T09:00:00Z",
+                  } : null,
+                  evidence_representation: exactCandidate ? "schema1_observations" : null,
+                  scan_available: exactCandidate,
+                  read_only: !exactCandidate,
+                }, {
+                  selection: { kind: "exact_derivation", derivation_id: 41 },
+                  generation: null,
+                  commit_hash: historicalHash,
+                  derivation_id: 41,
+                  is_current: false,
+                  is_latest_per_flake: false,
+                  source: { scan_id: "00000000-0000-0000-0000-000000000c44", scanner_name: "vulnix", scanner_version: "0.8.0", completed_at: "2026-04-09T08:00:00Z" },
+                  evidence_representation: "schema0_projection",
+                  scan_available: true,
+                  read_only: true,
+                }],
+              }),
+            });
+            return;
+          }
           inventoryRequests.push(requestUrl);
           if (!requestUrl.pathname.endsWith("/cve-inventory-page")) {
             throw new Error(`Expected the versioned paged inventory route, got ${requestUrl.pathname}`);
@@ -10092,8 +11052,14 @@ const steps = [
               status: 200,
               contentType: "application/json",
               body: JSON.stringify({
+                system_id: mockSystemId,
                 authority: "exact",
                 exact_authority_failure: null,
+                current_state: "exact_current_scan",
+                running_target: { derivation_id: 42, generation: 74, commit_hash: currentHash, reported_at: "2026-04-07T08:10:00Z" },
+                selection: { kind: "current" },
+                evidence_representation: "schema1_observations",
+                read_only: false,
                 source: {
                   scan_id: "00000000-0000-0000-0000-000000000c45",
                   scanner_name: "vulnix",
@@ -10134,23 +11100,36 @@ const steps = [
             : [];
           const noScan = inventoryState === "no-scan";
           const exact = inventoryState === "exact-clean";
+          const historical = inventoryState.startsWith("legacy-");
           await route.fulfill({
             status: 200,
             contentType: "application/json",
             body: JSON.stringify({
+              system_id: mockSystemId,
               authority: noScan ? "no_scan" : exact ? "exact" : "legacy",
-              exact_authority_failure: exact
+              exact_authority_failure: historical || exact
                 ? null
-                : noScan
-                ? "missing_current_generation"
-                : "no_schema1_current_scan",
+                : "missing_current_generation",
+              current_state: historical ? null : exact
+                ? "exact_current_scan"
+                : "current_authority_unavailable",
+              selection: historical ? { kind: "exact_derivation", derivation_id: 41 } : { kind: "current" },
+              running_target: exact ? { derivation_id: 42, generation: 74, commit_hash: currentHash, reported_at: "2026-04-07T08:10:00Z" } : null,
+              evidence_representation: noScan
+                ? null
+                : exact ? "schema1_observations" : "schema0_projection",
+              read_only: !exact,
               source: noScan
                 ? null
                 : {
-                    scan_id: "00000000-0000-0000-0000-000000000c44",
+                    scan_id: exact
+                      ? "00000000-0000-0000-0000-000000000c45"
+                      : "00000000-0000-0000-0000-000000000c44",
                     scanner_name: "vulnix",
-                    scanner_version: "0.8.0",
-                    completed_at: "2026-04-09T08:00:00Z",
+                    scanner_version: exact ? "1.10.1" : "0.8.0",
+                    completed_at: exact
+                      ? "2026-04-10T09:00:00Z"
+                      : "2026-04-09T08:00:00Z",
                   },
               vulnerabilities,
               metadata: metadata(vulnerabilities.length),
@@ -10161,9 +11140,36 @@ const steps = [
           });
         },
       );
+      const inventoryTriageRoute = /\/api\/v1\/systems\/00000000-0000-0000-0000-0000000000a1\/cves\/CVE-2026-0000\/triage\?package=package-0000$/;
+      await page.route(inventoryTriageRoute, async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            canonical_cve_id: "CVE-2026-0000",
+            canonical_package_name: "package-0000",
+            scope: {
+              kind: "current_exact_affected_hosts_in_environment",
+              selected_system_id: "00000000-0000-0000-0000-0000000000a1",
+              selected_system_hostname: "warning-system-01",
+              environment_id: "00000000-0000-0000-0000-0000000000e1",
+              environment_name: "Production",
+              exact_affected_system_count: 1,
+            },
+            systems: [],
+            host_disposition: null,
+            environment_disposition: null,
+            effective_disposition: null,
+            effective_source: "none",
+            disposition: null,
+          }),
+        });
+      });
 
       const openCves = async () => {
-        await page.goto(`${baseUrl}/systems/00000000-0000-0000-0000-0000000000a1`, {
+        const historical = inventoryState.startsWith("legacy-");
+        const query = historical ? "?tab=cves&cve_target=derivation:41&cve_mode=commit" : "";
+        await page.goto(`${baseUrl}/systems/${mockSystemId}${query}`, {
           timeout: LOAD_TIMEOUT,
         });
         await page.getByRole("tab", { name: "CVEs" }).first().click();
@@ -10172,12 +11178,12 @@ const steps = [
       try {
         await openCves();
         await assertVisible(
-          page.getByTestId("system-cves-exact"),
-          "Expected exact CVE inventory state",
+          page.getByRole("combobox", { name: "Scan target" }),
+          "Expected selected CVE scan target",
           12000,
         );
         await assertVisible(
-          page.getByText("100 of 1,315 shown · 100 of 1,315 packages loaded", { exact: true }),
+          page.getByText("100 of 1,315 shown · 100 of 1,315 packages loaded", { exact: false }),
           "Expected first page to show authoritative full-scope totals",
         );
         if (inventoryRequests.length !== 1 || inventoryRequests[0].searchParams.has("after")) {
@@ -10198,6 +11204,26 @@ const steps = [
           page.getByText("Unknown", { exact: true }).first(),
           "Expected explicit Unknown row severity",
         );
+        await assertVisible(
+          page.getByTestId("system-cve-triage-state").filter({ hasText: "Outstanding" }),
+          "Expected server-issued remediation observation to hydrate actionable triage",
+        );
+        await assertCount(
+          page.getByTestId("system-cve-triage-open"),
+          1,
+          "Rows without server-issued remediation observations must not become actionable",
+        );
+        await unknownPackage.click();
+        await page.getByRole("button", { name: /package-0001/ }).click();
+        await assertVisible(
+          page.getByTestId("system-cve-triage-state").filter({ hasText: "Unavailable" }),
+          "Expected a null-remediation exact row to remain truthfully unavailable",
+        );
+        await assertCount(
+          page.getByTestId("system-cve-triage-open"),
+          0,
+          "A null-remediation exact row must not expose triage",
+        );
         const conflictResponse = page.waitForResponse(
           (response) => response.url().includes("/cve-inventory-page") && response.status() === 409,
         );
@@ -10217,12 +11243,31 @@ const steps = [
         ) {
           throw new Error("Expected a changed-inventory conflict to restart from page zero");
         }
-        while (await page.getByRole("button", { name: "Load more vulnerabilities" }).count()) {
-          await page.getByRole("button", { name: "Load more vulnerabilities" }).click();
-          await page.waitForTimeout(100);
+        await assertVisible(
+          page.getByText("100 of 1,315 shown · 100 of 1,315 packages loaded", { exact: false }),
+          "Expected the conflict restart to render the replacement first page",
+        );
+        for (let pageIndex = 1; pageIndex <= 13; pageIndex += 1) {
+          const loadMore = page.getByTestId("system-cves-load-more");
+          await assertVisible(loadMore, `Expected continuation control for inventory page ${pageIndex + 1}`);
+          await assertEnabled(loadMore, `Expected continuation control to settle for inventory page ${pageIndex + 1}`);
+          const continuation = page.waitForResponse((response) => {
+            const responseUrl = new URL(response.url());
+            return responseUrl.pathname.endsWith("/cve-inventory-page")
+              && responseUrl.searchParams.has("after")
+              && response.status() === 200;
+          });
+          await loadMore.click();
+          await continuation;
+          const loaded = Math.min(100 + pageIndex * 100, largeInventory.length);
+          await assertVisible(
+            page.getByText(`${loaded.toLocaleString("en-US")} of 1,315 shown · ${loaded.toLocaleString("en-US")} of 1,315 packages loaded`, { exact: false }),
+            `Expected inventory page ${pageIndex + 1} to render before the next continuation`,
+            12000,
+          );
         }
         await assertVisible(
-          page.getByText("1,315 of 1,315 shown · 1,315 of 1,315 packages loaded", { exact: true }),
+          page.getByText("1,315 of 1,315 shown · 1,315 of 1,315 packages loaded", { exact: false }),
           "Expected every stable identity to remain reachable without duplicate rows",
           12000,
         );
@@ -10233,69 +11278,607 @@ const steps = [
           throw new Error("Expected duplicate stable identity to render once after append");
         }
 
+        // A mounted authoritative draft is not discarded when an existing
+        // continuation control detects a changed Current inventory and retries
+        // its first page. Use the control behind the modal programmatically;
+        // no test-only refresh control or database write is introduced.
+        await openCves();
+        await page.getByRole("button", { name: /package-0000/ }).click();
+        await page.getByTestId("system-cve-triage-open").click();
+        const draft = page.getByRole("dialog", { name: "Triage CVE-2026-0000 package-0000" });
+        await assertVisible(draft, "Expected an authoritative mounted triage draft");
+        await draft.getByRole("button", { name: "Accept risk" }).click();
+        const unsaved = "SC1 draft remains bound to its original Current evidence and host.";
+        await draft.getByTestId("cve-accept-justification").fill(unsaved);
+        rejectNextContinuation = true;
+        const draftConflict = page.waitForResponse((response) => response.url().includes("/cve-inventory-page") && response.status() === 409);
+        await page.getByTestId("system-cves-load-more").evaluate((button) => button.click());
+        await draftConflict;
+        await assertVisible(draft, "Current refresh must not unmount the open triage draft");
+        if (await draft.getByTestId("cve-accept-justification").inputValue() !== unsaved) {
+          throw new Error("Current refresh erased unsaved triage fields");
+        }
+        await assertVisible(draft.getByText("Current evidence changed while this draft was open.", { exact: false }), "Approved draft conflict footer must retain the starting context");
+        if (await draft.getByTestId("cve-triage-submit").isEnabled()) {
+          throw new Error("A draft bound to the old Current evidence may not submit after refresh");
+        }
+        await draft.getByRole("button", { name: "Close triage editor" }).click();
+
+        // Presentation-only role contexts. The SQLx and direct API checks
+        // below independently prove server authorization; whoami is mocked
+        // here only to exercise the controls rendered for each role.
+        const roleBrowser = page.context().browser();
+        if (!roleBrowser) throw new Error("SC1 role presentation requires a browser instance");
+        const roleInventory = {
+          system_id: mockSystemId,
+          authority: "exact",
+          exact_authority_failure: null,
+          current_state: "exact_current_scan",
+          running_target: { derivation_id: 42, generation: 74, commit_hash: currentHash, reported_at: "2026-04-07T08:10:00Z" },
+          selection: { kind: "current" },
+          evidence_representation: "schema1_observations",
+          read_only: false,
+          source: { scan_id: "00000000-0000-0000-0000-000000000c45", scanner_name: "vulnix", scanner_version: "1.10.1", completed_at: "2026-04-10T09:00:00Z" },
+          vulnerabilities: [largeInventory[0]],
+          metadata: metadata(1, true),
+          inventory_revision: "sc1-role-exact",
+          has_more: false,
+          next_cursor: null,
+        };
+        for (const role of ["Viewer", "Operator", "Admin"]) {
+          const roleContext = await roleBrowser.newContext({ viewport: VIEWPORTS.desktop });
+          const rolePage = await roleContext.newPage();
+          let readTier = "exact";
+          try {
+            await suppressOnboardingCoach(rolePage);
+            await routeStandaloneUiBootstrap(rolePage, role);
+            await routeSystemsWarningData(rolePage);
+            await rolePage.route(`**/api/v1/systems/${mockSystemId}/cve-inventory*`, async (route) => {
+              const path = new URL(route.request().url()).pathname;
+              const body = path.endsWith("/cve-inventory-sources")
+                ? { items: [] }
+                : readTier === "exact" ? roleInventory : {
+                    ...roleInventory,
+                    authority: "mapped_running",
+                    exact_authority_failure: "retained_generation_unavailable",
+                    current_state: "mapped_running_read_only_scan",
+                    read_only: true,
+                    vulnerabilities: [{ ...largeInventory[0], remediation: null }],
+                    inventory_revision: "sc1-role-read-only",
+                  };
+              await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+            });
+            await rolePage.goto(`${baseUrl}/systems/${mockSystemId}?tab=cves`, { timeout: LOAD_TIMEOUT });
+            await assertVisible(rolePage.getByText("CVE-2026-0000", { exact: true }), `${role} should see the exact finding`);
+            await assertCount(rolePage.getByTestId("system-cve-triage-open"), role === "Viewer" ? 0 : 1, `${role} exact triage control must follow role capability`);
+            readTier = "mapped";
+            await rolePage.reload({ timeout: LOAD_TIMEOUT });
+            await assertVisible(rolePage.getByText("CVE-2026-0000", { exact: true }), `${role} should see read-only mapped evidence`);
+            await assertCount(rolePage.getByTestId("system-cve-triage-open"), 0, `${role} must not receive a mapped-running triage control`);
+          } finally {
+            await rolePage.unrouteAll({ behavior: "ignoreErrors" }).catch(() => {});
+            await roleContext.close().catch(() => {});
+          }
+        }
+
         inventoryState = "legacy-findings";
         await openCves();
-        const legacy = page.getByTestId("system-cves-legacy");
-        await assertVisible(legacy, "Expected legacy CVE inventory state", 12000);
-        await assertVisible(
-          legacy.getByText("Legacy scan findings.", { exact: false }),
-          "Expected legacy findings guidance",
-        );
+        const historicalTarget = page.getByRole("combobox", { name: "Scan target" });
+        await assertVisible(historicalTarget, "Expected a selectable historical scan target");
+        const historicalValue = await historicalTarget.inputValue();
+        if (historicalValue !== "derivation:41") {
+          throw new Error(`Explicit historical derivation was not selected: ${historicalValue} at ${page.url()}`);
+        }
         await assertVisible(
           page.getByText("legacy-openssl", { exact: true }),
           "Expected pre-upgrade finding to remain visible",
         );
-        if (await page.getByRole("button", { name: "Create POA&M" }).count()) {
-          throw new Error("Legacy inventory exposed exact POA&M creation");
+        const historicalTriageState = page.getByTestId("system-cve-triage-state").filter({ hasText: "Historical inventory" });
+        if (await historicalTriageState.count() === 0) {
+          await page.getByRole("button", { name: /legacy-openssl/ }).click();
         }
-        await page.getByRole("button", { name: /legacy-openssl/ }).click();
-        const justify = page.getByRole("button", { name: "Justify" });
         await assertVisible(
-          justify,
-          "Expected ordinary justification to remain available for a legacy finding",
+          historicalTriageState,
+          "Expected historical row to retain truthful authority labeling",
         );
-        await justify.click();
-        await assertVisible(
-          page.getByRole("heading", { name: "Justification — CVE-2025-4400" }),
-          "Expected the legacy finding justification editor",
+        await assertCount(
+          page.getByTestId("system-cve-triage-open"),
+          0,
+          "Historical inventory must not open environment triage",
         );
 
         inventoryState = "exact-clean";
         await openCves();
         await assertVisible(
-          page.getByTestId("system-cves-exact").getByText("Exact scan clean.", { exact: false }),
+          page.getByText("No findings in the selected scan", { exact: true }),
           "Expected exact-clean state to use authoritative zero totals",
           12000,
         );
 
         inventoryState = "legacy-clean";
         await openCves();
+        const historicalCleanTarget = page.getByRole("combobox", { name: "Scan target" });
+        await assertVisible(historicalCleanTarget, "Expected a historical clean scan target", 12000);
+        if (await historicalCleanTarget.inputValue() !== "derivation:41") {
+          throw new Error("Completed historical scan must retain its explicit target");
+        }
         await assertVisible(
-          page.getByTestId("system-cves-legacy").getByText("Legacy scan clean.", { exact: false }),
-          "Expected legacy-clean state to remain distinct from no scan",
-          12000,
-        );
-        await assertVisible(
-          page.getByText("No vulnerabilities detected", { exact: true }),
+          page.getByText("No findings in the selected scan", { exact: true }),
           "Expected a completed legacy-clean scan to render a clean result",
         );
 
         inventoryState = "no-scan";
         await openCves();
         await assertVisible(
-          page.getByTestId("system-cves-no-scan"),
+          page.getByText("Running target unavailable", { exact: true }),
           "Expected no-scan CVE inventory state",
           12000,
         );
         await assertVisible(
-          page.getByText("No scan inventory available", { exact: true }),
-          "Expected no-scan state not to claim a clean result",
+          page.getByText("The server could not prove Current identity. Choose a known revision to inspect its own results."),
+          "Expected no-scan authority boundary to remain explicit",
+        );
+        await assertCount(page.getByText("No findings in the selected scan"), 0, "Missing source must not claim a clean scan");
+        await assertCount(
+          page.getByTestId("system-cve-triage-open"),
+          0,
+          "No-scan inventory must not open environment triage",
         );
       } finally {
         await page.unroute(
           "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-inventory*",
         );
+        await page.unroute(`**/api/v1/systems/${mockSystemId}/commits*`);
+        await page.unroute(inventoryTriageRoute);
         await unrouteSystemsWarningData(page);
+      }
+
+      const authorityFixture = createTask326CurrentCveAuthorityFixture();
+      const authorityCommitsRoute = `**/api/v1/systems/${authorityFixture.systemId}/commits*`;
+      await page.route(authorityCommitsRoute, async (route) => route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          current_commit: authorityFixture.currentCommitHash,
+          commits: [
+            { sha: authorityFixture.currentCommitHash, short_sha: authorityFixture.currentCommitHash.slice(0, 8), message: "Observed A", author: "Web UI test", timestamp: "2026-09-21T10:00:00Z", config_inspectable: true, deployed_here: true },
+            { sha: authorityFixture.historicalRevision, short_sha: authorityFixture.historicalRevision.slice(0, 8), message: "Scanned B", author: "Web UI test", timestamp: "2026-09-22T10:00:00Z", config_inspectable: true, deployed_here: true },
+          ],
+        }),
+      }));
+      try {
+        const historical = (await phase6Api(
+          page,
+          `/api/v1/systems/${authorityFixture.systemId}/cve-inventory-page?limit=100&target=exact_derivation&target_id=${authorityFixture.historicalDerivationId}`,
+        )).body;
+        if (
+          historical.authority !== "legacy"
+          || historical.read_only !== true
+          || historical.selection?.kind !== "exact_derivation"
+          || Number(historical.selection?.derivation_id) !== authorityFixture.historicalDerivationId
+          || historical.source?.scan_id !== authorityFixture.historicalScanId
+          || historical.source?.scanner_name !== "historical-authority-scanner"
+          || historical.vulnerabilities?.length !== 1
+          || historical.vulnerabilities[0].cve_id !== authorityFixture.historicalCveId
+          || historical.vulnerabilities[0].canonical_package_name !== "historical-only-package"
+          || historical.vulnerabilities[0].installed_version !== "0.9-historical"
+        ) {
+          throw new Error(`Historical CVE authority fixture was not independently readable: ${JSON.stringify(historical)}`);
+        }
+
+        const currentResponsePromise = page.waitForResponse((response) => {
+          const url = new URL(response.url());
+          return response.request().method() === "GET"
+            && url.pathname === `/api/v1/systems/${authorityFixture.systemId}/cve-inventory-page`
+            && url.searchParams.get("limit") === "100"
+            && !url.searchParams.has("target")
+            && !url.searchParams.has("target_id")
+            && !url.searchParams.has("after");
+        });
+        await page.goto(`${baseUrl}/systems/${authorityFixture.systemId}`, { timeout: LOAD_TIMEOUT });
+        await assertVisible(
+          page.getByRole("heading", { name: new RegExp(authorityFixture.hostname, "i") }).first(),
+          "Expected production-shaped current-authority system",
+        );
+        await page.getByRole("tab", { name: "CVEs" }).first().click();
+        const currentResponse = await currentResponsePromise;
+        if (currentResponse.status() !== 200) {
+          throw new Error(`Current CVE inventory returned HTTP ${currentResponse.status()}`);
+        }
+        const current = await currentResponse.json();
+        const expectedMetadata = {
+          total_findings: 1,
+          total_cves: 1,
+          total_packages: 1,
+          severity: { critical: 0, high: 1, medium: 0, low: 0, unknown: 0 },
+        };
+        if (
+          current.authority !== "exact"
+          || current.system_id !== authorityFixture.systemId
+          || current.current_state !== "exact_current_scan"
+          || current.exact_authority_failure !== null
+          || current.selection?.kind !== "current"
+          || current.evidence_representation !== "schema1_observations"
+          || current.read_only !== false
+          || current.running_target?.derivation_id !== authorityFixture.currentDerivationId
+          || current.source?.scan_id !== authorityFixture.currentScanId
+          || current.source?.scanner_name !== "current-authority-scanner"
+          || current.source?.scanner_version !== "2.6.0"
+          || Date.parse(current.source?.completed_at) !== Date.parse(authorityFixture.currentCompletedAt)
+          || current.has_more !== false
+          || current.next_cursor !== null
+          || !isDeepStrictEqual(current.metadata, expectedMetadata)
+          || current.vulnerabilities?.length !== 1
+          || current.vulnerabilities[0].cve_id !== authorityFixture.currentCveId
+          || current.vulnerabilities[0].canonical_package_name !== "current-authority-package"
+          || current.vulnerabilities[0].installed_version !== "3.2.1-current"
+        ) {
+          throw new Error(`Current CVE inventory did not use the running exact scan: ${JSON.stringify(current)}`);
+        }
+        if (current.vulnerabilities.some((row) =>
+          row.cve_id === authorityFixture.historicalCveId
+          || row.canonical_package_name === "historical-only-package"
+          || row.installed_version === "0.9-historical"
+        )) {
+          throw new Error(`Current CVE inventory leaked historical findings: ${JSON.stringify(current.vulnerabilities)}`);
+        }
+
+        await assertVisible(page.getByRole("combobox", { name: "Scan target" }), "Expected exact Current CVE target", 12000);
+        await assertVisible(page.getByText("1 of 1 shown · 1 of 1 package loaded", { exact: false }), "Expected source-labelled exact Current totals");
+        await assertVisible(page.getByRole("button", { name: /current-authority-package/ }), "Expected current exact package group");
+        await assertVisible(page.getByText(authorityFixture.currentCveId, { exact: true }), "Expected current exact CVE");
+        await assertVisible(page.getByText("3.2.1-current", { exact: true }), "Expected current exact installed version");
+        await assertCount(page.getByText(authorityFixture.historicalCveId, { exact: true }), 0, "Current must exclude the historical CVE");
+        await assertCount(page.getByText("historical-only-package", { exact: true }), 0, "Current must exclude the historical package");
+        await assertCount(page.getByText("0.9-historical", { exact: true }), 0, "Current must exclude historical package metadata");
+        await assertCount(page.getByText("No findings in the selected scan"), 0, "Nonempty Current must not claim a clean scan");
+
+        // Keep the System Detail component mounted while changing its target.
+        // The first Current A response is real API evidence captured above; the
+        // held response is a controlled stale-delivery simulation, not a claim
+        // that the server returned A after reporting B.
+        const changeCveIntent = async (target) => {
+          if (target) await page.getByRole("button", { name: "Commits", exact: true }).first().click({ force: true });
+          await page.getByRole("combobox", { name: "Scan target" }).selectOption(target || "current", { force: true });
+        };
+        const reportTarget = (derivationId, generation, minutes) => {
+          const storePath = runFixtureSql(`SELECT store_path FROM derivations WHERE id=${derivationId};`);
+          runFixtureSql(`INSERT INTO system_states(hostname,change_reason,store_path,
+            generation,generation_matches_current_store_path,timestamp)
+            VALUES ($hostname$${authorityFixture.hostname}$hostname$,'startup',
+              $path$${storePath}$path$,${generation},true,now()+interval '${minutes} minutes');`);
+        };
+        const historicalIntent = `derivation:${authorityFixture.historicalDerivationId}`;
+        let holdNextCurrent = true;
+        let releaseA;
+        const heldA = new Promise((resolve) => { releaseA = resolve; });
+        let settleA;
+        const lateAOutcome = new Promise((resolve) => { settleA = resolve; });
+        const inventoryRoute = `**/api/v1/systems/${authorityFixture.systemId}/cve-inventory-page*`;
+        await page.route(inventoryRoute, async (route) => {
+          const url = new URL(route.request().url());
+          if (url.searchParams.has("target") || !holdNextCurrent) {
+            await route.continue();
+            return;
+          }
+          holdNextCurrent = false;
+          await heldA;
+          try {
+            await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(current) });
+            settleA("delivered");
+          } catch {
+            // Changing selection may cancel A before the held response is sent.
+            settleA("canceled");
+          }
+        });
+        try {
+          await changeCveIntent(historicalIntent);
+          await assertVisible(page.getByText(authorityFixture.historicalCveId, { exact: true }), "Explicit B must load before starting the stale A read");
+          const aRequest = page.waitForRequest((request) => {
+            const url = new URL(request.url());
+            return url.pathname.endsWith(`/${authorityFixture.systemId}/cve-inventory-page`)
+              && !url.searchParams.has("target");
+          }, { timeout: 12000 });
+          await changeCveIntent(null);
+          await aRequest;
+          reportTarget(authorityFixture.historicalDerivationId, 75, 1);
+          await changeCveIntent(historicalIntent);
+          await assertVisible(page.getByText(authorityFixture.historicalCveId, { exact: true }), "Historical B must remain browsable while A is held");
+          const currentBResponse = page.waitForResponse((response) => {
+            const url = new URL(response.url());
+            return url.pathname.endsWith(`/${authorityFixture.systemId}/cve-inventory-page`)
+              && !url.searchParams.has("target") && response.status() === 200;
+          }, { timeout: 12000 });
+          await changeCveIntent(null);
+          const currentB = await (await currentBResponse).json();
+          if (currentB.selection?.kind !== "current"
+              || currentB.running_target?.derivation_id !== authorityFixture.historicalDerivationId
+              || currentB.source?.scan_id !== authorityFixture.historicalScanId) {
+            throw new Error(`Current failed to follow reported activation B: ${JSON.stringify(currentB)}`);
+          }
+          await assertVisible(page.getByText(authorityFixture.historicalCveId, { exact: true }), "Reported activation B must win the new Current read");
+          const lateAResponse = page.waitForResponse((response) => {
+            const url = new URL(response.url());
+            return url.pathname.endsWith(`/${authorityFixture.systemId}/cve-inventory-page`)
+              && !url.searchParams.has("target")
+              && response.status() === 200;
+          }, { timeout: 12000 });
+          releaseA();
+          const lateOutcome = await lateAOutcome;
+          if (lateOutcome !== "delivered") throw new Error("Late A was canceled; delivered-response race was not exercised");
+          const staleResponse = await lateAResponse;
+          if ((await staleResponse.json()).source?.scan_id !== authorityFixture.currentScanId) {
+            throw new Error("Held response was not source A");
+          }
+          await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+          await assertCount(page.getByText(authorityFixture.currentCveId, { exact: true }), 0, "Late A must not overwrite the observed B source");
+          await assertVisible(page.getByTestId("system-cve-triage-open"), "Reported B retains its own exact Current triage after late A");
+        } finally {
+          releaseA();
+          await page.unroute(inventoryRoute);
+        }
+
+      } finally {
+        await page.unroute(authorityCommitsRoute);
+        removeTask326CurrentCveAuthorityFixture(authorityFixture);
+      }
+
+      // SC1: SQL/API-produced evidence, not an intercepted inventory response.
+      // A uniquely mapped running A and its completed schema-1 scan are exact
+      // Current CVE authority even without retained Config proof. Scanned B is newer.
+      const mappedFixture = createTask326CurrentCveAuthorityFixture({ retainCurrent: false });
+      try {
+        const currentPath = `/api/v1/systems/${mappedFixture.systemId}/cve-inventory-page?limit=100`;
+        const mapped = (await phase6Api(page, currentPath)).body;
+        if (mapped.system_id !== mappedFixture.systemId
+            || mapped.selection?.kind !== "current"
+            || mapped.authority !== "exact"
+            || mapped.current_state !== "exact_current_scan"
+            || mapped.exact_authority_failure != null
+             || mapped.running_target?.derivation_id !== mappedFixture.currentDerivationId
+             || mapped.source?.scan_id !== mappedFixture.currentScanId
+             || mapped.attempt?.scan_id !== mappedFixture.currentScanId
+             || mapped.attempt?.derivation_id !== mappedFixture.currentDerivationId
+            || mapped.read_only !== false
+            || mapped.vulnerabilities?.length !== 1
+            || mapped.vulnerabilities[0]?.cve_id !== mappedFixture.currentCveId
+            || mapped.vulnerabilities[0]?.remediation == null
+            || mapped.vulnerabilities.some(row => row.cve_id === mappedFixture.historicalCveId)) {
+          throw new Error(`Current CVE read crossed its running source boundary: ${JSON.stringify(mapped)}`);
+        }
+        const triagePath = `/api/v1/systems/${mappedFixture.systemId}/cves/${mappedFixture.currentCveId}/triage`;
+        const triageRead = await phase6ApiResponse(page, `${triagePath}?package=current-authority-package`);
+        if (triageRead.status !== 200 || triageRead.body?.canonical_cve_id !== mappedFixture.currentCveId) {
+          throw new Error(`Exact Current triage detail requires only CVE evidence: ${triageRead.status}`);
+        }
+
+        await page.goto(`${baseUrl}/systems/${mappedFixture.systemId}`, { timeout: LOAD_TIMEOUT });
+        await page.getByRole("tab", { name: "CVEs" }).first().click();
+        await assertVisible(page.getByText(mappedFixture.currentCveId, { exact: true }), "Exact running source A must display its own finding");
+        await assertVisible(page.getByTestId("system-cve-triage-open"), "Exact Current must expose the normal triage interaction");
+        await assertCount(page.getByText(mappedFixture.historicalCveId, { exact: true }), 0, "Newer scanned B must not replace A");
+        await captureWorkflowViewportState(page, "12ha-system-detail-cve-inventory-fallbacks", "external-current-actionable", "desktop");
+        await captureWorkflowViewportState(page, "12ha-system-detail-cve-inventory-fallbacks", "external-current-actionable", "narrowDesktop");
+
+        const failedAttemptId = crypto.randomUUID();
+        runFixtureSql(`INSERT INTO cve_scans(id,derivation_id,scanner_name,status,created_at)
+          VALUES ('${failedAttemptId}'::uuid,${mappedFixture.currentDerivationId},
+                  'current-authority-scanner','failed',now()+interval '2 minutes');`);
+        const failedAttempt = (await phase6Api(page, currentPath)).body;
+        if (failedAttempt.source?.scan_id !== mappedFixture.currentScanId
+            || failedAttempt.attempt?.scan_id !== failedAttemptId
+            || failedAttempt.attempt?.derivation_id !== mappedFixture.currentDerivationId
+            || failedAttempt.attempt?.status !== "failed") {
+          throw new Error(`A later failed attempt displaced completed A: ${JSON.stringify(failedAttempt)}`);
+        }
+        await page.reload({ timeout: LOAD_TIMEOUT });
+        await assertVisible(page.getByText("A newer scan failed. Showing the last completed scan for this target."), "Approved failed-attempt notice must retain A's evidence");
+        const queuedAttemptId = crypto.randomUUID();
+        runFixtureSql(`INSERT INTO cve_scans(id,derivation_id,scanner_name,status,created_at)
+          VALUES ('${queuedAttemptId}'::uuid,${mappedFixture.currentDerivationId},
+                  'current-authority-scanner','pending',now()+interval '3 minutes');`);
+        const queuedAttempt = (await phase6Api(page, currentPath)).body;
+        if (queuedAttempt.source?.scan_id !== mappedFixture.currentScanId
+            || queuedAttempt.attempt?.scan_id !== queuedAttemptId
+            || queuedAttempt.attempt?.status !== "pending") {
+          throw new Error(`A queued attempt displaced completed A: ${JSON.stringify(queuedAttempt)}`);
+        }
+        await page.reload({ timeout: LOAD_TIMEOUT });
+        await assertVisible(page.getByText("A newer scan is queued. Showing the last completed scan for this target."), "Approved queued-attempt notice must retain A's evidence");
+
+        runFixtureSql(`INSERT INTO system_states(
+          hostname,change_reason,store_path,generation,
+          generation_matches_current_store_path,timestamp
+        ) VALUES ($hostname$${mappedFixture.hostname}$hostname$,'startup',
+          '/nix/store/33333333333333333333333333333333-unmapped',75,true,
+          now()+interval '1 minute');`);
+        const unmapped = (await phase6Api(page, currentPath)).body;
+        if (unmapped.system_id !== mappedFixture.systemId
+            || unmapped.current_state !== "unmapped_running"
+            || unmapped.authority !== "no_scan"
+            || unmapped.source !== null
+            || unmapped.running_target != null
+            || unmapped.vulnerabilities?.length !== 0) {
+          throw new Error(`Unmapped Current substituted another revision: ${JSON.stringify(unmapped)}`);
+        }
+        await page.reload({ timeout: LOAD_TIMEOUT });
+        await page.getByRole("tab", { name: "CVEs" }).first().click();
+        await assertVisible(page.getByText("Running configuration is unmapped", { exact: true }), "Unmapped Current must have its own empty state");
+        await assertCount(page.getByText(mappedFixture.currentCveId, { exact: true }), 0, "Unmapped Current must not retain A's rows");
+        await assertCount(page.getByText(mappedFixture.historicalCveId, { exact: true }), 0, "Unmapped Current must not display B automatically");
+        await captureWorkflowViewportState(page, "12ha-system-detail-cve-inventory-fallbacks", "unmapped-current", "desktop");
+        await captureWorkflowViewportState(page, "12ha-system-detail-cve-inventory-fallbacks", "unmapped-current", "narrowDesktop");
+        const historical = (await phase6Api(
+          page,
+          `${currentPath}&target=exact_derivation&target_id=${mappedFixture.historicalDerivationId}`,
+        )).body;
+        if (historical.selection?.derivation_id !== mappedFixture.historicalDerivationId
+            || historical.source?.scan_id !== mappedFixture.historicalScanId
+            || historical.vulnerabilities?.[0]?.cve_id !== mappedFixture.historicalCveId
+            || historical.read_only !== true) {
+          throw new Error(`Explicit B must remain independently readable: ${JSON.stringify(historical)}`);
+        }
+        const absentId = crypto.randomUUID();
+        const hidden = await phase6ApiResponse(page, `/api/v1/systems/${absentId}/cve-inventory-page?limit=100&after=not-a-cursor`);
+        if (hidden.status !== 404) {
+          throw new Error(`An absent/hidden system disclosed cursor validity: ${hidden.status}`);
+        }
+        const foreignToken = crypto.randomUUID();
+        const foreignFlakeId = Number(runFixtureSql(`WITH inserted AS (
+          INSERT INTO flakes(name,repo_url,branch,build_scope)
+          VALUES ('sc1-foreign-${foreignToken}','https://example.test/sc1-foreign-${foreignToken}.git','main','cf_systems_only') RETURNING id
+        ) SELECT id FROM inserted;`));
+        try {
+          const foreignHash = createHash("sha1").update(foreignToken).digest("hex");
+          const foreignCommitId = Number(runFixtureSql(`WITH inserted AS (INSERT INTO commits(
+            flake_id,git_commit_hash,commit_timestamp,message,author,
+            evaluation_status,evaluation_completed_at)
+            VALUES (${foreignFlakeId},'${foreignHash}',now(),'SC1 foreign target','Web UI test','complete',now()) RETURNING id
+          ) SELECT id FROM inserted;`));
+          const foreignDerivationId = Number(runFixtureSql(`WITH inserted AS (INSERT INTO derivations(
+            commit_id,derivation_type,derivation_name,derivation_path,
+            store_path,expected_store_path,status_id,attempt_count,completed_at,policy_results)
+            VALUES (${foreignCommitId},'nixos',$name$${mappedFixture.configurationName}$name$,
+              '/nix/store/${foreignToken}-foreign.drv','/nix/store/${foreignToken}-foreign',
+              '/nix/store/${foreignToken}-foreign',10,1,now(),'{}'::jsonb) RETURNING id
+          ) SELECT id FROM inserted;`));
+          const foreign = await phase6ApiResponse(page,
+            `/api/v1/systems/${mappedFixture.systemId}/cve-inventory-page?limit=100&target=exact_derivation&target_id=${foreignDerivationId}`);
+          if (foreign.status !== 404) {
+            throw new Error(`A foreign-flake derivation disclosed evidence: ${foreign.status}`);
+          }
+        } finally {
+          runFixtureSql(`DELETE FROM flakes WHERE name='sc1-foreign-${foreignToken}';`);
+        }
+      } finally {
+        removeTask326CurrentCveAuthorityFixture(mappedFixture);
+      }
+
+      // Retained Config provenance is supplemental to exact Current CVE proof.
+      // Adding it after Current is actionable must not change the scan or UI.
+      // The database trigger independently checks the external retained row.
+      const reconciledFixture = createTask326CurrentCveAuthorityFixture({ retainCurrent: false });
+      try {
+        const currentPath = `/api/v1/systems/${reconciledFixture.systemId}/cve-inventory-page?limit=100`;
+        const initial = (await phase6Api(page, currentPath)).body;
+        if (initial.authority !== "exact" || initial.read_only !== false
+            || initial.source?.scan_id !== reconciledFixture.currentScanId) {
+          throw new Error(`The external fixture must begin with exact Current CVE authority: ${JSON.stringify(initial)}`);
+        }
+        runFixtureSql(`INSERT INTO evaluation_snapshot_selections(
+          commit_id,configuration_name,current_snapshot_id)
+          VALUES (${reconciledFixture.currentCommitId},
+            $name$${reconciledFixture.configurationName}$name$,
+            '${reconciledFixture.snapshotId}'::uuid);`);
+        runFixtureSql(`INSERT INTO evaluation_generation_snapshots(
+          system_id,generation,snapshot_id,derivation_id,commit_id,
+          source_store_path,configuration_name,lineage_verified,binding_origin)
+          SELECT '${reconciledFixture.systemId}'::uuid,74,
+            '${reconciledFixture.snapshotId}'::uuid,
+            ${reconciledFixture.currentDerivationId},
+            ${reconciledFixture.currentCommitId},derivation.store_path,
+            $name$${reconciledFixture.configurationName}$name$,
+            true,'external_reconciled'
+          FROM derivations derivation
+          WHERE derivation.id=${reconciledFixture.currentDerivationId}
+          ON CONFLICT (system_id,generation) DO NOTHING;`);
+        const origin = runFixtureSql(`SELECT binding_origin FROM evaluation_generation_snapshots
+          WHERE system_id='${reconciledFixture.systemId}'::uuid AND generation=74;`);
+        if (origin !== "external_reconciled") {
+          throw new Error(`The supplemental generation must retain external provenance: ${origin}`);
+        }
+        const exact = (await phase6Api(page, currentPath)).body;
+        if (exact.authority !== "exact"
+            || exact.current_state !== "exact_current_scan"
+            || exact.read_only !== false
+            || exact.source?.scan_id !== reconciledFixture.currentScanId
+            || exact.vulnerabilities?.[0]?.cve_id !== reconciledFixture.currentCveId
+            || !exact.vulnerabilities[0].remediation) {
+          throw new Error(`Supplemental Config retention changed exact Current CVE context: ${JSON.stringify(exact)}`);
+        }
+        const triageRead = await phase6ApiResponse(page,
+          `/api/v1/systems/${reconciledFixture.systemId}/cves/${reconciledFixture.currentCveId}/triage?package=current-authority-package`);
+        if (triageRead.status !== 200 || triageRead.body?.canonical_cve_id !== reconciledFixture.currentCveId) {
+          throw new Error(`The normal Current triage detail rejected reconciled evidence: ${triageRead.status}`);
+        }
+        await page.goto(`${baseUrl}/systems/${reconciledFixture.systemId}?tab=cves`, { timeout: LOAD_TIMEOUT });
+        await assertVisible(page.getByTestId("system-cve-triage-open"), "Reconciled external Current must expose normal triage");
+        await page.getByTestId("system-cve-triage-open").click();
+        const triage = page.getByRole("dialog", { name: `Triage ${reconciledFixture.currentCveId} current-authority-package` });
+        await assertVisible(triage, "Reconciled external Current must open the normal triage dialog");
+        await triage.getByRole("button", { name: "Close triage editor" }).click();
+      } finally {
+        removeTask326CurrentCveAuthorityFixture(reconciledFixture);
+      }
+    },
+  },
+  {
+    name: "12hb-system-detail-assignment-versions",
+    description: "System Detail shows each host's assigned bundle revision and enforcement mode instead of the catalog version",
+    action: async (page) => {
+      await suppressOnboardingCoach(page);
+      await routeSystemsWarningData(page, { getHostname: (id) => id.endsWith("a1") ? "host-a" : "host-b" });
+      await page.route("**/api/v1/poams/rollups/systems*", async (route) => {
+        const ids = new URL(route.request().url()).searchParams.get("ids")?.split(",") || [];
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(ids.map((id) => ({
+          scope_id: id, total: 0, active: 0, overdue: 0, awaiting_verification: 0,
+          completed: 0, open_findings: 0, on_poam_findings: 0, no_poam_findings: 0,
+        }))) });
+      });
+      await page.route("**/api/v1/poams?*", async (route) => route.fulfill({
+        status: 200, contentType: "application/json",
+        body: JSON.stringify({ items: [], limit: 100, offset: 0, has_more: false, next_offset: null }),
+      }));
+      const hosts = [
+        { id: "00000000-0000-0000-0000-0000000000a1", version: "v1", mode: "report_only", label: "Report only" },
+        { id: "00000000-0000-0000-0000-0000000000a2", version: "v2", mode: "enforce", label: "Enforce" },
+      ];
+      const bundleId = "00000000-0000-0000-0000-0000000000b1";
+      const versions = Object.fromEntries(hosts.map((host, index) => [
+        host.version,
+        "00000000-0000-0000-0000-0000000000" + (index + 41),
+      ]));
+      const bundle = {
+        id: bundleId, name: "Demo Bundle", framework: "NIST CSF", version: "catalog-lineage",
+        description: null, layer: "fleet", owner: "Platform Security", last_review: null,
+        policy_ids: [], required_envs: [], control_count: 1, environment_count: 2,
+        policy_count: 1, requirement_count: 0, active_assignment_count: 2,
+        current_draft_version_id: null, current_published_version_id: versions.v2,
+        current_draft_version: null, current_published_version: "v2", applicable_system_count: 1,
+        aggregate_score: null,
+        versions: hosts.map((host) => ({
+          id: versions[host.version], bundle_id: bundleId, version: host.version,
+          publication_state: "accepted", trust_state: "trusted", semantic_digest: "test-digest",
+          created_at: "2026-09-24T12:00:00Z", published_at: "2026-09-24T12:00:00Z",
+          derived_from_version_id: null, control_count: 1, is_current_published: host.version === "v2",
+          is_current_draft: false,
+        })),
+      };
+      for (const host of hosts) {
+        await page.route(`**/api/v1/systems/${host.id}/compliance`, async (route) => {
+          const rollup = {
+            system_id: host.id, hostname: `host-${host.version}`, environment: host.version === "v1" ? "ATA" : "LAN",
+            applies: true, total: 1, evaluated_total: 0, pass: 0, warn: 0, fail: 0, waiver: 0,
+            not_checked: 1, not_applicable: 0, error: 0,
+            report_only: host.mode === "report_only" ? 1 : 0, score: 0,
+            resolution_state: "resolved", assignment_status: host.version === "v1" ? "pinned" : "current",
+            assignment_reason: null, assignment_approved_by: null,
+          };
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+            system_id: host.id,
+            bundles: [{ bundle, rollup, assigned_bundle_version_id: versions[host.version], assignment_mode: host.mode }],
+            direct_rollup: rollup, overall_rollup: rollup,
+          }) });
+        });
+      }
+      for (const host of hosts) {
+        await page.goto(`${baseUrl}/systems/${host.id}?tab=compliance`, { timeout: LOAD_TIMEOUT });
+        await page.getByRole("tab", { name: "Compliance" }).first().click();
+        await assertVisible(page.getByText("Demo Bundle", { exact: true }), "Assigned bundle lineage must be visible in System Compliance");
+        await assertVisible(page.getByText(host.version, { exact: true }), `System Compliance must show assigned ${host.version}`);
+        await assertVisible(page.getByText(host.label, { exact: true }), `System Compliance must show ${host.mode} mode`);
+        await assertCount(page.getByText("catalog-lineage", { exact: true }), 0, "Catalog lineage version must not replace assigned revision");
+        await captureWorkflowViewportState(page, "12hb-system-detail-assignment-versions", `assigned-${host.version}`, "desktop");
       }
     },
   },
@@ -11549,8 +13132,11 @@ const steps = [
             exploited: 2,
             environments_affected: 3,
             systems_affected: 8,
-            exact_systems_affected: 7,
+            exact_systems_affected: 8,
             legacy_systems_affected: 1,
+            current_systems_affected: 6,
+            scheduled_deployment_target_systems: 3,
+            historical_inventory_systems: 1,
             no_scan_systems: 1,
             outstanding: 30,
             accepted: 8,
@@ -11562,7 +13148,7 @@ const steps = [
         await route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: JSON.stringify(["openssl", "glibc"]),
+          body: JSON.stringify(["openssl", "glibc", "lib_foo", "libXfoo", "lib%foo", "lib\\foo"]),
         });
       });
       const cveRowFixture = {
@@ -11578,38 +13164,32 @@ const steps = [
         fixed_version: "3.0.2",
         fix_status: "fix_available",
         affected_count: 4,
+        current_affected_count: 3,
+        scheduled_deployment_target_count: 2,
+        historical_inventory_count: 1,
         affected_environments: ["prod", "staging"],
         first_seen: new Date().toISOString(),
         last_seen: new Date().toISOString(),
         age_days: 12,
         triage_status: "outstanding",
       };
-      // Grouped (default) view fetches /cves/grouped — mock the package rollup so
-      // the default grouped surface renders real-shaped data (not a fallback).
-      await page.route(/\/api\/v1\/cves\/grouped(?:\?.*)?$/, async (route) => {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify([
-            {
-              package_name: "openssl",
-              cve_count: 1,
-              critical_count: 1,
-              high_count: 0,
-              medium_count: 0,
-              low_count: 0,
-              environments_count: 2,
-              total_affected_systems: 4,
-              fixable_count: 1,
-              outstanding_count: 1,
-              exploited_count: 1,
-              max_cvss: 9.8,
-              severity_score: 1000,
-              cves: [cveRowFixture],
-            },
-          ]),
-        });
-      });
+      const inventoryOnlyRowFixture = {
+        ...cveRowFixture,
+        cve_id: "CVE-2024-5678",
+        title: "Scheduled and historical inventory only",
+        affected_count: 1,
+        current_affected_count: 0,
+        scheduled_deployment_target_count: 1,
+        historical_inventory_count: 1,
+        triage_status: "inventory_only",
+      };
+      const environmentIds = {
+        development: "00000000-0000-0000-0000-0000000000e1",
+        production: "00000000-0000-0000-0000-0000000000e2",
+        lab: "00000000-0000-0000-0000-0000000000e3",
+        archive: "00000000-0000-0000-0000-0000000000e4",
+        rollout: "00000000-0000-0000-0000-0000000000e6",
+      };
       const fleetDetail = {
         cve: {
           cve_id: "CVE-2024-1234",
@@ -11630,8 +13210,12 @@ const steps = [
         canonical_package_name: "openssl",
         rollup: "partial",
         affected_system_count: 4,
-        exact_affected_system_count: 3,
+        exact_affected_system_count: 4,
+        exact_mutation_target_count: 3,
         legacy_affected_system_count: 1,
+        current_affected_system_count: 3,
+        scheduled_deployment_target_count: 2,
+        historical_inventory_system_count: 1,
         no_scan_system_count: 1,
         environments: [
           {
@@ -11640,6 +13224,9 @@ const steps = [
             affected_system_count: 1,
             exact_affected_system_count: 1,
             legacy_affected_system_count: 0,
+            current_affected_system_count: 1,
+            scheduled_deployment_target_count: 0,
+            historical_inventory_system_count: 0,
             systems: [{
               system_id: "00000000-0000-0000-0000-0000000000a1",
               environment_id: "00000000-0000-0000-0000-0000000000e1",
@@ -11652,6 +13239,7 @@ const steps = [
               deployment_policy: "automatic",
               current_package_version: "3.0.1",
               inventory_authority: "exact",
+              inventory_section: "current",
             }],
             disposition: {
               state: "accepted",
@@ -11667,6 +13255,9 @@ const steps = [
             affected_system_count: 1,
             exact_affected_system_count: 1,
             legacy_affected_system_count: 0,
+            current_affected_system_count: 1,
+            scheduled_deployment_target_count: 1,
+            historical_inventory_system_count: 0,
             systems: [{
               system_id: "00000000-0000-0000-0000-0000000000a2",
               environment_id: "00000000-0000-0000-0000-0000000000e2",
@@ -11679,6 +13270,20 @@ const steps = [
               deployment_policy: "manual",
               current_package_version: "3.0.1",
               inventory_authority: "exact",
+              inventory_section: "current",
+            }, {
+              system_id: "00000000-0000-0000-0000-0000000000a2",
+              environment_id: "00000000-0000-0000-0000-0000000000e2",
+              hostname: "prod-web-01",
+              environment: "Production",
+              primary_ip_address: "10.0.1.1",
+              flake_name: "platform",
+              flake_id: 1,
+              commit_hash: "cccccccccccccccccccccccccccccccccccccccc",
+              deployment_policy: "manual",
+              current_package_version: "3.0.1",
+              inventory_authority: "exact",
+              inventory_section: "scheduled_deployment_target",
             }],
             disposition: {
               state: "scheduled",
@@ -11707,6 +13312,9 @@ const steps = [
             affected_system_count: 1,
             exact_affected_system_count: 1,
             legacy_affected_system_count: 0,
+            current_affected_system_count: 1,
+            scheduled_deployment_target_count: 0,
+            historical_inventory_system_count: 0,
             systems: [{
               system_id: "00000000-0000-0000-0000-0000000000a4",
               environment_id: "00000000-0000-0000-0000-0000000000e3",
@@ -11719,15 +13327,44 @@ const steps = [
               deployment_policy: "manual",
               current_package_version: "3.0.1",
               inventory_authority: "exact",
+              inventory_section: "current",
+            }],
+            disposition: null,
+          },
+          {
+            environment_id: "00000000-0000-0000-0000-0000000000e6",
+            environment_name: "Rollout target",
+            affected_system_count: 1,
+            exact_affected_system_count: 1,
+            legacy_affected_system_count: 0,
+            current_affected_system_count: 0,
+            scheduled_deployment_target_count: 1,
+            historical_inventory_system_count: 0,
+            systems: [{
+              system_id: "00000000-0000-0000-0000-0000000000a6",
+              environment_id: "00000000-0000-0000-0000-0000000000e6",
+              hostname: "rollout-web-01",
+              environment: "Rollout target",
+              primary_ip_address: "10.0.4.1",
+              flake_name: "platform",
+              flake_id: 1,
+              commit_hash: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              deployment_policy: "automatic",
+              current_package_version: "3.0.1",
+              inventory_authority: "exact",
+              inventory_section: "scheduled_deployment_target",
             }],
             disposition: null,
           },
           {
             environment_id: "00000000-0000-0000-0000-0000000000e4",
             environment_name: "Archive",
-            affected_system_count: 1,
+            affected_system_count: 0,
             exact_affected_system_count: 0,
             legacy_affected_system_count: 1,
+            current_affected_system_count: 0,
+            scheduled_deployment_target_count: 0,
+            historical_inventory_system_count: 1,
             systems: [{
               system_id: "00000000-0000-0000-0000-0000000000a5",
               environment_id: "00000000-0000-0000-0000-0000000000e4",
@@ -11740,19 +13377,308 @@ const steps = [
               deployment_policy: "manual",
               current_package_version: "3.0.1",
               inventory_authority: "legacy",
+              inventory_section: "historical",
             }],
             disposition: null,
           },
         ],
       };
+      await page.route("**/api/v1/environments", async (route) => route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(fleetDetail.environments.map((environment) => ({
+          id: environment.environment_id,
+          name: environment.environment_name,
+          color_hex: environment.environment_name === "Production" ? "#f87171" :
+            environment.environment_name === "Lab" ? "#a78bfa" : "#60a5fa",
+          is_active: true,
+          system_count: environment.affected_system_count,
+        }))),
+      }));
+      const inventoryRequests = { pairs: [], groups: [], members: [] };
+      let focusedCveFixtureMode = "single";
+      let largePairFixture = false;
+      const baseMembers = fleetDetail.environments.flatMap((environment) =>
+        environment.systems.map((system) => ({
+          cve_id: "CVE-2024-1234",
+          package_name: "openssl",
+          system_id: system.system_id,
+          environment_id: environment.environment_id,
+          hostname: system.hostname,
+          inventory_section: system.inventory_section,
+          installed_version: system.current_package_version,
+          deployment_status: "deployed",
+          flake_name: system.flake_name,
+        })));
+      const inventoryPage = (items, url, defaultLimit) => {
+        const offset = Number(url.searchParams.get("offset") ?? 0);
+        const limit = Number(url.searchParams.get("limit") ?? defaultLimit);
+        if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 200) {
+          throw new Error(`Invalid CVE inventory pagination: ${url}`);
+        }
+        return {
+          items: items.slice(offset, offset + limit),
+          total: items.length,
+          next_offset: offset + limit < items.length ? offset + limit : null,
+        };
+      };
+      let packageFilterFixture = false;
+      let batchQuickFixture = false;
+      let wildcardPackageFixture = false;
+      let heldPackagePage = null;
+      const inventoryRows = (url) => {
+        const search = url.searchParams.get("search")?.toLowerCase();
+        const focused = search?.startsWith("cve-");
+        let rows = [cveRowFixture, inventoryOnlyRowFixture];
+        let members = [
+          ...baseMembers,
+          ...baseMembers.filter((member) => [environmentIds.rollout, environmentIds.archive].includes(member.environment_id) ||
+            (member.environment_id === environmentIds.production && member.inventory_section === "scheduled_deployment_target"))
+            .map((member) => ({ ...member, cve_id: inventoryOnlyRowFixture.cve_id })),
+        ];
+        if (packageFilterFixture && !focused) {
+          const low = { ...cveRowFixture, cve_id: "CVE-2024-8080", severity: "low", cvss_v3_score: 2.1,
+            exploited: false, fix_status: "open", fixed_version: null, triage_status: "accepted",
+            affected_count: 1, current_affected_count: 1, scheduled_deployment_target_count: 0,
+            historical_inventory_count: 0 };
+          const glibc = { ...cveRowFixture, cve_id: "CVE-2024-9090", package_name: "glibc" };
+          rows.push(low, glibc);
+          members.push(
+            { ...baseMembers.find((member) => member.environment_id === environmentIds.development), cve_id: low.cve_id },
+            { ...baseMembers.find((member) => member.environment_id === environmentIds.production), cve_id: glibc.cve_id, package_name: "glibc" },
+          );
+        }
+        if (focused) {
+          if (search !== "cve-2024-1234" || focusedCveFixtureMode === "stale") {
+            rows = [];
+            members = [];
+          } else if (focusedCveFixtureMode === "multiple") {
+            rows = [cveRowFixture, { ...cveRowFixture, package_name: "glibc", current_affected_count: 2 }];
+            members = [...baseMembers, ...baseMembers.filter((member) => member.inventory_section === "current")
+              .map((member) => ({ ...member, package_name: "glibc" }))];
+          } else if (focusedCveFixtureMode === "scheduled" || focusedCveFixtureMode === "historical") {
+            const scheduled = focusedCveFixtureMode === "scheduled";
+            rows = [{ ...cveRowFixture, affected_count: scheduled ? 2 : 0, current_affected_count: 0,
+              scheduled_deployment_target_count: scheduled ? 2 : 0, historical_inventory_count: scheduled ? 0 : 1 }];
+            members = baseMembers.filter((member) => member.inventory_section ===
+              (scheduled ? "scheduled_deployment_target" : "historical"));
+          } else if (focusedCveFixtureMode === "metadata-only") {
+            rows = [{ ...cveRowFixture, package_name: null, affected_count: 0, exact_affected_count: 0,
+              legacy_affected_count: 0, current_affected_count: 0, scheduled_deployment_target_count: 0,
+              historical_inventory_count: 0 }];
+            members = [];
+          } else {
+            rows = [cveRowFixture];
+            members = baseMembers;
+          }
+        }
+        const environmentId = url.searchParams.get("environment_id");
+        if (environmentId) {
+          members = members.filter((member) => member.environment_id === environmentId);
+          rows = rows.filter((row) => members.some((member) =>
+            member.cve_id === row.cve_id && member.package_name === row.package_name)).map((row) => {
+            const found = members.filter((member) => member.cve_id === row.cve_id && member.package_name === row.package_name);
+            const hosts = (section) => new Set(found.filter((member) => member.inventory_section === section)
+              .map((member) => member.system_id));
+            const current = hosts("current");
+            const scheduled = hosts("scheduled_deployment_target");
+            return {
+              ...row,
+              affected_count: new Set([...current, ...scheduled]).size,
+              exact_affected_count: new Set([...current, ...scheduled]).size,
+              legacy_affected_count: hosts("historical").size,
+              current_affected_count: current.size,
+              scheduled_deployment_target_count: scheduled.size,
+              historical_inventory_count: hosts("historical").size,
+              affected_environments: [fleetDetail.environments.find((env) => env.environment_id === environmentId).environment_name],
+            };
+          });
+        }
+        rows = rows.filter((row) =>
+          (!search || focused || [row.cve_id, row.package_name, row.title].some((value) => value?.toLowerCase().includes(search))) &&
+          (!url.searchParams.has("severity") || row.severity === url.searchParams.get("severity")) &&
+          (!url.searchParams.has("triage_status") || row.triage_status === url.searchParams.get("triage_status")) &&
+          (!url.searchParams.has("package") || row.package_name?.includes(url.searchParams.get("package"))) &&
+          (!url.searchParams.has("fix_status") || (url.searchParams.get("fix_status") === "exploited"
+            ? row.exploited : url.searchParams.get("fix_status") === "available" ? row.fix_status === "fix_available" : row.fix_status !== "fix_available")));
+        if (largePairFixture && !focused) {
+          rows = Array.from({ length: 205 }, (_, index) => ({
+            ...cveRowFixture, cve_id: `CVE-2024-${String(2000 + index)}`,
+            package_name: "openssl", affected_environments: ["Production"],
+          }));
+          if (environmentId && environmentId !== environmentIds.production) rows = [];
+        }
+        if (batchQuickFixture && !focused) {
+          rows = Array.from({ length: 202 }, (_, index) => ({
+            ...cveRowFixture,
+            cve_id: `CVE-2024-${String(3000 + index)}`,
+            severity: index < 200 ? "critical" : "high",
+            fix_status: index === 201 ? "open" : "fix_available",
+            triage_status: index === 201 ? "accepted" : "outstanding",
+            package_name: "openssl",
+          })).filter((row) =>
+            (!url.searchParams.has("severity") || row.severity === url.searchParams.get("severity")) &&
+            (!url.searchParams.has("triage_status") || row.triage_status === url.searchParams.get("triage_status")) &&
+            (!url.searchParams.has("fix_status") || row.fix_status === "fix_available") &&
+            (!url.searchParams.has("package") || row.package_name.includes(url.searchParams.get("package"))));
+          if (environmentId && environmentId !== environmentIds.production) rows = [];
+        }
+        if (wildcardPackageFixture && !focused) {
+          rows = [
+            { ...cveRowFixture, cve_id: "CVE-2024-7000", package_name: "lib_foo" },
+            { ...cveRowFixture, cve_id: "CVE-2024-7001", package_name: "libXfoo" },
+            { ...cveRowFixture, cve_id: "CVE-2024-7002", package_name: "lib%foo" },
+            { ...cveRowFixture, cve_id: "CVE-2024-7003", package_name: "lib\\foo" },
+          ].filter((row) => {
+            const packageQuery = url.searchParams.get("package");
+            // The server escapes %, _ and backslash before matching literal package text.
+            return !packageQuery || row.package_name.toLowerCase().includes(packageQuery.toLowerCase());
+          });
+        }
+        const keys = new Set(rows.map((row) => `${row.cve_id}|${row.package_name}`));
+        members = members.filter((member) => keys.has(`${member.cve_id}|${member.package_name}`));
+        return { rows, members };
+      };
+      const inventoryRoute = /\/api\/v1\/cves\/inventory\/(pairs|groups|members)(?:\?.*)?$/;
+      let legacyGroupedRequests = 0;
+      await page.route(/\/api\/v1\/cves\/grouped(?:\?.*)?$/, async (route) => {
+        legacyGroupedRequests += 1;
+        const url = new URL(route.request().url());
+        const { rows, members } = inventoryRows(url);
+        const packages = [...new Set(rows.map((row) => row.package_name))].filter(Boolean).map((packageName) => {
+          const pairs = rows.filter((row) => row.package_name === packageName);
+          const matching = members.filter((member) => member.package_name === packageName && pairs.some((pair) => pair.cve_id === member.cve_id));
+          const hosts = (sections) => new Set(matching.filter((member) => sections.includes(member.inventory_section)).map((member) => member.system_id));
+          return { package_name: packageName, cve_count: pairs.length,
+            critical_count: pairs.filter((row) => row.severity === "critical").length,
+            high_count: pairs.filter((row) => row.severity === "high").length,
+            medium_count: pairs.filter((row) => row.severity === "medium").length,
+            low_count: pairs.filter((row) => row.severity === "low").length,
+            environments_count: new Set(matching.map((member) => member.environment_id)).size,
+            // Deliberately disagree with the pair-page snapshot. A late legacy
+            // grouped response must never label a pair-page package header.
+            total_affected_systems: 777,
+            current_affected_systems: hosts(["current"]).size,
+            scheduled_deployment_target_systems: hosts(["scheduled_deployment_target"]).size,
+            historical_inventory_systems: hosts(["historical"]).size,
+            fixable_count: pairs.filter((row) => row.fix_status === "fix_available").length,
+            outstanding_count: pairs.filter((row) => row.triage_status === "outstanding").length,
+            exploited_count: pairs.filter((row) => row.exploited).length,
+            max_cvss: Math.max(...pairs.map((row) => row.cvss_v3_score || 0)), severity_score: 2000, cves: null };
+        });
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(
+          packages) });
+      });
+      const serveInventory = async (route) => {
+        const url = new URL(route.request().url());
+        const endpoint = url.pathname.split("/").at(-1);
+        inventoryRequests[endpoint].push(url);
+        const { rows, members } = inventoryRows(url);
+        let items = rows;
+        if (endpoint === "groups") {
+          const byHost = url.searchParams.get("group_by") === "host";
+          if (!byHost && url.searchParams.get("group_by") !== "environment") throw new Error(`Invalid CVE group scope: ${url}`);
+          const groups = new Map();
+          for (const member of members) {
+            const id = byHost ? member.system_id : member.environment_id;
+            if (!groups.has(id)) groups.set(id, []);
+            groups.get(id).push(member);
+          }
+          items = [...groups].map(([id, found]) => {
+            const pairs = rows.filter((row) => found.some((member) =>
+              member.cve_id === row.cve_id && member.package_name === row.package_name));
+            return {
+            group_id: id,
+            name: byHost ? found[0].hostname : fleetDetail.environments.find((env) => env.environment_id === id).environment_name,
+            cve_package_count: pairs.length,
+            cve_count: new Set(found.map((member) => member.cve_id)).size,
+            critical_pair_count: pairs.filter((pair) => pair.severity === "critical").length,
+            high_pair_count: pairs.filter((pair) => pair.severity === "high").length,
+            medium_pair_count: pairs.filter((pair) => pair.severity === "medium").length,
+            low_pair_count: pairs.filter((pair) => pair.severity === "low").length,
+            unknown_pair_count: pairs.filter((pair) => !["critical", "high", "medium", "low"].includes(pair.severity)).length,
+            exploited_pair_count: pairs.filter((pair) => pair.exploited).length,
+            patchable_pair_count: pairs.filter((pair) => pair.fix_status === "fix_available").length,
+            host_count: new Set(found.map((member) => member.system_id)).size,
+            total_active_hosts: null,
+            current_host_count: new Set(found.filter((member) => member.inventory_section === "current").map((member) => member.system_id)).size,
+            scheduled_host_count: new Set(found.filter((member) => member.inventory_section === "scheduled_deployment_target").map((member) => member.system_id)).size,
+            historical_host_count: new Set(found.filter((member) => member.inventory_section === "historical").map((member) => member.system_id)).size,
+            flake_name: byHost ? found[0].flake_name : null,
+            deployment_status: byHost ? found[0].deployment_status : null,
+          }; }).sort((left, right) => left.name.localeCompare(right.name) || left.group_id.localeCompare(right.group_id));
+        } else if (endpoint === "members") {
+          const byHost = url.searchParams.get("group_by") === "host";
+          const id = url.searchParams.get("group_id");
+          items = members.filter((member) => (byHost ? member.system_id : member.environment_id) === id)
+            .sort((left, right) => left.cve_id.localeCompare(right.cve_id) ||
+              (left.package_name || "").localeCompare(right.package_name || "") ||
+              left.system_id.localeCompare(right.system_id) || left.inventory_section.localeCompare(right.inventory_section));
+        }
+        const held = endpoint === "pairs" && url.searchParams.get("package") === "openssl" &&
+          url.searchParams.get("offset") === "200" && !url.searchParams.has("severity") ? heldPackagePage : null;
+        if (held) {
+          heldPackagePage = null;
+          held.started();
+          await held.release;
+        }
+        const result = inventoryPage(items, url, endpoint === "pairs" ? 200 : 50);
+        if (endpoint === "pairs") {
+          result.package_host_unions = result.next_offset === null && Number(url.searchParams.get("offset") || 0) === 0 && result.total === result.items.length
+            ? [...new Set(items.map((row) => row.package_name))].filter(Boolean).map((name) => ({
+              package_name: name,
+              pair_count: items.filter((row) => row.package_name === name).length,
+              affected_system_count: new Set(members.filter((member) => member.package_name === name &&
+                items.some((row) => row.package_name === name && row.cve_id === member.cve_id) &&
+                ["current", "scheduled_deployment_target"].includes(member.inventory_section)).map((member) => member.system_id)).size,
+            })) : [];
+        }
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(result) });
+        held?.completed();
+      };
+      await page.route(inventoryRoute, serveInventory);
       let fleetDetailRequests = 0;
       let fleetDetailAfterMutation = null;
-      await page.route(/\/api\/v1\/cves\/CVE-2024-1234\/fleet\?package=openssl$/, async (route) => {
+      const noPatchFleetDetail = JSON.parse(JSON.stringify(fleetDetail));
+      noPatchFleetDetail.cve.cve_id = "CVE-2024-5678";
+      noPatchFleetDetail.cve.title = "OpenSSL vulnerability without an upstream patch";
+      noPatchFleetDetail.cve.fixed_version = null;
+      noPatchFleetDetail.cve.fix_status = "open";
+      noPatchFleetDetail.cve.exploited = false;
+      noPatchFleetDetail.canonical_package_name = "openssl";
+      const rolloutEvidence = JSON.parse(JSON.stringify(fleetDetail.environments.find((environment) => environment.environment_name === "Rollout target")));
+      rolloutEvidence.affected_system_count = 1;
+      rolloutEvidence.exact_affected_system_count = 1;
+      rolloutEvidence.legacy_affected_system_count = 0;
+      rolloutEvidence.current_affected_system_count = 0;
+      rolloutEvidence.scheduled_deployment_target_count = 1;
+      rolloutEvidence.historical_inventory_system_count = 0;
+      rolloutEvidence.disposition = null;
+      const archivedEvidence = JSON.parse(JSON.stringify(fleetDetail.environments.find((environment) => environment.environment_name === "Archive")));
+      archivedEvidence.affected_system_count = 1;
+      archivedEvidence.exact_affected_system_count = 0;
+      archivedEvidence.legacy_affected_system_count = 1;
+      archivedEvidence.current_affected_system_count = 0;
+      archivedEvidence.scheduled_deployment_target_count = 0;
+      archivedEvidence.historical_inventory_system_count = 1;
+      archivedEvidence.disposition = null;
+      noPatchFleetDetail.rollup = "outstanding";
+      noPatchFleetDetail.affected_system_count = 2;
+      noPatchFleetDetail.exact_affected_system_count = 1;
+      noPatchFleetDetail.exact_mutation_target_count = 0;
+      noPatchFleetDetail.legacy_affected_system_count = 1;
+      noPatchFleetDetail.current_affected_system_count = 0;
+      noPatchFleetDetail.scheduled_deployment_target_count = 1;
+      noPatchFleetDetail.historical_inventory_system_count = 1;
+      noPatchFleetDetail.environments = [rolloutEvidence, archivedEvidence];
+      await page.route(/\/api\/v1\/cves\/(CVE-2024-1234|CVE-2024-5678)\/fleet\?package=openssl$/, async (route) => {
         fleetDetailRequests += 1;
+        const cveId = new URL(route.request().url()).pathname.split("/").at(-2);
+        const response = cveId === "CVE-2024-5678" ? noPatchFleetDetail : fleetDetailAfterMutation ?? fleetDetail;
         await route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: JSON.stringify(fleetDetailAfterMutation ?? fleetDetail),
+          body: JSON.stringify(response),
         });
       });
       await page.route("**/api/v1/poams/assignees", async (route) => {
@@ -11783,7 +13709,9 @@ const steps = [
         }
         const returnedDetail = JSON.parse(JSON.stringify(fleetDetail));
         returnedDetail.affected_system_count = 5;
-        returnedDetail.exact_affected_system_count = 4;
+        returnedDetail.exact_affected_system_count = 5;
+        returnedDetail.exact_mutation_target_count = 4;
+        returnedDetail.current_affected_system_count = 4;
         returnedDetail.rollup = "partial";
         returnedDetail.environments[1].systems.push({
           system_id: "00000000-0000-0000-0000-0000000000a3",
@@ -11797,9 +13725,11 @@ const steps = [
           deployment_policy: "automatic",
           current_package_version: "3.0.1",
           inventory_authority: "exact",
+          inventory_section: "current",
         });
-        returnedDetail.environments[1].affected_system_count =
-          returnedDetail.environments[1].systems.length;
+        returnedDetail.environments[1].affected_system_count = 2;
+        returnedDetail.environments[1].exact_affected_system_count = 2;
+        returnedDetail.environments[1].current_affected_system_count = 2;
         fleetDetailAfterMutation = JSON.parse(JSON.stringify(returnedDetail));
         fleetDetailAfterMutation.environments[1].systems.at(-1).hostname =
           "server-recomputed-prod-02";
@@ -11813,11 +13743,18 @@ const steps = [
           }),
         });
       });
-      await page.route(/\/api\/v1\/cves(?:\?.*)?$/, async (route) => {
+      const cveCsv = [
+        "CVE ID,Severity,CVSS Score,Package,Installed Version,Fixed Version,Affected Systems,Currently Affected Systems,Scheduled Deployment Targets,Historical Inventory Systems,Environments,Fix Status,Triage Status,Age (days),First Seen,Last Seen",
+        "CVE-2024-1234,critical,9.8,openssl,3.0.1,3.0.2,4,3,2,1,prod;staging,fix_available,outstanding,12,2024-02-01 00:00,2026-09-21 00:00",
+      ].join("\n");
+      const cveExportRequests = [];
+      await page.route(/\/api\/v1\/cves\/export(?:\?.*)?$/, async (route) => {
+        cveExportRequests.push(new URL(route.request().url()));
         await route.fulfill({
           status: 200,
-          contentType: "application/json",
-          body: JSON.stringify([cveRowFixture]),
+          contentType: "text/csv",
+          headers: { "Content-Disposition": "attachment; filename=crystal-forge-cves.csv" },
+          body: cveCsv,
         });
       });
       let fleetRescanRequests = 0;
@@ -12053,6 +13990,8 @@ const steps = [
               total_cves: 1, critical: 1, high: 0, medium: 0, low: 0,
               fixable: 1, exploited: 1, environments_affected: 3,
               systems_affected: 3, outstanding: 1, accepted: 1, scheduled: 1,
+              current_systems_affected: 2, scheduled_deployment_target_systems: 2,
+              historical_inventory_systems: 1,
             }),
           });
         });
@@ -12063,22 +14002,7 @@ const steps = [
           }
           await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(["openssl"]) });
         });
-        await viewerPage.route(/\/api\/v1\/cves\/grouped(?:\?.*)?$/, async (route) => {
-          await route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: JSON.stringify([{
-              package_name: "openssl", cve_count: 1, critical_count: 1,
-              high_count: 0, medium_count: 0, low_count: 0,
-              environments_count: 3, total_affected_systems: 3,
-              fixable_count: 1, outstanding_count: 1, exploited_count: 1,
-              max_cvss: 9.8, severity_score: 1000, cves: [cveRowFixture],
-            }]),
-          });
-        });
-        await viewerPage.route(/\/api\/v1\/cves(?:\?.*)?$/, async (route) => {
-          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([cveRowFixture]) });
-        });
+        await viewerPage.route(inventoryRoute, serveInventory);
       let viewerFleetRequests = 0;
       await viewerPage.route(/\/api\/v1\/cves\/CVE-2024-1234\/fleet(?:\?.*)?$/, async (route) => {
         const url = new URL(route.request().url());
@@ -12151,13 +14075,46 @@ const steps = [
       await assertVisible(viewerPage.getByText("No current inventory findings"), "404 should render the fleet inventory empty state");
       await viewerPage.goto(`${baseUrl}/cves?cve=CVE-DENIED&cve_package=openssl`, { timeout: LOAD_TIMEOUT });
       await assertVisible(viewerPage.getByText("Fleet detail unavailable"), "403 should render the exact-fleet unauthorized state");
-      await viewerPage.goto(`${baseUrl}/cves?cve=CVE-ERROR&cve_package=openssl`, { timeout: LOAD_TIMEOUT });
-      await assertVisible(viewerPage.getByText("Could not load fleet detail"), "500 should render the retryable exact-fleet error state");
-      await assertVisible(viewerPage.getByRole("button", { name: "Retry" }), "Retryable fleet errors should expose retry");
+        await viewerPage.goto(`${baseUrl}/cves?cve=CVE-ERROR&cve_package=openssl`, { timeout: LOAD_TIMEOUT });
+        await assertVisible(viewerPage.getByText("Could not load fleet detail"), "500 should render the retryable exact-fleet error state");
+        await assertVisible(viewerPage.getByRole("button", { name: "Retry" }), "Retryable fleet errors should expose retry");
+        await viewerPage.goto(`${baseUrl}/cves?view=flat`, { timeout: LOAD_TIMEOUT });
+        await viewerPage.getByTestId("cve-row").filter({ hasText: "CVE-2024-1234" }).click({ modifiers: ["Control"] });
+        await assertVisible(viewerPage.getByRole("toolbar", { name: "Selected CVEs" }).getByText("1 selected"), "Viewer may select exact pairs for inspection");
+        await assertDisabled(viewerPage.getByTestId("cve-batch-open"), "Viewer must not get an enabled batch mutation");
       } finally {
         if (releaseLoadingFleet) releaseLoadingFleet();
         await viewerPage.unrouteAll({ behavior: "ignoreErrors" }).catch(() => {});
         await viewerContext.close().catch(() => {});
+      }
+
+      const operatorContext = await browserInstance.newContext({ viewport: VIEWPORTS.desktop });
+      const operatorPage = await operatorContext.newPage();
+      try {
+        await suppressOnboardingCoach(operatorPage);
+        await routeStandaloneUiBootstrap(operatorPage, "Operator");
+        await operatorPage.route("**/api/v1/cves/stats*", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+          total_cves: 1, critical: 1, high: 0, medium: 0, low: 0, fixable: 1, exploited: 1,
+          environments_affected: 3, systems_affected: 4, exact_systems_affected: 4,
+          legacy_systems_affected: 1, current_systems_affected: 3,
+          scheduled_deployment_target_systems: 2, historical_inventory_systems: 1,
+          no_scan_systems: 0, outstanding: 1, accepted: 1, scheduled: 1,
+        }) }));
+        await operatorPage.route("**/api/v1/cves/packages*", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(["openssl"]) }));
+        await operatorPage.route(inventoryRoute, serveInventory);
+        await operatorPage.route(/\/api\/v1\/cves\/CVE-2024-1234\/fleet\?package=openssl$/, async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(fleetDetail) }));
+        await operatorPage.route("**/api/v1/poams/assignees", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ people: [], groups: [{ group_name: "platform-operators" }] }) }));
+        await operatorPage.goto(`${baseUrl}/cves?cve=CVE-2024-1234&cve_package=openssl`, { timeout: LOAD_TIMEOUT });
+        const operatorDrawer = operatorPage.getByRole("dialog", { name: "CVE-2024-1234 openssl fleet inventory" });
+        await assertVisible(operatorDrawer, "Operator should have readable fleet inventory");
+        await assertCount(operatorPage.getByRole("button", { name: "Rescan fleet" }), 0, "Operator must not receive the Admin-only fleet rescan action");
+        const operatorTriage = operatorDrawer.getByTestId("cve-triage-open");
+        await assertVisible(operatorTriage, "Operator should receive fleet triage controls");
+        await operatorTriage.click();
+        await assertVisible(operatorPage.getByRole("dialog", { name: "Triage CVE-2024-1234 openssl" }), "Operator should open fleet triage");
+      } finally {
+        await operatorPage.unrouteAll({ behavior: "ignoreErrors" }).catch(() => {});
+        await operatorContext.close().catch(() => {});
       }
 
       const completedPoamId = "00000000-0000-0000-0000-0000000000d3";
@@ -12232,7 +14189,29 @@ const steps = [
       await completedPage.goto(`${baseUrl}/compliance?poam=${completedPoamId}`, { timeout: LOAD_TIMEOUT });
       const completedDetail = completedPage.getByTestId("poam-detail");
       await assertVisible(completedDetail, "Completed POA&M deep link should open exact detail");
+      // Design order: Deficiency precedes Vulnerability scope, which precedes the plan.
+      // A CVE-only POA&M may truthfully show no policy findings; the exact CVE
+      // links live under Vulnerability scope.
+      const completedHierarchy = await completedDetail.locator(".poam-tray-section > header h3").allTextContents();
+      const completedPosition = (prefix) => completedHierarchy.findIndex((heading) => heading.trim().startsWith(prefix));
+      for (const [earlier, later] of [
+        ["Remediation status", "Deficiency"],
+        ["Deficiency", "Vulnerability scope"],
+        ["Vulnerability scope", "Remediation plan"],
+      ]) {
+        if (completedPosition(earlier) < 0 || completedPosition(later) <= completedPosition(earlier)) {
+          throw new Error(`CVE-originated POA&M lost the design section order: ${JSON.stringify(completedHierarchy)}`);
+        }
+      }
+      await assertVisible(completedDetail.getByRole("heading", { name: "Deficiency · 0 findings" }), "A CVE-only POA&M must not fabricate policy findings");
+      await assertVisible(completedDetail.getByRole("heading", { name: "Vulnerability scope · 1 CVE · 1 host" }), "Vulnerability scope must count the exact CVE links");
+      await assertCount(completedDetail.getByRole("heading", { name: "POA&M metadata" }), 0, "The standalone POA&M metadata section must not exist");
       await assertVisible(completedDetail.getByText("Retired vulnerability history"), "Completed POA&M should expose retired exact-link history");
+      // Every link is retired here, so retired history is the recorded scope
+      // and opens by default. It stays an immutable, non-unlinkable disclosure.
+      if (!(await completedDetail.getByTestId("poam-retired-vulnerability-history").evaluate((node) => node.open))) {
+        throw new Error("Retired vulnerability history must be open when no link is active");
+      }
       const retiredExactLink = completedDetail.getByTestId("poam-retired-vulnerability");
       await assertVisible(retiredExactLink.getByText("CVE-2024-1234"), "Retired exact link should retain its CVE identity");
       await assertVisible(retiredExactLink.getByText("Generation 42"), "Retired exact link should retain its generation baseline");
@@ -12242,9 +14221,155 @@ const steps = [
         await completedContext.close().catch(() => {});
       }
 
+      // ── Grouped Vulnerability scope, milestones and activity (design parity) ──
+      // One card per CVE and package with compact host rows beneath it, so the
+      // CVE is not repeated per host and nothing needs horizontal scrolling.
+      const scopePoamId = "00000000-0000-0000-0000-0000000000e3";
+      const scopeUuid = (n) => `00000000-0000-0000-0000-${String(n).padStart(12, "0")}`;
+      const scopeLink = (n, cve, pkg, host, active, version, state) => ({
+        id: scopeUuid(5000 + n), system_id: scopeUuid(6000 + n), hostname: host, environment_id: scopeUuid(7000 + n),
+        canonical_cve_id: cve, canonical_package_name: pkg, link_id: scopeUuid(8000 + n),
+        linked_at: "2026-09-01T12:00:00Z", linked_by: scopeUuid(1), retired_at: active ? null : "2026-09-13T12:00:00Z",
+        retired_by: active ? null : scopeUuid(1), retirement_reason: active ? null : "replaced:exact baseline",
+        link_active: active, baseline_scan_id: scopeUuid(9000 + n), baseline_scan_completed_at: "2026-09-01T11:55:00Z",
+        baseline_generation: 7, baseline_target_store_path: "/nix/store/baseline-system", baseline_occurrence_derivation_path: "/nix/store/pkg.drv",
+        baseline_observed_package_version: "1.0.0", current_derivation_id: null, current_target_store_path: null,
+        current_scan_id: active ? scopeUuid(9500 + n) : null, current_occurrence_derivation_path: null,
+        current_observed_package_version: active ? version : null, resolution_state: state,
+      });
+      const scopeLinks = [
+        scopeLink(1, "CVE-2015-4082", "attic", "web-04", true, "0.1.3", "fail"),
+        scopeLink(2, "CVE-2015-4082", "attic", "web-01", true, "0.1.3", "fail"),
+        scopeLink(3, "CVE-2015-4082", "attic", "web-03", true, "0.1.4", "pass"),
+        scopeLink(4, "CVE-2015-4082", "attic", "web-02", true, "0.1.3", "fail"),
+        scopeLink(5, "CVE-2024-5678", "curl", "db-01", true, "8.4.0", "fail"),
+        scopeLink(6, "CVE-2023-0001", "zlib", "old-host", false, null, "resolved"),
+      ];
+      const scopeDetail = {
+        id: scopePoamId, human_id: "POAM-2026-0077", title: "Patch attic and curl", plan: "Roll the fixed packages.", owner: "",
+        assignee: { kind: "user", user_id: scopeUuid(1), display: "Morgan Reyes", available: true },
+        target_date: "2026-12-01", risk: "high", status: "in_progress", revision: 3, overdue: false, finding_count: 0, cve_finding_count: 5,
+        created_at: "2026-09-01T12:00:00Z", updated_at: "2026-09-13T12:00:00Z", closed_at: null, closure_attempt_id: null,
+        findings: [], cve_findings: scopeLinks, findings_has_more: false, findings_next_cursor: null,
+        milestones: [
+          { id: scopeUuid(1100), ordinal: 0, title: "Build fixed closure", target_date: "2026-01-05", completed_at: null, completed_by: null, created_by: scopeUuid(1), updated_by: scopeUuid(1), created_at: "2026-09-01T12:00:00Z", updated_at: "2026-09-01T12:00:00Z" },
+          { id: scopeUuid(1101), ordinal: 1, title: "Roll out to production", target_date: "2026-12-20", completed_at: "2026-09-10T12:00:00Z", completed_by: scopeUuid(1), created_by: scopeUuid(1), updated_by: scopeUuid(1), created_at: "2026-09-01T12:00:00Z", updated_at: "2026-09-10T12:00:00Z" },
+        ],
+        assignment_references: [], verification_attempts: [], verification_has_more: false, verification_next_cursor: null,
+        activity: [{ id: scopeUuid(1300), actor_user_id: scopeUuid(1), actor_display: "m.reyes", kind: "note", payload: { text: "Opened from scan", secret_marker: "RAW-PAYLOAD-MUST-NOT-RENDER" }, created_at: "2026-09-02T12:00:00Z" }],
+        activity_has_more: false, activity_next_cursor: null,
+      };
+      for (const [role, viewport] of [["Admin", VIEWPORTS.desktop], ["Admin", VIEWPORTS.narrowDesktop], ["Viewer", VIEWPORTS.desktop]]) {
+        const scopeContext = await browserInstance.newContext({ viewport });
+        const scopePage = await scopeContext.newPage();
+        const label = `${role} ${viewport.width}px`;
+        try {
+          await suppressOnboardingCoach(scopePage);
+          await routeStandaloneUiBootstrap(scopePage, role);
+          await scopePage.route(new RegExp(`/api/v1/poams/${scopePoamId}(?:\\?.*)?$`), async (route) => {
+            await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(scopeDetail) });
+          });
+          await scopePage.goto(`${baseUrl}/compliance?poam=${scopePoamId}`, { timeout: LOAD_TIMEOUT });
+          const scopeTray = scopePage.getByTestId("poam-detail");
+          await assertVisible(scopeTray, `${label}: scope POA&M must open`);
+          await assertVisible(scopeTray.getByRole("heading", { name: "Vulnerability scope · 2 CVEs · 5 hosts" }), `${label}: scope heading must count unique active CVEs and hosts`);
+          const groups = scopeTray.getByTestId("poam-cve-group");
+          await assertCount(groups, 2, `${label}: one card per unique CVE and package`);
+          const attic = scopePage.locator('[data-testid="poam-cve-group"][data-cve-id="CVE-2015-4082"][data-cve-package="attic"]');
+          await assertCount(attic.locator(".poam-cve-group-head").getByText("CVE-2015-4082", { exact: true }), 1, `${label}: CVE identity appears once in its card header`);
+          await assertVisible(attic.locator(".poam-cve-group-head").getByText("4 hosts", { exact: true }), `${label}: card header must show the host count`);
+          await assertCount(attic.getByTestId("poam-linked-vulnerability"), 4, `${label}: every attic host must appear under its CVE`);
+          await assertCount(attic.getByTestId("poam-linked-vulnerability").getByText("CVE-2015-4082"), 0, `${label}: host rows must not repeat the CVE identity`);
+          const hosts = await attic.getByTestId("poam-linked-vulnerability").locator(".poam-cve-host-name").allTextContents();
+          if (JSON.stringify(hosts) !== JSON.stringify(["web-01", "web-02", "web-03", "web-04"])) throw new Error(`${label}: hosts must sort by name, got ${JSON.stringify(hosts)}`);
+          const curl = scopePage.locator('[data-testid="poam-cve-group"][data-cve-id="CVE-2024-5678"][data-cve-package="curl"]');
+          await assertVisible(curl.getByText("1 host", { exact: true }), `${label}: a one-host card must say 1 host`);
+          await assertVisible(curl.getByTestId("poam-linked-vulnerability").getByText("db-01", { exact: true }), `${label}: curl host must sit under its CVE`);
+          // Source-backed evidence stays compact on each row.
+          const failing = attic.locator('[data-cve-finding-id]').filter({ hasText: "web-01" });
+          await assertVisible(failing.getByText("0.1.3", { exact: true }), `${label}: installed version must stay visible`);
+          await assertVisible(failing.getByText(/^scan 00000000$/), `${label}: a compact exact-scan reference must stay visible`);
+          const fullScan = await failing.locator("small[title]").getAttribute("title");
+          if (fullScan !== scopeUuid(9502)) throw new Error(`${label}: the full scan UUID must be in the title, got ${fullScan}`);
+          await assertVisible(failing.locator(".poam-chip", { hasText: "FAIL" }), `${label}: the resolution state chip must stay visible`);
+          await assertVisible(attic.locator('[data-cve-finding-id]').filter({ hasText: "web-03" }).locator(".poam-chip", { hasText: "PASS" }), `${label}: a cleared host must show PASS`);
+          // Nothing is invented: the detail response has no severity, CVSS, or fix version.
+          const scopeText = await scopeTray.getByTestId("poam-linked-vulnerabilities").innerText();
+          for (const forbidden of [/\bcritical\b/i, /\bCVSS\b/i, /\bfix pending\b/i, /Fixed:/]) {
+            if (forbidden.test(scopeText.replace(/Retired vulnerability history[\s\S]*$/, ""))) throw new Error(`${label}: scope must not fabricate ${forbidden}: ${scopeText}`);
+          }
+          await assertCount(scopeTray.getByTestId("poam-linked-vulnerabilities").locator("table"), 0, `${label}: the scope must not be a tabular grid`);
+          // No horizontal overflow anywhere in the scrollable drawer body.
+          const overflow = await scopeTray.locator(".poam-tray-scroll").evaluate((node) => ({ scroll: node.scrollWidth, client: node.clientWidth }));
+          if (overflow.scroll > overflow.client + 1) throw new Error(`${label}: drawer must not scroll horizontally (${JSON.stringify(overflow)})`);
+          const scopeOverflow = await scopeTray.getByTestId("poam-linked-vulnerabilities").evaluate((node) => ({ scroll: node.scrollWidth, client: node.clientWidth }));
+          if (scopeOverflow.scroll > scopeOverflow.client + 1) throw new Error(`${label}: the scope section must not overflow (${JSON.stringify(scopeOverflow)})`);
+          // Row actions stay on screen, including at the narrow width.
+          const drawerBox = await scopeTray.boundingBox();
+          const unlink = failing.getByRole("button", { name: /^Unlink vulnerability CVE-2015-4082 attic/ });
+          await assertVisible(unlink, `${label}: unlink action must be present`);
+          const unlinkBox = await unlink.boundingBox();
+          if (!unlinkBox || unlinkBox.x + unlinkBox.width > drawerBox.x + drawerBox.width + 1 || unlinkBox.x < drawerBox.x) throw new Error(`${label}: unlink action must stay inside the drawer (${JSON.stringify({ unlinkBox, drawerBox })})`);
+          if (role === "Viewer") {
+            if (!(await unlink.isDisabled())) throw new Error(`${label}: a viewer must not unlink a vulnerability`);
+          } else if (await unlink.isDisabled()) throw new Error(`${label}: an operator must be able to unlink`);
+          // Retired history is secondary: collapsed while active scope exists.
+          const retired = scopeTray.getByTestId("poam-retired-vulnerability-history");
+          await assertVisible(retired.locator("summary"), `${label}: retired history must stay reachable`);
+          if (await retired.evaluate((node) => node.open)) throw new Error(`${label}: retired history must be collapsed while active links exist`);
+          await retired.locator("summary").click();
+          const retiredRow = retired.getByTestId("poam-retired-vulnerability");
+          await assertVisible(retiredRow.getByText("Baseline 1.0.0", { exact: false }), `${label}: retired baseline version must remain`);
+          await assertVisible(retiredRow.getByText(`Scan ${scopeUuid(9006)}`, { exact: false }), `${label}: retired baseline scan must remain`);
+          await assertVisible(retiredRow.getByText("Generation 7", { exact: false }), `${label}: retired generation must remain`);
+          await assertVisible(retiredRow.getByText("replaced:exact baseline", { exact: false }), `${label}: retirement reason must remain`);
+          await assertCount(retiredRow.getByRole("button"), 0, `${label}: retired links must stay non-unlinkable`);
+          // Milestones follow the design: label-wrapped checkbox, date, remove; no editor.
+          const open = scopeTray.locator('[data-testid="poam-milestone"]').filter({ hasText: "Build fixed closure" });
+          const done = scopeTray.locator('[data-testid="poam-milestone"]').filter({ hasText: "Roll out to production" });
+          await assertVisible(open.getByText("due Jan 5", { exact: true }), `${label}: open milestone date must be visible`);
+          await assertVisible(done.getByText(/^done /), `${label}: completed milestone date must be visible`);
+          if (!(await open.locator(".poam-milestone-date").evaluate((node) => node.classList.contains("poam-overdue")))) throw new Error(`${label}: a late open milestone date must be marked overdue`);
+          if (await done.locator(".poam-milestone-date").evaluate((node) => node.classList.contains("poam-overdue"))) throw new Error(`${label}: a completed milestone must not be marked overdue`);
+          if (!(await done.locator(".poam-milestone-title").evaluate((node) => getComputedStyle(node).textDecorationLine.includes("line-through")))) throw new Error(`${label}: a completed milestone title must be struck through`);
+          await assertCount(open.getByRole("button", { name: /^Edit milestone/ }), 0, `${label}: a milestone must not be an edit button`);
+          await assertCount(open.locator("input:not([type='checkbox'])"), 0, `${label}: a milestone must have no inline editor`);
+          const checkbox = open.getByRole("checkbox", { name: "Mark Build fixed closure complete", exact: true });
+          const removeMilestone = open.getByRole("button", { name: "Remove milestone Build fixed closure", exact: true });
+          if (role === "Viewer") {
+            if (!(await checkbox.isDisabled()) || !(await removeMilestone.isDisabled())) throw new Error(`${label}: a viewer must not toggle or remove a milestone`);
+          } else {
+            const toggled = [];
+            await scopePage.route(new RegExp(`/api/v1/poams/${scopePoamId}/milestones/${scopeUuid(1100)}$`), async (route) => {
+              toggled.push(route.request().postDataJSON());
+              await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...scopeDetail, revision: 4, milestones: scopeDetail.milestones.map((item) => item.id === scopeUuid(1100) ? { ...item, completed_at: "2026-09-27T12:00:00Z" } : item) }) });
+            });
+            // Clicking the title text toggles completion because the label wraps it.
+            await open.locator(".poam-milestone-title").click();
+            await open.getByRole("checkbox", { name: "Reopen Build fixed closure", exact: true }).waitFor({ state: "visible", timeout: 15000 });
+            if (toggled.length !== 1 || toggled[0].completed !== true || toggled[0].title != null || toggled[0].target_date != null) throw new Error(`${label}: title click must send only completion: ${JSON.stringify(toggled)}`);
+            if (!(await open.locator(".poam-milestone-title").evaluate((node) => getComputedStyle(node).textDecorationLine.includes("line-through")))) throw new Error(`${label}: the reconciled milestone must be struck through`);
+          }
+          // Activity: date, actor, message; never a diagnostics disclosure or raw payload.
+          const activityRow = scopeTray.locator('[data-activity-kind="note"]');
+          await assertVisible(activityRow.locator(".poam-activity-date"), `${label}: activity date must be visible`);
+          await assertVisible(activityRow.locator(".poam-activity-actor").getByText("m.reyes", { exact: true }), `${label}: activity actor must be visible`);
+          await assertVisible(activityRow.getByText("Added note: Opened from scan", { exact: true }), `${label}: the human activity message must be visible`);
+          await assertCount(scopeTray.locator(".poam-activity-diagnostics, .poam-activity details, .poam-activity pre"), 0, `${label}: activity must not render diagnostics`);
+          if ((await scopeTray.innerText()).includes("RAW-PAYLOAD-MUST-NOT-RENDER")) throw new Error(`${label}: the raw activity payload must not be rendered`);
+        } finally {
+          await scopePage.unrouteAll({ behavior: "ignoreErrors" }).catch(() => {});
+          await scopeContext.close().catch(() => {});
+        }
+      }
+
       // Assert summary stat cards are rendered.
       const patchableCard = page.locator("main").getByText("Patchable now");
       await assertVisible(patchableCard, "Expected 'Patchable now' stat card");
+      const kpis = page.locator("main .stat-strip .stat");
+      await assertCount(kpis, 5, "CVE strip must have exactly five fleet-wide KPIs");
+      await assertVisible(kpis.filter({ hasText: "Accepted risk" }).getByText("8", { exact: true }), "Scheduled is not accepted risk");
+      await assertVisible(kpis.filter({ hasText: "Patchable now" }).getByText("Fixed package version available"), "Patch availability must not claim deployment readiness");
 
       // Assert severity breakdown section.
       const criticalCard = page.locator("main").getByText("Critical").first();
@@ -12255,19 +14380,540 @@ const steps = [
       const severityFilterSeg = page.locator("main .seg button:has-text('Critical')");
       await assertVisible(severityFilterSeg, "Expected severity filter controls");
 
-      // Grouped view is the default. Assert the package group card renders the
-      // real-shaped grouped data (package-first parity surface).
-      const groupCard = page.locator("main .mono:has-text('openssl')").first();
+      // Package is the default grouping; its pair page is bounded and scoped.
+      const groupCard = page.locator("main .card").filter({ hasText: "openssl" }).first();
       await assertVisible(groupCard, "Expected grouped package card to render");
+      const packageHeader = page.locator("main .cve-package-toggle").filter({ hasText: "openssl" });
+      await assertVisible(packageHeader.getByText("4 distinct systems affected", { exact: false }), "Package host union must use aggregate rather than summed pair counts");
+      await assertCount(packageHeader.getByText(/777 distinct systems/), 0, "Old grouped snapshot must not label the pair page even when it arrives later");
+      if (legacyGroupedRequests !== 0) throw new Error("Package labels must not fetch the independent grouped snapshot");
+      await assertVisible(packageHeader.getByText("Worst CVSS"), "Collapsed package must show worst CVSS");
+      await assertVisible(packageHeader.getByText("2 crit"), "Collapsed package must show severity rollup");
+      await assertVisible(page.getByRole("toolbar", { name: "CVE selection" }).getByText("SELECT", { exact: true }), "Source-backed selection strip belongs before package groups");
+      await captureWorkflowViewportState(page, "16-cves", "package-groups-visible", "desktop");
+      const quickSelection = page.getByRole("toolbar", { name: "CVE selection" });
+      const criticalQuick = quickSelection.getByRole("button", { name: "Critical 5" });
+      await assertVisible(criticalQuick, "The Critical quick-select chip must be a button");
+      await criticalQuick.click();
+      await assertVisible(quickSelection.getByText("2 selected"), "Quick-select must resolve exact matching pairs, not merely highlight a KPI");
+      await assertAttribute(criticalQuick, "aria-pressed", "true", "Selected category should expose its toggle state");
+      await captureWorkflowViewportState(page, "16-cves", "quick-select-critical", "desktop");
+      await criticalQuick.click();
+      await page.waitForFunction(() => ![...document.querySelectorAll(".cve-selection-strip span")].some((node) => /\d+ selected/.test(node.textContent)));
+      await assertAttribute(criticalQuick, "aria-pressed", "false", "Second category click must clear its selected exact pairs");
+      await quickSelection.getByRole("button", { name: "Outstanding 30" }).click();
+      await assertVisible(quickSelection.getByText("1 selected"), "Outstanding quick-select must use source triage status");
+      await quickSelection.getByRole("button", { name: "Patchable 20" }).click();
+      await assertVisible(quickSelection.getByText("2 selected"), "Overlapping quick selections must union exact CVE/package identities");
+      await page.getByRole("toolbar", { name: "Selected CVEs" }).getByRole("button", { name: "Clear" }).click();
+      await page.getByRole("button", { name: "Medium", exact: true }).click();
+      await criticalQuick.click();
+      await assertVisible(page.getByRole("status").getByText("No matching CVEs in the current filters."), "A fleet statistic with no active-filter matches must not select anything");
+      await assertCount(quickSelection.getByText(/\d+ selected/), 0, "Zero matching quick-select must leave selection unchanged");
+      await page.getByRole("button", { name: "All", exact: true }).first().click();
+      const expectedPackageRollup = { critical_count: 2, fixable_count: 2, exploited_count: 2 };
+      const initialPairs = inventoryRows(new URL(`${baseUrl}/api/v1/cves/inventory/pairs`)).rows;
+      if (initialPairs.filter((row) => row.severity === "critical").length !== expectedPackageRollup.critical_count ||
+          initialPairs.filter((row) => row.fix_status === "fix_available").length !== expectedPackageRollup.fixable_count ||
+          initialPairs.filter((row) => row.exploited).length !== expectedPackageRollup.exploited_count) {
+        throw new Error("Package fixture lost critical, fixable, or exploited pairs");
+      }
 
-      // Verify flat view mode renders individual CVE rows in a table, then
-      // return to grouped mode so the drawer is opened from the design's default surface.
-      const flatViewBtn = page.locator("button:has-text('Flat')");
+      // Package headers and expanded children must share the exact filtered
+      // pair identity, including while an expanded package disappears.
+      packageFilterFixture = true;
+      await page.goto(`${baseUrl}/cves`);
+      const assertPackages = async (names, counts) => {
+        const cards = page.locator(".cve-package-card");
+        await page.waitForFunction((expected) => {
+          const names = [...document.querySelectorAll(".cve-package-card .cve-package-name")].map((node) => node.textContent.trim());
+          return names.length === expected.length && names.every((name) => expected.includes(name));
+        }, names);
+        await assertCount(cards, names.length, "Only packages with filtered children may render");
+        for (let i = 0; i < names.length; i++) {
+          const card = cards.filter({ has: page.locator(".cve-package-name", { hasText: names[i] }) });
+          await assertVisible(card, `Expected filtered ${names[i]} package`);
+          const header = card.locator(".cve-package-toggle");
+          await assertVisible(header.getByText(`${counts[i]} CVEs shown`), "Header count must equal filtered children");
+          if (await header.getAttribute("aria-expanded") !== "true") await header.click();
+          await assertCount(card.locator("tbody tr"), counts[i], "Visible package expanded without filtered children");
+        }
+      };
+      await assertPackages(["openssl", "glibc"], [3, 1]);
+      // Batch detail is authoritative for every selected pair, including
+      // identities not currently rendered by the bounded inventory page.
+      const batchPairs = inventoryRows(new URL(`${baseUrl}/api/v1/cves/inventory/pairs`)).rows;
+      const batchIdentity = (row) => ({ cve_id: row.cve_id, canonical_package_name: row.package_name });
+      const batchKey = (pair) => `${pair.cve_id}|${pair.canonical_package_name}`;
+      const pairById = (id) => batchIdentity(batchPairs.find((row) => row.cve_id === id));
+      const manualPairs = [pairById("CVE-2024-1234"), pairById("CVE-2024-9090")];
+      const packagePairs = batchPairs.filter((row) => row.package_name === "openssl").map(batchIdentity);
+      const batchDetailBodies = [];
+      const batchTriageBodies = [];
+      let batchConflict = false;
+      let batchPartialSuccess = false;
+      const batchEnvironments = fleetDetail.environments.map((env) => ({
+        id: env.environment_id, name: env.environment_name,
+      }));
+      const batchSubjectCounts = {
+        "CVE-2024-1234|openssl": { [environmentIds.development]: 1, [environmentIds.production]: 1, [environmentIds.lab]: 1 },
+        "CVE-2024-5678|openssl": {},
+        "CVE-2024-8080|openssl": { [environmentIds.development]: 1 },
+        "CVE-2024-9090|glibc": { [environmentIds.production]: 1 },
+      };
+      const batchToken = (pair, environmentId) => `fixture:${batchKey(pair)}:${environmentId}`;
+      await page.route(/\/api\/v1\/cves\/batch-detail$/, async (route) => {
+        if (route.request().method() !== "POST") throw new Error("Batch detail must use POST");
+        const body = route.request().postDataJSON();
+        batchDetailBodies.push(body);
+        const sourcePairs = inventoryRows(new URL(`${baseUrl}/api/v1/cves/inventory/pairs`)).rows;
+        const items = body.pairs.map((pair) => {
+          const source = sourcePairs.find((row) => batchKey(batchIdentity(row)) === batchKey(pair));
+          if (!source) throw new Error(`Batch detail asked for a non-source pair: ${JSON.stringify(pair)}`);
+          return {
+            ...pair, severity: source.severity, cvss_v3_score: source.cvss_v3_score,
+            state: batchKey(pair) === "CVE-2024-5678|openssl" ? "unavailable" : "actionable",
+            unavailable_reason: batchKey(pair) === "CVE-2024-5678|openssl" ? "inventory_only" : null,
+            environments: batchKey(pair) === "CVE-2024-5678|openssl" ? [] : batchEnvironments.map((env) => ({
+              environment_id: env.id, environment_name: env.name,
+              exact_affected_system_count: (batchQuickFixture ? env.id === environmentIds.production : batchSubjectCounts[batchKey(pair)]?.[env.id]) ? 1 : 0,
+              existing_state: null, evidence_token: batchToken(pair, env.id),
+            })),
+          };
+        });
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items }) });
+      });
+      await page.route(/\/api\/v1\/cves\/batch-triage$/, async (route) => {
+        if (route.request().method() !== "POST") throw new Error("Batch triage must use POST");
+        const body = route.request().postDataJSON();
+        batchTriageBodies.push(body);
+        if (batchConflict) {
+          await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({
+            error: "cve_evidence_changed", message: "Exact evidence changed before batch commit.",
+            details: { current_subject_count: 2 },
+          }) });
+          return;
+        }
+        if (batchPartialSuccess) {
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+            applied: [{ pair: body.pairs[0], environment_ids: [environmentIds.production] }],
+            skipped: [body.pairs[1]], poam_ids: [],
+          }) });
+          return;
+        }
+        const applied = body.pairs.map((pair) => ({ pair, environment_ids: body.environment_ids.filter((id) =>
+          (batchQuickFixture ? id === environmentIds.production : (batchSubjectCounts[batchKey(pair)]?.[id] || 0) > 0)) }));
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+          applied: applied.filter((item) => item.environment_ids.length),
+          skipped: applied.filter((item) => !item.environment_ids.length).map((item) => item.pair),
+          poam_ids: body.disposition.action === "schedule_patch" ? ["00000000-0000-0000-0000-0000000000d2"] : [],
+        }) });
+      });
+      const selectedBar = page.getByRole("toolbar", { name: "Selected CVEs" });
+      const batchDialog = page.getByRole("dialog", { name: "Batch triage" });
+      const expectBulkCount = async (count, packages) => {
+        await assertVisible(selectedBar.getByText(`${count} selected`), "Bulk bar must show the exact selected-pair count");
+        await assertVisible(selectedBar.getByText(`${packages} package${packages === 1 ? "" : "s"}`), "Bulk bar must show distinct selected packages");
+      };
+      const openBatch = async (pairs) => {
+        await selectedBar.getByTestId("cve-batch-open").click();
+        await assertVisible(batchDialog.getByRole("heading", { name: `Triage ${pairs.length} CVEs together` }), "Batch dialog must hydrate selected pairs");
+        await page.waitForFunction((count) => document.querySelectorAll("[data-testid='cve-batch-dialog'] .cve-batch-id").length === count, pairs.length);
+        const detail = batchDetailBodies.at(-1);
+        if (!isDeepStrictEqual(detail.pairs.map(batchKey).sort(), pairs.map(batchKey).sort())) {
+          throw new Error(`Batch hydration identities differ from selection: ${JSON.stringify(detail)}`);
+        }
+        for (const pair of pairs) {
+          await assertVisible(batchDialog.getByText(pair.cve_id, { exact: true }), `Missing hydrated ${batchKey(pair)}`);
+        }
+      };
+      const resetBatch = async () => {
+        await page.goto(`${baseUrl}/cves`);
+        await assertPackages(["openssl", "glibc"], [3, 1]);
+        await assertHidden(selectedBar, "Navigation must reset batch selection");
+      };
+      const chooseManualPairs = async () => {
+        for (const pair of manualPairs) {
+          const card = page.locator(".cve-package-card").filter({ has: page.locator(".cve-package-name", { hasText: pair.canonical_package_name }) });
+          const header = card.locator(".cve-package-toggle");
+          if (await header.getAttribute("aria-expanded") !== "true") await header.click();
+          await card.getByTestId("cve-row").filter({ hasText: pair.cve_id }).click({ modifiers: ["Control"] });
+        }
+        await expectBulkCount(2, 2);
+        await assertHidden(batchDialog, "Ctrl-row selection must not open fleet detail or batch dialog");
+        await assertHidden(page.getByTestId("cve-fleet-drawer"), "Ctrl-row selection must not open fleet detail");
+      };
+      await chooseManualPairs();
+      await captureWorkflowState(page, "16-cves", "batch-two-selected", () => expectBulkCount(2, 2));
+      await selectedBar.getByRole("button", { name: "Clear" }).click();
+      await assertHidden(selectedBar, "Bulk Clear must remove both manual selections");
+      await page.locator(".cve-package-toggle").filter({ hasText: "openssl" }).click({ modifiers: ["Control"] });
+      await expectBulkCount(3, 1);
+      await captureWorkflowState(page, "16-cves", "batch-package-selected", () => expectBulkCount(3, 1));
+      await openBatch(packagePairs);
+      await assertVisible(batchDialog.getByText(/Inventory only — no current exact subjects/), "Inventory-only selected pair must report its typed reason");
+      await assertDisabled(batchDialog.getByRole("button", { name: /Apply to/ }), "An unavailable selected pair blocks the entire set");
+      if (batchTriageBodies.length !== 0) throw new Error("Unavailable hydration must not submit a subset");
+      await captureWorkflowViewportState(page, "16-cves", "batch-unavailable", "desktop");
+      await batchDialog.getByRole("button", { name: "Cancel" }).click();
+      await resetBatch();
+
+      // One actionable pair plus one unavailable pair is still one indivisible selection.
+      const oneValid = page.locator(".cve-package-card").filter({ has: page.locator(".cve-package-name", { hasText: "openssl" }) });
+      await oneValid.getByTestId("cve-row").filter({ hasText: "CVE-2024-1234" }).click({ modifiers: ["Control"] });
+      await oneValid.getByTestId("cve-row").filter({ hasText: "CVE-2024-5678" }).click({ modifiers: ["Control"] });
+      await openBatch([pairById("CVE-2024-1234"), pairById("CVE-2024-5678")]);
+      await assertVisible(batchDialog.getByText(/Inventory only — no current exact subjects/), "One unavailable pair must remain in the selected set");
+      await assertDisabled(batchDialog.getByRole("button", { name: /Apply to/ }), "One valid pair cannot authorize a partial write");
+      await batchDialog.getByRole("button", { name: "Cancel" }).click();
+      await resetBatch();
+
+      await chooseManualPairs();
+      await openBatch(manualPairs);
+      await captureWorkflowState(page, "16-cves", "batch-modal-default", () => assertVisible(batchDialog.getByText(/creates 1 POA&M/), "Exact current pairs should be writable"));
+      await captureWorkflowViewportState(page, "16-cves", "batch-default", "narrowDesktop");
+      await captureWorkflowState(page, "16-cves", "batch-multi-env", () => assertVisible(batchDialog.getByRole("button", { name: /Production 2 CVEs/ }), "Production must contain both selected pairs"));
+      await captureWorkflowViewportState(page, "16-cves", "batch-multi-env", "desktop");
+      await batchDialog.getByRole("button", { name: "Accept risk" }).click();
+      await batchDialog.getByRole("button", { name: /Development 1 CVEs/ }).click();
+      await batchDialog.getByRole("button", { name: /Lab 1 CVEs/ }).click();
+      await batchDialog.getByRole("textbox", { name: /Justification/ }).fill("Approved for the production fleet only.");
+      await captureWorkflowState(page, "16-cves", "batch-accept-panel", () => assertVisible(batchDialog.getByRole("button", { name: "Apply to 2" }), "Acceptance must be ready for two source pairs"));
+      await captureWorkflowViewportState(page, "16-cves", "batch-accept", "narrowDesktop");
+      await batchDialog.getByRole("button", { name: "Apply to 2" }).click();
+      await assertHidden(batchDialog, "Successful acceptance must close the batch dialog");
+      const acceptedBody = batchTriageBodies.at(-1);
+      if (batchTriageBodies.length !== 1 || acceptedBody.disposition.action !== "accept_risk" ||
+          acceptedBody.disposition.justification !== "Approved for the production fleet only." ||
+          !isDeepStrictEqual(acceptedBody.pairs.map(batchKey).sort(), manualPairs.map(batchKey).sort()) ||
+          !isDeepStrictEqual(acceptedBody.environment_ids, [environmentIds.production]) ||
+          !isDeepStrictEqual(acceptedBody.expected_tokens.map((token) => `${batchKey(token.pair)}|${token.environment_id}|${token.evidence_token}`).sort(),
+            manualPairs.map((pair) => `${batchKey(pair)}|${environmentIds.production}|${batchToken(pair, environmentIds.production)}`).sort()) ||
+          triageBodies.length !== 0) {
+        throw new Error(`Acceptance must submit one exact production-only batch, leaving unselected environments untouched: ${JSON.stringify(acceptedBody)}`);
+      }
+
+      await resetBatch();
+      await chooseManualPairs();
+      await openBatch(manualPairs);
+      await batchDialog.getByRole("combobox", { name: "Owner" }).selectOption(`user:00000000-0000-0000-0000-0000000000f1`);
+      await assertVisible(batchDialog.getByRole("button", { name: "One POA&M" }), "One-plan grouping must be available");
+      await captureWorkflowState(page, "16-cves", "batch-schedule-panel", () => assertVisible(batchDialog.getByRole("button", { name: "Apply to 2" }), "Schedule panel must accept typed assignee"));
+      await captureWorkflowViewportState(page, "16-cves", "batch-schedule", "narrowDesktop");
+      await batchDialog.getByRole("button", { name: "Apply to 2" }).click();
+      await assertHidden(batchDialog, "Successful schedule must close the dialog");
+      const scheduledBody = batchTriageBodies.at(-1);
+      if (batchTriageBodies.length !== 2 || scheduledBody.disposition.action !== "schedule_patch" ||
+          scheduledBody.disposition.grouping !== "ONE" ||
+          !isDeepStrictEqual(scheduledBody.disposition.assignee, { kind: "user", user_id: "00000000-0000-0000-0000-0000000000f1" }) ||
+          !isDeepStrictEqual(scheduledBody.pairs.map(batchKey).sort(), manualPairs.map(batchKey).sort()) ||
+          !isDeepStrictEqual([...scheduledBody.environment_ids].sort(),
+            [environmentIds.development, environmentIds.production, environmentIds.lab].sort()) ||
+          scheduledBody.expected_tokens.length !== scheduledBody.pairs.length * scheduledBody.environment_ids.length ||
+          !isDeepStrictEqual(scheduledBody.expected_tokens.map((token) =>
+            `${batchKey(token.pair)}|${token.environment_id}|${token.evidence_token}`).sort(),
+            manualPairs.flatMap((pair) => scheduledBody.environment_ids.map((id) =>
+              `${batchKey(pair)}|${id}|${batchToken(pair, id)}`)).sort()) ||
+          triageBodies.length !== 0) {
+        throw new Error(`Schedule must submit one source-backed, grouped POST without per-CVE mutations: ${JSON.stringify(scheduledBody)}`);
+      }
+
+      await resetBatch();
+      await chooseManualPairs();
+      await openBatch(manualPairs);
+      batchConflict = true;
+      await batchDialog.getByRole("combobox", { name: "Owner" }).selectOption(`user:00000000-0000-0000-0000-0000000000f1`);
+      await batchDialog.getByRole("button", { name: "Apply to 2" }).click();
+      await assertVisible(batchDialog.getByRole("alert").filter({ hasText: "no changes were applied" }), "409 must report atomic failure");
+      await expectBulkCount(2, 2);
+      if (batchTriageBodies.length !== 3 || triageBodies.length !== 0) throw new Error("Conflict must not retry or fall back to per-CVE mutation");
+      batchConflict = false;
+      await batchDialog.getByRole("button", { name: "Cancel" }).click();
+      await resetBatch();
+      await chooseManualPairs();
+      await openBatch(manualPairs);
+      await batchDialog.getByRole("button", { name: "Accept risk" }).click();
+      await batchDialog.getByRole("textbox", { name: /Justification/ }).fill("Accepted under documented controls.");
+      batchPartialSuccess = true;
+      await batchDialog.getByRole("button", { name: "Apply to 2" }).click();
+      await assertHidden(batchDialog, "Committed batch closes the dialog");
+      await expectBulkCount(1, 1);
+      await assertVisible(selectedBar.getByText("1 selected"), "Skipped exact pairs must remain selected after a committed batch");
+      batchPartialSuccess = false;
+      await resetBatch();
+      batchQuickFixture = true;
+      packageFilterFixture = false;
+      await page.goto(`${baseUrl}/cves?view=flat`);
+      await assertVisible(page.getByRole("button", { name: "Show more findings (200 of 202)" }), "Quick-pick fixture must expose its bounded first page");
+      await assertCount(page.getByTestId("cve-row"), 200, "Quick-pick fixture must have unloaded source pairs");
+      const quickChips = page.getByRole("toolbar", { name: "CVE selection" });
+      const quickExpectations = [
+        ["Critical 5", 200, "critical"], ["High 12", 2, "high"],
+        ["Patchable 20", 201, "available"], ["Outstanding 30", 201, "outstanding"],
+      ];
+      for (const [label, count, filter] of quickExpectations) {
+        const before = inventoryRequests.pairs.length;
+        await quickChips.getByRole("button", { name: label }).click();
+        await assertVisible(quickChips.getByText(`${count} selected`), `${label} must resolve every source-backed pair`);
+        await expectBulkCount(count, 1);
+        const fetches = inventoryRequests.pairs.slice(before);
+        const lastOffset = filter === "available" || filter === "outstanding" ? "200" : "0";
+        if (!fetches.some((url) => url.searchParams.get("offset") === lastOffset &&
+            (filter === "outstanding" ? url.searchParams.get("triage_status") === filter :
+              filter === "available" ? url.searchParams.get("fix_status") === filter : url.searchParams.get("severity") === filter))) {
+          throw new Error(`${label} did not hydrate its exact filtered source pairs (offset ${lastOffset})`);
+        }
+        if (label === "Critical 5") {
+          await assertDisabled(selectedBar.getByTestId("cve-batch-open"), "More than 100 selected pairs must disable batch triage");
+          await captureWorkflowState(page, "16-cves", "batch-over-100-disabled", () => assertVisible(selectedBar.getByRole("status"), "Bounded batch selection must explain its limit"));
+        }
+        if (label === "High 12") {
+          const highPairs = [3000 + 200, 3000 + 201].map((id) => ({ cve_id: `CVE-2024-${id}`, canonical_package_name: "openssl" }));
+          await assertCount(page.getByTestId("cve-row").filter({ hasText: highPairs[0].cve_id }), 0, "High pair must remain unloaded in the table");
+          await openBatch(highPairs);
+          await batchDialog.getByRole("button", { name: "Cancel" }).click();
+        }
+        await selectedBar.getByRole("button", { name: "Clear" }).click();
+        await assertHidden(selectedBar, `Clearing ${label} must remove all exact pairs`);
+      }
+      await page.goto(`${baseUrl}/cves?view=grouped`);
+      await assertPackages(["openssl"], [200]);
+      await assertVisible(page.getByRole("button", { name: "Show more findings (200 of 202)" }), "Package fixture must have an unloaded second pair page");
+      await assertVisible(page.locator(".cve-package-toggle").getByText(/host total unavailable/), "Multi-page package has no co-snapshot union");
+      await assertCount(page.getByTestId("cve-row"), 200, "Package header starts with only its first 200 children materialized");
+      const pagedHeader = page.locator(".cve-package-toggle").filter({ hasText: "openssl" });
+      const expandedBefore = await pagedHeader.getAttribute("aria-expanded");
+      const packageRequestsBefore = inventoryRequests.pairs.length;
+      await pagedHeader.click({ modifiers: ["Control"] });
+      await expectBulkCount(202, 1);
+      await assertDisabled(selectedBar.getByTestId("cve-batch-open"), "Package selection above the 100-pair mutation bound stays selected but cannot submit");
+      await assertVisible(selectedBar.getByRole("status"), "Over-limit package selection must explain the supported mutation maximum");
+      if (await pagedHeader.getAttribute("aria-expanded") !== expandedBefore) throw new Error("Modifier-click changed ordinary package expansion");
+      const packageFetches = inventoryRequests.pairs.slice(packageRequestsBefore);
+      if (!["0", "200"].every((offset) => packageFetches.some((url) => url.searchParams.get("package") === "openssl" && url.searchParams.get("offset") === offset))) {
+        throw new Error(`Package header did not page through the full authorized filtered pair set: ${packageFetches.join(", ")}`);
+      }
+      await captureWorkflowState(page, "16-cves", "batch-package-paged-selected", () => expectBulkCount(202, 1));
+      await pagedHeader.click({ modifiers: ["Control"] });
+      await assertHidden(selectedBar, "Second package modifier-click must deselect all 202 pairs, not just loaded children");
+      await pagedHeader.click({ modifiers: ["Control"] });
+      await expectBulkCount(202, 1);
+      await selectedBar.getByRole("button", { name: "Clear" }).click();
+      await assertHidden(selectedBar, "Clear must remove the full package set, including unloaded pairs");
+      await pagedHeader.click({ modifiers: ["Control"] });
+      await expectBulkCount(202, 1);
+      const loadedPackageRows = page.getByTestId("cve-row");
+      for (let index = 0; index < 103; index++) {
+        await loadedPackageRows.nth(index).click({ modifiers: ["Control"] });
+      }
+      await expectBulkCount(99, 1);
+      await assertCount(page.getByTestId("cve-row").filter({ hasText: "CVE-2024-3200" }), 0, "Unloaded package child stays absent from rendered rows");
+      await selectedBar.getByTestId("cve-batch-open").click();
+      await page.waitForFunction(() => document.querySelectorAll("[data-testid='cve-batch-dialog'] .cve-batch-id").length === 99);
+      const pagedBatchDetail = batchDetailBodies.at(-1);
+      for (const cveId of ["CVE-2024-3200", "CVE-2024-3201"]) {
+        if (!pagedBatchDetail.pairs.some((pair) => pair.cve_id === cveId && pair.canonical_package_name === "openssl")) {
+          throw new Error(`Batch hydration omitted unloaded selected package child ${cveId}`);
+        }
+        await assertVisible(batchDialog.getByText(cveId, { exact: true }), "Unloaded selected pair must appear in the batch modal");
+      }
+      await batchDialog.getByRole("button", { name: "Cancel" }).click();
+      await selectedBar.getByRole("button", { name: "Clear" }).click();
+      await page.getByRole("button", { name: "High", exact: true }).click();
+      await assertPackages(["openssl"], [2]);
+      const filteredRequestsBefore = inventoryRequests.pairs.length;
+      await page.locator(".cve-package-toggle").filter({ hasText: "openssl" }).click({ modifiers: ["Control"] });
+      await expectBulkCount(2, 1);
+      const filteredFetches = inventoryRequests.pairs.slice(filteredRequestsBefore);
+      if (!filteredFetches.some((url) => url.searchParams.get("package") === "openssl" && url.searchParams.get("severity") === "high" && url.searchParams.get("offset") === "0")) {
+        throw new Error("Package modifier-click ignored the active severity filter");
+      }
+      await page.locator(".cve-package-toggle").filter({ hasText: "openssl" }).click({ modifiers: ["Control"] });
+      await assertHidden(selectedBar, "Filtered package modifier-click must deselect exactly its two filtered pairs");
+      await page.getByRole("button", { name: "All", exact: true }).first().click();
+      await assertPackages(["openssl"], [200]);
+      let releasePackagePage;
+      let markPackagePageStarted;
+      let markPackagePageCompleted;
+      const packagePageStarted = new Promise((resolve) => { markPackagePageStarted = resolve; });
+      const packagePageCompleted = new Promise((resolve) => { markPackagePageCompleted = resolve; });
+      heldPackagePage = {
+        started: markPackagePageStarted,
+        release: new Promise((resolve) => { releasePackagePage = resolve; }),
+        completed: markPackagePageCompleted,
+      };
+      try {
+        await page.locator(".cve-package-toggle").filter({ hasText: "openssl" }).click({ modifiers: ["Control"] });
+        await packagePageStarted;
+        await page.getByRole("button", { name: "High", exact: true }).click();
+        await assertPackages(["openssl"], [2]);
+        releasePackagePage();
+        await packagePageCompleted;
+        await assertHidden(selectedBar, "Late unfiltered package page must not select pairs after the filter changes");
+      } finally {
+        heldPackagePage = null;
+        releasePackagePage?.();
+      }
+      batchQuickFixture = false;
+      wildcardPackageFixture = true;
+      await page.goto(`${baseUrl}/cves?view=grouped`);
+      await assertPackages(["lib_foo", "libXfoo", "lib%foo", "lib\\foo"], [1, 1, 1, 1]);
+      const wildcardRequestsBefore = inventoryRequests.pairs.length;
+      const wildcardHeader = page.locator(".cve-package-toggle").filter({ hasText: "lib_foo" });
+      await wildcardHeader.click({ modifiers: ["Control"] });
+      await expectBulkCount(1, 1);
+      if (!inventoryRequests.pairs.slice(wildcardRequestsBefore).some((url) => url.searchParams.get("package") === "lib_foo")) {
+        throw new Error("Wildcard-bearing package did not resolve server-backed exact pairs");
+      }
+      const exactWildcardRow = page.getByTestId("cve-row").filter({ hasText: "CVE-2024-7000" });
+      const otherWildcardRow = page.getByTestId("cve-row").filter({ hasText: "CVE-2024-7001" });
+      if (!(await exactWildcardRow.getAttribute("class"))?.includes("cve-row-selected") ||
+          (await otherWildcardRow.getAttribute("class"))?.includes("cve-row-selected")) {
+        throw new Error("Literal package selection included a different canonical package");
+      }
+      await wildcardHeader.click({ modifiers: ["Control"] });
+      await assertHidden(selectedBar, "Wildcard-bearing package toggle must deselect only its exact identity");
+      await page.getByPlaceholder("All packages…").fill("lib_foo");
+      await assertPackages(["lib_foo"], [1]);
+      await page.getByPlaceholder("All packages…").fill("lib%foo");
+      await assertPackages(["lib%foo"], [1]);
+      await page.locator(".cve-package-toggle").filter({ hasText: "lib%foo" }).click({ modifiers: ["Control"] });
+      await expectBulkCount(1, 1);
+      await assertVisible(page.getByTestId("cve-row").filter({ hasText: "CVE-2024-7002" }).locator(".mono").first(), "Literal percent package must be selectable");
+      if (!inventoryRequests.pairs.some((url) => url.searchParams.get("package") === "lib%foo")) throw new Error("Percent package selection must send literal package filter");
+      await selectedBar.getByRole("button", { name: "Clear" }).click();
+      await page.getByPlaceholder("All packages…").fill("lib\\foo");
+      await assertPackages(["lib\\foo"], [1]);
+      wildcardPackageFixture = false;
+      packageFilterFixture = true;
+      await page.goto(`${baseUrl}/cves`);
+      await assertPackages(["openssl", "glibc"], [3, 1]);
+      await page.getByRole("button", { name: "Low", exact: true }).click();
+      await assertPackages(["openssl"], [1]);
+      await assertVisible(page.locator(".cve-package-card tbody tr").getByText("CVE-2024-8080"), "Low filter must retain only the low child");
+      await captureWorkflowViewportState(page, "16-cves", "filtered-package-low-expanded", "desktop");
+      await page.getByRole("button", { name: "Medium", exact: true }).click();
+      await assertPackages([], []);
+      await page.getByRole("button", { name: "All", exact: true }).first().click();
+      await assertPackages(["openssl", "glibc"], [3, 1]);
+      await page.getByRole("button", { name: "Inventory only", exact: true }).click();
+      await assertPackages(["openssl"], [1]);
+      await page.getByRole("button", { name: "Any triage", exact: true }).click();
+      await page.getByRole("button", { name: "Has patch", exact: true }).click();
+      await assertPackages(["openssl", "glibc"], [2, 1]);
+      await page.getByRole("button", { name: "No patch", exact: true }).click();
+      await assertPackages(["openssl"], [1]);
+      await page.getByRole("button", { name: "Any status", exact: true }).click();
+      await page.getByPlaceholder("All packages…").fill("glibc");
+      await assertPackages(["glibc"], [1]);
+      await page.getByPlaceholder("All packages…").fill("");
+      await page.getByPlaceholder("Search CVE / package / title…").fill("8080");
+      await assertPackages(["openssl"], [1]);
+      await page.getByPlaceholder("Search CVE / package / title…").fill("");
+      await page.getByRole("combobox", { name: "Environment" }).selectOption(environmentIds.production);
+      await assertPackages(["openssl", "glibc"], [2, 1]);
+      await page.getByRole("combobox", { name: "Environment" }).selectOption(environmentIds.development);
+      await assertPackages(["openssl"], [2]);
+      packageFilterFixture = false;
+      await page.goto(`${baseUrl}/cves`);
+      await assertPackages(["openssl"], [2]);
+
+      const inventoryOnlyFilter = page.getByRole("button", { name: "Inventory only", exact: true });
+      const inventoryOnlyRequest = page.waitForRequest((request) => {
+        const url = new URL(request.url());
+        return url.pathname === "/api/v1/cves/inventory/pairs" && url.searchParams.get("triage_status") === "inventory_only";
+      });
+      await inventoryOnlyFilter.click();
+      await inventoryOnlyRequest;
+      await assertAttribute(inventoryOnlyFilter, "class", "active", "Inventory-only filter should retain selected state");
+      if (new URL(page.url()).searchParams.get("triage_status") !== "inventory_only") {
+        throw new Error(`Inventory-only filter was not retained in route state: ${page.url()}`);
+      }
+      const csvDownloadPromise = page.waitForEvent("download");
+      await page.getByRole("button", { name: /Export 1 ▾/ }).click();
+      await assertCount(page.getByRole("menu", { name: "Export CVEs" }).getByRole("menuitem"), 1, "Only working CSV export may appear");
+      await page.getByRole("menuitem", { name: /CSV/ }).click();
+      const csvDownload = await csvDownloadPromise;
+      const csvStream = await csvDownload.createReadStream();
+      let downloadedCsv = "";
+      for await (const chunk of csvStream) downloadedCsv += chunk.toString();
+      if (cveExportRequests.length !== 1
+        || cveExportRequests[0].searchParams.get("triage_status") !== "inventory_only"
+        || cveExportRequests[0].searchParams.get("sort") !== "severity"
+        || cveExportRequests[0].searchParams.has("limit")) {
+        throw new Error(`CVE CSV did not preserve active request filters: ${cveExportRequests.map(String).join(", ")}`);
+      }
+      const [csvHeader, csvRow] = downloadedCsv.trim().split(/\r?\n/);
+      for (const column of ["Affected Systems", "Currently Affected Systems", "Scheduled Deployment Targets", "Historical Inventory Systems"]) {
+        if (!csvHeader.split(",").includes(column)) throw new Error(`CVE CSV is missing '${column}': ${csvHeader}`);
+      }
+      if (csvRow.split(",").slice(6, 10).join(",") !== "4,3,2,1") {
+        throw new Error(`CVE CSV must preserve overlap-deduplicated active/current/scheduled/historical values: ${csvRow}`);
+      }
+      await page.getByRole("button", { name: "Any triage", exact: true }).click();
+      if (!inventoryRequests.pairs.some((url) => url.searchParams.get("triage_status") === "inventory_only")) {
+        throw new Error("Paged CVE request did not use triage_status=inventory_only");
+      }
+
+      // Each grouping must use the exact scoped aggregate and membership IDs.
+      const groupMode = (name) => page.getByRole("button", { name, exact: true }).last();
+      await groupMode("Environment").click();
+       const productionGroup = page.getByRole("button", { name: /Production.*2 distinct CVEs/ });
+       await assertVisible(productionGroup, "Environment mode must show Production's distinct CVEs");
+       await assertVisible(productionGroup.locator("xpath=../..").getByText("1 hosts with findings"), "Environment mode must deduplicate the current/scheduled Production host");
+      await productionGroup.click();
+      await assertVisible(page.getByText("prod-web-01", { exact: true }).first(), "Environment members must retain exact host identity");
+      if (!inventoryRequests.members.some((url) => url.searchParams.get("group_by") === "environment" &&
+          url.searchParams.get("group_id") === environmentIds.production)) {
+        throw new Error("Production expansion did not request exact environment membership");
+      }
+      await groupMode("Env › System").click();
+       const prodHosts = page.getByRole("button", { name: /Production.*2 distinct CVEs/ });
+      await prodHosts.click();
+       const prodHost = page.getByRole("button", { name: /prod-web-01.*2 distinct CVEs/ });
+       await assertVisible(prodHost, "Nested host mode must aggregate by stable system ID");
+       if (await prodHost.getAttribute("aria-expanded") === "false") await prodHost.click();
+       await assertAttribute(prodHost, "aria-expanded", "true", "Production host members must be expanded");
+       await assertVisible(page.getByText("Scheduled configuration", { exact: true }).first(), "Overlapping host must retain scheduled evidence");
+      if (!inventoryRequests.groups.some((url) => url.searchParams.get("group_by") === "host" &&
+          url.searchParams.get("environment_id") === environmentIds.production) ||
+          !inventoryRequests.members.some((url) => url.searchParams.get("group_by") === "host" &&
+            url.searchParams.get("group_id") === "00000000-0000-0000-0000-0000000000a2")) {
+        throw new Error("Nested host view did not request exact Production host membership");
+      }
+      await page.getByRole("combobox", { name: "Environment" }).selectOption(environmentIds.production);
+       await assertVisible(page.getByRole("button", { name: /Production.*2 distinct CVEs/ }), "Environment filter must retain matching group");
+       await assertCount(page.getByRole("button", { name: /Development.*distinct CVEs/ }), 0, "Environment filter must not leak another environment");
+      if (!inventoryRequests.groups.some((url) => url.searchParams.get("environment_id") === environmentIds.production &&
+          url.searchParams.get("group_by") === "environment") ||
+          !inventoryRequests.pairs.some((url) => url.searchParams.get("environment_id") === environmentIds.production)) {
+        throw new Error("Environment filter must reach both group and pair endpoints before paging");
+      }
+      const productionPairs = inventoryRows(new URL(`${baseUrl}/api/v1/cves/inventory/pairs?environment_id=${environmentIds.production}`)).rows;
+      if (productionPairs.length !== 2 || productionPairs.some((row) => row.affected_count !== 1 ||
+          row.current_affected_count !== (row.cve_id === cveRowFixture.cve_id ? 1 : 0) ||
+          row.scheduled_deployment_target_count !== 1)) {
+        throw new Error(`Scoped pairs must deduplicate the exact current/scheduled Production host: ${JSON.stringify(productionPairs)}`);
+      }
+      await page.getByRole("button", { name: /Export \d+ ▾/ }).click();
+      await assertDisabled(page.getByRole("menuitem", { name: /CSV/ }), "Environment-scoped export must not claim fleet CSV scope");
+      await assertVisible(page.getByText("Environment-scoped CSV unavailable"), "Scoped CSV limit must be explicit");
+      await page.getByRole("button", { name: /Export \d+ ▾/ }).click();
+      await page.getByRole("combobox", { name: "Environment" }).selectOption("");
+      // Flat mode still opens the same exact fleet drawer and retains inventory-only semantics.
+      const flatViewBtn = groupMode("None");
       await flatViewBtn.waitFor({ timeout: 5000 });
       await flatViewBtn.click();
 
       const cveRow = page.locator("main td:has-text('CVE-2024-1234')");
       await assertVisible(cveRow, "Expected CVE row to render");
+      const selectableRow = page.getByTestId("cve-row").filter({ hasText: "CVE-2024-1234" });
+      await selectableRow.click({ modifiers: ["Control"] });
+      await assertVisible(page.getByRole("toolbar", { name: "CVE selection" }).getByText("1 selected"), "Modifier click selects exact pair");
+      await assertCount(page.getByRole("dialog", { name: /fleet inventory/ }), 0, "Selecting must not open a drawer or mutate");
+      await selectableRow.click({ modifiers: ["Control"] });
+      await assertCount(page.getByRole("toolbar", { name: "CVE selection" }).getByText("1 selected", { exact: true }), 0, "Modifier click toggles pair");
+      await assertVisible(page.getByText("inventory only", { exact: true }), "Inventory-only rows must render read-only rather than outstanding");
 
       // Open the CVE detail drawer from the flat-view row and assert it renders.
       const openFleet = page.getByRole("button", {
@@ -12279,15 +14925,36 @@ const steps = [
       const drawerCveId = drawer.locator(".mono:has-text('CVE-2024-1234')").first();
       await assertVisible(drawerCveId, "Expected CVE id in drawer header");
       await assertVisible(drawer.getByText("OpenSSL bounds check issue"), "Expected advisory title in drawer header");
+      await assertCount(drawer.locator(".cve-fleet-title").getByText("CVE-2024-1234", { exact: true }), 0, "Human vulnerability title must not repeat the CVE identifier");
       await assertVisible(drawer.getByText("exploited in the wild"), "Expected exploited status in drawer header");
       const advisoryLink = drawer.getByTestId("cve-advisory-link");
       await assertVisible(advisoryLink, "Expected advisory action in drawer header");
       await assertAttribute(advisoryLink, "target", "_blank", "Advisory should open separately");
-      await assertAttribute(advisoryLink, "rel", "noopener noreferrer", "Advisory must not receive opener access");
-      await assertVisible(drawer.getByTestId("cve-cvss-vector").getByText(cveRowFixture.cvss_vector), "Expected CVSS vector section");
-      await assertVisible(drawer.getByTestId("cve-authority-details"), "Expected exact and legacy authority summary");
-      await assertVisible(drawer.getByTestId("cve-remediation").getByText("openssl-3.0.2"), "Expected prominent fixed-version remediation");
+       await assertAttribute(advisoryLink, "rel", "noopener noreferrer", "Advisory must not receive opener access");
+       await assertVisible(drawer.getByRole("button", { name: "Maximize fleet inventory" }), "Drawer must support maximize");
+        await assertVisible(drawer.getByTestId("cve-cvss-vector").getByText(cveRowFixture.cvss_vector), "Expected CVSS vector section");
+        const cvssStatColor = await drawer.getByTestId("cve-stat-cvss").evaluate((element) => getComputedStyle(element).color);
+        if (cvssStatColor !== "rgb(248, 113, 113)") {
+          throw new Error(`Critical CVSS summary should use the critical severity color, got ${cvssStatColor}`);
+        }
+       for (const label of ["CVSS", "Package", "Affected", "Fix", "Published"]) {
+         await assertVisible(drawer.locator(".cve-fleet-stats").getByText(label, { exact: true }), `Expected source-backed ${label} summary stat`);
+       }
+       await assertCount(drawer.locator(".cve-fleet-stats").getByText("Discovered", { exact: true }), 0, "Publication date must not be relabeled as discovery time");
+        await assertVisible(drawer.getByTestId("cve-authority-details"), "Expected exact and legacy authority summary");
+        await assertVisible(drawer.getByTestId("cve-triage-open"), "Authorized operator must retain fleet triage action");
+        await assertVisible(drawer.getByRole("button", { name: "Edit triage" }), "A previously dispositioned fleet must offer the edit action");
+        await assertVisible(drawer.getByTestId("cve-triage-section-action").getByText("Edit", { exact: true }), "Triage section must retain its local edit action");
+       await assertVisible(drawer.getByTestId("cve-remediation").getByText("openssl-3.0.2"), "Expected prominent fixed-version remediation");
+       await assertVisible(drawer.getByTestId("cve-remediation").getByText("3.0.1", { exact: true }), "Fixed-patch detail must retain the installed version");
+       await assertVisible(drawer.getByTestId("cve-remediation").getByText("3.0.2", { exact: true }), "Fixed-patch detail must identify the upstream fixed version");
+       await assertVisible(drawer.getByTestId("cve-remediation").getByText(/exact follow-up scan verifies absence/), "Fixed-patch detail must explain that exposure clears only after verification");
       await assertVisible(drawer.getByTestId("cve-affected-systems"), "Expected a distinct affected-systems section");
+      await assertVisible(drawer.getByText("Current exposure · 3", { exact: true }), "Expected current exposure inventory section");
+      await assertVisible(drawer.getByText("Scheduled configuration exposure · 2", { exact: true }), "Expected scheduled configuration inventory section");
+      await assertVisible(drawer.getByText("Historical evidence · 1", { exact: true }), "Expected historical evidence inventory section");
+       const authorityDetails = drawer.getByTestId("cve-authority-details");
+        await assertVisible(authorityDetails.locator("summary"), "Expected authority disclosure before checking scheduled-target semantics");
 
       const environmentCards = drawer.getByTestId("cve-fleet-environment");
       const developmentCard = environmentCards.filter({ has: page.getByText("Development", { exact: true }) });
@@ -12295,22 +14962,29 @@ const steps = [
       const labCard = environmentCards.filter({ has: page.getByText("Lab", { exact: true }) });
       const affectedEnvironmentCards = drawer.getByTestId("cve-affected-environment");
       const archiveInventory = affectedEnvironmentCards.filter({ has: page.getByText("Archive", { exact: true }) });
-      await assertVisible(drawer.getByText("MIXED", { exact: true }), "Expected authoritative mixed fleet rollup");
-      await assertVisible(developmentCard.getByText("EXACT ACCEPTED", { exact: true }), "Expected accepted environment state");
-      await assertVisible(developmentCard.getByText(/Accepted by Morgan Reyes/), "Expected accepted-risk disposition actor");
-      await assertVisible(developmentCard.getByText("review 2026-10-01"), "Expected accepted review date");
-      await assertVisible(productionCard.getByText("EXACT SCHEDULED", { exact: true }), "Expected scheduled environment state");
+      const rolloutInventory = affectedEnvironmentCards.filter({ has: page.getByText("Rollout target", { exact: true }) });
+       await assertVisible(developmentCard.getByText("Risk accepted", { exact: true }), "Expected accepted environment state");
+       await assertVisible(developmentCard.getByText(/Accepted by Morgan Reyes/), "Expected accepted-risk disposition actor");
+       await assertVisible(developmentCard.getByText("review Oct 1, 2026"), "Expected accepted review date");
+       await assertVisible(productionCard.getByText("Patch scheduled", { exact: true }), "Expected scheduled environment state");
       await assertVisible(productionCard.getByText(/Scheduled by Morgan Reyes/), "Expected scheduled-remediation actor");
       await assertVisible(productionCard.getByText("POAM-0042: Existing OpenSSL fleet remediation"), "Expected useful scheduled POA&M link label");
       await assertVisible(productionCard.getByText("Promote the fixed OpenSSL package and verify exact scan absence."), "Expected scheduled remediation plan");
       await assertVisible(productionCard.getByText("Platform operators"), "Expected typed scheduled assignee");
-      await assertVisible(productionCard.getByText("2026-10-15"), "Expected scheduled target date");
+       await assertVisible(productionCard.getByText("Oct 15, 2026"), "Expected scheduled target date");
       await assertVisible(productionCard.getByText("CAT I - High"), "Expected scheduled risk");
-      await assertVisible(labCard.getByText("EXACT OPEN", { exact: true }), "Expected open environment state");
-      await assertCount(environmentCards.filter({ has: page.getByText("Archive", { exact: true }) }), 0, "Legacy-only environments must not imply a triage disposition");
-      await assertVisible(drawer.getByTestId("cve-fleet-legacy"), "Expected display-only legacy fleet warning");
-      await assertVisible(drawer.getByTestId("cve-fleet-no-scan"), "Expected no-scan fleet warning");
-      await assertVisible(archiveInventory.getByText("LEGACY", { exact: true }), "Expected legacy host authority label");
+       await assertVisible(labCard.getByText("Outstanding", { exact: true }), "Expected open environment state");
+       await assertCount(environmentCards.filter({ has: page.getByText("Archive", { exact: true }) }), 0, "Legacy-only environments must not imply a triage disposition");
+         await authorityDetails.locator("summary").click();
+         await assertVisible(authorityDetails.getByText("MIXED", { exact: true }), "Expected authoritative mixed fleet rollup");
+         await assertVisible(authorityDetails.getByText(/Scheduled configuration findings describe deployment intent/), "Scheduled targets must remain distinct from POA&M patch scheduling");
+        await assertVisible(authorityDetails.getByText(/Historical and legacy evidence is read-only/), "Evidence authority disclosure must retain historical/legacy read-only limits");
+        await assertVisible(authorityDetails.getByText(/1 active host has no usable completed CVE scan/), "No-scan hosts must remain clearly excluded from exposure counts");
+        await authorityDetails.locator("summary").click();
+       await assertCount(drawer.getByTestId("cve-fleet-legacy"), 0, "Legacy evidence must not dominate the primary hierarchy");
+      await assertVisible(archiveInventory.locator(".cve-inventory-authority").getByText("HISTORICAL", { exact: true }), "Expected historical host authority label");
+      await assertVisible(rolloutInventory.locator(".cve-inventory-authority").getByText("SCHEDULED CONFIGURATION", { exact: true }), "Expected scheduled-only host section label");
+      await assertCount(environmentCards.filter({ has: page.getByText("Rollout target", { exact: true }) }), 0, "Scheduled-target-only environments must not imply a triage disposition");
       for (let index = 0; index < await affectedEnvironmentCards.count(); index += 1) {
         const card = affectedEnvironmentCards.nth(index);
         const declared = Number((await card.locator("header .mono").textContent()).match(/(\d+) host/)?.[1]);
@@ -12322,25 +14996,46 @@ const steps = [
       if (!new URL(page.url()).searchParams.get("cve_package")) {
         throw new Error(`Exact package selection was not encoded in URL state: ${page.url()}`);
       }
-      const assertFleetDetailCapture = async () => {
-        const authority = drawer.getByTestId("cve-authority-details");
-        const vector = drawer.getByTestId("cve-cvss-vector");
-        const legacyWarning = drawer.getByTestId("cve-fleet-legacy");
-        await assertVisible(authority, "CVE capture must preserve authority details");
-        const [authorityBox, vectorBox, legacyBox] = await Promise.all([
-          authority.boundingBox(),
-          vector.boundingBox(),
-          legacyWarning.boundingBox(),
-        ]);
-        const authorityRender = await authority.evaluate((element) => ({
-          opacity: getComputedStyle(element).opacity,
-        }));
-        if (!authorityBox || !vectorBox || !legacyBox || authorityBox.height < 30 || authorityRender.opacity !== "1" || authorityBox.y <= vectorBox.y || authorityBox.y >= legacyBox.y) {
-          throw new Error(`CVE authority details must render between the vector and legacy warning: ${JSON.stringify({ authorityBox, vectorBox, legacyBox, authorityRender })}`);
-        }
-      };
-      await captureWorkflowViewportState(page, "16-cves", "mixed-fleet-detail", "wide", assertFleetDetailCapture);
-      await captureWorkflowViewportState(page, "16-cves", "mixed-fleet-detail", "tablet", assertFleetDetailCapture);
+        const assertFleetDetailCapture = async () => {
+          await drawer.locator(".ed-body").evaluate((element) => { element.scrollTop = 0; });
+          await page.evaluate(() => { if (typeof window.closeDXToast === "function") window.closeDXToast(); });
+          const dismissToast = page.getByRole("button", { name: "Dismiss notification" });
+          if (await dismissToast.count()) await dismissToast.click();
+          const authority = drawer.getByTestId("cve-authority-details");
+         const vector = drawer.getByTestId("cve-cvss-vector");
+         await assertVisible(authority, "CVE capture must preserve authority details");
+         const [statsBox, vectorBox, triageBox, remediationBox, authorityBox, inventoryBox] = await Promise.all([
+           drawer.locator(".cve-fleet-stats").boundingBox(),
+           vector.boundingBox(),
+           drawer.getByTestId("cve-triage-status").boundingBox(),
+           drawer.getByTestId("cve-remediation").boundingBox(),
+           authority.boundingBox(),
+           drawer.getByTestId("cve-affected-systems").boundingBox(),
+         ]);
+          if (!statsBox || !vectorBox || !triageBox || !remediationBox || !authorityBox || !inventoryBox || !(statsBox.y < vectorBox.y && vectorBox.y < triageBox.y && triageBox.y < remediationBox.y && remediationBox.y < authorityBox.y && authorityBox.y < inventoryBox.y)) {
+            throw new Error(`CVE drawer does not follow the approved information hierarchy: ${JSON.stringify({ statsBox, vectorBox, triageBox, remediationBox, authorityBox, inventoryBox })}`);
+          }
+          const viewportWidth = await page.evaluate(() => window.innerWidth);
+          if (viewportWidth <= 700) {
+            const statsLast = await drawer.locator(".cve-fleet-stats > .ed-stat").last().boundingBox();
+            const [hostsOverflow, actions] = await Promise.all([
+              drawer.getByTestId("cve-fleet-host").evaluateAll((elements) => elements.some((element) => element.scrollWidth > element.clientWidth)),
+              drawer.getByTestId("cve-fleet-actions").boundingBox(),
+            ]);
+            if (!statsLast || !actions || statsLast.width + 2 < statsBox.width || hostsOverflow) {
+              throw new Error(`Narrow CVE drawer must use the full summary row and wrap host evidence without clipping: ${JSON.stringify({ statsLast, statsBox, actions, hostsOverflow })}`);
+            }
+          }
+       };
+        await captureWorkflowViewportState(page, "16-cves", "fixed-patch-detail", "desktop", assertFleetDetailCapture);
+        await captureWorkflowViewportState(page, "16-cves", "mixed-fleet-detail", "desktop", assertFleetDetailCapture);
+        await captureWorkflowViewportState(page, "16-cves", "mixed-fleet-detail", "wide", assertFleetDetailCapture);
+        await captureWorkflowViewportState(page, "16-cves", "mixed-fleet-detail", "tablet", assertFleetDetailCapture);
+        await captureWorkflowViewportState(page, "16-cves", "mixed-fleet-detail", "narrowDesktop", assertFleetDetailCapture);
+        await drawer.getByRole("button", { name: "Maximize fleet inventory" }).click();
+        await assertVisible(drawer.getByRole("button", { name: "Restore fleet inventory" }), "Maximized drawer must expose restore");
+        await captureWorkflowViewportState(page, "16-cves", "mixed-fleet-detail-maximized", "desktop", assertFleetDetailCapture);
+       await drawer.getByRole("button", { name: "Restore fleet inventory" }).click();
       await page.goBack();
       await assertHidden(drawer, "Browser back should close exact fleet detail");
       await page.goForward();
@@ -12350,9 +15045,11 @@ const steps = [
       let triageDialog = page.getByRole("dialog", { name: "Triage CVE-2024-1234 openssl" });
       await assertVisible(triageDialog, "Operator/Admin should receive the exact fleet triage editor");
       await assertVisible(triageDialog.getByTestId("cve-triage-context"), "Expected vulnerability context in triage editor");
+      await assertCount(triageDialog.getByTestId("cve-triage-scope-host"), 0, "Fleet triage must not expose a host scope selector");
+      await assertCount(triageDialog.getByTestId("cve-triage-scope-environment"), 0, "Fleet triage must not expose a System Detail environment scope selector");
       const assertTriageCapture = async () => {
         const context = triageDialog.getByTestId("cve-triage-context");
-        const firstEnvironment = triageDialog.locator(".cve-triage-env").first();
+        const firstEnvironment = triageDialog.getByTestId("cve-triage-environment").first();
         await assertVisible(context, "CVE triage capture must preserve vulnerability context");
         const [contextBox, environmentBox] = await Promise.all([context.boundingBox(), firstEnvironment.boundingBox()]);
         const contextOpacity = await context.evaluate((element) => getComputedStyle(element).opacity);
@@ -12397,30 +15094,50 @@ const steps = [
       await assertVisible(drawer, "Closing the nested triage editor should preserve fleet detail");
       await drawer.getByTestId("cve-triage-open").click();
       triageDialog = page.getByRole("dialog", { name: "Triage CVE-2024-1234 openssl" });
-      const developmentDraft = triageDialog.getByTestId("cve-triage-environment").filter({ hasText: "Development" });
       const productionDraft = triageDialog.getByTestId("cve-triage-environment").filter({ hasText: "Production" });
       const labDraft = triageDialog.getByTestId("cve-triage-environment").filter({ hasText: "Lab" });
+      await assertCount(triageDialog.getByTestId("cve-triage-environment"), 3, "Each actionable environment must use one disposition row");
+      await assertVisible(triageDialog.getByText("Disposition by environment", { exact: true }), "Fleet triage must label the environment disposition section");
+      await assertCount(triageDialog.getByTestId("cve-accept-justification"), 1, "One accepted environment must render one shared justification field");
+      await assertCount(triageDialog.getByTestId("cve-accept-review-date"), 1, "One accepted environment must render one shared review date");
+      await assertCount(triageDialog.getByTestId("cve-triage-poam"), 1, "One scheduled environment must render one shared POA&M panel");
+      for (const environmentRow of await triageDialog.getByTestId("cve-triage-environment").all()) {
+        await assertCount(environmentRow.getByTestId("cve-accept-justification"), 0, "Disposition rows must not own acceptance fields");
+        await assertCount(environmentRow.getByTestId("cve-accept-review-date"), 0, "Disposition rows must not own review-date fields");
+      }
+      for (const [name, color] of [["Development", "rgb(96, 165, 250)"], ["Production", "rgb(248, 113, 113)"], ["Lab", "rgb(167, 139, 250)"]]) {
+        const dotColor = await triageDialog.getByTestId("cve-triage-environment").filter({ hasText: name })
+          .locator(".cve-triage-decision-dot").evaluate((dot) => getComputedStyle(dot).backgroundColor);
+        if (dotColor !== color) throw new Error(`${name} disposition row must use its server environment color; expected ${color}, got ${dotColor}`);
+      }
+      await captureWorkflowViewportState(page, "16-cves", "triage-initial-one-accepted-one-scheduled", "desktop");
       await assertCount(
         triageDialog.getByTestId("cve-triage-environment").filter({ hasText: "Archive" }),
         0,
         "Legacy-only environments must not enter the triage draft",
       );
-      await developmentDraft.getByTestId("cve-accept-justification").fill("");
+      await assertCount(
+        triageDialog.getByTestId("cve-triage-environment").filter({ hasText: "Rollout target" }),
+        0,
+        "Scheduled-target-only environments must not enter the triage draft",
+      );
+      const justification = triageDialog.getByTestId("cve-accept-justification");
+      await justification.fill("");
       await triageDialog.getByTestId("cve-triage-submit").click();
       await assertVisible(
         triageDialog.getByRole("alert").filter({ hasText: "Development" }),
-        "Missing environment-specific acceptance justification must fail before POST",
+        "Missing shared acceptance justification must fail before POST",
       );
       if (triageBodies.length !== 0) throw new Error("Acceptance validation sent a triage request");
-      await developmentDraft.getByTestId("cve-accept-justification").fill("too short");
+      await justification.fill("too short");
       await triageDialog.getByTestId("cve-triage-submit").click();
       await assertVisible(
         triageDialog.getByRole("alert").filter({ hasText: "10 to 2000 bytes for Development" }),
-        "Short environment-specific acceptance justification must fail before POST",
+        "Short shared acceptance justification must fail before POST",
       );
       if (triageBodies.length !== 0) throw new Error("Short acceptance validation sent a triage request");
-      await developmentDraft.getByTestId("cve-accept-justification").fill("Internal-only service behind network segmentation.");
-      const reviewDate = developmentDraft.getByTestId("cve-accept-review-date");
+      await justification.fill("Internal-only service behind network segmentation.");
+      const reviewDate = triageDialog.getByTestId("cve-accept-review-date");
       await reviewDate.evaluate((input) => {
         input.type = "text";
         input.value = "invalid-review-date";
@@ -12433,15 +15150,39 @@ const steps = [
       );
       if (triageBodies.length !== 0) throw new Error("Review-date validation sent a triage request");
       await reviewDate.fill("");
-      if (await triageDialog.getByTestId("cve-poam-title").inputValue() !== "Existing OpenSSL fleet remediation") {
-        throw new Error("Scheduled POA&M title did not initialize from fleet metadata");
-      }
+      await productionDraft.getByRole("button", { name: "Leave open" }).click();
+      await assertCount(triageDialog.getByTestId("cve-triage-waiver"), 1, "One accepted environment must render one waiver panel");
+      await assertCount(triageDialog.getByTestId("cve-triage-poam"), 0, "An open environment must not retain an unused POA&M panel");
+      await captureWorkflowViewportState(page, "16-cves", "triage-one-accepted-environment", "desktop");
+      await labDraft.getByRole("button", { name: "Accept risk" }).click();
+      await assertCount(triageDialog.getByTestId("cve-accept-justification"), 1, "Two accepted environments must share one justification field");
+      await assertCount(triageDialog.getByTestId("cve-accept-review-date"), 1, "Two accepted environments must share one review date");
+      await captureWorkflowViewportState(page, "16-cves", "triage-multiple-accepted-environments", "desktop");
+      await productionDraft.getByRole("button", { name: "Schedule patch" }).click();
+      await assertCount(triageDialog.getByTestId("cve-triage-poam"), 1, "One scheduled environment must use one POA&M panel");
+      await captureWorkflowViewportState(page, "16-cves", "triage-one-scheduled-environment", "desktop");
+      await labDraft.getByRole("button", { name: "Schedule patch" }).click();
+      await assertCount(triageDialog.getByTestId("cve-triage-poam"), 1, "Two scheduled environments must share one POA&M panel");
+      await assertCount(triageDialog.getByTestId("cve-poam-assignee"), 1, "Two scheduled environments must share one owner field");
+      await assertCount(triageDialog.getByTestId("cve-poam-target"), 1, "Two scheduled environments must share one target date");
+      await assertCount(triageDialog.getByTestId("cve-poam-plan"), 1, "Two scheduled environments must share one remediation plan");
+      await labDraft.getByRole("button", { name: "Leave open" }).click();
+      await assertCount(triageDialog.getByTestId("cve-triage-environment"), 3, "Mixed environment intents retain all three rows");
+      await assertCount(triageDialog.getByTestId("cve-accept-justification"), 1, "Mixed acceptance and scheduling must not duplicate acceptance fields");
+      await assertCount(triageDialog.getByTestId("cve-accept-review-date"), 1, "Mixed acceptance and scheduling must not duplicate review dates");
+      await assertCount(triageDialog.getByTestId("cve-triage-poam"), 1, "Mixed acceptance and scheduling must keep one shared POA&M panel");
+      await captureWorkflowViewportState(page, "16-cves", "triage-mixed-environment-intents", "desktop");
+      await page.setViewportSize({ width: 900, height: 1000 });
+      await captureWorkflowViewportState(page, "16-cves", "triage-mixed-environment-intents", "narrowDesktop");
+      await page.setViewportSize(MANIFEST.settings.viewport);
+      await assertCount(triageDialog.getByTestId("cve-poam-title"), 0, "CVE triage must not expose an editable POA&M title");
       if (await triageDialog.getByTestId("cve-poam-target").inputValue() !== "2026-10-15") {
         throw new Error("Scheduled POA&M target date did not initialize from fleet metadata");
       }
       if (await triageDialog.getByTestId("cve-poam-plan").inputValue() !== "Promote the fixed OpenSSL package and verify exact scan absence.") {
         throw new Error("Scheduled POA&M plan did not initialize from fleet metadata");
       }
+      await assertCount(triageDialog.getByTestId("cve-poam-risk"), 0, "Compatible reuse must not expose an editable risk control");
       const assignee = triageDialog.getByTestId("cve-poam-assignee");
       if (await assignee.inputValue() !== "group:platform-operators") {
         throw new Error("Typed scheduled POA&M assignee did not initialize from fleet metadata");
@@ -12460,7 +15201,10 @@ const steps = [
         "Untyped assignee shape must fail before POST",
       );
       if (triageBodies.length !== 0) throw new Error("Assignee validation sent a triage request");
-      await assignee.selectOption("group:platform-operators");
+      await assignee.evaluate((select) => {
+        select.value = "group:platform-operators";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      });
       await triageDialog.getByTestId("cve-triage-submit").click();
       await assertVisible(
         drawer.getByRole("alert").filter({ hasText: "exact affected fleet changed" }),
@@ -12468,8 +15212,14 @@ const steps = [
       );
       if (triageBodies.length !== 1) throw new Error(`Expected one conflicted triage POST, got ${triageBodies.length}`);
       const firstTriage = triageBodies[0];
+      if (firstTriage.poam.title !== "Existing OpenSSL fleet remediation" || firstTriage.poam.risk !== "high") {
+        throw new Error(`Compatible POA&M reuse did not preserve server-authored title and risk: ${JSON.stringify(firstTriage.poam)}`);
+      }
       if (JSON.stringify(firstTriage).match(/system_id|hostname|actor|evidence/i)) {
         throw new Error(`Fleet triage body leaked server-owned authority: ${JSON.stringify(firstTriage)}`);
+      }
+      if (Object.hasOwn(firstTriage, "scope") || firstTriage.actions.some((action) => !Object.hasOwn(action, "environment_id"))) {
+        throw new Error(`Fleet environment request shape changed with System Detail scope support: ${JSON.stringify(firstTriage)}`);
       }
       if (firstTriage.actions.map((action) => action.action).join(",") !== "accept_risk,schedule_patch,leave_open") {
         throw new Error(`Mixed environment intentions were not preserved: ${JSON.stringify(firstTriage.actions)}`);
@@ -12539,6 +15289,9 @@ const steps = [
       legacyOnlyDetail.exact_affected_system_count = 0;
       legacyOnlyDetail.exact_mutation_target_count = 0;
       legacyOnlyDetail.legacy_affected_system_count = 1;
+      legacyOnlyDetail.current_affected_system_count = 0;
+      legacyOnlyDetail.scheduled_deployment_target_count = 0;
+      legacyOnlyDetail.historical_inventory_system_count = 1;
       legacyOnlyDetail.environments = [legacyOnlyDetail.environments.find((environment) => environment.environment_name === "Archive")];
       fleetDetailAfterMutation = legacyOnlyDetail;
       await openFleet.click();
@@ -12547,19 +15300,66 @@ const steps = [
         drawer.getByTestId("cve-triage-open"),
         "Legacy-only CVE inventory should show why fleet triage is unavailable",
       );
-      await assertVisible(
-        drawer.getByText("No exact current scan subjects are available"),
-        "Legacy-only CVE inventory should explain the read-only authority boundary",
-      );
-      await drawer.getByRole("button", { name: "Close fleet inventory" }).click();
-      await assertHidden(drawer, "Expected legacy-only detail to close");
+       const legacyAuthority = drawer.getByTestId("cve-authority-details");
+       await legacyAuthority.locator("summary").click();
+       await assertVisible(
+         legacyAuthority.getByText(/read-only and cannot authorize fleet triage/),
+         "Legacy-only CVE inventory should explain the read-only authority boundary",
+       );
+       await drawer.getByRole("button", { name: "Close fleet inventory" }).click();
+       await assertHidden(drawer, "Expected legacy-only detail to close");
 
-      const exactOnlyDetail = JSON.parse(JSON.stringify(fleetDetail));
+       const historicalHeavyDetail = JSON.parse(JSON.stringify(legacyOnlyDetail));
+       const historicalArchive = historicalHeavyDetail.environments[0];
+       historicalArchive.affected_system_count = 4;
+       historicalArchive.exact_affected_system_count = 0;
+       historicalArchive.legacy_affected_system_count = 4;
+       historicalArchive.current_affected_system_count = 0;
+       historicalArchive.historical_inventory_system_count = 4;
+       const historicalTemplate = historicalArchive.systems[0];
+       historicalArchive.systems = [historicalTemplate, ...[2, 3, 4].map((index) => ({
+         ...historicalTemplate,
+         system_id: `00000000-0000-0000-0000-0000000000b${index}`,
+         hostname: `archive-web-0${index}`,
+         primary_ip_address: `10.0.3.${index}`,
+       }))];
+       historicalHeavyDetail.affected_system_count = 4;
+       historicalHeavyDetail.exact_affected_system_count = 0;
+       historicalHeavyDetail.legacy_affected_system_count = 4;
+       historicalHeavyDetail.historical_inventory_system_count = 4;
+       fleetDetailAfterMutation = historicalHeavyDetail;
+       await openFleet.click();
+       await assertVisible(drawer, "Expected the historical-heavy CVE detail drawer to open");
+       await assertVisible(drawer.getByText("Historical evidence · 4", { exact: true }), "Historical-heavy detail must show the retained-evidence count");
+       await assertCount(drawer.getByTestId("cve-fleet-host"), 4, "Historical-heavy detail must retain all four historical hosts");
+       await assertDisabled(drawer.getByTestId("cve-triage-open"), "Historical-heavy evidence must remain read-only");
+       const historicalAuthority = drawer.getByTestId("cve-authority-details");
+       await historicalAuthority.locator("summary").click();
+       await assertVisible(historicalAuthority.getByText(/4 hosts have retained historical findings/), "Historical-heavy authority summary must disclose all retained hosts");
+       const assertHistoricalCapture = async () => {
+         await drawer.locator(".ed-body").evaluate((element) => { element.scrollTop = 0; });
+         await page.evaluate(() => { if (typeof window.closeDXToast === "function") window.closeDXToast(); });
+         const dismissToast = page.getByRole("button", { name: "Dismiss notification" });
+         if (await dismissToast.count()) await dismissToast.click();
+         await assertCount(drawer.getByTestId("cve-fleet-host"), 4, "Historical-heavy capture must retain all four historical hosts");
+       };
+       await captureWorkflowViewportState(page, "16-cves", "historical-heavy-detail", "desktop", assertHistoricalCapture);
+       await captureWorkflowViewportState(page, "16-cves", "historical-heavy-detail", "narrowDesktop", assertHistoricalCapture);
+       await drawer.getByRole("button", { name: "Close fleet inventory" }).click();
+       await assertHidden(drawer, "Expected historical-heavy detail to close");
+
+       const exactOnlyDetail = JSON.parse(JSON.stringify(fleetDetail));
       exactOnlyDetail.affected_system_count = 3;
       exactOnlyDetail.exact_affected_system_count = 3;
       exactOnlyDetail.exact_mutation_target_count = 3;
       exactOnlyDetail.legacy_affected_system_count = 0;
-      exactOnlyDetail.environments = exactOnlyDetail.environments.filter((environment) => environment.environment_name !== "Archive");
+      exactOnlyDetail.current_affected_system_count = 3;
+      exactOnlyDetail.scheduled_deployment_target_count = 0;
+      exactOnlyDetail.historical_inventory_system_count = 0;
+      exactOnlyDetail.environments = exactOnlyDetail.environments.filter((environment) =>
+        environment.environment_name !== "Archive" && environment.environment_name !== "Rollout target");
+      exactOnlyDetail.environments[1].systems = exactOnlyDetail.environments[1].systems.filter((system) => system.inventory_section === "current");
+      exactOnlyDetail.environments[1].scheduled_deployment_target_count = 0;
       fleetDetailAfterMutation = exactOnlyDetail;
       await openFleet.click();
       await assertVisible(drawer, "Expected exact-only CVE inventory to remain actionable");
@@ -12599,15 +15399,197 @@ const steps = [
         throw new Error(`CVE detail drawer overflows the viewport: ${JSON.stringify(drawerGeometry)}`);
       }
 
+      largePairFixture = true;
+      await page.goto(`${baseUrl}/cves?view=flat`, { timeout: LOAD_TIMEOUT });
+       await assertVisible(page.getByRole("button", { name: "Show more findings (200 of 205)" }), "First bounded pair page must expose continuation");
+      await assertCount(page.getByTestId("cve-row"), 200, "First pair page must not silently truncate or prefetch remaining rows");
+       await page.getByRole("button", { name: "Show more findings (200 of 205)" }).click();
+      await page.waitForFunction(() => document.querySelectorAll('[data-testid="cve-row"]').length === 205, null, { timeout: LOAD_TIMEOUT });
+      await assertCount(page.getByTestId("cve-row"), 205, "Second pair page must append remaining pairs");
+      if (!inventoryRequests.pairs.some((url) => url.searchParams.get("offset") === "200" &&
+          url.searchParams.get("limit") === "200")) {
+        throw new Error("Pair continuation did not request exact offset 200 and limit 200");
+      }
+      const largeQuick = page.getByRole("toolbar", { name: "CVE selection" });
+      const readsBeforeQuick = inventoryRequests.pairs.length;
+      await largeQuick.getByRole("button", { name: "Critical 5" }).click();
+      await assertVisible(largeQuick.getByText("205 selected"), "Critical quick-select must page beyond 200 without truncating");
+      if (!inventoryRequests.pairs.slice(readsBeforeQuick).some((url) => url.searchParams.get("severity") === "critical" && url.searchParams.get("offset") === "200")) {
+        throw new Error("Quick-select did not fetch the second exact filtered pair page");
+      }
+      await largeQuick.getByRole("button", { name: "Critical 5" }).click();
+      await page.waitForFunction(() => ![...document.querySelectorAll(".cve-selection-strip span")].some((node) => node.textContent.trim() === "205 selected"));
+      await assertAttribute(largeQuick.getByRole("button", { name: "Critical 5" }), "aria-pressed", "false", "Second quick-select click must remove all 205 exact pairs");
+      largePairFixture = false;
+
+      await page.goto(`${baseUrl}/cves?focus_cve=CVE-2024-1234`, { timeout: LOAD_TIMEOUT });
+      await assertCount(page.getByTestId("cve-notification-focus"), 0, "CVE focus must not add an unapproved notification banner");
+      await assertVisible(page.getByTestId("cve-fleet-drawer"), "One current package match should open its exact fleet drawer");
+      await assertAttribute(
+        page.getByTestId("cve-fleet-drawer"),
+        "aria-label",
+        "CVE-2024-1234 openssl fleet inventory",
+        "The focused drawer must use the unique exact package match",
+      );
+      await captureWorkflowViewportState(page, "16-cves", "notification-focus-single-package", "desktop");
+      await page.getByRole("button", { name: "Close fleet inventory" }).click();
+      await page.waitForFunction(
+        () => new URLSearchParams(window.location.search).get("focus_cve") === "CVE-2024-1234",
+      );
+      await assertValue(page.getByPlaceholder("Search CVE / package / title…"), "CVE-2024-1234", "Closing the package drawer must preserve the focused CVE filter");
+      await assertHidden(page.getByTestId("cve-fleet-drawer"), "The package drawer should close without clearing the focused CVE list");
+
+      focusedCveFixtureMode = "multiple";
+      await page.goto(`${baseUrl}/cves?focus_cve=CVE-2024-1234`, { timeout: LOAD_TIMEOUT });
+      await assertCount(page.getByTestId("cve-notification-focus"), 0, "Multiple package focus must not invent a notification banner");
+      await assertHidden(page.getByTestId("cve-fleet-drawer"), "Multiple current packages must not choose a package drawer");
+      await assertVisible(page.getByText("openssl", { exact: true }), "Focused list should retain the first matching package");
+      await assertVisible(page.getByText("glibc", { exact: true }), "Focused list should retain the second matching package");
+      await page.getByRole("button", { name: "Package", exact: true }).click();
+      await assertVisible(page.locator(".cve-package-toggle").filter({ hasText: "openssl" }).getByText(/host total unavailable/), "Focused CVE must not count hosts from hidden package siblings");
+      await captureWorkflowViewportState(page, "16-cves", "notification-focus-multiple-packages", "desktop");
+
+      focusedCveFixtureMode = "scheduled";
+      const scheduledOnlyDetail = JSON.parse(JSON.stringify(fleetDetail));
+      scheduledOnlyDetail.affected_system_count = 2;
+      scheduledOnlyDetail.exact_affected_system_count = 2;
+      scheduledOnlyDetail.exact_mutation_target_count = 0;
+      scheduledOnlyDetail.current_affected_system_count = 0;
+      scheduledOnlyDetail.scheduled_deployment_target_count = 2;
+      scheduledOnlyDetail.historical_inventory_system_count = 0;
+      scheduledOnlyDetail.environments = scheduledOnlyDetail.environments.filter((environment) =>
+        environment.environment_name === "Rollout target");
+      fleetDetailAfterMutation = scheduledOnlyDetail;
+      await page.goto(`${baseUrl}/cves?focus_cve=CVE-2024-1234`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.getByTestId("cve-fleet-drawer"), "A unique scheduled-target package must remain discoverable");
+       await assertVisible(page.getByText("Scheduled configuration exposure · 2", { exact: true }), "Scheduled-only focus must disclose target exposure");
+      await assertVisible(page.getByText("rollout-web-01", { exact: true }), "Scheduled-only focus must open the exact package drawer");
+      await assertDisabled(page.getByTestId("cve-triage-open"), "Scheduled deployment evidence must remain read-only");
+      await captureWorkflowViewportState(page, "16-cves", "notification-focus-scheduled-package", "desktop");
+      await page.getByRole("button", { name: "Close fleet inventory" }).click();
+      await assertHidden(page.getByTestId("cve-fleet-drawer"), "Scheduled package detail should close without clearing URL focus");
+
+      focusedCveFixtureMode = "historical";
+      fleetDetailAfterMutation = legacyOnlyDetail;
+      await page.goto(`${baseUrl}/cves?focus_cve=CVE-2024-1234`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.getByTestId("cve-fleet-drawer"), "A unique historical package must remain discoverable");
+       await assertVisible(page.getByText("Historical evidence · 1", { exact: true }), "Historical-only focus must disclose retained evidence");
+      await assertVisible(page.getByText("archive-web-01", { exact: true }), "Historical-only focus must open the exact package drawer");
+      await assertDisabled(page.getByTestId("cve-triage-open"), "Historical evidence must remain read-only");
+      await captureWorkflowViewportState(page, "16-cves", "notification-focus-historical-package", "desktop");
+      await page.getByRole("button", { name: "Close fleet inventory" }).click();
+      await assertHidden(page.getByTestId("cve-fleet-drawer"), "Historical package detail should close without clearing URL focus");
+
+      focusedCveFixtureMode = "metadata-only";
+      fleetDetailAfterMutation = null;
+      await page.goto(`${baseUrl}/cves?focus_cve=CVE-2024-1234`, { timeout: LOAD_TIMEOUT });
+      await assertCount(page.getByTestId("cve-fleet-drawer"), 0, "Metadata without package evidence must not fabricate a package drawer");
+      await assertVisible(page.getByText("No retained package finding matches this focused CVE."), "Metadata-only focus must use the paged empty-list state");
+      await assertCount(page.getByTestId("cve-notification-focus"), 0, "Metadata-only focus must not invent presentation copy");
+      await captureWorkflowViewportState(page, "16-cves", "notification-focus-metadata-only", "desktop");
+
+      focusedCveFixtureMode = "stale";
+      await page.goto(`${baseUrl}/cves?focus_cve=CVE-2024-9999`, { timeout: LOAD_TIMEOUT });
+      await assertValue(page.getByPlaceholder("Search CVE / package / title…"), "CVE-2024-9999", "A stale CVE should retain its focused URL-backed filter");
+      await assertVisible(page.getByText("No retained package finding matches this focused CVE."), "A stale focused CVE should use the paged empty-list state");
+      await assertCount(page.getByTestId("cve-notification-focus"), 0, "A stale focus must not display an invented notification banner");
+      await assertHidden(page.getByTestId("cve-fleet-drawer"), "A stale CVE must not open a package drawer");
+      await captureWorkflowViewportState(page, "16-cves", "notification-focus-stale-cve", "desktop");
+
+      await page.goto(`${baseUrl}/cves?focus_cve=not-a-cve`, { timeout: LOAD_TIMEOUT });
+      await assertCount(page.getByTestId("cve-notification-focus"), 0, "Invalid focused CVE values must not display notification copy");
+      await assertHidden(page.getByTestId("cve-fleet-drawer"), "Invalid focused CVE values must not open a package drawer");
+
+      await page.goto(`${baseUrl}/cves?view=flat`, { timeout: LOAD_TIMEOUT });
+      const noPatchRow = page.getByTestId("cve-row").filter({ hasText: "CVE-2024-5678" });
+      await assertVisible(noPatchRow, "The no-upstream-patch fixture must remain browseable");
+      await noPatchRow.click();
+      const noPatchDrawer = page.getByRole("dialog", { name: "CVE-2024-5678 openssl fleet inventory" });
+      await assertVisible(noPatchDrawer, "No-patch CVE must open its exact package drawer");
+      await assertVisible(noPatchDrawer.getByText("OpenSSL vulnerability without an upstream patch", { exact: true }), "Drawer header must use the source-backed human title");
+      await assertCount(noPatchDrawer.locator(".cve-fleet-title").getByText("CVE-2024-5678", { exact: true }), 0, "No-patch header must not repeat the CVE ID as a title");
+      await assertVisible(noPatchDrawer.getByTestId("cve-remediation").getByText(/No upstream patch is reported/), "No-patch remediation must show the truthful warning once");
+      await assertVisible(noPatchDrawer.getByTestId("cve-remediation").getByText("Observed version", { exact: true }), "No-patch drawer must retain its source-backed observed version label");
+      await assertVisible(noPatchDrawer.getByTestId("cve-remediation").getByText("nvd.nist.gov", { exact: true }), "No-patch drawer must retain its advisory reference");
+       await assertDisabled(noPatchDrawer.getByTestId("cve-triage-open"), "Scheduled and historical evidence must not enable current triage");
+       const unavailableTriageClass = await noPatchDrawer.getByTestId("cve-triage-open").getAttribute("class");
+       if (!unavailableTriageClass?.includes("btn-ghost") || unavailableTriageClass.includes("btn-primary")) {
+         throw new Error(`Unavailable triage must not be styled as the primary action: ${unavailableTriageClass}`);
+       }
+       await assertVisible(noPatchDrawer.getByTestId("cve-authority-details").locator("summary"), "Evidence authority must stay available as a disclosure");
+       await noPatchDrawer.getByTestId("cve-authority-details").locator("summary").click();
+       await assertVisible(noPatchDrawer.getByTestId("cve-authority-details").getByText("No current exact scan findings are available for fleet triage.", { exact: true }), "No-target triage explanation must remain available in secondary evidence detail");
+       await assertVisible(noPatchDrawer.getByTestId("cve-authority-details").getByText(/no usable completed CVE scan/), "No-usable-scan state must remain available in secondary evidence detail");
+       await noPatchDrawer.getByTestId("cve-authority-details").locator("summary").click();
+       await assertHidden(noPatchDrawer.getByTestId("cve-authority-details").getByText("No current exact scan findings are available for fleet triage.", { exact: true }), "No-target triage explanation must not dominate the collapsed drawer");
+      const noPatchOrder = async () => {
+        const [stats, vector, triage, remediation, authority, inventory] = await Promise.all([
+          noPatchDrawer.locator(".cve-fleet-stats").boundingBox(),
+          noPatchDrawer.getByTestId("cve-cvss-vector").boundingBox(),
+          noPatchDrawer.getByTestId("cve-triage-status").boundingBox(),
+          noPatchDrawer.getByTestId("cve-remediation").boundingBox(),
+          noPatchDrawer.getByTestId("cve-authority-details").boundingBox(),
+          noPatchDrawer.getByTestId("cve-affected-systems").boundingBox(),
+        ]);
+        if (![stats, vector, triage, remediation, authority, inventory].every(Boolean) ||
+            !(stats.y < vector.y && vector.y < triage.y && triage.y < remediation.y && remediation.y < authority.y && authority.y < inventory.y)) {
+          throw new Error(`No-patch drawer lost the approved information hierarchy: ${JSON.stringify({ stats, vector, triage, remediation, authority, inventory })}`);
+        }
+        const cvssStatColor = await noPatchDrawer.getByTestId("cve-stat-cvss").evaluate((element) => getComputedStyle(element).color);
+        const fixStatColor = await noPatchDrawer.locator(".cve-fix-value").evaluate((element) => getComputedStyle(element).color);
+        if (cvssStatColor !== "rgb(248, 113, 113)" || fixStatColor !== "rgb(251, 191, 36)") {
+          throw new Error(`Critical/no-patch summary colors must communicate severity and patch availability: ${JSON.stringify({ cvssStatColor, fixStatColor })}`);
+        }
+        if (await page.evaluate(() => window.innerWidth) <= 700) {
+          const statsLast = await noPatchDrawer.locator(".cve-fleet-stats > .ed-stat").last().boundingBox();
+          const statsBox = await noPatchDrawer.locator(".cve-fleet-stats").boundingBox();
+          const hostsOverflow = await noPatchDrawer.getByTestId("cve-fleet-host").evaluateAll((elements) => elements.some((element) => element.scrollWidth > element.clientWidth));
+          if (!statsLast || !statsBox || statsLast.width + 2 < statsBox.width || hostsOverflow) {
+            throw new Error(`Narrow no-patch drawer must not leave a blank summary cell or clip host evidence: ${JSON.stringify({ statsLast, statsBox, hostsOverflow })}`);
+          }
+        }
+      };
+      await captureWorkflowViewportState(page, "16-cves", "no-patch-drawer", "desktop", noPatchOrder);
+      await captureWorkflowViewportState(page, "16-cves", "no-patch-drawer", "narrowDesktop", noPatchOrder);
+      await noPatchDrawer.getByRole("button", { name: "Close fleet inventory" }).click();
+      await assertHidden(noPatchDrawer, "No-patch fleet detail should close normally");
+
       // Unroute after test.
       await page.unroute("**/api/v1/cves/stats*");
       await page.unroute("**/api/v1/cves/packages*");
-      await page.unroute(/\/api\/v1\/cves\/grouped(?:\?.*)?$/);
-      await page.unroute(/\/api\/v1\/cves\/CVE-2024-1234\/fleet\?package=openssl$/);
+      await page.unroute("**/api/v1/environments");
+      await page.unroute(inventoryRoute);
+       await page.unroute(/\/api\/v1\/cves\/(CVE-2024-1234|CVE-2024-5678)\/fleet\?package=openssl$/);
       await page.unroute("**/api/v1/poams/assignees");
       await page.unroute(/\/api\/v1\/cves\/CVE-2024-1234\/triage$/);
-      await page.unroute(/\/api\/v1\/cves(?:\?.*)?$/);
+      await page.unroute(/\/api\/v1\/cves\/export(?:\?.*)?$/);
       await page.unroute("**/api/v1/cves/rescan-fleet");
+
+      const cveNotificationId = "77777777-7777-4777-8777-777777777779";
+      const cveNotificationRequests = await mockAccountNotifications(page, {
+        id: cveNotificationId,
+        category: "critical_cves",
+        source_type: "cves",
+        source_id: "CVE-2024-1234",
+        title: "New critical CVE",
+        summary: "A critical CVE attention episode opened.",
+        route: "/cves",
+      });
+      const notificationsBell = page.locator("[data-testid='topbar-notifications-button']");
+      await assertVisible(notificationsBell, "Expected the shared notification bell before CVE navigation");
+      await notificationsBell.click();
+      const notificationsPanel = page.locator("[data-testid='topbar-notifications-panel']");
+      const cveNotificationRow = notificationsPanel.locator(`[data-testid="topbar-notification-item-${cveNotificationId}"]`);
+      await assertVisible(cveNotificationRow, "Expected the critical-CVE notification for focus navigation");
+      const cveNotificationRead = page.waitForResponse((response) =>
+        response.url().endsWith(`/api/v1/user/notifications/${cveNotificationId}/read`));
+      await cveNotificationRow.click();
+      if ((await cveNotificationRead).status() !== 204 || cveNotificationRequests.read.length !== 1) {
+        throw new Error("Critical-CVE notification activation must preserve the existing mark-read request");
+      }
+      await page.waitForURL((url) =>
+        url.pathname === "/cves" && url.searchParams.get("focus_cve") === "CVE-2024-1234",
+      { timeout: LOAD_TIMEOUT });
 
       // Regression guard for the route-leak fix above: routeStandaloneUiBootstrap()
       // must not run unconditionally in this step. Its broad
@@ -15989,516 +18971,1861 @@ security.audit.enable = true;</fixtext>
   },
   {
     name: "16c-scanning-view",
-    description: "Scanning view - live endpoint wiring, nested rows, and schedule modal",
+    description: "Scanning view - authoritative lifecycle collections, diagnostics, retention, and system history",
     action: async (page) => {
-      const exactRescanRequests = [];
-      const exactRescanRoute = /\/api\/v1\/cves\/rescan\/\d+(?:\?.*)?$/;
-      let diagnosticMode = "loaded";
-      let diagnosticRequests = 0;
-      const diagnosticResponses = [];
-      let releaseInitialDiagnosticRequest;
-      const initialDiagnosticGate = new Promise((resolve) => {
-        releaseInitialDiagnosticRequest = resolve;
+      const ids = {
+        running: "10000000-0000-4000-8000-000000000001",
+        build: "10000000-0000-4000-8000-000000000002",
+        closure: "10000000-0000-4000-8000-000000000003",
+        pending: "10000000-0000-4000-8000-000000000004",
+        failedBuild: "10000000-0000-4000-8000-000000000005",
+        cancelledBuild: "10000000-0000-4000-8000-000000000006",
+        newest: "20000000-0000-4000-8000-000000000001",
+        superseded: "20000000-0000-4000-8000-000000000002",
+        failed: "20000000-0000-4000-8000-000000000003",
+        oldFailure: "20000000-0000-4000-8000-000000000004",
+        retained: "20000000-0000-4000-8000-000000000005",
+        gray: "20000000-0000-4000-8000-000000000006",
+        liveArrival: "20000000-0000-4000-8000-000000000007",
+        rangeOne: "20000000-0000-4000-8000-000000000008",
+        rangeTwo: "20000000-0000-4000-8000-000000000009",
+        rangeThree: "20000000-0000-4000-8000-000000000010",
+        rangeFour: "20000000-0000-4000-8000-000000000011",
+        systemFailed: "20000000-0000-4000-8000-000000000012",
+      };
+      const timestamp = (hour) => `2026-09-20T${String(hour).padStart(2, "0")}:00:00Z`;
+      // Terminal fixtures are ordered by minutes before a fixed newest moment.
+      // Named rows keep the newest positions so existing first-page coverage
+      // stays valid, and the bulk rows extend the collection past the former
+      // 500-row client cap with interleaved failed and completed timestamps.
+      const terminalOrigin = Date.parse("2026-09-20T18:00:00Z");
+      const terminalAt = (minutesBeforeNewest) => new Date(terminalOrigin - minutesBeforeNewest * 60_000).toISOString();
+      const record = (scanId, derivationId, hostname, flakeName, revision, status, at, extra = {}) => ({
+        scan_id: scanId,
+        derivation_id: derivationId,
+        hostname,
+        flake_name: flakeName,
+        commit_hash: revision,
+        status,
+        source_trigger: "manual",
+        created_at: at,
+        scheduled_at: at,
+        started_at: status === "in_progress"
+          ? new Date(Date.now() - 305_000).toISOString()
+          : ["completed", "failed"].includes(status) && extra.attempts !== 0 ? at : null,
+        completed_at: ["completed", "failed"].includes(status) ? at : null,
+        scanner_name: "vulnix",
+        scanner_version: "1.12.4",
+        executor: "builder-a",
+        failure: status === "failed" ? `failure for ${revision}` : null,
+        wait_reason: null,
+        build_job_id: `30000000-0000-4000-8000-${String(derivationId).padStart(12, "0")}`,
+        build_status: status === "failed" ? "failed" : status === "awaiting_build" ? "queued" : "success",
+        total_packages: status === "completed" ? 120 : 0,
+        total_vulnerabilities: status === "completed" ? 4 : 0,
+        critical_count: status === "completed" ? 1 : 0,
+        high_count: status === "completed" ? 2 : 0,
+        medium_count: status === "completed" ? 1 : 0,
+        low_count: 0,
+        scan_duration_ms: status === "in_progress" ? 1_000 : 42_000,
+        attempts: 1,
+        archived_at: null,
+        cancellable: false,
+        is_current: false,
+        is_latest_per_flake: false,
+        ...extra,
       });
-      await page.route("**/api/v1/cves/rescan-fleet", async (route) => {
-        await new Promise((resolve) => setTimeout(resolve, 120));
-        await route.fulfill({
-          status: 202,
-          contentType: "application/json",
-          body: JSON.stringify({
-            eligible_count: 3,
-            enqueued_count: 2,
-            reused_count: 1,
-            message: "Queued 2 CVE scan(s); 1 already had an active scan.",
-          }),
-        });
+      const activeRows = [
+        record(ids.running, 101, "zeta-running", "edge-fleet", "ffff-running", "in_progress", timestamp(9), { is_latest_per_flake: true }),
+        record(ids.build, 102, "alpha-build-wait", "core-fleet", "aaaa-build", "awaiting_build", timestamp(8), { scheduled_at: null, wait_reason: "Build output is not available." }),
+        record(ids.closure, 103, "beta-closure-wait", "core-fleet", "bbbb-closure", "awaiting_closure", timestamp(7), { wait_reason: "A completed cache closure is not available." }),
+        record(ids.pending, 104, "gamma-queued", "lab-fleet", "cccc-queued", "pending", timestamp(6), { created_at: timestamp(1), scheduled_at: timestamp(10) }),
+      ];
+      const namedTerminalRows = [
+        record(ids.failed, 203, "omega-new-failure", "failure-fleet", "ffff-failed", "failed", terminalAt(1)),
+        record(ids.gray, 206, "gray", "core-fleet", "gray-recent-revision", "completed", terminalAt(2), { is_latest_per_flake: true }),
+        record(ids.newest, 201, "alpha-current", "core-fleet", "zzzz-current", "completed", terminalAt(3), { is_current: true, scheduled_at: terminalAt(30) }),
+        record(ids.retained, 205, "retained-archive", "archive-fleet", "dddd-archive", "completed", terminalAt(4)),
+        record(ids.superseded, 202, "alpha-old", "core-fleet", "aaaa-old", "completed", terminalAt(5)),
+        record(ids.oldFailure, 204, "omega-old-failure", "failure-fleet", "eeee-failed", "failed", terminalAt(6), { failure: `bounded failure ${"detail ".repeat(30)}` }),
+        record(ids.failedBuild, 105, "delta-build-failed", "failed-build-fleet", "dddd-build-failed", "failed", terminalAt(7), { source_trigger: "post_build", attempts: 0, build_status: "failed", failure: "The associated build failed before vulnix started." }),
+        record(ids.cancelledBuild, 106, "epsilon-build-cancelled", "cancelled-build-fleet", "eeee-build-cancelled", "failed", terminalAt(8), { source_trigger: "post_build", attempts: 0, build_status: "cancelled", failure: "The associated build was cancelled before vulnix started." }),
+        // Consecutive deterministic rows make the range restore assertion
+        // independent of older archived rows elsewhere in display order.
+        record(ids.rangeOne, 301, "range-one", "range-fleet", "range-revision-1", "completed", terminalAt(9)),
+        record(ids.rangeTwo, 302, "range-two", "range-fleet", "range-revision-2", "completed", terminalAt(10)),
+        record(ids.rangeThree, 303, "range-three", "range-fleet", "range-revision-3", "completed", terminalAt(11)),
+        record(ids.rangeFour, 304, "range-four", "range-fleet", "range-revision-4", "completed", terminalAt(12)),
+        record(ids.systemFailed, 401, "prod-server-01", "core-fleet", "dddd-system-failure", "failed", terminalAt(13)),
+      ];
+      const BULK_TERMINAL_ROWS = 700;
+      // Index 400 names the configuration searched for while it sits far
+      // beyond the first page, which proves search reaches the whole
+      // collection instead of the loaded rows.
+      const DEEP_SEARCH_INDEX = 400;
+      const bulkTerminalRows = Array.from({ length: BULK_TERMINAL_ROWS }, (_, index) => {
+        const failed = index % 10 < 7;
+        const suffix = String(index).padStart(3, "0");
+        return record(
+          `40000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+          1_000 + index,
+          index === DEEP_SEARCH_INDEX ? "needle-deep-config" : `bulk-${failed ? "failed" : "completed"}-${suffix}`,
+          index % 2 === 0 ? "core-fleet" : "lab-fleet",
+          `bulk-revision-${suffix}`,
+          failed ? "failed" : "completed",
+          terminalAt(30 + index),
+        );
       });
-      await page.route(exactRescanRoute, async (route) => {
-        const derivationId = Number(route.request().url().split("/").pop());
-        exactRescanRequests.push(derivationId);
-        await new Promise((resolve) => setTimeout(resolve, 120));
-        if (derivationId === 202) {
-          await route.fulfill({
-            status: 500,
-            contentType: "application/json",
-            body: JSON.stringify({ error: "scanner queue unavailable" }),
-          });
+      const terminalRows = [...namedTerminalRows, ...bulkTerminalRows];
+      const archivedIds = new Set([ids.retained]);
+      const collectionRequests = [];
+      const retryRequests = [];
+      const archiveRequests = [];
+      const scanDetailRequests = [];
+      let scheduleRequest = null;
+      const scansRoute = /\/api\/v1\/scanning\/scans(?:\?.*)?$/;
+      const scanDetailRoute = /\/api\/v1\/scanning\/scans\/([0-9a-f-]+)$/;
+      const exactRetryRoute = /\/api\/v1\/cves\/rescan\/(\d+)$/;
+      const withArchiveState = (row) => ({ ...row, archived_at: archivedIds.has(row.scan_id) ? timestamp(16) : null });
+      const revisionClass = (row) => (row.is_current ? "deployed" : row.is_latest_per_flake ? "recent" : "superseded");
+      const matchesScanFilters = (row, filters) => {
+        const haystack = [row.hostname, row.flake_name || "", row.commit_hash || "", row.scan_id, String(row.derivation_id)].join(" ").toLowerCase();
+        return (filters.search === "" || haystack.includes(filters.search))
+          && (filters.status === "all" || row.status === filters.status)
+          && (filters.revision === "all" || revisionClass(row) === filters.revision)
+          && (!filters.latestOnly || row.is_latest_per_flake === true);
+      };
+      // Mirrors the server's deterministic tiebreak: terminal_at DESC, scan_id DESC.
+      const compareTerminalRecency = (left, right) => (Date.parse(right.completed_at) - Date.parse(left.completed_at))
+        || (left.scan_id < right.scan_id ? 1 : left.scan_id > right.scan_id ? -1 : 0);
+      const terminalStatusRank = (row) => (row.status === "completed" ? 0 : row.status === "failed" ? 1 : 2);
+      const primaryComparators = {
+        timestamp: (left, right) => (Date.parse(left.completed_at) - Date.parse(right.completed_at))
+          || (left.scan_id < right.scan_id ? -1 : left.scan_id > right.scan_id ? 1 : 0),
+        configuration: (left, right) => left.hostname.toLowerCase().localeCompare(right.hostname.toLowerCase()),
+        revision: (left, right) => (left.commit_hash || "").localeCompare(right.commit_hash || ""),
+        status: (left, right) => terminalStatusRank(left) - terminalStatusRank(right),
+        severity: (left, right) => ["critical_count", "high_count", "medium_count", "low_count"]
+          .reduce((order, key) => order || (left[key] - right[key]), 0),
+      };
+      const compareOrderedTerminalRows = (left, right, sort, direction) => {
+        const sign = direction === "asc" ? 1 : -1;
+        return (sign * primaryComparators[sort](left, right)) || compareTerminalRecency(left, right);
+      };
+      const orderTerminalRows = (rows, sort, direction) => {
+        return [...rows].sort((left, right) => compareOrderedTerminalRows(left, right, sort, direction));
+      };
+      const visibleTerminalRows = (options = {}) => {
+        const filters = { search: "", status: "all", revision: "all", latestOnly: false, ...options };
+        const matching = terminalRows.filter((row) => matchesScanFilters(row, filters));
+        return orderTerminalRows(
+          matching.filter((row) => options.includeArchived === true || !archivedIds.has(row.scan_id)),
+          options.sort || "timestamp",
+          options.direction || "desc",
+        );
+      };
+      const encodeMockScanCursor = (payload) => Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+      const decodeMockScanCursor = (value) => JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+      // The server binds a cursor to the exact request that issued it. The
+      // fingerprint mirrors that contract so a changed filter, page size, or
+      // ordering must restart from the first page without a cursor.
+      const scanRequestFingerprint = (params) => [
+        params.get("collection") || "",
+        params.get("include_archived") || "",
+        params.get("system_id") || "",
+        params.get("limit") || "",
+        (params.get("q") || "").trim().toLowerCase(),
+        params.get("status") || "",
+        params.get("revision") || "",
+        params.get("latest_only") || "",
+        params.get("sort") || "",
+        params.get("direction") || "",
+      ].join("\u0000");
+      const invalidCursorBody = JSON.stringify({ error: "Invalid or request-incompatible pagination cursor." });
+
+      await page.route("**/api/v1/scanning/stats", async (route) => route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ scanning: 1, queued: 1, awaiting_build: 1, awaiting_closure: 1, stale: 2, never_scanned: 2, failed: 5, coverage_percent: 86 }),
+      }));
+      await page.route(scansRoute, async (route) => {
+        const request = route.request();
+        if (request.method() === "PATCH") {
+          const body = request.postDataJSON();
+          archiveRequests.push(body);
+          const changed = body.scan_ids.filter((scanId) => body.archived
+            ? !archivedIds.has(scanId)
+            : archivedIds.has(scanId)).length;
+          for (const scanId of body.scan_ids) body.archived ? archivedIds.add(scanId) : archivedIds.delete(scanId);
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ requested: body.scan_ids.length, changed, archived: body.archived }) });
           return;
         }
-        await route.fulfill({
-          status: 202,
-          contentType: "application/json",
-          body: JSON.stringify({
-            derivation_id: derivationId,
-            scan_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-            enqueued: true,
-            message: `Queued derivation ${derivationId}`,
-          }),
+        const url = new URL(request.url());
+        const params = url.searchParams;
+        const collection = params.get("collection");
+        const includeArchived = params.get("include_archived") === "true";
+        const requestedLimit = Number.parseInt(params.get("limit") || "0", 10);
+        const search = (params.get("q") || "").trim().toLowerCase();
+        const status = params.get("status") || "";
+        const revision = params.get("revision") || "";
+        const latestOnly = params.get("latest_only") === "true";
+        const sort = params.get("sort") || "";
+        const direction = params.get("direction") || "";
+        const after = params.get("after");
+        collectionRequests.push({
+          collection,
+          includeArchived,
+          systemId: params.get("system_id"),
+          limit: params.get("limit"),
+          search,
+          status,
+          revision,
+          latestOnly,
+          sort,
+          direction,
+          after,
+          query: url.search,
         });
-      });
-      await page.route("**/api/v1/scanning/stats*", async (route) => {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            scanning: 2,
-            queued: 3,
-            stale: 4,
-            never_scanned: 1,
-            failed: 1,
-            coverage_percent: 87,
-          }),
-        });
-      });
-
-      await page.route("**/api/v1/scanning/queue*", async (route) => {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify([
-            {
-              derivation_id: 101,
-              rescan_eligible: true,
-              scan_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
-              hostname: "prod-server-01",
-              flake_name: "core-fleet",
-              commit_hash: "abc1234",
-              status: "completed",
-              completed_at: new Date().toISOString(),
-              scheduled_at: new Date().toISOString(),
-              critical_count: 1,
-              high_count: 2,
-              medium_count: 0,
-              freshness: "deployed",
-              is_current: true,
-              is_latest_per_flake: true,
-              source_trigger: "manual",
-            },
-            {
-              derivation_id: 202,
-              rescan_eligible: true,
-              scan_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
-              hostname: "prod-server-01",
-              flake_name: "core-fleet",
-              commit_hash: "def5678",
-              status: "completed",
-              completed_at: new Date(Date.now() - 86400000).toISOString(),
-              scheduled_at: new Date(Date.now() - 86400000).toISOString(),
-              critical_count: 0,
-              high_count: 0,
-              medium_count: 1,
-              freshness: "recent",
-              is_current: false,
-              is_latest_per_flake: false,
-              source_trigger: "fleet",
-            },
-          ]),
-        });
-      });
-
-      await page.route("**/api/v1/scanning/scans/*", async (route) => {
-        diagnosticRequests += 1;
-        const response = diagnosticResponses.shift();
-        response?.started?.();
-        if (diagnosticRequests === 1) {
-          await initialDiagnosticGate;
+        if (!["active", "completed"].includes(collection)
+          || !Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 500
+          || !["true", "false"].includes(params.get("include_archived"))
+          || !["true", "false"].includes(params.get("latest_only"))
+          || !["all", "completed", "failed"].includes(status)
+          || !["all", "deployed", "recent", "superseded"].includes(revision)
+          || !["configuration", "revision", "status", "severity", "timestamp"].includes(sort)
+          || !["asc", "desc"].includes(direction)
+          || search.length > 200) {
+          throw new Error(`Unexpected scanning collection contract: ${url.search}`);
         }
-        if (response?.gate) {
-          await response.gate;
-        }
-        const responseMode = response?.mode ?? diagnosticMode;
-        if (responseMode === "error") {
-          await route.fulfill({
-            status: 503,
-            contentType: "application/json",
-            body: JSON.stringify({ error: "diagnostics temporarily unavailable" }),
-          });
-          return;
-        }
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            scan_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
-            status: "completed",
-            scanner_name: "vulnix",
-            scanner_version: "1.12.4",
-            source_trigger: "manual",
-            events: responseMode === "empty" ? [] : [
-              {
-                id: diagnosticRequests,
-                execution_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-                attempt_number: 1,
-                occurred_at: new Date().toISOString(),
-                level: "warning",
-                source: "vulnix",
-                event_type: "output",
-                message: response?.message ?? "Authorization: Bearer [REDACTED]",
-                truncated: true,
-              },
-            ],
-            truncated: responseMode === "loaded",
-          }),
-        });
-        response?.finished?.();
-      });
-
-      await page.route("**/api/v1/scanning/deployed*", async (route) => {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            items: [],
-            total: 0,
-            has_more: false,
-            next_cursor: null,
-          }),
-        });
-      });
-
-      await page.route("**/api/v1/scanning/systems*", async (route) => {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify([
-            {
-              system_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-              hostname: "prod-server-01",
-              environment: "prod",
-              total_configs: 3,
-              scanned: 2,
-              stale: 1,
-              needs_build: 0,
-              unscanned: 1,
-              current_crit: 1,
-              current_high: 2,
-              current_derivation_id: 101,
-            },
-          ]),
-        });
-      });
-
-      await page.route("**/api/v1/scanning/systems/*/scans*", async (route) => {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify([
-            {
-              derivation_id: 101,
-              rescan_eligible: true,
-              scan_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
-              hostname: "prod-server-01",
-              flake_name: "core-fleet",
-              commit_hash: "abc1234",
-              status: "completed",
-              completed_at: new Date().toISOString(),
-              scheduled_at: new Date().toISOString(),
-              critical_count: 1,
-              high_count: 2,
-              medium_count: 0,
-              freshness: "deployed",
-              is_current: true,
-              is_latest_per_flake: true,
-              source_trigger: "manual",
-            },
-            {
-              derivation_id: 202,
-              rescan_eligible: true,
-              scan_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
-              hostname: "prod-server-01",
-              flake_name: "core-fleet",
-              commit_hash: "def5678",
-              status: "completed",
-              completed_at: new Date(Date.now() - 86400000).toISOString(),
-              scheduled_at: new Date(Date.now() - 86400000).toISOString(),
-              critical_count: 0,
-              high_count: 0,
-              medium_count: 1,
-              freshness: "recent",
-              is_current: false,
-              is_latest_per_flake: false,
-              source_trigger: "fleet",
-            },
-            {
-              derivation_id: 303,
-              rescan_eligible: false,
-              scan_id: null,
-              hostname: "prod-server-01",
-              flake_name: "core-fleet",
-              commit_hash: "987zyx6",
-              status: "never_scanned",
-              completed_at: null,
-              scheduled_at: null,
-              critical_count: 0,
-              high_count: 0,
-              medium_count: 0,
-              freshness: "archived",
-              is_current: false,
-              is_latest_per_flake: false,
-              source_trigger: null,
-            },
-          ]),
-        });
-      });
-
-      await page.route("**/api/v1/scanning/activity*", async (route) => {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify([
-            {
-              at: new Date().toISOString(),
-              name: "prod-server-01",
-              event: "completed",
-              detail: "scan finished",
-              status: "ok",
-            },
-          ]),
-        });
-      });
-
-      await page.route("**/api/v1/scanning/schedule*", async (route) => {
-        if (route.request().method() === "PUT") {
-          const req = route.request().postDataJSON();
+        if (collection === "active") {
+          // The server rejects continuation cursors for collections without a
+          // keyset order, so the browser must never send one here.
+          if (after !== null) {
+            await route.fulfill({ status: 400, contentType: "application/json", body: invalidCursorBody });
+            return;
+          }
+          const rows = activeRows;
+          const hiddenArchived = includeArchived ? 0 : rows.filter((row) => archivedIds.has(row.scan_id)).length;
+          const items = rows
+            .filter((row) => includeArchived || !archivedIds.has(row.scan_id))
+            .slice(0, requestedLimit)
+            .map(withArchiveState);
           await route.fulfill({
             status: 200,
             contentType: "application/json",
-            body: JSON.stringify({
-              on_build: req.on_build,
-              deployed_interval: req.deployed_interval,
-              recent_interval: req.recent_interval,
-              archived_interval: req.archived_interval,
-              archived_enabled: req.archived_enabled,
-              rebuild_to_scan: req.rebuild_to_scan,
-              updated_at: new Date().toISOString(),
-            }),
+            body: JSON.stringify({ items, total: rows.length, hidden_archived: hiddenArchived, has_more: false, next_cursor: null }),
           });
           return;
         }
-
+        const matching = terminalRows.filter((row) => matchesScanFilters(row, { search, status, revision, latestOnly }));
+        let cursor = null;
+        if (after !== null) {
+          try {
+            cursor = decodeMockScanCursor(after);
+          } catch {
+            cursor = null;
+          }
+          if (!cursor || cursor.fingerprint !== scanRequestFingerprint(params)) {
+            await route.fulfill({ status: 400, contentType: "application/json", body: invalidCursorBody });
+            return;
+          }
+        }
+        const newestMatching = orderTerminalRows(matching, "timestamp", "desc")[0];
+        const highWater = cursor
+          ? { completedAt: cursor.highWaterCompletedAt, scanId: cursor.highWaterScanId }
+          : newestMatching
+            ? { completedAt: newestMatching.completed_at, scanId: newestMatching.scan_id }
+            : null;
+        // Continuations remain bound to the first page's newest terminal row.
+        // A later terminal insert must not shift or enter that cursor sequence.
+        const snapshotMatching = highWater === null
+          ? []
+          : matching.filter((row) => Date.parse(row.completed_at) < Date.parse(highWater.completedAt)
+            || (row.completed_at === highWater.completedAt && row.scan_id <= highWater.scanId));
+        const hiddenArchived = includeArchived ? 0 : snapshotMatching.filter((row) => archivedIds.has(row.scan_id)).length;
+        const visible = orderTerminalRows(
+          snapshotMatching.filter((row) => includeArchived || !archivedIds.has(row.scan_id)),
+          sort,
+          direction,
+        );
+        let startIndex = 0;
+        if (cursor !== null) {
+          const position = visible.findIndex((row) => row.scan_id === cursor.afterScanId);
+          if (position >= 0) {
+            startIndex = position + 1;
+          } else {
+            const cursorRow = {
+              hostname: cursor.configuration,
+              commit_hash: cursor.revision,
+              status: ["completed", "failed", "unknown"][cursor.statusRank],
+              critical_count: cursor.criticalCount,
+              high_count: cursor.highCount,
+              medium_count: cursor.mediumCount,
+              low_count: cursor.lowCount,
+              completed_at: cursor.terminalAt,
+              scan_id: cursor.afterScanId,
+            };
+            const firstAfterCursor = visible.findIndex((row) => compareOrderedTerminalRows(row, cursorRow, sort, direction) > 0);
+            startIndex = firstAfterCursor >= 0 ? firstAfterCursor : visible.length;
+          }
+        }
+        const pageRows = visible.slice(startIndex, startIndex + requestedLimit);
+        const hasMore = startIndex + pageRows.length < visible.length;
+        const nextCursor = hasMore && pageRows.length > 0
+          ? encodeMockScanCursor({
+            fingerprint: scanRequestFingerprint(params),
+            highWaterCompletedAt: highWater.completedAt,
+            highWaterScanId: highWater.scanId,
+            afterScanId: pageRows[pageRows.length - 1].scan_id,
+            configuration: pageRows[pageRows.length - 1].hostname.toLowerCase(),
+            revision: pageRows[pageRows.length - 1].commit_hash || "",
+            statusRank: terminalStatusRank(pageRows[pageRows.length - 1]),
+            criticalCount: pageRows[pageRows.length - 1].critical_count,
+            highCount: pageRows[pageRows.length - 1].high_count,
+            mediumCount: pageRows[pageRows.length - 1].medium_count,
+            lowCount: pageRows[pageRows.length - 1].low_count,
+            terminalAt: pageRows[pageRows.length - 1].completed_at,
+          })
+          : null;
         await route.fulfill({
           status: 200,
           contentType: "application/json",
           body: JSON.stringify({
-            on_build: true,
-            deployed_interval: "24h",
-            recent_interval: "24h",
-            archived_interval: "168h",
-            archived_enabled: true,
-            rebuild_to_scan: false,
-            updated_at: new Date().toISOString(),
+            items: pageRows.map(withArchiveState),
+            total: snapshotMatching.length,
+            hidden_archived: hiddenArchived,
+            has_more: hasMore,
+            next_cursor: nextCursor,
           }),
         });
       });
+      await page.route(scanDetailRoute, async (route) => {
+        const scanId = route.request().url().match(scanDetailRoute)?.[1];
+        const row = [...activeRows, ...terminalRows].find((candidate) => candidate.scan_id === scanId);
+        if (!row) throw new Error(`Unexpected scan detail identity ${scanId}`);
+        scanDetailRequests.push(scanId);
+        const events = ["pending", "awaiting_build", "awaiting_closure"].includes(row.status) || row.attempts === 0
+          ? []
+          : [
+            { id: 1, execution_id: "cccccccc-cccc-4ccc-8ccc-ccccccccccc1", attempt_number: 1, occurred_at: timestamp(13), level: "warning", source: "vulnix", event_type: "output", message: "Authorization: Bearer [REDACTED] bounded diagnostic", truncated: true },
+            { id: 2, execution_id: "cccccccc-cccc-4ccc-8ccc-ccccccccccc1", attempt_number: 1, occurred_at: timestamp(14), level: "info", source: "worker", event_type: "complete", message: "ordered terminal diagnostic", truncated: false },
+          ];
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            ...row,
+            archived_at: archivedIds.has(row.scan_id) ? timestamp(16) : null,
+            events,
+            truncated: true,
+          }),
+        });
+      });
+      await page.route(exactRetryRoute, async (route) => {
+        const derivationId = Number(route.request().url().match(exactRetryRoute)?.[1]);
+        retryRequests.push(derivationId);
+        await route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify({ derivation_id: derivationId, scan_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", enqueued: true, message: "Exact retry queued" }) });
+      });
+      await page.route("**/api/v1/scanning/schedule", async (route) => {
+        const policy = { on_build: true, deployed_interval: "24h", recent_interval: "24h", archived_interval: "168h", archived_enabled: true, rebuild_to_scan: false, updated_at: timestamp(16) };
+        if (route.request().method() === "PUT") scheduleRequest = route.request().postDataJSON();
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(scheduleRequest ? { ...policy, ...scheduleRequest } : policy) });
+      });
+      const removedTabRequests = [];
+      const noteRemovedTabRequest = (request) => {
+        if (/\/api\/v1\/scanning\/systems(?:\/|\?|$)/.test(request.url())) removedTabRequests.push(request.url());
+      };
+      page.on("request", noteRemovedTabRequest);
 
-      await page.goto(`${baseUrl}/scanning`, { timeout: LOAD_TIMEOUT });
-      await page.waitForTimeout(1600);
+      try {
+        await page.goto(`${baseUrl}/scanning`, { timeout: LOAD_TIMEOUT });
+        await assertVisible(page.getByRole("heading", { name: "Scanning" }), "Expected Scanning heading");
+        for (const tab of ["Active", "Completed"]) await assertVisible(page.getByRole("tab", { name: new RegExp(`^${tab}`) }), `Expected ${tab} tab`);
+        await assertCount(page.getByRole("tab", { name: /^By system/ }), 0, "Scanning must have only the two designed tabs");
+        await assertVisible(page.getByText("1 queued · 1 awaiting build · 1 awaiting closure"), "Expected prerequisite wait totals");
+        await assertVisible(page.getByText("Awaiting: Build output is not available."), "Expected build wait reason");
+        await assertVisible(page.getByText("Awaiting: A completed cache closure is not available."), "Expected closure wait reason");
+        await assertCount(page.getByRole("button", { name: /Cancel scan/i }), 0, "Scanning must not expose cancellation");
+        await assertCount(page.getByRole("button", { name: "Rescan all" }), 0, "Scanning must not expose obsolete fleet rescan");
+        const activeTable = page.locator("#scan-active-panel table.sys-table");
+        const activeColumnNames = (await activeTable.locator("thead th").allTextContents())
+          .map((label) => label.replace(/\s+/g, " ").trim());
+        const expectedActiveColumns = [
+          "Configuration", "Revision", "Status", "Findings", "Queued", "Trigger", "Actions",
+        ];
+        if (activeColumnNames.join("|") !== expectedActiveColumns.join("|")) {
+          throw new Error(`Active columns must label the timestamp as Queued: ${JSON.stringify(activeColumnNames)}`);
+        }
+        await assertVisible(page.getByRole("button", { name: "Sort by Queued" }), "Active queue time must remain sortable by its displayed label");
+        await page.waitForFunction(() => document.querySelectorAll("#scan-active-panel tbody tr").length === 4);
+        const initialActiveOrder = await activeTable.locator("tbody .scanning-config-name").allTextContents();
+        if (initialActiveOrder.join(",") !== "gamma-queued,zeta-running,alpha-build-wait,beta-closure-wait") {
+          throw new Error(`Active queue sorting must use scheduled_at with created_at fallback: ${initialActiveOrder.join(",")}`);
+        }
+        const scheduledQueuedTitle = await page.getByTestId(`scanning-record-${ids.pending}`).locator(".scanning-last-scan time").getAttribute("datetime");
+        if (Date.parse(scheduledQueuedTitle) !== Date.parse(timestamp(10))) {
+          throw new Error(`The Queued timestamp must prefer scheduled_at over created_at: ${scheduledQueuedTitle}`);
+        }
+        const unscheduledQueuedTitle = await page.getByTestId(`scanning-record-${ids.build}`).locator(".scanning-last-scan time").getAttribute("datetime");
+        if (Date.parse(unscheduledQueuedTitle) !== Date.parse(timestamp(8))) {
+          throw new Error(`An Active row without scheduled_at must display created_at: ${unscheduledQueuedTitle}`);
+        }
+        await captureWorkflowViewportState(page, "16c-scanning-view", "active-queued-timestamp", "desktop");
 
-      await assertVisible(page.locator("main h1:has-text('Scanning')"), "Expected Scanning heading");
-      await assertVisible(page.getByText("Scanning now").first(), "Expected Scanning stat cards");
-      await assertVisible(page.getByRole("tab", { name: /Deployed/ }), "Expected Deployed tab");
-      await assertVisible(page.getByRole("tab", { name: /All scans/ }), "Expected All scans tab");
-      await assertVisible(page.getByRole("tab", { name: /By system/ }), "Expected By system tab");
+        const activeTab = page.getByRole("tab", { name: /^Active/ });
+        await activeTab.focus();
+        await activeTab.press("End");
+        await assertAttribute(page.getByRole("tab", { name: /^Completed/ }), "aria-selected", "true", "End should select Completed");
+        await page.getByRole("tab", { name: /^Completed/ }).press("Home");
+        await assertAttribute(activeTab, "aria-selected", "true", "Home should select the first scan tab");
 
-      const fleetRescan = page.getByRole("button", { name: /^Rescan all$/ });
-      await fleetRescan.click();
-      await page.waitForFunction(
-        () => document.querySelector('button[aria-label="Rescan all"]')?.disabled === true,
-      );
-      await assertDisabled(fleetRescan, "Expected fleet rescan to stay disabled while pending");
-      await assertVisible(
-        page.getByText(/3 eligible, 2 queued, 1 reused/),
-        "Expected fleet response counts in success feedback",
-      );
+        const search = page.getByRole("textbox", { name: "Search scans by configuration, flake, revision, scan ID, or derivation ID" });
+        await search.fill("alpha-build-wait");
+        await assertVisible(page.getByText("alpha-build-wait", { exact: true }), "Expected text scan filter");
+        await assertHidden(page.getByText("beta-closure-wait", { exact: true }), "Text filter should exclude other records");
+        await page.getByRole("button", { name: "Clear scan search" }).click();
+        await page.getByRole("combobox", { name: "Filter by scan status" }).selectOption("awaiting_closure");
+        await assertVisible(page.getByText("beta-closure-wait", { exact: true }), "Expected status filter");
+        await page.getByRole("combobox", { name: "Filter by scan status" }).selectOption("all");
+        await page.getByRole("button", { name: "Latest per flake" }).click();
+        await assertAttribute(page.getByRole("button", { name: "Latest per flake" }), "aria-pressed", "true", "Expected latest filter state");
+        await assertHidden(page.getByText("beta-closure-wait", { exact: true }), "Latest filter should hide the superseded core-fleet lifecycle");
+        await page.getByRole("button", { name: "Latest per flake" }).click();
+        await page.getByRole("button", { name: "Sort by Configuration" }).click();
+        const sortedActive = await page.locator("#scan-active-panel tbody .scanning-config-name").allTextContents();
+        if (sortedActive.join(",") !== "alpha-build-wait,beta-closure-wait,gamma-queued,zeta-running") {
+          throw new Error(`Configuration sorting was not deterministic: ${sortedActive.join(",")}`);
+        }
 
-      await page.getByRole("tab", { name: /All scans/ }).click();
-      await assertVisible(page.getByText("manual").first(), "Expected persisted source_trigger in scan DTO");
-      const scanDiagnostics = page.getByRole("button", { name: "View scan diagnostics" }).first();
-      await scanDiagnostics.click();
-      await assertVisible(
-        page.getByRole("status").filter({ hasText: "Loading scan diagnostics" }),
-        "Expected scan diagnostics loading state",
-      );
-      releaseInitialDiagnosticRequest();
-      await assertVisible(
-        page.getByRole("heading", { name: "Scan diagnostics" }),
-        "Expected loaded scan diagnostics drawer",
-      );
-      await assertVisible(page.getByText("Authorization: Bearer [REDACTED]"), "Expected redacted diagnostic output");
-      await assertVisible(page.getByText("Only the first 500 diagnostic events are shown."), "Expected response truncation notice");
-      await assertVisible(page.getByText("Output truncated at the capture boundary."), "Expected event truncation notice");
+        const queuedRow = page.getByTestId(`scanning-record-${ids.pending}`);
+        const queuedDetailRequestCount = scanDetailRequests.length;
+        await queuedRow.click();
+        let detail = page.locator("#scan-diagnostics-dialog");
+        await assertVisible(detail.getByRole("heading", { name: "gamma-queued", exact: true }), "Plain-clicking an Active queued row should open its exact scan drawer");
+        await assertVisible(detail.getByText("lab-fleet · cccc-queued", { exact: true }), "Queued drawer should show flake and revision below its host title");
+        await assertVisible(detail.locator(".scanning-detail-status-strip").getByText("Queued", { exact: true }), "Queued scan should not be presented as running");
+        await assertVisible(detail.locator(".scanning-detail-status-strip .scanning-trigger-chip").getByText("manual", { exact: true }), "Queued drawer should retain its trigger");
+        const queuedTimestamp = await detail.locator(".scanning-detail-status-strip time").getAttribute("datetime");
+        if (Date.parse(queuedTimestamp) !== Date.parse(timestamp(10))) throw new Error(`Queued lifecycle timestamp was not preserved: ${queuedTimestamp}`);
+        await assertCount(detail.locator(".scanning-detail-status-strip .scanning-detail-elapsed"), 0, "Queued scans must not look like Vulnix is already running");
+        await assertVisible(detail.getByText("No persisted diagnostic events", { exact: true }), "Queued scans without events should show a truthful empty log");
+        if (scanDetailRequests.length !== queuedDetailRequestCount + 1 || scanDetailRequests.at(-1) !== ids.pending) {
+          throw new Error(`Plain Active row click must request only its exact scan detail: ${JSON.stringify(scanDetailRequests)}`);
+        }
+        await detail.getByRole("button", { name: "Close exact scan detail" }).click();
+        await assertFocused(queuedRow, "Closing the queued drawer should restore focus to its row");
 
-      await page.setViewportSize({ width: 900, height: 900 });
-      const narrowDrawer = page.getByRole("dialog", { name: "Scan diagnostics" });
-      await assertVisible(narrowDrawer, "Expected diagnostics drawer at the narrow viewport");
-      const narrowGeometry = await narrowDrawer.evaluate((element) => {
-        const rect = element.getBoundingClientRect();
+        const queuedActionRequestCount = scanDetailRequests.length;
+        await queuedRow.getByRole("button", { name: `Open details for scan ${ids.pending}` }).click();
+        detail = page.locator("#scan-diagnostics-dialog");
+        await assertVisible(detail.getByText(`Scan ID ${ids.pending}`, { exact: true }), "The terminal action should open the same exact queued scan");
+        if (scanDetailRequests.length !== queuedActionRequestCount + 1 || scanDetailRequests.at(-1) !== ids.pending) {
+          throw new Error(`The terminal action also triggered an unintended row action: ${JSON.stringify(scanDetailRequests)}`);
+        }
+        await detail.getByRole("button", { name: "Close exact scan detail" }).click();
+
+        await page.getByRole("button", { name: "Open the newest failed scan" }).click();
+        await assertVisible(detail.getByRole("heading", { name: "omega-new-failure", exact: true }), "Failed stat should open the newest failure with host as the drawer title");
+        await assertVisible(detail.getByText("failure-fleet · ffff-failed", { exact: true }), "Failed drawer should retain flake and revision context");
+        await assertVisible(detail.getByRole("alert"), "Expected prominent failed-scan callout");
+        await assertVisible(detail.getByRole("button", { name: "Retry scan" }), "Expected real failed-scan retry action");
+        const exactBuildId = `30000000-0000-4000-8000-${String(203).padStart(12, "0")}`;
+        const buildLink = detail.getByRole("link", { name: "View build" });
+        await assertAttribute(buildLink, "href", `/builds?job=${exactBuildId}`, "Expected exact associated-build deep link");
+        await detail.getByRole("tab", { name: "Details" }).click();
+        await assertVisible(detail.getByText("Not supported by execution ownership"), "Expected non-cancellable ownership detail");
+        await assertVisible(detail.getByRole("heading", { name: "Findings" }), "Expected findings-first detail hierarchy");
+        await captureWorkflowViewportState(page, "16c-scanning-view", "failed-detail", "desktop");
+        const exactBuildRoute = `**/api/v1/build-jobs/${exactBuildId}`;
+        await page.route(exactBuildRoute, async (route) => {
+          const exactBuild = {
+            ...mockRecentBuilds().items[1],
+            job_id: exactBuildId,
+            hostname: "omega-new-failure",
+            flake_name: "failure-fleet",
+            commit_hash: "ffff-failed",
+            commit_message: "Exact prerequisite build for failed scan",
+          };
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({ collection: "completed", attempt: exactBuild }),
+          });
+        });
+        await buildLink.click();
+        await page.waitForURL(new RegExp(`/builds\\?job=${exactBuildId}$`));
+        await assertValue(page.locator("input.q-search-input").first(), "", "Exact build deep link must preserve ordinary search state");
+        await assertAttribute(page.getByRole("button", { name: /^Completed/ }), "class", "sd-tab focus-ring active", "Exact terminal build should select Completed");
+        await assertVisible(page.locator(".build-log-tray .fl-tray-head").getByText("omega-new-failure", { exact: true }), "Exact build deep link should open the associated build");
+        await page.unroute(exactBuildRoute);
+        await page.goto(`${baseUrl}/scanning`, { timeout: LOAD_TIMEOUT });
+        await assertVisible(page.getByRole("heading", { name: "Scanning" }), "Expected Scanning heading after exact build navigation");
+
+        await activeTab.click();
+        const waitingRow = page.locator("#scan-active-panel tbody tr").filter({ hasText: "alpha-build-wait" });
+        await waitingRow.click();
+        detail = page.locator("#scan-diagnostics-dialog");
+        await assertVisible(detail.getByRole("heading", { name: "alpha-build-wait", exact: true }), "Plain Active waiting-row click should open its exact drawer");
+        await assertVisible(detail.getByText("Waiting on the build", { exact: true }), "Expected typed build-prerequisite callout");
+        await assertVisible(detail.getByText(/starts automatically after the associated build succeeds/), "Expected truthful automatic progression guidance");
+        await assertFocused(detail.getByRole("button", { name: "Refresh exact scan detail" }), "Scan detail initial focus did not land on the first enabled control");
+        await captureWorkflowViewportState(page, "16c-scanning-view", "awaiting-build", "desktop");
+        await detail.press("Escape");
+        await assertHidden(detail, "Escape should close scan detail");
+        await assertFocused(waitingRow, "Scan detail did not restore focus to the Active row that opened it");
+
+        const closureRow = page.locator("#scan-active-panel tbody tr").filter({ hasText: "beta-closure-wait" });
+        await closureRow.click();
+        detail = page.locator("#scan-diagnostics-dialog");
+        await assertVisible(detail.getByRole("heading", { name: "beta-closure-wait", exact: true }), "Plain Active closure-wait row click should open its exact drawer");
+        await assertVisible(detail.getByText("Waiting for a reachable closure", { exact: true }), "Expected typed closure-prerequisite callout");
+        await detail.getByRole("button", { name: "Close exact scan detail" }).click();
+
+        const runningRow = page.locator("#scan-active-panel tbody tr").filter({ hasText: "zeta-running" });
+        await runningRow.click();
+        detail = page.locator("#scan-diagnostics-dialog");
+        await assertVisible(detail.getByRole("heading", { name: "zeta-running", exact: true }), "Plain Active running-row click should open that host's drawer");
+        await assertVisible(detail.getByText("edge-fleet · ffff-running", { exact: true }), "Running drawer should preserve flake and revision hierarchy");
+        await assertVisible(detail.getByText(`Scan ID ${ids.running}`, { exact: true }), "Running drawer should retain exact scan identity");
+        await assertVisible(detail.locator(".scanning-detail-status-strip").getByText("Scanning", { exact: true }), "Running scan must show its authoritative status");
+        await assertAttribute(detail.getByRole("tab", { name: "Log" }), "aria-selected", "true", "Log must be the default drawer tab");
+        if (!(await detail.evaluate((dialog) => dialog.contains(document.activeElement)))) throw new Error("Scan detail drawer did not receive initial focus");
+        await assertVisible(detail.getByText("2 events", { exact: true }), "Running drawer should count only persisted fixture events");
+        const runningEvent = detail.getByTestId("scan-event-2");
+        await assertVisible(runningEvent, "Running drawer should render the persisted diagnostic event row");
+        const runningEventText = await runningEvent.textContent() || "";
+        if (!runningEventText.includes("ordered terminal diagnostic")) {
+          throw new Error(`Running drawer must show the persisted event message: ${runningEventText}`);
+        }
+        await captureWorkflowViewportState(page, "16c-scanning-view", "active-running-drawer", "desktop");
+        const logTab = detail.getByRole("tab", { name: "Log" });
+        await logTab.focus();
+        await logTab.press("End");
+        await assertAttribute(detail.getByRole("tab", { name: "Details" }), "aria-selected", "true", "End should select the Details tab");
+        await detail.getByRole("tab", { name: "Details" }).press("Home");
+        await assertAttribute(logTab, "aria-selected", "true", "Home should return to the Log tab");
+        const elapsed = detail.getByText(/^Elapsed \d+m \d{2}s$/);
+        await assertVisible(elapsed, "Expected running elapsed time");
+        const elapsedMinutes = Number.parseInt((await elapsed.textContent()).match(/Elapsed (\d+)m/)?.[1] || "0", 10);
+        if (elapsedMinutes < 5) throw new Error(`Running elapsed time did not derive from authoritative started_at: ${await elapsed.textContent()}`);
+        const diagnosticSearch = detail.getByRole("textbox", { name: "Search authorized diagnostic content" });
+        await diagnosticSearch.fill("terminal");
+        await assertVisible(detail.getByText("1 of 1 matches"), "Expected bounded diagnostic search count");
+        await assertEnabled(detail.getByRole("button", { name: "Next diagnostic match" }), "Expected diagnostic match navigation");
+        await assertVisible(detail.getByRole("button", { name: "Export current content" }), "Expected bounded diagnostic export control");
+        await assertVisible(detail.getByText("The API bounded this authorized response."), "Expected bounded response disclosure");
+        await assertVisible(detail.getByText("Event output was truncated at the capture boundary."), "Expected event truncation disclosure");
+        await captureWorkflowViewportState(page, "16c-scanning-view", "running-diagnostics", "desktop");
+        await captureWorkflowViewportState(page, "16c-scanning-view", "running-diagnostics", "narrowDesktop", async () => {
+          const geometry = await detail.evaluate((element) => {
+            const rect = element.getBoundingClientRect();
+            return { left: rect.left, right: rect.right, width: window.innerWidth, scrollWidth: document.documentElement.scrollWidth };
+          });
+          if (geometry.left < 0 || geometry.right > geometry.width + 1 || geometry.scrollWidth > geometry.width) throw new Error(`Narrow scan detail overflow: ${JSON.stringify(geometry)}`);
+        });
+        await detail.getByRole("button", { name: "Close exact scan detail" }).click();
+
+        await page.getByRole("tab", { name: /^Completed/ }).click();
+        for (const [scanId, hostname, expectedTitle] of [
+          [ids.failedBuild, "delta-build-failed", "Build failed before scan"],
+          [ids.cancelledBuild, "epsilon-build-cancelled", "Build cancelled before scan"],
+        ]) {
+          const terminalBuildRow = page.locator("#scan-completed-panel tbody tr").filter({ hasText: hostname });
+          await assertCount(terminalBuildRow.getByRole("button", { name: "Retry exact" }), 0, `${hostname} must not offer a misleading scan retry`);
+          await terminalBuildRow.getByRole("button", { name: `Open details for scan ${scanId}` }).click();
+          detail = page.locator("#scan-diagnostics-dialog");
+          await assertVisible(detail.getByRole("alert").getByText(expectedTitle, { exact: true }), `Expected ${hostname} prerequisite callout`);
+          await assertVisible(detail.getByRole("link", { name: "View build" }), `Expected ${hostname} primary build action`);
+          await assertCount(detail.getByRole("button", { name: "Retry scan" }), 0, `${hostname} detail must not offer scan retry`);
+          await detail.getByRole("button", { name: "Close exact scan detail" }).click();
+        }
+        const failedPreview = page.locator("#scan-completed-panel tbody tr").filter({ hasText: "omega-old-failure" }).locator(".scanning-row-failure");
+        if ((await failedPreview.textContent()).trim() !== "Scan failed · view log") throw new Error("Scan failure must show a concise primary-table reason");
+        if ((await failedPreview.textContent()).includes("/nix/store/")) throw new Error("Scanner diagnostics must stay in the detail drawer");
+        const revisionFilter = page.getByRole("combobox", { name: "Filter by revision freshness" });
+        await revisionFilter.selectOption("superseded");
+        await assertVisible(page.getByText("alpha-old", { exact: true }), "Expected superseded revision filter");
+        await assertHidden(page.getByText("alpha-current", { exact: true }), "Superseded filter should exclude newest flake revision");
+        await revisionFilter.selectOption("all");
+        const completedRow = page.locator("#scan-completed-panel tbody tr").filter({ hasText: "alpha-current" });
+        await assertVisible(completedRow.getByRole("button", { name: `View CVEs for scan ${ids.newest}` }), "Critical/high findings should retain the CVE navigation action");
+        const completedLastScanTitle = await page.getByTestId(`scanning-record-${ids.newest}`).locator(".scanning-last-scan time").getAttribute("datetime");
+        if (Date.parse(completedLastScanTitle) !== Date.parse(terminalAt(3))) {
+          throw new Error(`Completed Scanned must continue to use terminal time: ${completedLastScanTitle}`);
+        }
+        await completedRow.click();
+        detail = page.locator("#scan-diagnostics-dialog");
+        await assertVisible(detail.getByRole("heading", { name: "alpha-current", exact: true }), "Plain Completed row click should open its exact scan drawer");
+        await detail.getByRole("tab", { name: "Details" }).click();
+        await assertVisible(detail.getByText("4 vulnerabilities across 120 packages"), "Expected operator findings summary");
+        await captureWorkflowViewportState(page, "16c-scanning-view", "completed-detail", "desktop");
+        await detail.getByRole("button", { name: "Close exact scan detail" }).click();
+        const failedRow = page.locator("#scan-completed-panel tbody tr").filter({ hasText: "omega-new-failure" });
+        await failedRow.getByRole("button", { name: "Retry exact" }).click();
+        await assertVisible(page.getByText(/omega-new-failure ffff-failed: queued exact scan/), "Expected exact failed-scan retry feedback");
+        if (retryRequests.at(-1) !== 203) throw new Error(`Exact retry used derivation ${retryRequests.at(-1)} instead of 203`);
+        await assertVisible(page.getByText("1 archived scans hidden by retention view"), "Expected retention hidden count");
+
+        // ── Completed server pagination ──────────────────────────────────────
+        // The collection is larger than any single response, so ordering,
+        // counts, filters, and search must come from the server and pages must
+        // accumulate without duplicates, skips, or full refetches.
+        const completedRowNames = () => page.locator("#scan-completed-panel tbody .scanning-config-name");
+        const completedNames = () => completedRowNames().allTextContents();
+        const waitForCompletedRows = async (minimum) => page.waitForFunction(
+          (expected) => document.querySelectorAll("#scan-completed-panel tbody .scanning-config-name").length >= expected,
+          minimum,
+          { timeout: 25000 },
+        );
+        const expectedCompletedOrder = (count, options = {}) => visibleTerminalRows(options).slice(0, count).map((row) => row.hostname);
+        const assertCompletedPrefix = async (label, options = {}) => {
+          const names = await completedNames();
+          if (new Set(names).size !== names.length) throw new Error(`${label} duplicated loaded scan rows`);
+          const expected = expectedCompletedOrder(names.length, options);
+          if (names.join(",") !== expected.join(",")) {
+            throw new Error(`${label} skipped or reordered rows: got ${names.slice(0, 4).join(",")} expected ${expected.slice(0, 4).join(",")}`);
+          }
+        };
+        const completedFilterCount = () => page.locator("#scan-completed-panel .filter-count").textContent();
+        // Returning to the top keeps the scroll sentinel out of view so a
+        // deliberate assertion about one page is not raced by scroll paging.
+        const scrollCompletedToTop = async () => page.evaluate(() => {
+          const container = document.querySelector(".content");
+          if (container) container.scrollTop = 0;
+        });
+        const bulkBar = page.locator("#scan-completed-panel .bulk-bar");
+        const assertBulkAction = async (kind, count, message) => {
+          await assertVisible(bulkBar.getByRole("button", { name: `${kind} ${count}` }), message);
+          await assertCount(
+            bulkBar.getByRole("button", { name: /^(Archive|Restore) \d+$/ }),
+            1,
+            "BulkBar must expose exactly one contextual archive/restore action",
+          );
+          const opposite = kind === "Archive" ? "Restore" : "Archive";
+          await assertCount(
+            bulkBar.getByRole("button", { name: new RegExp(`^${opposite} \\d+$`) }),
+            0,
+            "BulkBar must not show the inapplicable opposite action",
+          );
+        };
+
+        await scrollCompletedToTop();
+        await waitForCompletedRows(50);
+        await assertCount(completedRowNames(), 50, "Completed must request one explicitly bounded page instead of a silent 500-row cap");
+        await assertCompletedPrefix("The newest-first first page");
+        await assertVisible(page.locator("#scan-completed-panel").getByText("gray", { exact: true }), "Expected the newest gray configuration scan on page one");
+        const visibleTerminalTotal = visibleTerminalRows().length;
+        const firstPageCountText = await completedFilterCount();
+        if (!firstPageCountText.includes(`50 loaded · ${visibleTerminalTotal} matching`)) {
+          throw new Error(`Completed counts must describe the whole collection: ${firstPageCountText}`);
+        }
+
+        const loadMore = page.getByTestId("scanning-completed-load-more");
+        await assertVisible(loadMore, "Expected an accessible Load more fallback for Completed");
+        const secondPageResponse = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("after="));
+        await loadMore.click();
+        await secondPageResponse;
+        await waitForCompletedRows(100);
+        await assertCompletedPrefix("The second Completed page");
+        const cursorPageRequests = collectionRequests.filter((entry) => entry.after);
+        if (cursorPageRequests.length === 0 || cursorPageRequests.some((entry) => entry.collection !== "completed" || entry.limit !== "50")) {
+          throw new Error(`Continuation must request bounded Completed pages by cursor: ${JSON.stringify(cursorPageRequests)}`);
+        }
+
+        for (let iteration = 0; iteration < 2; iteration += 1) {
+          const scrolledPage = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("after="));
+          await page.evaluate(() => {
+            const container = document.querySelector(".content");
+            if (container) container.scrollTop = container.scrollHeight;
+          });
+          await scrolledPage;
+        }
+        await waitForCompletedRows(150);
+        await assertCompletedPrefix("Infinite scroll");
+
+        // Live refresh replaces the head page only. Accumulated pages keep
+        // their cursor bound, so no loaded row is refetched or duplicated.
+        const cursorRequestsBeforeLive = collectionRequests.filter((entry) => entry.after).length;
+        const rowsBeforeLive = await completedNames();
+        const scrollBeforeLive = await page.evaluate(() => document.querySelector(".content")?.scrollTop ?? 0);
+        terminalRows.unshift(record(ids.liveArrival, 907, "live-arrival-completed", "core-fleet", "live-arrival-revision", "completed", terminalAt(0)));
+        await page.waitForFunction(
+          () => document.querySelector("#scan-completed-panel tbody .scanning-config-name")?.textContent === "live-arrival-completed",
+          undefined,
+          { timeout: 30000 },
+        );
+        const rowsAfterLive = await completedNames();
+        if (new Set(rowsAfterLive).size !== rowsAfterLive.length) throw new Error("Live refresh duplicated accumulated Completed rows");
+        if (!rowsAfterLive.slice(1).join(",").startsWith(rowsBeforeLive.join(","))) {
+          throw new Error("Live refresh reordered accumulated Completed rows");
+        }
+        if (collectionRequests.filter((entry) => entry.after).length !== cursorRequestsBeforeLive) {
+          throw new Error("Live refresh refetched accumulated Completed pages");
+        }
+        const scrollAfterLive = await page.evaluate(() => document.querySelector(".content")?.scrollTop ?? 0);
+        if (scrollBeforeLive > 0 && scrollAfterLive === 0) throw new Error("Live refresh reset the Completed scroll position");
+
+        // The original cursor excludes the new head row. Its continuation
+        // therefore adds the next 50 original rows without a gap or duplicate.
+        await scrollCompletedToTop();
+        const postRefreshContinuation = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("after="));
+        await loadMore.click();
+        await postRefreshContinuation;
+        await waitForCompletedRows(201);
+        await assertCompletedPrefix("Continuation after a live insert");
+        const postRefreshRows = await completedNames();
+        if (new Set(postRefreshRows).size !== postRefreshRows.length) {
+          throw new Error("Continuation after a live insert duplicated a Completed row");
+        }
+
+        // A changed filter restarts pagination without a cursor and stays
+        // scoped to the whole collection, not the loaded rows.
+        const completedStatusFilter = page.getByRole("combobox", { name: "Filter by scan status" });
+        await scrollCompletedToTop();
+        await completedStatusFilter.selectOption("failed");
+        await page.waitForFunction(
+          () => document.querySelectorAll("#scan-completed-panel tbody .scanning-config-name").length === 50,
+          undefined,
+          { timeout: 25000 },
+        );
+        const failedPageRequests = collectionRequests.filter((entry) => entry.collection === "completed" && entry.status === "failed" && entry.limit === "50");
+        if (failedPageRequests.length === 0 || failedPageRequests.some((entry) => entry.after !== null)) {
+          throw new Error(`The Failed filter must restart a server-scoped request without a cursor: ${JSON.stringify(failedPageRequests)}`);
+        }
+        const failedTotal = visibleTerminalRows({ status: "failed" }).length;
+        const failedCountText = await completedFilterCount();
+        if (!failedCountText.includes(`· ${failedTotal} matching`)) {
+          throw new Error(`The Failed filter must count the whole collection: ${failedCountText}`);
+        }
+        await assertCount(page.locator("#scan-completed-panel tbody tr").filter({ hasText: "gray" }), 0, "The Failed filter must exclude successful scans server-side");
+        await scrollCompletedToTop();
+        await completedStatusFilter.selectOption("all");
+        await waitForCompletedRows(50);
+
+        // Search reaches a scan that is intentionally far beyond page one, and
+        // typing is debounced into a small number of server requests.
+        const searchRequestsBefore = collectionRequests.filter((entry) => entry.collection === "completed" && entry.search !== "").length;
+        const deepScan = terminalRows.find((row) => row.hostname === "needle-deep-config");
+        const deepScanPosition = visibleTerminalRows().findIndex((row) => row.scan_id === deepScan.scan_id);
+        if (deepScanPosition < 50) throw new Error(`The searched scan must start beyond page one, not at ${deepScanPosition}`);
+        await scrollCompletedToTop();
+        await search.pressSequentially("needle-deep", { delay: 40 });
+        await page.waitForFunction(
+          () => document.querySelectorAll("#scan-completed-panel tbody .scanning-config-name").length === 1,
+          undefined,
+          { timeout: 25000 },
+        );
+        await assertVisible(page.getByText("needle-deep-config", { exact: true }), "Server search must reach scans beyond page one");
+        const searchRequests = collectionRequests
+          .filter((entry) => entry.collection === "completed" && entry.search !== "")
+          .slice(searchRequestsBefore);
+        if (searchRequests.length === 0 || searchRequests.length > 4) {
+          throw new Error(`Debounced search must not request one page per keystroke: ${searchRequests.length}`);
+        }
+        if (searchRequests.some((entry) => entry.after !== null)) throw new Error("A changed search must restart without a cursor");
+        await page.getByRole("button", { name: "Clear scan search" }).click();
+        await waitForCompletedRows(50);
+        await scrollCompletedToTop();
+
+        for (const scanId of [ids.newest, ids.superseded, ids.failed, ids.oldFailure, ids.failedBuild, ids.cancelledBuild]) {
+          await page.getByTestId(`scanning-record-${scanId}`).click({ modifiers: ["Control"] });
+        }
+        const completedReload = page.waitForResponse((response) => response.url().includes("collection=completed&include_archived=false") && response.request().method() === "GET");
+        await assertBulkAction("Archive", 6, "Six selected scans should show one Archive 6 action");
+        await page.getByRole("button", { name: "Archive 6" }).click();
+        await completedReload;
+        await waitForCompletedRows(50);
+        for (const hostname of ["alpha-current", "alpha-old", "omega-new-failure", "omega-old-failure", "delta-build-failed", "epsilon-build-cancelled"]) {
+          await assertHidden(page.locator("#scan-completed-panel tbody tr").filter({ hasText: hostname }), `Archiving must remove ${hostname} from the default Completed view`);
+        }
+        await assertCompletedPrefix("The reloaded Completed page after archiving");
+        await assertVisible(page.getByRole("button", { name: "Archived [7]" }), "The archived count must stay truthful after archiving");
+        await search.fill("retained-archive");
+        await assertVisible(page.getByRole("heading", { name: "Completed scans are hidden" }), "Expected retention empty state");
+        await assertVisible(page.getByText("The current retention view hides 1 archived scan(s). Include archived scans to review or restore them."), "Expected retention empty count");
+        await page.getByRole("button", { name: "Clear scan search" }).click();
+        await waitForCompletedRows(50);
+        const archivedToggle = page.getByRole("button", { name: /^Archived \[/ });
+        await archivedToggle.click();
+        await assertAttribute(page.getByRole("button", { name: "Archived [7]" }), "aria-pressed", "true", "Archived filter should expose its active state");
+        await assertVisible(page.getByText("retained-archive", { exact: true }), "Expected archived history to be reviewable");
+        await waitForCompletedRows(50);
+        await assertCompletedPrefix("The archived Completed view", { includeArchived: true });
+        await assertCount(page.locator("#scan-completed-panel tbody tr.archived .scanning-archived-label"), 7, "Archived rows must remain visually marked");
+        await page.getByTestId(`scanning-record-${ids.retained}`).click({ modifiers: ["Control"] });
+        await assertBulkAction("Restore", 1, "An all-archived selection should show only Restore 1");
+        const restoreReload = page.waitForResponse((response) => response.url().includes("collection=completed&include_archived=true") && response.request().method() === "GET");
+        const restoreCountReload = page.waitForResponse((response) => response.url().includes("collection=completed&include_archived=false") && response.request().method() === "GET");
+        await page.getByRole("button", { name: "Restore 1" }).click();
+        await Promise.all([restoreReload, restoreCountReload]);
+        await assertVisible(page.getByRole("button", { name: "Archived [6]" }), "Restoring must reduce the archived count");
+        await waitForCompletedRows(50);
+        await assertCount(page.locator("#scan-completed-panel tbody tr").filter({ hasText: "retained-archive" }).locator(".scanning-archived-label"), 0, "A restored scan must stop reporting archived state");
+        if (!archiveRequests.some((request) => request.archived === true && request.scan_ids.length === 6) || !archiveRequests.some((request) => request.archived === false && request.scan_ids.includes(ids.retained))) {
+          throw new Error(`Archive/restore selection requests were incomplete: ${JSON.stringify(archiveRequests)}`);
+        }
+        await page.getByTestId(`scanning-record-${ids.retained}`).click({ modifiers: ["Control"] });
+        await page.getByTestId(`scanning-record-${ids.newest}`).click({ modifiers: ["Control"] });
+        await assertBulkAction("Archive", 2, "A mixed archived/unarchived selection should show one Archive 2 action");
+        const mixedArchiveCount = archiveRequests.length;
+        const mixedArchiveResponse = page.waitForResponse((response) => response.request().method() === "PATCH" && response.url().match(scansRoute));
+        const mixedArchiveReload = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("collection=completed&include_archived=true"));
+        await page.getByRole("button", { name: "Archive 2" }).click();
+        const [mixedArchiveResult] = await Promise.all([mixedArchiveResponse, mixedArchiveReload]);
+        if (!mixedArchiveResult.ok()) throw new Error(`Mixed archive request failed: ${mixedArchiveResult.status()}`);
+        const mixedArchiveRequest = archiveRequests.slice(mixedArchiveCount);
+        if (mixedArchiveRequest.length !== 1 || mixedArchiveRequest[0].archived !== true ||
+            mixedArchiveRequest[0].scan_ids.length !== 2 ||
+            new Set(mixedArchiveRequest[0].scan_ids).size !== 2 ||
+            !mixedArchiveRequest[0].scan_ids.includes(ids.retained) ||
+            !mixedArchiveRequest[0].scan_ids.includes(ids.newest)) {
+          throw new Error(`Mixed archive must carry both exact IDs once: ${JSON.stringify(mixedArchiveRequest)}`);
+        }
+        const mixedArchiveBody = await mixedArchiveResult.json();
+        if (mixedArchiveBody.requested !== 2 || mixedArchiveBody.changed !== 1) {
+          throw new Error(`Mixed archive should request both IDs and change only the unarchived one: ${JSON.stringify(mixedArchiveBody)}`);
+        }
+        await assertVisible(page.getByRole("button", { name: "Archived [7]" }), "Idempotent mixed archive should keep the total archived count truthful");
+        await assertCount(bulkBar, 0, "Successful archive must clear the selection and hide BulkBar");
+        const continuationAfterArchive = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("after="));
+        await page.getByTestId("scanning-completed-load-more").evaluate((button) => button.click());
+        await continuationAfterArchive;
+        await waitForCompletedRows(100);
+        await assertCompletedPrefix("Continuation after archive and restore", { includeArchived: true });
+
+        // Ctrl/Cmd-click and Shift-click use only the currently loaded
+        // Completed rows. The archive/restore endpoints must receive the
+        // exact four scan UUIDs in that visible order, with no duplicate IDs,
+        // while Shift-drag selection must not select browser page text.
+        await scrollCompletedToTop();
+        const defaultRangeReload = page.waitForResponse((response) =>
+          response.request().method() === "GET" && response.url().includes("collection=completed&include_archived=false"));
+        await archivedToggle.click();
+        await defaultRangeReload;
+        await waitForCompletedRows(50);
+        await assertCompletedPrefix("Default Completed rows before range selection");
+        const completedTable = page.locator("#scan-completed-panel table.sys-table");
+        await assertCount(
+          completedTable.locator("input[type='checkbox']"),
+          0,
+          "Completed table must not render row-selection checkboxes",
+        );
+        const completedColumnNames = (await completedTable.locator("thead th").allTextContents())
+          .map((label) => label.replace(/\s+/g, " ").trim());
+        const expectedCompletedColumns = [
+          "Configuration", "Revision", "Status", "Findings", "Scanned", "Trigger", "Actions",
+        ];
+        if (completedColumnNames.join("|") !== expectedCompletedColumns.join("|")) {
+          throw new Error(`Completed columns must match the approved design: ${JSON.stringify(completedColumnNames)}`);
+        }
+        await assertCount(bulkBar, 0, "The bulk action bar must not exist without a selection");
+        await page.getByTestId(`scanning-record-${ids.rangeOne}`).click();
+        await assertVisible(page.getByRole("heading", { name: "range-one", exact: true }), "A plain Completed row click should open the exact config as the drawer title");
+        await page.getByRole("button", { name: "Close exact scan detail" }).click();
+        const rangeIdSet = new Set([ids.rangeOne, ids.rangeTwo, ids.rangeThree, ids.rangeFour]);
+        const rangeIds = visibleTerminalRows().filter((row) => rangeIdSet.has(row.scan_id)).map((row) => row.scan_id);
+        if (rangeIds.length !== 4 || new Set(rangeIds).size !== 4 ||
+            rangeIds.join(",") !== [ids.rangeOne, ids.rangeTwo, ids.rangeThree, ids.rangeFour].join(",")) {
+          throw new Error(`Expected four ordered, unique, loaded scans for range selection: ${JSON.stringify(rangeIds)}`);
+        }
+        const ctrlToggleRow = page.getByTestId(`scanning-record-${rangeIds[1]}`);
+        await ctrlToggleRow.click({ modifiers: ["Control"] });
+        await assertVisible(page.getByText("1 selected", { exact: true }), "Ctrl-click should toggle one exact row on");
+        await assertBulkAction("Archive", 1, "One unarchived selection should show only Archive 1");
+        await ctrlToggleRow.click({ modifiers: ["Control"] });
+        await assertCount(bulkBar, 0, "The bulk action bar should disappear when selection is empty");
+        const firstRangeRow = page.getByTestId(`scanning-record-${rangeIds[0]}`);
+        await firstRangeRow.click({ modifiers: ["Control"] });
+        await assertVisible(page.getByText("1 selected", { exact: true }), "Ctrl-click should anchor and select the first exact scan");
+        await page.getByTestId(`scanning-record-${rangeIds[3]}`).click({ modifiers: ["Shift"] });
+        await assertVisible(page.getByText("4 selected", { exact: true }), "Shift-click should select the four-row inclusive range");
+        await assertBulkAction("Archive", 4, "Four unarchived selections should show only Archive 4");
+        for (const scanId of rangeIds) {
+          const selectedRow = page.getByTestId(`scanning-record-${scanId}`);
+          if (!(await selectedRow.evaluate((element) => element.classList.contains("row-checked")))) {
+            throw new Error(`Shift range did not apply the selected-row treatment to ${scanId}`);
+          }
+        }
+        const selectedBrowserText = await page.evaluate(() => window.getSelection()?.toString() || "");
+        if (selectedBrowserText !== "") throw new Error(`Shift range highlighted page text: ${JSON.stringify(selectedBrowserText)}`);
+        const stickyBulkBar = await page.evaluate(async () => {
+          const content = document.querySelector(".content");
+          const bar = document.querySelector("#scan-completed-panel .bulk-bar");
+          if (!content || !bar) return null;
+          const scrollBehavior = content.style.scrollBehavior;
+          content.style.scrollBehavior = "auto";
+          content.scrollTop = content.scrollHeight;
+          await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const contentRect = content.getBoundingClientRect();
+          const barRect = bar.getBoundingClientRect();
+          const contentPaddingBottom = Number.parseFloat(getComputedStyle(content).paddingBottom) || 0;
+          content.style.scrollBehavior = scrollBehavior;
+          return {
+            position: getComputedStyle(bar).position,
+            left: barRect.left,
+            right: barRect.right,
+            bottom: barRect.bottom,
+            contentLeft: contentRect.left,
+            contentRight: contentRect.right,
+            contentBottom: contentRect.bottom,
+            contentPaddingBottom,
+          };
+        });
+        if (!stickyBulkBar || stickyBulkBar.position !== "sticky" ||
+            Math.abs((stickyBulkBar.left + stickyBulkBar.right) / 2 - (stickyBulkBar.contentLeft + stickyBulkBar.contentRight) / 2) > 3 ||
+            Math.abs(stickyBulkBar.bottom - (stickyBulkBar.contentBottom - stickyBulkBar.contentPaddingBottom - 16)) > 4) {
+          throw new Error(`Selected BulkBar must be centered and sticky while Completed is scrolled: ${JSON.stringify(stickyBulkBar)}`);
+        }
+        await captureWorkflowViewportState(page, "16c-scanning-view", "completed-range-selected", "desktop");
+        await captureWorkflowViewportState(page, "16c-scanning-view", "completed-bulkbar-sticky", "desktop");
+        await scrollCompletedToTop();
+        await page.getByRole("button", { name: "Clear selection" }).click();
+        await assertCount(bulkBar, 0, "Clear should hide BulkBar immediately");
+        for (const scanId of rangeIds) {
+          if (await page.getByTestId(`scanning-record-${scanId}`).evaluate((element) => element.classList.contains("row-checked"))) {
+            throw new Error(`Clear left scan ${scanId} selected`);
+          }
+        }
+        await page.getByTestId(`scanning-record-${rangeIds[3]}`).click({ modifiers: ["Shift"] });
+        await assertVisible(page.getByText("1 selected", { exact: true }), "Clear must reset the range anchor");
+        await page.getByRole("button", { name: "Clear selection" }).click();
+        await page.getByTestId(`scanning-record-${rangeIds[0]}`).click({ modifiers: ["Control"] });
+        await page.getByTestId(`scanning-record-${rangeIds[3]}`).click({ modifiers: ["Shift"] });
+        await assertVisible(page.getByText("4 selected", { exact: true }), "Range selection should still work after Clear");
+
+        const archiveCountBeforeRange = archiveRequests.length;
+        const rangeArchiveResponse = page.waitForResponse((response) =>
+          response.request().method() === "PATCH" && response.url().match(scansRoute));
+        const rangeArchiveReload = page.waitForResponse((response) =>
+          response.request().method() === "GET" && response.url().includes("collection=completed&include_archived=false"));
+        await page.getByRole("button", { name: "Archive 4" }).click();
+        const [rangeArchiveResult] = await Promise.all([rangeArchiveResponse, rangeArchiveReload]);
+        if (!rangeArchiveResult.ok()) throw new Error(`Range archive failed: ${rangeArchiveResult.status()}`);
+        const rangeArchiveRequest = archiveRequests.slice(archiveCountBeforeRange);
+        if (rangeArchiveRequest.length !== 1 || rangeArchiveRequest[0].archived !== true ||
+            rangeArchiveRequest[0].scan_ids.length !== 4 ||
+            new Set(rangeArchiveRequest[0].scan_ids).size !== 4 ||
+            rangeArchiveRequest[0].scan_ids.join(",") !== rangeIds.join(",")) {
+          throw new Error(`Range archive must carry those four exact IDs once: ${JSON.stringify(rangeArchiveRequest)}`);
+        }
+        for (const scanId of rangeIds) {
+          await assertHidden(page.getByTestId(`scanning-record-${scanId}`), `Archived range scan ${scanId} must leave default Completed`);
+        }
+
+        const archivedRangeReload = page.waitForResponse((response) =>
+          response.request().method() === "GET" && response.url().includes("collection=completed&include_archived=true"));
+        await archivedToggle.click();
+        await archivedRangeReload;
+        await waitForCompletedRows(50);
+        for (const scanId of rangeIds) {
+          await assertVisible(page.getByTestId(`scanning-record-${scanId}`), `Archived range scan ${scanId} must be visible for restore`);
+        }
+        await page.getByTestId(`scanning-record-${rangeIds[0]}`).click({ modifiers: ["Control"] });
+        await page.getByTestId(`scanning-record-${rangeIds[3]}`).click({ modifiers: ["Shift"] });
+        await assertVisible(page.getByText("4 selected", { exact: true }), "Shift-click should select the archived restore range");
+        const restoreCountBeforeRange = archiveRequests.length;
+        const rangeRestoreResponse = page.waitForResponse((response) =>
+          response.request().method() === "PATCH" && response.url().match(scansRoute));
+        const rangeRestoreReload = page.waitForResponse((response) =>
+          response.request().method() === "GET" && response.url().includes("collection=completed&include_archived=true"));
+        await assertBulkAction("Restore", 4, "All archived range rows should show Restore 4");
+        await page.getByRole("button", { name: "Restore 4" }).click();
+        const [rangeRestoreResult] = await Promise.all([rangeRestoreResponse, rangeRestoreReload]);
+        if (!rangeRestoreResult.ok()) throw new Error(`Range restore failed: ${rangeRestoreResult.status()}`);
+        const rangeRestoreRequest = archiveRequests.slice(restoreCountBeforeRange);
+        if (rangeRestoreRequest.length !== 1 || rangeRestoreRequest[0].archived !== false ||
+            rangeRestoreRequest[0].scan_ids.length !== 4 ||
+            new Set(rangeRestoreRequest[0].scan_ids).size !== 4 ||
+            rangeRestoreRequest[0].scan_ids.join(",") !== rangeIds.join(",")) {
+          throw new Error(`Range restore must carry those four exact IDs once: ${JSON.stringify(rangeRestoreRequest)}`);
+        }
+        await waitForCompletedRows(50);
+        for (const scanId of rangeIds) {
+          const row = page.getByTestId(`scanning-record-${scanId}`);
+          await assertVisible(row, `Restored range scan ${scanId} remains visible`);
+          await assertCount(row.locator(".scanning-archived-label"), 0, `Restored scan ${scanId} must no longer show archived`);
+        }
+
+        const secondOversizePage = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("after="));
+        await page.getByTestId("scanning-completed-load-more").evaluate((button) => button.click());
+        await secondOversizePage;
+        await waitForCompletedRows(100);
+        const thirdPageResponse = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("after="));
+        await page.getByTestId("scanning-completed-load-more").evaluate((button) => button.click());
+        await thirdPageResponse;
+        await waitForCompletedRows(150);
+        const firstLoadedScan = page.getByTestId((await page.locator("#scan-completed-panel tbody tr[data-testid^='scanning-record-']").first().getAttribute("data-testid")));
+        const oneHundredFirstScan = page.getByTestId((await page.locator("#scan-completed-panel tbody tr[data-testid^='scanning-record-']").nth(100).getAttribute("data-testid")));
+        await firstLoadedScan.click({ modifiers: ["Control"] });
+        await oneHundredFirstScan.click({ modifiers: ["Shift"] });
+        await assertVisible(page.getByText("101 selected", { exact: true }), "A loaded range over the request limit must remain selected");
+        const oversizedArchive = page.getByRole("button", { name: "Archive 101" });
+        await assertDisabled(oversizedArchive, "An archive request over 100 exact scan IDs must be disabled");
+        if (!(await oversizedArchive.getAttribute("title")).includes("100 or fewer")) {
+          throw new Error("Oversized selection must explain the 100-ID request limit");
+        }
+        await page.getByRole("button", { name: "Clear selection" }).click();
+        await assertCount(bulkBar, 0, "Clearing an oversized selection should remove BulkBar without truncating the selection first");
+
+        await assertCount(page.getByRole("tab"), 2, "Scanning must expose exactly Active and Completed");
+        await assertCount(page.locator("#scan-systems-panel"), 0, "The removed system-history panel must not mount");
+        if (collectionRequests.some((request) => request.collection === "history")) {
+          throw new Error("Scanning must not request removed per-system history");
+        }
+        if (removedTabRequests.length) throw new Error(`Scanning still polls the removed system view: ${JSON.stringify(removedTabRequests)}`);
+        await assertAttribute(page.getByRole("button", { name: "Archived [7]" }), "aria-pressed", "true", "Completed archived state must survive selection changes");
+
+        await page.getByRole("button", { name: "Schedule" }).click();
+        const scheduleDialog = page.getByRole("dialog", { name: "Scan schedule" });
+        await assertVisible(scheduleDialog, "Expected schedule dialog");
+        await scheduleDialog.getByRole("combobox", { name: "Deployed configs scan interval" }).selectOption("12h");
+        await scheduleDialog.getByRole("checkbox", { name: "Rebuild to scan old configs" }).check();
+        await scheduleDialog.getByRole("button", { name: "Save schedule" }).click();
+        await assertHidden(scheduleDialog, "Expected saved schedule dialog to close");
+        if (scheduleRequest?.deployed_interval !== "12h" || scheduleRequest?.rebuild_to_scan !== true) throw new Error(`Schedule request did not preserve controls: ${JSON.stringify(scheduleRequest)}`);
+
+        await captureWorkflowViewportState(page, "16c-scanning-view", "completed-history", "desktop");
+        await captureWorkflowViewportState(page, "16c-scanning-view", "completed-history", "narrowDesktop", async () => {
+          const width = await page.evaluate(() => ({ viewport: window.innerWidth, document: document.documentElement.scrollWidth }));
+          if (width.document > width.viewport) throw new Error(`Scanning narrow layout overflows: ${JSON.stringify(width)}`);
+        });
+      } finally {
+        page.off("request", noteRemovedTabRequest);
+        await page.unroute("**/api/v1/scanning/stats");
+        await page.unroute(scansRoute);
+        await page.unroute(scanDetailRoute);
+        await page.unroute(exactRetryRoute);
+        await page.unroute("**/api/v1/scanning/schedule");
+      }
+    },
+  },
+  {
+    name: "16e-poam-register-design",
+    description: "Mocked paged POA&M register: source-backed mixed rows, bounded counts, exact scopes and partial bulk failures",
+    action: async (page) => {
+      const ids = {
+        envA: "31000000-0000-4000-8000-000000000001",
+        envB: "31000000-0000-4000-8000-000000000002",
+        host: "31000000-0000-4000-8000-000000000003",
+        hostB: "31000000-0000-4000-8000-000000000008",
+        hostC: "31000000-0000-4000-8000-000000000009",
+        bundle: "31000000-0000-4000-8000-000000000004",
+        version: "31000000-0000-4000-8000-000000000005",
+        assignment: "31000000-0000-4000-8000-000000000006",
+        owner: "31000000-0000-4000-8000-000000000007",
+      };
+      const planId = (number) => `30000000-0000-4000-8000-${String(number).padStart(12, "0")}`;
+      const today = new Date().toISOString().slice(0, 10);
+      const dueSoon = new Date(Date.now() + 7 * 86400_000).toISOString().slice(0, 10);
+      const rows = Array.from({ length: 105 }, (_, index) => {
+        const number = index + 1;
         return {
-          left: rect.left,
-          right: rect.right,
-          top: rect.top,
-          bottom: rect.bottom,
-          viewportWidth: window.innerWidth,
-          viewportHeight: window.innerHeight,
-          documentWidth: document.documentElement.scrollWidth,
+          id: planId(number), human_id: `POAM-${String(number).padStart(4, "0")}`,
+          title: number === 105 ? "CVE-only remediation" : `Register plan ${number}`,
+          plan: "Review and remediate retained evidence", owner: "", revision: 1,
+          assignee: number === 6 ? { kind: "unassigned" } : { kind: "user", user_id: ids.owner, display: "Morgan Owner", available: true },
+          status: number === 3 ? "awaiting_verification" : number === 4 ? "blocked" : number === 104 ? "completed" : "in_progress",
+          risk: number === 1 ? "high" : number === 2 ? "low" : "medium",
+          target_date: number === 1 ? "2020-01-01" : number === 2 ? dueSoon : "2099-01-01",
+          overdue: number === 1, finding_count: 1, cve_finding_count: number === 105 ? 1 : 0,
+          created_at: "2026-01-01T12:00:00Z", updated_at: "2026-01-02T12:00:00Z",
+          closed_at: number === 104 ? "2026-01-03T12:00:00Z" : null, closure_attempt_id: null,
+          environment_ids: number === 1 ? [ids.envA, ids.envB] : number === 2 ? [ids.envB] : [ids.envA],
+          system_ids: number === 1 ? [ids.host, ids.hostB] : number === 2 ? [ids.hostB, ids.hostC] : [],
+          systems: number === 1 ? [
+            { system_id: ids.host, hostname: "prod-node-01", environment_id: ids.envA },
+            { system_id: ids.hostB, hostname: "stage-node-01", environment_id: ids.envB },
+          ] : number === 2 ? [
+            { system_id: ids.hostB, hostname: "stage-node-01", environment_id: ids.envB },
+            { system_id: ids.hostC, hostname: "stage-node-02", environment_id: ids.envB },
+          ] : [],
+          bundle_ids: number <= 2 ? [ids.bundle] : [],
+          bundle_version_ids: number <= 2 ? [ids.version] : [],
+          assignment_version_ids: number <= 2 ? [ids.assignment] : [],
+          first_requirement: number === 105 ? null : `AC-${number}`,
+          first_cve: number === 105 ? "CVE-2024-1234" : null,
+          milestone_count: number === 1 ? 3 : 0,
+          completed_milestone_count: number === 1 ? 1 : 0,
+          last_activity_at: number === 5 ? "2020-01-01T12:00:00Z" : `${today}T12:00:00Z`,
         };
       });
-      if (
-        narrowGeometry.left < 0
-        || narrowGeometry.right > narrowGeometry.viewportWidth
-        || narrowGeometry.top < 0
-        || narrowGeometry.bottom > narrowGeometry.viewportHeight
-        || narrowGeometry.documentWidth > narrowGeometry.viewportWidth
-      ) {
-        throw new Error(`Diagnostics drawer clips or causes horizontal overflow at 900x900: ${JSON.stringify(narrowGeometry)}`);
+      const requests = [];
+      const writes = [];
+      const poamWrites = [];
+      const noteWrite = (request) => {
+        if (/\/api\/v1\/poams(?:\/|\?|$)/.test(request.url()) && request.method() !== "GET") {
+          poamWrites.push(`${request.method()} ${new URL(request.url()).pathname}`);
+        }
+      };
+      page.on("request", noteWrite);
+      const failPlan = planId(2);
+      const listRoute = /\/api\/v1\/poams(?:\?.*)?$/;
+      const detailRoute = /\/api\/v1\/poams\/([0-9a-f-]+)(?:\?.*)?$/;
+      const transitionRoute = /\/api\/v1\/poams\/([0-9a-f-]+)\/transition$/;
+      const acceptanceRoute = /\/api\/v1\/acceptances(?:\?.*)?$/;
+      const acceptanceCommand = /\/api\/v1\/acceptances\/(policy_waiver|cve_host|cve_environment)\/([0-9a-f-]+)\/(renew|convert)$/;
+      const acceptanceWrites = [];
+      const accepted = [
+        { source: "cve_host", human_id: "RA-0001", source_id: "32000000-0000-4000-8000-000000000001", waiver_updated_at: null, status: "accepted", finding_id: null,
+           system_id: ids.host, system_hostname: "prod-node-01", environment_id: null, policy_lineage_id: null, policy_version_id: null,
+          canonical_cve_id: "CVE-2024-1234", canonical_package_name: "openssl", justification: "Reviewed host risk",
+           review_date: "2026-09-25", review_due_at: null, expires_at: null, accepted_by: ids.owner, accepted_at: "2026-09-20T12:00:00Z",
+          retired_at: null, retired_by: null, retirement_reason: null, replacement_poam_id: null, recorded_at: "2026-09-20T12:00:00Z" },
+        { source: "policy_waiver", human_id: "RA-0002", source_id: "32000000-0000-4000-8000-000000000002", waiver_updated_at: "2026-09-18T12:00:00Z", status: "accepted", finding_id: planId(1),
+           system_id: ids.host, system_hostname: "prod-node-01", environment_id: null, policy_lineage_id: ids.bundle, policy_version_id: ids.version,
+          canonical_cve_id: null, canonical_package_name: null, justification: "Approved policy exception",
+          review_date: null, review_due_at: null, expires_at: "2026-12-01T12:00:00Z", accepted_by: planId(89), accepted_at: "2026-09-18T12:00:00Z",
+          retired_at: null, retired_by: null, retirement_reason: null, replacement_poam_id: null, recorded_at: "2026-09-18T12:00:00Z" },
+        { source: "cve_environment", human_id: "RA-0003", source_id: "32000000-0000-4000-8000-000000000003", waiver_updated_at: null, status: "converted", finding_id: null,
+          system_id: null, environment_id: ids.envA, policy_lineage_id: null, policy_version_id: null,
+          canonical_cve_id: "CVE-2025-1234", canonical_package_name: "curl", justification: "Historical environment decision",
+          review_date: "2026-10-15", review_due_at: null, expires_at: null, accepted_by: ids.owner, accepted_at: "2026-09-10T12:00:00Z",
+          retired_at: "2026-09-21T12:00:00Z", retired_by: ids.owner, retirement_reason: "converted", replacement_poam_id: planId(94), recorded_at: "2026-09-10T12:00:00Z" },
+      ];
+      const detailPayload = (row) => ({ ...row, findings: [], cve_findings: [], findings_has_more: false,
+        findings_next_cursor: null, milestones: [], assignment_references: [], verification_attempts: [],
+        verification_has_more: false, verification_next_cursor: null, activity: [],
+        activity_has_more: false, activity_next_cursor: null });
+      await page.route(listRoute, async (route) => {
+        const request = route.request();
+        if (request.method() !== "GET") throw new Error(`Unexpected register write: ${request.method()}`);
+        const url = new URL(request.url());
+        requests.push(url);
+        const limit = Number(url.searchParams.get("limit"));
+        const offset = Number(url.searchParams.get("offset"));
+        if (limit !== 100 || ![0, 100].includes(offset)) throw new Error(`Invalid register page: ${url}`);
+        const scoped = rows.filter((row) =>
+          (!url.searchParams.has("system_id") || row.system_ids.includes(url.searchParams.get("system_id"))) &&
+          (!url.searchParams.has("bundle_id") || row.bundle_ids.includes(url.searchParams.get("bundle_id"))));
+        const items = scoped.slice(offset, offset + limit);
+        await route.fulfill({ json: { items, limit, offset, has_more: offset + limit < scoped.length,
+          next_offset: offset + limit < scoped.length ? offset + limit : null } });
+      });
+      await page.route(acceptanceRoute, (route) => {
+        if (route.request().method() !== "GET") throw new Error("Register acceptance read attempted a write");
+        const url = new URL(route.request().url());
+        if (url.searchParams.get("status") !== "accepted_or_converted" || url.searchParams.get("limit") !== "100") {
+          throw new Error(`Acceptance register requested an unapproved scope: ${url}`);
+        }
+        const search = (url.searchParams.get("search") || "").trim().toLowerCase();
+        const visible = accepted.filter((item) =>
+          (!url.searchParams.has("environment_id") || url.searchParams.get("environment_id") === ids.envA) &&
+          (!search || [item.human_id, item.policy_title, item.requirement_external_id,
+            item.canonical_cve_id, item.canonical_package_name, item.system_hostname,
+            item.environment_name, item.justification].some((label) => label?.toLowerCase().includes(search))));
+        const offset = Number(url.searchParams.get("offset"));
+        return route.fulfill({ json: { items: visible.slice(offset, offset + 100), total: visible.length, offset,
+          limit: 100, has_more: offset + 100 < visible.length } });
+      });
+      await page.route(acceptanceCommand, (route) => {
+        const [, source, sourceId, command] = new URL(route.request().url()).pathname.match(acceptanceCommand) || [];
+        const body = route.request().postDataJSON();
+        acceptanceWrites.push({ source, sourceId, command, body });
+        const original = accepted.find((item) => item.source === source && item.source_id === sourceId);
+        if (route.request().method() !== "POST" || !original || body.expected_source_id !== sourceId ||
+            body.expected_waiver_updated_at !== original.waiver_updated_at) {
+          throw new Error(`Acceptance command did not retain exact source identity: ${JSON.stringify(acceptanceWrites.at(-1))}`);
+        }
+        if (command === "renew") {
+          if (!isDeepStrictEqual(body, { expected_source_id: sourceId, expected_waiver_updated_at: original.waiver_updated_at })) {
+            throw new Error(`Renewal must carry only exact source revision: ${JSON.stringify(body)}`);
+          }
+          if (source === "policy_waiver") return route.fulfill({ status: 409, json: { error: "waiver_source_changed", message: "Policy waiver changed" } });
+          original.review_date = "2027-02-01";
+          return route.fulfill({ json: { source, predecessor_id: sourceId, successor_id: planId(90), review_deadline: original.review_date } });
+        }
+        if (source === "cve_host") {
+          if (body.reuse_poam_id !== null || !isDeepStrictEqual(body.poam, {
+            title: "Patch openssl", plan: "Deploy verified patch", assignee: { kind: "user", user_id: ids.owner },
+            target_date: "2027-05-01", risk: "high", default_milestones: true,
+          })) throw new Error(`CVE conversion must send a server-eligible typed assignee: ${JSON.stringify(body)}`);
+          original.status = "converted";
+          original.replacement_poam_id = planId(92);
+          return route.fulfill({ json: { source, predecessor_id: sourceId, successor_id: planId(93), poam_id: planId(92), poam_reused: false } });
+        }
+        if (source !== "policy_waiver" || body.reuse_poam_id !== null || body.poam.assessment_id !== undefined ||
+            body.poam.finding_id !== undefined || body.poam.observation !== undefined || body.poam.owner !== "Named owner" ||
+            body.poam.title !== "Real remediation" || body.poam.plan !== "Apply approved configuration" ||
+            body.poam.risk !== "high" || body.poam.target_date !== "2027-05-01") {
+          throw new Error(`Conversion must use entered policy metadata without invented evidence: ${JSON.stringify(body)}`);
+        }
+        original.status = "converted";
+        original.replacement_poam_id = planId(91);
+        return route.fulfill({ json: { source, predecessor_id: sourceId, poam_id: planId(91), poam_reused: false } });
+      });
+      await page.route("**/api/v1/poams/assignees", (route) => route.fulfill({ json: { people: [{ user_id: ids.owner, label: "Morgan Owner" }], groups: [] } }));
+      await page.route("**/api/v1/environments", (route) => route.fulfill({ json: [
+        { id: ids.envA, name: "Production", color_hex: "#a78bfa", is_active: true, system_count: 1 },
+        { id: ids.envB, name: "Staging", color_hex: "#60a5fa", is_active: true, system_count: 1 },
+      ] }));
+      await page.route(detailRoute, (route) => {
+        const id = new URL(route.request().url()).pathname.split("/").at(-1);
+        if (route.request().method() !== "GET") throw new Error(`Unexpected detail write: ${route.request().method()}`);
+        const row = rows.find((item) => item.id === id);
+        if (!row) throw new Error(`Unexpected detail ID: ${id}`);
+        return route.fulfill({ json: detailPayload(row) });
+      });
+      await page.route(transitionRoute, (route) => {
+        const id = new URL(route.request().url()).pathname.split("/").at(-2);
+        const body = route.request().postDataJSON();
+        writes.push({ id, method: route.request().method(), body });
+        if (route.request().method() !== "POST" || body.revision !== 1 || body.status !== "blocked") {
+          throw new Error(`Unexpected bulk transition: ${JSON.stringify(writes.at(-1))}`);
+        }
+        if (id === failPlan) return route.fulfill({ status: 409, json: { error: "stale revision" } });
+        const row = rows.find((item) => item.id === id);
+        row.status = "blocked";
+        row.revision += 1;
+        return route.fulfill({ json: detailPayload(row) });
+      });
+      const selected = page.getByRole("group", { name: "Selected remediation plans" });
+      const row = (number) => page.locator(".poams-group tbody tr").filter({ hasText: `POAM-${String(number).padStart(4, "0")}` });
+      const browse = (name) => page.getByRole("tablist", { name: "Browse by" }).getByRole("tab", { name });
+      const scopeUrl = (key, id) => new URL(page.url()).searchParams.get(key) === id;
+      try {
+        await page.goto(`${baseUrl}/poams`, { timeout: LOAD_TIMEOUT, waitUntil: "commit" });
+        await assertVisible(page.getByRole("heading", { name: "POA&M", exact: true }), "Register heading must load");
+        await assertVisible(page.getByText("Showing 100 open remediation plans · 2 active risk decisions"), "First page must describe only fetched records");
+        await assertVisible(page.getByRole("tab", { name: "Everything 103" }), "Mixed tab must show the count of fetched source records");
+        const mixedDecision = page.locator(`.poams-group tbody tr[data-source-id="${accepted[0].source_id}"]`);
+        await assertVisible(mixedDecision, "Mixed register must render the source decision alongside plans");
+        await assertVisible(mixedDecision.getByRole("cell", { name: "RA-0001" }), "Everything must show the source-assigned RA identity");
+        await assertVisible(mixedDecision.getByRole("cell", { name: "No category" }), "Everything must not infer plan risk for an acceptance");
+        await page.getByRole("textbox", { name: "Search register" }).fill("RA-0001");
+        await assertVisible(page.locator(`.poams-group tbody tr[data-source-id="${accepted[0].source_id}"]`), "Everything search must match RA ID");
+        await assertCount(page.locator(`.poams-group tbody tr[data-source-id="${accepted[0].source_id}"]`), 1, "Everything search must match RA ID");
+        await page.getByRole("textbox", { name: "Search register" }).fill("");
+        await mixedDecision.click();
+         const mixedTray = page.getByRole("dialog", { name: "Risk acceptance RA-0001 · Host CVE" });
+         await assertVisible(mixedTray.getByText("Reviewed host risk"), "Mixed row must open the exact source decision without writing");
+         await assertVisible(mixedTray.getByRole("heading", { name: "RA-0001", exact: true }), "Mixed drawer must show human RA ID as the heading");
+        await mixedTray.getByRole("button", { name: "Close acceptance" }).click();
+        await mixedDecision.click({ modifiers: ["Control"] });
+        await assertVisible(page.getByRole("group", { name: "Selected risk acceptances" }).getByText("1 source decisions selected"), "Mixed selection must preserve typed source identity");
+        await page.getByRole("group", { name: "Selected risk acceptances" }).getByRole("button", { name: "Clear" }).click();
+        if (acceptanceWrites.length) throw new Error("Mixed row read or selection wrote a source decision");
+        const exportMenu = page.getByRole("menu", { name: "Export POA&Ms" });
+        await page.getByRole("button", { name: /^Export \d+\+? ▾$/ }).click();
+        for (const [name, format] of [["OSCAL JSON", "oscal-json"], ["Excel XLSX", "xlsx"], ["CSV", "csv"], ["OSCAL XML", "oscal-xml"]]) {
+          const href = new URL(await exportMenu.getByRole("menuitem", { name: new RegExp(`^${name}`) }).getAttribute("href"));
+          if (href.pathname !== "/api/v1/register/export" || href.searchParams.get("record_type") !== "all" || href.searchParams.get("poam_status") !== "active" || href.searchParams.get("acceptance_status") !== "accepted_current" || href.searchParams.get("format") !== format || href.searchParams.has("limit") || href.searchParams.has("offset")) {
+            throw new Error(`Mixed ${format} download must use the complete authorized default scope: ${href}`);
+          }
+        }
+        await assertVisible(page.getByText("53 items", { exact: false }), "Initial environment-grouped window deduplicates a plan that spans two environments");
+        await assertVisible(row(1).first().getByText("CAT I"), "Risk category must come from the plan summary");
+        const productionGroup = page.locator(".poams-group").filter({ has: page.locator(".pv-group-name", { hasText: "Production" }) });
+        const stagingGroup = page.locator(".poams-group").filter({ has: page.locator(".pv-group-name", { hasText: "Staging" }) });
+        const productionPlanSub = productionGroup.locator("tbody tr").filter({ hasText: "POAM-0001" }).locator(".pv-sub");
+        const stagingPlanSub = stagingGroup.locator("tbody tr").filter({ hasText: "POAM-0001" }).locator(".pv-sub");
+        await assertVisible(productionPlanSub.getByText("prod-node-01 · Production"), "Environment A must show only its own hostname");
+        await assertVisible(stagingPlanSub.getByText("stage-node-01 · Staging"), "The same plan in environment B must show only B's hostname");
+        await assertVisible(stagingGroup.locator("tbody tr").filter({ hasText: "POAM-0002" }).locator(".pv-sub").getByText("2 hosts · Staging · AC-2"), "A multi-host row must use scoped count and one finding identity");
+        if ((await productionPlanSub.textContent()).includes("Staging") || (await stagingPlanSub.textContent()).includes("Production")) throw new Error("One plan's subtitle concatenated multiple environment groups");
+        const groupDistribution = productionGroup.locator(".pv-stack");
+        await assertVisible(groupDistribution, "Status distribution belongs before Focus");
+        if ((await groupDistribution.locator("span").count()) < 1) throw new Error("Group distribution omitted recorded plan statuses");
+        await captureWorkflowViewportState(page, "16e-poam-register-design", "group-scoped-subtitles", "desktop");
+        await captureWorkflowViewportState(page, "16e-poam-register-design", "everything", "narrowDesktop");
+        await page.getByRole("button", { name: /^Export \d+\+? ▾$/ }).click();
+        await stagingGroup.scrollIntoViewIfNeeded();
+        await page.evaluate(() => window.scrollBy(0, 480));
+        await captureWorkflowViewportState(page, "16e-poam-register-design", "group-scoped-staging", "desktop");
+        await assertVisible(row(1).first().getByText("1/3"), "Milestone progress must come from the register projection");
+        await assertVisible(row(6).getByText("Unassigned"), "Missing owner must not be given an invented identity");
+        await page.getByRole("button", { name: "Columns" }).click();
+        await page.getByRole("menu", { name: "Toggle columns" }).getByRole("checkbox", { name: "Progress" }).uncheck();
+        await assertCount(row(1).first().locator("td.pv-c-ms:visible"), 0, "Column control must hide only the requested progress column");
+        await page.getByRole("menu", { name: "Toggle columns" }).getByRole("checkbox", { name: "Progress" }).check();
+        for (const [label, count] of [["Overdue plans", "1"], ["Expired acceptances", "1"], ["Coming due", "1"], ["Awaiting verification", "1"], ["Blocked", "1"], ["Missing owner/review", "2"]]) {
+          await assertVisible(page.getByRole("group", { name: "Work queues" }).getByRole("button", { name: new RegExp(`^${count} ${label}`) }), `${label} must count loaded rows only`);
+        }
+        await assertVisible(page.locator(".poams-pills").getByRole("button", { name: "Production", exact: false }), "Authorized environment name must replace UUID in scope pills");
+        const prodPillDot = page.locator(".poams-pills").getByRole("button", { name: "Production", exact: false }).locator(".rr-scope-dot");
+        await assertVisible(prodPillDot, "Environment pill uses its catalog color");
+        if (await prodPillDot.evaluate((dot) => getComputedStyle(dot).backgroundColor) !== "rgb(167, 139, 250)") throw new Error("Environment pill color must be source-backed");
+        await assertVisible(productionGroup.locator(".rr-group-source-dot"), "Environment group uses its catalog color");
+        const hostOnly = page.locator(".poams-group").filter({ hasText: "Host-only decisions" }).locator(`tbody tr[data-source-id="${accepted[0].source_id}"]`);
+        await assertVisible(hostOnly, "Host-only decisions must not be inferred into an environment group");
+        await assertVisible(hostOnly.locator(".pv-title").getByText("CVE-2024-1234 — openssl on prod-node-01"), "Host-only title must use its source-backed hostname");
+        await assertVisible(page.locator(".rr-host-only-summary"), "Host-only scope summary stays neutral");
+        await assertCount(hostOnly.locator(".rr-group-source-dot"), 0, "Host-only scope must not inherit a plan environment color");
+        await page.getByRole("tab", { name: "Remediation plans" }).click();
+        await captureWorkflowViewportState(page, "16e-poam-register-design", "plans", "desktop");
+        await captureWorkflowViewportState(page, "16e-poam-register-design", "plans", "narrowDesktop");
+        await page.getByRole("tab", { name: "Everything" }).click();
+        const visibleRegisterCopy = (await page.locator(".poams-group tbody").allTextContents()).join(" ");
+        if (/\bHost(?:\s+Host)+\b/.test(visibleRegisterCopy) || visibleRegisterCopy.includes(ids.host) || visibleRegisterCopy.includes(accepted[0].source_id)) throw new Error("Register leaked repeated scope types or raw UUIDs in row copy");
+        await assertAttribute(page.getByRole("tab", { name: "Everything" }), "aria-selected", "true", "Everything is the initial type");
+        await page.getByRole("tab", { name: "Risk acceptances" }).click();
+        await assertVisible(page.getByRole("navigation", { name: "Scope" }), "Acceptance tab must retain the shared scope bar");
+        await assertVisible(page.getByRole("textbox", { name: "Search register" }), "Acceptance tab must retain register search");
+        await assertVisible(page.getByRole("combobox", { name: "Group register" }), "Acceptance tab must retain grouping");
+        await assertDisabled(page.getByRole("combobox", { name: "Risk" }), "No acceptance source records a CAT severity");
+        await assertVisible(page.locator(".poams-acceptances").getByText("Host-only decisions"), "Host decision group must remain separate from environment decisions");
+        const hostOnlyGroup = page.locator(".poams-acceptances .poams-group").filter({ hasText: "Host-only decisions" });
+        await assertVisible(hostOnlyGroup.locator(".rr-group-neutral-dot"), "Host-only group has a neutral identity marker");
+        await assertCount(hostOnlyGroup.getByRole("button", { name: "Focus" }), 0, "Host-only group must not infer an environment Focus");
+        const hostGroupToggle = hostOnlyGroup.getByRole("button", { name: /Host-only decisions/ });
+        await hostGroupToggle.click();
+        await assertCount(hostOnlyGroup.locator("tbody tr"), 0, "Collapse hides the group rows");
+        await hostGroupToggle.click();
+        await assertVisible(hostOnlyGroup.locator(`tbody tr[data-source-id="${accepted[0].source_id}"]`), "Expand restores source rows");
+        for (const label of ["Expired acceptances", "Review in 30 days", "No review date", "Accepted decisions"]) {
+          await assertVisible(page.getByRole("group", { name: "Work queues" }).getByText(label), `${label} must be a source-backed acceptance card`);
+        }
+        await assertVisible(page.locator(".poams-acceptances").getByText("CVE-2024-1234", { exact: false }), "Accepted CVE host decision must keep its canonical package identity");
+        await assertVisible(page.locator(".poams-acceptances").getByText("Authorization expires Dec 1, 2026", { exact: false }), "Policy waiver expiry must not be mistaken for a review deadline");
+        await assertVisible(page.locator(".poams-acceptances").getByRole("cell", { name: "RA-0001" }), "Acceptance-only table retains the ID column");
+        const acceptanceHeaders = await page.locator(".poams-acceptances thead th").allTextContents();
+        if (!isDeepStrictEqual(acceptanceHeaders, ["ID", "Title", "Status", "Approved", "Approver", "Review"])) throw new Error(`Expected six acceptance columns: ${acceptanceHeaders}`);
+        await assertVisible(page.locator(".poams-acceptances").getByRole("cell", { name: "Morgan Owner" }).first(), "Approver should use the authorized catalog label");
+        await assertVisible(page.locator(".poams-acceptances").getByRole("cell", { name: "Approver unavailable" }), "Unknown approver must not render as a UUID");
+        await page.setViewportSize({ width: 1000, height: 1000 });
+        const bounds = await page.locator(".poams-acceptances .poams-table").first().evaluate((table) => {
+          const card = table.closest(".poams-main").getBoundingClientRect();
+          const cells = [...table.querySelectorAll("thead th")].filter((th) => th.getBoundingClientRect().width > 0)
+            .map((th) => ({ label: th.textContent, left: th.getBoundingClientRect().left, right: th.getBoundingClientRect().right }));
+          return { cardLeft: card.left, cardRight: card.right, tableRight: table.getBoundingClientRect().right, cells };
+        });
+        if (bounds.tableRight > bounds.cardRight + 1 || bounds.cells.some((cell) => cell.left < bounds.cardLeft - 1 || cell.right > bounds.cardRight + 1)) {
+          throw new Error(`Acceptances table overflows the 1000px register: ${JSON.stringify(bounds)}`);
+        }
+        await page.setViewportSize(MANIFEST.settings.viewport);
+        await page.getByRole("textbox", { name: "Search register" }).fill("CVE-2024-1234");
+        await assertVisible(page.locator(`.poams-acceptances tbody tr[data-source-id="${accepted[0].source_id}"]`), "Acceptance search filters source subject");
+        await assertCount(page.locator(".poams-acceptances tbody tr"), 1, "Acceptance search filters source subject");
+        await page.getByRole("textbox", { name: "Search register" }).fill("RA-0001");
+        await assertVisible(page.locator(`.poams-acceptances tbody tr[data-source-id="${accepted[0].source_id}"]`), "Acceptance search must match the human RA ID");
+        await assertCount(page.locator(".poams-acceptances tbody tr"), 1, "Acceptance search must match the human RA ID");
+        await page.getByRole("textbox", { name: "Search register" }).fill("");
+        await page.getByRole("combobox", { name: "Group register" }).selectOption("owner");
+        await assertVisible(page.locator(".poams-acceptances").getByText("Morgan Owner", { exact: true }).first(), "Approver grouping must use a name");
+        await page.getByRole("combobox", { name: "Group register" }).selectOption("environment");
+        await page.getByRole("combobox", { name: "Status" }).selectOption("all");
+        await assertVisible(page.locator(".poams-acceptances .poams-group").filter({ hasText: "Production" }).locator(`tbody tr[data-source-id="${accepted[2].source_id}"]`), "Environment decision must join its exact source environment group");
+        await page.getByRole("combobox", { name: "Status" }).selectOption("active");
+        await assertVisible(page.getByRole("group", { name: "Work queues" }).getByText("No review date"), "Acceptance queues must remain available");
+        await captureWorkflowViewportState(page, "16e-poam-register-design", "source-decisions-readonly", "desktop");
+        await captureWorkflowViewportState(page, "16e-poam-register-design", "source-decisions-readonly", "narrowDesktop");
+        const acceptanceTable = page.locator(".poams-acceptances");
+        const hostDecision = acceptanceTable.locator(`tbody tr[data-source-id="${accepted[0].source_id}"]`);
+        const policyDecision = acceptanceTable.locator(`tbody tr[data-source-id="${accepted[1].source_id}"]`);
+        await page.setViewportSize({ width: 1000, height: 1000 });
+        await hostDecision.click();
+         const hostTray = page.getByRole("dialog", { name: "Risk acceptance RA-0001 · Host CVE" });
+         await assertVisible(hostTray.getByRole("heading", { name: "RA-0001", exact: true }), "Drawer title must show only the human RA ID");
+        await assertVisible(hostTray.getByText("Reviewed host risk"), "Tray must preserve original justification");
+         await assertVisible(hostTray.getByText("CVE-2024-1234 — openssl on prod-node-01", { exact: true }), "Drawer subject must use source-aware CVE format with em dash");
+        await assertVisible(hostTray.getByText("Morgan Owner", { exact: true }), "Approver must resolve through the authorized catalog");
+        await assertVisible(hostTray.getByText("Sep 20, 2026", { exact: true }), "Approval time must render as a human-readable date");
+        await assertVisible(hostTray.getByText("Sep 25, 2026", { exact: true }), "Review date must render as a human-readable date");
+        await assertVisible(hostTray.getByText("review expired", { exact: true }), "Past source review date must use the review-expired treatment");
+        await assertVisible(hostTray.getByRole("heading", { name: "Justification" }), "Drawer must label justification");
+         await assertVisible(hostTray.getByRole("heading", { name: "Decision scope and evidence" }), "Drawer must present source evidence");
+         const sourceToggle = hostTray.locator("button.rr-acceptance-source-toggle");
+         await assertVisible(sourceToggle, "Source record toggle must be present");
+         await assertVisible(hostTray.locator(".rr-acceptance-source-detail"), "Source record must be expanded by default");
+         const sourceDetail = hostTray.locator(".rr-acceptance-source-detail");
+         await assertVisible(sourceDetail.getByText(`${accepted[0].source_id}`, { exact: true }), "Exact source UUID must remain visible in metadata");
+         await sourceToggle.click();
+         await assertCount(hostTray.locator(".rr-acceptance-source-detail"), 0, "Clicking toggle collapses source record");
+         await sourceToggle.click();
+         await assertVisible(hostTray.locator(".rr-acceptance-source-detail"), "Clicking toggle again expands source record");
+        await assertCount(hostTray.locator(".chip").filter({ hasText: /CAT|Risk level/ }), 0, "CVE decisions do not record a CAT/risk category");
+        await assertVisible(hostTray.getByRole("button", { name: /Re-review · renew 90 days/ }), "Authorized host decision must offer renewal");
+        await assertVisible(hostTray.getByRole("button", { name: /Convert to POA&M/ }), "Authorized host decision must offer conversion");
+        await assertCount(hostTray.getByRole("button", { name: /Revoke/ }), 0, "No source-owned revoke operation is available");
+        await captureWorkflowViewportState(page, "16e-poam-register-design", "acceptance-tray-host-cve", "desktop");
+        await captureWorkflowViewportState(page, "16e-poam-register-design", "acceptance-tray-host-cve", "narrowDesktop");
+        await page.setViewportSize({ width: 560, height: 900 });
+        const conversionActionBounds = await hostTray.getByRole("button", { name: "Convert to POA&M" }).evaluate((button) => {
+          const bounds = button.getBoundingClientRect();
+          return { left: bounds.left, right: bounds.right, width: window.innerWidth };
+        });
+        if (conversionActionBounds.left < 0 || conversionActionBounds.right > conversionActionBounds.width) {
+          throw new Error(`Acceptance conversion action is clipped on narrow screens: ${JSON.stringify(conversionActionBounds)}`);
+        }
+        await page.setViewportSize(MANIFEST.settings.viewport);
+        await hostTray.getByRole("button", { name: "Close acceptance" }).click();
+        await policyDecision.click();
+        const policyTray = page.getByRole("dialog", { name: "Risk acceptance RA-0002 · Policy waiver" });
+        await assertVisible(policyTray.getByText("Policy authorization expires"), "Policy expiry is distinct from review deadline");
+        await page.keyboard.press("Escape");
+        await assertCount(policyTray, 0, "Escape closes without a write");
+        await hostDecision.click();
+        await page.locator(".poam-tray-backdrop").click({ position: { x: 5, y: 5 } });
+        await assertCount(hostTray, 0, "Backdrop closes without a write");
+        if (acceptanceWrites.length) throw new Error("Read, close, Escape or backdrop wrote a decision");
+        await page.getByRole("combobox", { name: "Status" }).selectOption("all");
+        const convertedDecision = acceptanceTable.locator(`tbody tr[data-source-id="${accepted[2].source_id}"]`);
+        await convertedDecision.click();
+        const convertedTray = page.getByRole("dialog", { name: "Risk acceptance RA-0003 · Environment CVE" });
+         await assertVisible(convertedTray.getByRole("button", { name: "Open replacement POA&M" }), "Converted decision must link its source-backed replacement");
+         await assertVisible(convertedTray.locator(".rr-acceptance-source-detail"), "Converted decision source record is expanded by default");
+         const replacementLink = convertedTray.getByRole("button", { name: "Open replacement POA&M" });
+         const beforeUrl = page.url();
+         await replacementLink.click();
+         await page.waitForURL((url) => url.toString() !== beforeUrl);
+         const replacementUrl = new URL(page.url());
+         if (!replacementUrl.searchParams.has("poam")) throw new Error(`Replacement POA&M link did not navigate to plan detail: ${page.url()}`);
+         const openedPlanId = replacementUrl.searchParams.get("poam");
+         if (openedPlanId !== planId(94)) throw new Error(`Expected replacement plan ${planId(94)}, but navigated to ${openedPlanId}`);
+         await page.goBack();
+         await convertedDecision.click();
+        await assertCount(convertedTray.getByRole("button", { name: /Re-review|Convert to POA&M/ }), 0, "Converted historical decision must not offer active actions");
+        await convertedTray.getByRole("button", { name: "Close acceptance" }).click();
+        await page.setViewportSize(MANIFEST.settings.viewport);
+
+        await hostDecision.click({ modifiers: ["Control"] });
+        await policyDecision.click({ modifiers: ["Control"] });
+        const acceptanceBulk = page.getByRole("group", { name: "Selected risk acceptances" });
+        await assertVisible(acceptanceBulk.getByText("2 source decisions selected"), "Bulk identities must be distinct");
+        await acceptanceBulk.getByRole("button", { name: "Renew 2 acceptance(s) 90 days" }).click();
+        await assertVisible(page.getByText("1 renewed; 1 failed; 0 ineligible.", { exact: false }), "Partial renewal reports source-specific failures");
+        await assertAttribute(policyDecision, "aria-selected", "true", "Failed source remains selected");
+        await assertAttribute(hostDecision, "aria-selected", "false", "Confirmed source clears");
+        if (acceptanceWrites.length !== 2 || acceptanceWrites[0].source !== "cve_host" || acceptanceWrites[1].source !== "policy_waiver") {
+          throw new Error(`Bulk must be sequential and exact: ${JSON.stringify(acceptanceWrites)}`);
+        }
+        await acceptanceBulk.getByRole("button", { name: "Renew 1 acceptance(s) 90 days" }).click();
+        await assertVisible(page.getByText("0 renewed; 1 failed; 0 ineligible.", { exact: false }), "Retry must not repeat successes");
+        if (acceptanceWrites.length !== 3 || acceptanceWrites[2].source !== "policy_waiver") throw new Error("Retry repeated successful renewal");
+        await acceptanceBulk.getByRole("button", { name: "Clear" }).click();
+        await policyDecision.click();
+        await policyTray.getByRole("button", { name: "Convert to POA&M" }).click();
+        await assertDisabled(policyTray.getByRole("button", { name: "Review conversion" }), "Empty conversion cannot send fabricated metadata");
+        await policyTray.getByRole("button", { name: "Cancel" }).click();
+        if (acceptanceWrites.length !== 3) throw new Error("Cancel wrote a decision");
+        await policyTray.getByRole("button", { name: "Convert to POA&M" }).click();
+        await policyTray.getByRole("textbox", { name: "Conversion title" }).fill("Real remediation");
+        await policyTray.getByRole("textbox", { name: "Conversion plan" }).fill("Apply approved configuration");
+        await policyTray.getByRole("textbox", { name: "Conversion owner" }).fill("Named owner");
+        await policyTray.getByRole("combobox", { name: "Conversion risk" }).selectOption("high");
+        await policyTray.getByLabel("Conversion due date").fill("2027-05-01");
+        await policyTray.getByRole("button", { name: "Review conversion" }).click();
+        if (acceptanceWrites.length !== 3) throw new Error("Review without confirmation wrote a decision");
+        await policyTray.getByRole("button", { name: "Confirm conversion" }).click();
+         await assertVisible(policyDecision.getByText("Converted to POA&M"), "Policy conversion must refresh the source decision");
+         if (await policyTray.count() === 0) await policyDecision.click();
+          await assertVisible(policyTray.locator(".rr-acceptance-source-detail"), "Policy waiver source record is expanded by default");
+         const policyReplacementLink = policyTray.getByRole("button", { name: "Open replacement POA&M" });
+         const beforePolicyUrl = page.url();
+         await policyReplacementLink.click();
+         await page.waitForURL((url) => url.toString() !== beforePolicyUrl);
+         const policyReplacementUrl = new URL(page.url());
+         if (!policyReplacementUrl.searchParams.has("poam")) throw new Error(`Policy replacement POA&M link did not navigate to plan detail: ${page.url()}`);
+         const policyOpenedPlanId = policyReplacementUrl.searchParams.get("poam");
+         if (policyOpenedPlanId !== planId(91)) throw new Error(`Expected replacement plan ${planId(91)}, but navigated to ${policyOpenedPlanId}`);
+         await page.goBack();
+         await policyDecision.click();
+        if (acceptanceWrites.length !== 4) throw new Error("Confirmation must send one conversion");
+        await policyTray.getByRole("button", { name: "Close acceptance" }).click();
+        await hostDecision.click();
+        await hostTray.getByRole("button", { name: "Convert to POA&M" }).click();
+        await hostTray.getByRole("textbox", { name: "Conversion title" }).fill("Patch openssl");
+        await hostTray.getByRole("textbox", { name: "Conversion plan" }).fill("Deploy verified patch");
+        await hostTray.getByRole("combobox", { name: "Conversion assignee" }).selectOption(`user:${ids.owner}`);
+        await hostTray.getByRole("combobox", { name: "Conversion risk" }).selectOption("high");
+        await hostTray.getByLabel("Conversion due date").fill("2027-05-01");
+        await hostTray.getByRole("button", { name: "Review conversion" }).click();
+        if (acceptanceWrites.length !== 4) throw new Error("CVE review without confirmation wrote a decision");
+        await hostTray.getByRole("button", { name: "Confirm conversion" }).click();
+         await assertVisible(hostDecision.getByText("Converted to POA&M"), "CVE conversion must refresh the source decision");
+         if (await hostTray.count() === 0) await hostDecision.click();
+          await assertVisible(hostTray.locator(".rr-acceptance-source-detail"), "CVE host source record is expanded by default");
+         const hostReplacementLink = hostTray.getByRole("button", { name: "Open replacement POA&M" });
+         const beforeHostUrl = page.url();
+         await hostReplacementLink.click();
+         await page.waitForURL((url) => url.toString() !== beforeHostUrl);
+         const hostReplacementUrl = new URL(page.url());
+         if (!hostReplacementUrl.searchParams.has("poam")) throw new Error(`CVE replacement POA&M link did not navigate to plan detail: ${page.url()}`);
+         const hostOpenedPlanId = hostReplacementUrl.searchParams.get("poam");
+         if (hostOpenedPlanId !== planId(92)) throw new Error(`Expected replacement plan ${planId(92)}, but navigated to ${hostOpenedPlanId}`);
+         await page.goBack();
+         await hostDecision.click();
+        await hostTray.getByRole("button", { name: "Close acceptance" }).click();
+        if (acceptanceWrites.length !== 5) throw new Error("CVE conversion must issue one source-owned command");
+        await page.getByRole("tab", { name: "Remediation plans" }).click();
+        await assertAttribute(page.getByRole("tab", { name: "Remediation plans" }), "aria-selected", "true", "Plan type must be URL-backed");
+        if (!new URL(page.url()).searchParams.has("kind")) throw new Error(`Plan type missing in URL: ${page.url()}`);
+
+        await page.getByRole("button", { name: "Load next page" }).click();
+        await assertVisible(page.getByText("Showing 104 open remediation plans · 0 active risk decisions"), "Converted source decisions are not active acceptances");
+        if (!requests.some((url) => url.searchParams.get("offset") === "100" && url.searchParams.get("limit") === "100")) throw new Error("Register did not request page two");
+        await page.getByRole("textbox", { name: "Search register" }).fill("CVE-2024-1234");
+        await assertVisible(row(105).getByText("CVE-only remediation"), "First CVE must be searchable without a policy requirement");
+        await page.getByRole("textbox", { name: "Search register" }).fill("");
+        await page.getByRole("combobox", { name: "Status", exact: true }).selectOption("all");
+        await page.getByRole("combobox", { name: "Group register" }).selectOption("environment");
+        await assertVisible(page.getByRole("group", { name: "Register group Production" }).getByText("104", { exact: true }), "Environment A must count unique plans in its group");
+        await assertVisible(page.getByRole("group", { name: "Register group Staging" }).getByText("2", { exact: true }), "One plan must appear in two environment groups");
+        await page.getByRole("button", { name: "Show more plans" }).click();
+        await page.getByRole("button", { name: "Show more plans" }).click();
+        await assertVisible(page.getByText("105 items"), "Group display must deduplicate shown IDs");
+        await assertCount(row(1), 2, "One multi-environment plan must render once in each group");
+        await row(1).first().click({ modifiers: ["Control"] });
+        await assertVisible(selected.getByText("1 plans selected"), "The same POA&M must be selected only once across groups");
+        await selected.getByRole("button", { name: "Clear" }).click();
+        await page.getByRole("combobox", { name: "Group register" }).selectOption("none");
+        await page.getByRole("combobox", { name: "Sort register" }).selectOption("id");
+        await row(1).click({ modifiers: ["Control"] });
+        await row(2).click({ modifiers: ["Shift"] });
+        await assertVisible(selected.getByText("2 plans selected"), "Shift must select the visible loaded-order range");
+        await assertAttribute(row(1), "aria-selected", "true", "Range start must be selected");
+        await assertAttribute(row(2), "aria-selected", "true", "Range end must be selected");
+        await selected.getByRole("button", { name: "Clear" }).click();
+        await assertCount(selected, 0, "Clear must remove selection without a write");
+        if (poamWrites.length) throw new Error(`Selection or cancel caused a write: ${JSON.stringify(poamWrites)}`);
+
+        await page.locator(".poams-pills").getByRole("button", { name: /Staging/ }).click();
+        if (!scopeUrl("environment", ids.envB)) throw new Error(`Environment scope did not preserve exact ID: ${page.url()}`);
+        await assertVisible(page.getByRole("navigation", { name: "Scope" }).getByText("Staging"), "Environment scope must be visible without implying page completeness");
+        await assertVisible(row(1), "Environment B must load its spanning plan");
+        await assertCount(row(1), 1, "Spanning plan must remain in environment B");
+        await assertCount(row(3), 0, "Environment B must exclude unrelated plans");
+        await page.reload({ waitUntil: "commit" });
+        await assertVisible(row(2), "Environment-scoped rows must load after refresh");
+        await assertCount(row(2), 1, "Environment URL must survive refresh");
+        const hostScopeResponse = page.waitForResponse((response) => {
+          const url = new URL(response.url());
+          return url.pathname === "/api/v1/poams" && url.searchParams.get("system_id") === ids.hostB;
+        });
+        await page.locator(".poams-pills").getByRole("button", { name: /stage-node-01/ }).click();
+        await hostScopeResponse.catch(() => {
+          throw new Error(`Host list did not request exact server scope: ${page.url()} ${JSON.stringify(requests.map((url) => url.toString()).slice(-8))}`);
+        });
+        if (!scopeUrl("system", ids.hostB)) throw new Error(`Host scope did not preserve exact ID: ${page.url()}`);
+        if (!requests.some((url) => url.searchParams.get("system_id") === ids.hostB)) throw new Error("Host list did not request exact server scope");
+        await page.goBack();
+        if (!scopeUrl("environment", ids.envB)) throw new Error(`Back did not restore environment scope: ${page.url()}`);
+        await browse("Bundle").click();
+        await page.locator(".poams-pills").getByRole("button", { name: `Bundle ${ids.bundle}` }).click();
+        if (!scopeUrl("bundle", ids.bundle) || !requests.some((url) => url.searchParams.get("bundle_id") === ids.bundle)) throw new Error("Bundle scope must keep its exact UUID in URL and server query");
+        await page.reload({ waitUntil: "commit" });
+        await assertVisible(row(2), "Bundle-scoped rows must load after refresh");
+        await assertCount(row(2), 1, "Bundle URL must survive refresh");
+        await browse("Environment").click();
+        await page.getByRole("combobox", { name: "Group register" }).selectOption("none");
+        await page.getByRole("combobox", { name: "Sort register" }).selectOption("id");
+        await row(1).click();
+        const detail = page.locator(`[data-testid="poam-detail"][data-poam-id="${planId(1)}"]`);
+        await assertVisible(detail, "Plain row click must open exact POA&M detail");
+        await detail.getByRole("button", { name: "Close", exact: true }).click();
+        await assertCount(detail, 0, "Closing detail must not mutate the plan");
+        if (poamWrites.length) throw new Error(`Read-only detail close caused a write: ${JSON.stringify(poamWrites)}`);
+
+        await row(1).click({ modifiers: ["Control"] });
+        await row(2).click({ modifiers: ["Control"] });
+        await assertVisible(selected.getByText("2 plans selected"), "Both visible plans must be selected before the batch starts");
+        await selected.getByRole("combobox", { name: "Set selected plan status" }).selectOption("blocked");
+        try {
+          await assertVisible(page.getByText("1 plan(s) confirmed; 1 not confirmed.", { exact: false }), "Partial batch must report confirmed and failed IDs");
+        } catch (error) {
+          throw new Error(`${error.message}; writes: ${JSON.stringify(writes)}; selected: ${await selected.textContent().catch(() => "not visible")}`);
+        }
+        await assertVisible(selected.getByText("1 plans selected"), "Only failed POA&M must remain selected");
+        await assertAttribute(row(2), "aria-selected", "true", "Failed row must remain selected after refresh");
+        await assertAttribute(row(1), "aria-selected", "false", "Confirmed row must clear after refresh");
+        if (writes.length !== 2 || new Set(writes.map((item) => item.id)).size !== 2) throw new Error(`Bulk mutation must target each exact POA&M once: ${JSON.stringify(writes)}`);
+        if (poamWrites.length !== 2) throw new Error(`Bulk mutation sent an unexpected write: ${JSON.stringify(poamWrites)}`);
+
+        // A previous scope's delayed response must not replace the newer URL's
+        // rows, loaded count, or pagination state after the newer request wins.
+        let releaseOldScope;
+        const waitForOldScope = new Promise((resolve) => { releaseOldScope = resolve; });
+        let delayedScopeRequest = false;
+        const outOfOrderRoute = async (route) => {
+          const url = new URL(route.request().url());
+          if (url.searchParams.get("offset") !== "0") throw new Error(`Unexpected scope-race page: ${url}`);
+          const oldScope = !delayedScopeRequest;
+          delayedScopeRequest = true;
+          if (oldScope) await waitForOldScope;
+          await route.fulfill({ json: { items: rows.slice(0, 100), limit: 100, offset: 0,
+            has_more: true, next_offset: 100 }, headers: oldScope ? { "x-old-scope-response": "true" } : {} });
+        };
+        await selected.getByRole("button", { name: "Clear" }).click();
+        await page.route(listRoute, outOfOrderRoute);
+        try {
+          const slowRequest = page.waitForRequest((request) => new URL(request.url()).pathname === "/api/v1/poams");
+        await page.locator(".poams-pills").getByRole("button", { name: /Production/ }).click();
+          await slowRequest;
+          await page.getByRole("navigation", { name: "Scope" }).getByRole("button", { name: "All" }).click();
+          await assertVisible(row(2), "The newer unscoped response must restore the second environment's plan");
+          const staleResponse = page.waitForResponse((response) => response.headers()["x-old-scope-response"] === "true");
+          releaseOldScope();
+          await staleResponse;
+          await assertVisible(row(2), "The stale environment response must not replace the current scope's rows");
+          await assertVisible(page.getByText("50 items", { exact: false }), "A stale response must not replace the current loaded count");
+        } finally {
+          releaseOldScope();
+          await page.unroute(listRoute, outOfOrderRoute);
+        }
+      } finally {
+        page.off("request", noteWrite);
+        await page.unroute(listRoute);
+        await page.unroute(acceptanceRoute);
+        await page.unroute(acceptanceCommand);
+        await page.unroute(detailRoute);
+        await page.unroute(transitionRoute);
+        await page.unroute("**/api/v1/poams/assignees");
+        await page.unroute("**/api/v1/environments");
       }
-      await assertVisible(page.getByRole("button", { name: "Refresh scan diagnostics" }), "Expected narrow refresh control");
-      await assertVisible(page.getByRole("button", { name: "Close scan diagnostics" }), "Expected narrow close control");
-      await page.setViewportSize({ width: 1920, height: 1080 });
 
-      let releaseStaleRefresh;
-      let markStaleRefreshStarted;
-      let markStaleRefreshFinished;
-      const staleRefreshGate = new Promise((resolve) => {
-        releaseStaleRefresh = resolve;
-      });
-      const staleRefreshStarted = new Promise((resolve) => {
-        markStaleRefreshStarted = resolve;
-      });
-      const staleRefreshFinished = new Promise((resolve) => {
-        markStaleRefreshFinished = resolve;
-      });
-      diagnosticResponses.push(
-        {
-          mode: "loaded",
-          message: "stale overlapping refresh",
-          gate: staleRefreshGate,
-          started: markStaleRefreshStarted,
-          finished: markStaleRefreshFinished,
-        },
-        { mode: "loaded", message: "newest overlapping refresh" },
-      );
-      await page.getByRole("button", { name: "Refresh scan diagnostics" }).click();
-      await staleRefreshStarted;
-      await page.getByRole("button", { name: "Refresh scan diagnostics" }).click();
-      await assertVisible(page.getByText("newest overlapping refresh"), "Expected newest overlapping refresh response");
-      releaseStaleRefresh();
-      await staleRefreshFinished;
-      await assertHidden(page.getByText("stale overlapping refresh"), "Expected stale overlapping refresh to be ignored");
+      // ── Evidence navigation: register -> System Detail Compliance -> exact evidence ──
+      // The register hands the chosen finding to System Detail, which opens the
+      // same evidence flow as an Evidence click inside that tab. Only the API
+      // boundary is stubbed, so the real routing and drawer code runs.
+      const evidenceBrowser = page.context().browser();
+      if (!evidenceBrowser) throw new Error("Evidence navigation scenario requires a browser instance");
+      const evUuid = (n) => `33000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+      const ev = {
+        // routeSystemsWarningData serves this system id as its detail fixture.
+        system: "00000000-0000-0000-0000-0000000000a1",
+        plan: evUuid(1), finding: evUuid(2), lineage: evUuid(3), otherPolicy: evUuid(4),
+        bundle: evUuid(5), v1: evUuid(6), v2: evUuid(7), owner: evUuid(8),
+      };
+      const evidenceScenarios = [
+        { name: "one exact revision", linked: [ev.v1], visible: [["1.0", ev.v1], ["2.0", ev.v2]], expect: "drawer", opened: ev.v1 },
+        { name: "several exact revisions", linked: [ev.v1, ev.v2], visible: [["1.0", ev.v1], ["2.0", ev.v2]], expect: "picker", opened: ev.v2 },
+        { name: "no visible exact revision", linked: [ev.v1], visible: [], expect: "unavailable" },
+        // The same evidence flow, entered from the POA&M tray inside System Detail.
+        { name: "one exact revision from the System Detail tray", linked: [ev.v1], visible: [["1.0", ev.v1]], expect: "drawer", opened: ev.v1, entry: "tray" },
+      ];
+      for (const scenario of evidenceScenarios) {
+        const evContext = await evidenceBrowser.newContext({ viewport: VIEWPORTS.desktop });
+        const evPage = await evContext.newPage();
+        const label = `Evidence navigation (${scenario.name})`;
+        try {
+          await suppressOnboardingCoach(evPage);
+          await routeStandaloneUiBootstrap(evPage, "Operator");
+          await routeSystemsWarningData(evPage);
+          const evidenceRequests = [];
+          const mutations = [];
+          evPage.on("request", (request) => {
+            const url = new URL(request.url());
+            if (request.method() !== "GET" && url.pathname.startsWith("/api/")) mutations.push(`${request.method()} ${url.pathname}`);
+            if (url.pathname.includes("/evidence")) evidenceRequests.push(`${url.pathname}${url.search}`);
+          });
+          const plan = {
+            id: ev.plan, human_id: "POAM-0201", title: "Disable direct root SSH login", plan: "Deploy PermitRootLogin=no.", owner: "",
+            revision: 1, assignee: { kind: "user", user_id: ev.owner, display: "Morgan Owner", available: true },
+            status: "open", risk: "high", target_date: "2026-12-01", overdue: false, finding_count: 1, cve_finding_count: 0,
+            created_at: "2026-09-20T12:00:00Z", updated_at: "2026-09-21T12:00:00Z", closed_at: null, closure_attempt_id: null,
+            environment_ids: [], system_ids: [ev.system], systems: [], bundle_ids: [ev.bundle], bundle_version_ids: scenario.linked,
+            assignment_version_ids: [], first_requirement: null, first_cve: null, milestone_count: 0, completed_milestone_count: 0,
+            last_activity_at: "2026-09-21T12:00:00Z",
+          };
+          const planDetail = {
+            ...plan,
+            findings: [{
+              id: ev.finding, system_id: ev.system, hostname: "warning-system-01", environment_id: null,
+              policy_lineage_id: ev.lineage, policy_name: "SSH hardening", link_id: evUuid(9),
+              linked_at: "2026-09-01T12:00:00Z", linked_by: ev.owner, retired_at: null, retired_by: null, retirement_reason: null,
+              link_active: true, current_assessment_id: evUuid(10), current_outcome: "fail", current_policy_version_id: evUuid(11),
+              current_target_store_path: "/nix/store/abc-system", assessment_updated_at: "2026-09-25T12:00:00Z",
+              resolution_state: "fail", effective_set_digest: null, effective_config_digest: null,
+              bundle_ids: [ev.bundle], bundle_version_ids: scenario.linked, requirement_version_ids: [], requirements: [],
+            }],
+            cve_findings: [], findings_has_more: false, findings_next_cursor: null, milestones: [], assignment_references: [],
+            verification_attempts: [], verification_has_more: false, verification_next_cursor: null,
+            activity: [], activity_has_more: false, activity_next_cursor: null,
+          };
+          await evPage.route("**/api/v1/poams**", async (route) => {
+            const request = route.request();
+            if (request.method() !== "GET") return route.fallback();
+            const url = new URL(request.url());
+            const json = (body) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+            if (url.pathname === "/api/v1/poams/dashboard") return json({ total: 1, active: 1, overdue: 0, awaiting_verification: 0, completed: 0 });
+            if (url.pathname === "/api/v1/poams/assignees") return json({ people: [], groups: [] });
+            if (url.pathname.startsWith("/api/v1/poams/rollups")) {
+              const scopeIds = url.searchParams.get("ids")?.split(",") || [];
+              return json(scopeIds.map((id) => ({ scope_id: id, total: 1, active: 1, overdue: 0, awaiting_verification: 0, completed: 0, open_findings: 1, on_poam_findings: 1, no_poam_findings: 0 })));
+            }
+            if (url.pathname === `/api/v1/poams/${ev.plan}`) return json(planDetail);
+            return json({ items: [plan], limit: Number(url.searchParams.get("limit") || 100), offset: Number(url.searchParams.get("offset") || 0), has_more: false, next_offset: null });
+          });
+          await evPage.route("**/api/v1/acceptances**", async (route) => {
+            if (route.request().method() !== "GET") return route.fallback();
+            return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items: [], total: 0, limit: 100, offset: 0, has_more: false }) });
+          });
+          const bundleSummary = {
+            id: ev.bundle, name: "STIG baseline", framework: "NIST", version: "catalog-lineage", description: null, layer: "fleet",
+            owner: "Platform Security", last_review: null, policy_ids: [], required_envs: [], control_count: 2, environment_count: 1,
+            policy_count: 2, requirement_count: 0, active_assignment_count: 1, current_draft_version_id: null,
+            current_published_version_id: scenario.visible.at(-1)?.[1] ?? null, current_draft_version: null,
+            current_published_version: scenario.visible.at(-1)?.[0] ?? null, applicable_system_count: 1, aggregate_score: null,
+            versions: scenario.visible.map(([version, versionId]) => ({
+              id: versionId, bundle_id: ev.bundle, version, publication_state: "accepted", trust_state: "trusted", semantic_digest: "digest",
+              created_at: "2026-09-24T12:00:00Z", published_at: "2026-09-24T12:00:00Z", derived_from_version_id: null, control_count: 2,
+              is_current_published: false, is_current_draft: false,
+            })),
+          };
+          await evPage.route(`**/api/v1/systems/${ev.system}/compliance`, async (route) => {
+            const rollup = { system_id: ev.system, hostname: "warning-system-01", environment: "production", applies: true, total: 2, evaluated_total: 2, pass: 1, warn: 0, fail: 1, waiver: 0, not_checked: 0, not_applicable: 0, error: 0, report_only: 0, score: 50, resolution_state: "resolved", assignment_status: "current", assignment_reason: null, assignment_approved_by: null };
+            const bundles = scenario.visible.length ? [{ bundle: bundleSummary, rollup, assigned_bundle_version_id: scenario.visible.at(-1)[1], assignment_mode: "enforce" }] : [];
+            await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ system_id: ev.system, bundles, direct_rollup: rollup, overall_rollup: rollup }) });
+          });
+          await evPage.route(`**/api/v1/systems/${ev.system}/compliance-assignments`, async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ assignments: [] }) }));
+          await evPage.route(`**/api/v1/compliance/bundles/${ev.bundle}/systems/${ev.system}/evidence**`, async (route) => {
+            const versionId = new URL(route.request().url()).searchParams.get("version_id");
+            const control = (policyId, name, status) => ({ policy_id: policyId, policy_name: name, status, severity: "high", summary: `${name} summary`, evidence_items: [], framework_mapping: "AC-17", requirements: [], composite_expected: false });
+            await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+              bundle_id: ev.bundle, bundle_version_id: versionId, framework: "NIST", system_id: ev.system, hostname: "warning-system-01", resolution_state: "resolved",
+              // The linked policy is deliberately second, so focus must reorder it first.
+              controls: [control(ev.otherPolicy, "Unrelated control", "pass"), control(ev.lineage, "SSH hardening", "fail")],
+            }) });
+          });
 
-      let releaseClosedRequest;
-      let markClosedRequestStarted;
-      let markClosedRequestFinished;
-      const closedRequestGate = new Promise((resolve) => {
-        releaseClosedRequest = resolve;
-      });
-      const closedRequestStarted = new Promise((resolve) => {
-        markClosedRequestStarted = resolve;
-      });
-      const closedRequestFinished = new Promise((resolve) => {
-        markClosedRequestFinished = resolve;
-      });
-      diagnosticResponses.push({
-        mode: "loaded",
-        message: "response from closed drawer",
-        gate: closedRequestGate,
-        started: markClosedRequestStarted,
-        finished: markClosedRequestFinished,
-      });
-      await page.getByRole("button", { name: "Refresh scan diagnostics" }).click();
-      await closedRequestStarted;
-      await page.keyboard.press("Escape");
-      diagnosticResponses.push({ mode: "loaded", message: "response after drawer reopened" });
-      await scanDiagnostics.click();
-      await assertVisible(page.getByText("response after drawer reopened"), "Expected reopened drawer response");
-      releaseClosedRequest();
-      await closedRequestFinished;
-      await assertHidden(page.getByText("response from closed drawer"), "Expected pre-close response to be ignored");
+          const fromTray = scenario.entry === "tray";
+          await evPage.goto(fromTray ? `${baseUrl}/systems/${ev.system}?tab=compliance&poam=${ev.plan}` : `${baseUrl}/poams?poam=${ev.plan}`, { timeout: LOAD_TIMEOUT });
+          const registerDetail = evPage.getByTestId("poam-detail");
+          await assertVisible(registerDetail, `${label}: the entry point must open the POA&M drawer`);
+          await registerDetail.getByTestId("poam-linked-finding").getByRole("button", { name: "Evidence", exact: true }).click();
 
-      diagnosticMode = "error";
-      await page.getByRole("button", { name: "Refresh scan diagnostics" }).click();
-      await assertVisible(
-        page.getByRole("heading", { name: "Diagnostics could not be loaded" }),
-        "Expected refresh error state",
-      );
-      diagnosticMode = "empty";
-      await page.getByRole("button", { name: "Retry" }).click();
-      await assertVisible(page.getByRole("heading", { name: "No diagnostic events" }), "Expected retry empty state");
-      await page.keyboard.press("Escape");
-      await assertHidden(
-        page.getByRole("heading", { name: "Scan diagnostics" }),
-        "Expected Escape to close scan diagnostics",
-      );
-      const restoredLabel = await page.evaluate(() => document.activeElement?.getAttribute("aria-label"));
-      if (restoredLabel !== "View scan diagnostics") {
-        throw new Error(`Expected scan diagnostics to restore opener focus, got ${restoredLabel}`);
+          // Common to every outcome: the register drawer is gone and the user is on
+          // the finding's own System Detail, Compliance tab.
+          if (!fromTray) await evPage.waitForURL((url) => url.pathname === `/systems/${ev.system}` && url.searchParams.get("tab") === "compliance", { timeout: 15000 });
+          await assertCount(evPage.getByTestId("poam-detail"), 0, `${label}: the POA&M drawer must close`);
+          // The route always emits empty optional keys; only a non-empty value would open a POA&M drawer.
+          if (new URL(evPage.url()).searchParams.get("poam")) throw new Error(`${label}: the destination URL must not carry a POA&M drawer: ${evPage.url()}`);
+
+          if (scenario.expect === "picker") {
+            const picker = evPage.getByRole("dialog", { name: "Choose exact evidence context" });
+            await assertVisible(picker, `${label}: several exact revisions must ask the user to choose`);
+            await assertCount(evPage.locator("#system-evidence-loading-dialog, [data-testid='evidence-policy-target']"), 0, `${label}: nothing may open before the user chooses`);
+            if (evidenceRequests.length !== 0) throw new Error(`${label}: no evidence may load before the choice: ${JSON.stringify(evidenceRequests)}`);
+            await picker.getByRole("button", { name: /STIG baseline/ }).filter({ hasText: "Exact revision 2.0" }).click();
+          }
+          if (scenario.expect === "unavailable") {
+            const unavailable = evPage.locator("#system-evidence-error-dialog");
+            await assertVisible(unavailable, `${label}: an unavailable context must show the explicit error state`);
+            await assertVisible(unavailable.getByText(/No exact visible bundle revision is available for this finding\./), `${label}: the error must say why`);
+            await assertCount(evPage.locator("[data-testid='evidence-policy-target']"), 0, `${label}: unrelated evidence must not be shown`);
+            if (evidenceRequests.length !== 0) throw new Error(`${label}: no evidence request may be made without an exact context: ${JSON.stringify(evidenceRequests)}`);
+          } else {
+            const drawer = evPage.getByRole("dialog", { name: /evidence/i }).first();
+            const focused = evPage.locator("[data-testid='evidence-policy-target'][aria-current='true']");
+            await assertVisible(focused, `${label}: the evidence drawer must open automatically`);
+            const focusedPolicy = await focused.getAttribute("data-policy-id");
+            if (focusedPolicy !== ev.lineage) throw new Error(`${label}: the linked policy must be focused, got ${focusedPolicy}`);
+            await assertVisible(evPage.locator("[data-testid='evidence-policy-name']").first().getByText("SSH hardening", { exact: true }), `${label}: the linked control must be listed first`);
+            if (evidenceRequests.length !== 1 || !evidenceRequests[0].includes(`version_id=${scenario.opened}`)) throw new Error(`${label}: exactly one request for the exact revision is expected: ${JSON.stringify(evidenceRequests)}`);
+            void drawer;
+          }
+          if (mutations.length !== 0) throw new Error(`${label}: navigation must not mutate anything: ${JSON.stringify(mutations)}`);
+
+          if (scenario.expect === "drawer" && !fromTray) {
+            // Back returns to the register drawer, and Forward lands on Compliance
+            // without reopening evidence: the handoff is consumed once.
+            await evPage.goBack({ waitUntil: "domcontentloaded" });
+            await assertVisible(evPage.getByTestId("poam-detail"), `${label}: Back must return to the POA&M drawer`);
+            if (new URL(evPage.url()).pathname !== "/poams") throw new Error(`${label}: Back must return to the register: ${evPage.url()}`);
+            await evPage.goForward({ waitUntil: "domcontentloaded" });
+            await evPage.waitForURL((url) => url.pathname === `/systems/${ev.system}`, { timeout: 15000 });
+            await evPage.waitForTimeout(1500);
+            await assertCount(evPage.locator("[data-testid='evidence-policy-target']"), 0, `${label}: a later visit must not reopen evidence`);
+            if (evidenceRequests.length !== 1) throw new Error(`${label}: a later visit must not request evidence again: ${JSON.stringify(evidenceRequests)}`);
+          }
+        } finally {
+          await evPage.unrouteAll({ behavior: "ignoreErrors" }).catch(() => {});
+          await evContext.close().catch(() => {});
+        }
       }
-
-      const rowRescan = page.getByRole("button", { name: "Rescan exact derivation" }).first();
-      await rowRescan.click();
-      await assertDisabled(rowRescan, "Expected exact row rescan to stay disabled while pending");
-      await assertVisible(
-        page.getByText(/Scan IDs: bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/),
-        "Expected returned scan identity in exact rescan feedback",
-      );
-      if (exactRescanRequests[0] !== 101) {
-        throw new Error(`Expected exact row action to request derivation 101, got ${exactRescanRequests[0]}`);
+    },
+  },
+  {
+    name: "16d-scanning-recovery-mock",
+    description: "Mock-only Scanning presentation of expired post-build history, retention stats, and trigger provenance (not DB eligibility/SQL)",
+    action: async (page) => {
+      const expiredId = "20000000-0000-4000-8000-000000000081";
+      const at = "2026-09-20T18:00:00Z";
+      const scan = (id, hostname, status, sourceTrigger) => ({
+        scan_id: id,
+        derivation_id: Number(id.slice(-2)),
+        hostname,
+        flake_name: "recovery-fleet",
+        commit_hash: hostname,
+        status,
+        source_trigger: sourceTrigger,
+        created_at: at,
+        scheduled_at: at,
+        started_at: null,
+        completed_at: status === "failed" ? at : null,
+        scanner_name: "vulnix",
+        scanner_version: null,
+        executor: null,
+        failure: status === "failed" ? "Post-build scan not completed. The recovery window expired before a successful scan was recorded." : null,
+        wait_reason: null,
+        build_job_id: null,
+        build_status: "success",
+        total_packages: 0,
+        total_vulnerabilities: 0,
+        critical_count: 0,
+        high_count: 0,
+        medium_count: 0,
+        low_count: 0,
+        scan_duration_ms: null,
+        attempts: 0,
+        archived_at: null,
+        cancellable: false,
+        is_current: false,
+        is_latest_per_flake: false,
+      });
+      const expired = scan(expiredId, "expired-post-build", "failed", "post_build");
+      const periodic = scan("10000000-0000-4000-8000-000000000082", "periodic-target", "pending", "periodic");
+      const manual = scan("10000000-0000-4000-8000-000000000083", "manual-target", "pending", "manual");
+      let archived = false;
+      const mutations = [];
+      const stats = () => ({ scanning: 0, queued: 2, awaiting_build: 0, awaiting_closure: 0, stale: 0, never_scanned: archived ? 3 : 2, failed: archived ? 0 : 1, coverage_percent: 50 });
+      const scansRoute = /\/api\/v1\/scanning\/scans(?:\?.*)?$/;
+      await page.route("**/api/v1/scanning/stats", (route) => route.fulfill({ json: stats() }));
+      await page.route(scansRoute, (route) => {
+        if (route.request().method() === "PATCH") {
+          const body = route.request().postDataJSON();
+          mutations.push(body);
+          if (body.archived !== true || body.scan_ids.join(",") !== expiredId) throw new Error(`Unexpected archive request: ${JSON.stringify(body)}`);
+          archived = true;
+          return route.fulfill({ json: { requested: 1, changed: 1, archived: true } });
+        }
+        if (route.request().method() !== "GET") throw new Error(`Unexpected scan mutation: ${route.request().method()}`);
+        const params = new URL(route.request().url()).searchParams;
+        const collection = params.get("collection");
+        const items = collection === "active" ? [periodic, manual]
+          : collection === "completed" ? (archived && params.get("include_archived") !== "true" ? [] : [{ ...expired, archived_at: archived ? at : null }])
+            : [];
+        return route.fulfill({ json: { items, total: collection === "completed" ? 1 : items.length, hidden_archived: collection === "completed" && archived && params.get("include_archived") !== "true" ? 1 : 0, has_more: false, next_cursor: null } });
+      });
+      try {
+        await page.goto(`${baseUrl}/scanning`, { timeout: LOAD_TIMEOUT });
+        const card = (label) => page.locator(".scanning-stats .stat").filter({ has: page.locator(".stat-label", { hasText: label }) });
+        await assertVisible(card("Failed").getByText("1", { exact: true }), "Mock Failed count must start at one");
+        await assertVisible(card("Never scanned").getByText("2", { exact: true }), "Mock Never scanned count must start at two");
+        const active = page.locator("#scan-active-panel tbody");
+        await assertCount(active.getByText("expired-post-build", { exact: true }), 0, "Terminal expired post-build must not appear in Active");
+        for (const [hostname, trigger] of [["periodic-target", "periodic"], ["manual-target", "manual"]]) {
+          await assertVisible(active.locator("tr").filter({ hasText: hostname }).getByText(trigger, { exact: true }), `Mock ${trigger} provenance must be displayed`);
+        }
+        await page.getByRole("tab", { name: /^Completed/ }).click();
+        const completed = page.locator("#scan-completed-panel tbody");
+        const expiredRow = completed.locator("tr").filter({ hasText: "expired-post-build" });
+        await assertVisible(expiredRow.getByText("post_build", { exact: true }), "Expired post-build provenance must remain in Completed history");
+        await expiredRow.click({ modifiers: ["Control"] });
+        const archivedCollection = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("collection=completed&include_archived=false"));
+        await page.getByRole("button", { name: "Archive 1" }).click();
+        await archivedCollection;
+        await assertHidden(expiredRow, "Mock archive response must remove the expired row from default Completed");
+        if (mutations.length !== 1) throw new Error(`Expected one intercepted archive request, got ${mutations.length}`);
+        // Reload forces the summary resource to consume the updated mocked server response.
+        await page.reload();
+        await assertVisible(card("Failed").getByText("0", { exact: true }), "Archived failure must leave the mock Failed card at zero");
+        await assertVisible(card("Never scanned").getByText("3", { exact: true }), "Mock Never scanned card must reflect the updated server response");
+        await page.getByRole("tab", { name: /^Completed/ }).click();
+        await assertCount(completed.getByText("expired-post-build", { exact: true }), 0, "Archived expired history must stay hidden by default");
+      } finally {
+        await page.unroute("**/api/v1/scanning/stats");
+        await page.unroute(scansRoute);
       }
-
-      await page.getByRole("tab", { name: /By system/ }).click();
-      await page.waitForTimeout(500);
-
-      await assertVisible(page.getByText("prod-server-01").first(), "Expected system row in By system table");
-      await page.locator("button.scanning-system-toggle").first().click();
-      await page.waitForTimeout(400);
-
-      await assertVisible(page.getByText("abc1234").first(), "Expected nested per-commit scan row after expand");
-      await assertVisible(page.getByText("def5678").first(), "Expected distinct historical derivation row");
-
-      const currentRescan = page.getByRole("button", { name: "Rescan current deployed derivation" });
-      await currentRescan.click();
-      await assertVisible(page.getByText(/current deployment: queued 1, reused 0/), "Expected current-scope feedback");
-      if (exactRescanRequests.at(-1) !== 101) {
-        throw new Error(`Expected current action to request derivation 101, got ${exactRescanRequests.at(-1)}`);
-      }
-
-      const historyRescans = page.getByRole("button", { name: "Rescan exact historical derivation" });
-      await historyRescans.nth(1).click();
-      await assertVisible(
-        page.getByText(/derivation 202:.*scanner queue unavailable.*Retrying is safe/),
-        "Expected actionable historical rescan error feedback",
-      );
-      if (exactRescanRequests.at(-1) !== 202) {
-        throw new Error(`Expected historical action to request derivation 202, got ${exactRescanRequests.at(-1)}`);
-      }
-      await assertDisabled(
-        historyRescans.nth(2),
-        "Expected an unbuilt historical derivation rescan to be disabled",
-      );
-      await page.getByRole("button", { name: "Rescan history" }).click();
-      await assertVisible(
-        page.getByText(/prod-server-01 history: queued 1, reused 0; 1 request\(s\) failed/),
-        "Expected history batch to finish before route cleanup",
-      );
-      if (exactRescanRequests.includes(303)) {
-        throw new Error("Expected history bulk rescan to exclude unbuilt derivation 303");
-      }
-
-      await assertVisible(
-        page.getByRole("button", { name: /^Schedule$/ }).first(),
-        "Expected schedule button to be visible",
-      );
-
-      await page.unroute("**/api/v1/scanning/stats*");
-      await page.unroute("**/api/v1/scanning/queue*");
-      await page.unroute("**/api/v1/scanning/scans/*");
-      await page.unroute("**/api/v1/scanning/deployed*");
-      await page.unroute("**/api/v1/scanning/systems*");
-      await page.unroute("**/api/v1/scanning/systems/*/scans*");
-      await page.unroute("**/api/v1/scanning/activity*");
-      await page.unroute("**/api/v1/scanning/schedule*");
-      await page.unroute("**/api/v1/cves/rescan-fleet");
-      await page.unroute(exactRescanRoute);
     },
   },
   // ── End CVE/multi-rule policy checks ─────────────────────────────────────
@@ -17201,6 +21528,77 @@ security.audit.enable = true;</fixtext>
 
       await routeSystemsWarningData(page);
 
+      const historicalGenerationId = "00000000-0000-4000-8000-000000000073";
+      let candidateRequests = 0;
+      let candidateMode = "tracked";
+      await page.route(
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-inventory-sources",
+        async (route) => {
+          candidateRequests += 1;
+          if (candidateRequests === 1) {
+            await route.fulfill({
+              status: 503,
+              contentType: "application/json",
+              body: JSON.stringify({ error: "candidate fixture unavailable" }),
+            });
+            return;
+          }
+          if (candidateMode === "out-of-band") {
+            await route.fulfill({
+              status: 200,
+              contentType: "application/json",
+              body: JSON.stringify({
+                items: [
+                  { selection: { kind: "current" }, generation: 74, commit_hash: "1111111111111111111111111111111111111111", derivation_id: null, is_current: true, is_latest_per_flake: false, source: { scan_id: "00000000-0000-0000-0000-000000000c01", scanner_name: "vulnix", scanner_version: "1.10.1", completed_at: "2026-04-10T09:00:00Z" }, evidence_representation: "schema1_observations", scan_available: true, read_only: false },
+                  { selection: { kind: "exact_derivation", derivation_id: 99 }, generation: null, commit_hash: "3333333333333333333333333333333333333333", derivation_id: 99, is_current: false, is_latest_per_flake: true, source: null, evidence_representation: null, scan_available: false, read_only: true },
+                ],
+              }),
+            });
+            return;
+          }
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              items: [
+                {
+                  selection: { kind: "current" },
+                  generation: 74,
+                  commit_hash: "1111111111111111111111111111111111111111",
+                  derivation_id: 42,
+                  is_current: true,
+                  is_latest_per_flake: true,
+                  source: {
+                    scan_id: "00000000-0000-0000-0000-000000000c01",
+                    scanner_name: "vulnix",
+                    scanner_version: "1.10.1",
+                    completed_at: "2026-04-10T09:00:00Z",
+                  },
+                  evidence_representation: "schema1_observations",
+                  scan_available: true,
+                  read_only: false,
+                },
+                { selection: { kind: "retained_generation", generation_snapshot_id: historicalGenerationId }, generation: 73, commit_hash: "2222222222222222222222222222222222222222", derivation_id: 41, is_current: false, is_latest_per_flake: false, source: null, evidence_representation: null, scan_available: false, read_only: true },
+              ],
+            }),
+          });
+        },
+      );
+      await page.route(
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/generations",
+        async (route) => route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            current_generation: 74,
+            generations: [
+              { generation: 74, store_path: "/nix/store/11111111111111111111111111111111-system", commit_hash: "1111111111111111111111111111111111111111", timestamp: "2026-04-07T08:10:00Z", is_current: true },
+              { generation: 73, store_path: "/nix/store/22222222222222222222222222222222-system", commit_hash: "2222222222222222222222222222222222222222", timestamp: "2026-04-06T22:00:00Z", is_current: false },
+            ],
+          }),
+        }),
+      );
+
       await page.route(
         "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening/justifications*",
         async (route) => {
@@ -17208,8 +21606,9 @@ security.audit.enable = true;</fixtext>
         },
       );
 
+      let hardeningLifecycleState = "completed";
       await page.route(
-        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening*",
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening-inventory*",
         async (route) => {
           const vulnerableDirectives = [
             { name: "PrivateTmp", enabled: false, value: false, points: 0, max_points: 5 },
@@ -17255,37 +21654,120 @@ security.audit.enable = true;</fixtext>
             { name: "RestrictAddressFamilies", enabled: true, value: ["AF_UNIX", "AF_INET"], points: 4, max_points: 4 },
           ];
 
+          const url = new URL(route.request().url());
+          const historical = url.searchParams.get("target") === "retained_generation";
+          if (historical) {
+            await route.fulfill({
+              status: 200,
+              contentType: "application/json",
+              body: JSON.stringify({
+                selection: { kind: "retained_generation", generation_snapshot_id: historicalGenerationId },
+                derivation_id: 41,
+                source: null,
+                services: [],
+                attempt: null,
+                read_only: true,
+              }),
+            });
+            return;
+          }
+          const completedSource = {
+            scan_id: "00000000-0000-0000-0000-00000000b001",
+            scheduled_at: "2026-04-07T08:10:00Z",
+            started_at: "2026-04-07T08:10:05Z",
+            completed_at: "2026-04-07T08:10:20Z",
+            attempts: 1,
+            total_services: 2,
+            well_hardened_count: 0,
+            moderately_hardened_count: 1,
+            poorly_hardened_count: 0,
+            vulnerable_count: 1,
+            overall_score: 56,
+            scan_duration_ms: 15000,
+          };
+          const services = [
+            {
+              id: "00000000-0000-0000-0000-00000000c001",
+              scan_id: "00000000-0000-0000-0000-00000000b001",
+              service_name: "nginx.service",
+              service_type: "simple",
+              hardening_score: 34,
+              risk_level: "vulnerable",
+              enabled_directives_count: 4,
+              disabled_directives_count: 8,
+              missing_directives_count: 6,
+              directives_detail: vulnerableDirectives,
+              created_at: new Date().toISOString(),
+            },
+            {
+              id: "00000000-0000-0000-0000-00000000c002",
+              scan_id: "00000000-0000-0000-0000-00000000b001",
+              service_name: "sshd.service",
+              service_type: "notify",
+              hardening_score: 78,
+              risk_level: "moderately_hardened",
+              enabled_directives_count: 16,
+              disabled_directives_count: 3,
+              missing_directives_count: 1,
+              directives_detail: moderateDirectives,
+              created_at: new Date().toISOString(),
+            },
+          ];
+          const attempts = {
+            never_scanned: null,
+            queued: {
+              scan_id: "00000000-0000-0000-0000-00000000d001",
+              state: "queued",
+              source_trigger: "post_build",
+              scheduled_at: "2026-04-07T08:12:00Z",
+              started_at: null,
+              completed_at: null,
+              attempts: 0,
+              error: null,
+            },
+            scanning: {
+              scan_id: "00000000-0000-0000-0000-00000000d001",
+              state: "scanning",
+              source_trigger: "post_build",
+              scheduled_at: "2026-04-07T08:12:00Z",
+              started_at: "2026-04-07T08:12:05Z",
+              completed_at: null,
+              attempts: 1,
+              error: null,
+            },
+            failed: {
+              scan_id: "00000000-0000-0000-0000-00000000d001",
+              state: "failed",
+              source_trigger: "post_build",
+              scheduled_at: "2026-04-07T08:12:00Z",
+              started_at: "2026-04-07T08:12:05Z",
+              completed_at: "2026-04-07T08:12:20Z",
+              attempts: 1,
+              error: "nix eval timed out",
+            },
+            completed: {
+              scan_id: completedSource.scan_id,
+              state: "completed",
+              source_trigger: "post_build",
+              scheduled_at: completedSource.scheduled_at,
+              started_at: completedSource.started_at,
+              completed_at: completedSource.completed_at,
+              attempts: 1,
+              error: null,
+            },
+          };
+          const hasCompletedEvidence = hardeningLifecycleState !== "never_scanned";
           await route.fulfill({
             status: 200,
             contentType: "application/json",
-            body: JSON.stringify([
-              {
-                id: "00000000-0000-0000-0000-00000000c001",
-                scan_id: "00000000-0000-0000-0000-00000000b001",
-                service_name: "nginx.service",
-                service_type: "simple",
-                hardening_score: 34,
-                risk_level: "vulnerable",
-                enabled_directives_count: 4,
-                disabled_directives_count: 8,
-                missing_directives_count: 6,
-                directives_detail: vulnerableDirectives,
-                created_at: new Date().toISOString(),
-              },
-              {
-                id: "00000000-0000-0000-0000-00000000c002",
-                scan_id: "00000000-0000-0000-0000-00000000b001",
-                service_name: "sshd.service",
-                service_type: "notify",
-                hardening_score: 78,
-                risk_level: "moderately_hardened",
-                enabled_directives_count: 16,
-                disabled_directives_count: 3,
-                missing_directives_count: 1,
-                directives_detail: moderateDirectives,
-                created_at: new Date().toISOString(),
-              },
-            ]),
+            body: JSON.stringify({
+              selection: { kind: "current" },
+              derivation_id: 42,
+              source: hasCompletedEvidence ? completedSource : null,
+              services: hasCompletedEvidence ? services : [],
+              attempt: attempts[hardeningLifecycleState],
+              read_only: false,
+            }),
           });
         },
       );
@@ -17306,7 +21788,7 @@ security.audit.enable = true;</fixtext>
       await page.waitForTimeout(1200);
 
       await assertVisible(
-        page.getByText("Run Hardening Scan").first(),
+        page.getByRole("button", { name: "Check now" }).first(),
         "Expected hardening scan action to be visible on system detail",
       );
       await assertVisible(page.getByText("Avg score").first(), "Expected hardening summary stats row to be visible");
@@ -17314,11 +21796,116 @@ security.audit.enable = true;</fixtext>
         page.getByText("nginx.service").first(),
         "Expected hardening service rows to render in hardening table",
       );
+      await assertVisible(
+        page.getByText(/Revision targets could not be loaded/i).first(),
+        "Candidate failure must not replace loaded hardening evidence",
+      );
+      await page.getByRole("button", { name: "Retry revision targets" }).click();
+      await assertVisible(
+        page.getByRole("combobox", { name: "Audited config" }),
+        "Retry should restore the server-owned revision targets without reloading evidence",
+      );
+      if (candidateRequests !== 2) {
+        throw new Error(`Expected one candidate retry request, observed ${candidateRequests} total requests`);
+      }
       await assertVisible(page.getByText("nginx.service").first(), "Expected mocked service row to render");
       await assertVisible(
         page.getByRole("button", { name: /^View details$/i }).first(),
         "Expected hardening table detail action to render",
       );
+      const hardeningRevision = page.getByRole("combobox", { name: "Audited config" });
+      await hardeningRevision.selectOption({ label: "gen #73 · 2222222222222222222222222222222222222222" });
+      await assertVisible(page.getByText("Historical hardening evidence is read-only."), "Expected historical hardening authority disclosure");
+      await assertVisible(page.getByRole("heading", { name: "No hardening scan for this revision" }), "Expected historical no-scan state without current fallback");
+      await assertCount(page.getByRole("button", { name: "Check now" }), 0, "Historical hardening must not expose Check now");
+      await assertCount(page.getByText("nginx.service", { exact: true }), 0, "Historical no-scan target must not retain current services");
+      await hardeningRevision.selectOption({ label: "gen #74 (current) · 1111111111111111111111111111111111111111" });
+      await assertVisible(page.getByText("nginx.service").first(), "Returning to current should restore current hardening evidence");
+
+      const historicalHardeningLabel = "gen #73 · 2222222222222222222222222222222222222222";
+      const currentHardeningLabel = "gen #74 (current) · 1111111111111111111111111111111111111111";
+      const selectCurrentHardeningLifecycle = async (state, testId) => {
+        await hardeningRevision.selectOption({ label: historicalHardeningLabel });
+        await assertVisible(
+          page.getByRole("heading", { name: "No hardening scan for this revision" }),
+          `Expected historical boundary before loading ${state}`,
+        );
+        hardeningLifecycleState = state;
+        await hardeningRevision.selectOption({ label: currentHardeningLabel });
+        const banner = page.getByTestId(testId);
+        await assertVisible(banner, `Expected ${state} hardening lifecycle`);
+        return banner;
+      };
+
+      await assertVisible(page.getByTestId("hardening-state-completed"), "Expected completed hardening lifecycle");
+      let lifecycle = await selectCurrentHardeningLifecycle("never_scanned", "hardening-state-never-scanned");
+      await assertVisible(lifecycle.getByText("Never scanned", { exact: true }), "Expected never-scanned label");
+      await assertVisible(
+        lifecycle.getByText("No hardening scan has run for the current configuration yet.", { exact: true }),
+        "Expected current never-scanned explanation",
+      );
+      await assertVisible(page.getByRole("heading", { name: "No scan results yet", exact: true }), "Expected current no-results state");
+      await assertCount(page.getByText("nginx.service", { exact: true }), 0, "Never-scanned current target must not substitute another revision's evidence");
+      await assertEnabled(page.getByTestId("hardening-check-now"), "Never-scanned current target should permit Check now");
+
+      lifecycle = await selectCurrentHardeningLifecycle("queued", "hardening-state-queued");
+      await assertVisible(lifecycle.getByText("Queued", { exact: true }), "Expected queued label");
+      await assertVisible(page.getByText("nginx.service", { exact: true }), "Queued attempt must preserve earlier exact-target evidence");
+      await assertDisabled(page.getByTestId("hardening-check-now"), "Queued attempt must disable Check now");
+      await assertAttribute(
+        page.getByTestId("hardening-check-now"),
+        "title",
+        "A hardening scan is already queued for this configuration.",
+        "Queued attempt must explain why Check now is disabled",
+      );
+
+      lifecycle = await selectCurrentHardeningLifecycle("scanning", "hardening-state-scanning");
+      await assertVisible(lifecycle.getByText("Scanning", { exact: true }), "Expected scanning label");
+      await assertVisible(page.getByText("nginx.service", { exact: true }), "Scanning attempt must preserve earlier exact-target evidence");
+      await assertDisabled(page.getByTestId("hardening-check-now"), "Scanning attempt must disable Check now");
+      await assertAttribute(
+        page.getByTestId("hardening-check-now"),
+        "title",
+        "A hardening scan is already running for this configuration.",
+        "Scanning attempt must explain why Check now is disabled",
+      );
+
+      lifecycle = await selectCurrentHardeningLifecycle("failed", "hardening-state-failed");
+      await assertVisible(lifecycle.getByText("Last scan failed", { exact: true }), "Expected failed label");
+      await assertVisible(
+        lifecycle.getByText("The most recent hardening scan failed: nix eval timed out The evidence below is from the last scan that completed.", { exact: true }),
+        "Failed attempt must preserve and identify earlier exact-target evidence",
+      );
+      await assertVisible(page.getByText("nginx.service", { exact: true }), "Failed attempt must keep earlier exact-target evidence visible");
+      await assertEnabled(page.getByTestId("hardening-check-now"), "Failed terminal attempt should permit another Check now");
+
+      lifecycle = await selectCurrentHardeningLifecycle("completed", "hardening-state-completed");
+      await assertVisible(lifecycle.getByText("Scan complete", { exact: true }), "Expected completed label");
+      await assertVisible(page.getByText("nginx.service", { exact: true }), "Completed current target must restore exact-target evidence");
+      await assertEnabled(page.getByTestId("hardening-check-now"), "Completed terminal attempt should permit another Check now");
+
+      candidateMode = "out-of-band";
+      await page.goto(`${baseUrl}/systems/00000000-0000-0000-0000-0000000000a1`, { timeout: LOAD_TIMEOUT });
+      await page.getByRole("tab", { name: /^Hardening$/i }).first().click();
+      const outOfBandRevision = page.getByRole("combobox", { name: "Audited config" });
+      await assertVisible(outOfBandRevision, "Out-of-band hardening must load its revision selector");
+      await assertAttribute(
+        outOfBandRevision,
+        "value",
+        "derivation:99",
+        "Out-of-band hardening must select the authoritative flake head rather than retained evidence",
+      );
+      await assertVisible(
+        page.getByText("Showing flake head because the running configuration is out of band.", { exact: true }),
+        "Out-of-band hardening must explain the flake-head fallback",
+      );
+      await assertAttribute(
+        page.getByRole("button", { name: "Commits", exact: true }),
+        "aria-pressed",
+        "true",
+        "Out-of-band hardening must default to commit presentation",
+      );
+      await assertCount(page.getByRole("button", { name: "Check now" }), 0, "Head fallback must not expose Check now");
 
       await page.getByRole("button", { name: /^View details$/i }).first().click({ force: true });
       await assertVisible(
@@ -17342,8 +21929,10 @@ security.audit.enable = true;</fixtext>
       await page.unroute(
         "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening-scan-eligibility*",
       );
+      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-inventory-sources");
+      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/generations");
       await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening/justifications*");
-      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening*");
+      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening-inventory*");
       await unrouteSystemsWarningData(page);
     },
   },
@@ -17612,6 +22201,178 @@ security.audit.enable = true;</fixtext>
           `Unexpected coverage after imported policy deletion: before=${JSON.stringify(importedState.coverage)} after=${JSON.stringify(deletionState.coverage)} affected=${affectedRequirements}`,
         );
       }
+    },
+  },
+  {
+    name: "29n-compliance-evidence-control-rail-alignment",
+    description: "Compliance evidence control names and ordinals retain fixed horizontal geometry across selection, filtering and CAT group changes",
+    action: async (page) => {
+      await routeStandaloneUiBootstrap(page, "Admin");
+      const bundleId = "29000000-0000-4000-8000-000000000001";
+      const versionId = "29000000-0000-4000-8000-000000000002";
+      const systemId = "29000000-0000-4000-8000-000000000003";
+      const policyIds = [
+        "29000000-0000-4000-8000-000000000011",
+        "29000000-0000-4000-8000-000000000012",
+        "29000000-0000-4000-8000-000000000013",
+      ];
+      const names = ["demo-apps-installed", "test rollout", "require_ssh_key_auth"];
+      const bundle = {
+        id: bundleId, name: "Evidence rail fixture", framework: "DISA STIG", version: "2.0",
+        description: "Control navigation geometry fixture", layer: "fleet", owner: "Platform Security",
+        last_review: null, policy_ids: policyIds, required_envs: [], control_count: 3,
+        environment_count: 1, active_assignment_count: 1, current_draft_version_id: null,
+        current_published_version_id: versionId, current_draft_version: null,
+        current_published_version: "2.0", applicable_system_count: 1, aggregate_score: 33,
+        versions: [{ id: versionId, bundle_id: bundleId, version: "2.0", publication_state: "accepted",
+          trust_state: "trusted", semantic_digest: "alignment-fixture", created_at: "2026-09-25T00:00:00Z",
+          published_at: "2026-09-25T00:00:00Z", derived_from_version_id: null, control_count: 3,
+          is_current_published: true, is_current_draft: false }],
+      };
+      const controls = names.map((policyName, index) => ({
+        policy_id: policyIds[index], policy_name: policyName,
+        status: ["fail", "warn", "pass"][index],
+        severity: ["high", "medium", "low"][index],
+        summary: `${policyName} evidence`, evidence_items: [], framework_mapping: "",
+        control_family: null, finding_id: null, finding_observation: null,
+      }));
+      const totals = { system_count: 1, fully_compliant_count: 0, pass: 1, warn: 1, fail: 1,
+        waiver: 0, total_controls: 3, evaluated_controls: 3, not_checked: 0,
+        not_applicable: 0, error: 0, overall_score: 33 };
+      const systemRollup = { system_id: systemId, hostname: "alignment-host", environment: "Dev",
+        applies: true, total: 3, evaluated_total: 3, pass: 1, warn: 1, fail: 1, waiver: 0,
+        not_checked: 0, not_applicable: 0, error: 0, report_only: 0, score: 33,
+        resolution_state: "resolved", assignment_status: "current" };
+
+      await page.route("**/api/v1/compliance/bundles", async (route) => route.fulfill({
+        status: 200, contentType: "application/json", body: JSON.stringify([bundle]),
+      }));
+      await page.route(`**/api/v1/compliance/bundles/${bundleId}/systems?*`, async (route) => route.fulfill({
+        status: 200, contentType: "application/json",
+        body: JSON.stringify({ bundle_id: bundleId, bundle_version_id: versionId, systems: [systemRollup], totals }),
+      }));
+      await page.route(`**/api/v1/compliance/bundles/${bundleId}/systems/${systemId}/evidence?*`, async (route) => route.fulfill({
+        status: 200, contentType: "application/json",
+        body: JSON.stringify({ bundle_id: bundleId, bundle_version_id: versionId, framework: "DISA STIG",
+          system_id: systemId, hostname: "alignment-host", controls, resolution_state: "resolved" }),
+      }));
+      await page.route(`**/api/v1/systems/${systemId}/compliance-assignments`, async (route) => route.fulfill({
+        status: 200, contentType: "application/json", body: JSON.stringify({ assignments: [] }),
+      }));
+      await page.route("**/api/v1/poams/rollups/bundles*", async (route) => route.fulfill({
+        status: 200, contentType: "application/json", body: "[]",
+      }));
+
+      await page.setViewportSize({ width: 960, height: 768 });
+      await page.goto(`${baseUrl}/compliance?bundle=${bundleId}&version=${versionId}&system=${systemId}&policy=${policyIds[0]}&view=evidence`, { timeout: LOAD_TIMEOUT });
+      const dialog = page.locator("#compliance-evidence-dialog");
+      await dialog.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await dialog.evaluate((element) => Promise.all(element.getAnimations().map((animation) => animation.finished)));
+      const rowFor = (policyId) => dialog.locator(`nav button[data-testid="evidence-policy-target"][data-policy-id="${policyId}"]`);
+      const rows = dialog.locator('nav button[data-testid="evidence-policy-target"]');
+      const collectGeometry = async () => rows.evaluateAll((buttons) => buttons.map((button) => {
+        const name = button.querySelector('[data-testid="evidence-policy-name"]');
+        const ordinal = button.querySelector('[data-testid="evidence-policy-ordinal"]');
+        const dot = button.querySelector('[data-testid="evidence-policy-status-dot"]');
+        const styles = (node) => {
+          const computed = getComputedStyle(node);
+          const rect = node.getBoundingClientRect();
+          return { x: rect.x, width: rect.width, height: rect.height, display: computed.display,
+            gridTemplateColumns: computed.gridTemplateColumns, flexDirection: computed.flexDirection,
+            textAlign: computed.textAlign, justifyContent: computed.justifyContent,
+            alignItems: computed.alignItems, padding: computed.padding, margin: computed.margin,
+            fontWeight: computed.fontWeight, boxSizing: computed.boxSizing };
+        };
+        return { policyId: button.getAttribute("data-policy-id"), selected: button.getAttribute("aria-current"), row: styles(button), ordinal: styles(ordinal),
+          name: styles(name), status: styles(dot), focusShadow: getComputedStyle(button).boxShadow };
+      }));
+      const assertAligned = (snapshot, label) => {
+        const nameX = snapshot.map((entry) => entry.name.x);
+        const ordinalX = snapshot.map((entry) => entry.ordinal.x);
+        const statusX = snapshot.map((entry) => entry.status.x);
+        for (const [column, positions] of [["name", nameX], ["ordinal", ordinalX], ["status", statusX]]) {
+          if (Math.max(...positions) - Math.min(...positions) > 1) {
+            throw new Error(`${label}: ${column} column is not aligned at a stable x coordinate: ${positions}`);
+          }
+        }
+      };
+      const assertSameRowGeometry = (left, right, label) => {
+        for (const key of ["x", "width", "height", "display", "gridTemplateColumns", "textAlign", "justifyContent", "alignItems", "padding", "margin", "boxSizing"]) {
+          if (left.row[key] !== right.row[key]) {
+            throw new Error(`${label}: row geometry property ${key} changed (${left.row[key]} -> ${right.row[key]})`);
+          }
+        }
+        for (const key of ["x", "width", "textAlign", "padding", "margin"]) {
+          if (left.name[key] !== right.name[key] || left.ordinal[key] !== right.ordinal[key] || left.status[key] !== right.status[key]) {
+            throw new Error(`${label}: fixed column geometry ${key} changed`);
+          }
+        }
+      };
+      const before = await collectGeometry();
+      console.log(`COMPLIANCE_CONTROL_RAIL_BEFORE ${JSON.stringify(before)}`);
+      await captureWorkflowViewportState(page, "29n-compliance-evidence-control-rail-alignment", "selected-control-01", "narrowDesktop");
+      assertAligned(before, "initial selected control");
+      await rowFor(policyIds[2]).focus();
+      const focused = await collectGeometry();
+      assertSameRowGeometry(before[2], focused[2], "keyboard focus on control 03");
+      await rowFor(policyIds[0]).click();
+      const selectionStates = [before];
+      for (let index = 1; index < policyIds.length; index += 1) {
+        await rowFor(policyIds[index]).click();
+        const snapshot = await collectGeometry();
+        assertAligned(snapshot, `selected control ${index + 1}`);
+        assertSameRowGeometry(before[0], snapshot[index], `select control ${index + 1}`);
+        selectionStates.push(snapshot);
+      }
+      for (let index = policyIds.length - 2; index >= 0; index -= 1) {
+        await rowFor(policyIds[index]).click();
+        const snapshot = await collectGeometry();
+        assertAligned(snapshot, `navigate back to control ${index + 1}`);
+        assertSameRowGeometry(before[0], snapshot[index], `navigate back to control ${index + 1}`);
+        selectionStates.push(snapshot);
+      }
+      const filter = dialog.getByPlaceholder("Filter controls…");
+      await fillDioxusInput(filter, "test rollout");
+      await rowFor(policyIds[1]).waitFor({ state: "visible" });
+      selectionStates.push(await collectGeometry());
+      await fillDioxusInput(filter, "");
+      selectionStates.push(await collectGeometry());
+      const catI = dialog.getByRole("button", { name: /CAT I/ }).first();
+      const groupBefore = await catI.evaluate((button) => {
+        const style = getComputedStyle(button);
+        const rect = button.getBoundingClientRect();
+        return { x: rect.x, width: rect.width, height: rect.height, display: style.display,
+          textAlign: style.textAlign, justifyContent: style.justifyContent, alignItems: style.alignItems,
+          padding: style.padding, margin: style.margin };
+      });
+      await catI.focus();
+      const groupFocused = await catI.evaluate((button) => {
+        const style = getComputedStyle(button);
+        const rect = button.getBoundingClientRect();
+        return { x: rect.x, width: rect.width, height: rect.height, display: style.display,
+          textAlign: style.textAlign, justifyContent: style.justifyContent, alignItems: style.alignItems,
+          padding: style.padding, margin: style.margin };
+      });
+      if (JSON.stringify(groupFocused) !== JSON.stringify(groupBefore)) {
+        throw new Error(`CAT group focus changed geometry: before=${JSON.stringify(groupBefore)} focused=${JSON.stringify(groupFocused)}`);
+      }
+      await catI.click();
+      selectionStates.push(await collectGeometry());
+      await catI.click();
+      await rowFor(policyIds[0]).waitFor({ state: "visible" });
+      const after = await collectGeometry();
+      selectionStates.push(after);
+      for (const [index, snapshot] of selectionStates.entries()) {
+        assertAligned(snapshot, `rerender state ${index}`);
+      }
+      for (const snapshot of selectionStates) {
+        for (const entry of snapshot) {
+          const original = before.find((candidate) => candidate.policyId === entry.policyId);
+          if (!original) throw new Error(`Unexpected evidence control in rerender state: ${entry.policyId}`);
+          assertSameRowGeometry(original, entry, `control ${entry.policyId} across select/filter/group states`);
+        }
+      }
+      await captureWorkflowViewportState(page, "29n-compliance-evidence-control-rail-alignment", "after-navigation-filter-and-cat-toggle", "narrowDesktop");
     },
   },
   {
@@ -18389,23 +23150,64 @@ security.audit.enable = true;</fixtext>
         }
       const detail = page.getByTestId("poam-detail");
       await detail.waitFor({ state: "visible", timeout: 15000 });
+      const hierarchy = await detail.locator(".poam-tray-section > header h3").allTextContents();
+      const position = (prefix) => hierarchy.findIndex((heading) => heading.trim().startsWith(prefix));
+      // Design order after the metadata band: Remediation status, Deficiency,
+      // Vulnerability scope (only when exact CVE links exist), Remediation
+      // plan, Milestones, Activity. This policy-finding POA&M has no CVE links.
+      for (const [earlier, later] of [
+        ["Remediation status", "Deficiency"],
+        ["Deficiency", "Remediation plan"],
+        ["Remediation plan", "Milestones"],
+        ["Milestones", "Activity"],
+      ]) {
+        if (position(earlier) < 0 || position(later) <= position(earlier)) {
+          throw new Error(`POA&M tray lost its primary design hierarchy: ${JSON.stringify(hierarchy)}`);
+        }
+      }
+      if (position("Vulnerability scope") >= 0) {
+        throw new Error(`A policy-finding POA&M must not fabricate a vulnerability scope: ${JSON.stringify(hierarchy)}`);
+      }
+      // There is exactly one metadata surface, at the top. The old trailing
+      // metadata section and the trailing assignment-reference section must be
+      // removed from the DOM, not merely hidden.
+      for (const removed of ["POA&M metadata", "Baseline assignment references", "Linked findings", "Linked vulnerabilities"]) {
+        if (position(removed) >= 0) throw new Error(`POA&M tray still renders the removed "${removed}" section: ${JSON.stringify(hierarchy)}`);
+      }
+      await assertCount(detail.getByRole("heading", { name: "POA&M metadata" }), 0, "The standalone POA&M metadata section must not exist");
+      await assertVisible(detail.getByRole("heading", { name: /^Deficiency · 1 finding$/ }), "Deficiency heading must carry the exact finding count");
+      await assertVisible(detail.getByRole("button", { name: "Save plan", exact: true }), "Remediation text retains its independent save");
+      // Save metadata is part of the top metadata surface and appears only
+      // while a metadata draft differs from the saved POA&M.
+      await assertCount(detail.getByRole("button", { name: "Save metadata", exact: true }), 0, "Save metadata must stay hidden while no metadata draft changed");
       await assertVisible(detail.getByText(created.human_id, { exact: true }), "Expected returned human POA&M ID");
       await assertVisible(detail.getByText("Open", { exact: true }).first(), "Expected returned Open status");
-      await assertVisible(
-        detail.getByTestId("poam-metadata-summary").getByText(eligibleAssignee.label, { exact: true }),
-        "Expected returned typed assignee",
-      );
-      const metadataSummary = detail.getByTestId("poam-metadata-summary");
-      await metadataSummary.waitFor({ state: "visible", timeout: 15000 });
-      const returnedDueDate = metadataSummary
-        .locator(":scope > div")
-        .filter({ hasText: "Target completion" })
-        .locator("strong");
-      await returnedDueDate.waitFor({ state: "visible", timeout: 15000 });
-      if ((await returnedDueDate.textContent())?.trim() !== "2026-09-19") {
-        throw new Error(`Expected returned due date, got ${JSON.stringify(await returnedDueDate.textContent())}`);
-      }
+      const metaBand = detail.getByTestId("poam-meta");
+      await metaBand.waitFor({ state: "visible", timeout: 15000 });
+      await assertValue(metaBand.getByTestId("poam-assignee-select"), eligibleAssignee.value, "Expected returned typed assignee in the metadata band");
+      await assertValue(metaBand.getByLabel("Target completion"), "2026-09-19", "Expected returned due date in the metadata band");
+      await assertValue(detail.getByLabel("Title", { exact: true }), created.title, "Expected editable title in the header");
+      await assertValue(detail.getByLabel("Risk"), "High", "Expected the returned risk in the header chip control");
+      // Title and risk live in the header, not in the metadata band.
+      await assertCount(metaBand.getByLabel("Title", { exact: true }), 0, "Title belongs to the header");
+      await assertCount(metaBand.getByLabel("Risk"), 0, "Risk belongs to the header chip");
       if (!page.url().includes(`poam=${created.id}`)) throw new Error(`POA&M detail route omitted exact ID: ${page.url()}`);
+      const savedDetailUrl = page.url();
+      let unsavedPatches = 0;
+      const countUnsavedPatch = (request) => {
+        if (request.method() === "PATCH" && new URL(request.url()).pathname === `/api/v1/poams/${created.id}`) unsavedPatches += 1;
+      };
+      page.on("request", countUnsavedPatch);
+      await detail.getByLabel("Title", { exact: true }).fill("Unsaved title must not persist");
+      await assertVisible(detail.getByRole("button", { name: "Save metadata", exact: true }), "Editing a metadata draft must reveal the explicit Save metadata action");
+      await detail.getByPlaceholder("What will change, where, and how it will be verified").fill("Unsaved plan must not persist");
+      await detail.getByRole("button", { name: "Close", exact: true }).click();
+      await page.goto(savedDetailUrl, { waitUntil: "domcontentloaded", timeout: LOAD_TIMEOUT });
+      await detail.waitFor({ state: "visible", timeout: 15000 });
+      page.off("request", countUnsavedPatch);
+      if (unsavedPatches !== 0) throw new Error(`Closing an unsaved POA&M draft sent ${unsavedPatches} metadata writes`);
+      await assertValue(detail.getByLabel("Title", { exact: true }), created.title, "Unsaved metadata must not claim persistence");
+      await assertValue(detail.getByPlaceholder("What will change, where, and how it will be verified"), created.plan, "Unsaved remediation plan must not claim persistence");
 
       const exactEvidence = detail.getByTestId("poam-linked-finding").filter({ hasText: system.hostname });
       await exactEvidence.getByRole("button", { name: "Evidence", exact: true }).click();
@@ -18513,9 +23315,12 @@ security.audit.enable = true;</fixtext>
       const historyActivity = detail.locator(`[data-activity-kind="note"]`).filter({ hasText: "History note 100" });
       await assertVisible(historyActivity.locator(".poam-activity-actor").getByText(historyActorDisplay, { exact: true }), "Activity must identify its actor in a compact column");
       await assertVisible(historyActivity.locator("time"), "Activity must render its timestamp");
-      if (await historyActivity.getByText("Diagnostics", { exact: true }).locator("..").evaluate((node) => node.open)) {
-        throw new Error("Raw activity diagnostics must remain collapsed by default");
-      }
+      // The drawer shows date, actor, and the human message only, as the design
+      // does. The stored payload feeds the message but is never rendered raw.
+      await assertCount(detail.locator(".poam-activity-diagnostics"), 0, "Activity must not render a raw diagnostics disclosure");
+      await assertCount(detail.locator(".poam-activity").getByText("Diagnostics"), 0, "Activity must not show a Diagnostics label");
+      await assertCount(detail.locator(".poam-activity details, .poam-activity pre"), 0, "Activity must not contain disclosure or raw JSON elements");
+      await assertCount(historyActivity.locator(".poam-activity-date, .poam-activity-actor, .poam-activity-message"), 3, "Each activity row must be exactly date, actor, and message");
 
       const verificationPagePromise = page.waitForResponse((response) => {
         const url = new URL(response.url());
@@ -18537,12 +23342,18 @@ security.audit.enable = true;</fixtext>
       const metadataResponse = await metadataResponsePromise;
       const metadataRequest = metadataResponse.request().postDataJSON();
       const metadataDetail = await metadataResponse.json();
-      if (metadataResponse.status() !== 200 || metadataRequest.plan != null ||
+      if (metadataResponse.status() !== 200 || metadataRequest.plan != null || metadataRequest.owner != null ||
           metadataRequest.assignee?.kind !== "user" || metadataRequest.assignee.user_id !== metadataAssignee.id ||
           metadataDetail.assignee?.kind !== "user" || metadataDetail.assignee.user_id !== metadataAssignee.id) {
         throw new Error(`Metadata save must not implicitly persist the remediation plan: ${JSON.stringify(metadataRequest)}`);
       }
-      await assertVisible(detail.getByText(metadataAssignee.label, { exact: true }).first(), "Saved typed assignee must reconcile from server response");
+      // The header and metadata band edit one explicit payload: title, typed
+      // assignee, target date, and risk. The plan draft above must not ride along.
+      if (metadataRequest.title !== "Persisted remediation metadata" || metadataRequest.target_date !== "2026-11-12" || metadataRequest.risk !== "low") {
+        throw new Error(`Metadata save must carry the header and metadata-band drafts: ${JSON.stringify(metadataRequest)}`);
+      }
+      await assertValue(detail.getByTestId("poam-assignee-select"), metadataAssignee.value, "Saved typed assignee must reconcile from server response");
+      await assertHidden(detail.getByRole("button", { name: "Save metadata", exact: true }), "Save metadata must disappear once the saved POA&M matches the drafts");
       const planResponsePromise = page.waitForResponse(
         (response) => response.url().endsWith(`/api/v1/poams/${poam.id}`) && response.request().method() === "PATCH",
       );
@@ -18585,35 +23396,19 @@ security.audit.enable = true;</fixtext>
       const milestone = detail.locator(`[data-testid="poam-milestone"][data-milestone-id="${addedMilestone.id}"]`);
       await assertVisible(milestone, "Added milestone must reconcile from server response");
       await assertVisible(milestone.getByText("due Oct 31", { exact: true }), "Open milestone must show its compact due date");
-      const milestoneTitleEditor = milestone.getByLabel("Milestone title for Browser release gate", { exact: true });
-      await assertHidden(milestoneTitleEditor, "Milestone editing controls must not be permanent row content");
-      await milestone.getByRole("button", { name: "Edit milestone Browser release gate", exact: true }).click();
-      await assertVisible(milestoneTitleEditor, "Compact title interaction must expose optional milestone editing");
-      await page.waitForFunction(
-        (label) => document.activeElement?.getAttribute("aria-label") === label,
-        "Milestone title for Browser release gate",
-        { timeout: 15000 },
-      );
-      if (!(await milestoneTitleEditor.evaluate((node) => node === document.activeElement))) {
-        throw new Error("Opening optional milestone editing must focus its title field");
-      }
-      await milestone.getByLabel("Milestone target date for Browser release gate", { exact: true }).fill("2026-11-01");
-      const updateMilestoneResponsePromise = page.waitForResponse(
-        (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/milestones/${addedMilestone.id}`) && response.request().method() === "PATCH",
-      );
-      await milestone.getByRole("button", { name: "Save", exact: true }).click();
-      if ((await updateMilestoneResponsePromise).status() !== 200) throw new Error("Milestone update failed");
-      await assertHidden(milestoneTitleEditor, "Saving milestone editing must restore compact checklist geometry");
-      await assertVisible(milestone.getByText("due Nov 1", { exact: true }), "Saved milestone must reconcile its updated date");
-      if (!(await milestone.getByRole("button", { name: "Edit milestone Browser release gate", exact: true }).evaluate((node) => node === document.activeElement))) {
-        throw new Error("Saving optional milestone editing must restore focus to its trigger after reconciliation");
-      }
-      await milestone.getByRole("button", { name: "Edit milestone Browser release gate", exact: true }).click();
-      await milestone.getByRole("button", { name: "Cancel", exact: true }).click();
-      await assertHidden(milestoneTitleEditor, "Cancelling milestone editing must restore compact checklist geometry");
-      if (!(await milestone.getByRole("button", { name: "Edit milestone Browser release gate", exact: true }).evaluate((node) => node === document.activeElement))) {
-        throw new Error("Closing optional milestone editing must restore focus to its trigger");
-      }
+      // Design behaviour: the row is checkbox, title, date, and remove. The title
+      // is plain label text, not an edit button, and no inline editor exists.
+      await assertCount(milestone.getByRole("button", { name: /^Edit milestone/ }), 0, "A milestone title must not be an edit button");
+      await assertCount(milestone.getByLabel(/^Milestone (title|target date) for /), 0, "A milestone row must not contain an inline editor");
+      await assertCount(milestone.locator("input:not([type='checkbox']), textarea, select"), 0, "A milestone row must contain only its checkbox as an input");
+      await assertCount(milestone.getByRole("button", { name: "Save", exact: true }), 0, "A milestone row must not offer Save");
+      await assertCount(milestone.getByRole("button", { name: "Cancel", exact: true }), 0, "A milestone row must not offer Cancel");
+      await assertCount(milestone.locator("label").filter({ hasText: "Browser release gate" }), 1, "Checkbox and title must share one label");
+      // Clicking the title text, not the editor, must be inert for editing.
+      const editorRequests = [];
+      const countMilestonePatch = (request) => {
+        if (request.method() === "PATCH" && request.url().includes("/milestones/")) editorRequests.push(request.postDataJSON());
+      };
       const completeResponsePromise = page.waitForResponse(
         (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/milestones/${addedMilestone.id}`) && response.request().method() === "PATCH",
       );
@@ -18630,12 +23425,19 @@ security.audit.enable = true;</fixtext>
       const reopenResponsePromise = page.waitForResponse(
         (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/milestones/${addedMilestone.id}`) && response.request().method() === "PATCH",
       );
-      await milestone.getByRole("checkbox", { name: "Reopen Browser release gate", exact: true }).click();
+      page.on("request", countMilestonePatch);
+      // The design label wraps the title, so clicking the title text toggles completion.
+      await milestone.locator(".poam-milestone-title").click();
       const reopenResponse = await reopenResponsePromise;
       if (reopenResponse.status() !== 200 || reopenResponse.request().postDataJSON().completed !== false) {
         throw new Error(`Milestone checkbox must send completed=false: ${reopenResponse.request().postData()}`);
       }
       await assertVisible(milestone.getByRole("checkbox", { name: "Mark Browser release gate complete", exact: true }), "Reopened milestone must persist");
+      page.off("request", countMilestonePatch);
+      if (editorRequests.length !== 1 || editorRequests[0].completed !== false || editorRequests[0].title != null || editorRequests[0].target_date != null) {
+        throw new Error(`Toggling a milestone must send only its completion: ${JSON.stringify(editorRequests)}`);
+      }
+      await assertVisible(milestone.getByText("due Oct 31", { exact: true }), "A milestone must keep its target date visible after toggling");
       await milestone.getByRole("button", { name: "Remove milestone Browser release gate", exact: true }).click();
       await assertHidden(detail.getByTestId("poam-milestone").filter({ hasText: "Browser release gate" }), "Removed milestone must disappear");
 
@@ -18666,6 +23468,7 @@ security.audit.enable = true;</fixtext>
       if (staleResponse.status() !== 409) throw new Error(`Expected real stale revision 409, got ${staleResponse.status()}`);
       await assertVisible(reloaded.getByText(/changed before saving metadata/i), "Stale revision must have actionable presentation");
       await assertValue(reloaded.getByLabel("Title", { exact: true }), "Preserved stale draft title", "Stale refresh must preserve the exact Title draft");
+      await assertVisible(reloaded.getByRole("button", { name: "Save metadata", exact: true }), "A preserved stale draft must keep Save metadata available for retry");
     },
   },
   {
@@ -19067,9 +23870,17 @@ security.audit.enable = true;</fixtext>
 
       await page.goto(`${baseUrl}/compliance?bundle=${fixture.bundle.id}&version=${fixture.bundleVersionId}&view=poam&poam=${poam.id}`, { timeout: LOAD_TIMEOUT });
       await waitForPhase6Target(page, detail, "Canonical POA&M detail after rollup navigation");
+      // The server records verification only while a POA&M is awaiting
+      // verification (409 invalid_transition otherwise), so the UI must not
+      // offer Verify now or Authoritative close in any earlier state.
+      await assertCount(detail.getByRole("button", { name: "Verify now", exact: true }), 0, "Verify now must not be offered while the POA&M is not awaiting verification");
+      await assertCount(detail.getByRole("button", { name: "Authoritative close", exact: true }), 0, "Authoritative close must not be offered while the POA&M is not awaiting verification");
       await detail.getByRole("button", { name: "In Progress", exact: true }).click();
+      await assertCount(detail.getByRole("button", { name: "Verify now", exact: true }), 0, "Verify now must not be offered while In Progress");
       await detail.getByRole("button", { name: "Awaiting Verification", exact: true }).click();
       await assertVisible(detail.getByText("Awaiting verification.", { exact: true }), "Awaiting state must explain finding independence");
+      await assertVisible(detail.getByRole("button", { name: "Verify now", exact: true }), "Verify now must be offered while awaiting verification");
+      await assertVisible(detail.getByRole("button", { name: "Authoritative close", exact: true }), "Authoritative close must be offered while awaiting verification");
       const currentFailAssessment = await runTask433ProductionEvaluation(page, {
         systemId,
         commitId,
@@ -19160,6 +23971,8 @@ security.audit.enable = true;</fixtext>
         throw new Error(`Immediate close response omitted hydrated requirement metadata: ${JSON.stringify(successfulCloseDetail)}`);
       }
       await assertVisible(detail.getByText("Completed", { exact: true }).first(), "Successful authoritative closure must render Completed");
+      await assertVisible(detail.getByRole("button", { name: "Reopen", exact: true }), "A completed POA&M must offer Reopen");
+      await assertCount(detail.getByRole("button", { name: "Verify now", exact: true }), 0, "A completed POA&M must not offer Verify now");
       runFixtureSql(`
         UPDATE poams
         SET closed_at='2026-09-01T10:39:37Z'::timestamptz
@@ -19460,7 +24273,15 @@ security.audit.enable = true;</fixtext>
       await page.goto(`${baseUrl}/compliance?bundle=${fixture.bundle.id}&version=${fixture.bundleVersionId}&view=poam&poam=${poam.id}`, { timeout: LOAD_TIMEOUT });
       const viewerDetail = page.getByTestId("poam-detail");
       await viewerDetail.waitFor({ state: "visible", timeout: 15000 });
-      if (!(await viewerDetail.getByRole("button", { name: "Save metadata", exact: true }).isDisabled())) throw new Error("Viewer must not mutate POA&M metadata");
+      // A viewer gets plain read-only text in the single header/metadata
+      // surface: no editors and no Save metadata action to invoke at all.
+      await assertCount(viewerDetail.getByRole("button", { name: "Save metadata", exact: true }), 0, "Viewer must not be offered Save metadata");
+      await assertCount(viewerDetail.getByLabel("Title", { exact: true }), 0, "Viewer must not receive an editable title");
+      await assertCount(viewerDetail.getByLabel("Risk"), 0, "Viewer must not receive an editable risk");
+      await assertCount(viewerDetail.getByLabel("Target completion"), 0, "Viewer must not receive an editable target date");
+      await assertCount(viewerDetail.getByTestId("poam-assignee-select"), 0, "Viewer must not receive an assignee editor");
+      await assertVisible(viewerDetail.locator(".poam-tray-heading p"), "Viewer must still read the POA&M title");
+      await assertCount(viewerDetail.getByRole("heading", { name: "POA&M metadata" }), 0, "The standalone POA&M metadata section must not exist for a viewer either");
       if (!(await viewerDetail.getByRole("button", { name: "Save plan", exact: true }).isDisabled())) throw new Error("Viewer must not mutate the POA&M remediation plan");
       if (!(await viewerDetail.getByRole("button", { name: "Link finding", exact: true }).isDisabled())) throw new Error("Viewer must not mutate POA&M findings");
       await page.unroute("**/api/auth/whoami");
@@ -21147,7 +25968,26 @@ function runStaticHarnessContracts() {
   assertContract(!topbar.includes('role: "menuitem"'), "Notification controls must retain ordinary button semantics");
   const scenario12h = source.slice(source.indexOf('name: "12h-'), source.indexOf('name: "12d-systems-api-error'));
   const scenario16 = source.slice(source.indexOf('name: "16-cves"'), source.indexOf('name: "16b-cves'));
+  const scenario16c = source.slice(source.indexOf('name: "16c-scanning-view"'), source.indexOf('// ── End CVE/multi-rule policy checks'));
   assertContract(!scenario12h.includes("triageBodies") && !scenario12h.includes("fleetDetail"), "System-detail scenario must not own global CVE triage fixtures");
+  assertContract(
+    scenario12h.includes("/cves/CVE-2025-1111/triage") &&
+      scenario12h.includes('request.method() === "GET"') &&
+      scenario12h.includes('request.method() !== "POST"') &&
+      !scenario12h.includes("/justification") &&
+      !scenario12h.includes("/poams/cves"),
+    "System-detail workflow must use only the unified exact-CVE triage endpoint",
+  );
+  for (const contract of [
+    "createTask326CurrentCveAuthorityFixture()",
+    'current.current_state !== "exact_current_scan"',
+    'current.source?.scan_id !== authorityFixture.currentScanId',
+    'current.vulnerabilities[0].canonical_package_name !== "current-authority-package"',
+    "Current CVE inventory leaked historical findings",
+    "Current must exclude the historical CVE",
+  ]) {
+    assertContract(scenario12h.includes(contract), `12ha Current CVE authority workflow is missing ${contract}`);
+  }
   for (const identifier of ["fleetDetail", "triageBodies"]) {
     const declaration = scenario16.search(new RegExp(`(?:const|let) ${identifier}\\b`));
     assertContract(declaration >= 0 && scenario16.indexOf(identifier, declaration + identifier.length) > declaration, `16-cves must declare ${identifier} before runtime use`);
@@ -21158,8 +25998,65 @@ function runStaticHarnessContracts() {
     typedCveAssignees.every(([fixture]) => /available:\s*true/.test(fixture)),
     "16-cves typed User/Group assignee fixtures must include available: true",
   );
+  assertContract(
+    scenario16.includes('getByTestId("cve-poam-risk")') &&
+      scenario16.includes("Compatible POA&M reuse did not preserve server-authored title and risk"),
+    "16-cves must retain shared risk and compatible POA&M reuse coverage",
+  );
+  for (const contract of [
+    'collection === "active"',
+    'Scanning must have only the two designed tabs',
+    'Scanning still polls the removed system view',
+    '"Scanned", "Trigger", "Actions"',
+    "awaiting_build",
+    "awaiting_closure",
+    'name: "Archive 4"',
+    'name: "Restore 4"',
+    '"No persisted diagnostic events"',
+    "Plain-clicking an Active queued row",
+    "Plain Active running-row click",
+    "Mixed archive must carry both exact IDs once",
+    "Selected BulkBar must be centered and sticky",
+    "Clear must reset the range anchor",
+    "A plain Completed row click should open the exact config",
+    "View CVEs for scan",
+    "active-running-drawer",
+    'name: "Search authorized diagnostic content"',
+    'name: "Rescan all"',
+  ]) {
+    assertContract(scenario16c.includes(contract), `16c scanning workflow is missing ${contract}`);
+  }
+  assertContract(!scenario16c.includes("/scanning/queue") && !scenario16c.includes("/scanning/deployed") && !scenario16c.includes("/scanning/activity") && !scenario16c.includes("/cves/rescan-fleet"), "16c must not mock obsolete scanning surfaces");
   assertContract(cveView.includes("request_token_is_current") && cveView.includes("load_generation.peek()"), "Exact fleet loads must use non-reactive newest-request tokens");
   assertContract(poamComponent.includes("Retired vulnerability history") && poamComponent.includes("Retired links are immutable audit evidence"), "POA&M detail must distinguish immutable retired exact links");
+  // The detail drawer has one metadata surface (header plus metadata band). The
+  // duplicate trailing section must be removed from the component, not hidden.
+  assertContract(
+    !poamComponent.includes('h3 { "POA&M metadata" }') && !poamComponent.includes("poam-tray-supplemental") && !poamComponent.includes('"Linked findings'),
+    "POA&M detail must not render a standalone trailing POA&M metadata section",
+  );
+  assertContract(
+    poamComponent.includes("fn build_metadata_request") && poamComponent.includes("fn build_plan_request") && poamComponent.includes("plan: None,") && poamComponent.includes("..UpdatePoamRequest::default()"),
+    "Save metadata and Save plan must keep their disjoint PATCH contracts",
+  );
+  // Design parity: milestones toggle through a label with no inline editor,
+  // activity shows no raw diagnostics, and the CVE scope is grouped, not a table.
+  assertContract(
+    !poamComponent.includes("Edit milestone") && !poamComponent.includes("poam-milestone-editor") && poamComponent.includes("label { class: \"poam-check poam-ms-label\""),
+    "POA&M milestones must toggle through a label and must not render an inline editor",
+  );
+  assertContract(
+    !poamComponent.includes("poam-activity-diagnostics") && !poamComponent.includes("summary { \"Diagnostics\" }"),
+    "POA&M activity must not render a raw diagnostics disclosure",
+  );
+  assertContract(
+    poamComponent.includes("fn group_cve_scope") && poamComponent.includes("poam-cve-group-head") && !poamComponent.includes("poam-cve-findings-table"),
+    "POA&M vulnerability scope must group hosts under one card per CVE and package",
+  );
+  assertContract(
+    poamComponent.includes("fn verification_actions_available") && poamComponent.includes("if verification_actions_available(status) {"),
+    "Verify now and Authoritative close must be offered only while awaiting verification",
+  );
   assertContract(
     poamApi.includes('request("POST", &format!("{}/poams/cves", base_url()), Some(body))'),
     "Exact-CVE creation must use the dedicated API route",
@@ -21173,13 +26070,90 @@ function runStaticHarnessContracts() {
     cveComponent.includes(
       "inventory_allows_exact_remediation(inventory_authority, allow_mutations)",
     ) &&
-      cveComponent.includes(
-        "inventory_allows_ordinary_justification(inventory_authority, allow_mutations)",
-      ) &&
-      cveComponent.includes("if exact_remediation_allowed {") &&
-      cveComponent.includes("if ordinary_justification_allowed { button {") &&
-      cveComponent.includes('title: if has_justification { "Edit justification" } else { "Justify" }'),
+      cveComponent.includes("let triage_actionable = exact_remediation_allowed") &&
+      cveComponent.includes("if triage_actionable {") &&
+      cveComponent.includes('"data-testid": "system-cve-triage-open"') &&
+      !cveComponent.includes('"data-testid": "system-cve-justify"'),
     "System CVE mutation controls must remain authorization-gated",
+  );
+  assertContract(
+    poamApi.includes("pub async fn fetch_system_cve_triage_detail") &&
+      poamApi.includes('"{}/systems/{}/cves/{}/triage?package={}"') &&
+      poamApi.includes("pub async fn triage_system_cve") &&
+      poamApi.includes('"{}/systems/{}/cves/{}/triage"'),
+    "System CVE triage must retain unified GET and POST API contracts",
+  );
+  assertContract(
+    poamApi.includes("pub enum SystemCveTriageScopeChoice") &&
+      poamApi.includes("Host,") &&
+      poamApi.includes("Environment,") &&
+      poamApi.includes("pub scope: SystemCveTriageScopeChoice") &&
+      poamApi.includes("pub selected_system_hostname: String") &&
+      poamApi.includes("pub host_disposition: Option<CveEnvironmentDisposition>") &&
+      poamApi.includes("pub environment_disposition: Option<CveEnvironmentDisposition>") &&
+      poamApi.includes("pub effective_disposition: Option<CveEnvironmentDisposition>") &&
+      poamApi.includes("pub effective_source: SystemCveEffectiveDispositionSource") &&
+      poamApi.includes("pub disposition: Option<CveEnvironmentDisposition>") &&
+      poamApi.includes("pub enum SystemCveEffectiveDispositionSource") &&
+      poamApi.includes("None,"),
+    "System Detail triage types must retain scope, direct/effective provenance, hostname, and compatibility disposition",
+  );
+  assertContract(
+    cveComponent.includes('Self::AcceptedEnvironment => "Accepted · env"') &&
+      cveComponent.includes('Self::ScheduledEnvironment => "Scheduled · env"') &&
+      cveComponent.includes('"Risk accepted for all of {}"') &&
+      cveComponent.includes('"Patch scheduled for all of {}"'),
+    "System Detail inherited environment chips must retain visible and tooltip provenance",
+  );
+  for (const contract of [
+    'getByTestId("cve-triage-scope-host")',
+    'getByTestId("cve-triage-scope-environment")',
+    'effective_source: hostDisposition ? "host" : environmentDisposition ? "environment" : "none"',
+    'await assertTriageChip("Accepted · env", "Risk accepted for all of Production")',
+    'await assertTriageChip("Scheduled · env", "Patch scheduled for all of Production")',
+    'await page.keyboard.press("Escape")',
+    'routeStandaloneUiBootstrap(viewerPage, "Viewer")',
+    'available — version pending',
+    'filter({ hasText: "Historical inventory" })',
+    'getByText("Running target unavailable", { exact: true })',
+  ]) {
+    assertContract(scenario12h.includes(contract), `12h System Detail triage workflow is missing ${contract}`);
+  }
+  assertContract(
+    scenario16.includes('getByTestId("cve-triage-scope-host")') &&
+      scenario16.includes('Object.hasOwn(firstTriage, "scope")') &&
+      scenario16.includes('Object.hasOwn(action, "environment_id")'),
+    "16-cves must prove fleet triage retains environment actions without System Detail scope selectors",
+  );
+  for (const contract of [
+    "current_systems_affected: 6",
+    "scheduled_deployment_target_systems: 3",
+    "historical_inventory_systems: 1",
+    'inventory_section: "scheduled_deployment_target"',
+    'inventory_section: "historical"',
+    'getByText("Current exposure · 3"',
+    'getByText("Scheduled configuration exposure · 2"',
+    'getByText("Historical evidence · 1"',
+    "Scheduled-target-only environments must not enter the triage draft",
+    "Inventory-only rows must render read-only rather than outstanding",
+    'name: "Inventory only"',
+    'searchParams.get("triage_status") === "inventory_only"',
+    "Currently Affected Systems",
+    "Scheduled Deployment Targets",
+    "Historical Inventory Systems",
+    "4,3,2,1",
+    "Operator should have readable fleet inventory",
+    "Operator should receive fleet triage controls",
+    "Operator must not receive the Admin-only fleet rescan action",
+    "critical_count: 2",
+    "fixable_count: 2",
+    "exploited_count: 2",
+  ]) {
+    assertContract(scenario16.includes(contract), `16-cves inventory relation coverage is missing ${contract}`);
+  }
+  assertContract(
+    (scenario16.match(/system_id: "00000000-0000-0000-0000-0000000000a2"/g) || []).length >= 2,
+    "16-cves must retain the same system in current and scheduled configuration sections to cover affected-count deduplication",
   );
   const sqlAuthoredHelperName = "createTask433Composite" + "AssessmentFixture";
   assertContract(!source.includes(`${sqlAuthoredHelperName}(`), "Canonical workflows must not use the SQL-authored assessment helper");
@@ -21256,6 +26230,63 @@ function runStaticHarnessContracts() {
     assertContract(start >= 0 && end > start, `Could not isolate canonical workflow ${name}`);
     return source.slice(start, end);
   };
+  const scanningWorkflowSource = isolateWorkflow("16c-scanning-view");
+  for (const contract of [
+    'getByRole("button", { name: "Archived [7]" })',
+    '"Build failed before scan"',
+    '"Build cancelled before scan"',
+    'must not offer a misleading scan retry',
+    'Scan failure must show a concise primary-table reason',
+    'includeArchived ? 0 : rows.filter',
+    '.slice(0, requestedLimit)',
+    'Archived range scan ${scanId} must leave default Completed',
+    'Archived range scan ${scanId} must be visible for restore',
+    'name: "Archived [6]"',
+    // Request-bound keyset pagination for the Completed collection.
+    'next_cursor: nextCursor',
+    'has_more: hasMore',
+    'cursor.fingerprint !== scanRequestFingerprint(params)',
+    'getByTestId("scanning-completed-load-more")',
+    'Expected the newest gray configuration scan on page one',
+    'The second Completed page',
+    'Infinite scroll',
+    'Live refresh refetched accumulated Completed pages',
+    'The Failed filter must count the whole collection',
+    'Server search must reach scans beyond page one',
+    'Debounced search must not request one page per keystroke',
+    'must restart a server-scoped request without a cursor',
+    'Archiving must remove ${hostname} from the default Completed view',
+    'Continuation after archive and restore',
+  ]) {
+    assertContract(scanningWorkflowSource.includes(contract), `16c Scanning workflow is missing ${contract}`);
+  }
+  assertContract(
+    /BULK_TERMINAL_ROWS = (\d+)/.test(scanningWorkflowSource)
+      && Number(scanningWorkflowSource.match(/BULK_TERMINAL_ROWS = (\d+)/)[1]) > 500,
+    "16c must exercise a terminal scan collection larger than one response",
+  );
+  const hardeningWorkflowSource = isolateWorkflow("28-system-hardening-tab");
+  for (const contract of [
+    'hardening-inventory*',
+    'name: "Audited config"',
+    'name: "Retry revision targets"',
+    'Candidate failure must not replace loaded hardening evidence',
+    '"Historical hardening evidence is read-only."',
+    '"No hardening scan for this revision"',
+    'Historical no-scan target must not retain current services',
+    '"hardening-state-never-scanned"',
+    '"hardening-state-queued"',
+    '"hardening-state-scanning"',
+    '"hardening-state-failed"',
+    '"hardening-state-completed"',
+    'Failed attempt must preserve and identify earlier exact-target evidence',
+    'candidateMode = "out-of-band"',
+    'derivation:99',
+    'Showing flake head because the running configuration is out of band.',
+    'Head fallback must not expose Check now',
+  ]) {
+    assertContract(hardeningWorkflowSource.includes(contract), `28 System Detail hardening workflow is missing ${contract}`);
+  }
   const notificationWorkflowSource = isolateWorkflow("09g-topbar-notifications-dark");
   assertContract(
     notificationWorkflowSource.includes('reopenedPanel.getByRole("button"') &&

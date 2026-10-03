@@ -81,7 +81,7 @@ function isProductionEnv(envName) {
 }
 window.isProductionEnv = isProductionEnv;
 
-function EnvironmentsView({ defaultView, onOpenCache, onOpenSystem, onOpenBundle, onOpenFlake, focusEnv, onClearFocusEnv }) {
+function EnvironmentsView({ defaultView, onOpenCache, onOpenSystem, onOpenBundle, onOpenFlake, focusEnv, onClearFocusEnv, onNavigate }) {
   const [query, setQuery] = React.useState("");
   const [viewMode, setViewMode] = React.useState(defaultView || "cards");
   React.useEffect(() => { if (defaultView) setViewMode(defaultView); }, [defaultView]);
@@ -98,6 +98,18 @@ function EnvironmentsView({ defaultView, onOpenCache, onOpenSystem, onOpenBundle
     onClearFocusEnv?.();
   }, [focusEnv]);
   const [addOpen, setAddOpen] = React.useState(false);
+  const [editSection, setEditSection] = React.useState(null);
+  // Deep link into the edit form at a section (used by the Coach's Enforce vs Report only stop).
+  React.useEffect(() => {
+    const h = (e) => {
+      const raw = ENVIRONMENTS.find(x => x.name === e.detail?.name) || ENVIRONMENTS.find(x => x.complianceBundleId) || ENVIRONMENTS[0];
+      if (!raw) return;
+      setViewEnv(null); setEditSection(e.detail?.section || null);
+      setEditEnv({ ...raw, ...(ENV_META[raw.name] || {}), stats: envStats(raw.name) });
+    };
+    window.addEventListener("cf-env-edit", h);
+    return () => window.removeEventListener("cf-env-edit", h);
+  }, []);
   const [atoEnv, setAtoEnv] = React.useState(null);
   const envNeedsAttention = (name) => SYSTEMS.some(s => s.environment === name && (s.health === "critical" || s.health === "offline"));
   const flashAttention = useAttentionFlash("environments", ENVIRONMENTS.some(e => envNeedsAttention(e.name)));
@@ -197,13 +209,14 @@ function EnvironmentsView({ defaultView, onOpenCache, onOpenSystem, onOpenBundle
         <window.AtoPackageModal initialEnv={atoEnv} onClose={() => setAtoEnv(null)}/>
       )}
       {viewEnv && (
-        <EnvPanel env={viewEnv} onClose={() => setViewEnv(null)} onExportAto={() => setAtoEnv(viewEnv.name)} onEdit={() => { setEditEnv(viewEnv); }} onOpenCache={onOpenCache} onOpenSystem={onOpenSystem} onOpenBundle={onOpenBundle} onOpenFlake={onOpenFlake} />
+        <EnvPanel env={viewEnv} onClose={() => setViewEnv(null)} onExportAto={() => setAtoEnv(viewEnv.name)} onEdit={() => { setEditEnv(viewEnv); }} onOpenCache={onOpenCache} onOpenSystem={onOpenSystem} onOpenBundle={onOpenBundle} onOpenFlake={onOpenFlake}  onNavigate={onNavigate}/>
       )}
       {(editEnv || addOpen) && (
         <EnvFormModal
           mode={addOpen ? "add" : "edit"}
           env={editEnv}
-          onClose={() => { setEditEnv(null); setAddOpen(false); }}
+          initialSection={editSection}
+          onClose={() => { setEditEnv(null); setAddOpen(false); setEditSection(null); }}
         />
       )}
     </div>
@@ -367,7 +380,7 @@ function EnvCard({ env, onEdit, flash }) {
 }
 
 // Side panel — environment reference peek, with Edit handing off to the form modal
-function EnvPanel({ env, onClose, onEdit, onExportAto, onOpenCache, onOpenSystem, onOpenBundle, onOpenFlake }) {
+function EnvPanel({ env, onClose, onEdit, onExportAto, onOpenCache, onOpenSystem, onOpenBundle, onOpenFlake, onNavigate }) {
   const total = env.stats.total || 1;
   const sys = SYSTEMS.filter(s => s.environment === env.name);
   return (
@@ -452,6 +465,11 @@ function EnvPanel({ env, onClose, onEdit, onExportAto, onOpenCache, onOpenSystem
                   })()}
                   {(env.gatePolicyIds || []).length > 0 && <span className="chip chip-unknown">{env.gatePolicyIds.length} gate{env.gatePolicyIds.length === 1 ? "" : "s"}</span>}
                   {!env.complianceBundleId && (env.gatePolicyIds || []).length === 0 && <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>none</span>}
+                  {onNavigate && (
+                    <span className="chip chip-info sd-commit-sha-link" title={`Open ${env.name} in the POA&M register`} onClick={() => onNavigate("poams", { scope:{ type:"env", id:env.name, label:env.name } })}>
+                      <Icon name="activity" size={9}/> POA&M
+                    </span>
+                  )}
                 </div>
               </dd>
               <dt>Role assignments</dt>
@@ -491,7 +509,7 @@ function EnvPanel({ env, onClose, onEdit, onExportAto, onOpenCache, onOpenSystem
   );
 }
 
-function EnvFormModal({ mode, env, onClose }) {
+function EnvFormModal({ mode, env, onClose, initialSection }) {
   const isEdit = mode === "edit";
   const [form, setForm] = React.useState(() => isEdit && env ? {
     name: env.name,
@@ -503,6 +521,7 @@ function EnvFormModal({ mode, env, onClose }) {
     defaultPolicy: env.defaultPolicy || "manual",
     gatePolicyIds: env.gatePolicyIds || [],
     complianceBundleId: env.complianceBundleId || "",
+    complianceMode: env.complianceMode || (env.isProduction ? "enforce" : "report"),
     autoSync: env.autoSync ?? true,
     requiresApproval: env.requiresApproval ?? true,
     isProduction: env.isProduction ?? false,
@@ -516,6 +535,7 @@ function EnvFormModal({ mode, env, onClose }) {
     defaultPolicy: "manual",
     gatePolicyIds: [],
     complianceBundleId: "",
+    complianceMode: "enforce",
     autoSync: true,
     requiresApproval: true,
     isProduction: false,
@@ -535,7 +555,7 @@ function EnvFormModal({ mode, env, onClose }) {
     { name:"slate",   value:"#475569" },
   ];
 
-  const [section, setSection] = React.useState("basics");
+  const [section, setSection] = React.useState(initialSection || "basics");
   const sections = [
     { id:"basics", label:"Basics",            icon:"grid" },
     { id:"cache",  label:"Binary cache",      icon:"download" },
@@ -740,24 +760,42 @@ function EnvFormModal({ mode, env, onClose }) {
                     : `${form.gatePolicyIds.length} gate ${form.gatePolicyIds.length === 1 ? "policy" : "policies"} must pass before any deploy in this env.`}
                 </div>
               </div>
-              <div className="field">
+              <div className="field" data-coach-target="env-bundle-assignment">
                 <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
-                  <label style={{ margin:0 }}>Required compliance bundle</label>
+                  <label style={{ margin:0 }}>Compliance bundle</label>
                   <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>for regulated / ATO environments</span>
                 </div>
                 <select className="input focus-ring" value={form.complianceBundleId} onChange={e=>set("complianceBundleId", e.target.value)}>
-                  <option value="">None — no compliance bundle required</option>
-                  {(typeof COMPLIANCE_BUNDLES !== "undefined" ? COMPLIANCE_BUNDLES : []).map(b => (
-                    <option key={b.id} value={b.id}>{b.name} ({b.framework})</option>
+                  <option value="">None — no compliance bundle assigned</option>
+                  {(typeof groupBundlesByLineage === "function" ? groupBundlesByLineage(COMPLIANCE_BUNDLES) : []).map(g => (
+                    <optgroup key={g.lineageId} label={`${g.lineageName} · ${g.current.framework}`}>
+                      {g.revisions.map(b => <option key={b.id} value={b.id}>{b.version} · rev {b.revision} · {b.publicationState}</option>)}
+                    </optgroup>
                   ))}
                 </select>
                 {bundleMeta && (
-                  <div className="sd-callout sd-callout-info" style={{ marginTop:10, fontSize:11 }}>
-                    <Icon name="shield" size={12}/>
-                    <div>
-                      Systems must satisfy all <strong>{bundleMeta.policyIds.length}</strong> controls in <strong>{bundleMeta.name}</strong>. Non-compliant hosts are blocked from deploy and flagged in the Compliance view.
-                    </div>
+                  <div className="help" style={{ marginTop:6 }}>
+                    Pinned to <span className="mono" style={{ color:"var(--cf-text-primary)" }}>{bundleMeta.version}</span> (rev {bundleMeta.revision}, {bundleMeta.publicationState}). Other environments can assign a different version of the same bundle, and a system can carry its own pin.
                   </div>
+                )}
+                {bundleMeta && (
+                  <>
+                    <div data-coach-target="env-assignment-mode" style={{ display:"flex", alignItems:"center", gap:10, marginTop:10, flexWrap:"wrap", width:"fit-content" }}>
+                      <label style={{ margin:0 }}>Assignment mode</label>
+                      <div className="seg" role="radiogroup" aria-label="Assignment mode">
+                        <button type="button" className={form.complianceMode === "enforce" ? "active" : ""} onClick={() => set("complianceMode", "enforce")}>Enforce</button>
+                        <button type="button" className={form.complianceMode === "report" ? "active" : ""} onClick={() => set("complianceMode", "report")}>Report only</button>
+                      </div>
+                    </div>
+                    <div className="sd-callout sd-callout-info" style={{ marginTop:10, fontSize:11 }}>
+                      <Icon name="shield" size={12}/>
+                      <div>
+                        {form.complianceMode === "enforce"
+                          ? <>Failing applicable controls in <strong>{bundleMeta.name}</strong> can block deploys to this environment under the enforcement rules.</>
+                          : <>Hosts are assessed against <strong>{bundleMeta.name}</strong> and failures stay <strong>FAIL</strong>: they produce findings, can take a waiver or POA&M, and keep their evidence. They don't block deploys.</>}
+                      </div>
+                    </div>
+                  </>
                 )}
               </div>
             </>

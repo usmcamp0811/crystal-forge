@@ -186,7 +186,7 @@ function poamForFinding(sysId, policyId) {
   return list.find(p => p.status !== "completed") || list[0] || null;
 }
 function poamsForSystem(sysId) {
-  return POAMS.filter(p => p.findings.some(f => f.sysId === sysId) || p.assignmentRef?.sysId === sysId);
+  return POAMS.filter(p => p.findings.some(f => f.sysId === sysId) || p.assignmentRef?.sysId === sysId || (p.cveRefs || []).some(c => c.sysId === sysId));
 }
 function poamsForBundle(bundle) {
   const ids = new Set(bundle.policyIds || []);

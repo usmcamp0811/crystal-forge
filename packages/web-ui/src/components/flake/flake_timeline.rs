@@ -778,11 +778,15 @@ fn CommitNode(
     let build_status = commit.build_status.unwrap_or(BuildStatus::Idle);
     let build_ring = build_ring_style(build_status);
     let target_route = if build_status == BuildStatus::Building {
-        Some(Route::BuildsView {})
+        Some(Route::BuildsView {
+            query: String::new(),
+        })
     } else if is_eval_active(commit.evaluation_status.as_deref()) {
         Some(Route::EvaluationsView {})
     } else {
-        Some(Route::FlakesView { query: String::new() })
+        Some(Route::FlakesView {
+            query: String::new(),
+        })
     };
     let clickable = target_route.is_some();
 

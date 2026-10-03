@@ -662,7 +662,7 @@ function AdminRetries() {
 function AdminServer({ coach, classif, onClassif }) {
   const s = SERVER_INFO;
   const done = coach ? coach.count : 0;
-  const total = coach ? coach.total : 6;
+  const total = coach ? coach.total : 9;
   const cls = classif || { enabled: false, level: "UNCLASSIFIED", text: "" };
   const setCls = (patch) => onClassif && onClassif({ ...cls, ...patch });
   return (
@@ -755,16 +755,17 @@ function AdminServer({ coach, classif, onClassif }) {
             <h3 style={{ margin:"0 0 4px", fontSize:13, fontWeight:600, display:"flex", alignItems:"center", gap:7 }}>
               <Icon name="dashboard" size={13}/> Onboarding
             </h3>
-            <p style={{ margin:0, fontSize:12, color:"var(--cf-text-muted)" }}>
-              The Setup Coach walks admins through first-run configuration. {coach ? `${done} of ${total} steps complete.` : ""}
+            <p style={{ margin:0, fontSize:12, color:"var(--cf-text-muted)", maxWidth:"72ch", lineHeight:1.5 }}>
+              Setup completion is reported by the server from saved resources{coach ? ` · ${done} of ${total} steps complete` : ""}. Security walkthroughs are open to every role from <strong>Guide</strong> in the top bar; their progress is kept per browser and only records what each person has viewed.
             </p>
           </div>
           {coach && (
             <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-              <button className="btn btn-primary focus-ring" onClick={() => { coach.relaunch(); onNavigate && onNavigate("dashboard"); }}>
+              <button className="btn btn-primary focus-ring" onClick={() => coach.relaunch()}>
                 <Icon name="sync" size={13}/> Relaunch Setup Coach
               </button>
-              <button className="btn btn-ghost focus-ring" onClick={() => coach.reset()}>Reset progress</button>
+              <button className="btn btn-ghost focus-ring" onClick={() => coach.restartWalkthroughs()} title="Clears which walkthrough stops this browser has viewed. Does not touch setup or security records.">Restart walkthroughs</button>
+              <button className="btn btn-ghost focus-ring" disabled title="Setup completion is derived from persisted resources on the server and can't be erased from here.">Reset progress · unavailable</button>
             </div>
           )}
         </div>

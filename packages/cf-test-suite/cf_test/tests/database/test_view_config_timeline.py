@@ -44,8 +44,31 @@ def test_config_timeline_counts_from_current_status(
       - medium: one behind (idx 3)
       - slow: three behind (idx 1)
     Expect counts by commit timestamp: {idx4:1, idx3:1, idx1:1, others:0}
+
+    The view counts only systems whose status is up_to_date, behind, or ahead.
+    A status needs a newest deployable build for the system's configuration, so
+    the scenario publishes a deployable build for every commit. The statuses are
+    asserted first so a fixture that stops producing deployable builds fails
+    here, with the status named, instead of as an unexplained zero count.
     """
     sc = scenario_progressive_system_updates(cf_client)
+
+    statuses = {
+        r["hostname"]: (r["deployment_status"], r["commits_behind"])
+        for r in cf_client.execute_sql(
+            """
+            SELECT hostname, deployment_status, commits_behind
+            FROM view_system_deployment_status
+            WHERE hostname = ANY(%s)
+            """,
+            (sc["hostnames"],),
+        )
+    }
+    assert statuses == {
+        "test-progressive-fast": ("up_to_date", 0),
+        "test-progressive-medium": ("behind", 1),
+        "test-progressive-slow": ("behind", 3),
+    }, f"scenario systems must be deployable, got {statuses}"
 
     # Resolve flake name and commit timestamps
     [flake] = cf_client.execute_sql(
@@ -87,6 +110,56 @@ def test_config_timeline_counts_from_current_status(
         assert got == want, f"commit idx {idx} expected {want}, got {got}"
 
     # cleanup
+    cf_client.cleanup_test_data(sc["cleanup"])
+
+
+@pytest.mark.views
+@pytest.mark.database
+def test_config_timeline_excludes_known_path_without_deployable_target(
+    cf_client: CFTestClient, clean_test_data
+):
+    """
+    A running path that maps to a known commit is still `unknown` when its
+    configuration has no deployable build, and `unknown` is not counted.
+
+    This pins the exclusion that motivated modernizing the progressive
+    scenario: removing deployability must change the status and zero the
+    counts, which is the documented behavior, rather than the count of the
+    healthy scenario being edited to match.
+    """
+    sc = scenario_progressive_system_updates(cf_client)
+    cf_client.execute_sql(
+        "UPDATE derivations SET cf_agent_enabled = FALSE WHERE id = ANY(%s)",
+        (sc["derivation_ids"],),
+    )
+
+    rows = cf_client.execute_sql(
+        """
+        SELECT hostname, deployment_status, current_commit_hash IS NOT NULL AS known
+        FROM view_system_deployment_status
+        WHERE hostname = ANY(%s)
+        """,
+        (sc["hostnames"],),
+    )
+    assert len(rows) == 3
+    for r in rows:
+        assert r["known"], f"{r['hostname']} running path must still map to a commit"
+        assert r["deployment_status"] == "unknown", r
+
+    [flake] = cf_client.execute_sql(
+        "SELECT name FROM public.flakes WHERE id=%s", (sc["flake_id"],)
+    )
+    timeline = cf_client.execute_sql(
+        f"""
+        SELECT "Config" FROM {VIEW_CONFIG_TIMELINE}
+        WHERE flake_name = %s
+        """,
+        (flake["name"],),
+    )
+    assert len(timeline) >= 5
+    for r in timeline:
+        assert _parse_count(r["Config"]) == 0, r["Config"]
+
     cf_client.cleanup_test_data(sc["cleanup"])
 
 

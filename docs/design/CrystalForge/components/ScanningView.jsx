@@ -63,20 +63,17 @@ function ScanningView({ onNavigate }) {
           {[
             { k:"active",    l:"Active",    n:SCAN_ACTIVE.length },
             { k:"completed", l:"Completed", n:doneArc.include ? SCAN_DONE.length : SCAN_DONE.length - doneArc.archived.size },
-            { k:"systems",   l:"By system", n:(typeof SCAN_HISTORY!=="undefined"?SCAN_HISTORY.length:0) },
           ].map(t => (
             <button key={t.k} className={`sd-tab focus-ring${tab===t.k?" active":""}`} onClick={()=>setTab(t.k)}>
               {t.l} <span className="sd-tab-badge">{t.n}</span>
             </button>
           ))}
         </div>
-        {tab === "systems"
-          ? <ScanAllConfigs onNavigate={onNavigate} onOpenLog={setLogCfg}/>
-          : <ScanQueue
-              scope={tab}
-              rows={tab === "active" ? SCAN_ACTIVE : SCAN_DONE}
-              arc={tab === "completed" ? doneArc : null}
-              onNavigate={onNavigate} sel={scanSel} onOpenLog={setLogCfg}/>}
+        <ScanQueue
+          scope={tab}
+          rows={tab === "active" ? SCAN_ACTIVE : SCAN_DONE}
+          arc={tab === "completed" ? doneArc : null}
+          onNavigate={onNavigate} sel={scanSel} onOpenLog={setLogCfg}/>
       </div>
 
       {logCfg && <ScanLogDrawer cfg={logCfg} onClose={()=>setLogCfg(null)} onNavigate={onNavigate}/>}
@@ -221,13 +218,13 @@ function ScanQueue({ rows, scope, onNavigate, sel, onOpenLog, arc }) {
         </div>
         )
       ) : (
-        <ScanTable rows={sorted} onNavigate={onNavigate} sel={sel} onOpenLog={onOpenLog} sort={sort} onSort={setSort} showFreshness={true} arc={arc} selectAll={scope==="completed"}/>
+        <ScanTable rows={sorted} onNavigate={onNavigate} sel={sel} onOpenLog={onOpenLog} sort={sort} onSort={setSort} showFreshness={true} arc={arc} selectAll={scope==="completed"} timeLabel={scope === "completed" ? "Scanned" : "Queued"}/>
       )}
     </>
   );
 }
 
-function ScanTable({ rows, onNavigate, sel, onOpenLog, sort, onSort, showFreshness = true, arc, selectAll }) {
+function ScanTable({ rows, onNavigate, sel, onOpenLog, sort, onSort, showFreshness = true, arc, selectAll, timeLabel = "Last scan" }) {
   const latestIds = React.useMemo(() => (typeof latestPerFlake === "function" ? latestPerFlake(rows) : new Set()), [rows]);
   const freshChip = (f) => {
     const map = { deployed:["chip-healthy","deployed"], recent:["chip-info","recent"], archived:["chip-unknown","superseded"] };
@@ -259,7 +256,7 @@ function ScanTable({ rows, onNavigate, sel, onOpenLog, sort, onSort, showFreshne
           {showFreshness && <SortTh k="freshness">Revision</SortTh>}
           <SortTh k="status">Status</SortTh>
           <SortTh k="findings">Findings</SortTh>
-          <SortTh k="lastScan">Last scan</SortTh>
+          <SortTh k="lastScan">{timeLabel}</SortTh>
           <th>Trigger</th>
           <th style={{ textAlign:"right" }}> </th>
         </tr>
@@ -498,202 +495,6 @@ function ScanLogDrawer({ cfg, onClose, onNavigate }) {
           </div>
         )}
       </aside>
-    </>
-  );
-}
-
-function ScanAllConfigs({ onNavigate, onOpenLog }) {
-  const [query, setQuery] = React.useState("");
-  const [envFilter, setEnvFilter] = React.useState("all");
-  const [expanded, setExpanded] = React.useState(null);
-  // Scan history follows the same retention rules as builds and evals: older
-  // results are hidden, never removed. Keyed per system so expanding one
-  // long-lived host doesn't unhide every other.
-  const scanArc = useArchive("scans", React.useMemo(() => SCAN_HISTORY.flatMap(s => s.commits || []), []));
-
-  const rows = SCAN_HISTORY.filter(s =>
-    (envFilter === "all" || s.environment === envFilter) &&
-    (!query || s.hostname.toLowerCase().includes(query.toLowerCase()) || s.flake.toLowerCase().includes(query.toLowerCase()))
-  ).sort((a,b) => b.totalConfigs - a.totalConfigs);
-
-  const freshChip = (f) => {
-    const map = { deployed:["chip-healthy","deployed"], recent:["chip-info","recent"], archived:["chip-unknown","superseded"] };
-    const [cls,label] = map[f] || ["chip-unknown",f];
-    return <span className={`chip ${cls}`} style={{ fontSize:10 }}>{label}</span>;
-  };
-
-  return (
-    <>
-      <div className="scan-toolbar">
-        <div className="q-search" style={{ maxWidth:250 }}>
-          <Icon name="search" size={13}/>
-          <input className="q-search-input" placeholder="Search systems…" value={query} onChange={e=>setQuery(e.target.value)}/>
-          {query && <button className="btn-icon xs focus-ring" title="Clear search" onClick={()=>setQuery("")}><Icon name="x" size={13}/></button>}
-        </div>
-        <select className="input filter-select focus-ring" style={{ width:"auto" }} value={envFilter} onChange={e=>setEnvFilter(e.target.value)}>
-          <option value="all">All environments</option>
-          {ENVIRONMENTS.map(e => <option key={e.name} value={e.name}>{e.name}</option>)}
-        </select>
-        <span className="filter-count">{rows.length} systems · {rows.reduce((a,s)=>a+s.totalConfigs,0)} configs</span>
-      </div>
-      <table className="sys-table">
-        <thead>
-          <tr>
-            <th>System</th>
-            <th>Env</th>
-            <th>Configs</th>
-            <th title="Share of this system's configs that have a fresh scan (green), a stale scan past the rescan interval (amber), or were never scanned (gray)">Scan freshness</th>
-            <th>Current findings</th>
-            <th style={{ textAlign:"right" }}> </th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map(s => {
-            const isOpen = expanded === s.id;
-            const covPct = Math.round(s.scanned / s.totalConfigs * 100);
-            return (
-              <React.Fragment key={s.id}>
-                <tr style={{ cursor:"pointer" }} onClick={()=>setExpanded(isOpen?null:s.id)}>
-                  <td>
-                    <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                      <Icon name={isOpen?"chevron-down":"chevron-right"} size={12} style={{ color:"var(--cf-text-muted)", flexShrink:0 }}/>
-                      <span className="status-dot" style={{ "--status-color": s.statusColor }}/>
-                      <div>
-                        <div style={{ fontWeight:600, fontSize:13 }}>{s.hostname}</div>
-                        <div className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{s.flake}</div>
-                      </div>
-                    </div>
-                  </td>
-                  <td><EnvBadge env={s.environment}/></td>
-                  <td className="mono" style={{ fontSize:12 }}>{s.totalConfigs}</td>
-                  <td>
-                    <div style={{ display:"flex", alignItems:"center", gap:8, minWidth:120 }} title={`${s.scanned} fresh · ${s.stale} stale · ${s.needsBuild} need build · ${s.unscanned} never scanned`}>
-                      <div style={{ flex:1, height:5, background:"var(--cf-subtle-bg)", borderRadius:99, overflow:"hidden", display:"flex" }}>
-                        <div style={{ width:`${(s.scanned/s.totalConfigs)*100}%`, background:"#34d399" }}/>
-                        <div style={{ width:`${(s.stale/s.totalConfigs)*100}%`, background:"#fbbf24" }}/>
-                        <div style={{ width:`${(s.needsBuild/s.totalConfigs)*100}%`, background:"#f59e0b" }}/>
-                        <div style={{ width:`${(s.unscanned/s.totalConfigs)*100}%`, background:"#4b5563" }}/>
-                      </div>
-                      <span className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{s.scanned}/{s.totalConfigs}</span>
-                    </div>
-                    <div style={{ fontSize:10, color:"var(--cf-text-muted)", marginTop:3, display:"flex", gap:8, flexWrap:"wrap" }}>
-                      <span style={{ color:"#34d399" }}>{s.scanned} fresh</span>
-                      {s.stale>0 && <span style={{ color:"#fbbf24" }}>{s.stale} stale</span>}
-                      {s.needsBuild>0 && <span style={{ color:"#f59e0b" }}>{s.needsBuild} need build</span>}
-                      {s.unscanned>0 && <span>{s.unscanned} never</span>}
-                    </div>
-                  </td>
-                  <td>
-                    {s.currentCrit>0 || s.currentHigh>0 ? (
-                      <div style={{ display:"flex", gap:4 }}>
-                        {s.currentCrit>0 && <span className="chip chip-critical" style={{ fontSize:10 }}>{s.currentCrit}C</span>}
-                        {s.currentHigh>0 && <span className="chip chip-warning" style={{ fontSize:10 }}>{s.currentHigh}H</span>}
-                      </div>
-                    ) : <span className="chip chip-healthy" style={{ fontSize:10 }}><Icon name="check" size={9}/> clean</span>}
-                  </td>
-                  <td>
-                    <div className="row-actions">
-                      <button className="btn-icon focus-ring" title="Rescan current" onClick={e=>e.stopPropagation()}><Icon name="sync" size={14}/></button>
-                    </div>
-                  </td>
-                </tr>
-                {isOpen && (() => {
-                  const shownCommits = scanArc.visible(s.commits);
-                  const hiddenCommits = s.commits.length - shownCommits.length;
-                  return (
-                  <tr className="scan-sys-expand-row">
-                    <td colSpan={6} style={{ padding:0 }}>
-                      <div className="scan-sys-expand">
-                        <div className="scan-sys-expand-head">
-                          <span>
-                            {shownCommits.length} config{shownCommits.length===1?"":"s"} for this system{shownCommits.length>8 ? " · newest first" : ""}
-                            {hiddenCommits > 0 && (
-                              <>
-                                {" · "}
-                                <button className="scan-arc-link focus-ring" onClick={e=>{e.stopPropagation();scanArc.setInclude(v=>!v);}}
-                                  title="Older scan results are hidden by retention, not deleted">
-                                  {hiddenCommits} older hidden by retention
-                                </button>
-                              </>
-                            )}
-                            {scanArc.include && (
-                              <>
-                                {" · "}
-                                <button className="scan-arc-link focus-ring" onClick={e=>{e.stopPropagation();scanArc.setInclude(false);}}>hide old scans again</button>
-                              </>
-                            )}
-                          </span>
-                          <button className="btn btn-ghost focus-ring xs"><Icon name="sync" size={10}/> Rescan all</button>
-                        </div>
-                        <div className="scan-sys-expand-table-wrap" style={{ maxHeight: shownCommits.length > 8 ? 300 : "none", overflowY: shownCommits.length > 8 ? "auto" : "visible" }}>
-                        <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
-                          <thead style={{ position:"sticky", top:0, zIndex:1 }}>
-                            <tr style={{ color:"var(--cf-text-muted)", fontSize:10, textTransform:"uppercase", letterSpacing:"0.06em", background:"var(--cf-card-bg)" }}>
-                              <th style={{ textAlign:"left", padding:"6px 8px", fontWeight:600 }}>Commit</th>
-                              <th style={{ textAlign:"left", padding:"6px 8px", fontWeight:600 }}>Freshness</th>
-                              <th style={{ textAlign:"left", padding:"6px 8px", fontWeight:600 }}>Status</th>
-                              <th style={{ textAlign:"left", padding:"6px 8px", fontWeight:600 }}>Findings</th>
-                              <th style={{ textAlign:"left", padding:"6px 8px", fontWeight:600 }}>Last scan</th>
-                              <th style={{ textAlign:"right", padding:"6px 8px" }}></th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {shownCommits.map((c, i) => {
-                              const meta = SCAN_STATUS_META[c.status];
-                              const openable = c.status !== "needs-build" && c.status !== "unscanned";
-                              const openLog = () => onOpenLog && onOpenLog({
-                                id: `${s.id}-${c.commit}-${i}`, name: s.hostname, flake: s.flake, commit: c.commit,
-                                status: c.status === "complete" ? "complete" : c.status, found: c.found,
-                                lastScan: c.lastScan, trigger: c.trigger, freshness: c.freshness,
-                                error: c.status === "failed" ? "vulnix: derivation not available" : undefined,
-                              });
-                              return (
-                                <tr key={i} className={`scan-sys-commit-row${openable?"":" no-log"}`}
-                                  style={{ borderTop:"1px solid var(--cf-divider)" }}
-                                  onClick={openable ? openLog : undefined} title={openable ? "Open scan log" : undefined}>
-                                  <td style={{ padding:"7px 8px" }}>
-                                    <span className="mono" style={{ fontWeight:600 }}>{c.commit}</span>
-                                    {c.current && <span className="chip chip-info" style={{ fontSize:9, marginLeft:6 }}>current</span>}
-                                    <div style={{ fontSize:10, color:"var(--cf-text-muted)" }}>{c.msg}</div>
-                                  </td>
-                                  <td style={{ padding:"7px 8px" }}>{freshChip(c.freshness)}</td>
-                                  <td style={{ padding:"7px 8px" }}>
-                                    <span className={`chip ${meta.cls}`} style={{ fontSize:10 }}><span className="chip-dot" style={{ background:meta.color }}/>{meta.label}</span>
-                                  </td>
-                                  <td style={{ padding:"7px 8px" }}>
-                                    {c.found ? (
-                                      <div style={{ display:"flex", gap:4 }}>
-                                        {c.found.crit>0 && <span className="chip chip-critical" style={{ fontSize:10 }}>{c.found.crit}C</span>}
-                                        {c.found.high>0 && <span className="chip chip-warning" style={{ fontSize:10 }}>{c.found.high}H</span>}
-                                        {c.found.med>0  && <span className="chip chip-info" style={{ fontSize:10 }}>{c.found.med}M</span>}
-                                        {c.found.crit===0 && c.found.high===0 && c.found.med===0 && <span className="chip chip-healthy" style={{ fontSize:10 }}>clean</span>}
-                                      </div>
-                                    ) : <span style={{ color:"var(--cf-text-muted)" }}>—</span>}
-                                  </td>
-                                  <td style={{ padding:"7px 8px", color:"var(--cf-text-muted)" }}>{c.lastScan}</td>
-                                  <td style={{ padding:"7px 8px", textAlign:"right" }}>
-                                    {c.status === "needs-build"
-                                      ? <button className="btn btn-ghost focus-ring xs" title="Not in cache — build first, then scan" onClick={e=>e.stopPropagation()}><Icon name="build" size={11}/> Build & scan</button>
-                                      : openable
-                                      ? <button className="btn-icon focus-ring" title="Open scan log" onClick={e=>{ e.stopPropagation(); openLog(); }}><Icon name="terminal" size={13}/></button>
-                                      : <button className="btn-icon focus-ring" title="Rescan this config" onClick={e=>e.stopPropagation()}><Icon name="sync" size={13}/></button>}
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                        </div>
-                      </div>
-                    </td>
-                  </tr>
-                  );
-                })()}
-              </React.Fragment>
-            );
-          })}
-        </tbody>
-      </table>
     </>
   );
 }

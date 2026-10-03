@@ -1,0 +1,6 @@
+OSCAL POA&M v1.1.2 schemas (unmodified NIST release assets)
+Release: https://github.com/usnistgov/OSCAL/releases/tag/v1.1.2
+JSON: https://github.com/usnistgov/OSCAL/releases/download/v1.1.2/oscal_poam_schema.json
+SHA-256: 906725163d767036c6189aec51252109b203214e121fc1acaff494b4d2dfbc04
+XSD: https://github.com/usnistgov/OSCAL/releases/download/v1.1.2/oscal_poam_schema.xsd
+SHA-256: 4de13f26b9c0007504029daf3dd3538250c684139b9fec516d23789110fe05a1

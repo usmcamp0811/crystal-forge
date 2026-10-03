@@ -1,0 +1,236 @@
+{
+  "reviewed_sha": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+  "sources": [
+    {
+      "id": "C01",
+      "repository_path": null,
+      "revision": null,
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/329",
+      "description": "MR !329; live metadata, checked on 2026-09-23"
+    },
+    {
+      "id": "C02",
+      "repository_path": "docs/fleet-cve-triage.md",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/docs/fleet-cve-triage.md",
+      "description": "Fleet CVE triage specification"
+    },
+    {
+      "id": "C03",
+      "repository_path": "docs/specs/02-backend-api.md",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/docs/specs/02-backend-api.md#L901-1170",
+      "description": "Fleet inventory and exact-CVE POAM contracts"
+    },
+    {
+      "id": "C04",
+      "repository_path": "docs/design/CrystalForge/cve-poam-evidence-continuity-design-spec.md",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/docs/design/CrystalForge/cve-poam-evidence-continuity-design-spec.md",
+      "description": "Proposed evidence continuity across deployments"
+    },
+    {
+      "id": "C05",
+      "repository_path": "docs/design/CrystalForge/components/CvesView.jsx",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/docs/design/CrystalForge/components/CvesView.jsx",
+      "description": "Fleet CVEs visual reference"
+    },
+    {
+      "id": "C06",
+      "repository_path": "packages/web-ui/src/views/cves.rs",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/web-ui/src/views/cves.rs",
+      "description": "Production fleet page, drawer, editor and tests"
+    },
+    {
+      "id": "C07",
+      "repository_path": "packages/web-ui/src/components/cve/triage.rs",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/web-ui/src/components/cve/triage.rs",
+      "description": "Shared triage state and host override editor"
+    },
+    {
+      "id": "C08",
+      "repository_path": "packages/default/crates/cf-server/src/handlers/api/cves.rs",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/default/crates/cf-server/src/handlers/api/cves.rs",
+      "description": "Fleet CVE handlers, export and rescan"
+    },
+    {
+      "id": "C09",
+      "repository_path": "packages/default/crates/cf-server/src/queries/cves.rs",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/default/crates/cf-server/src/queries/cves.rs",
+      "description": "Fleet inventory CTE, list, groups, counts and bounds"
+    },
+    {
+      "id": "C10",
+      "repository_path": "packages/default/crates/cf-server/migrations/0259_exact_cve_poam_findings.sql",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/default/crates/cf-server/migrations/0259_exact_cve_poam_findings.sql#L1-290",
+      "description": "Original exact evidence and raw occurrence view"
+    },
+    {
+      "id": "C11",
+      "repository_path": "packages/default/crates/cf-server/migrations/0177_optimize_cve_scan_read_path.sql",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/default/crates/cf-server/migrations/0177_optimize_cve_scan_read_path.sql",
+      "description": "Latest compatibility inventory projection"
+    },
+    {
+      "id": "C12",
+      "repository_path": "packages/default/crates/cf-server/migrations/0270_cve_system_dispositions.sql",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/default/crates/cf-server/migrations/0270_cve_system_dispositions.sql",
+      "description": "Host overrides and scheduled coherence"
+    },
+    {
+      "id": "C13",
+      "repository_path": "packages/default/crates/cf-server/src/services/poam.rs",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/default/crates/cf-server/src/services/poam.rs#L3280-4110",
+      "description": "Current exact subjects and fleet detail assembly"
+    },
+    {
+      "id": "C14",
+      "repository_path": "packages/default/crates/cf-server/migrations/0272_active_scheduled_cve_inventory.sql",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/default/crates/cf-server/migrations/0272_active_scheduled_cve_inventory.sql",
+      "description": "Active scheduled deployment evidence"
+    },
+    {
+      "id": "C15",
+      "repository_path": "packages/default/crates/cf-server/src/services/poam.rs",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/default/crates/cf-server/src/services/poam.rs#L5107-5767",
+      "description": "Fleet triage transaction"
+    },
+    {
+      "id": "C16",
+      "repository_path": "packages/default/crates/cf-server/src/queries/cve_scans.rs",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/default/crates/cf-server/src/queries/cve_scans.rs#L1450-1718",
+      "description": "Result publication and owned evidence seal"
+    },
+    {
+      "id": "C17",
+      "repository_path": "packages/default/crates/cf-server/src/services/poam.rs",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/default/crates/cf-server/src/services/poam.rs#L6666-6885",
+      "description": "Exact-CVE verification and baseline lineage"
+    },
+    {
+      "id": "C18",
+      "repository_path": "packages/web-ui/src/views/poam_api.rs",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/web-ui/src/views/poam_api.rs#L1790-1900",
+      "description": "Typed fleet and System Detail API calls"
+    },
+    {
+      "id": "C19",
+      "repository_path": "packages/default/crates/cf-server/src/queries/cve_scan_leases.rs",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/default/crates/cf-server/src/queries/cve_scan_leases.rs#L1415-1495",
+      "description": "Typed result conversion to Vulnix entries"
+    },
+    {
+      "id": "C20",
+      "repository_path": "packages/default/crates/cf-server/src/queries/cve_scans.rs",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/default/crates/cf-server/src/queries/cve_scans.rs#L2180-2365",
+      "description": "Fleet target resolver and atomic enqueue"
+    },
+    {
+      "id": "C21",
+      "repository_path": "packages/default/crates/cf-server/src/vulnix/vulnix_parser.rs",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/default/crates/cf-server/src/vulnix/vulnix_parser.rs",
+      "description": "Scanner occurrence counter definitions"
+    },
+    {
+      "id": "C22",
+      "repository_path": "packages/default/crates/cf-server/src/services/poam.rs",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/default/crates/cf-server/src/services/poam.rs#L4138-4350",
+      "description": "Baseline materialization and POAM creation"
+    },
+    {
+      "id": "C23",
+      "repository_path": "packages/default/crates/cf-server/tests/poam_workflows.rs",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/default/crates/cf-server/tests/poam_workflows.rs#L1941-3355",
+      "description": "Host override and coherence workflow test locations"
+    },
+    {
+      "id": "C24",
+      "repository_path": "packages/default/crates/cf-server/tests/poam_workflows.rs",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/default/crates/cf-server/tests/poam_workflows.rs#L3580-3880",
+      "description": "Current, scheduled and Historical overlap regression"
+    },
+    {
+      "id": "C25",
+      "repository_path": "checks/web-ui/tests/integration-test.js",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/checks/web-ui/tests/integration-test.js#L12695-13435",
+      "description": "Fleet browser fixtures and behavior assertions"
+    },
+    {
+      "id": "C26",
+      "repository_path": "packages/default/crates/cf-server/src/services/poam.rs",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/default/crates/cf-server/src/services/poam.rs#L8030-8500",
+      "description": "Close and reopen workflow ranges"
+    },
+    {
+      "id": "C27",
+      "repository_path": "backlog/tasks/task-326.2 - Bring-Scanning-queue-and-scan-log-interactions-to-updated-design-parity.md",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/backlog/tasks/task-326.2%20-%20Bring-Scanning-queue-and-scan-log-interactions-to-updated-design-parity.md",
+      "description": "Task acceptance criteria and historical reported verification"
+    },
+    {
+      "id": "C28",
+      "repository_path": "COMMIT",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/commit/58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "description": "Audited source commit"
+    },
+    {
+      "id": "C29",
+      "repository_path": "docs/specs/01-frontend-views.md",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/docs/specs/01-frontend-views.md",
+      "description": "Frontend route and view index"
+    },
+    {
+      "id": "C30",
+      "repository_path": "packages/default/crates/cf-server/src/queries/cve_scans.rs",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/default/crates/cf-server/src/queries/cve_scans.rs",
+      "description": "Publication code and bounded producer search context"
+    },
+    {
+      "id": "C31",
+      "repository_path": "packages/default/crates/cf-server/src/services/poam.rs",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/default/crates/cf-server/src/services/poam.rs#L4511-4572",
+      "description": "Serialization retry wrapper"
+    },
+    {
+      "id": "C32",
+      "repository_path": "packages/default/crates/cf-server/src/handlers/api/poam.rs",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/default/crates/cf-server/src/handlers/api/poam.rs#L480-580",
+      "description": "Fleet POAM HTTP handlers"
+    },
+    {
+      "id": "C33",
+      "repository_path": "packages/default/crates/cf-server/tests/poam_workflows.rs",
+      "revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/58006084aa699b84bcb1d02d6f911d4d4ee94ea3/packages/default/crates/cf-server/tests/poam_workflows.rs",
+      "description": "Located database workflow tests; execution not performed"
+    }
+  ]
+}
