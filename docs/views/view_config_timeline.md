@@ -22,6 +22,7 @@ This view combines:
 - **Current deployment state per system** from `view_system_deployment_status`
   - Counts only systems with `deployment_status IN ('up_to_date','behind','ahead')`
   - Excludes `unknown` and `no_deployment`
+  - A system is `unknown` when its configuration has no deployable build to compare against (a NixOS derivation with a store path, `cf_agent_enabled`, `policy_requirements_met`, no error, and a completed cache push of that exact store path), even if its running path maps to a known commit. Such a system is not counted.
 - **Commit timeline & flake context** from `view_commit_deployment_timeline`
   - Supplies commit timestamps, hashes, and flake names
   - Limits history to recent activity (inherits its time window)
