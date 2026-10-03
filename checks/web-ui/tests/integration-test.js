@@ -20571,6 +20571,167 @@ security.audit.enable = true;</fixtext>
         await page.unroute("**/api/v1/poams/assignees");
         await page.unroute("**/api/v1/environments");
       }
+
+      // ── Evidence navigation: register -> System Detail Compliance -> exact evidence ──
+      // The register hands the chosen finding to System Detail, which opens the
+      // same evidence flow as an Evidence click inside that tab. Only the API
+      // boundary is stubbed, so the real routing and drawer code runs.
+      const evidenceBrowser = page.context().browser();
+      if (!evidenceBrowser) throw new Error("Evidence navigation scenario requires a browser instance");
+      const evUuid = (n) => `33000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+      const ev = {
+        // routeSystemsWarningData serves this system id as its detail fixture.
+        system: "00000000-0000-0000-0000-0000000000a1",
+        plan: evUuid(1), finding: evUuid(2), lineage: evUuid(3), otherPolicy: evUuid(4),
+        bundle: evUuid(5), v1: evUuid(6), v2: evUuid(7), owner: evUuid(8),
+      };
+      const evidenceScenarios = [
+        { name: "one exact revision", linked: [ev.v1], visible: [["1.0", ev.v1], ["2.0", ev.v2]], expect: "drawer", opened: ev.v1 },
+        { name: "several exact revisions", linked: [ev.v1, ev.v2], visible: [["1.0", ev.v1], ["2.0", ev.v2]], expect: "picker", opened: ev.v2 },
+        { name: "no visible exact revision", linked: [ev.v1], visible: [], expect: "unavailable" },
+        // The same evidence flow, entered from the POA&M tray inside System Detail.
+        { name: "one exact revision from the System Detail tray", linked: [ev.v1], visible: [["1.0", ev.v1]], expect: "drawer", opened: ev.v1, entry: "tray" },
+      ];
+      for (const scenario of evidenceScenarios) {
+        const evContext = await evidenceBrowser.newContext({ viewport: VIEWPORTS.desktop });
+        const evPage = await evContext.newPage();
+        const label = `Evidence navigation (${scenario.name})`;
+        try {
+          await suppressOnboardingCoach(evPage);
+          await routeStandaloneUiBootstrap(evPage, "Operator");
+          await routeSystemsWarningData(evPage);
+          const evidenceRequests = [];
+          const mutations = [];
+          evPage.on("request", (request) => {
+            const url = new URL(request.url());
+            if (request.method() !== "GET" && url.pathname.startsWith("/api/")) mutations.push(`${request.method()} ${url.pathname}`);
+            if (url.pathname.includes("/evidence")) evidenceRequests.push(`${url.pathname}${url.search}`);
+          });
+          const plan = {
+            id: ev.plan, human_id: "POAM-0201", title: "Disable direct root SSH login", plan: "Deploy PermitRootLogin=no.", owner: "",
+            revision: 1, assignee: { kind: "user", user_id: ev.owner, display: "Morgan Owner", available: true },
+            status: "open", risk: "high", target_date: "2026-12-01", overdue: false, finding_count: 1, cve_finding_count: 0,
+            created_at: "2026-09-20T12:00:00Z", updated_at: "2026-09-21T12:00:00Z", closed_at: null, closure_attempt_id: null,
+            environment_ids: [], system_ids: [ev.system], systems: [], bundle_ids: [ev.bundle], bundle_version_ids: scenario.linked,
+            assignment_version_ids: [], first_requirement: null, first_cve: null, milestone_count: 0, completed_milestone_count: 0,
+            last_activity_at: "2026-09-21T12:00:00Z",
+          };
+          const planDetail = {
+            ...plan,
+            findings: [{
+              id: ev.finding, system_id: ev.system, hostname: "warning-system-01", environment_id: null,
+              policy_lineage_id: ev.lineage, policy_name: "SSH hardening", link_id: evUuid(9),
+              linked_at: "2026-09-01T12:00:00Z", linked_by: ev.owner, retired_at: null, retired_by: null, retirement_reason: null,
+              link_active: true, current_assessment_id: evUuid(10), current_outcome: "fail", current_policy_version_id: evUuid(11),
+              current_target_store_path: "/nix/store/abc-system", assessment_updated_at: "2026-09-25T12:00:00Z",
+              resolution_state: "fail", effective_set_digest: null, effective_config_digest: null,
+              bundle_ids: [ev.bundle], bundle_version_ids: scenario.linked, requirement_version_ids: [], requirements: [],
+            }],
+            cve_findings: [], findings_has_more: false, findings_next_cursor: null, milestones: [], assignment_references: [],
+            verification_attempts: [], verification_has_more: false, verification_next_cursor: null,
+            activity: [], activity_has_more: false, activity_next_cursor: null,
+          };
+          await evPage.route("**/api/v1/poams**", async (route) => {
+            const request = route.request();
+            if (request.method() !== "GET") return route.fallback();
+            const url = new URL(request.url());
+            const json = (body) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+            if (url.pathname === "/api/v1/poams/dashboard") return json({ total: 1, active: 1, overdue: 0, awaiting_verification: 0, completed: 0 });
+            if (url.pathname === "/api/v1/poams/assignees") return json({ people: [], groups: [] });
+            if (url.pathname.startsWith("/api/v1/poams/rollups")) {
+              const scopeIds = url.searchParams.get("ids")?.split(",") || [];
+              return json(scopeIds.map((id) => ({ scope_id: id, total: 1, active: 1, overdue: 0, awaiting_verification: 0, completed: 0, open_findings: 1, on_poam_findings: 1, no_poam_findings: 0 })));
+            }
+            if (url.pathname === `/api/v1/poams/${ev.plan}`) return json(planDetail);
+            return json({ items: [plan], limit: Number(url.searchParams.get("limit") || 100), offset: Number(url.searchParams.get("offset") || 0), has_more: false, next_offset: null });
+          });
+          await evPage.route("**/api/v1/acceptances**", async (route) => {
+            if (route.request().method() !== "GET") return route.fallback();
+            return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items: [], total: 0, limit: 100, offset: 0, has_more: false }) });
+          });
+          const bundleSummary = {
+            id: ev.bundle, name: "STIG baseline", framework: "NIST", version: "catalog-lineage", description: null, layer: "fleet",
+            owner: "Platform Security", last_review: null, policy_ids: [], required_envs: [], control_count: 2, environment_count: 1,
+            policy_count: 2, requirement_count: 0, active_assignment_count: 1, current_draft_version_id: null,
+            current_published_version_id: scenario.visible.at(-1)?.[1] ?? null, current_draft_version: null,
+            current_published_version: scenario.visible.at(-1)?.[0] ?? null, applicable_system_count: 1, aggregate_score: null,
+            versions: scenario.visible.map(([version, versionId]) => ({
+              id: versionId, bundle_id: ev.bundle, version, publication_state: "accepted", trust_state: "trusted", semantic_digest: "digest",
+              created_at: "2026-09-24T12:00:00Z", published_at: "2026-09-24T12:00:00Z", derived_from_version_id: null, control_count: 2,
+              is_current_published: false, is_current_draft: false,
+            })),
+          };
+          await evPage.route(`**/api/v1/systems/${ev.system}/compliance`, async (route) => {
+            const rollup = { system_id: ev.system, hostname: "warning-system-01", environment: "production", applies: true, total: 2, evaluated_total: 2, pass: 1, warn: 0, fail: 1, waiver: 0, not_checked: 0, not_applicable: 0, error: 0, report_only: 0, score: 50, resolution_state: "resolved", assignment_status: "current", assignment_reason: null, assignment_approved_by: null };
+            const bundles = scenario.visible.length ? [{ bundle: bundleSummary, rollup, assigned_bundle_version_id: scenario.visible.at(-1)[1], assignment_mode: "enforce" }] : [];
+            await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ system_id: ev.system, bundles, direct_rollup: rollup, overall_rollup: rollup }) });
+          });
+          await evPage.route(`**/api/v1/systems/${ev.system}/compliance-assignments`, async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ assignments: [] }) }));
+          await evPage.route(`**/api/v1/compliance/bundles/${ev.bundle}/systems/${ev.system}/evidence**`, async (route) => {
+            const versionId = new URL(route.request().url()).searchParams.get("version_id");
+            const control = (policyId, name, status) => ({ policy_id: policyId, policy_name: name, status, severity: "high", summary: `${name} summary`, evidence_items: [], framework_mapping: "AC-17", requirements: [], composite_expected: false });
+            await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+              bundle_id: ev.bundle, bundle_version_id: versionId, framework: "NIST", system_id: ev.system, hostname: "warning-system-01", resolution_state: "resolved",
+              // The linked policy is deliberately second, so focus must reorder it first.
+              controls: [control(ev.otherPolicy, "Unrelated control", "pass"), control(ev.lineage, "SSH hardening", "fail")],
+            }) });
+          });
+
+          const fromTray = scenario.entry === "tray";
+          await evPage.goto(fromTray ? `${baseUrl}/systems/${ev.system}?tab=compliance&poam=${ev.plan}` : `${baseUrl}/poams?poam=${ev.plan}`, { timeout: LOAD_TIMEOUT });
+          const registerDetail = evPage.getByTestId("poam-detail");
+          await assertVisible(registerDetail, `${label}: the entry point must open the POA&M drawer`);
+          await registerDetail.getByTestId("poam-linked-finding").getByRole("button", { name: "Evidence", exact: true }).click();
+
+          // Common to every outcome: the register drawer is gone and the user is on
+          // the finding's own System Detail, Compliance tab.
+          if (!fromTray) await evPage.waitForURL((url) => url.pathname === `/systems/${ev.system}` && url.searchParams.get("tab") === "compliance", { timeout: 15000 });
+          await assertCount(evPage.getByTestId("poam-detail"), 0, `${label}: the POA&M drawer must close`);
+          // The route always emits empty optional keys; only a non-empty value would open a POA&M drawer.
+          if (new URL(evPage.url()).searchParams.get("poam")) throw new Error(`${label}: the destination URL must not carry a POA&M drawer: ${evPage.url()}`);
+
+          if (scenario.expect === "picker") {
+            const picker = evPage.getByRole("dialog", { name: "Choose exact evidence context" });
+            await assertVisible(picker, `${label}: several exact revisions must ask the user to choose`);
+            await assertCount(evPage.locator("#system-evidence-loading-dialog, [data-testid='evidence-policy-target']"), 0, `${label}: nothing may open before the user chooses`);
+            if (evidenceRequests.length !== 0) throw new Error(`${label}: no evidence may load before the choice: ${JSON.stringify(evidenceRequests)}`);
+            await picker.getByRole("button", { name: /STIG baseline/ }).filter({ hasText: "Exact revision 2.0" }).click();
+          }
+          if (scenario.expect === "unavailable") {
+            const unavailable = evPage.locator("#system-evidence-error-dialog");
+            await assertVisible(unavailable, `${label}: an unavailable context must show the explicit error state`);
+            await assertVisible(unavailable.getByText(/No exact visible bundle revision is available for this finding\./), `${label}: the error must say why`);
+            await assertCount(evPage.locator("[data-testid='evidence-policy-target']"), 0, `${label}: unrelated evidence must not be shown`);
+            if (evidenceRequests.length !== 0) throw new Error(`${label}: no evidence request may be made without an exact context: ${JSON.stringify(evidenceRequests)}`);
+          } else {
+            const drawer = evPage.getByRole("dialog", { name: /evidence/i }).first();
+            const focused = evPage.locator("[data-testid='evidence-policy-target'][aria-current='true']");
+            await assertVisible(focused, `${label}: the evidence drawer must open automatically`);
+            const focusedPolicy = await focused.getAttribute("data-policy-id");
+            if (focusedPolicy !== ev.lineage) throw new Error(`${label}: the linked policy must be focused, got ${focusedPolicy}`);
+            await assertVisible(evPage.locator("[data-testid='evidence-policy-name']").first().getByText("SSH hardening", { exact: true }), `${label}: the linked control must be listed first`);
+            if (evidenceRequests.length !== 1 || !evidenceRequests[0].includes(`version_id=${scenario.opened}`)) throw new Error(`${label}: exactly one request for the exact revision is expected: ${JSON.stringify(evidenceRequests)}`);
+            void drawer;
+          }
+          if (mutations.length !== 0) throw new Error(`${label}: navigation must not mutate anything: ${JSON.stringify(mutations)}`);
+
+          if (scenario.expect === "drawer" && !fromTray) {
+            // Back returns to the register drawer, and Forward lands on Compliance
+            // without reopening evidence: the handoff is consumed once.
+            await evPage.goBack({ waitUntil: "domcontentloaded" });
+            await assertVisible(evPage.getByTestId("poam-detail"), `${label}: Back must return to the POA&M drawer`);
+            if (new URL(evPage.url()).pathname !== "/poams") throw new Error(`${label}: Back must return to the register: ${evPage.url()}`);
+            await evPage.goForward({ waitUntil: "domcontentloaded" });
+            await evPage.waitForURL((url) => url.pathname === `/systems/${ev.system}`, { timeout: 15000 });
+            await evPage.waitForTimeout(1500);
+            await assertCount(evPage.locator("[data-testid='evidence-policy-target']"), 0, `${label}: a later visit must not reopen evidence`);
+            if (evidenceRequests.length !== 1) throw new Error(`${label}: a later visit must not request evidence again: ${JSON.stringify(evidenceRequests)}`);
+          }
+        } finally {
+          await evPage.unrouteAll({ behavior: "ignoreErrors" }).catch(() => {});
+          await evContext.close().catch(() => {});
+        }
+      }
     },
   },
   {

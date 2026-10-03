@@ -21,6 +21,7 @@ use crate::components::poam::PoamDetailHost;
 use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
+use crate::state::navigation_focus::FindingEvidenceFocus;
 use crate::views::poam_api::{
     self, AcceptanceEntry, AcceptanceSource, CreatePoamRequest, FleetCvePoamRequest, PoamApiError,
     PoamAssigneeCatalog, PoamAssigneeRequest, PoamAssigneeView, PoamListQuery, PoamRegisterSummary,
@@ -1861,6 +1862,7 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
     let mut export_open = use_signal(|| false);
     let mut columns_open = use_signal(|| false);
     let nav = use_navigator();
+    let mut evidence_focus = use_context::<Signal<Option<FindingEvidenceFocus>>>();
     let detail_id = location.poam;
 
     // CONCURRENCY: A URL scope change can finish after a previous list request.
@@ -2656,7 +2658,7 @@ fn PoamsRegister(location: RegisterLocation) -> Element {
             if let Some(entry) = mixed_open().and_then(|id| acceptance_rows.iter().find(|entry| acceptance_id(entry) == id).cloned()) {
                 AcceptanceTray { key: "mixed-{entry.source:?}:{entry.source_id}", entry, environments: env_names.clone(), operator: !viewer, admin: is_admin, catalog: catalog(), on_close: move |_| mixed_open.set(None), on_changed: move |_| { refresh.set(refresh().wrapping_add(1)); } }
             }
-            PoamDetailHost { poam_id: detail_id, viewer, on_close: move |_| { nav.push(Route::PoamsView { query: RegisterLocation { poam: None, ..location }.query() }); }, on_open_finding: move |finding: poam_api::FindingView| { nav.push(Route::SystemDetailView { id: finding.system_id.to_string(), tab: "compliance".into(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new(), cve_target: String::new(), cve_mode: String::new() }); } }
+            PoamDetailHost { poam_id: detail_id, viewer, on_close: move |_| { nav.push(Route::PoamsView { query: RegisterLocation { poam: None, ..location }.query() }); }, on_open_finding: move |finding: poam_api::FindingView| { evidence_focus.set(Some(FindingEvidenceFocus::from(&finding))); nav.push(Route::SystemDetailView { id: finding.system_id.to_string(), tab: "compliance".into(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new(), cve_target: String::new(), cve_mode: String::new() }); } }
         }
     }
 }

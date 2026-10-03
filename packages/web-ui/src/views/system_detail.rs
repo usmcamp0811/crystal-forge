@@ -75,8 +75,8 @@ use crate::state::{
     app_state::AppState,
     auth,
     navigation_focus::{
-        ConfigRevision, FocusTarget, NavigationFocus, SystemDetailNavigation, SystemDetailTab,
-        current_query, update_query,
+        ConfigRevision, FindingEvidenceFocus, FocusTarget, NavigationFocus, SystemDetailNavigation,
+        SystemDetailTab, current_query, update_query,
     },
 };
 use crate::systems::adapter::{
@@ -1166,6 +1166,12 @@ pub fn SystemDetailView(
     let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
     let mut breadcrumb_override = use_context::<Signal<Option<(String, String)>>>();
     let app_state = use_context::<Signal<AppState>>();
+
+    // A finding handed over for evidence lives only as long as this view. If the
+    // system never loads, or the user leaves first, the unused handoff is
+    // dropped here instead of opening evidence on a later, unrelated visit.
+    let mut unconsumed_evidence = use_context::<Signal<Option<FindingEvidenceFocus>>>();
+    use_drop(move || unconsumed_evidence.set(None));
 
     // Read the initial tab synchronously so deep links do not flash Overview first.
     //
@@ -3061,7 +3067,7 @@ struct FindingEvidenceTarget {
 }
 
 fn finding_evidence_targets(
-    finding: &FindingView,
+    finding: &FindingEvidenceFocus,
     bundles: &[SystemComplianceBundle],
 ) -> Vec<FindingEvidenceTarget> {
     let mut targets = bundles
@@ -3116,6 +3122,104 @@ fn finding_evidence_targets(
     });
     targets.dedup_by_key(|target| (target.bundle_id, target.bundle_version_id));
     targets
+}
+
+/// Describes how many exact evidence contexts a finding resolves to for the user.
+#[derive(Debug, Clone, PartialEq)]
+enum EvidenceResolution {
+    /// No bundle revision visible to the user holds this finding.
+    Unavailable,
+    /// Exactly one revision holds it, so its evidence opens directly.
+    Single(FindingEvidenceTarget),
+    /// Several revisions hold it, so the user must choose one.
+    Choose(Vec<FindingEvidenceTarget>),
+}
+
+/// Resolves a finding to the exact evidence contexts the user may open.
+///
+/// SECURITY: Candidates come only from `bundles`, which the server filtered for
+/// the current user. The finding's own bundle IDs narrow that list and never
+/// extend it. No arbitrary or newest revision is ever substituted.
+fn resolve_finding_evidence(
+    finding: &FindingEvidenceFocus,
+    bundles: &[SystemComplianceBundle],
+) -> EvidenceResolution {
+    let mut targets = finding_evidence_targets(finding, bundles);
+    match targets.len() {
+        0 => EvidenceResolution::Unavailable,
+        1 => EvidenceResolution::Single(targets.remove(0)),
+        _ => EvidenceResolution::Choose(targets),
+    }
+}
+
+/// Bundles the signals that drive the compliance evidence drawer and its
+/// context picker.
+///
+/// Every way into the drawer goes through this type: the in-page POA&M tray,
+/// the context picker, and a finding handed over by another route. One request
+/// generation guards all of them, so a slow response for an earlier choice can
+/// never replace the evidence for a later one.
+#[derive(Clone, Copy)]
+struct EvidenceDrawerSignals {
+    open: Signal<bool>,
+    data: Signal<Option<Result<ComplianceEvidenceResponse, String>>>,
+    bundle_name: Signal<Option<String>>,
+    generation: Signal<u64>,
+    choices: Signal<Vec<FindingEvidenceTarget>>,
+}
+
+impl EvidenceDrawerSignals {
+    /// Opens the evidence for one finding, or the picker, or an explicit error.
+    fn open_for_finding(
+        mut self,
+        finding: FindingEvidenceFocus,
+        system_id: Uuid,
+        bundles: &[SystemComplianceBundle],
+    ) {
+        match resolve_finding_evidence(&finding, bundles) {
+            EvidenceResolution::Choose(targets) => self.choices.set(targets),
+            EvidenceResolution::Single(target) => self.open_target(target, system_id),
+            EvidenceResolution::Unavailable => self.show_error(
+                finding.policy_name,
+                "No exact visible bundle revision is available for this finding.".to_string(),
+            ),
+        }
+    }
+
+    /// Shows an explicit unavailable state instead of unrelated evidence.
+    fn show_error(mut self, label: String, message: String) {
+        self.choices.set(Vec::new());
+        self.generation += 1;
+        self.open.set(true);
+        self.bundle_name.set(Some(label));
+        self.data.set(Some(Err(message)));
+    }
+
+    /// Loads the evidence for one exact bundle revision and focuses its policy.
+    fn open_target(mut self, target: FindingEvidenceTarget, system_id: Uuid) {
+        self.choices.set(Vec::new());
+        self.generation += 1;
+        let requested = *self.generation.peek();
+        self.open.set(true);
+        self.bundle_name.set(Some(format!(
+            "{} {}",
+            target.bundle_name, target.bundle_version
+        )));
+        self.data.set(None);
+        spawn(async move {
+            let result = fetch_compliance_system_evidence(
+                &target.bundle_id,
+                &system_id,
+                Some(&target.bundle_version_id),
+            )
+            .await
+            .map(|response| focus_evidence_policy(response, target.policy_id))
+            .map_err(|error| error.to_string());
+            if *self.generation.peek() == requested {
+                self.data.set(Some(result));
+            }
+        });
+    }
 }
 
 fn focus_evidence_policy(
@@ -3243,6 +3347,35 @@ fn ComplianceTab(system: SystemDetail, viewer: bool, initial_poam: String) -> El
     let mut evidence_bundle_name: Signal<Option<String>> = use_signal(|| None);
     let mut evidence_generation = use_signal(|| 0_u64);
     let mut evidence_choices: Signal<Vec<FindingEvidenceTarget>> = use_signal(Vec::new);
+    let drawer = EvidenceDrawerSignals {
+        open: evidence_open,
+        data: evidence_data,
+        bundle_name: evidence_bundle_name,
+        generation: evidence_generation,
+        choices: evidence_choices,
+    };
+
+    // A finding handed over by the POA&M register opens its exact evidence here
+    // through the same path as an Evidence click in this tab. The effect waits
+    // for the user's bundles, takes the handoff once, and drops it if it names a
+    // different system, so ordinary later visits never reopen the drawer.
+    let mut pending_evidence = use_context::<Signal<Option<FindingEvidenceFocus>>>();
+    use_effect(move || {
+        let Some(loaded) = compliance_resource.read_unchecked().clone() else {
+            return;
+        };
+        let Some(pending) = pending_evidence.read().clone() else {
+            return;
+        };
+        pending_evidence.set(None);
+        let Some(focus) = FindingEvidenceFocus::for_system(Some(pending), system_id) else {
+            return;
+        };
+        match loaded.error {
+            Some(error) => drawer.show_error(focus.policy_name, error),
+            None => drawer.open_for_finding(focus, system_id, &loaded.bundles),
+        }
+    });
 
     let loading = compliance_resource.read_unchecked().is_none();
     let data = compliance_resource
@@ -3643,27 +3776,7 @@ fn ComplianceTab(system: SystemDetail, viewer: bool, initial_poam: String) -> El
                     p { class: "poam-muted", "This finding belongs to multiple bundle revisions. Select the evidence context to open." }
                     div { class: "poam-picker-list",
                         for target in evidence_choices.read().clone() {
-                            button { class: "poam-pick focus-ring", onclick: move |_| {
-                                evidence_choices.set(Vec::new());
-                                evidence_generation += 1;
-                                let requested = evidence_generation();
-                                evidence_open.set(true);
-                                evidence_bundle_name.set(Some(format!("{} {}", target.bundle_name, target.bundle_version)));
-                                evidence_data.set(None);
-                                spawn(async move {
-                                    let result = fetch_compliance_system_evidence(
-                                        &target.bundle_id,
-                                        &system_id,
-                                        Some(&target.bundle_version_id),
-                                    )
-                                    .await
-                                    .map(|response| focus_evidence_policy(response, target.policy_id))
-                                    .map_err(|error| error.to_string());
-                                    if evidence_generation() == requested {
-                                        evidence_data.set(Some(result));
-                                    }
-                                });
-                            },
+                            button { class: "poam-pick focus-ring", onclick: move |_| drawer.open_target(target.clone(), system_id),
                                 strong { "{target.bundle_name}" }
                                 small { "Exact revision {target.bundle_version} · " span { class: "mono", "{target.bundle_version_id}" } }
                             }
@@ -3697,41 +3810,11 @@ fn ComplianceTab(system: SystemDetail, viewer: bool, initial_poam: String) -> El
                         None,
                     );
                     sync_system_detail_query(&query, false);
-                    let targets = finding_evidence_targets(&finding, &data.bundles);
-                    if targets.len() > 1 {
-                        evidence_choices.set(targets);
-                        return;
-                    }
-                    let Some(target) = targets.into_iter().next() else {
-                        evidence_open.set(true);
-                        evidence_bundle_name.set(Some(finding.policy_name));
-                        evidence_data.set(Some(Err(
-                            "No exact visible bundle revision is available for this finding."
-                                .to_string(),
-                        )));
-                        return;
-                    };
-                    evidence_generation += 1;
-                    let requested = evidence_generation();
-                    evidence_open.set(true);
-                    evidence_bundle_name.set(Some(format!(
-                        "{} {}",
-                        target.bundle_name, target.bundle_version
-                    )));
-                    evidence_data.set(None);
-                    spawn(async move {
-                        let result = fetch_compliance_system_evidence(
-                            &target.bundle_id,
-                            &system_id,
-                            Some(&target.bundle_version_id),
-                        )
-                        .await
-                        .map(|response| focus_evidence_policy(response, target.policy_id))
-                        .map_err(|error| error.to_string());
-                        if evidence_generation() == requested {
-                            evidence_data.set(Some(result));
-                        }
-                    });
+                    drawer.open_for_finding(
+                        FindingEvidenceFocus::from(&finding),
+                        system_id,
+                        &data.bundles,
+                    );
                 },
                 on_changed: move |_| poam_resource.restart(),
             }
@@ -13313,5 +13396,130 @@ mod tests {
             None
         );
         assert_eq!(visible_config_response(None, None, None), None);
+    }
+}
+
+#[cfg(test)]
+mod evidence_resolution_tests {
+    use super::{
+        EvidenceResolution, FindingEvidenceTarget, finding_evidence_targets,
+        resolve_finding_evidence,
+    };
+    use crate::api::models::SystemComplianceBundle;
+    use crate::state::navigation_focus::FindingEvidenceFocus;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    fn id(value: u128) -> Uuid {
+        Uuid::from_u128(value)
+    }
+
+    /// Builds a bundle through the real \`Deserialize\` impl so the fixture matches
+    /// the API shape. \`versions\` are \`(version id, label)\` pairs.
+    fn bundle(bundle_id: u128, name: &str, versions: &[(u128, &str)]) -> SystemComplianceBundle {
+        serde_json::from_value(json!({
+            "bundle": {
+                "id": id(bundle_id), "name": name, "framework": "stig", "version": "1",
+                "description": null, "layer": "base", "owner": "ops", "last_review": null,
+                "policy_ids": [], "required_envs": [], "control_count": 1,
+                "environment_count": 1,
+                "versions": versions.iter().map(|(version_id, label)| json!({
+                    "id": id(*version_id), "bundle_id": id(bundle_id), "version": label,
+                    "publication_state": "published", "semantic_digest": "digest",
+                    "created_at": "2026-09-01T00:00:00Z", "published_at": null,
+                    "derived_from_version_id": null, "control_count": 1
+                })).collect::<Vec<_>>()
+            },
+            "rollup": {
+                "system_id": id(99), "hostname": "host", "environment": null,
+                "applies": true, "total": 1, "pass": 0, "warn": 0, "fail": 1,
+                "waiver": 0, "score": 0
+            }
+        }))
+        .expect("bundle fixture should deserialize")
+    }
+
+    fn finding(bundle_ids: &[u128], version_ids: &[u128]) -> FindingEvidenceFocus {
+        FindingEvidenceFocus {
+            finding_id: id(1),
+            system_id: id(99),
+            policy_lineage_id: id(7),
+            policy_name: "SSH hardening".into(),
+            bundle_ids: bundle_ids.iter().map(|value| id(*value)).collect(),
+            bundle_version_ids: version_ids.iter().map(|value| id(*value)).collect(),
+        }
+    }
+
+    #[test]
+    fn no_visible_bundle_revision_is_explicitly_unavailable() {
+        // The finding names bundle 10, but the user's bundles do not include it.
+        let visible = [bundle(20, "Other", &[(200, "1.0")])];
+        assert_eq!(
+            resolve_finding_evidence(&finding(&[10], &[100]), &visible),
+            EvidenceResolution::Unavailable
+        );
+        // No bundles at all, as when the user may see none, is the same outcome.
+        assert_eq!(
+            resolve_finding_evidence(&finding(&[10], &[100]), &[]),
+            EvidenceResolution::Unavailable
+        );
+    }
+
+    #[test]
+    fn one_exact_revision_opens_directly_and_focuses_the_linked_policy() {
+        let visible = [bundle(10, "STIG", &[(100, "1.0"), (101, "2.0")])];
+        // Only revision 100 is linked to the finding, so 101 must not be offered.
+        assert_eq!(
+            resolve_finding_evidence(&finding(&[10], &[100]), &visible),
+            EvidenceResolution::Single(FindingEvidenceTarget {
+                bundle_id: id(10),
+                bundle_version_id: id(100),
+                bundle_name: "STIG".into(),
+                bundle_version: "1.0".into(),
+                policy_id: id(7),
+            })
+        );
+    }
+
+    #[test]
+    fn several_exact_revisions_require_an_explicit_choice() {
+        let visible = [
+            bundle(10, "STIG", &[(100, "1.0"), (101, "2.0")]),
+            bundle(11, "CIS", &[(110, "3.0")]),
+        ];
+        let EvidenceResolution::Choose(targets) =
+            resolve_finding_evidence(&finding(&[10, 11], &[100, 101, 110]), &visible)
+        else {
+            panic!("several linked revisions must produce a choice");
+        };
+        // Sorted by bundle name, then version, so the picker order is stable.
+        let labels = targets
+            .iter()
+            .map(|target| format!("{} {}", target.bundle_name, target.bundle_version))
+            .collect::<Vec<_>>();
+        assert_eq!(labels, vec!["CIS 3.0", "STIG 1.0", "STIG 2.0"]);
+        assert!(targets.iter().all(|target| target.policy_id == id(7)));
+    }
+
+    #[test]
+    fn a_revision_the_finding_does_not_name_is_never_substituted() {
+        // The user can see bundle 10, but only revision 105 is linked to the
+        // finding and 105 is not among the visible revisions. No other revision
+        // of the same bundle may stand in for it.
+        let visible = [bundle(10, "STIG", &[(100, "1.0"), (101, "2.0")])];
+        assert!(finding_evidence_targets(&finding(&[10], &[105]), &visible).is_empty());
+        assert_eq!(
+            resolve_finding_evidence(&finding(&[10], &[105]), &visible),
+            EvidenceResolution::Unavailable
+        );
+    }
+
+    #[test]
+    fn a_linked_revision_in_a_bundle_the_finding_does_not_name_is_ignored() {
+        let visible = [bundle(10, "STIG", &[(100, "1.0")])];
+        assert_eq!(
+            resolve_finding_evidence(&finding(&[11], &[100]), &visible),
+            EvidenceResolution::Unavailable
+        );
     }
 }
