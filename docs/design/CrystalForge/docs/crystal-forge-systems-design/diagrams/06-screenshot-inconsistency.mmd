@@ -1,0 +1,10 @@
+flowchart TD
+    HOST["Sledge observed running state"] --> MENU["Observational commit and generation menu"]
+    MENU --> RUN["running now label"]
+    HOST --> STRICT["Strict retained-generation Current resolver"]
+    STRICT -->|"Retained binding unavailable"| NONE["No Current CVE source"]
+    STRICT -.->|"Same kind of prerequisite used separately"| SUM["Scanning current summary"]
+    SUM --> Z["Missing counts coalesced to zero"]
+    Z --> BAD["Frontend passes authoritative=true and displays clean"]
+    LEG["Legacy latest scan by derivation name"] --> HDR["Distinct-CVE header counts"]
+    SCAN["Completed exact scan record"] --> HIST["Stored occurrence counts in revision history"]

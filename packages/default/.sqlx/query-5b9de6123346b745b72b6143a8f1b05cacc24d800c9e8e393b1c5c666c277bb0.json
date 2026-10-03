@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id FROM cve_scans\n            WHERE derivation_id = $1\n            ORDER BY\n              CASE WHEN status IN ('awaiting_build', 'awaiting_closure', 'pending', 'in_progress') THEN 0 ELSE 1 END,\n              created_at DESC,\n              id DESC\n            LIMIT 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5b9de6123346b745b72b6143a8f1b05cacc24d800c9e8e393b1c5c666c277bb0"
+}

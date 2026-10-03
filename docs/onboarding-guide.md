@@ -4,18 +4,22 @@ Welcome to Crystal Forge! This guide will walk you through your first-time setup
 
 ## Introduction
 
-This guide covers the complete initial setup process for Crystal Forge, mirroring the 6-step guided tour built into the web interface. If you're a sysadmin with basic-to-intermediate NixOS knowledge, this guide will help you understand what Crystal Forge is doing and why each configuration step matters.
+This guide describes the nine-step Setup track and five Security Workflows walkthroughs in the web interface. Setup completion comes from server-reported persisted resources. Security walkthrough progress is browser-local presentation state only; it does not report security or remediation state.
 
 ### What This Guide Covers
 
 - Setting up your Crystal Forge server and database
-- Configuring the 6 core components via the web UI:
-  1. Environments (organize your fleet)
-  2. Flakes (define what to build)
-  3. Builders (evaluation and build workers)
-  4. Caches (binary cache destinations)
-  5. Systems (NixOS hosts to manage)
-  6. Agents (connect managed systems)
+- Configuring the nine Setup steps via the web UI:
+  1. Create an environment
+  2. Add a flake
+  3. Register a builder
+  4. Configure a cache
+  5. Register a system
+  6. Deploy the agent and acknowledge its first signed report
+  7. Create or import a policy
+  8. Build a compliance bundle
+  9. Track a POA&M
+- Using the five Security Workflows walkthroughs available from Guide to every authenticated role
 
 ### Prerequisites
 
@@ -30,11 +34,11 @@ Before you begin, you should have:
   - Ed25519 cryptographic keys
   - Binary caches (Nix, S3, Attic)
 
-### Overview of the 6-Step Guided Tour
+### Overview of the Setup Track
 
-Crystal Forge's web UI includes a **Setup Coach** panel that appears automatically when you first log in as an admin. This non-blocking, floating panel guides you through the essential configuration steps in the correct order.
+Crystal Forge's web UI includes a non-blocking Coach. Administrators can use the **Setup** track. Operators and Viewers can use **Security workflows**. Every authenticated role can open or reopen the Coach from **Guide** in the top bar.
 
-The coach tracks your progress and provides contextual callouts on each page, showing you exactly where to click and what information to provide. You can minimize or dismiss the coach at any time and reopen it from Server Management.
+The server reports Setup completion from saved resources. Opening a page never completes a setup step. Walkthrough progress is stored in this browser and records only which stops were viewed. It does not record whether a CVE, scan, acceptance, compliance control or POA&M is safe, passed, fixed or verified.
 
 ---
 
@@ -117,7 +121,7 @@ Add Crystal Forge to your server's NixOS configuration:
       auth_mode = "local";  # Use local username/password auth
     };
 
-    # Builder (for evaluating flakes and building derivations)
+    # Builder (for building server-evaluated derivations)
     build = {
       enable = true;
       max_concurrent_derivations = 2;
@@ -154,28 +158,30 @@ After you register the first admin user and log in, you'll see the **Setup Coach
 
 ### How the Coach Works
 
-- **Progress Tracking**: Shows nine setup steps with completion checkmarks
+- **Setup progress**: Shows nine steps from server-reported resource state
 - **Clickable Steps**: Click any step to navigate to the relevant page
 - **Contextual Callouts**: Destination pages show blue callouts pointing to the actions you need to take
 - **Progressive Guidance**: Form fields display hints as you fill them in, guiding you through each required field
 - **Non-Blocking**: You can navigate anywhere in the app; the coach doesn't lock you into a specific flow
-- **Minimize/Dismiss**: Click "Minimize" to collapse the coach into a small tab, or "Dismiss" to hide it permanently
-- **Reopen**: From **Server Management** (in the admin menu), you can relaunch the coach at any time
+- **Security workflows**: Offers five independent modules with Start, Resume and Restart controls
+- **Minimize/Close**: Minimize the Coach or close it. Use **Guide** to reopen it.
+- **Relaunch Setup**: Administrators can reopen Setup from Server Management
 
 ### Coach States
 
 **Expanded** (default): Shows the full checklist with progress
 
-**Minimized**: Collapses to a small "Setup Guide" tab showing completion count (for example, "3/9")
+**Minimized**: Collapses to a small pill. The pill shows setup progress when setup is incomplete and security walkthroughs otherwise.
 
 ![Coach Minimized](./screenshots/06g-onboarding-coach-minimized.png)
 
-**Dismissed**: Hides completely (can be reopened from admin)
+**Closed**: Hides the panel. **Guide** reopens it for every authenticated role.
 
-The final three steps use persisted production data. A policy step requires a
-user-created or imported policy version. A compliance bundle step requires a
-persisted bundle. A POA&M step requires a persisted POA&M in any lifecycle
-state. Create the POA&M from a failing control's evidence in **Compliance**.
+The final three Setup steps use persisted production data. A policy step requires a
+user-created or imported policy lineage. A compliance bundle step requires a
+saved bundle. A POA&M step requires a persisted POA&M in any lifecycle state.
+POA&Ms can originate from failing compliance evidence, scheduled CVE remediation,
+or conversion of accepted risk.
 
 ## POA&M Dashboard and Notifications
 
@@ -219,7 +225,7 @@ The form shows progressive field callouts and a **Required Policies** section wi
 - **Name**: A short identifier (e.g., `production`, `staging`, `dev`)
 - **Deployment Policy**:
   - `manual`: Admin must approve each deployment
-  - `auto_latest`: Automatically deploy the latest evaluated commit
+  - `auto_latest`: Automatically deploy the newest successfully deployable derivation for this system configuration; pending or failed newer commits do not replace it
   - `pinned`: Deploy a specific commit/derivation
 - **Deployment Strategy**:
   - `immediate_persist`: Activate and set as boot default (recommended)
@@ -252,13 +258,13 @@ After creating your first environment, the coach will mark **Step 1** complete.
 
 ## Step 2: Add Flake
 
-**Flakes** in Crystal Forge represent Git repositories containing NixOS configurations. Crystal Forge monitors these repositories, evaluates commits, builds derivations, and tracks what's deployed to your systems.
+**Flakes** in Crystal Forge represent Git repositories containing NixOS configurations. Crystal Forge monitors these repositories, evaluates commits on the server, builds eligible derivations, and tracks what's deployed to your systems.
 
 ### Why Flakes Matter
 
 - **Source of Truth**: Your NixOS configurations as code
-- **Evaluation**: Crystal Forge evaluates each commit to determine what needs to be built
-- **CVE Scanning**: Every evaluated commit is scanned for known vulnerabilities
+- **Evaluation**: The server evaluates commits to determine which derivations need to be built
+- **CVE Scanning**: Scanning follows scan policy; registering a flake does not mean every commit is scanned
 - **Deployment Tracking**: Know which commit is deployed on which system
 
 ### Guided Tour: Flakes Page
@@ -350,9 +356,9 @@ After adding your first flake, the coach marks **Step 2** complete.
 
 ### Why Builders Matter
 
-- **Flake Evaluation**: Builders run `nix eval` to determine what needs to be built from each commit
-- **Build Execution**: Builds are isolated in systemd scopes with resource limits
-- **CVE Scanning**: Each build is scanned with `vulnix` for known vulnerabilities
+- **Evaluation and build work**: The server evaluates registered flakes and creates build jobs. Builders build server-evaluated derivations and perform the build-side work Crystal Forge assigns.
+- **Build Execution**: Builders build assigned derivations in systemd scopes with resource limits
+- **CVE Scanning**: Crystal Forge scans according to the configured scan policy
 - **Cache Population**: Successful builds are pushed to your binary cache destinations
 
 ### Guided Tour: Builders Page
@@ -653,14 +659,14 @@ If you don't have an Ed25519 key pair for this system yet, click **Generate Key 
 Systems inherit the deployment policy from their environment, but you can override it per system:
 
 - **manual**: An admin must explicitly approve deployments (safest for production)
-- **auto_latest**: Automatically deploy the latest evaluated commit on the tracked branch
+- **auto_latest**: Automatically deploy the newest eligible cached derivation for this system configuration across commits of its registered flake. Newer failed or pending commits do not make the deployed system behind; a newer deployable derivation does.
 - **pinned**: Deploy a specific commit/derivation (useful for canary deployments)
 
 ![System Created](./screenshots/06f4-onboarding-systems-create.png)
 
 ### System Creation Success
 
-After creating your first system, the coach marks **Step 5** complete and you're ready for the final step: deploying the agent.
+After creating your first system, the server reports **Step 5** complete. The agent step remains incomplete until the first signed report arrives and an Administrator acknowledges it.
 
 ---
 
@@ -768,11 +774,35 @@ In the Crystal Forge web UI:
 
 ### Onboarding Complete!
 
-After the agent connects and reports its first heartbeat, the coach automatically marks **Step 6** complete. All six setup steps are now configured.
+After the agent sends its first signed report, an Administrator can select **Acknowledge agent setup** in the Setup track. A heartbeat alone does not complete the step. The acknowledgement is saved through the existing setup-progress API.
 
 ![All Steps Configured](./screenshots/06h-onboarding-coach-all-configured.png)
 
-The coach panel will automatically dismiss itself, but you can always reopen it from **Server Management**.
+When all nine setup steps are complete, the Coach shows the setup-complete card and offers **Explore security workflows**. The top-bar **Guide** remains available. Administrators can relaunch Setup from Server Management.
+
+### Steps 7–9: Policies, compliance bundles and POA&Ms
+
+Step 7 completes when the server reports a saved policy lineage. Platform policies govern pipeline mechanics; security controls carry framework criteria. Whether a failure can block deployment depends on enforcement, not on the policy existing.
+
+Step 8 completes when the server reports a saved compliance bundle. Bundle versions can be assigned to environments or systems.
+
+Step 9 completes when the server reports a POA&M in any lifecycle state. A POA&M may come from a failing compliance finding, a scheduled CVE patch, or conversion of accepted risk. Compliance is not the only source.
+
+---
+
+## Security Workflows track
+
+The top-bar **Guide** opens Security Workflows for Admins, Operators and Viewers. The walkthroughs navigate to existing records and open read-only presentation surfaces. They do not submit decisions or mutations. Each module can be started, resumed or restarted:
+
+1. **Review vulnerability posture** — scan lifecycle, scan evidence, scan schedule, fleet CVEs, Current/Scheduled/Historical evidence, and System Detail evidence tabs.
+2. **Triage vulnerabilities** — exact finding detail, per-environment triage, schedule-patch POA&Ms, exact-pair selection and batch triage.
+3. **Review compliance evidence** — policies, bundles, assignments, enforcement modes, system matrix, control evidence and finding-linked remediation.
+4. **Manage remediation and accepted risk** — the register, queues, scope, plan detail, lifecycle, verification, risk acceptance identity, and renewal/conversion.
+5. **Prepare audit evidence** — bundle baseline exports, register exports, and the difference between the human RA number and immutable source UUID.
+
+The coach uses records the authenticated person can read. If no suitable record exists, it says what condition is needed. Operator-only or Admin-only actions stay explanatory for roles without permission.
+
+Keep these distinctions in view: a failed scan is not “no CVEs”; no scan is not clean; only Current exact evidence authorizes CVE triage; Accepted risk is not remediation; a scheduled patch is not verified; POA&M status is not verification; report-only FAIL is still FAIL; and a POA&M does not turn FAIL into PASS. Verification needs authoritative current evidence.
 
 ---
 

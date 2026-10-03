@@ -178,7 +178,7 @@
     {
       "name": "setup-coach",
       "route": "/",
-      "designMarker": { "selector": ".coach[aria-label='Setup Coach']", "text": "Track a POA&M" },
+      "designMarker": { "selector": ".coach[aria-label='Crystal Forge Coach']", "text": "Crystal Forge Coach" },
       "dioxusMarker": { "selector": "[data-testid='onboarding-coach-panel']" },
       "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx"
     },

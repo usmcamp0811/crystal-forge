@@ -21,11 +21,11 @@ use crystal_forge::{
         agent::{deployment_failed, deployment_started, heartbeat, state},
         agent_request::CFState,
         api::{
-            admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
-            builders, caches, commits, compliance, config_health, cves, dashboard,
+            acceptance_register, admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status,
+            auth_whoami, builders, caches, commits, compliance, config_health, cves, dashboard,
             deployment_policies, deployments, environments, flakes, framework_requirements,
-            hardening, navigation, nixos_options, poam, scanning, setup_wizard, systems,
-            user_notifications, user_preferences, user_sessions,
+            hardening, navigation, nixos_options, poam, register_export, scanning, setup_wizard,
+            systems, user_notifications, user_preferences, user_sessions,
         },
         status,
         webhook::webhook_handler,
@@ -337,6 +337,21 @@ async fn main() -> anyhow::Result<()> {
             get(poam::list_waivers).post(poam::create_waiver),
         )
         .route("/api/v1/finding-waivers/:id", get(poam::get_waiver))
+        .route("/api/v1/acceptances", get(acceptance_register::list))
+        .route("/api/v1/poams/export", get(poam::export))
+        .route("/api/v1/register/export", get(register_export::export))
+        .route(
+            "/api/v1/acceptances/export",
+            get(acceptance_register::export),
+        )
+        .route(
+            "/api/v1/acceptances/:source/:id/renew",
+            post(acceptance_register::renew),
+        )
+        .route(
+            "/api/v1/acceptances/:source/:id/convert",
+            post(acceptance_register::convert),
+        )
         .route(
             "/api/v1/finding-waivers/:id/status",
             post(poam::decide_waiver),
@@ -414,6 +429,18 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/v1/cves", get(cves::list_cves))
         .route("/api/v1/cves/grouped", get(cves::list_cves_grouped))
+        .route(
+            "/api/v1/cves/inventory/groups",
+            get(cves::list_inventory_groups),
+        )
+        .route(
+            "/api/v1/cves/inventory/members",
+            get(cves::list_inventory_members),
+        )
+        .route(
+            "/api/v1/cves/inventory/pairs",
+            get(cves::list_inventory_pairs),
+        )
         .route("/api/v1/cves/stats", get(cves::get_fleet_stats))
         .route("/api/v1/cves/packages", get(cves::list_package_names))
         .route(
@@ -425,6 +452,14 @@ async fn main() -> anyhow::Result<()> {
             post(cves::trigger_derivation_rescan),
         )
         .route("/api/v1/cves/export", get(cves::export_cves))
+        .route(
+            "/api/v1/cves/batch-detail",
+            post(poam::fleet_cve_batch_detail),
+        )
+        .route(
+            "/api/v1/cves/batch-triage",
+            post(poam::triage_fleet_cves_batch),
+        )
         .route("/api/v1/cves/:cve_id/fleet", get(poam::fleet_cve_detail))
         .route("/api/v1/cves/:cve_id/triage", post(poam::triage_fleet_cve))
         .route("/api/v1/cves/:cve_id", get(cves::get_cve_detail))
@@ -439,6 +474,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/v1/scanning/stats", get(scanning::get_scanning_stats))
         .route("/api/v1/scanning/queue", get(scanning::get_scanning_queue))
+        .route(
+            "/api/v1/scanning/scans",
+            get(scanning::get_scanning_scan_records).patch(scanning::update_scanning_archive),
+        )
         .route(
             "/api/v1/scanning/scans/:scan_id",
             get(scanning::get_scanning_scan_detail),
@@ -493,8 +532,16 @@ async fn main() -> anyhow::Result<()> {
             get(systems::get_system_cve_inventory_page),
         )
         .route(
+            "/api/v1/systems/:id/cve-inventory-sources",
+            get(systems::get_system_cve_inventory_candidates),
+        )
+        .route(
             "/api/v1/systems/:id/cves/:cve_id/justification",
             put(systems::save_system_cve_justification),
+        )
+        .route(
+            "/api/v1/systems/:id/cves/:cve_id/triage",
+            get(poam::system_cve_triage_detail).post(poam::triage_system_cve),
         )
         .route(
             "/api/v1/systems/:id/cve-scan-eligibility",
@@ -507,6 +554,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/systems/:id/hardening",
             get(hardening::get_system_hardening),
+        )
+        .route(
+            "/api/v1/systems/:id/hardening-inventory",
+            get(hardening::get_system_hardening_inventory),
         )
         .route(
             "/api/v1/systems/:id/hardening/justifications",
@@ -934,6 +985,7 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/build-jobs/recent",
             get(builders::list_recent_build_jobs),
         )
+        .route("/api/v1/build-jobs/:id", get(builders::get_build_attempt))
         .route(
             "/api/v1/build-jobs/:id/prioritize",
             post(builders::prioritize_build_job),
@@ -969,7 +1021,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .route(
             "/api/v1/builders/:id/cve-scans/heartbeat",
-            post(builders::heartbeat_cve_scan),
+            post(builders::heartbeat_cve_scan).layer(DefaultBodyLimit::max(
+                cf_protocol::builder::CVE_SCAN_HEARTBEAT_MAX_BODY_BYTES as usize,
+            )),
         )
         .route(
             "/api/v1/builders/:id/cve-scans/complete",

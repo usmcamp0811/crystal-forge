@@ -172,6 +172,45 @@ concurrent revocation prevents the move. Unknown and unauthorized environments
 use the same not-found behavior for scoped callers. The success body is built
 from the transaction's updated row before commit.
 
+### Compliance bundle assignment scope
+
+`GET /systems/:id/compliance` returns each bundle lineage that has an active
+system or environment assignment for the system. Its per-bundle
+`assigned_bundle_version_id` and `assignment_mode` identify the governing
+immutable assignment snapshot. A system assignment takes precedence over an
+environment assignment for the same bundle. The catalog's
+`current_published_version_id` and `current_draft_version_id` do not control
+system applicability or retarget an existing assignment. The bundle summary's
+catalog version and current-version counts remain catalog metadata; they are
+not the system's assigned version.
+
+`GET /compliance/bundles/:id/systems/:system_id/evidence` without `version_id`
+uses that system's effective active assignment version and its exact policy
+membership and overlays. Without an active assignment, it returns not-found;
+inactive assignment history is not authority. With `?version_id=<uuid>`, the
+request inspects precisely that version only when the system's effective
+assignment targets it. It does not substitute the global catalog version.
+
+`report_only` changes deployment enforcement, not compliance evidence or
+remediation. A composite policy in either mode produces an exact-target
+assessment and ordered rule results. A failing report-only assessment remains
+FAIL and can support the same stable finding, waiver, POA&M creation/linking,
+and verification as an enforced FAIL. Deployment authorization selects only
+enforced composite assessments. A POA&M does not turn FAIL into PASS. Changing
+assignment mode does not replace the stable finding or erase POA&M history;
+current actions require an assessment for the effective mode and exact target.
+An older assessment does not become current again if the assignment mode
+changes back; currentness also requires evidence created under the active
+assignment snapshot.
+
+`GET /compliance/bundles/:id/systems` without `version_id` remains a
+single-version convenience alias for the bundle's current published (or draft)
+version. It does not combine systems pinned to other versions. The exact
+`?version_id=<uuid>` form lists only systems whose effective assignment targets
+that version. The catalog `applicable_system_count` keeps its current-version
+unit, consistent with the unversioned bundle-systems alias. A lineage-wide
+assigned-system count would need a separately named contract.
+
 ### Query Parameters
 
 ```bash
@@ -733,10 +772,17 @@ The build queue manages Nix derivation builds.
 
 | Method | Endpoint | Role | Description |
 |--------|----------|------|-------------|
-| GET | `/build-queue` | Viewer+ | Get pending/in-progress builds |
+| GET | `/build-jobs` | Viewer+ | Get a bounded page of pending/in-progress builds |
+| GET | `/build-jobs/recent` | Viewer+ | Get a bounded page of terminal build attempts |
+| GET | `/build-jobs/:id` | Viewer+ | Get one exact visible attempt and its active or completed collection |
 | POST | `/build-queue` | Operator+ | Queue new derivation |
-| GET | `/build-queue/:id` | Viewer+ | Get build status |
 | DELETE | `/build-queue/:id` | Operator+ | Cancel pending build |
+
+The exact build-attempt endpoint applies the caller's environment visibility in
+the primary-key query. It returns `404 Not Found` for both missing attempts and
+attempts outside the caller's visibility scope. This behavior prevents attempt
+identity disclosure. Exact lookup does not expand either paginated list and does
+not treat a UUID as ordinary text search.
 
 ### Build States
 
@@ -841,11 +887,76 @@ GET /api/v1/admin/audit?start_date=2024-01-01&end_date=2024-01-31&actor=john
 
 ## CVE Scan Operations
 
+### Post-build recovery and scanning statistics
+
+Post-build scanning is an event-driven obligation with a bounded recovery
+window. A successful exact NixOS build starts the clock at
+`build_jobs.completed_at`. `scan_schedule_policy.post_build_recovery_window`
+defaults to `168h` (7 days). The schedule GET returns this positive hour/day
+interval; the admin schedule PUT accepts it optionally. Omitting the field
+preserves its stored value atomically, including for older clients and the
+current Scanning Schedule dialog. The database and API reject zero, malformed,
+or over-100-year values so worker interval casts stay valid. The dialog does
+not expose this field.
+
+The build transaction persists post-build intent. Worker maintenance repairs
+unfinished intent after restarts. A legacy build with no intent is eligible for
+fallback discovery only when its authoritative successful build completed
+inside the recovery window. Missing build completion time fails closed.
+Backoff can retry a failed post-build scan only before the deadline. Maintenance
+marks an unresolved persisted obligation `failed` at the deadline, once, with
+`scan_metadata.terminal_reason = post_build_recovery_window_expired`, build
+completion/deadline and previous attempt diagnostics. It does not synthesize
+terminal rows for ancient builds without persisted intent. A live scan keeps
+its execution ownership until its existing lease/recovery protocol settles.
+Scheduled scanning is an independent freshness mechanism; a missed post-build
+obligation is never retried automatically through the post-build path after
+expiration, but periodic and explicit exact scans may still produce later
+evidence. A still-deployed, never-successfully-scanned derivation with an old
+successful build can enter the deployed periodic cadence when due; ancient
+superseded never-scanned builds do not enter this path. Expiration does not
+imply the derivation is secure or scanned.
+
+The operational Scanning cards have these populations:
+
+- **Failed** counts derivations in the operational population whose latest
+  lifecycle is a visible, unarchived failed scan. Archiving hides that row
+  from the attention count; the scan, diagnostics and evidence remain in
+  history. An ancient superseded failure outside the operational population
+  does not add to this count.
+- **Never scanned** counts operational derivations without a successfully
+  completed scan. A failed attempt does not count as completed evidence.
+- **Coverage** divides operational derivations with at least one successfully
+  completed scan by the operational derivation count. It does not count failed
+  attempts as coverage. The operational population is the union of exact
+  currently deployed derivations on active systems, successful builds still
+  inside post-build recovery, and derivations with active scan obligations.
+  Ancient superseded derivations without any such obligation stay in history,
+  not in this denominator. Archiving never removes completed evidence.
+
 ### Scan Diagnostics
 
 | Method | Endpoint | Role | Description |
 |--------|----------|------|-------------|
+| GET | `/scanning/scans` | Admin | Return one bounded Active, Completed, or History scan-record page |
 | GET | `/scanning/scans/:scan_id` | Admin | Return bounded diagnostics for one exact CVE scan |
+
+The collection route accepts `collection=active|completed|history` and a `limit`
+from 1 through 500. `history` requires `system_id` and returns that system's
+bounded revision history without a continuation cursor. Completed requests
+also accept normalized `q` (with `search` retained as an alias), terminal
+`status`, revision class, latest-per-flake, archive visibility, sort, direction,
+and an opaque `after` cursor. The server applies those values to the complete
+collection before counting or paging. Completed rows use deterministic keyset
+order with terminal timestamp and scan ID tie-breakers. Responses include
+`total`, `hidden_archived`, `has_more`, and `next_cursor`.
+
+The versioned cursor binds every normalized request value and the first page's
+terminal high-water tuple. A request with changed filters or ordering must start
+without a cursor. Malformed cursors return 400. A cursor rebound to another
+request returns 400. Newer terminal rows cannot enter continuation pages from an
+existing walk. Archive and restore operations continue to use exact scan IDs;
+including archived rows does not change chronological keyset semantics.
 
 The endpoint returns `scan_id`, current `status`, `scanner_name`, optional
 `scanner_version`, `source_trigger`, an `events` array, and `truncated`. Each
@@ -853,11 +964,13 @@ event contains an immutable row `id`, immutable `execution_id`, and one-based
 `attempt_number` identity, `occurred_at`, normalized `level`, `source`,
 `event_type`, redacted `message`, and an event-level `truncated` flag.
 
-The response uses a fixed chronological limit of 500 events. `truncated=true`
-means later persisted events exist. This endpoint does not provide cursor or
-offset pagination. Clients must not infer that a truncated response contains the
-complete attempt history. Unknown scan IDs return `404`. Non-admin callers
-receive the standard admin authorization failure.
+The response uses a fixed limit of 500 events in attempt and server receipt
+order. The builder-supplied `occurred_at` value is informational and cannot
+reorder lifecycle events. `truncated=true` means later persisted events exist.
+This endpoint does not provide cursor or offset pagination. Clients must not
+infer that a truncated response contains the complete attempt history. Unknown
+scan IDs return `404`. Non-admin callers receive the standard admin authorization
+failure.
 
 Diagnostic messages are untrusted operational data. Builders can omit the
 optional diagnostics field for backward compatibility. The server accepts at
@@ -865,8 +978,11 @@ most 256 prepared events per terminal report, persists at most 2,048 Unicode
 scalar values per event, removes control characters, and applies canonical
 secret redaction before the first database write. Upgraded builders also apply
 their shared credential-redaction policy before request serialization.
-Diagnostics are independent
-from canonical CVE evidence and are not included in the schema-1 evidence digest.
+The heartbeat endpoint additionally accepts up to 16 single-line phase events
+in a 64 KiB body. It renews the fenced lease and appends those events atomically,
+and it deduplicates uncertain retries by execution and event type. Diagnostics
+are independent from canonical CVE evidence and are not included in the schema-1
+evidence digest.
 
 ---
 
@@ -876,34 +992,116 @@ Fleet triage uses exact deployed evidence. The identity is a canonical CVE ID
 plus a canonical package name. Package version is evidence context and is not
 part of the stable finding identity.
 
+The authenticated fleet inventory read also provides bounded register pages:
+
+| Method | Endpoint | Role | Description |
+|--------|----------|------|-------------|
+| GET | `/cves/inventory/pairs` | Viewer+ | Filtered CVE/package rows with `total` and `next_offset` |
+| GET | `/cves/inventory/groups` | Viewer+ | Environment or host aggregates with stable IDs and complete scoped counts |
+| GET | `/cves/inventory/members` | Viewer+ | Exact CVE/package/system/section membership for one group |
+
+These routes apply the caller's environment scope and optional exact
+`environment_id` before grouping or paging. An unauthorized environment yields
+no rows; it never removes the scope restriction. Pair pages accept the existing
+severity, fix, triage, package, search, and sort filters. Group and member
+pages accept the same filters except sort and require
+`group_by=environment|host`. Members require `group_id` for host groups;
+an omitted environment group ID selects unassigned hosts, not all groups.
+`offset` starts at zero; `limit` defaults to 100 and cannot exceed 200.
+`next_offset` is absent after the final page. Each response counts its complete
+authorized filtered set before the limit. Offset pages are separate database
+snapshots; clients must not assert unique notification targets based on a
+multi-page read when membership can change between pages.
+
+Group counts deduplicate CVE/package identities within each group. The same
+pair can appear in several environments and does not become several global
+findings. Severity, exploited, and patchable facets count distinct pairs;
+Current, scheduled-target, and Historical host counts identify separate
+inventory relations. `total_active_hosts` is the authorized environment host
+population, not a scanned or clean-host count. These endpoints do not report
+scan coverage or grant mutation authority. Historical evidence and a missing
+scan are not Current exposure. Existing exact drawer and triage routes remain
+the only way to read and mutate server-resolved CVE decisions.
+
+The [CVE/POA&M continuity contract](../design/CrystalForge/cve-poam-evidence-continuity-design-spec.md#29-acceptance-criteria)
+governs Current CVE authority, baseline continuity, verification, and environment
+membership. TASK-326.2.2 is implementing this contract; this section does not
+assert that all paths are deployed or verified. Config inspection and rollback
+keep their separate retained-artifact authority.
+
 ### System CVE Inventory
 
 | Method | Endpoint | Role | Description |
 |--------|----------|------|-------------|
 | GET | `/systems/:id/cves` | Viewer+ | Return the compatible bare array of current exact findings |
 | GET | `/systems/:id/cve-inventory` | Viewer+ | Return the complete compatibility inventory up to 1,000 rows |
-| GET | `/systems/:id/cve-inventory-page` | Viewer+ | Return a bounded typed exact, legacy, or no-scan inventory page |
+| GET | `/systems/:id/cve-inventory-page` | Viewer+ | Return a bounded exact, read-only mapped-running, historical, or no-scan inventory page |
 
-The paged inventory response contains `authority`,
-`exact_authority_failure`, `source`, `vulnerabilities`, `metadata`, `has_more`,
-`inventory_revision`, and `next_cursor`. `authority` is `exact`, `legacy`, or `no_scan`. `source`
-contains the real scan ID, scanner name and optional version, and completion
-time. The server selects exact authority independently of finding count in one
-read-only repeatable-read transaction. An exact clean scan therefore cannot
-fall back to stale legacy findings.
+The paged inventory response contains `authority`, `exact_authority_failure`,
+`current_state`, `running_target`, `system_id`, `selection`, `attempt`,
+`evidence_representation`, `read_only`, `source`,
+`vulnerabilities`, `metadata`, `has_more`, `inventory_revision`, and
+`next_cursor`. `authority` is `exact`, `mapped_running`, `legacy`, or `no_scan`.
+`source` contains
+the real scan ID, scanner name and optional version, and completion time.
+`attempt` is optional and records the newest scan ID, derivation ID, persisted
+status, and creation time for the selected exact derivation. It is ordered by
+`COALESCE(created_at, scheduled_at) DESC NULLS LAST, id DESC` in the same read
+transaction. The newest attempt is independent of `source`: a newer pending,
+in-progress, or failed scan does not replace completed evidence or authorize
+triage. An unmapped Current selection has neither an exact attempt nor a source.
+The attempt does not change inventory pagination or the source revision. The
+client shows a "newer attempt" notice only when the attempt's creation time is
+after the selected source's completion time. An older or undated attempt does
+not claim to be newer.
 
-When exact authority is unavailable, the server selects the latest completed
-legacy scan under the bounded `view_system_vulnerabilities` semantics. A
-completed legacy scan with no findings returns `legacy` with an empty array. No
-usable completed scan returns `no_scan`. Sources are never unioned. Legacy
-findings can include ordinary system justification state, but never
-server-issued exact remediation context. The pre-existing ordinary system
-justification API continues to accept a qualifying legacy finding. That write
-does not create exact remediation authority. POA&M creation, patch scheduling,
-finding attach/link/reopen, verification, and closure continue to resolve
-retained generation, store path, verified lineage, certified snapshot,
-schema-1 scan, and immutable observation authority independently and fail
-closed for legacy or no-scan input.
+For `selection=current`, the server selects the latest reported state before
+checking its validity. It counts every derivation whose output matches that
+report in the registered flake and effective configuration; the bounded
+candidate menu does not prove uniqueness. A unique mapping selects that exact
+derivation's newest completed schema-1 scan by `completed_at DESC, id DESC`.
+For CVE-domain Current authority, the latest observation must have a generation,
+a usable store path, and true generation/store agreement. The mapping must
+identify exactly one NixOS derivation in the registered flake and effective
+configuration. Its newest completed schema-1 scan is the exact source. The
+shared `view_current_cve_authority` is the target authority for inventory,
+fleet/triage, link, and verification paths. Retained evaluation-generation
+provenance is optional; a missing or unavailable Config artifact does not make
+this exact CVE source read-only. The origin of activation and distance from
+flake head do not change CVE authority. Server-owned external retention can
+still supply extra provenance; it is not a prerequisite for CVE mutation and
+must not fabricate a CF deployment or evaluation artifact.
+
+`mapped_running_read_only_scan` is a compatibility display state for a uniquely
+mapped scan that does not qualify as exact Current CVE authority; it is not a
+permanent state solely because retained proof is missing. A unique target without
+an eligible scan remains `mapped_running_no_scan` or `no_current_scan` as
+applicable. `no_running_report`, `invalid_running_report`, `unmapped_running`,
+and `ambiguous_running` remain source-less `no_scan` states.
+`system_id` is returned on paged responses and `running_target` contains only
+the unique derivation ID, registered commit hash, trusted reported generation
+when bound to the output, and report time. An absent source never claims clean;
+a completed scan with zero eligible findings retains its source and totals.
+Unsupported enum values make older clients fail to parse conservatively instead
+of treating mapped-running evidence as fully authorized `exact` evidence.
+
+Historical `retained_generation` and `exact_derivation` selections remain
+exactly bound and read-only. Their evidence can be schema-1 observations or a
+schema-0 historical projection, but is never promoted to Current authority.
+Clients select them with `target=retained_generation&target_id=<snapshot UUID>`
+or `target=exact_derivation&target_id=<derivation integer>`. Current is the
+default and can be requested explicitly with `target=current`; it has no
+`target_id`.
+Sources are never unioned. Historical findings can include ordinary system
+justification state, but never server-issued exact remediation context. The
+mapped-running read-only tier also omits that context. POA&M creation, patch
+scheduling, finding attach/link/reopen, verification, and closure re-resolve
+latest-first exact Current CVE authority on the server under writer locks.
+Missing or inconsistent latest state, ambiguous or foreign mapping, missing
+completed schema-1 scan, wrong-derivation or historical evidence, and unauthorized
+scope fail closed. No source is not a clean scan. Inventory GET requests run in
+read-only repeatable-read transactions and do not repair retained proof, enqueue
+scans, run Nix, or persist deployments.
 
 The paged route accepts `limit` from 1 through 500 with a default of 100, an opaque
 `after` cursor, `q` up to 200 normalized characters, comma-separated `severity`
@@ -942,13 +1140,204 @@ value.
 
 | Method | Endpoint | Role | Description |
 |--------|----------|------|-------------|
+| GET | `/poams` | Viewer+ | One visibility-filtered page of plan summaries with batched register scope and progress metadata |
+| GET | `/acceptances` | Viewer+ | Source-owned policy waiver and CVE disposition decisions, scoped and paged before presentation |
+| GET | `/acceptances/export?format=csv\|xlsx` | Viewer+ | Download the full authorized, filtered acceptance register |
+| POST | `/acceptances/:source/:id/renew` | Source-specific | Renew one accepted source decision through its owning service |
+| POST | `/acceptances/:source/:id/convert` | Source-specific | Replace one acceptance with an atomically linked policy or CVE POA&M |
 | POST | `/poams/cves` | Operator+ | Create a POA&M from one server-issued exact occurrence |
+| POST | `/cves/batch-detail` | Viewer+ | Hydrate at most 100 selected exact CVE/package pairs and per-environment evidence tokens, including pairs from unloaded list pages |
+| POST | `/cves/batch-triage` | Operator+ | Apply one atomic disposition to selected exact pairs in selected environments; schedule grouping is `ONE`, `PER_PACKAGE`, or `PER_ENVIRONMENT` |
 | GET | `/poams/relationships/cves?system_id=:id` | Viewer+ | Return bounded current exact occurrences and POA&M relationships |
 | POST | `/poams/:id/cve-findings` | Operator+ | Link one current exact occurrence |
 | DELETE | `/poams/:id/cve-findings/:finding_id?revision=:revision` | Operator+ | Retire one exact finding link |
 | POST | `/poams/:id/verify` | Operator+ | Seal exact current verification evidence |
 | POST | `/poams/:id/close` | Operator+ | Verify and close atomically |
 | POST | `/poams/:id/reopen` | Operator+ | Restore the exact closure finding set |
+
+The batch hydration request contains `pairs: [{cve_id,
+canonical_package_name}]`. It fails the entire request if any selected pair
+lacks visible current exact evidence. For each applicable pair/environment the
+response includes source-backed severity, disposition state, exact host count,
+and an opaque evidence token. The browser does not send host IDs as mutation
+authority. The mutation request contains the same bounded exact pairs,
+selected `environment_ids`, a complete per-pair/environment set of
+`expected_tokens`, `skip_existing`, and either `accept_risk` (one justification
+and optional review date) or `schedule_patch` (typed assignee, target date,
+optional plan, milestone toggle, and grouping). The server limits the request
+to 100 pairs and 100 environments. It reloads authorization, recomputes exact
+subjects under ordered locks, compares tokens, and commits every accepted
+decision, grouped POA&M, exact finding link, and audit event in one transaction.
+Changed evidence returns HTTP 409; no partial mutation commits. An unselected
+environment is unchanged. Existing schedules are skipped rather than
+overwritten; accepted decisions are skipped by default and require explicit
+`skip_existing: false` for replacement. A shared POA&M may contain multiple
+exact CVE/package identities, but never policy finding history. Existing
+single-CVE routes retain their independent contract.
+
+The register response retains list pagination (`limit`, `offset`, `has_more`,
+`next_offset`) and includes exact environment, system, bundle lineage, bundle
+version and assignment-version IDs, first requirement/CVE, milestone totals,
+and last activity for each visible plan. Each `systems` entry gives the visible
+`system_id`, current `hostname`, and current `environment_id` for one system
+in `system_ids`. The server applies the same actor-scope filter to both fields.
+Current membership is not historical link-time scope. A moved host hidden from
+the reader cannot supply a hostname in either field. The first requirement/CVE
+describes the page-visible plan, not one particular environment in a plan that
+spans environments. The register does not turn a POA&M into a risk
+acceptance. CVE-only plans can have no policy finding, and version IDs must not
+be replaced by a bundle's catalog-current pointer. The register currently
+does not return whole-collection work-queue facets or risk-acceptance records;
+clients must label counts computed from loaded pages as partial.
+The first CVE comes from a visible current finding, or from the caller's
+scheduled environment disposition if its last current member has moved out.
+For a non-admin reader, the last-activity timestamp excludes finding-specific
+events that are not known to be in scope. If authorization changes between
+the list and its context read, the server rejects the entire page instead of
+returning a shortened page with an unsafe continuation offset; retry the read.
+
+The approved [register acceptance-action contract](../design/CrystalForge/cve-poam-evidence-continuity-design-spec.md#32-unified-risk-acceptance-register-actions)
+does not make this POA&M list an acceptance reader. Policy waivers and CVE
+accepted dispositions keep their own stable source identities, source-specific
+version checks, authorization rules, audit history, and lifecycle. The GET
+`/acceptances` projection tags each entry as `policy_waiver`, `cve_host`, or
+`cve_environment` and returns its exact source UUID. Its `human_id` (`RA-####`)
+identifies a renewal chain: distinct predecessor and successor source UUIDs
+share that number. An unrelated acceptance chain gets a new number. The number
+does not authorize mutation. CVE decision UUIDs are immutable version
+identities; `waiver_updated_at` is the waiver status-change version to pair
+with its UUID for later optimistic checks. The list accepts `source`, `status`,
+`environment_id`, `limit` (1–100, default 25), nonnegative `offset`, and an
+optional literal case-insensitive `search` of at most 256 bytes. Search matches
+RA ID, exact-version policy title, trusted requirement ID, CVE ID, package,
+hostname, directly stored environment name, or justification after actor
+scoping but before total and pagination. A missing source label stays absent.
+It returns `items`, complete scoped `total`, `limit`, `offset`, and `has_more`.
+Admin can read policy waivers; Viewer and Operator can read CVE decisions only
+in currently assigned environments. Host decisions retain `system_id`; the
+host's current environment is used for read visibility, not presented as its
+original historical scope. Host-scoped entries include `system_hostname` from
+the authorized current system; environment decisions include `environment_name`
+but have no hostname. Policy waiver entries expose the name of their recorded
+policy version and an optional trusted requirement ID from that exact version.
+These labels do not change the source's original scope. Retired CVE decisions
+retain `retired_at` and `retirement_reason`. They are not current accepted
+authority.
+Waivers have no invented review date; CVE decisions have no invented
+authorization expiry. This endpoint grants no mutation permission.
+
+`GET /acceptances/export` accepts `format=csv` or `format=xlsx` and the
+`source`, `status`, and `environment_id` filters from `/acceptances`. It ignores
+list search and pagination. The server rechecks the active reader role and
+environment memberships. It pages all matches in one repeatable-read,
+read-only snapshot. It rejects the entire download above 1,000 authorized
+decisions (HTTP 422, `export_limit`). CSV and XLSX contain the same rows. A
+separate Risk Acceptance ID column retains the chain number. It never replaces
+the typed source UUID.
+The source UUID, stored system or environment UUID, current scope name,
+justification, native status, canonical CVE identity, policy finding UUID,
+and source-specific dates come from that snapshot. A retired CVE decision
+is labeled `retired accepted`, or `converted (retired accepted)` when a
+durable plan replacement exists. Its source status remains `accepted` in the
+register read. A converted policy
+waiver is labeled `converted (revoked)`; its native status remains `revoked`.
+A CVE disposition has
+no linked scan UUID in its source
+record; the scan cell is empty. A policy waiver's review deadline is separate
+from its authorization expiry; a CVE review deadline is the recorded
+`review_date` (the renewal service sets it to server-clock date plus 90 days),
+and CVEs have no authorization
+expiry. Spreadsheet formula-like fields are escaped. Downloads use fixed
+filenames, `Content-Disposition: attachment`, `Cache-Control: private, no-store`,
+and the CSV or XLSX media type. Invalid format/filter returns HTTP 400;
+unavailable source context or serialization rejects the entire response.
+This route exports acceptances only. It does not claim to export POA&M plans
+or OSCAL documents.
+
+`GET /poams/export?format=csv|xlsx` accepts the `/poams` list filters and
+ignores `limit` and `offset`. The server rechecks current reader roles and
+environment membership, then loads every matching POA&M and its recorded
+finding links in one repeatable-read snapshot. It rejects more than 1,000
+authorized plans (HTTP 422, `export_limit`), hidden linked evidence, or an
+unrepresentable scope rather than returning a partial file. CSV and real XLSX
+use the same source UUID and rows. Multi-system or multi-environment scopes
+contain the exact recorded identity/name arrays; a plan without a recorded
+scope is marked `unspecified`. The export does not turn the first displayed
+requirement or CVE into complete technical evidence. Text that could be a
+spreadsheet formula is neutralized in both files. The browser offers these
+downloads only when its loaded-only filters do not narrow the server selection;
+grouping and sorting do not alter the exported identity set.
+The POA&M status filter also accepts `active`, meaning every status except
+`completed`; the browser's Closed filter maps to the native `completed` value.
+Source review dates are date-only CSV/XLSX cells, not midnight timestamps.
+
+`GET /register/export?format=csv|xlsx|oscal-json|oscal-xml` selects both
+source families by default. Optional `record_type=all|plans|acceptances`
+selects both, only plans, or only acceptance decisions in one read-only
+repeatable-read authorization snapshot. An excluded family's filters return
+HTTP 400 instead of being silently ignored; an unsupported record type or
+acceptance status (including `accepted_historical`) also returns HTTP 400.
+`poam_status`, `poam_risk`, `poam_owner`, `poam_system_id`,
+`poam_policy_lineage_id`, `poam_bundle_id`, `poam_requirement`,
+`poam_overdue`, and `poam_q` filter plans. `acceptance_source`,
+`acceptance_status`, and `acceptance_environment_id` filter decisions.
+The `accepted_or_converted` decision filter also includes expired policy
+waiver history. Inclusion does not authorize renewal: the source service
+rechecks current approval authority and evidence before any mutation.
+`accepted_current` includes persisted accepted waivers without a durable
+conversion and accepted CVE decisions without retirement or conversion.
+An elapsed waiver `expires_at` does not erase the recorded accepted decision:
+it remains in this export, but does not renew or confer an authorization grant.
+`accepted_or_converted` remains the source-history view for Closed; it is not
+an alias for current authorization.
+Filters do not silently reduce the other family. The combined cap is 1,000
+source records; duplicate presentation-group identities remain one record.
+CSV and genuine XLSX repeat exact source UUIDs for each recorded evidence
+link. Acceptance rows have a separate human RA ID; plan rows do not. Both
+formats neutralize spreadsheet formulas. OSCAL JSON and XML represent the
+same authorized source records as valid OSCAL 1.1.2
+POA&M items. A Crystal Forge-namespaced property carries the human RA ID;
+OSCAL `source-id` retains the typed source identity. Source
+decision justification is a rationale, not a measured risk impact. A generated
+document UUID, version 1 and the actual export-generation timestamp describe
+the output document, not an assessment or approval. Source dates remain
+date-only; approval user/time appear only when stored. The server rejects an
+incomplete or hidden linked context instead of issuing a partial export.
+An empty authorized OSCAL selection returns HTTP 204 with no file. OSCAL 1.1.2
+requires at least one POA&M item, so the server does not add a fictitious item.
+
+Renew uses a new review date from the
+server clock and a deadline 90 days later; it does not edit original approval.
+Convert must atomically create or compatibly reuse a source-family plan,
+replace only the selected effective decision, and record the relationship.
+No separate waiver-to-plan frontend write sequence is authorized. These two
+commands require an authenticated session and a matching CSRF cookie/header.
+`source` is `policy_waiver`, `cve_host`, or `cve_environment`, and `:id` is the
+source decision UUID. Both bodies require `expected_source_id` equal to `:id`.
+Policy waivers additionally require `expected_waiver_updated_at`; CVE rows use
+their immutable UUID as their source version. A missing or stale version fails
+without mutation. The server rechecks the source-specific role, complete scope,
+and current technical evidence after it takes its writer locks.
+
+Renewal returns `source`, `predecessor_id`, `successor_id`, and
+`review_deadline`. The server uses its clock to set the deadline 90 calendar
+days after review. The policy-waiver successor has a separate `review_due_at`;
+its original approval and authorization expiry are not rewritten. The CVE
+successor preserves the original approval attribution, while the reviewer,
+timestamp, evidence, and old/new review dates remain in committed audit data.
+An elapsed policy authorization does not become valid by renewal.
+
+Conversion requires `poam` with the existing source-family creation metadata.
+Policy-family requests may additionally select `reuse_poam_id`; CVE-family
+requests use their existing source-owned compatibility rules and reject that
+field. The response includes `source`, `predecessor_id`, `poam_id`, and
+`poam_reused`; CVE responses also include the scheduled `successor_id`.
+Policy conversions store an immutable waiver-to-plan replacement relationship.
+CVE conversions retain a retired accepted decision, an active scheduled
+decision, and a same-transaction replacement audit. The server never edits a
+technical finding to PASS or closes the resulting plan. A repeat of the exact
+committed command returns its prior result; a mismatched command or changed
+permission does not create another plan.
 
 All routes require an authenticated session. Mutation routes require matching
 CSRF cookie and header values. Operator and Admin roles can mutate. Viewer can
@@ -962,10 +1351,12 @@ request-time actor snapshot was authorized.
 
 The create and link bodies contain an opaque `observation` with `system_id`,
 `scan_id`, `occurrence_derivation_path`, `canonical_cve_id`, and
-`canonical_package_name`. The server re-resolves this context against the latest
-completed evidence-schema-1 scan for the exact retained deployed generation.
+`canonical_package_name`. The server re-resolves this context against the newest
+completed schema-1 scan for the exact observed Current derivation.
 Clients must not construct or modify this context. Create accepts at most 100
-assignment-version references. A POA&M accepts at most 100 active findings.
+assignment-version references. Policy findings retain their 100-active-link
+limit. Exact-CVE links can exceed 100 as current environment membership changes;
+bounded read pages and verification-item batches do not truncate closure proof.
 Relationship history defaults to 100 rows, accepts a limit from 1 through 100,
 and returns no more than 1,000 current exact occurrence rows.
 
@@ -977,14 +1368,19 @@ waiting mutation.
 Link, unlink, verify, close, reopen, update, and transition operations use the
 current POA&M `revision`. A stale revision returns `409 stale_revision`. Exact
 finding links retain an immutable server-resolved link-time baseline: scan,
-derivation, completion time, retained generation, target store path, occurrence
-derivation path, and observed package version. The API does not accept baseline
-fields from clients. Exact verification returns `pass` only when a strictly
-newer authoritative schema-1 scan for unchanged retained deployment lineage
-omits the exact CVE/package occurrence. The baseline scan and scans completed
-before it cannot pass verification. Present, whitelisted, justified, missing,
-legacy, changed-deployment, or inconsistent evidence does not pass. No newer
-evidence and changed lineage return `missing`. A rejected close records and
+derivation, completion time, observed generation, target store path, occurrence
+derivation path, observed package version, and optional retained-generation ID.
+Existing non-null retained IDs remain historical proof. The API does not accept
+baseline fields from clients. Exact verification returns `pass` only when a
+strictly newer completed schema-1 scan of the exact observed Current derivation
+omits the canonical CVE/package occurrence. The baseline scan and scans completed
+before it cannot pass verification. A changed commit, generation, derivation,
+package version, or activation origin alone does not return `missing`. Present,
+whitelisted, justified, legacy, historical, unavailable, or inconsistent evidence
+does not pass. A clean newer scan makes remediation a candidate; it does not
+close the POA&M. If both whitelisted and unwhitelisted paths for the same
+canonical pair exist in that scan, the unwhitelisted path determines the
+verification result. A rejected close records and
 returns the committed verification attempt as `412 closure_not_ready`; clients
 must continue with the returned committed revision.
 
@@ -994,9 +1390,10 @@ detail and `cve_items` to verification attempts and verify/close results. Older
 clients must ignore these fields. New clients must default absent fields to an
 empty array while servers are upgraded. Exact finding rows include stable
 system/CVE/package identity and evidence context. Exact verification rows also
-include the observed package version, scan, deployed generation binding,
-result, and bounded diagnostic detail. Each row distinguishes the immutable
-baseline evidence from the current verification evidence. Both cited scans are
+include the observed package version, scan, observed generation and optional
+retained-generation provenance, result, and bounded diagnostic detail. Each
+row distinguishes immutable baseline evidence from current verification
+evidence. Both cited scans are
 retained for audit while their finding or verification records exist.
 
 POA&M detail returns active and retired exact finding links. Retired rows retain
@@ -1078,8 +1475,8 @@ environments to OPEN or ACCEPTED and submit when POA&M lifecycle rules permit.
 When scheduled rows share one reusable POA&M, the editor initializes the shared
 draft from this metadata so an unchanged scheduled row survives mixed edits.
 
-The POST body contains one action for every currently visible affected
-environment:
+The POST body contains one action for every currently visible environment that
+has at least one Current exact subject:
 
 ```json
 {
@@ -1103,39 +1500,49 @@ environment:
 `poam` is required exactly when at least one action is `schedule_patch`. The
 assignee must be a server-validated user or OIDC group. Clients do not send host
 IDs. After writer locks and a fresh actor-membership check, the server recomputes
-the complete visible affected-environment set. The request environment IDs must
-equal that set. Omitted, extra, forged, hidden, or duplicate IDs return the same
-typed evidence conflict without mutation and without identifying hidden
-environments. The server includes every current exact subject in each
-environment. All scheduled subjects use one POA&M. ACCEPTED records operator
-rationale only; it does not create remediation links or PASS evidence.
+the complete visible Current exact environment set. The request environment IDs
+must equal that set. Scheduled-target-only and Historical environments do not
+enter the action set. Omitted, extra, forged, hidden, or duplicate IDs return
+the same typed evidence conflict without mutation and without identifying
+hidden environments. The server includes every Current exact subject in each
+actionable environment. All subjects selected for SCHEDULED use one POA&M.
+ACCEPTED records operator rationale only; it does not create remediation links
+or PASS evidence.
 
-Authenticated CVE dashboard reads combine retained deployed-generation
-schema-1 occurrences with bounded legacy inventory for systems that lack exact
-authority. An exact clean scan suppresses stale legacy findings. Rows and fleet
-statistics expose separate exact and legacy-affected counts; fleet statistics
-also count visible active no-scan systems. Active dispositions apply only to
-exact canonical CVE, canonical package, and environment identities. A row with
-any legacy subject is `inventory_only` and cannot imply accepted risk or
-scheduled remediation. Legacy `system_cve_justifications` rows do not determine
-list status. Admin reads cover the fleet. Viewer and Operator reads first limit
-subjects to current `user_environment_memberships`. Scoped reads exclude
-unassigned systems and do not disclose hidden environment names, counts,
-statuses, package names, CVE presence, or fleet-wide justification rows. The
-legacy `GET /cves/:cve_id` returns the alphabetically first visible canonical
-package row and returns `404` when the CVE is absent or hidden. Lists return only
-visible rows.
+Authenticated CVE dashboard reads classify inventory as Current exact deployed
+findings, exact active scheduled deployment targets, or retained Historical
+evidence. An exact clean scan suppresses stale compatibility findings. Rows and
+fleet statistics expose separate Current, Scheduled deployment target, and
+Historical counts. Compatibility `affected_count` is the distinct union of
+Current and Scheduled deployment target systems. Historical systems do not
+contribute to that count. Fleet statistics also count visible active no-scan
+systems.
 
-A row is `accepted` only when all affected environments are
-ACCEPTED. A row is `scheduled` only when all affected environments are
-SCHEDULED. Any OPEN or mixed state is `outstanding`. Grouped counts, list
+Active dispositions apply only to Current exact canonical CVE, canonical
+package, and environment identities. Scheduled-target-only and Historical-only
+rows are `inventory_only`. Historical evidence on a row that also has Current
+exact subjects does not remove mutation authority from those Current exact
+subjects. Scheduled deployment intent does not imply the SCHEDULED triage state.
+Legacy `system_cve_justifications` rows do not determine list status. Admin reads
+cover the fleet. Viewer and Operator reads first limit subjects to current
+`user_environment_memberships`. Scoped reads exclude unassigned systems and do
+not disclose hidden environment names, counts, statuses, package names, CVE
+presence, or fleet-wide justification rows. The legacy `GET /cves/:cve_id`
+returns the alphabetically first visible canonical package row and returns `404`
+when the CVE is absent or hidden. Lists return only visible rows.
+
+A row is `accepted` only when all Current exact affected environments are
+ACCEPTED. A row is `scheduled` only when all Current exact affected environments
+are SCHEDULED. Any OPEN or mixed Current exact state is `outstanding`. A row
+without Current exact subjects is `inventory_only`. Grouped counts, list
 filters, export/list responses, and fleet statistics consume this conservative
-summary. Package cards count distinct affected systems per package after active
-filters. Fleet statistics count distinct affected systems across scoped mixed
-inventory; they do not sum per-CVE counts. CVE totals count canonical
-CVE/package inventory rows. The exact mutation rollup keeps its more precise
-`partial`/MIXED state and exact-matches both the canonical CVE and canonical
-package when it loads installed version, fixed version, and fix status.
+summary. Package cards count distinct Current-or-Scheduled systems per package
+after active filters. Fleet statistics count distinct systems across the scoped
+Current-or-Scheduled union; they do not sum per-CVE counts. CVE totals count
+canonical CVE/package inventory rows. The exact mutation rollup keeps its more
+precise `partial`/MIXED state and exact-matches both the canonical CVE and
+canonical package when it loads installed version, fixed version, and fix
+status.
 
 The successful response contains transaction-owned `detail`, `detail_scope`,
 `poam_id`, and `poam_reused`; response construction completes before the
@@ -1143,24 +1550,42 @@ mutation commits. `detail_scope` is `exact_mutation_subjects`. The returned
 `detail` excludes legacy and unassigned inventory rows. A client must refetch
 the fleet inventory endpoint after success before it renders the drawer again.
 Repeating an identical accepted-risk request does not retire and recreate its
-disposition history. Repeating a schedule request reuses an existing POA&M only
-when its complete active exact-finding set equals the recomputed scheduled
-subjects plus links that another action in the same request explicitly retires.
-This permits one atomic request to retain scheduled coverage in one environment
-and accept or open another environment. All CVE, package, domain, and semantic
-POA&M metadata must also match. A schedule-only subset never reuses a stale
-superset.
+disposition history. Repeating a schedule request reuses a compatible active
+POA&M when all current affected environment-owned subjects are covered.
+Historical clean or moved-out links may remain in the episode; they do not
+count as current subjects or block reuse merely because the link set is larger.
+Other actions in the same request may retire their own current ownership
+atomically. Canonical CVE, package, domain, host-override precedence, and
+semantic POA&M metadata must still match. Server-owned bounded reconciliation
+adds newly affected subjects idempotently after relevant scan, state,
+environment, and disposition changes, with periodic repair and post-lock
+rechecks. It must not create duplicate active remediation, overwrite host
+overrides, or treat missing evidence as clean.
+
+An authorized A→B environment move retires A's environment-owned active CVE
+link in the same transaction and preserves its immutable baseline as history.
+An active A schedule may temporarily reference an open POA&M with no active
+findings when its last member moved; later exact A subjects reuse that episode.
+A direct host override stays with the system. B may schedule a distinct POA&M.
+Non-admin A readers can inspect A's historical finding ID but cannot search
+for the moved host's current B hostname or inspect its current B environment.
+Reconciliation attaches at most 100 missing subjects per page and repeats until
+coverage is complete. Verification writes bounded 100-item pages within one
+transaction and never seals a partial subject set as successful closure.
 
 Closing a fleet-created POA&M retires its active SCHEDULED dispositions with
 its exact links. A later recurrence therefore reads as OPEN, not SCHEDULED by a
 completed POA&M. Reopen restores SCHEDULED only when each environment's current
-exact subject set equals its closure set and no active disposition conflicts.
+current affected owned subjects are covered by restored links and no active
+disposition conflicts. Historical closure members need not remain affected.
 Systems without an environment restore their exact links without an
 environment disposition. Unlinking an environment's final active exact link
 retires that environment's SCHEDULED disposition and does not change another
 environment's disposition. Fleet reads suppress a SCHEDULED disposition when
-its POA&M is completed or its active links no longer equal current exact
-subjects.
+its POA&M is completed or its current affected environment-owned subjects are
+not covered by active links. Extra historical links do not invalidate current
+coverage. Closure re-resolves current subjects; a completed POA&M cannot
+silently reopen on recurrence.
 
 The following conflict codes are significant:
 

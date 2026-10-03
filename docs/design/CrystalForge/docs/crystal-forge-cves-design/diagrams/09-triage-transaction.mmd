@@ -1,0 +1,25 @@
+sequenceDiagram
+    actor Operator
+    participant UI as Fleet editor
+    participant Service as Triage service
+    participant DB as PostgreSQL
+    Operator->>UI: Submit all visible Current exact environments
+    UI->>Service: Pair, environment actions, optional POAM draft
+    Service->>Service: Validate action shape and bounds
+    Service->>DB: Begin transaction and lock canonical CVE key
+    Service->>DB: Resolve initial exact subjects
+    Service->>DB: Lock sorted environment and system scope
+    Service->>DB: Lock policy and exact finding keys, then rows
+    Service->>DB: Reload active actor, roles, and memberships
+    Service->>DB: Re-resolve Current subjects and overrides
+    alt Scope or authority changed
+        Service->>DB: Roll back
+        Service-->>UI: Typed conflict; no triage mutation committed
+    else Exact action set remains valid
+        Service->>DB: Reuse or create one compatible POAM
+        Service->>DB: Retire prior decisions and affected links
+        Service->>DB: Insert new decisions, baselines, and audit
+        Service->>DB: Build exact-subject response and commit
+        Service-->>UI: Committed result and reuse metadata
+        UI->>Service: Refetch full fleet inventory
+    end

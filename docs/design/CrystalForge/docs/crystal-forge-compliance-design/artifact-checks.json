@@ -1,0 +1,39 @@
+{
+  "generated_at_utc": "2026-09-23T15:54:31.296646+00:00",
+  "kind": "Generated document/package checks only",
+  "checks": {
+    "numbered_sections_1_through_26": true,
+    "main_markdown_fences_balanced": true,
+    "ledger_markdown_fences_balanced": true,
+    "all_source_references_defined": true,
+    "fourteen_inline_and_standalone_diagrams_agree": true,
+    "all_json_files_parse": true,
+    "unique_sequential_register_ids": true,
+    "all_register_cross_references_resolve": true,
+    "all_regression_scenarios_marked_unexecuted": true,
+    "companion_files_unchanged_during_build": true,
+    "same_head_at_final_connector_read": true,
+    "every_gap_has_a_regression_scenario": true,
+    "all_source_urls_pin_reviewed_revision": true,
+    "relative_readme_links_resolve": true,
+    "markdown_table_column_counts_match": true,
+    "no_unresolved_template_placeholders": true
+  },
+  "explicitly_not_validated": [
+    "Application behavior",
+    "SQL execution",
+    "Role and CSRF enforcement at runtime",
+    "Mermaid parser syntax or rendering",
+    "Visual design parity",
+    "Export standards schema conformance"
+  ],
+  "counts": {
+    "sections": 26,
+    "gaps": 32,
+    "regression_scenarios": 80,
+    "cross_view_contracts": 22,
+    "decisions": 15,
+    "diagrams": 14,
+    "source_references": 25
+  }
+}

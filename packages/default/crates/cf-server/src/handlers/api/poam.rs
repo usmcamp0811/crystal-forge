@@ -10,7 +10,7 @@ use axum::{
         Path, Query, State,
         rejection::{JsonRejection, PathRejection, QueryRejection},
     },
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
@@ -23,8 +23,9 @@ use crate::handlers::api::{auth_session::validate_csrf, rbac::extract_request_or
 use crate::models::poam::*;
 use crate::queries::poam::user_environment_ids;
 use crate::services::poam::{self, PoamActor, PoamError, SystemClock};
+use crate::services::register_poam_tabular::{self, ExportError};
 
-fn error_response(error: PoamError) -> Response {
+pub(super) fn error_response(error: PoamError) -> Response {
     let (status, code, message, details) = match error {
         PoamError::NotFound => (
             StatusCode::NOT_FOUND,
@@ -63,7 +64,7 @@ fn error_response(error: PoamError) -> Response {
         .into_response()
 }
 
-async fn actor(
+pub(super) async fn actor(
     pool: &PgPool,
     user: crate::auth::extractors::AuthenticatedUser,
     headers: &HeaderMap,
@@ -87,7 +88,7 @@ async fn actor(
     })
 }
 
-fn csrf(headers: &HeaderMap) -> Result<(), Response> {
+pub(super) fn csrf(headers: &HeaderMap) -> Result<(), Response> {
     validate_csrf(headers).map_err(|_| {
         (
             StatusCode::FORBIDDEN,
@@ -141,6 +142,87 @@ fn path_body<T>(path: Result<Path<T>, PathRejection>) -> Result<T, Response> {
     })
 }
 
+/// Selects a complete POA&M register download and its existing list filters.
+#[derive(Deserialize)]
+pub struct PoamExportQuery {
+    /// Chooses `csv` or `xlsx`.
+    pub format: String,
+    /// Reuses the server-side register filters; page bounds do not limit export.
+    #[serde(flatten)]
+    pub filters: PoamListQuery,
+}
+
+/// Downloads the complete authorized POA&M selection as CSV or Excel XLSX.
+///
+/// The reader rechecks current roles and scope and collects all pages and
+/// persisted finding links in one snapshot. An ambiguous or hidden source
+/// scope fails the whole request instead of producing partial evidence.
+pub async fn export(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    query: Result<Query<PoamExportQuery>, QueryRejection>,
+) -> Response {
+    let Ok(Query(query)) = query else {
+        return error_response(PoamError::Validation(
+            "invalid_query",
+            "Invalid POA&M export query".into(),
+        ));
+    };
+    if query.format != "csv" && query.format != "xlsx" {
+        return error_response(PoamError::Validation(
+            "invalid_format",
+            "Unsupported export format".into(),
+        ));
+    }
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(actor) => actor,
+        Err(response) => return response,
+    };
+    let output = match register_poam_tabular::export(&pool, &actor, &query.filters, &SystemClock)
+        .await
+    {
+        Ok(output) => output,
+        Err(error) => {
+            let (status, code) = match error {
+                ExportError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
+                ExportError::InvalidQuery => (StatusCode::BAD_REQUEST, "invalid_query"),
+                ExportError::TooManyRows => (StatusCode::UNPROCESSABLE_ENTITY, "export_limit"),
+                ExportError::AmbiguousScope => {
+                    (StatusCode::UNPROCESSABLE_ENTITY, "incomplete_scope")
+                }
+                ExportError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "export_unavailable"),
+            };
+            return (
+                status,
+                Json(json!({"error":code,"message":error.to_string()})),
+            )
+                .into_response();
+        }
+    };
+    let download = if query.format == "csv" {
+        output.csv
+    } else {
+        output.xlsx
+    };
+    (
+        [
+            (header::CONTENT_TYPE, download.content_type),
+            (
+                header::CONTENT_DISPOSITION,
+                if query.format == "csv" {
+                    "attachment; filename=poam-register.csv"
+                } else {
+                    "attachment; filename=poam-register.xlsx"
+                },
+            ),
+            (header::CACHE_CONTROL, "private, no-store"),
+        ],
+        download.bytes,
+    )
+        .into_response()
+}
+
 /// Lists POA&Ms visible to the authenticated actor.
 ///
 /// Returns a structured error response when authentication, query validation,
@@ -164,7 +246,7 @@ pub async fn list(
         Ok(v) => v,
         Err(e) => return e,
     };
-    match poam::list(&pool, &actor, &query, &SystemClock).await {
+    match poam::list_register(&pool, &actor, &query, &SystemClock).await {
         Ok(v) => Json(v).into_response(),
         Err(e) => error_response(e),
     }
@@ -566,6 +648,125 @@ pub async fn triage_fleet_cve(
         Err(response) => return response,
     };
     match poam::triage_fleet_cve(&pool, &actor, &cve_id, body, &SystemClock).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+/// Hydrates authoritative batch metadata for exact CVE/package identities.
+///
+/// The browser's selection may include identities from unloaded pages; this
+/// endpoint re-derives severity, applicable environments, and existing
+/// disposition state for exactly the requested identities.
+///
+/// Returns a structured error response for malformed input, hidden scope, or
+/// persistence failures.
+pub async fn fleet_cve_batch_detail(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    body: Result<Json<crate::api::models::FleetCveBatchDetailRequest>, JsonRejection>,
+) -> Response {
+    let body = match json_body(body, "Malformed fleet CVE batch detail request") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match poam::fleet_cve_batch_detail(&pool, &actor, body).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+/// Applies one bounded, atomic batch CVE triage mutation.
+///
+/// Returns a structured error response for CSRF, authorization, bounded
+/// input, exact-evidence, or ownership conflicts.
+pub async fn triage_fleet_cves_batch(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    body: Result<Json<crate::api::models::FleetCveBatchTriageRequest>, JsonRejection>,
+) -> Response {
+    if let Err(response) = csrf(&headers) {
+        return response;
+    }
+    let body = match json_body(body, "Malformed fleet CVE batch triage request") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match poam::triage_fleet_cves_batch(&pool, &actor, body, &SystemClock).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+/// Returns host and environment triage state for one System Detail CVE row.
+///
+/// The service derives the selected hostname, current environment, exact
+/// environment subjects, both direct dispositions, and host-precedence
+/// effective state. A hidden system or a row without current exact evidence
+/// returns not found.
+pub async fn system_cve_triage_detail(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<(Uuid, String)>, PathRejection>,
+    query: Result<Query<FleetCveDetailQuery>, QueryRejection>,
+) -> Response {
+    let (system_id, cve_id) = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let query = match query_body(query, "invalid_query", "Malformed system CVE triage query") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match poam::system_cve_triage_detail(&pool, &actor, system_id, &cve_id, &query.package).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+/// Applies one host- or environment-scoped triage action from System Detail.
+///
+/// The body selects only the safe scope enum. It cannot supply environment,
+/// system, or host-list identities. The handler enforces CSRF before the shared
+/// service validates authorization and exact evidence.
+pub async fn triage_system_cve(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<(Uuid, String)>, PathRejection>,
+    body: Result<Json<crate::api::models::SystemCveTriageRequest>, JsonRejection>,
+) -> Response {
+    let (system_id, cve_id) = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(response) = csrf(&headers) {
+        return response;
+    }
+    let body = match json_body(body, "Malformed system CVE triage request") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match poam::triage_system_cve(&pool, &actor, system_id, &cve_id, body, &SystemClock).await {
         Ok(value) => Json(value).into_response(),
         Err(error) => error_response(error),
     }
@@ -1509,6 +1710,15 @@ mod tests {
         );
         let app = Router::new()
             .route("/api/v1/poams", get(list).post(create))
+            .route("/api/v1/poams/export", get(export))
+            .route(
+                "/api/v1/register/export",
+                get(crate::handlers::api::register_export::export),
+            )
+            .route(
+                "/api/v1/acceptances/export",
+                get(crate::handlers::api::acceptance_register::export),
+            )
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1570,5 +1780,287 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(authenticated.status().as_u16(), 404);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified disposable PG35457"]
+    async fn mixed_register_download_serves_four_real_formats(pool: PgPool) {
+        let base = server(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let url = format!(
+            "{base}/api/v1/register/export?poam_status=completed&acceptance_status=accepted_or_converted&format=csv"
+        );
+        assert_eq!(client.get(&url).send().await.unwrap().status(), 401);
+        let token = session(&pool, AuthRole::Admin).await;
+        let unknown_filter = client
+            .get(format!("{url}&unrecognized_scope=all"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unknown_filter.status(), 400);
+        let empty_oscal = client
+            .get(format!(
+                "{base}/api/v1/register/export?poam_status=completed&acceptance_status=pending&format=oscal-json"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(empty_oscal.status(), 204);
+        assert!(empty_oscal.bytes().await.unwrap().is_empty());
+        let user_id: Uuid =
+            sqlx::query_scalar("SELECT user_id FROM user_sessions WHERE session_token_hash=$1")
+                .bind(hash_token(&token))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let environment: Uuid =
+            sqlx::query_scalar("INSERT INTO environments(name) VALUES($1) RETURNING id")
+                .bind(format!("mixed-{}", Uuid::new_v4()))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        sqlx::query("INSERT INTO cves(id) VALUES('CVE-2099-54321')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO cve_environment_dispositions(canonical_cve_id,canonical_package_name,environment_id,state,justification,review_date,accepted_by,accepted_at) VALUES('CVE-2099-54321','sample',$1,'accepted','Reviewed source risk','2099-01-10',$2,now())")
+            .bind(environment).bind(user_id).execute(&pool).await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        let host: Uuid = sqlx::query_scalar("INSERT INTO systems(hostname,public_key,derivation,environment_id) VALUES($1,'key','key',$2) RETURNING id")
+            .bind(format!("export-http-{}", Uuid::new_v4())).bind(environment)
+            .fetch_one(&mut *tx).await.unwrap();
+        let policy: Uuid = sqlx::query_scalar("INSERT INTO deployment_policies(name,policy_type,config,enabled) VALUES($1,'custom_check','{}',false) RETURNING id")
+            .bind(format!("Export HTTP {}", Uuid::new_v4())).fetch_one(&mut *tx).await.unwrap();
+        let finding: Uuid = sqlx::query_scalar(
+            "INSERT INTO poam_findings(system_id,policy_lineage_id) VALUES($1,$2) RETURNING id",
+        )
+        .bind(host)
+        .bind(policy)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        let plan: Uuid = sqlx::query_scalar("INSERT INTO poams(title,risk,created_by) VALUES('HTTP scoped plan','high',$1) RETURNING id")
+            .bind(user_id).fetch_one(&mut *tx).await.unwrap();
+        sqlx::query(
+            "INSERT INTO poam_finding_links(poam_id,finding_id,linked_by) VALUES($1,$2,$3)",
+        )
+        .bind(plan)
+        .bind(finding)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let invalid_scopes = [
+            "record_type=plans&acceptance_status=accepted_current",
+            "record_type=acceptances&poam_status=completed",
+            "record_type=unknown",
+            "record_type=acceptances&acceptance_status=accepted_historical",
+        ];
+        for scope in invalid_scopes {
+            let response = client
+                .get(format!("{base}/api/v1/register/export?format=csv&{scope}"))
+                .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 400, "{scope}");
+        }
+        let plan_csv = client
+            .get(format!(
+                "{base}/api/v1/register/export?format=csv&record_type=plans"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(plan_csv.status(), 200);
+        let plan_text = plan_csv.text().await.unwrap();
+        assert!(plan_text.contains(&plan.to_string()));
+        assert!(!plan_text.contains("CVE-2099-54321"));
+        let acceptance_csv = client.get(format!("{base}/api/v1/register/export?format=csv&record_type=acceptances&acceptance_status=accepted_current"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send().await.unwrap();
+        assert_eq!(acceptance_csv.status(), 200);
+        let acceptance_text = acceptance_csv.text().await.unwrap();
+        assert!(acceptance_text.contains("CVE-2099-54321"));
+        assert!(!acceptance_text.contains(&plan.to_string()));
+        for (format, media_type, marker) in [
+            ("csv", "text/csv; charset=utf-8", "CVE-2099-54321"),
+            (
+                "xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "PK",
+            ),
+            (
+                "oscal-json",
+                "application/json",
+                "plan-of-action-and-milestones",
+            ),
+            (
+                "oscal-xml",
+                "application/xml",
+                "plan-of-action-and-milestones",
+            ),
+        ] {
+            let response = client.get(format!("{base}/api/v1/register/export?poam_status=completed&acceptance_status=accepted_or_converted&format={format}"))
+                .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+                .send().await.unwrap();
+            assert_eq!(response.status(), 200, "{format}");
+            assert_eq!(response.headers()["content-type"], media_type);
+            assert_eq!(response.headers()["cache-control"], "private, no-store");
+            let bytes = response.bytes().await.unwrap();
+            if format == "xlsx" {
+                assert!(bytes.starts_with(marker.as_bytes()));
+            } else {
+                assert!(String::from_utf8(bytes.to_vec()).unwrap().contains(marker));
+            }
+            for record_type in ["plans", "acceptances"] {
+                let scoped = client
+                    .get(format!(
+                        "{base}/api/v1/register/export?format={format}&record_type={record_type}"
+                    ))
+                    .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(scoped.status(), 200, "{format}/{record_type}");
+                assert_eq!(scoped.headers()["content-type"], media_type);
+                let body = scoped.bytes().await.unwrap();
+                if format == "xlsx" {
+                    assert!(body.starts_with(b"PK"));
+                } else {
+                    let text = String::from_utf8(body.to_vec()).unwrap();
+                    assert!(text.contains(if record_type == "plans" {
+                        "HTTP scoped plan"
+                    } else {
+                        "CVE-2099-54321"
+                    }));
+                    assert!(!text.contains(if record_type == "plans" {
+                        "CVE-2099-54321"
+                    } else {
+                        "HTTP scoped plan"
+                    }));
+                }
+            }
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified disposable PG35457"]
+    async fn poam_download_checks_auth_and_format(pool: PgPool) {
+        let base = server(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let url = format!("{base}/api/v1/poams/export?format=csv&status=completed");
+        assert_eq!(client.get(&url).send().await.unwrap().status(), 401);
+        let token = session(&pool, AuthRole::Admin).await;
+        let invalid = client
+            .get(format!("{base}/api/v1/poams/export?format=xml"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), 400);
+        let csv = client
+            .get(&url)
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(csv.status(), 200);
+        assert_eq!(csv.headers()["content-type"], "text/csv; charset=utf-8");
+        assert_eq!(csv.headers()["cache-control"], "private, no-store");
+        let csv_bytes = csv.bytes().await.unwrap();
+        assert!(csv_bytes.starts_with(b"\"Source type\","));
+        let xlsx = client
+            .get(format!(
+                "{base}/api/v1/poams/export?format=xlsx&status=completed"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(xlsx.status(), 200);
+        assert!(xlsx.bytes().await.unwrap().starts_with(b"PK"));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified disposable PG35457"]
+    async fn acceptance_download_checks_session_filters_and_file_headers(pool: PgPool) {
+        let base = server(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let url = format!("{base}/api/v1/acceptances/export?format=csv&source=cve_environment");
+        assert_eq!(client.get(&url).send().await.unwrap().status(), 401);
+        let token = session(&pool, AuthRole::Admin).await;
+        let user_id: Uuid =
+            sqlx::query_scalar("SELECT user_id FROM user_sessions WHERE session_token_hash=$1")
+                .bind(hash_token(&token))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let environment: Uuid =
+            sqlx::query_scalar("INSERT INTO environments(name) VALUES($1) RETURNING id")
+                .bind(format!("export-http-{}", Uuid::new_v4()))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        sqlx::query("INSERT INTO cves(id) VALUES('CVE-2099-12345')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO cve_environment_dispositions(canonical_cve_id,canonical_package_name,environment_id,state,justification,review_date,accepted_by,accepted_at) VALUES('CVE-2099-12345','sample',$1,'accepted','=1+1','2099-01-10',$2,now())")
+            .bind(environment).bind(user_id).execute(&pool).await.unwrap();
+        let response = client
+            .get(&url)
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response.headers()["content-type"],
+            "text/csv; charset=utf-8"
+        );
+        assert_eq!(
+            response.headers()["content-disposition"],
+            "attachment; filename=acceptance-register.csv"
+        );
+        assert_eq!(response.headers()["cache-control"], "private, no-store");
+        let bytes = response.bytes().await.unwrap();
+        let mut reader = csv::Reader::from_reader(bytes.as_ref());
+        let records = reader.records().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(&records[0][0], "CVE decision");
+        assert_eq!(&records[0][8], "CVE-2099-12345");
+        assert_eq!(&records[0][10], "2099-01-10");
+        assert_eq!(&records[0][15], "'=1+1");
+        assert!(records[0][13].is_empty());
+        let xlsx = client
+            .get(format!(
+                "{base}/api/v1/acceptances/export?format=xlsx&source=cve_environment"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(xlsx.status(), 200);
+        assert_eq!(
+            xlsx.headers()["content-disposition"],
+            "attachment; filename=acceptance-register.xlsx"
+        );
+        assert_eq!(
+            xlsx.headers()["content-type"],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        );
+        assert!(xlsx.bytes().await.unwrap().starts_with(b"PK"));
+        let invalid = client
+            .get(format!("{base}/api/v1/acceptances/export?format=xml"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), 400);
     }
 }

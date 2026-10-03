@@ -238,16 +238,6 @@ pub fn EnvironmentsListView(initial_query: String) -> Element {
 
     rsx! {
         div { style: "display:flex; flex-direction:column; gap:16px;",
-            if from_setup() {
-                div { "data-testid": "setup-coach-environments-callout", class: "sd-callout sd-callout-info",
-                    Icon { name: IconName::Plus, size: 13 }
-                    div {
-                        div { style: "font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:0.03em;", "Setup Tour - Step 1 of 6" }
-                        div { style: "font-size:13px;", "Create your first environment using Add environment." }
-                    }
-                }
-            }
-
             if let Some(notice) = api_notice.read().clone() {
                 div { class: "flex items-center gap-2 px-4 py-3 rounded-lg border text-yellow-100 text-sm cf-chip-olive",
                     span { class: "shrink-0", "⚠" }
@@ -276,7 +266,7 @@ pub fn EnvironmentsListView(initial_query: String) -> Element {
                 }
             }
 
-            div { class: "page-head",
+            div { class: "page-head", "data-coach-target": "env-page-head",
                 div {
                     h1 { class: "page-title", "Environments" }
                     p { class: "page-subtitle", "{items.len()} tiers · {totals.systems} systems · {totals.caches} caches configured" }
@@ -823,6 +813,15 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
             }
 
             div { class: "panel-body",
+                if !env.id.is_nil() {
+                    Link {
+                        class: "btn btn-ghost xs focus-ring",
+                        to: Route::PoamsView { query: format!("dim=environment&environment={}", env.id) },
+                        title: "Open {env.name} in the POA&M register",
+                        Icon { name: IconName::ArrowRight, size: 11 }
+                        " View in POA&M register"
+                    }
+                }
                 if display_policy.is_some()
                     || display_auto_sync.is_some()
                     || display_requires_approval.is_some()
@@ -1072,7 +1071,7 @@ fn EnvPanelSystems(props: EnvPanelSystemsProps) -> Element {
                                     let nav = nav.clone();
                                     let system_id = system.id.to_string();
                                     move |_| {
-                                        nav.push(Route::SystemDetailView { id: system_id.clone(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new() });
+                                        nav.push(Route::SystemDetailView { id: system_id.clone(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new(), cve_target: String::new(), cve_mode: String::new() });
                                     }
                                 },
                                 span { class: "status-dot", style: "--status-color: {system_status_color(&system.health_status)};" }

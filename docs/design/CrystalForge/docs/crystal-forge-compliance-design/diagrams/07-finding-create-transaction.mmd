@@ -1,0 +1,17 @@
+sequenceDiagram
+  participant U as Finding UI
+  participant S as POAM service
+  participant D as Database
+  U->>S: Create with assessment or finding plus observation
+  S->>D: Begin transaction and resolve typed assignee
+  S->>D: Acquire stable finding key
+  S->>D: Re-resolve current evidence and visibility
+  S->>D: Require current FAIL and compatible references
+  S->>D: Insert POAM, finding link, references, milestones, audit
+  S->>D: Commit
+  S->>D: Read POAM detail after commit
+  alt Detail read succeeds
+    S-->>U: Created detail
+  else Detail read fails
+    S-->>U: Error although creation already committed
+  end

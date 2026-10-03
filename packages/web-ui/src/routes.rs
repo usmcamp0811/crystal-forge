@@ -18,6 +18,7 @@ use crate::views::evaluations::{EvaluationsCommitView, EvaluationsView};
 use crate::views::flakes::FlakesView;
 use crate::views::login::LoginView;
 use crate::views::not_found::NotFoundView;
+use crate::views::poams::PoamsView;
 use crate::views::policies::PoliciesView;
 use crate::views::profile::ProfileView;
 use crate::views::register::RegisterView;
@@ -43,7 +44,9 @@ pub enum Route {
     #[route("/environments?:..query")]
     EnvironmentsView { query: String },
 
-    #[route("/systems/:id?:tab&:poam&:config_mode&:revision&:generation&:deploy_generation")]
+    #[route(
+        "/systems/:id?:tab&:poam&:config_mode&:revision&:generation&:deploy_generation&:cve_target&:cve_mode"
+    )]
     SystemDetailView {
         id: String,
         tab: String,
@@ -52,13 +55,15 @@ pub enum Route {
         revision: String,
         generation: String,
         deploy_generation: String,
+        cve_target: String,
+        cve_mode: String,
     },
 
     #[route("/flakes?:..query")]
     FlakesView { query: String },
 
-    #[route("/builds")]
-    BuildsView {},
+    #[route("/builds?:..query")]
+    BuildsView { query: String },
 
     #[route("/evaluations")]
     EvaluationsView {},
@@ -80,6 +85,9 @@ pub enum Route {
 
     #[route("/deployment-policies")]
     PoliciesView {},
+
+    #[route("/poams?:..query")]
+    PoamsView { query: String },
 
     #[route("/compliance?:bundle&:version&:system&:policy&:poam&:view")]
     ComplianceView {
@@ -120,6 +128,10 @@ pub enum Route {
 }
 
 impl Route {
+    /// Returns the navigation breadcrumb for this route.
+    ///
+    /// The bundle catalog retains its Compliance page heading, while the
+    /// breadcrumb identifies its specific Bundles destination.
     pub fn title(&self) -> String {
         match self {
             Route::DashboardView { .. } => "Dashboard".to_string(),
@@ -137,7 +149,8 @@ impl Route {
             Route::CvesView { .. } => "CVEs".to_string(),
             Route::ScanningView { .. } => "Scanning".to_string(),
             Route::PoliciesView { .. } => "Deployment Policies".to_string(),
-            Route::ComplianceView { .. } => "Compliance".to_string(),
+            Route::PoamsView { .. } => "POA&M".to_string(),
+            Route::ComplianceView { .. } => "Bundles".to_string(),
             Route::AdminView { .. } => "Server Management".to_string(),
             Route::ProfileView { .. } => "Profile & Preferences".to_string(),
             Route::StyleGuideView { .. } => "Component Showcase".to_string(),

@@ -4,12 +4,15 @@
 //!
 //! 1. **Stale recovery** — examines bounded batches of abandoned executions and
 //!    old revocations so recovery cannot monopolize a worker cycle.
-//! 2. **Operator-queued scans** — runs explicit fleet-rescan requests before
+//! 2. **Prerequisite reconciliation** — repairs durable post-build waits before
+//!    optional executor gates so disabled or unavailable Vulnix cannot strand
+//!    lifecycle state.
+//! 3. **Operator-queued scans** — runs explicit fleet-rescan requests before
 //!    loading scan policy. This phase is independent of `on_build` and still
 //!    runs when policy loading fails.
-//! 3. **Post-build scans** — picks up build-complete derivations that have
+//! 4. **Post-build scans** — picks up build-complete derivations that have
 //!    never been successfully scanned and runs vulnix on them.
-//! 4. **Periodic rescans** — picks up derivations whose last completed scan is
+//! 5. **Periodic rescans** — picks up derivations whose last completed scan is
 //!    older than the configured interval in `scan_schedule_policy`, so newly
 //!    published NVD advisories are picked up automatically (vulnix fetches the
 //!    latest NVD data on every invocation).
@@ -22,7 +25,8 @@
 //!
 //! After bounded stale recovery, Phase 0 processes operator-queued scans before
 //! the worker loads `scan_schedule_policy`. Phase 1 processes post-build scans
-//! only when `on_build` is enabled. Phase 2 processes periodic rescans. Each
+//! for new builds only when `on_build` is enabled, but retries existing intent
+//! independently of that switch. Phase 2 processes periodic rescans. Each
 //! scan phase runs at most [`MAX_SCANS_PER_CYCLE`] scans, and each recovery
 //! phase applies its own conservative query-layer batch limit.
 
@@ -33,14 +37,19 @@ use crate::derivations::utils::{
 use crate::log::{WorkerState, WorkerStatus, get_cve_status};
 use crate::models::cache_destination::CacheDestination;
 use crate::queries::cache_destinations::get_cache_destination;
+use crate::queries::cve_scan_leases::{
+    expire_post_build_scan_obligations, reconcile_post_build_scan_prerequisites,
+};
+#[cfg(test)]
+use crate::queries::cve_scans::create_cve_scan;
 use crate::queries::cve_scans::{
-    CreateCveScanOutcome, CveScanExecutionClaim, acknowledge_revoked_cve_scan_execution,
-    acquire_execution_lock, claim_queued_cve_scans, create_cve_scan,
-    get_targets_needing_cve_rescan, get_targets_needing_cve_scan, heartbeat_cve_scan_execution,
-    mark_cve_scan_failed_by_id_for_execution, mark_cve_scan_failed_for_execution,
-    mark_cve_scan_failed_with_diagnostics_for_execution, recover_stale_scans,
-    release_execution_lock_or_close, requeue_cve_scan_execution,
-    save_scan_results_with_diagnostics_for_execution,
+    CreateCveScanOutcome, CveScanExecutionClaim, ScanTrigger,
+    acknowledge_revoked_cve_scan_execution, acquire_execution_lock, claim_queued_cve_scans,
+    create_cve_scan_with_trigger, get_targets_needing_cve_rescan, get_targets_needing_cve_scan,
+    heartbeat_cve_scan_execution, mark_cve_scan_failed_by_id_for_execution,
+    mark_cve_scan_failed_for_execution, mark_cve_scan_failed_with_diagnostics_for_execution,
+    promote_waiting_cve_scans, recover_stale_scans, release_execution_lock_or_close,
+    requeue_cve_scan_execution, save_scan_results_with_diagnostics_for_execution,
 };
 use crate::queries::derivations::get_derivation_by_id;
 use crate::queries::scanning::get_scan_schedule_policy;
@@ -76,6 +85,55 @@ trait CveScanRunner {
         crate::vulnix::vulnix_runner::VulnixScanExecution,
         crate::vulnix::vulnix_runner::VulnixScanExecutionError,
     >;
+}
+
+#[async_trait]
+trait CveScanResultWriter {
+    async fn save(
+        &self,
+        pool: &PgPool,
+        scan_id: uuid::Uuid,
+        entries: &crate::vulnix::vulnix_runner::VulnixScanOutput,
+        elapsed_ms: Option<i32>,
+        execution_id: uuid::Uuid,
+        diagnostics: &[crate::queries::cve_scan_diagnostics::PreparedScanDiagnostic],
+    ) -> Result<()>;
+}
+
+struct DatabaseCveScanResultWriter;
+
+#[async_trait]
+impl CveScanResultWriter for DatabaseCveScanResultWriter {
+    async fn save(
+        &self,
+        pool: &PgPool,
+        scan_id: uuid::Uuid,
+        entries: &crate::vulnix::vulnix_runner::VulnixScanOutput,
+        elapsed_ms: Option<i32>,
+        execution_id: uuid::Uuid,
+        diagnostics: &[crate::queries::cve_scan_diagnostics::PreparedScanDiagnostic],
+    ) -> Result<()> {
+        save_scan_results_with_diagnostics_for_execution(
+            pool,
+            scan_id,
+            entries,
+            elapsed_ms,
+            execution_id,
+            diagnostics,
+        )
+        .await
+    }
+}
+
+fn safe_bounded_error_chain(error: &anyhow::Error) -> (String, bool) {
+    let redacted = crate::security::snapshot_redaction::redact_text(&format!("{error:#}"));
+    let truncated =
+        redacted.chars().count() > crate::queries::cve_scan_diagnostics::MAX_DIAGNOSTIC_CHARS;
+    let bounded = redacted
+        .chars()
+        .take(crate::queries::cve_scan_diagnostics::MAX_DIAGNOSTIC_CHARS)
+        .collect();
+    (bounded, truncated)
 }
 
 #[async_trait]
@@ -225,6 +283,8 @@ pub async fn run_cve_scan_loop(
             Err(e) => error!("Failed to recover remote CVE scan leases: {e}"),
         }
 
+        run_cve_prerequisite_maintenance(&pool).await;
+
         // Honour the enabled flag — sleep the full interval and skip work when disabled.
         let enabled = *enabled_rx.read().await;
         if !enabled {
@@ -318,13 +378,37 @@ pub async fn run_cve_scan_loop(
     }
 }
 
+/// Runs bounded prerequisite maintenance independently of scan execution.
+///
+/// Reconciliation runs before promotion because it can bind a durable intent
+/// to a successful replacement that promotion can advance in the same pass.
+async fn run_cve_prerequisite_maintenance(pool: &PgPool) {
+    match reconcile_post_build_scan_prerequisites(pool, 32).await {
+        Ok(count) if count > 0 => info!("Reconciled {count} CVE build prerequisite wait(s)"),
+        Ok(_) => {}
+        Err(error) => error!("Failed to reconcile CVE build prerequisites: {error:#}"),
+    }
+
+    // Expire only persisted obligations, even when the executor or on_build is
+    // disabled. Do this before promotion so overdue waits cannot enter the queue.
+    match expire_post_build_scan_obligations(pool, 32).await {
+        Ok(count) if count > 0 => info!("Expired {count} post-build CVE scan obligation(s)"),
+        Ok(_) => {}
+        Err(error) => error!("Failed to expire post-build CVE obligations: {error:#}"),
+    }
+
+    match promote_waiting_cve_scans(pool, 32).await {
+        Ok(count) if count > 0 => info!("Advanced {count} CVE scan prerequisite wait(s)"),
+        Ok(_) => {}
+        Err(error) => error!("Failed to advance waiting CVE scans: {error:#}"),
+    }
+}
+
 /// Maximum derivations scanned per cycle phase.
 ///
-/// Processing is bounded per cycle so that a large historical backlog does not
-/// monopolise the database for an extended period. At 1 scan/cycle with a
-/// 60-second poll interval a backlog of N derivations clears in ~N minutes,
-/// which is acceptable. Raise this constant once bulk-persistence lands and
-/// the write amplification per scan is addressed.
+/// Processing is bounded per cycle because scan execution and persistence are
+/// expensive. Historical builds outside the recovery window are not backlog
+/// and must not enter this phase. Keep the bound independent of recovery age.
 const MAX_SCANS_PER_CYCLE: i64 = 1;
 
 /// Runs one bounded stale-recovery pass and three scan phases.
@@ -334,8 +418,8 @@ const MAX_SCANS_PER_CYCLE: i64 = 1;
 /// before policy loading. Explicit requests therefore run independently of
 /// `scan_schedule_policy` availability and the `on_build` setting.
 ///
-/// Phase 1 processes at most [`MAX_SCANS_PER_CYCLE`] post-build targets when
-/// `on_build` is enabled. Phase 2 processes at most
+/// Phase 1 processes at most [`MAX_SCANS_PER_CYCLE`] post-build targets; only
+/// admitted obligations can retry after `on_build` is disabled. Phase 2 processes at most
 /// [`MAX_SCANS_PER_CYCLE`] periodic rescan targets. No phase loops until its
 /// backlog is empty; later poll cycles continue each backlog.
 async fn scan_cycle(
@@ -484,20 +568,16 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
     // we skip this cycle rather than applying aggressive hardcoded defaults.
     // This prevents a database configuration failure from silently triggering
     // a full historical backfill on first deployment.
-    let policy = match get_scan_schedule_policy(pool).await {
-        Ok(p) => p,
-        Err(e) => {
-            error!("Failed to load scan schedule policy: {e} — skipping cycle");
-            return Ok(());
-        }
-    };
+    if let Err(e) = get_scan_schedule_policy(pool).await {
+        error!("Failed to load scan schedule policy: {e} — skipping cycle");
+        return Ok(());
+    }
     // --- Phase 1: post-build scans (bounded — at most MAX_SCANS_PER_CYCLE per cycle) ---
     //
-    // We intentionally do NOT loop until the queue is empty. A large historical
-    // backlog would otherwise monopolise the database for minutes. Each cycle
-    // advances the backlog by MAX_SCANS_PER_CYCLE; subsequent poll cycles
-    // continue draining it at a controlled rate.
-    if policy.on_build {
+    // We intentionally do NOT loop until the queue is empty. Only recent
+    // successful builds are eligible for recovery; the oldest derivations
+    // never become an unbounded post-build backlog.
+    {
         if !*enabled_rx.read().await {
             info!("🛑 CVE scan loop disabled — skipping post-build phase");
             return Ok(());
@@ -533,6 +613,7 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
                         vulnix_version.clone(),
                         derivation,
                         enabled_rx,
+                        ScanTrigger::PostBuild,
                     )
                     .await
                     {
@@ -550,8 +631,6 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
                 error!("❌ Failed to get post-build scan targets: {e}");
             }
         }
-    } else {
-        debug!("🔍 on_build = false — skipping post-build phase");
     }
 
     // Check enabled before entering Phase 2.
@@ -582,6 +661,7 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
                     vulnix_version.clone(),
                     derivation,
                     enabled_rx,
+                    ScanTrigger::Periodic,
                 )
                 .await
                 {
@@ -639,6 +719,7 @@ async fn scan_one<R: CveScanRunner + Sync>(
     vulnix_version: Option<String>,
     derivation: &crate::derivations::Derivation,
     enabled_rx: &tokio::sync::RwLock<bool>,
+    source_trigger: ScanTrigger,
 ) -> Result<()> {
     set_cve_status_working(&format!("scanning {}", derivation.derivation_name)).await;
 
@@ -661,8 +742,14 @@ async fn scan_one<R: CveScanRunner + Sync>(
             return Ok(());
         }
 
-        let scan_claim =
-            create_cve_scan(pool, derivation.id, "vulnix", vulnix_version.clone()).await?;
+        let scan_claim = create_cve_scan_with_trigger(
+            pool,
+            derivation.id,
+            "vulnix",
+            vulnix_version.clone(),
+            source_trigger,
+        )
+        .await?;
         // Release the guard as soon as the claim is committed.  From here the
         // scan is authorized and runs to completion even if disable fires later.
         drop(enabled_guard);
@@ -917,6 +1004,33 @@ async fn execute_scan_inner_with_nix_program<R: CveScanRunner + Sync>(
     execution_id: uuid::Uuid,
     nix_program: &std::ffi::OsStr,
 ) -> Result<()> {
+    execute_scan_inner_with_nix_program_and_writer(
+        pool,
+        vulnix_runner,
+        &DatabaseCveScanResultWriter,
+        vulnix_version,
+        derivation,
+        scan_id,
+        execution_id,
+        nix_program,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_scan_inner_with_nix_program_and_writer<
+    R: CveScanRunner + Sync,
+    W: CveScanResultWriter + Sync,
+>(
+    pool: &PgPool,
+    vulnix_runner: &R,
+    result_writer: &W,
+    vulnix_version: Option<String>,
+    derivation: &crate::derivations::Derivation,
+    scan_id: uuid::Uuid,
+    execution_id: uuid::Uuid,
+    nix_program: &std::ffi::OsStr,
+) -> Result<()> {
     let Some(ref path) = derivation.store_path else {
         warn!(
             "❌ No store_path set for derivation {}",
@@ -1046,24 +1160,44 @@ async fn execute_scan_inner_with_nix_program<R: CveScanRunner + Sync>(
             });
             let diagnostics =
                 crate::queries::cve_scan_diagnostics::prepare_diagnostics(&raw_diagnostics);
-            if let Err(err) = save_scan_results_with_diagnostics_for_execution(
-                pool,
-                scan_id,
-                &output.entries,
-                elapsed_ms,
-                execution_id,
-                &diagnostics,
-            )
-            .await
+            if let Err(err) = result_writer
+                .save(
+                    pool,
+                    scan_id,
+                    &output.entries,
+                    elapsed_ms,
+                    execution_id,
+                    &diagnostics,
+                )
+                .await
             {
-                mark_scan_failed_for_owner(
+                // The result transaction also contained the success diagnostics,
+                // so a rollback removes them. Persist a separate fenced terminal
+                // event that identifies this as a persistence failure rather than
+                // a scanner failure.
+                let (safe_error, error_truncated) = safe_bounded_error_chain(&err);
+                let failure_message = format!("Scan result persistence failed: {safe_error}");
+                let failure_diagnostics =
+                    crate::queries::cve_scan_diagnostics::prepare_diagnostics(&[
+                        cf_protocol::builder::CveScanDiagnostic {
+                            occurred_at: Utc::now(),
+                            level: "error".to_string(),
+                            source: "server".to_string(),
+                            event_type: "result_persistence_failed".to_string(),
+                            message: failure_message.clone(),
+                            truncated: error_truncated,
+                        },
+                    ]);
+                mark_cve_scan_failed_with_diagnostics_for_execution(
                     pool,
                     scan_id,
                     derivation,
-                    &err.to_string(),
+                    &failure_message,
                     execution_id,
+                    &failure_diagnostics,
                 )
-                .await?;
+                .await
+                .context("Failed to persist terminal CVE result-persistence diagnostics")?;
                 return Err(err);
             }
             info!(
@@ -1507,6 +1641,26 @@ mod tests {
         }
     }
 
+    struct FailingPersistenceWriter;
+
+    #[async_trait]
+    impl CveScanResultWriter for FailingPersistenceWriter {
+        async fn save(
+            &self,
+            _pool: &PgPool,
+            _scan_id: uuid::Uuid,
+            _entries: &crate::vulnix::vulnix_runner::VulnixScanOutput,
+            _elapsed_ms: Option<i32>,
+            _execution_id: uuid::Uuid,
+            _diagnostics: &[crate::queries::cve_scan_diagnostics::PreparedScanDiagnostic],
+        ) -> Result<()> {
+            Err(
+                anyhow::anyhow!("Authorization: Bearer nested-persistence-secret")
+                    .context("Database query failed"),
+            )
+        }
+    }
+
     struct FailingDiagnosticRunner;
 
     #[async_trait]
@@ -1613,6 +1767,107 @@ mod tests {
             .execute(&pool)
             .await
             .expect("diagnostic derivation cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn successful_scanner_persists_redacted_result_failure_stage() {
+        let Some(pool) = db_test_pool().await else {
+            return;
+        };
+        let directory = tempdir().expect("result persistence fixture directory");
+        let store_path = directory.path().join("system-output");
+        let derivation_path = directory.path().join("system.drv");
+        tokio::fs::write(&store_path, b"output")
+            .await
+            .expect("output fixture should exist");
+        tokio::fs::write(&derivation_path, b"derivation")
+            .await
+            .expect("derivation fixture should exist");
+        let derivation = insert_derivation(
+            &pool,
+            None,
+            &format!("result-persistence-{}", Uuid::new_v4()),
+            "nixos",
+        )
+        .await
+        .expect("persistence derivation should be inserted");
+        sqlx::query(
+            "UPDATE derivations SET store_path=$2, derivation_path=$3, status_id=$4, completed_at=NOW() WHERE id=$1",
+        )
+        .bind(derivation.id)
+        .bind(store_path.to_string_lossy().to_string())
+        .bind(derivation_path.to_string_lossy().to_string())
+        .bind(EvaluationStatus::BuildComplete.as_id())
+        .execute(&pool)
+        .await
+        .expect("persistence derivation paths should persist");
+        let derivation = get_derivation_by_id(&pool, derivation.id)
+            .await
+            .expect("persistence derivation should reload");
+        let claim = match create_cve_scan(&pool, derivation.id, "vulnix", Some("test".into()))
+            .await
+            .expect("persistence claim should persist")
+        {
+            CreateCveScanOutcome::Created(claim) => claim,
+            CreateCveScanOutcome::Existing(_) => panic!("persistence fixture must create a scan"),
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runner = FakeRunner {
+            calls: Arc::clone(&calls),
+        };
+
+        let error = execute_scan_inner_with_nix_program_and_writer(
+            &pool,
+            &runner,
+            &FailingPersistenceWriter,
+            Some("test".to_string()),
+            &derivation,
+            claim.scan_id,
+            claim.execution_id,
+            std::ffi::OsStr::new("nix"),
+        )
+        .await
+        .expect_err("result persistence failure should propagate");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(error.to_string(), "Database query failed");
+
+        let (status, failure): (String, Option<String>) =
+            sqlx::query_as("SELECT status, scan_metadata->>'error' FROM cve_scans WHERE id=$1")
+                .bind(claim.scan_id)
+                .fetch_one(&pool)
+                .await
+                .expect("failed persistence scan should be queryable");
+        assert_eq!(status, "failed");
+        let failure = failure.expect("persistence failure should be recorded");
+        assert!(failure.contains("Scan result persistence failed"));
+        assert!(failure.contains("Database query failed"));
+        assert!(failure.contains("[REDACTED]"));
+        assert!(!failure.contains("nested-persistence-secret"));
+
+        let diagnostics: Vec<(String, String)> = sqlx::query_as(
+            "SELECT event_type, message FROM cve_scan_diagnostic_events WHERE scan_id=$1 ORDER BY id",
+        )
+        .bind(claim.scan_id)
+        .fetch_all(&pool)
+        .await
+        .expect("persistence diagnostics should be queryable");
+        assert!(diagnostics.iter().any(|(event_type, message)| {
+            event_type == "result_persistence_failed"
+                && message.contains("Database query failed")
+                && message.contains("[REDACTED]")
+                && !message.contains("nested-persistence-secret")
+        }));
+
+        sqlx::query("DELETE FROM cve_scans WHERE id=$1")
+            .bind(claim.scan_id)
+            .execute(&pool)
+            .await
+            .expect("persistence scan cleanup should succeed");
+        sqlx::query("DELETE FROM derivations WHERE id=$1")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("persistence derivation cleanup should succeed");
     }
 
     /// Proves a deployed output that reports `unknown-deriver` still uses the
@@ -1958,6 +2213,82 @@ mod tests {
         .expect("original scan schedule policy should be restored");
     }
 
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn startup_maintenance_rebinds_and_promotes_before_executor_work(pool: PgPool) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let derivation = insert_derivation(
+            &pool,
+            None,
+            &format!("startup-maintenance-{suffix}"),
+            "nixos",
+        )
+        .await
+        .expect("maintenance derivation should be inserted");
+        sqlx::query("UPDATE derivations SET derivation_path = $2, store_path = $3 WHERE id = $1")
+            .bind(derivation.id)
+            .bind(format!("/nix/store/{suffix}-startup.drv"))
+            .bind(format!("/nix/store/{suffix}-startup"))
+            .execute(&pool)
+            .await
+            .expect("maintenance derivation paths should update");
+        let source_job: Uuid = sqlx::query_scalar(
+            r#"
+            INSERT INTO build_jobs (
+                derivation_id, status, attempt_number, created_at, completed_at
+            ) VALUES ($1, 'failed', 1, NOW() - INTERVAL '2 seconds', NOW())
+            RETURNING id
+            "#,
+        )
+        .bind(derivation.id)
+        .fetch_one(&pool)
+        .await
+        .expect("failed source attempt should be inserted");
+        let replacement_job: Uuid = sqlx::query_scalar(
+            r#"
+            INSERT INTO build_jobs (
+                derivation_id, status, attempt_number, parent_job_id,
+                root_job_id, created_at, completed_at
+            ) VALUES ($1, 'success', 2, $2, $2, NOW(), NOW())
+            RETURNING id
+            "#,
+        )
+        .bind(derivation.id)
+        .bind(source_job)
+        .fetch_one(&pool)
+        .await
+        .expect("successful replacement should be inserted");
+        let scan_id: Uuid = sqlx::query_scalar(
+            r#"
+            INSERT INTO cve_scans (
+                derivation_id, scanner_name, status, attempts,
+                source_trigger, completed_build_job_id
+            ) VALUES ($1, 'vulnix', 'awaiting_build', 0, 'post_build', $2)
+            RETURNING id
+            "#,
+        )
+        .bind(derivation.id)
+        .bind(source_job)
+        .fetch_one(&pool)
+        .await
+        .expect("waiting intent should be inserted");
+
+        // This helper is called at the top of the worker loop, before both the
+        // runtime-enabled and Vulnix availability checks.
+        run_cve_prerequisite_maintenance(&pool).await;
+
+        assert_eq!(
+            sqlx::query_as::<_, (String, Option<Uuid>)>(
+                "SELECT status, completed_build_job_id FROM cve_scans WHERE id = $1",
+            )
+            .bind(scan_id)
+            .fetch_one(&pool)
+            .await
+            .expect("maintained scan should load"),
+            ("pending".into(), Some(replacement_job))
+        );
+    }
+
     /// Confirms that [`run_cve_scan_loop`] exits cleanly when vulnix is not on
     /// `$PATH`, rather than panicking.  In CI vulnix is absent so the check at
     /// the top of the function short-circuits.  In dev environments where vulnix
@@ -2218,6 +2549,38 @@ mod tests {
         .execute(pool)
         .await
         .expect("derivation should be marked build-complete");
+        sqlx::query(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW())",
+        )
+        .bind(derivation.id)
+        .execute(pool)
+        .await
+        .expect("successful build must authorize post-build recovery");
+        let ancient = insert_derivation(
+            pool,
+            None,
+            &format!("task-396-cycle-ancient-{}", Uuid::new_v4()),
+            "nixos",
+        )
+        .await
+        .expect("ancient build fixture should be inserted");
+        sqlx::query(
+            "UPDATE derivations SET status_id = $2, completed_at = NOW() - INTERVAL '90 days', store_path = $3, derivation_path = $4 WHERE id = $1",
+        )
+        .bind(ancient.id)
+        .bind(EvaluationStatus::BuildComplete.as_id())
+        .bind(format!("{}-ancient", store_path.to_string_lossy()))
+        .bind(format!("{}-ancient.drv", derivation_path.to_string_lossy()))
+        .execute(pool)
+        .await
+        .expect("ancient build paths should be recorded");
+        sqlx::query(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'success', NOW() - INTERVAL '90 days')",
+        )
+        .bind(ancient.id)
+        .execute(pool)
+        .await
+        .expect("ancient successful build should persist without scan intent");
 
         let runner = FakeRunner {
             calls: Arc::new(AtomicUsize::new(0)),
@@ -2249,24 +2612,35 @@ mod tests {
             1,
             "target should be processed exactly once"
         );
+        let ancient_scans: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM cve_scans WHERE derivation_id = $1")
+                .bind(ancient.id)
+                .fetch_one(pool)
+                .await
+                .expect("ancient scan history should load");
+        assert_eq!(ancient_scans, 0, "old unadmitted builds are not backfilled");
 
-        let (status, completed_at): (Option<String>, Option<chrono::DateTime<chrono::Utc>>) =
-            sqlx::query_as(
-                r#"
-            SELECT status, completed_at
+        let (status, completed_at, source_trigger): (
+            Option<String>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<String>,
+        ) = sqlx::query_as(
+            r#"
+            SELECT status, completed_at, source_trigger
             FROM cve_scans
             WHERE derivation_id = $1
             ORDER BY created_at DESC
             LIMIT 1
             "#,
-            )
-            .bind(derivation.id)
-            .fetch_one(pool)
-            .await
-            .expect("scan row should exist");
+        )
+        .bind(derivation.id)
+        .fetch_one(pool)
+        .await
+        .expect("scan row should exist");
 
         assert_eq!(status, Some("completed".to_string()));
         assert!(completed_at.is_some(), "scan should be terminal");
+        assert_eq!(source_trigger.as_deref(), Some("post_build"));
 
         sqlx::query("UPDATE scan_schedule_policy SET on_build = FALSE WHERE id = 1")
             .execute(pool)
@@ -2311,12 +2685,17 @@ mod tests {
             "on_build=false must not process a new post-build target"
         );
 
-        let derivation_ids = vec![derivation.id, disabled_derivation.id];
+        let derivation_ids = vec![derivation.id, ancient.id, disabled_derivation.id];
         sqlx::query("DELETE FROM cve_scans WHERE derivation_id = ANY($1)")
             .bind(&derivation_ids)
             .execute(pool)
             .await
             .expect("scan-cycle scans should be deleted");
+        sqlx::query("DELETE FROM build_jobs WHERE derivation_id = ANY($1)")
+            .bind(&derivation_ids)
+            .execute(pool)
+            .await
+            .expect("scan-cycle build jobs should be deleted");
         sqlx::query("DELETE FROM derivations WHERE id = ANY($1)")
             .bind(&derivation_ids)
             .execute(pool)
@@ -2500,6 +2879,7 @@ mod tests {
                 Some("test".to_string()),
                 &first_derivation,
                 &first_enabled,
+                ScanTrigger::PostBuild,
             )
             .await
         });
@@ -2626,6 +3006,7 @@ mod tests {
                 Some("test".to_string()),
                 &second_derivation,
                 &second_enabled,
+                ScanTrigger::PostBuild,
             )
             .await
         });

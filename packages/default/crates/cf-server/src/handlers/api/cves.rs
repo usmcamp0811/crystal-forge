@@ -9,7 +9,8 @@ use axum::{
 use serde::Deserialize;
 
 use crate::api::models::{
-    CveAffectedSystemDetail, CveDetail, CveFilters, CveFleetStats, CveJustification,
+    CveAffectedSystemDetail, CveDetail, CveFilters, CveFleetStats, CveInventoryGroupPage,
+    CveInventoryMemberPage, CveInventoryPairPage, CveInventoryProjectionParams, CveJustification,
     CveJustificationInput, CveListItem, CvePackageGroup,
 };
 use crate::auth::extractors::{RequireAdmin, RequireAuth};
@@ -19,6 +20,98 @@ use crate::queries::cve_scans::{
     EnqueueCveScanOutcome, FleetEnqueueOutcome, enqueue_exact_cve_scan, enqueue_fleet_cve_scans,
 };
 use crate::queries::cves;
+
+fn validate_projection(
+    params: &CveInventoryProjectionParams,
+    group: Option<bool>,
+) -> Result<(), (StatusCode, String)> {
+    if (group.is_some() && !matches!(params.group_by.as_str(), "environment" | "host"))
+        || params.offset.unwrap_or(0) < 0
+        || params.offset.unwrap_or(0) > i64::MAX - 200
+        || !(1..=200).contains(&params.limit.unwrap_or(100))
+        || (group == Some(true) && params.group_by == "host" && params.group_id.is_none())
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid CVE inventory group or page".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Returns complete scoped environment or host finding aggregates in bounded pages.
+/// This read never grants triage authority or reports scan coverage.
+///
+/// # Errors
+///
+/// Returns 400 for invalid paging, 401 for missing authentication, or 500 on a database failure.
+pub async fn list_inventory_groups(
+    State(state): State<CFState>,
+    Query(params): Query<CveInventoryProjectionParams>,
+    RequireAuth(user): RequireAuth,
+) -> Result<Json<CveInventoryGroupPage>, (StatusCode, String)> {
+    validate_projection(&params, Some(false))?;
+    let scope = cve_read_scope(&state, &user).await?;
+    cves::fetch_cve_inventory_groups(&state.pool, &scope, &params)
+        .await
+        .map(Json)
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to load CVE groups: {error}"),
+            )
+        })
+}
+
+/// Returns paged scoped membership for one exact environment or system ID.
+/// For an environment, omitted `group_id` selects only unassigned hosts visible
+/// to an Admin. It does not select every environment. Historical rows are read-only.
+///
+/// # Errors
+///
+/// Returns 400 for invalid paging, 401 for missing authentication, or 500 on a database failure.
+pub async fn list_inventory_members(
+    State(state): State<CFState>,
+    Query(params): Query<CveInventoryProjectionParams>,
+    RequireAuth(user): RequireAuth,
+) -> Result<Json<CveInventoryMemberPage>, (StatusCode, String)> {
+    validate_projection(&params, Some(true))?;
+    let scope = cve_read_scope(&state, &user).await?;
+    cves::fetch_cve_inventory_members(&state.pool, &scope, &params)
+        .await
+        .map(Json)
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to load CVE members: {error}"),
+            )
+        })
+}
+
+/// Lists filtered CVE/package pairs with exact scoped counts and bounded pages.
+/// The response uses the existing [`CveListItem`] row contract, without the
+/// legacy list's 1,000-row ceiling. It does not authorize CVE mutations.
+///
+/// # Errors
+///
+/// Returns 400 for invalid paging, 401 for missing authentication, or 500 on a database failure.
+pub async fn list_inventory_pairs(
+    State(state): State<CFState>,
+    Query(params): Query<CveInventoryProjectionParams>,
+    RequireAuth(user): RequireAuth,
+) -> Result<Json<CveInventoryPairPage>, (StatusCode, String)> {
+    validate_projection(&params, None)?;
+    let scope = cve_read_scope(&state, &user).await?;
+    cves::fetch_cve_inventory_pairs(&state.pool, &scope, &params)
+        .await
+        .map(Json)
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to load CVE pairs: {error}"),
+            )
+        })
+}
 
 /// GET /api/v1/cves
 /// List CVEs with filters.
@@ -436,7 +529,7 @@ pub async fn export_cves(
 
     // Build CSV with proper RFC 4180 field escaping
     let mut csv_output = String::new();
-    csv_output.push_str("CVE ID,Severity,CVSS Score,Package,Installed Version,Fixed Version,Affected Systems,Environments,Fix Status,Triage Status,Age (days),First Seen,Last Seen\n");
+    csv_output.push_str("CVE ID,Severity,CVSS Score,Package,Installed Version,Fixed Version,Affected Systems,Currently Affected Systems,Scheduled Deployment Targets,Historical Inventory Systems,Environments,Fix Status,Triage Status,Age (days),First Seen,Last Seen\n");
 
     for cve in cves {
         let environments = cve.affected_environments.unwrap_or_default().join(";");
@@ -458,6 +551,9 @@ pub async fn export_cves(
             csv_field(&cve.installed_version.unwrap_or_default()),
             csv_field(&cve.fixed_version.unwrap_or_default()),
             cve.affected_count.to_string(),
+            cve.current_affected_count.to_string(),
+            cve.scheduled_deployment_target_count.to_string(),
+            cve.historical_inventory_count.to_string(),
             csv_field(&environments),
             csv_field(&cve.fix_status),
             csv_field(&cve.triage_status),
@@ -565,12 +661,13 @@ mod tests {
 
     #[test]
     fn csv_export_row_format_has_correct_column_count() {
-        // Verify our CSV header has 13 columns matching the row format string
+        // Verify the CSV header matches the row format string.
         let header = "CVE ID,Severity,CVSS Score,Package,Installed Version,Fixed Version,\
-                       Affected Systems,Environments,Fix Status,Triage Status,Age (days),\
-                       First Seen,Last Seen";
+                       Affected Systems,Currently Affected Systems,Scheduled Deployment Targets,\
+                       Historical Inventory Systems,Environments,Fix Status,Triage Status,\
+                       Age (days),First Seen,Last Seen";
         let col_count = header.split(',').count();
-        assert_eq!(col_count, 13, "CSV header must have 13 columns");
+        assert_eq!(col_count, 16, "CSV header must have 16 columns");
     }
 
     #[test]
@@ -829,15 +926,17 @@ mod fleet_rescan_authorization_tests {
                 .expect("authorization fixture commit model should resolve");
             let config_name = format!("auth-config-{suffix}");
             let store_path = format!("/nix/store/{suffix}-auth-running");
+            let derivation_path = format!("/nix/store/{suffix}-auth-running.drv");
             let derivation = insert_derivation(pool, Some(&commit), &config_name, "nixos")
                 .await
                 .expect("authorization fixture derivation should be inserted");
             sqlx::query(
-                "UPDATE derivations SET status_id = $2, completed_at = NOW(), store_path = $3 WHERE id = $1",
+                "UPDATE derivations SET status_id = $2, completed_at = NOW(), store_path = $3, derivation_path = $4 WHERE id = $1",
             )
             .bind(derivation.id)
             .bind(EvaluationStatus::BuildComplete.as_id())
             .bind(&store_path)
+            .bind(&derivation_path)
             .execute(pool)
             .await
             .expect("authorization fixture derivation should be build-complete");

@@ -5,7 +5,11 @@ function HardeningTab({ sys }) {
   const [filterRisk, setFilterRisk] = React.useState("all");
   const [selected, setSelected] = React.useState(null);
 
-  const services = React.useMemo(() => window.buildSystemHardening(sys), [sys.id]);
+  // Hardening is a property of one build of the system, so the tab scopes to a rev.
+  const scope = window.useRevScope(sys);
+  const { ageRank, key: revKey } = scope;
+
+  const services = React.useMemo(() => window.buildSystemHardening(sys, revKey, ageRank), [sys.id, revKey, ageRank]);
 
   const filtered = services.filter(svc => {
     if (query && !svc.name.toLowerCase().includes(query.toLowerCase())) return false;
@@ -23,6 +27,8 @@ function HardeningTab({ sys }) {
 
   return (
     <>
+      <window.RevScopeBar sys={sys} scope={scope} label="Audited config"/>
+
       {/* Summary */}
       <div className="hd-stat-row">
         {[

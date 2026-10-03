@@ -1,0 +1,14 @@
+flowchart TD
+    A["Active finding link and immutable baseline"] --> B{"Current exact deployment resolved?"}
+    B -->|No| M["MISSING"]
+    B -->|Yes| C{"Derivation, retained generation, generation number, and store equal baseline?"}
+    C -->|No| M
+    C -->|Yes| D{"Strictly newer completed schema-1 scan?"}
+    D -->|No| M
+    D -->|Yes| E{"Canonical CVE/package occurrence present?"}
+    E -->|No| P["PASS"]
+    E -->|Yes| F{"Whitelisted?"}
+    F -->|Yes| W["WHITELISTED, not PASS"]
+    F -->|No| G{"Ordinary justification applies?"}
+    G -->|Yes| J["JUSTIFIED, not PASS"]
+    G -->|No| X["FAIL"]

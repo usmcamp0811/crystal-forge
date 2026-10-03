@@ -6,6 +6,7 @@ use crate::api::client::{
 };
 use crate::api::models::{NotificationCategory, UpdateUserPreferences, UserNotificationDto};
 use crate::components::layout::sidebar::{PreferencesContext, SidebarContext};
+use crate::components::onboarding::CoachGuideButton;
 use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::preferences;
@@ -874,7 +875,9 @@ fn notification_target(route: &str) -> Option<NotificationTarget> {
         "/systems" => Some(NotificationTarget::Route(Route::SystemsView {
             query: String::new(),
         })),
-        "/builds" => Some(NotificationTarget::Route(Route::BuildsView {})),
+        "/builds" => Some(NotificationTarget::Route(Route::BuildsView {
+            query: String::new(),
+        })),
         "/cves" => Some(NotificationTarget::Route(Route::CvesView {
             query: String::new(),
         })),
@@ -882,6 +885,34 @@ fn notification_target(route: &str) -> Option<NotificationTarget> {
         "/profile" => Some(NotificationTarget::Route(Route::ProfileView {})),
         _ => None,
     }
+}
+
+fn notification_target_for_item(item: &UserNotificationDto) -> Option<NotificationTarget> {
+    if item.category == NotificationCategory::CriticalCves
+        && item.source_type == "cves"
+        && is_canonical_cve_id(&item.source_id)
+    {
+        return Some(NotificationTarget::Route(Route::CvesView {
+            query: format!("focus_cve={}", item.source_id),
+        }));
+    }
+
+    notification_target(&item.route)
+}
+
+fn is_canonical_cve_id(value: &str) -> bool {
+    let Some((prefix, remainder)) = value.split_once('-') else {
+        return false;
+    };
+    let Some((year, sequence)) = remainder.split_once('-') else {
+        return false;
+    };
+    prefix == "CVE"
+        && year.len() == 4
+        && year.bytes().all(|byte| byte.is_ascii_digit())
+        && year.parse::<u16>().is_ok_and(|year| year >= 1999)
+        && sequence.len() >= 4
+        && sequence.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn open_system_deploy(id: &str) {
@@ -1268,6 +1299,10 @@ pub fn TopBar(title: String) -> Element {
                 }
             }
 
+            // Guide launcher for every authenticated role. It reopens the
+            // coach after setup completes or the coach was closed.
+            CoachGuideButton {}
+
             div {
                 class: "topbar-notifications-wrap",
                 button {
@@ -1491,7 +1526,7 @@ pub fn TopBar(title: String) -> Element {
                                         },
                                     onclick: {
                                          let nav = nav.clone();
-                                         let target = notification_target(&item.route);
+                                          let target = notification_target_for_item(&item);
                                          let item_id = item.id;
                                          let mutation_owner = notification_owner.clone();
                                          move |_| {
@@ -1848,6 +1883,7 @@ mod tests {
         NotificationFeed, NotificationMutation, NotificationOwner, NotificationRequestKind,
         NotificationTarget, bounded_badge, dismiss_focus_is_current, notification_accessible_label,
         notification_boundary_index, notification_focus_index, notification_target,
+        notification_target_for_item,
     };
     use crate::api::models::{
         NotificationCategory, UserNotificationDto, UserNotificationsResponse,
@@ -1862,6 +1898,8 @@ mod tests {
         UserNotificationDto {
             id: uuid::Uuid::from_u128(id),
             category: NotificationCategory::BuildFailures,
+            source_type: String::new(),
+            source_id: String::new(),
             title: format!("Notification {id}"),
             summary: "Summary".to_string(),
             route: "/builds".to_string(),
@@ -1938,7 +1976,9 @@ mod tests {
         );
         assert_eq!(
             notification_target("/builds"),
-            Some(NotificationTarget::Route(Route::BuildsView {}))
+            Some(NotificationTarget::Route(Route::BuildsView {
+                query: String::new(),
+            }))
         );
         assert_eq!(
             notification_target("/cves"),
@@ -1953,6 +1993,80 @@ mod tests {
         assert_eq!(
             notification_target("/profile"),
             Some(NotificationTarget::Route(Route::ProfileView {}))
+        );
+    }
+
+    #[test]
+    fn critical_cve_notifications_focus_only_canonical_cve_sources() {
+        let mut item = notification(1, 1, true);
+        item.category = NotificationCategory::CriticalCves;
+        item.source_type = "cves".to_string();
+        item.source_id = "CVE-2025-12345".to_string();
+        item.route = "/cves".to_string();
+        assert_eq!(
+            notification_target_for_item(&item),
+            Some(NotificationTarget::Route(Route::CvesView {
+                query: "focus_cve=CVE-2025-12345".to_string(),
+            }))
+        );
+
+        for invalid in [
+            "CVE-25-12345",
+            "CVE-1998-12345",
+            "CVE-0000-12345",
+            "CVE-2025-123",
+            "cve-2025-12345",
+            "CVE-2025-12345-extra",
+        ] {
+            item.source_id = invalid.to_string();
+            assert_eq!(
+                notification_target_for_item(&item),
+                Some(NotificationTarget::Route(Route::CvesView {
+                    query: String::new(),
+                })),
+                "invalid source identity {invalid} must use the generic CVE route",
+            );
+        }
+
+        item.source_id = "CVE-2025-12345".to_string();
+        item.source_type = "systems".to_string();
+        assert_eq!(
+            notification_target_for_item(&item),
+            Some(NotificationTarget::Route(Route::CvesView {
+                query: String::new(),
+            }))
+        );
+
+        item.source_type = "cves".to_string();
+        item.category = NotificationCategory::BuildFailures;
+        assert_eq!(
+            notification_target_for_item(&item),
+            Some(NotificationTarget::Route(Route::CvesView {
+                query: String::new(),
+            }))
+        );
+    }
+
+    #[test]
+    fn notification_source_identity_defaults_for_older_server_payloads() {
+        let item: UserNotificationDto = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000001",
+            "category": "critical_cves",
+            "title": "New critical CVE",
+            "summary": "A critical CVE was reported.",
+            "route": "/cves",
+            "created_at": "2026-09-26T00:00:00Z",
+            "read_at": null
+        }))
+        .unwrap();
+
+        assert!(item.source_type.is_empty());
+        assert!(item.source_id.is_empty());
+        assert_eq!(
+            notification_target_for_item(&item),
+            Some(NotificationTarget::Route(Route::CvesView {
+                query: String::new(),
+            }))
         );
     }
 
@@ -2875,6 +2989,8 @@ mod tests {
         let notification = UserNotificationDto {
             id: uuid::Uuid::nil(),
             category: NotificationCategory::PolicyViolations,
+            source_type: "poams".into(),
+            source_id: "00000000-0000-0000-0000-000000000433".into(),
             title: "POAM-0433 awaiting verification".into(),
             summary: "Platform Security must re-evaluate the finding.".into(),
             route: "/compliance?poam=00000000-0000-0000-0000-000000000433".into(),

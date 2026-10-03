@@ -1,0 +1,13 @@
+flowchart TB
+  State["Awaiting verification"] --> Lock["Ordered locks and revision check"]
+  Lock --> Family{"One nonempty finding family?"}
+  Family -->|"policy"| Policy["Current policy evidence: PASS or matching waiver"]
+  Family -->|"exact CVE"| CVE["Baseline bound newer exact scan: PASS only"]
+  Family -->|"neither or both"| Reject["Reject without accepting closure"]
+  Policy --> Seal["Record and seal fresh verification attempt"]
+  CVE --> Seal
+  Seal --> Action{"Requested action"}
+  Action -->|"verify"| V["Commit attempt and revision; remain awaiting"]
+  Action -->|"close, not acceptable"| Failed["Commit rejected attempt and revision; HTTP 412"]
+  Action -->|"close, acceptable"| Done["Retire links and schedules; complete; build response; commit"]
+  Done --> Reopen["Separate reopen validation against closure set"]

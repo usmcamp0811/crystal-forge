@@ -63,6 +63,7 @@ const Icon = ({ name, size = 16, ...rest }) => {
     case "edit":      return <svg {...common}><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>;
     case "trash":     return <svg {...common}><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>;
     case "star":      return <svg {...common}><path d="m12 2.5 3 6.4 6.8.9-5 4.9 1.3 6.8L12 18l-6.1 3.5L7.2 14.7l-5-4.9 6.8-.9L12 2.5z"/></svg>;
+    case "help":      return <svg {...common}><circle cx="12" cy="12" r="9"/><path d="M9.5 9.2a2.6 2.6 0 0 1 5 1c0 1.8-2.5 2.2-2.5 3.8M12 17h.01"/></svg>;
     default: return null;
   }
 };

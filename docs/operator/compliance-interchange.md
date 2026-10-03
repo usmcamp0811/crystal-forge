@@ -116,12 +116,24 @@ result from colliding with another evaluator field.
 
 Composite deployment authorization uses a canonical digest of enforced
 composite policy versions and their effective configurations. The complete
-effective-set digest remains the compliance evidence identity. A report-only or
-non-composite assignment change does not stale an enforced composite deployment
-assessment. Assessments written before this digest split remain valid only when
-one complete legacy digest group exactly matches every current enforced
-composite policy version, effective configuration, and ordered rule result.
-Ambiguous, incomplete, malformed, or mismatched legacy groups remain stale.
+effective-set digest remains the general policy-resolution identity. Composite
+assessments are persisted for both assignment modes from the normal exact-target
+evaluation, scan, and deployment lifecycle. Each report-only composite uses a
+mode-bound policy-version/configuration assessment identity. That identity is
+not a deployment authorization digest or a weaker finding observation. A
+report-only failure remains a compliance failure: operators can waive it or
+create or link a POA&M, but it does not block deployment. Creating a POA&M
+does not change the assessment result. A report-only or non-composite assignment
+change does not stale an enforced composite deployment assessment. Changing
+mode preserves stable findings and historical POA&M/waiver evidence; current
+remediation must match an exact assessment created under the current assignment
+snapshot. A mode round-trip does not reactivate an assessment from an older
+snapshot; scan updates do not refresh its creation time. Assessments written
+before the enforced digest split remain valid for enforcement only when one
+complete legacy digest group exactly matches every current enforced composite
+policy version, effective configuration, and ordered rule result. Ambiguous,
+incomplete, malformed, or mismatched legacy groups remain stale. Legacy
+enforcement evidence cannot stand in for report-only evidence.
 
 Use `POST /api/v1/compliance/assignments/preview` before saving when a preview is
 needed. Effective policies are available from:

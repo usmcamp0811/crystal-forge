@@ -146,40 +146,39 @@ function ConfigExplorerTab({ sys, initialRev, onOpenFlake }) {
     <div className="cfgx">
       <div className="cfgx-top">
         <div className="cfgx-target">
-          <span className="cfgx-target-label">TARGET</span>
+          <span className="cfgx-target-label">Target</span>
           <span className="mono cfgx-target-path">
             <span className="dim">{sys.flake}#nixosConfigurations.</span>{sys.hostname}<span className="dim">.config</span>
           </span>
-        </div>
-        <div className="cfgx-top-r">
-          <div className="cfgx-rev">
-            <div className="seg xs">
-              <button className={!onCommits?"active":""} onClick={()=>setRevMode("generation")}>Generations</button>
-              <button className={onCommits?"active":""} onClick={()=>setRevMode("commit")}>Commits</button>
-            </div>
-            {onCommits ? (
-              <select className="cfgx-select focus-ring" value={activeCommit.sha} onChange={e=>setCommitSha(e.target.value)}>
-                {commits.map(c => <option key={c.sha} value={c.sha}>{c.sha}{c.sha === sys.commit ? " (deployed)" : ""} · {c.when}</option>)}
-              </select>
-            ) : (
-              <select className="cfgx-select focus-ring" value={activeGen ? activeGen.id : ""} onChange={e=>setGenId(Number(e.target.value))}>
-                {gens.map(g => <option key={g.id} value={g.id} disabled={!g.sha}>gen #{g.id}{g.current ? " (current)" : ""}{g.sha ? ` · ${g.sha}` : " · no commit"}</option>)}
-              </select>
-            )}
-          </div>
           <span className="cfgx-obs" title="Observational only. Deployment gating uses the policy evaluator, which evaluates this configuration independently — an Explorer cache hit never substitutes for an authoritative policy evaluation.">observational</span>
         </div>
-      </div>
-
-      {isHistorical && (
-        <div className="cfgx-hist">
-          <Icon name="info" size={12}/>
-          <div>{onCommits
-            ? <>Inspecting what this host <em>would</em> evaluate to at <span className="mono">{rev}</span>{deployedHere ? "" : " — a revision never deployed here"}, not what is running now.</>
-            : <>Inspecting generation #{activeGen.id} (<span className="mono">{rev}</span>), not what is running now.</>}</div>
-          <button className="cfgx-link" onClick={()=>{ setRevMode("generation"); setGenId(null); setCommitSha(null); }}>back to current</button>
+        <div className={`cfgx-revrow${isHistorical ? " is-hist" : ""}`}>
+          <span className="cfgx-target-label">Revision</span>
+          <div className="seg xs">
+            <button className={!onCommits?"active":""} onClick={()=>setRevMode("generation")}>Generations</button>
+            <button className={onCommits?"active":""} onClick={()=>setRevMode("commit")}>Commits</button>
+          </div>
+          {onCommits ? (
+            <select className="cfgx-select focus-ring" value={activeCommit.sha} onChange={e=>setCommitSha(e.target.value)}>
+              {commits.map(c => <option key={c.sha} value={c.sha}>{c.sha}{c.sha === sys.commit ? " (deployed)" : ""} · {c.when}</option>)}
+            </select>
+          ) : (
+            <select className="cfgx-select focus-ring" value={activeGen ? activeGen.id : ""} onChange={e=>setGenId(Number(e.target.value))}>
+              {gens.map(g => <option key={g.id} value={g.id} disabled={!g.sha}>gen #{g.id}{g.current ? " (current)" : ""}{g.sha ? ` · ${g.sha}` : " · no commit"}</option>)}
+            </select>
+          )}
+          <span className="cfgx-revnote">
+            {isHistorical
+              ? (onCommits
+                  ? <>evaluating at <span className="mono">{rev}</span>{deployedHere ? "" : ", never deployed here"}</>
+                  : <>evaluating generation #{activeGen.id} at <span className="mono">{rev}</span></>)
+              : <>evaluating the configuration running now</>}
+          </span>
+          {isHistorical
+            ? <button className="cfgx-link" onClick={()=>{ setRevMode("generation"); setGenId(null); setCommitSha(null); }}>back to current</button>
+            : <span className="cfgx-live"><Icon name="check" size={9}/> live</span>}
         </div>
-      )}
+      </div>
 
       <div className="cfgx-meta">
         <div className="cfgx-meta-i" title="Whether the primary evaluator has produced a result for this exact target. Config Explorer never initiates or substitutes for primary evaluation — this only reports what already exists."><span>primary eval</span><b className={summary ? "ok" : ""}>{summary ? "complete" : "…"}</b></div>

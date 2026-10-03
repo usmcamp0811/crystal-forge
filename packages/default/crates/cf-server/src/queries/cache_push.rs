@@ -167,7 +167,15 @@ pub async fn mark_cache_push_in_progress(pool: &PgPool, job_id: i32) -> Result<(
     Ok(())
 }
 
-/// Mark cache push job as completed
+/// Marks a cache push job as completed and prompts waiting CVE scan promotion.
+///
+/// Cache publication commits before promotion starts. Promotion and GC-root
+/// cleanup are best effort and do not turn successful publication into an
+/// error.
+///
+/// # Errors
+///
+/// Returns an error when the cache-push job lookup or completion update fails.
 pub async fn mark_cache_push_completed(
     pool: &PgPool,
     job_id: i32,
@@ -200,6 +208,20 @@ pub async fn mark_cache_push_completed(
     .await?;
 
     debug!("Marked cache push job {} as completed", job_id);
+
+    if let Err(error) = crate::queries::cve_scans::promote_waiting_cve_scans(
+        pool,
+        crate::queries::cve_scans::EVENT_PROMOTION_LIMIT,
+    )
+    .await
+    {
+        warn!(
+            cache_push_job_id = job_id,
+            derivation_id,
+            %error,
+            "Failed to promote waiting CVE scans after cache publication"
+        );
+    }
 
     // Remove GC root now that it's in cache
     if let Err(e) = remove_gc_root(derivation_id).await {

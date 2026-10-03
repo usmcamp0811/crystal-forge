@@ -1,0 +1,14 @@
+flowchart LR
+  Source["Source-level findings"] --> Unit["Pure state and serialization tests"]
+  Source --> DB["Database authority and transaction tests"]
+  Source --> HTTP["Real route role and scope tests"]
+  Source --> UI["Browser race and workflow tests"]
+  Source --> Export["Parse actual exported bytes"]
+  Source --> Visual["Exact-head design and production captures"]
+  Unit --> Record["Record exact SHA and evidence"]
+  DB --> Record
+  HTTP --> Record
+  UI --> Record
+  Export --> Record
+  Visual --> Record
+  Record --> Review["No unverified item treated as passed"]

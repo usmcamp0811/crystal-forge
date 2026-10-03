@@ -73,7 +73,7 @@ function BundleEditor({ bundle: editBundle, onClose, onDelete }) {
         lastReview: "just now",
       });
     } else {
-      window.__cfCoach?.complete("compliance");
+      window.__cfCoach?.serverObserve("compliance"); // mock: server sees a persisted bundle
     }
     onClose();
   };

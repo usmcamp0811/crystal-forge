@@ -1551,7 +1551,9 @@ fn route_for_nav(route: &str) -> Option<Route> {
         "flakes" => Route::FlakesView {
             query: String::new(),
         },
-        "builds" => Route::BuildsView {},
+        "builds" => Route::BuildsView {
+            query: String::new(),
+        },
         "evals" => Route::EvaluationsView {},
         "cves" => Route::CvesView {
             query: String::new(),

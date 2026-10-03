@@ -15,7 +15,7 @@ use crate::security::snapshot_redaction::redact_text;
 /// Maximum diagnostic events accepted from one terminal remote report.
 pub(crate) const MAX_DIAGNOSTIC_EVENTS: usize = 256;
 /// Maximum persisted Unicode scalar count for one event line.
-pub(crate) const MAX_DIAGNOSTIC_CHARS: usize = 2048;
+pub(crate) const MAX_DIAGNOSTIC_CHARS: usize = cf_protocol::builder::CVE_SCAN_MAX_DIAGNOSTIC_CHARS;
 /// Fixed maximum returned by the scan-detail API.
 pub(crate) const MAX_DETAIL_EVENTS: i64 = 500;
 
@@ -47,10 +47,32 @@ pub(crate) struct ScanDiagnosticRow {
 /// Scan identity and bounded diagnostics used by the admin detail API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ScanDiagnosticDetail {
+    pub(crate) derivation_id: i32,
+    pub(crate) hostname: String,
+    pub(crate) flake_name: Option<String>,
+    pub(crate) commit_hash: Option<String>,
     pub(crate) status: String,
     pub(crate) scanner_name: String,
     pub(crate) scanner_version: Option<String>,
-    pub(crate) source_trigger: String,
+    pub(crate) source_trigger: Option<String>,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) scheduled_at: Option<DateTime<Utc>>,
+    pub(crate) started_at: Option<DateTime<Utc>>,
+    pub(crate) completed_at: Option<DateTime<Utc>>,
+    pub(crate) scan_duration_ms: Option<i32>,
+    pub(crate) attempts: i32,
+    pub(crate) total_packages: i32,
+    pub(crate) total_vulnerabilities: i32,
+    pub(crate) critical_count: i32,
+    pub(crate) high_count: i32,
+    pub(crate) medium_count: i32,
+    pub(crate) low_count: i32,
+    pub(crate) failure: Option<String>,
+    pub(crate) wait_reason: Option<String>,
+    pub(crate) build_job_id: Option<Uuid>,
+    pub(crate) build_status: Option<String>,
+    pub(crate) executor: Option<String>,
+    pub(crate) archived_at: Option<DateTime<Utc>>,
     pub(crate) events: Vec<ScanDiagnosticRow>,
     pub(crate) truncated: bool,
 }
@@ -73,8 +95,15 @@ pub(crate) fn prepare_diagnostics(values: &[CveScanDiagnostic]) -> Vec<PreparedS
         };
         let event_type = match value.event_type.as_str() {
             "attempt_started" => "attempt_started",
+            "materialization_started" => "materialization_started",
+            "materialization_completed" => "materialization_completed",
+            "scanner_started" => "scanner_started",
+            "scanner_completed" => "scanner_completed",
+            "evidence_resolution_started" => "evidence_resolution_started",
+            "evidence_resolution_completed" => "evidence_resolution_completed",
             "attempt_completed" => "attempt_completed",
             "attempt_failed" => "attempt_failed",
+            "result_persistence_failed" => "result_persistence_failed",
             "attempt_requeued" => "attempt_requeued",
             _ => "output",
         };
@@ -188,7 +217,19 @@ async fn insert_diagnostics_tx(
                (scan_id, execution_id, attempt_number, occurred_at, level, source, event_type, message, truncated)
                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
                ON CONFLICT (scan_id, execution_id, event_type)
-               WHERE event_type IN ('attempt_started','attempt_completed','attempt_failed','attempt_requeued')
+               WHERE event_type IN (
+                   'attempt_started',
+                   'materialization_started',
+                   'materialization_completed',
+                   'scanner_started',
+                   'scanner_completed',
+                   'evidence_resolution_started',
+                   'evidence_resolution_completed',
+                    'attempt_completed',
+                    'attempt_failed',
+                    'result_persistence_failed',
+                    'attempt_requeued'
+               )
                DO NOTHING"#,
         )
         .bind(scan_id)
@@ -212,7 +253,39 @@ pub(crate) async fn get_scan_diagnostics(
     scan_id: Uuid,
 ) -> Result<Option<ScanDiagnosticDetail>> {
     let metadata = sqlx::query(
-        "SELECT status, scanner_name, scanner_version, source_trigger FROM cve_scans WHERE id=$1",
+        r#"
+        SELECT scan.derivation_id, derivation.derivation_name AS hostname,
+               flake.name AS flake_name, commit.git_commit_hash AS commit_hash,
+               scan.status, scan.scanner_name, scan.scanner_version,
+               scan.source_trigger, scan.created_at, scan.scheduled_at,
+               COALESCE(
+                   scan.lease_started_at,
+                   (scan.scan_metadata ->> 'execution_started_at')::timestamptz
+               ) AS started_at,
+               scan.completed_at, scan.scan_duration_ms, scan.attempts,
+               scan.total_packages, scan.total_vulnerabilities,
+               scan.critical_count, scan.high_count, scan.medium_count,
+               scan.low_count, scan.scan_metadata ->> 'error' AS failure,
+               CASE scan.status
+                   WHEN 'awaiting_build' THEN 'Build output is not available.'
+                   WHEN 'awaiting_closure' THEN 'A completed cache closure is not available.'
+               END AS wait_reason,
+               COALESCE(builder.name,
+                   CASE WHEN scan.scan_metadata ? 'execution_id' THEN 'server-local' END
+               ) AS executor,
+               archive.archived_at,
+               related_build.id AS build_job_id,
+               related_build.status AS build_status
+        FROM cve_scans scan
+        JOIN derivations derivation ON derivation.id = scan.derivation_id
+        LEFT JOIN commits commit ON commit.id = derivation.commit_id
+        LEFT JOIN flakes flake ON flake.id = commit.flake_id
+        LEFT JOIN builders builder ON builder.id = scan.lease_builder_id
+        LEFT JOIN cve_scan_archives archive ON archive.scan_id = scan.id
+        LEFT JOIN build_jobs related_build
+          ON related_build.id = scan.completed_build_job_id
+        WHERE scan.id = $1
+        "#,
     )
     .bind(scan_id)
     .fetch_optional(pool)
@@ -220,10 +293,12 @@ pub(crate) async fn get_scan_diagnostics(
     let Some(metadata) = metadata else {
         return Ok(None);
     };
+    // SECURITY: The database identity records server receipt order. The builder's
+    // wall clock remains informational and cannot reorder lifecycle events.
     let rows = sqlx::query(
         r#"SELECT id, execution_id, attempt_number, occurred_at, level, source, event_type, message, truncated
            FROM cve_scan_diagnostic_events WHERE scan_id=$1
-           ORDER BY occurred_at, id LIMIT $2"#,
+           ORDER BY attempt_number, id LIMIT $2"#,
     )
     .bind(scan_id)
     .bind(MAX_DETAIL_EVENTS + 1)
@@ -246,10 +321,39 @@ pub(crate) async fn get_scan_diagnostics(
         })
         .collect();
     Ok(Some(ScanDiagnosticDetail {
+        derivation_id: metadata.get("derivation_id"),
+        hostname: metadata.get("hostname"),
+        flake_name: metadata.get("flake_name"),
+        commit_hash: metadata.get("commit_hash"),
         status: metadata.get("status"),
         scanner_name: metadata.get("scanner_name"),
         scanner_version: metadata.get("scanner_version"),
-        source_trigger: metadata.get("source_trigger"),
+        source_trigger: crate::queries::cve_scans::present_scan_trigger(
+            metadata
+                .get::<Option<String>, _>("source_trigger")
+                .as_deref(),
+        ),
+        created_at: metadata.get("created_at"),
+        scheduled_at: metadata.get("scheduled_at"),
+        started_at: metadata.get("started_at"),
+        completed_at: metadata.get("completed_at"),
+        scan_duration_ms: metadata.get("scan_duration_ms"),
+        attempts: metadata.get("attempts"),
+        total_packages: metadata.get("total_packages"),
+        total_vulnerabilities: metadata.get("total_vulnerabilities"),
+        critical_count: metadata.get("critical_count"),
+        high_count: metadata.get("high_count"),
+        medium_count: metadata.get("medium_count"),
+        low_count: metadata.get("low_count"),
+        failure: metadata
+            .get::<Option<String>, _>("failure")
+            .map(|value| redact_text(&value))
+            .map(|value| value.chars().take(MAX_DIAGNOSTIC_CHARS).collect()),
+        wait_reason: metadata.get("wait_reason"),
+        build_job_id: metadata.get("build_job_id"),
+        build_status: metadata.get("build_status"),
+        executor: metadata.get("executor"),
+        archived_at: metadata.get("archived_at"),
         events,
         truncated,
     }))

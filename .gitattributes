@@ -1,0 +1,3 @@
+# Preserve byte-for-byte upstream OSCAL schemas, including original whitespace.
+schemas/oscal-1.1.2/oscal_poam_schema.json -whitespace
+schemas/oscal-1.1.2/oscal_poam_schema.xsd -whitespace

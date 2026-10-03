@@ -23,13 +23,14 @@ use wasm_bindgen::closure::Closure;
 
 use crate::api::client::{
     ApiClientError, fetch_compliance_system_evidence, fetch_flake_timeline_for_tray,
-    fetch_system_assignments, fetch_system_compliance_bundles, fetch_system_cve_inventory,
+    fetch_system_assignments, fetch_system_compliance_bundles,
+    fetch_system_cve_inventory_candidates, fetch_system_cve_inventory_for_target,
     fetch_system_cve_scan_eligibility, fetch_system_evaluated_options,
     fetch_system_evaluation_module_sources, fetch_system_evaluation_summary,
-    fetch_system_hardening, fetch_system_hardening_justifications,
+    fetch_system_hardening_inventory_for_target, fetch_system_hardening_justifications,
     fetch_system_hardening_scan_eligibility, get_system_deployment_progress,
     queue_system_config_inspection, request_system_generation_rollback, request_system_rollback,
-    request_system_sync, save_system_hardening_justification,
+    request_system_sync, save_system_hardening_justification, trigger_system_hardening_scan,
     verify_generation_closure as verify_generation_closure_request,
 };
 use crate::api::models::{
@@ -43,10 +44,12 @@ use crate::api::models::{
     OptionChangeKind, OptionDefinitionProvenance, OptionInventoryState, SafeOptionValue,
     SaveHardeningJustificationRequest, SelectedEvaluationSummary, SevenDayDriftStatus,
     SnapshotLifecycle, SnapshotRevisionMode, SystemAgentEvent, SystemCommitHistory,
-    SystemComplianceBundle, SystemCveInventoryAuthority, SystemCveInventoryPageResponse,
-    SystemDeploymentProgress, SystemDetail, SystemGeneration, SystemHistoryEntry,
-    SystemRollbackGenerationRequest, SystemRollbackRequest, SystemVulnerability,
-    TrackedFlakeIdentity, TypedOptionDiff, VerifyGenerationClosureRequest,
+    SystemComplianceBundle, SystemCveCurrentAuthorityState, SystemCveEvidenceRepresentation,
+    SystemCveInventoryAuthority, SystemCveInventoryCandidate, SystemCveInventoryPageResponse,
+    SystemCveInventorySelection, SystemCveRunningTarget, SystemDeploymentProgress, SystemDetail,
+    SystemGeneration, SystemHardeningInventoryAttemptResponse,
+    SystemHardeningInventorySourceResponse, SystemHistoryEntry, SystemRollbackGenerationRequest,
+    SystemRollbackRequest, TrackedFlakeIdentity, TypedOptionDiff, VerifyGenerationClosureRequest,
 };
 use crate::components::compliance::EvidenceDrawer;
 use crate::components::cve::{CveInventoryPaginationState, CvesTab};
@@ -72,8 +75,8 @@ use crate::state::{
     app_state::AppState,
     auth,
     navigation_focus::{
-        ConfigRevision, FocusTarget, NavigationFocus, SystemDetailNavigation, SystemDetailTab,
-        current_query, update_query,
+        ConfigRevision, FindingEvidenceFocus, FocusTarget, NavigationFocus, SystemDetailNavigation,
+        SystemDetailTab, current_query, update_query,
     },
 };
 use crate::systems::adapter::{
@@ -141,9 +144,688 @@ const POLICY_JSON_SAMPLE: &str = r#"[
 /// renders as a real empty/error state (TASK-353 review).
 #[derive(Debug, Clone, PartialEq)]
 struct VulnerabilitiesLoad {
+    system_id: String,
+    refresh_nonce: u64,
+    detail_nonce: u64,
+    selection: SystemCveInventorySelection,
     inventory: Option<SystemCveInventoryPageResponse>,
     error: Option<String>,
     redirect_to_login: bool,
+}
+
+impl VulnerabilitiesLoad {
+    // CONCURRENCY: Returning to Current after browsing another revision is a
+    // new request even though the selected enum value is Current again.
+    fn matches_request(
+        &self,
+        system_id: &str,
+        selection: SystemCveInventorySelection,
+        refresh_nonce: u64,
+        detail_nonce: u64,
+    ) -> bool {
+        self.system_id == system_id
+            && self.selection == selection
+            && self.refresh_nonce == refresh_nonce
+            && self.detail_nonce == detail_nonce
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RevisionScopeMode {
+    Generations,
+    Commits,
+}
+
+#[derive(Clone)]
+struct RevisionScopeChoice {
+    key: String,
+    label: String,
+    message: Option<String>,
+    timestamp: String,
+    author: Option<String>,
+    state: RevisionTargetState,
+    selection: Option<SystemCveInventorySelection>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RevisionTargetState {
+    Running,
+    NeverDeployed,
+    Historical,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RevisionScopeTransition {
+    mode: RevisionScopeMode,
+    selection: Option<SystemCveInventorySelection>,
+}
+
+/// Identifies the server-authorized target that the revision controls select
+/// before an operator chooses a target or presentation mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RevisionScopeDefault {
+    selection: SystemCveInventorySelection,
+    mode: RevisionScopeMode,
+    message: Option<&'static str>,
+    head_unavailable: bool,
+}
+
+/// Tracks whether an operator has overridden the automatic target for one tab.
+///
+/// The automatic target may change when candidate metadata refreshes. An
+/// explicit target or mode choice MUST survive that refresh until navigation
+/// selects a different system.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RevisionScopeSelectionState {
+    system_id: Option<String>,
+    is_explicit: bool,
+}
+
+fn selection_key(selection: SystemCveInventorySelection) -> String {
+    match selection {
+        SystemCveInventorySelection::Current => "current".to_string(),
+        SystemCveInventorySelection::RetainedGeneration {
+            generation_snapshot_id,
+        } => format!("generation:{generation_snapshot_id}"),
+        SystemCveInventorySelection::ExactDerivation { derivation_id } => {
+            format!("derivation:{derivation_id}")
+        }
+    }
+}
+
+fn cve_selection_from_query(query: &str) -> SystemCveInventorySelection {
+    match query_value(query, "cve_target").as_deref() {
+        Some(value) if value.starts_with("generation:") => value
+            .strip_prefix("generation:")
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .map(
+                |generation_snapshot_id| SystemCveInventorySelection::RetainedGeneration {
+                    generation_snapshot_id,
+                },
+            )
+            .unwrap_or_default(),
+        Some(value) if value.starts_with("derivation:") => value
+            .strip_prefix("derivation:")
+            .and_then(|value| value.parse::<i32>().ok())
+            .filter(|value| *value > 0)
+            .map(|derivation_id| SystemCveInventorySelection::ExactDerivation { derivation_id })
+            .unwrap_or_default(),
+        _ => SystemCveInventorySelection::Current,
+    }
+}
+
+fn cve_mode_from_query(query: &str) -> RevisionScopeMode {
+    if query_value(query, "cve_mode").as_deref() == Some("commit") {
+        RevisionScopeMode::Commits
+    } else {
+        RevisionScopeMode::Generations
+    }
+}
+
+// SECURITY: A response must identify the requested system, target, source,
+// representation, and read capability before it can replace visible pages.
+// An old server without system_id is not proof of this boundary.
+fn cve_page_matches_request(
+    system_id: Uuid,
+    selection: SystemCveInventorySelection,
+    page: &SystemCveInventoryPageResponse,
+) -> bool {
+    if page.system_id != Some(system_id) || page.selection != selection {
+        return false;
+    }
+    if let Some(attempt) = page.attempt.as_ref() {
+        let matches_target = match selection {
+            SystemCveInventorySelection::Current => page
+                .running_target
+                .as_ref()
+                .is_some_and(|target| attempt.derivation_id == target.derivation_id),
+            SystemCveInventorySelection::ExactDerivation { derivation_id } => {
+                attempt.derivation_id == derivation_id
+            }
+            SystemCveInventorySelection::RetainedGeneration { .. } => attempt.derivation_id > 0,
+        };
+        if !matches_target {
+            return false;
+        }
+    }
+    match page.authority {
+        SystemCveInventoryAuthority::Exact => {
+            page.source.is_some()
+                && page.evidence_representation
+                    == Some(SystemCveEvidenceRepresentation::Schema1Observations)
+                && if selection == SystemCveInventorySelection::Current {
+                    page.current_state == Some(SystemCveCurrentAuthorityState::ExactCurrentScan)
+                        && page
+                            .running_target
+                            .as_ref()
+                            .is_some_and(|target| target.derivation_id > 0)
+                        && !page.read_only
+                } else {
+                    page.current_state.is_none() && page.read_only
+                }
+        }
+        SystemCveInventoryAuthority::MappedRunning => {
+            selection == SystemCveInventorySelection::Current
+                && page.current_state
+                    == Some(SystemCveCurrentAuthorityState::MappedRunningReadOnlyScan)
+                && page
+                    .running_target
+                    .as_ref()
+                    .is_some_and(|target| target.derivation_id > 0)
+                && page.read_only
+                && page.source.is_some()
+                && page.evidence_representation
+                    == Some(SystemCveEvidenceRepresentation::Schema1Observations)
+                && page
+                    .vulnerabilities
+                    .iter()
+                    .all(|item| item.remediation.is_none())
+        }
+        SystemCveInventoryAuthority::Legacy => {
+            selection != SystemCveInventorySelection::Current
+                && page.read_only
+                && page.source.is_some()
+                && page.current_state.is_none()
+        }
+        SystemCveInventoryAuthority::NoScan => {
+            page.source.is_none()
+                && page.evidence_representation.is_none()
+                && page.vulnerabilities.is_empty()
+                && page.read_only
+                && page.metadata.total_findings == 0
+                && if selection == SystemCveInventorySelection::Current {
+                    matches!(
+                        page.current_state,
+                        Some(
+                            SystemCveCurrentAuthorityState::NoCurrentScan
+                                | SystemCveCurrentAuthorityState::MappedRunningNoScan
+                                | SystemCveCurrentAuthorityState::NoRunningReport
+                                | SystemCveCurrentAuthorityState::InvalidRunningReport
+                                | SystemCveCurrentAuthorityState::UnmappedRunning
+                                | SystemCveCurrentAuthorityState::AmbiguousRunning
+                                | SystemCveCurrentAuthorityState::CurrentAuthorityUnavailable
+                        )
+                    )
+                } else {
+                    page.current_state.is_none() && page.running_target.is_none()
+                }
+        }
+    }
+}
+
+fn candidate_is_tracked_current(candidate: &SystemCveInventoryCandidate) -> bool {
+    matches!(candidate.selection, SystemCveInventorySelection::Current)
+        && candidate.is_current
+        && candidate.derivation_id.is_some()
+}
+
+fn revision_scope_default(candidates: &[SystemCveInventoryCandidate]) -> RevisionScopeDefault {
+    // COMPATIBILITY: Hardening retains its existing default-selection contract.
+    // CVEs no longer infer Current or a head fallback from candidate metadata.
+    if candidates.iter().any(candidate_is_tracked_current) {
+        return RevisionScopeDefault {
+            selection: SystemCveInventorySelection::Current,
+            mode: RevisionScopeMode::Generations,
+            message: None,
+            head_unavailable: false,
+        };
+    }
+
+    if let Some(candidate) = candidates.iter().find(|candidate| {
+        matches!(
+            candidate.selection,
+            SystemCveInventorySelection::ExactDerivation { .. }
+        ) && candidate.is_latest_per_flake
+    }) {
+        return RevisionScopeDefault {
+            selection: candidate.selection,
+            mode: RevisionScopeMode::Commits,
+            message: Some("Showing flake head because the running configuration is out of band."),
+            head_unavailable: false,
+        };
+    }
+
+    // Do not select a retained scan or another candidate when the server has
+    // no selectable branch head. Current remains a fail-closed request target;
+    // the selector makes the unavailable head state visible to the operator.
+    RevisionScopeDefault {
+        selection: SystemCveInventorySelection::Current,
+        mode: RevisionScopeMode::Commits,
+        message: Some("The flake head is unavailable for this out-of-band running configuration."),
+        head_unavailable: true,
+    }
+}
+
+fn automatic_revision_scope_update(
+    state: &mut RevisionScopeSelectionState,
+    system_id: &str,
+    default: &RevisionScopeDefault,
+) -> Option<RevisionScopeDefault> {
+    if state.system_id.as_deref() != Some(system_id) {
+        *state = RevisionScopeSelectionState {
+            system_id: Some(system_id.to_string()),
+            is_explicit: false,
+        };
+    }
+    (!state.is_explicit).then(|| default.clone())
+}
+
+fn candidate_for_generation(
+    generation: &SystemGeneration,
+    candidates: &[SystemCveInventoryCandidate],
+) -> Option<SystemCveInventorySelection> {
+    candidates
+        .iter()
+        .find(|candidate| generation.is_current && candidate_is_tracked_current(candidate))
+        .or_else(|| {
+            candidates.iter().find(|candidate| {
+                candidate.generation == Some(generation.generation)
+                    && matches!(
+                        candidate.selection,
+                        SystemCveInventorySelection::RetainedGeneration { .. }
+                    )
+            })
+        })
+        .map(|candidate| candidate.selection)
+}
+
+fn candidate_for_commit(
+    commit: &CommitInfo,
+    current_commit: Option<&str>,
+    candidates: &[SystemCveInventoryCandidate],
+) -> Option<SystemCveInventorySelection> {
+    candidates
+        .iter()
+        .find(|candidate| {
+            current_commit == Some(commit.sha.as_str()) && candidate_is_tracked_current(candidate)
+        })
+        .or_else(|| {
+            candidates.iter().find(|candidate| {
+                candidate.commit_hash.as_deref() == Some(commit.sha.as_str())
+                    && matches!(
+                        candidate.selection,
+                        SystemCveInventorySelection::ExactDerivation { .. }
+                    )
+            })
+        })
+        .map(|candidate| candidate.selection)
+}
+
+fn revision_scope_choices(
+    mode: RevisionScopeMode,
+    candidates: &[SystemCveInventoryCandidate],
+    generations: &[SystemGeneration],
+    commits: &[CommitInfo],
+    current_commit: Option<&str>,
+) -> Vec<RevisionScopeChoice> {
+    match mode {
+        RevisionScopeMode::Generations => generations
+            .iter()
+            .map(|generation| {
+                let selection = candidate_for_generation(generation, candidates);
+                RevisionScopeChoice {
+                    key: selection.map(selection_key).unwrap_or_else(|| {
+                        format!("unavailable-generation:{}", generation.generation)
+                    }),
+                    label: format!(
+                        "gen #{}{} · {}",
+                        generation.generation,
+                        if generation.is_current {
+                            " (current)"
+                        } else {
+                            ""
+                        },
+                        generation.commit_hash.as_deref().unwrap_or("no commit")
+                    ),
+                    message: generation.commit_hash.as_ref().map(|hash| {
+                        format!("commit {}", hash.chars().take(12).collect::<String>())
+                    }),
+                    timestamp: generation.timestamp.to_rfc3339(),
+                    author: None,
+                    state: if generation.is_current {
+                        RevisionTargetState::Running
+                    } else {
+                        RevisionTargetState::Historical
+                    },
+                    selection,
+                }
+            })
+            .collect(),
+        RevisionScopeMode::Commits => commits
+            .iter()
+            .map(|commit| {
+                let selection = candidate_for_commit(commit, current_commit, candidates);
+                let current = current_commit == Some(commit.sha.as_str());
+                RevisionScopeChoice {
+                    key: selection
+                        .map(selection_key)
+                        .unwrap_or_else(|| format!("unavailable-commit:{}", commit.sha)),
+                    label: format!(
+                        "{}{} · {}",
+                        commit.short_sha,
+                        if current { " (deployed)" } else { "" },
+                        commit.timestamp
+                    ),
+                    message: (!commit.message.is_empty()).then(|| commit.message.clone()),
+                    timestamp: commit.timestamp.clone(),
+                    author: (!commit.author.is_empty()).then(|| commit.author.clone()),
+                    state: if current {
+                        RevisionTargetState::Running
+                    } else if commit.deployed_here {
+                        RevisionTargetState::Historical
+                    } else {
+                        RevisionTargetState::NeverDeployed
+                    },
+                    selection,
+                }
+            })
+            .collect(),
+    }
+}
+
+fn selection_after_scope_mode_change(
+    choices: &[RevisionScopeChoice],
+    candidates: &[SystemCveInventoryCandidate],
+    selected: SystemCveInventorySelection,
+) -> Option<SystemCveInventorySelection> {
+    if let Some(selection) = choices
+        .iter()
+        .find(|choice| choice.selection == Some(selected))
+        .and_then(|choice| choice.selection)
+    {
+        return Some(selection);
+    }
+
+    let selected_candidate = candidates
+        .iter()
+        .find(|candidate| candidate.selection == selected)?;
+    let linked = choices.iter().find_map(|choice| {
+        let selection = choice.selection?;
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.selection == selection)?;
+        let same_derivation = selected_candidate.derivation_id.is_some()
+            && selected_candidate.derivation_id == candidate.derivation_id;
+        let same_generation_and_commit = selected_candidate.generation.is_some()
+            && selected_candidate.generation == candidate.generation
+            && selected_candidate.commit_hash.is_some()
+            && selected_candidate.commit_hash == candidate.commit_hash;
+        (same_derivation || same_generation_and_commit).then_some(selection)
+    });
+    linked
+}
+
+fn revision_scope_transition(
+    mode: RevisionScopeMode,
+    choices: &[RevisionScopeChoice],
+    candidates: &[SystemCveInventoryCandidate],
+    selected: SystemCveInventorySelection,
+) -> RevisionScopeTransition {
+    RevisionScopeTransition {
+        mode,
+        selection: selection_after_scope_mode_change(choices, candidates, selected),
+    }
+}
+
+/// Renders the shared CVE and Hardening revision selector from server-owned targets.
+#[component]
+fn RevisionScopeBar(
+    label: &'static str,
+    candidates: Vec<SystemCveInventoryCandidate>,
+    generations: Vec<SystemGeneration>,
+    commits: Vec<CommitInfo>,
+    current_commit: Option<String>,
+    selected: SystemCveInventorySelection,
+    mut mode: Signal<RevisionScopeMode>,
+    loading: bool,
+    loaded: bool,
+    error: Option<String>,
+    default_message: Option<&'static str>,
+    #[props(default)] cve_current: bool,
+    #[props(default)] current_target: Option<SystemCveRunningTarget>,
+    #[props(default)] current_meta: Option<String>,
+    on_select: EventHandler<SystemCveInventorySelection>,
+    on_mode_change: EventHandler<RevisionScopeMode>,
+    on_retry: EventHandler<()>,
+) -> Element {
+    if !cve_current && !loaded && loading {
+        return rsx! {
+            div { class: "rev-bar", role: "status", aria_live: "polite", aria_busy: "true",
+                span { class: "rev-bar-label", "{label}" }
+                span { class: "rev-bar-msg", "Loading revision targets…" }
+            }
+        };
+    }
+    if !cve_current && !loaded {
+        return rsx! {
+            div { class: "rev-bar", role: "alert",
+                span { class: "rev-bar-label", "{label}" }
+                span { class: "rev-bar-msg",
+                    "Revision targets could not be loaded"
+                    if let Some(error) = error.as_deref() { ": {error}" }
+                }
+                button {
+                    class: "btn btn-sm",
+                    r#type: "button",
+                    onclick: move |_| on_retry.call(()),
+                    "Retry revision targets"
+                }
+            }
+        };
+    }
+
+    // CVE Current is a stable intent, not a candidate-menu position. The
+    // independently authorized Current read supplies its target identity;
+    // generation and commit options remain exact, read-only selections.
+    let browse_candidates = if cve_current {
+        candidates
+            .iter()
+            .filter(|candidate| candidate.selection != SystemCveInventorySelection::Current)
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        candidates.clone()
+    };
+    let mut choices = revision_scope_choices(
+        mode(),
+        &browse_candidates,
+        &generations,
+        &commits,
+        current_commit.as_deref(),
+    );
+    if cve_current {
+        let current_label = current_target.as_ref().map_or_else(
+            || "Current · running target unresolved".to_string(),
+            |target| {
+                format!(
+                    "Current · {} · {}",
+                    target.generation.map_or_else(
+                        || "generation unavailable".to_string(),
+                        |generation| format!("gen #{generation}")
+                    ),
+                    target.commit_hash
+                )
+            },
+        );
+        choices.insert(
+            0,
+            RevisionScopeChoice {
+                key: "current".to_string(),
+                label: current_label,
+                message: current_meta,
+                timestamp: String::new(),
+                author: None,
+                state: if current_target.is_some() {
+                    RevisionTargetState::Running
+                } else {
+                    RevisionTargetState::Unknown
+                },
+                selection: Some(SystemCveInventorySelection::Current),
+            },
+        );
+    }
+    let selected_key = selection_key(selected);
+    let selected_choice = choices
+        .iter()
+        .find(|choice| choice.key == selected_key)
+        .cloned();
+    let selected_is_missing = selected_choice.is_none();
+    let selected_state = selected_choice.as_ref().map(|choice| choice.state);
+    let read_only = if cve_current {
+        selected != SystemCveInventorySelection::Current
+    } else {
+        selected_state != Some(RevisionTargetState::Running)
+    };
+    let selected_is_unlisted = !browse_candidates
+        .iter()
+        .any(|candidate| candidate.selection == selected);
+
+    rsx! {
+        div { class: if read_only { "rev-bar rev-bar-hist" } else { "rev-bar" },
+            span { class: "rev-bar-label", "{label}" }
+            div { class: "seg xs", aria_label: "Revision scope type",
+                for (value, text) in [
+                    (RevisionScopeMode::Generations, "Generations"),
+                    (RevisionScopeMode::Commits, "Commits"),
+                ] {
+                    button {
+                        class: if mode() == value { "active" } else { "" },
+                        aria_pressed: mode() == value,
+                        onclick: {
+                            let candidates = candidates.clone();
+                            let generations = generations.clone();
+                            let commits = commits.clone();
+                            let current_commit = current_commit.clone();
+                            move |_| {
+                                on_mode_change.call(value);
+                                if cve_current {
+                                    mode.set(value);
+                                } else {
+                                    let choices = revision_scope_choices(
+                                        value,
+                                        &candidates,
+                                        &generations,
+                                        &commits,
+                                        current_commit.as_deref(),
+                                    );
+                                    let transition = revision_scope_transition(
+                                        value,
+                                        &choices,
+                                        &candidates,
+                                        selected,
+                                    );
+                                    mode.set(transition.mode);
+                                    if let Some(selection) = transition.selection {
+                                        on_select.call(selection);
+                                    }
+                                }
+                            }
+                        },
+                        "{text}"
+                    }
+                }
+            }
+            select {
+                class: "cfgx-select focus-ring",
+                aria_label: "{label}",
+                value: "{selected_key}",
+                onchange: {
+                    let choices = choices.clone();
+                    move |event| {
+                        if let Some(selection) = choices
+                            .iter()
+                            .find(|choice| choice.key == event.value())
+                            .and_then(|choice| choice.selection)
+                        {
+                            on_select.call(selection);
+                        }
+                    }
+                },
+                if selected_is_missing {
+                    option {
+                        value: "{selected_key}",
+                        disabled: true,
+                        if cve_current && !selected_is_unlisted { "Selected target · switch view to inspect" }
+                        else { "Selected target · unavailable" }
+                    }
+                }
+                for choice in choices.iter() {
+                    option {
+                        key: "{choice.key}",
+                        value: "{choice.key}",
+                        disabled: choice.selection.is_none(),
+                        "{choice.label}"
+                        if choice.selection.is_none() { " · unavailable" }
+                    }
+                }
+            }
+            span {
+                class: "rev-bar-meta",
+                title: selected_choice.as_ref().map(|choice| {
+                    [
+                        choice.message.as_deref(),
+                        Some(choice.timestamp.as_str()),
+                        choice.author.as_deref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+                }).unwrap_or_default(),
+                if let Some(choice) = selected_choice.as_ref() {
+                    if let Some(message) = choice.message.as_deref() {
+                        span { class: "rev-bar-msg", "{message}" }
+                    }
+                    if !choice.timestamp.is_empty() {
+                        span { class: "rev-bar-dot", "·" }
+                        span { "{choice.timestamp}" }
+                    }
+                    if let Some(author) = choice.author.as_deref() {
+                        span { class: "rev-bar-dot", "·" }
+                        span { class: "mono", "{author}" }
+                    }
+                }
+            }
+            span { class: "rev-bar-state",
+                if cve_current && selected != SystemCveInventorySelection::Current {
+                    span { class: "chip chip-info", "selected revision · read-only" }
+                } else if selected_state == Some(RevisionTargetState::Running) {
+                    span { class: "chip chip-healthy", Icon { name: IconName::Check, size: 9 } " running now" }
+                } else if selected_state == Some(RevisionTargetState::NeverDeployed) {
+                    span {
+                        class: "chip chip-info",
+                        title: "The server has no deployment observation for this revision on this system",
+                        "never deployed here"
+                    }
+                } else if selected_state == Some(RevisionTargetState::Historical) {
+                    span { class: "chip chip-warning", title: "Not the revision running on this system", "historical · read-only" }
+                } else if !(cve_current && selected == SystemCveInventorySelection::Current) {
+                    span { class: "chip chip-unknown", "target unavailable" }
+                }
+            }
+            if loading {
+                span { class: "rev-bar-msg", role: "status", aria_live: "polite", "Refreshing revision targets…" }
+            } else if let Some(error) = error.as_deref() {
+                span { class: "rev-bar-msg", role: "alert",
+                    "Revision targets could not be refreshed. Showing the last loaded targets. {error}"
+                }
+                button {
+                    class: "btn btn-sm",
+                    r#type: "button",
+                    onclick: move |_| on_retry.call(()),
+                    "Retry revision targets"
+                }
+            } else if selected_is_missing && selected_is_unlisted {
+                span { class: "rev-bar-msg", role: "alert",
+                    "The selected target is no longer listed. Loaded evidence remains selected."
+                }
+            }
+            if let Some(message) = default_message {
+                span { class: "rev-bar-msg", role: "status", "{message}" }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -458,7 +1140,8 @@ struct FlakeCommitPeekState {
 ///
 /// Route parameters select tabs and an optional POA&M drawer. System,
 /// compliance, finding, and remediation identity remain server-authoritative;
-/// the view owns only transient presentation and form state.
+/// CVE target and mode identify read-only navigation intent across reloads.
+/// The view owns only transient presentation and form state.
 #[component]
 pub fn SystemDetailView(
     id: String,
@@ -468,12 +1151,27 @@ pub fn SystemDetailView(
     revision: String,
     generation: String,
     deploy_generation: String,
+    cve_target: String,
+    cve_mode: String,
 ) -> Element {
-    let _route_owned_config_context = (config_mode, revision, generation, deploy_generation);
+    let _route_owned_context = (
+        config_mode,
+        revision,
+        generation,
+        deploy_generation,
+        cve_target,
+        cve_mode,
+    );
     let nav = navigator();
     let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
     let mut breadcrumb_override = use_context::<Signal<Option<(String, String)>>>();
     let app_state = use_context::<Signal<AppState>>();
+
+    // A finding handed over for evidence lives only as long as this view. If the
+    // system never loads, or the user leaves first, the unused handoff is
+    // dropped here instead of opening evidence on a later, unrelated visit.
+    let mut unconsumed_evidence = use_context::<Signal<Option<FindingEvidenceFocus>>>();
+    use_drop(move || unconsumed_evidence.set(None));
 
     // Read the initial tab synchronously so deep links do not flash Overview first.
     //
@@ -489,6 +1187,8 @@ pub fn SystemDetailView(
         initial_query = query_with_parameter(&initial_query, "poam", Some(&poam));
     }
     let initial_navigation = SystemDetailNavigation::from_query(&initial_query);
+    let initial_cve_selection = cve_selection_from_query(&initial_query);
+    let initial_cve_mode = cve_mode_from_query(&initial_query);
     let mut navigation_state = use_signal(|| initial_navigation.clone());
     let mut active_tab = use_signal(|| Tab::from_navigation(initial_navigation.tab));
     let initial_cve_poam = (active_tab() == Tab::Cves)
@@ -496,32 +1196,6 @@ pub fn SystemDetailView(
         .flatten()
         .and_then(|value| Uuid::parse_str(&value).ok());
     let mut cve_poam = use_signal(|| initial_cve_poam);
-    #[cfg(target_arch = "wasm32")]
-    {
-        let popstate_listener = use_hook(|| {
-            let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
-                let next = SystemDetailNavigation::from_query(&current_query());
-                active_tab.set(Tab::from_navigation(next.tab));
-                navigation_state.set(next);
-            });
-            if let Some(window) = web_sys::window() {
-                let _ = window.add_event_listener_with_callback(
-                    "popstate",
-                    callback.as_ref().unchecked_ref(),
-                );
-            }
-            Rc::new(callback)
-        });
-        let listener_for_drop = popstate_listener.clone();
-        use_drop(move || {
-            if let Some(window) = web_sys::window() {
-                let _ = window.remove_event_listener_with_callback(
-                    "popstate",
-                    listener_for_drop.as_ref().as_ref().unchecked_ref(),
-                );
-            }
-        });
-    }
     let mut edit_modal_system = use_signal(|| None::<SystemDetail>);
     let mut refresh_detail_after_edit = use_signal(|| false);
     let mut remove_in_progress = use_signal(|| false);
@@ -557,6 +1231,47 @@ pub fn SystemDetailView(
     // Reload nonce for system detail — incremented after edit-save to re-fetch the system.
     let mut detail_reload = use_signal(|| 0_u64);
     let mut cve_pagination = use_signal(CveInventoryPaginationState::default);
+    let mut cve_selection = use_signal(|| initial_cve_selection);
+    let mut cve_scope_mode = use_signal(|| initial_cve_mode);
+    let mut cve_refresh = use_signal(|| 0_u64);
+    let mut hardening_selection = use_signal(SystemCveInventorySelection::default);
+    let hardening_scope_mode = use_signal(|| RevisionScopeMode::Generations);
+    let mut hardening_selection_state = use_signal(RevisionScopeSelectionState::default);
+    let mut hardening_refresh = use_signal(|| 0_u64);
+    #[cfg(target_arch = "wasm32")]
+    {
+        let popstate_listener = use_hook(|| {
+            let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+                let query = current_query();
+                let next = SystemDetailNavigation::from_query(&query);
+                active_tab.set(Tab::from_navigation(next.tab));
+                navigation_state.set(next);
+                let next_selection = cve_selection_from_query(&query);
+                if next_selection != *cve_selection.peek() {
+                    let next_epoch = (*cve_refresh.peek()).wrapping_add(1);
+                    cve_refresh.set(next_epoch);
+                }
+                cve_selection.set(next_selection);
+                cve_scope_mode.set(cve_mode_from_query(&query));
+            });
+            if let Some(window) = web_sys::window() {
+                let _ = window.add_event_listener_with_callback(
+                    "popstate",
+                    callback.as_ref().unchecked_ref(),
+                );
+            }
+            Rc::new(callback)
+        });
+        let listener_for_drop = popstate_listener.clone();
+        use_drop(move || {
+            if let Some(window) = web_sys::window() {
+                let _ = window.remove_event_listener_with_callback(
+                    "popstate",
+                    listener_for_drop.as_ref().as_ref().unchecked_ref(),
+                );
+            }
+        });
+    }
 
     // Live clock tick for relative timers/heartbeat countdowns while page is open.
     let mut now_tick = use_signal(Utc::now);
@@ -591,23 +1306,108 @@ pub fn SystemDetailView(
         }
     });
 
+    let mut inventory_candidates_cache = use_signal(Vec::<SystemCveInventoryCandidate>::new);
+    let mut inventory_candidates_system_id = use_signal(|| None::<String>);
+    let mut inventory_candidates_loaded = use_signal(|| false);
+    let mut inventory_candidates_error_signal = use_signal(|| None::<String>);
+    let id_for_candidates = id.clone();
+    let mut inventory_candidates_resource = use_resource(move || {
+        let _ = detail_reload();
+        let id = id_for_candidates.clone();
+        async move {
+            let response = match Uuid::parse_str(&id) {
+                Ok(system_id) => fetch_system_cve_inventory_candidates(&system_id).await,
+                Err(_) => Err(ApiClientError::Deserialize(
+                    "Invalid system identifier".to_string(),
+                )),
+            };
+            (id, response)
+        }
+    });
+    let inventory_candidates_resource_for_state = inventory_candidates_resource.clone();
+    use_effect(move || {
+        let update = inventory_candidates_resource_for_state.read().as_ref().map(
+            |(response_system_id, result)| match result {
+                Ok(response) => Ok((response_system_id.clone(), response.items.clone())),
+                Err(error) => Err((response_system_id.clone(), error.to_string())),
+            },
+        );
+        match update {
+            Some(Ok((response_system_id, items))) => {
+                inventory_candidates_cache.set(items);
+                inventory_candidates_system_id.set(Some(response_system_id));
+                inventory_candidates_loaded.set(true);
+                inventory_candidates_error_signal.set(None);
+            }
+            Some(Err((_, error))) => inventory_candidates_error_signal.set(Some(error)),
+            None => {}
+        }
+    });
+
+    // CVE Current intent is independent of candidate history. Only the server's
+    // authorized current read can resolve the reported running derivation.
+    {
+        let id = id.clone();
+        let candidates = inventory_candidates_cache;
+        let loaded = inventory_candidates_loaded;
+        let candidates_system_id = inventory_candidates_system_id;
+        let mut selection = hardening_selection;
+        let mut mode = hardening_scope_mode;
+        let mut state = hardening_selection_state;
+        use_effect(move || {
+            if !loaded() || candidates_system_id().as_deref() != Some(id.as_str()) {
+                return;
+            }
+            let default = revision_scope_default(&candidates());
+            let mut current_state = state.write();
+            if let Some(default) =
+                automatic_revision_scope_update(&mut current_state, &id, &default)
+            {
+                selection.set(default.selection);
+                mode.set(default.mode);
+            }
+        });
+    }
+
     let id_for_vulns = id.clone();
     let mut vulnerabilities_resource = use_resource(move || {
         let id = id_for_vulns.clone();
+        let selection = cve_selection();
+        let refresh_nonce = cve_refresh();
+        let detail_nonce = detail_reload();
         async move {
             // Security data must never fall back to mock CVEs in production paths.
             // Surface a real error/empty state instead so an API outage cannot
             // render fake vulnerabilities (TASK-353 review).
             let Ok(system_id) = Uuid::parse_str(&id) else {
                 return VulnerabilitiesLoad {
+                    system_id: id,
+                    refresh_nonce,
+                    detail_nonce,
+                    selection,
                     inventory: None,
                     error: Some("Invalid system identifier.".to_string()),
                     redirect_to_login: false,
                 };
             };
 
-            match fetch_system_cve_inventory(&system_id, None).await {
+            match fetch_system_cve_inventory_for_target(&system_id, None, selection).await {
+                Ok(inventory) if !cve_page_matches_request(system_id, selection, &inventory) => {
+                    VulnerabilitiesLoad {
+                        system_id: id,
+                        refresh_nonce,
+                        detail_nonce,
+                        selection,
+                        inventory: None,
+                        error: Some("The server returned a different system, target, source, or read capability.".to_string()),
+                        redirect_to_login: false,
+                    }
+                }
                 Ok(inventory) => VulnerabilitiesLoad {
+                    system_id: id,
+                    refresh_nonce,
+                    detail_nonce,
+                    selection,
                     inventory: Some(inventory),
                     error: None,
                     redirect_to_login: false,
@@ -615,11 +1415,19 @@ pub fn SystemDetailView(
                 Err(ApiClientError::Status {
                     code: 401 | 403, ..
                 }) => VulnerabilitiesLoad {
+                    system_id: id,
+                    refresh_nonce,
+                    detail_nonce,
+                    selection,
                     inventory: None,
                     error: None,
                     redirect_to_login: true,
                 },
                 Err(err) => VulnerabilitiesLoad {
+                    system_id: id,
+                    refresh_nonce,
+                    detail_nonce,
+                    selection,
                     inventory: None,
                     error: Some(format!("Unable to load vulnerabilities: {err}")),
                     redirect_to_login: false,
@@ -627,11 +1435,33 @@ pub fn SystemDetailView(
             }
         }
     });
+    use_effect(move || {
+        let _ = (cve_selection(), cve_refresh(), detail_reload());
+        cve_pagination.write().reset(None);
+    });
     let vulnerabilities_resource_for_state = vulnerabilities_resource.clone();
+    let id_for_vulnerability_state = id.clone();
     use_effect(move || {
         let Some(load) = vulnerabilities_resource_for_state.read().as_ref().cloned() else {
             return;
         };
+        if !load.matches_request(
+            &id_for_vulnerability_state,
+            cve_selection(),
+            cve_refresh(),
+            detail_reload(),
+        ) {
+            return;
+        }
+        let Some(system_id) = Uuid::parse_str(&id_for_vulnerability_state).ok() else {
+            return;
+        };
+        if let Some(inventory) = load.inventory.as_ref() {
+            if !cve_page_matches_request(system_id, load.selection, inventory) {
+                cve_pagination.write().reset(None);
+                return;
+            }
+        }
         cve_pagination.write().reset(load.inventory);
     });
 
@@ -775,16 +1605,67 @@ pub fn SystemDetailView(
     });
 
     let id_for_hardening = id.clone();
-    let mut hardening_results_resource = use_resource(move || {
+    let mut hardening_inventory_resource = use_resource(move || {
+        let _ = hardening_refresh();
         let id = id_for_hardening.clone();
+        let selection = hardening_selection();
         async move {
             let Ok(system_id) = Uuid::parse_str(&id) else {
-                return Vec::<HardeningServiceResultResponse>::new();
+                return (
+                    selection,
+                    Err(ApiClientError::Deserialize(
+                        "Invalid system identifier".to_string(),
+                    )),
+                );
             };
-
-            fetch_system_hardening(&system_id).await.unwrap_or_default()
+            (
+                selection,
+                fetch_system_hardening_inventory_for_target(&system_id, selection).await,
+            )
         }
     });
+
+    // Bounded lifecycle poll. It refreshes the hardening inventory only while the
+    // selected revision has a queued or running attempt, and only for a limited
+    // number of consecutive polls, so an attempt that never leaves the queue
+    // cannot turn this page into an endless request source.
+    {
+        let inventory_resource = hardening_inventory_resource;
+        let mut refresh = hardening_refresh;
+        use_future(move || async move {
+            let mut polls_remaining = HARDENING_ACTIVE_POLL_LIMIT;
+            loop {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    gloo_timers::future::TimeoutFuture::new(HARDENING_ACTIVE_POLL_INTERVAL_MS)
+                        .await;
+                    let active = {
+                        let snapshot = inventory_resource.read_unchecked();
+                        snapshot.as_ref().is_some_and(|(_, result)| {
+                            result.as_ref().is_ok_and(|inventory| {
+                                hardening_lifecycle_state(
+                                    inventory.attempt.as_ref(),
+                                    inventory.source.is_some(),
+                                )
+                                .is_active()
+                            })
+                        })
+                    };
+                    if !active {
+                        polls_remaining = HARDENING_ACTIVE_POLL_LIMIT;
+                    } else if polls_remaining > 0 {
+                        polls_remaining -= 1;
+                        refresh.set(refresh().wrapping_add(1));
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let _ = (&inventory_resource, &refresh, &mut polls_remaining);
+                    break;
+                }
+            }
+        });
+    }
 
     let id_for_hardening_justifications = id.clone();
     let mut hardening_justifications_resource = use_resource(move || {
@@ -944,6 +1825,10 @@ pub fn SystemDetailView(
         .read_unchecked()
         .clone()
         .unwrap_or_else(|| VulnerabilitiesLoad {
+            system_id: id.clone(),
+            refresh_nonce: cve_refresh(),
+            detail_nonce: detail_reload(),
+            selection: cve_selection(),
             inventory: None,
             error: None,
             redirect_to_login: false,
@@ -957,13 +1842,39 @@ pub fn SystemDetailView(
             }
         };
     }
-    let vulnerabilities_loading = vulnerabilities_resource.read_unchecked().is_none();
+    let vulnerabilities_loading = vulnerabilities_resource.read_unchecked().is_none()
+        || !vulnerabilities_load.matches_request(
+            &id,
+            cve_selection(),
+            cve_refresh(),
+            detail_reload(),
+        );
     let cve_inventory = cve_pagination.read().inventory.clone();
+    let cve_target_key = format!(
+        "{}|{}|{}|{}",
+        selection_key(cve_selection()),
+        cve_inventory
+            .as_ref()
+            .map_or("none".to_string(), |inventory| format!(
+                "{:?}",
+                inventory.authority
+            )),
+        cve_inventory
+            .as_ref()
+            .and_then(|inventory| inventory.source.as_ref())
+            .map_or("none".to_string(), |source| source.scan_id.to_string()),
+        cve_inventory
+            .as_ref()
+            .map_or("none", |inventory| inventory.inventory_revision.as_str()),
+    );
     let vulnerabilities = cve_inventory
         .as_ref()
         .map(|inventory| inventory.vulnerabilities.clone())
         .unwrap_or_default();
-    let vulnerabilities_error = vulnerabilities_load.error.clone();
+    let vulnerabilities_error = vulnerabilities_load
+        .matches_request(&id, cve_selection(), cve_refresh(), detail_reload())
+        .then(|| vulnerabilities_load.error.clone())
+        .flatten();
     let deployment_logs = map_agent_events_to_logs(
         agent_events_resource
             .read_unchecked()
@@ -974,18 +1885,102 @@ pub fn SystemDetailView(
         .read_unchecked())
     .clone()
     .flatten();
-    let hardening_results = hardening_results_resource
-        .read_unchecked()
-        .clone()
+    let hardening_inventory_result = hardening_inventory_resource.read_unchecked().clone();
+    let hardening_inventory = hardening_inventory_result
+        .as_ref()
+        .filter(|(selection, _)| *selection == hardening_selection())
+        .and_then(|(_, result)| result.as_ref().ok())
+        .cloned();
+    let hardening_loading = hardening_inventory_result.is_none()
+        || hardening_inventory_result
+            .as_ref()
+            .is_some_and(|(selection, _)| *selection != hardening_selection());
+    let hardening_error = hardening_inventory_result
+        .as_ref()
+        .filter(|(selection, _)| *selection == hardening_selection())
+        .and_then(|(_, result)| result.as_ref().err())
+        .map(ToString::to_string);
+    let hardening_results = hardening_inventory
+        .as_ref()
+        .map(|inventory| inventory.services.clone())
         .unwrap_or_default();
-    let hardening_justifications = hardening_justifications_resource
-        .read_unchecked()
-        .clone()
-        .unwrap_or_default();
+    let hardening_read_only = hardening_inventory
+        .as_ref()
+        .is_some_and(|inventory| inventory.read_only);
+    let hardening_attempt = hardening_inventory
+        .as_ref()
+        .and_then(|inventory| inventory.attempt.clone());
+    let hardening_attempt_active = hardening_lifecycle_state(
+        hardening_attempt.as_ref(),
+        hardening_inventory
+            .as_ref()
+            .is_some_and(|inventory| inventory.source.is_some()),
+    )
+    .is_active();
+    let hardening_justifications = if hardening_read_only {
+        Vec::new()
+    } else {
+        hardening_justifications_resource
+            .read_unchecked()
+            .clone()
+            .unwrap_or_default()
+    };
     let hardening_scan_eligibility: Option<HardeningScanEligibilityResponse> =
         (*hardening_scan_eligibility_resource.read_unchecked())
             .clone()
             .flatten();
+    let inventory_candidates = inventory_candidates_cache();
+    let inventory_candidates_loading = inventory_candidates_resource.read_unchecked().is_none();
+    let inventory_candidates_have_loaded = inventory_candidates_loaded()
+        && inventory_candidates_system_id().as_deref() == Some(id.as_str());
+    let inventory_candidates_error = inventory_candidates_error_signal();
+    let automatic_revision_default =
+        inventory_candidates_have_loaded.then(|| revision_scope_default(&inventory_candidates));
+    let hardening_default_message = hardening_selection_state()
+        .system_id
+        .as_deref()
+        .filter(|system_id| *system_id == id)
+        .filter(|_| !hardening_selection_state().is_explicit)
+        .and_then(|_| automatic_revision_default.as_ref())
+        .and_then(|default| default.message);
+    let hardening_head_unavailable = hardening_selection_state()
+        .system_id
+        .as_deref()
+        .is_some_and(|system_id| system_id == id)
+        && !hardening_selection_state().is_explicit
+        && automatic_revision_default
+            .as_ref()
+            .is_some_and(|default| default.head_unavailable);
+    let hardening_system_id_for_selection = id.clone();
+    let hardening_system_id_for_mode = id.clone();
+    let mut cve_candidates_retry_resource = inventory_candidates_resource.clone();
+    let mut cve_candidates_saved_resource = inventory_candidates_resource.clone();
+    let mut hardening_candidates_retry_resource = inventory_candidates_resource.clone();
+    let mut cve_candidates_error_signal = inventory_candidates_error_signal;
+    let mut hardening_candidates_error_signal = inventory_candidates_error_signal;
+    let cve_read_only = cve_inventory
+        .as_ref()
+        .is_none_or(|inventory| inventory.read_only);
+    let cve_current_meta = cve_inventory.as_ref().and_then(|inventory| {
+        (cve_selection() == SystemCveInventorySelection::Current).then(|| {
+            match inventory.current_state {
+                Some(SystemCveCurrentAuthorityState::MappedRunningReadOnlyScan) => format!(
+                    "Retained deployment proof is unavailable: {}. This scan describes the reported running configuration. Triage and remediation are read-only.",
+                    inventory.exact_authority_failure.map(crate::components::cve::exact_authority_reason_label).unwrap_or("exact proof unavailable")
+                ),
+                Some(SystemCveCurrentAuthorityState::UnmappedRunning) => "The reported running output does not match a known configuration. No Current scan is available.".to_string(),
+                Some(SystemCveCurrentAuthorityState::AmbiguousRunning) => "More than one registered target matches the reported running output. Current results are unavailable.".to_string(),
+                Some(SystemCveCurrentAuthorityState::NoRunningReport) => "No usable running configuration has been reported.".to_string(),
+                Some(SystemCveCurrentAuthorityState::InvalidRunningReport) => "The latest running report has conflicting or incomplete target information.".to_string(),
+                Some(SystemCveCurrentAuthorityState::MappedRunningNoScan | SystemCveCurrentAuthorityState::NoCurrentScan) => "No completed CVE scan for the reported running target.".to_string(),
+                Some(SystemCveCurrentAuthorityState::ExactCurrentScan) => inventory.source.as_ref().map_or_else(
+                    || "Current scan source unavailable.".to_string(),
+                    |source| format!("Completed {} by {}.", source.completed_at, source.scanner_name)
+                ),
+                _ => "Current CVE evidence unavailable.".to_string(),
+            }
+        })
+    });
 
     let auth_context = app_state.read().auth.clone();
     let can_mutate = auth::can_mutate_systems(&auth_context);
@@ -1292,6 +2287,7 @@ pub fn SystemDetailView(
             // Tab navigation
             div {
                 "data-testid": "system-detail-tabs",
+                "data-coach-target": "system-tabs",
                 class: "sd-tabs",
                 role: "tablist",
                 "aria-label": "System detail sections",
@@ -1504,9 +2500,45 @@ pub fn SystemDetailView(
                         }
                     },
                     Tab::Cves => rsx! {
+                        RevisionScopeBar {
+                            label: "Scan target",
+                            candidates: if inventory_candidates_have_loaded { inventory_candidates.clone() } else { Vec::new() },
+                            generations: generations_result.generations.clone(),
+                            commits: commits_response.as_ref().map(|response| response.commits.clone()).unwrap_or_default(),
+                            current_commit: observational_current_commit.clone(),
+                            selected: cve_selection(),
+                            mode: cve_scope_mode,
+                            loading: inventory_candidates_loading,
+                            loaded: inventory_candidates_have_loaded,
+                            error: inventory_candidates_error.clone(),
+                            default_message: None,
+                            cve_current: true,
+                            current_target: cve_inventory.as_ref().and_then(|inventory| inventory.running_target.clone()),
+                            current_meta: cve_current_meta.clone(),
+                            on_select: move |selection| {
+                                cve_pagination.write().reset(None);
+                                if selection != cve_selection() {
+                                    cve_refresh.set(cve_refresh().wrapping_add(1));
+                                }
+                                cve_selection.set(selection);
+                                let key = (selection != SystemCveInventorySelection::Current).then(|| selection_key(selection));
+                                let query = query_with_parameter(&current_system_detail_query(), "cve_target", key.as_deref());
+                                sync_system_detail_query(&query, true);
+                            },
+                            on_mode_change: move |mode| {
+                                let mode_key = (mode == RevisionScopeMode::Commits).then_some("commit");
+                                let query = query_with_parameter(&current_system_detail_query(), "cve_mode", mode_key);
+                                sync_system_detail_query(&query, true);
+                            },
+                            on_retry: move |_| {
+                                cve_candidates_error_signal.set(None);
+                                cve_candidates_retry_resource.restart();
+                            },
+                        }
                         CvesTab {
                             system_id: system.id,
                             hostname: system.hostname.clone(),
+                            inventory_target_key: cve_target_key.clone(),
                             vulnerabilities: vulnerabilities.clone(),
                             inventory_metadata: cve_inventory
                                 .as_ref()
@@ -1515,13 +2547,20 @@ pub fn SystemDetailView(
                             inventory_authority: cve_inventory
                                 .as_ref()
                                 .map(|inventory| inventory.authority),
+                            current_state: cve_inventory
+                                .as_ref()
+                                .and_then(|inventory| inventory.current_state),
                             inventory_source: cve_inventory
                                 .as_ref()
                                 .and_then(|inventory| inventory.source.clone()),
+                            inventory_attempt: cve_inventory
+                                .as_ref()
+                                .and_then(|inventory| inventory.attempt.clone()),
                             exact_authority_failure: cve_inventory
                                 .as_ref()
                                 .and_then(|inventory| inventory.exact_authority_failure),
-                            allow_mutations: can_mutate,
+                            read_only: cve_read_only,
+                            allow_mutations: can_mutate && !cve_read_only,
                             loading: vulnerabilities_loading,
                             error: vulnerabilities_error.clone(),
                             has_more: cve_inventory
@@ -1529,36 +2568,49 @@ pub fn SystemDetailView(
                                 .is_some_and(|inventory| inventory.has_more),
                             continuation_loading: cve_pagination.read().continuation_loading,
                             continuation_error: cve_pagination.read().continuation_error.clone(),
+                            on_retry_read: move |_| {
+                                cve_refresh.set(cve_refresh().wrapping_add(1));
+                            },
                             on_load_more: move |_| {
                                 let Some(request) = cve_pagination.write().begin_continuation() else {
                                     return;
                                 };
                                 let cursor = request.cursor.clone();
+                                let selection = cve_selection();
+                                let refresh_nonce = cve_refresh();
                                 spawn(async move {
-                                    match fetch_system_cve_inventory(&system.id, Some(&cursor)).await {
+                                    match fetch_system_cve_inventory_for_target(&system.id, Some(&cursor), selection).await {
                                         Ok(page) => {
+                                            if cve_selection() != selection || cve_refresh() != refresh_nonce { return; }
+                                            if !cve_page_matches_request(system.id, selection, &page) {
+                                                cve_pagination.write().reset(None);
+                                                cve_refresh.set(cve_refresh().wrapping_add(1));
+                                                return;
+                                            }
                                             let source_matches = cve_pagination
                                                 .write()
                                                 .complete_continuation(&request, page);
                                             if !source_matches {
                                                 cve_pagination.write().reset(None);
-                                                vulnerabilities_resource.restart();
+                                                cve_refresh.set(cve_refresh().wrapping_add(1));
                                             }
                                         }
                                         Err(ApiClientError::Status { code: 409, .. }) => {
-                                            cve_pagination.write().reset(None);
-                                            vulnerabilities_resource.restart();
+                                            if cve_selection() == selection && cve_refresh() == refresh_nonce {
+                                                cve_pagination.write().reset(None);
+                                                cve_refresh.set(cve_refresh().wrapping_add(1));
+                                            }
                                         }
-                                        Err(error) => cve_pagination.write().fail_continuation(
-                                            &request,
-                                            error.to_string(),
-                                        ),
+                                        Err(error) => if cve_selection() == selection && cve_refresh() == refresh_nonce {
+                                            cve_pagination.write().fail_continuation(&request, error.to_string());
+                                        },
                                     }
                                 });
                             },
                             on_saved: move |_| {
                                 cve_pagination.write().reset(None);
-                                vulnerabilities_resource.restart();
+                                cve_refresh.set(cve_refresh().wrapping_add(1));
+                                cve_candidates_saved_resource.restart();
                             },
                             on_open_poam: move |poam_id| {
                                 cve_poam.set(Some(poam_id));
@@ -1568,13 +2620,77 @@ pub fn SystemDetailView(
                         }
                     },
                     Tab::Hardening => rsx! {
+                        RevisionScopeBar {
+                            label: "Audited config",
+                            candidates: inventory_candidates.clone(),
+                            generations: generations_result.generations.clone(),
+                            commits: commits_response.as_ref().map(|response| response.commits.clone()).unwrap_or_default(),
+                            current_commit: observational_current_commit.clone(),
+                            selected: hardening_selection(),
+                            mode: hardening_scope_mode,
+                            loading: inventory_candidates_loading,
+                            loaded: inventory_candidates_have_loaded,
+                            error: inventory_candidates_error.clone(),
+                            default_message: hardening_default_message,
+                            on_select: move |selection| {
+                                hardening_selection_state.set(RevisionScopeSelectionState {
+                                    system_id: Some(hardening_system_id_for_selection.clone()),
+                                    is_explicit: true,
+                                });
+                                hardening_selection.set(selection);
+                            },
+                            on_mode_change: move |_mode| {
+                                hardening_selection_state.set(RevisionScopeSelectionState {
+                                    system_id: Some(hardening_system_id_for_mode.clone()),
+                                    is_explicit: true,
+                                });
+                            },
+                            on_retry: move |_| {
+                                hardening_candidates_error_signal.set(None);
+                                hardening_candidates_retry_resource.restart();
+                            },
+                        }
                         HardeningTab {
                             system_id: system.id,
+                            inventory_target_key: selection_key(hardening_selection()),
                             results: hardening_results.clone(),
                             justifications: hardening_justifications.clone(),
-                            allow_mutations: can_mutate,
+                            source: hardening_inventory.as_ref().and_then(|inventory| inventory.source.clone()),
+                            attempt: hardening_attempt.clone(),
+                            read_only: hardening_read_only,
+                            loading: hardening_loading,
+                            error: hardening_error.clone(),
+                            allow_mutations: can_mutate && hardening_inventory.is_some() && !hardening_read_only,
+                            can_check_now: can_mutate
+                                && matches!(hardening_selection(), SystemCveInventorySelection::Current)
+                                && !hardening_head_unavailable
+                                && hardening_scan_eligible,
+                            check_now_disabled_reason: hardening_scan_blocked_reason.clone(),
+                            checking: hardening_scan_in_progress(),
+                            on_check_now: move |_| {
+                                // A queued or running attempt already covers this
+                                // revision. Sending a second request would be
+                                // absorbed by the server and would report work
+                                // this click did not create.
+                                if hardening_scan_in_progress()
+                                    || !hardening_scan_eligible
+                                    || hardening_attempt_active
+                                {
+                                    return;
+                                }
+                                hardening_scan_in_progress.set(true);
+                                hardening_scan_status_text.set(Some("Requesting a hardening scan for the current configuration…".to_string()));
+                                spawn(async move {
+                                    match trigger_system_hardening_scan(&system.id).await {
+                                        Ok(response) => hardening_scan_status_text.set(Some(response.message)),
+                                        Err(error) => hardening_scan_status_text.set(Some(format!("Hardening scan request failed: {error}"))),
+                                    }
+                                    hardening_scan_in_progress.set(false);
+                                    hardening_refresh.set(hardening_refresh().wrapping_add(1));
+                                });
+                            },
                             on_saved: move |_| {
-                                hardening_results_resource.restart();
+                                hardening_refresh.set(hardening_refresh().wrapping_add(1));
                                 hardening_justifications_resource.restart();
                             }
                         }
@@ -1672,7 +2788,9 @@ pub fn SystemDetailView(
                 },
                 on_open_build: move |focus: NavigationFocus| {
                     navigation_focus.set(Some(focus));
-                    nav.push(Route::BuildsView {});
+                    nav.push(Route::BuildsView {
+                        query: String::new(),
+                    });
                 },
                 on_open_systems: move |focus: NavigationFocus| {
                     navigation_focus.set(Some(NavigationFocus {
@@ -1949,7 +3067,7 @@ struct FindingEvidenceTarget {
 }
 
 fn finding_evidence_targets(
-    finding: &FindingView,
+    finding: &FindingEvidenceFocus,
     bundles: &[SystemComplianceBundle],
 ) -> Vec<FindingEvidenceTarget> {
     let mut targets = bundles
@@ -2004,6 +3122,104 @@ fn finding_evidence_targets(
     });
     targets.dedup_by_key(|target| (target.bundle_id, target.bundle_version_id));
     targets
+}
+
+/// Describes how many exact evidence contexts a finding resolves to for the user.
+#[derive(Debug, Clone, PartialEq)]
+enum EvidenceResolution {
+    /// No bundle revision visible to the user holds this finding.
+    Unavailable,
+    /// Exactly one revision holds it, so its evidence opens directly.
+    Single(FindingEvidenceTarget),
+    /// Several revisions hold it, so the user must choose one.
+    Choose(Vec<FindingEvidenceTarget>),
+}
+
+/// Resolves a finding to the exact evidence contexts the user may open.
+///
+/// SECURITY: Candidates come only from `bundles`, which the server filtered for
+/// the current user. The finding's own bundle IDs narrow that list and never
+/// extend it. No arbitrary or newest revision is ever substituted.
+fn resolve_finding_evidence(
+    finding: &FindingEvidenceFocus,
+    bundles: &[SystemComplianceBundle],
+) -> EvidenceResolution {
+    let mut targets = finding_evidence_targets(finding, bundles);
+    match targets.len() {
+        0 => EvidenceResolution::Unavailable,
+        1 => EvidenceResolution::Single(targets.remove(0)),
+        _ => EvidenceResolution::Choose(targets),
+    }
+}
+
+/// Bundles the signals that drive the compliance evidence drawer and its
+/// context picker.
+///
+/// Every way into the drawer goes through this type: the in-page POA&M tray,
+/// the context picker, and a finding handed over by another route. One request
+/// generation guards all of them, so a slow response for an earlier choice can
+/// never replace the evidence for a later one.
+#[derive(Clone, Copy)]
+struct EvidenceDrawerSignals {
+    open: Signal<bool>,
+    data: Signal<Option<Result<ComplianceEvidenceResponse, String>>>,
+    bundle_name: Signal<Option<String>>,
+    generation: Signal<u64>,
+    choices: Signal<Vec<FindingEvidenceTarget>>,
+}
+
+impl EvidenceDrawerSignals {
+    /// Opens the evidence for one finding, or the picker, or an explicit error.
+    fn open_for_finding(
+        mut self,
+        finding: FindingEvidenceFocus,
+        system_id: Uuid,
+        bundles: &[SystemComplianceBundle],
+    ) {
+        match resolve_finding_evidence(&finding, bundles) {
+            EvidenceResolution::Choose(targets) => self.choices.set(targets),
+            EvidenceResolution::Single(target) => self.open_target(target, system_id),
+            EvidenceResolution::Unavailable => self.show_error(
+                finding.policy_name,
+                "No exact visible bundle revision is available for this finding.".to_string(),
+            ),
+        }
+    }
+
+    /// Shows an explicit unavailable state instead of unrelated evidence.
+    fn show_error(mut self, label: String, message: String) {
+        self.choices.set(Vec::new());
+        self.generation += 1;
+        self.open.set(true);
+        self.bundle_name.set(Some(label));
+        self.data.set(Some(Err(message)));
+    }
+
+    /// Loads the evidence for one exact bundle revision and focuses its policy.
+    fn open_target(mut self, target: FindingEvidenceTarget, system_id: Uuid) {
+        self.choices.set(Vec::new());
+        self.generation += 1;
+        let requested = *self.generation.peek();
+        self.open.set(true);
+        self.bundle_name.set(Some(format!(
+            "{} {}",
+            target.bundle_name, target.bundle_version
+        )));
+        self.data.set(None);
+        spawn(async move {
+            let result = fetch_compliance_system_evidence(
+                &target.bundle_id,
+                &system_id,
+                Some(&target.bundle_version_id),
+            )
+            .await
+            .map(|response| focus_evidence_policy(response, target.policy_id))
+            .map_err(|error| error.to_string());
+            if *self.generation.peek() == requested {
+                self.data.set(Some(result));
+            }
+        });
+    }
 }
 
 fn focus_evidence_policy(
@@ -2131,6 +3347,35 @@ fn ComplianceTab(system: SystemDetail, viewer: bool, initial_poam: String) -> El
     let mut evidence_bundle_name: Signal<Option<String>> = use_signal(|| None);
     let mut evidence_generation = use_signal(|| 0_u64);
     let mut evidence_choices: Signal<Vec<FindingEvidenceTarget>> = use_signal(Vec::new);
+    let drawer = EvidenceDrawerSignals {
+        open: evidence_open,
+        data: evidence_data,
+        bundle_name: evidence_bundle_name,
+        generation: evidence_generation,
+        choices: evidence_choices,
+    };
+
+    // A finding handed over by the POA&M register opens its exact evidence here
+    // through the same path as an Evidence click in this tab. The effect waits
+    // for the user's bundles, takes the handoff once, and drops it if it names a
+    // different system, so ordinary later visits never reopen the drawer.
+    let mut pending_evidence = use_context::<Signal<Option<FindingEvidenceFocus>>>();
+    use_effect(move || {
+        let Some(loaded) = compliance_resource.read_unchecked().clone() else {
+            return;
+        };
+        let Some(pending) = pending_evidence.read().clone() else {
+            return;
+        };
+        pending_evidence.set(None);
+        let Some(focus) = FindingEvidenceFocus::for_system(Some(pending), system_id) else {
+            return;
+        };
+        match loaded.error {
+            Some(error) => drawer.show_error(focus.policy_name, error),
+            None => drawer.open_for_finding(focus, system_id, &loaded.bundles),
+        }
+    });
 
     let loading = compliance_resource.read_unchecked().is_none();
     let data = compliance_resource
@@ -2171,25 +3416,35 @@ fn ComplianceTab(system: SystemDetail, viewer: bool, initial_poam: String) -> El
                     }
                 },
                 Some(SystemPoamData::Loaded { rollup, items }) => rsx! {
-                    SystemPoamSection {
-                        hostname: system.hostname.clone(),
-                        rollup,
-                        items,
-                        filter: poam_filter(),
-                        on_filter: move |filter| poam_filter.set(filter),
-                        on_open: move |poam_id| {
-                            selected_poam.set(Some(poam_id));
-                            let query = query_with_parameter(
-                                &query_with_parameter(
-                                    &current_system_detail_query(),
-                                    "tab",
-                                    Some("compliance"),
-                                ),
-                                "poam",
-                                Some(&poam_id.to_string()),
-                            );
-                            sync_system_detail_query(&query, true);
-                        },
+                    div {
+                        SystemPoamSection {
+                            hostname: system.hostname.clone(),
+                            rollup,
+                            items,
+                            filter: poam_filter(),
+                            on_filter: move |filter| poam_filter.set(filter),
+                            on_open: move |poam_id| {
+                                selected_poam.set(Some(poam_id));
+                                let query = query_with_parameter(
+                                    &query_with_parameter(
+                                        &current_system_detail_query(),
+                                        "tab",
+                                        Some("compliance"),
+                                    ),
+                                    "poam",
+                                    Some(&poam_id.to_string()),
+                                );
+                                sync_system_detail_query(&query, true);
+                            },
+                        }
+                        if !system_id.is_nil() {
+                            Link {
+                                class: "btn btn-ghost xs focus-ring",
+                                to: crate::routes::Route::PoamsView { query: format!("dim=environment&system={system_id}") },
+                                Icon { name: IconName::ArrowRight, size: 11 }
+                                " View in POA&M register"
+                            }
+                        }
                     }
                 },
             }
@@ -2244,7 +3499,14 @@ fn ComplianceTab(system: SystemDetail, viewer: bool, initial_poam: String) -> El
                         let bundle_id = bd.bundle.id;
                         let bundle_name = bd.bundle.name.clone();
                         let framework = bd.bundle.framework.clone();
-                        let version = bd.bundle.version.clone();
+                        // The catalog version is not the system's assigned version.
+                        // Only the server-issued assignment ID may label this card.
+                        let version = bd
+                            .assigned_bundle_version_id
+                            .and_then(|id| bd.bundle.versions.iter().find(|item| item.id == id))
+                            .map(|item| item.version.clone())
+                            .unwrap_or_else(|| "Assigned revision unavailable".to_string());
+                        let assignment_mode = bd.assignment_mode.as_deref();
                         let owner = bd.bundle.owner.clone();
                         let total = bd.rollup.total;
                         let pass = bd.rollup.pass;
@@ -2265,6 +3527,13 @@ fn ComplianceTab(system: SystemDetail, viewer: bool, initial_poam: String) -> El
                                             span { style: "font-size:15px;font-weight:650;", "{bundle_name}" }
                                             span { class: "chip chip-info", style: "font-size:10px;", "{framework}" }
                                             span { class: "chip chip-unknown", style: "font-size:10px;", "{version}" }
+                                            if let Some(mode) = assignment_mode {
+                                                span { class: "chip chip-neutral", style: "font-size:10px;",
+                                                    if mode == "report_only" { "Report only" }
+                                                    else if mode == "enforce" { "Enforce" }
+                                                    else { "Assignment mode unavailable" }
+                                                }
+                                            }
                                             if fail == 0 {
                                                 span {
                                                     class: "chip chip-healthy",
@@ -2507,27 +3776,7 @@ fn ComplianceTab(system: SystemDetail, viewer: bool, initial_poam: String) -> El
                     p { class: "poam-muted", "This finding belongs to multiple bundle revisions. Select the evidence context to open." }
                     div { class: "poam-picker-list",
                         for target in evidence_choices.read().clone() {
-                            button { class: "poam-pick focus-ring", onclick: move |_| {
-                                evidence_choices.set(Vec::new());
-                                evidence_generation += 1;
-                                let requested = evidence_generation();
-                                evidence_open.set(true);
-                                evidence_bundle_name.set(Some(format!("{} {}", target.bundle_name, target.bundle_version)));
-                                evidence_data.set(None);
-                                spawn(async move {
-                                    let result = fetch_compliance_system_evidence(
-                                        &target.bundle_id,
-                                        &system_id,
-                                        Some(&target.bundle_version_id),
-                                    )
-                                    .await
-                                    .map(|response| focus_evidence_policy(response, target.policy_id))
-                                    .map_err(|error| error.to_string());
-                                    if evidence_generation() == requested {
-                                        evidence_data.set(Some(result));
-                                    }
-                                });
-                            },
+                            button { class: "poam-pick focus-ring", onclick: move |_| drawer.open_target(target.clone(), system_id),
                                 strong { "{target.bundle_name}" }
                                 small { "Exact revision {target.bundle_version} · " span { class: "mono", "{target.bundle_version_id}" } }
                             }
@@ -2561,41 +3810,11 @@ fn ComplianceTab(system: SystemDetail, viewer: bool, initial_poam: String) -> El
                         None,
                     );
                     sync_system_detail_query(&query, false);
-                    let targets = finding_evidence_targets(&finding, &data.bundles);
-                    if targets.len() > 1 {
-                        evidence_choices.set(targets);
-                        return;
-                    }
-                    let Some(target) = targets.into_iter().next() else {
-                        evidence_open.set(true);
-                        evidence_bundle_name.set(Some(finding.policy_name));
-                        evidence_data.set(Some(Err(
-                            "No exact visible bundle revision is available for this finding."
-                                .to_string(),
-                        )));
-                        return;
-                    };
-                    evidence_generation += 1;
-                    let requested = evidence_generation();
-                    evidence_open.set(true);
-                    evidence_bundle_name.set(Some(format!(
-                        "{} {}",
-                        target.bundle_name, target.bundle_version
-                    )));
-                    evidence_data.set(None);
-                    spawn(async move {
-                        let result = fetch_compliance_system_evidence(
-                            &target.bundle_id,
-                            &system_id,
-                            Some(&target.bundle_version_id),
-                        )
-                        .await
-                        .map(|response| focus_evidence_policy(response, target.policy_id))
-                        .map_err(|error| error.to_string());
-                        if evidence_generation() == requested {
-                            evidence_data.set(Some(result));
-                        }
-                    });
+                    drawer.open_for_finding(
+                        FindingEvidenceFocus::from(&finding),
+                        system_id,
+                        &data.bundles,
+                    );
                 },
                 on_changed: move |_| poam_resource.restart(),
             }
@@ -3135,7 +4354,9 @@ fn OverviewTab(
                             class: "tl-commit-link mono focus-ring",
                             title: "Open the build for {flake_commit_for_title}",
                             onclick: move |_| {
-                                nav.push(Route::BuildsView {});
+                                nav.push(Route::BuildsView {
+                                    query: String::new(),
+                                });
                             },
                             "{generation_text}"
                         }
@@ -8294,12 +9515,373 @@ fn CommitTimelineNode(
     }
 }
 
+/// Separates two hardening lifecycle polls while an attempt is active.
+///
+/// Hardening scans take tens of seconds at best, so a faster poll only adds
+/// request volume without showing the user anything new.
+const HARDENING_ACTIVE_POLL_INTERVAL_MS: u32 = 5_000;
+
+/// Bounds how many consecutive polls one active attempt may trigger.
+///
+/// At the interval above this is about ten minutes, which exceeds a normal scan
+/// and the worker's stale-claim recovery window. The budget stops a page left
+/// open on a stuck queue from polling for the lifetime of the browser tab. It is
+/// restored as soon as the attempt is no longer active.
+const HARDENING_ACTIVE_POLL_LIMIT: u32 = 120;
+
+/// Presents the newest hardening attempt for the selected revision.
+///
+/// The variants map one-to-one onto the server lifecycle contract, plus two
+/// client-side cases the server cannot express: no attempt at all, and a state
+/// string this build does not recognize. An unrecognized state is never shown as
+/// a known state, because that would let a newer server make the page report a
+/// scan outcome that did not happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HardeningLifecycleState {
+    /// The selected revision has no hardening attempt.
+    NeverScanned,
+    /// An attempt is admitted and waits for the serial worker.
+    Queued,
+    /// The worker is evaluating the configuration now.
+    Scanning,
+    /// The newest attempt failed. Earlier completed evidence, when present, is
+    /// still displayed.
+    Failed,
+    /// The newest attempt produced the displayed evidence.
+    Completed,
+    /// The server reported a state this build does not know.
+    Unrecognized,
+}
+
+impl HardeningLifecycleState {
+    /// Returns true while the attempt can still change without a new request.
+    ///
+    /// An unrecognized state is deliberately not active. Treating it as active
+    /// would disable `Check now` forever against a server this build cannot
+    /// interpret.
+    fn is_active(self) -> bool {
+        matches!(self, Self::Queued | Self::Scanning)
+    }
+
+    /// Returns the short status label shown in the Hardening tab header.
+    fn label(self) -> &'static str {
+        match self {
+            Self::NeverScanned => "Never scanned",
+            Self::Queued => "Queued",
+            Self::Scanning => "Scanning",
+            Self::Failed => "Last scan failed",
+            Self::Completed => "Scan complete",
+            Self::Unrecognized => "Scan state unavailable",
+        }
+    }
+
+    /// Returns the callout class used to render the status banner.
+    fn callout_class(self) -> &'static str {
+        match self {
+            Self::Failed => "sd-callout sd-callout-danger",
+            Self::Queued | Self::Scanning => "sd-callout sd-callout-info",
+            _ => "sd-callout",
+        }
+    }
+
+    /// Returns the stable test and automation identity for the banner.
+    fn test_id(self) -> &'static str {
+        match self {
+            Self::NeverScanned => "hardening-state-never-scanned",
+            Self::Queued => "hardening-state-queued",
+            Self::Scanning => "hardening-state-scanning",
+            Self::Failed => "hardening-state-failed",
+            Self::Completed => "hardening-state-completed",
+            Self::Unrecognized => "hardening-state-unrecognized",
+        }
+    }
+}
+
+/// Maps a server attempt onto the Hardening tab lifecycle presentation.
+///
+/// `None` means the selected revision was never scanned. It never means the
+/// state is unknown; an unknown server value maps to
+/// [`HardeningLifecycleState::Unrecognized`] instead.
+fn hardening_lifecycle_state(
+    attempt: Option<&SystemHardeningInventoryAttemptResponse>,
+    has_completed_evidence: bool,
+) -> HardeningLifecycleState {
+    match attempt {
+        None if has_completed_evidence => HardeningLifecycleState::Completed,
+        None => HardeningLifecycleState::NeverScanned,
+        Some(attempt) => match attempt.state.as_str() {
+            "queued" => HardeningLifecycleState::Queued,
+            "scanning" => HardeningLifecycleState::Scanning,
+            "failed" => HardeningLifecycleState::Failed,
+            "completed" => HardeningLifecycleState::Completed,
+            _ => HardeningLifecycleState::Unrecognized,
+        },
+    }
+}
+
+/// Builds the explanatory sentence shown under the lifecycle label.
+///
+/// The sentence states only facts the server supplied. Failure text is already
+/// redacted and bounded by the server and is reproduced without reinterpretation.
+fn hardening_lifecycle_detail(
+    state: HardeningLifecycleState,
+    attempt: Option<&SystemHardeningInventoryAttemptResponse>,
+    has_completed_evidence: bool,
+    read_only: bool,
+) -> String {
+    match state {
+        HardeningLifecycleState::NeverScanned if read_only => {
+            "No hardening scan ran for this revision. Evidence from another revision is not \
+             substituted."
+                .to_string()
+        }
+        HardeningLifecycleState::NeverScanned => {
+            "No hardening scan has run for the current configuration yet.".to_string()
+        }
+        HardeningLifecycleState::Queued => {
+            "A hardening scan is queued and will start when the scan worker is free.".to_string()
+        }
+        HardeningLifecycleState::Scanning => {
+            "A hardening scan is running for this revision now.".to_string()
+        }
+        HardeningLifecycleState::Failed => {
+            let reason = attempt
+                .and_then(|attempt| attempt.error.as_deref())
+                .filter(|error| !error.trim().is_empty())
+                .unwrap_or("The scan worker did not record a reason.");
+            if has_completed_evidence {
+                format!(
+                    "The most recent hardening scan failed: {reason} The evidence below is from the last scan that completed."
+                )
+            } else {
+                format!("The most recent hardening scan failed: {reason}")
+            }
+        }
+        HardeningLifecycleState::Completed => {
+            "The evidence below is from the most recent completed hardening scan.".to_string()
+        }
+        HardeningLifecycleState::Unrecognized => {
+            "This page cannot interpret the reported scan state. Reload after the interface is \
+             updated."
+                .to_string()
+        }
+    }
+}
+
+/// Decides whether `Check now` must be disabled and explains why.
+///
+/// Returns `None` when the control is usable. An active attempt always wins over
+/// eligibility, because a second request would be absorbed by the server and the
+/// button would report work it did not create.
+fn hardening_check_now_block_reason(
+    state: HardeningLifecycleState,
+    can_check_now: bool,
+    checking: bool,
+    eligibility_reason: &str,
+) -> Option<String> {
+    if state.is_active() {
+        return Some(match state {
+            HardeningLifecycleState::Scanning => {
+                "A hardening scan is already running for this configuration.".to_string()
+            }
+            _ => "A hardening scan is already queued for this configuration.".to_string(),
+        });
+    }
+    if checking {
+        return Some("The scan request is still being submitted.".to_string());
+    }
+    if !can_check_now {
+        return Some(eligibility_reason.to_string());
+    }
+    None
+}
+
+#[cfg(test)]
+mod hardening_lifecycle_tests {
+    use super::{
+        HardeningLifecycleState, hardening_check_now_block_reason, hardening_lifecycle_detail,
+        hardening_lifecycle_state,
+    };
+    use crate::api::models::SystemHardeningInventoryAttemptResponse;
+    use uuid::Uuid;
+
+    fn attempt(state: &str, error: Option<&str>) -> SystemHardeningInventoryAttemptResponse {
+        SystemHardeningInventoryAttemptResponse {
+            scan_id: Uuid::new_v4(),
+            state: state.to_string(),
+            source_trigger: "post_build".to_string(),
+            scheduled_at: None,
+            started_at: None,
+            completed_at: None,
+            attempts: 1,
+            error: error.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn absent_attempt_is_never_scanned() {
+        assert_eq!(
+            hardening_lifecycle_state(None, false),
+            HardeningLifecycleState::NeverScanned
+        );
+    }
+
+    #[test]
+    fn pre_lifecycle_response_with_completed_source_is_completed() {
+        assert_eq!(
+            hardening_lifecycle_state(None, true),
+            HardeningLifecycleState::Completed
+        );
+    }
+
+    #[test]
+    fn known_server_states_map_to_distinct_lifecycle_states() {
+        for (wire, expected) in [
+            ("queued", HardeningLifecycleState::Queued),
+            ("scanning", HardeningLifecycleState::Scanning),
+            ("failed", HardeningLifecycleState::Failed),
+            ("completed", HardeningLifecycleState::Completed),
+        ] {
+            let attempt = attempt(wire, None);
+            assert_eq!(hardening_lifecycle_state(Some(&attempt), false), expected);
+        }
+    }
+
+    #[test]
+    fn unknown_server_state_is_unrecognized_not_a_guess() {
+        let attempt = attempt("some-future-state", None);
+        assert_eq!(
+            hardening_lifecycle_state(Some(&attempt), false),
+            HardeningLifecycleState::Unrecognized
+        );
+    }
+
+    #[test]
+    fn never_scanned_detail_distinguishes_historical_from_current() {
+        assert!(
+            hardening_lifecycle_detail(HardeningLifecycleState::NeverScanned, None, false, true)
+                .contains("not substituted"),
+            "a read-only (historical) never-scanned target must say evidence is not substituted"
+        );
+        assert!(
+            !hardening_lifecycle_detail(HardeningLifecycleState::NeverScanned, None, false, false)
+                .contains("not substituted"),
+            "the mutable current target's never-scanned copy must not reference substitution"
+        );
+    }
+
+    #[test]
+    fn failed_detail_preserves_earlier_completed_evidence_distinctly() {
+        let failed = attempt("failed", Some("nix eval timed out"));
+        let with_evidence =
+            hardening_lifecycle_detail(HardeningLifecycleState::Failed, Some(&failed), true, false);
+        assert!(with_evidence.contains("nix eval timed out"));
+        assert!(
+            with_evidence.contains("last scan that completed"),
+            "a failed attempt with earlier evidence must say that evidence is still shown: {with_evidence}"
+        );
+        let without_evidence = hardening_lifecycle_detail(
+            HardeningLifecycleState::Failed,
+            Some(&failed),
+            false,
+            false,
+        );
+        assert!(
+            !without_evidence.contains("last scan that completed"),
+            "a failed attempt with no completed evidence must not claim evidence is shown: {without_evidence}"
+        );
+    }
+
+    #[test]
+    fn failed_detail_without_a_server_reason_uses_a_safe_default() {
+        let failed = attempt("failed", None);
+        let detail = hardening_lifecycle_detail(
+            HardeningLifecycleState::Failed,
+            Some(&failed),
+            false,
+            false,
+        );
+        assert!(detail.contains("did not record a reason"));
+    }
+
+    #[test]
+    fn active_states_block_check_now_regardless_of_eligibility() {
+        for state in [
+            HardeningLifecycleState::Queued,
+            HardeningLifecycleState::Scanning,
+        ] {
+            let reason = hardening_check_now_block_reason(state, true, false, "unused");
+            assert!(
+                reason.is_some(),
+                "an active attempt must always disable Check now"
+            );
+        }
+    }
+
+    #[test]
+    fn submitting_request_blocks_check_now_even_when_otherwise_eligible() {
+        let reason = hardening_check_now_block_reason(
+            HardeningLifecycleState::NeverScanned,
+            true,
+            true,
+            "unused",
+        );
+        assert!(reason.is_some());
+    }
+
+    #[test]
+    fn ineligible_target_surfaces_the_exact_server_reason() {
+        let reason = hardening_check_now_block_reason(
+            HardeningLifecycleState::NeverScanned,
+            false,
+            false,
+            "This revision is historical and read-only.",
+        );
+        assert_eq!(
+            reason.as_deref(),
+            Some("This revision is historical and read-only.")
+        );
+    }
+
+    #[test]
+    fn eligible_idle_target_leaves_check_now_enabled() {
+        let reason = hardening_check_now_block_reason(
+            HardeningLifecycleState::NeverScanned,
+            true,
+            false,
+            "unused",
+        );
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn completed_state_never_reports_as_active() {
+        assert!(!HardeningLifecycleState::Completed.is_active());
+        assert!(!HardeningLifecycleState::NeverScanned.is_active());
+        assert!(!HardeningLifecycleState::Failed.is_active());
+        assert!(
+            !HardeningLifecycleState::Unrecognized.is_active(),
+            "an unrecognized future state must not permanently disable Check now"
+        );
+    }
+}
+
 #[component]
 fn HardeningTab(
     system_id: Uuid,
+    inventory_target_key: String,
     results: Vec<HardeningServiceResultResponse>,
     justifications: Vec<HardeningJustificationResponse>,
+    source: Option<SystemHardeningInventorySourceResponse>,
+    attempt: Option<SystemHardeningInventoryAttemptResponse>,
+    read_only: bool,
+    loading: bool,
+    error: Option<String>,
     allow_mutations: bool,
+    can_check_now: bool,
+    check_now_disabled_reason: String,
+    checking: bool,
+    on_check_now: EventHandler<()>,
     on_saved: EventHandler<()>,
 ) -> Element {
     let mut selected_service: Signal<Option<HardeningServiceResultResponse>> = use_signal(|| None);
@@ -8311,17 +9893,43 @@ fn HardeningTab(
     let mut modal_tab = use_signal(|| "overview".to_string());
     let mut search_query = use_signal(String::new);
     let mut severity_filter = use_signal(|| "all".to_string());
+    use_effect(use_reactive(&inventory_target_key, move |_| {
+        selected_service.set(None);
+        reason.set(String::new());
+        justification_error.set(None);
+        justification_notice.set(None);
+        active_waiver_directive.set(None);
+        modal_tab.set("overview".to_string());
+        search_query.set(String::new());
+        severity_filter.set("all".to_string());
+    }));
 
-    let total_services = results.len();
-    let avg_score = if total_services > 0 {
-        results
-            .iter()
-            .map(|service| service.hardening_score as f64)
-            .sum::<f64>()
-            / total_services as f64
-    } else {
-        0.0
-    };
+    if loading {
+        return rsx! { div { class: "q-empty", role: "status", "Loading hardening evidence for the selected revision…" } };
+    }
+    if let Some(error) = error {
+        return rsx! { div { class: "q-empty", role: "alert", h3 { "Hardening evidence could not be loaded" } p { "{error}" } } };
+    }
+
+    let total_services = source
+        .as_ref()
+        .map(|source| source.total_services.max(0) as usize)
+        .unwrap_or(results.len());
+    let avg_score = source
+        .as_ref()
+        .and_then(|source| source.overall_score)
+        .map(f64::from)
+        .unwrap_or_else(|| {
+            if results.is_empty() {
+                0.0
+            } else {
+                results
+                    .iter()
+                    .map(|service| service.hardening_score as f64)
+                    .sum::<f64>()
+                    / results.len() as f64
+            }
+        });
     let vuln_count = results
         .iter()
         .filter(|service| matches!(service.risk_level.as_str(), "vulnerable"))
@@ -8394,7 +10002,67 @@ fn HardeningTab(
         theme::health::HEALTHY_TEXT
     };
 
+    // Lifecycle state and completed evidence are independent. A failed or queued
+    // attempt must not hide evidence produced by an earlier completed scan.
+    let lifecycle_state = hardening_lifecycle_state(attempt.as_ref(), source.is_some());
+    let lifecycle_detail = hardening_lifecycle_detail(
+        lifecycle_state,
+        attempt.as_ref(),
+        source.is_some(),
+        read_only,
+    );
+    let check_now_block_reason = hardening_check_now_block_reason(
+        lifecycle_state,
+        can_check_now,
+        checking,
+        &check_now_disabled_reason,
+    );
+    let check_now_disabled = check_now_block_reason.is_some();
+    let check_now_title = check_now_block_reason
+        .clone()
+        .unwrap_or_else(|| "Run a hardening audit for the current configuration".to_string());
+
     rsx! {
+        div { class: "hardening-target-state",
+            div {
+                class: "{lifecycle_state.callout_class()}",
+                role: if matches!(lifecycle_state, HardeningLifecycleState::Failed) { "alert" } else { "status" },
+                "data-testid": "{lifecycle_state.test_id()}",
+                strong { "{lifecycle_state.label()}" }
+                p { class: "text-xs", "{lifecycle_detail}" }
+                if let Some(attempt) = attempt.as_ref() {
+                    p { class: "text-[11px] {theme::text::MUTED}",
+                        "Attempt {attempt.scan_id} · trigger {attempt.source_trigger} · {attempt.attempts} execution attempts"
+                    }
+                }
+            }
+            if read_only {
+                div { class: "sd-callout sd-callout-warning", role: "status",
+                    strong { "Historical hardening evidence is read-only. " }
+                    "Justifications and Check now apply only to the current configuration."
+                    if let Some(source) = source.as_ref() {
+                        div { class: "text-xs", "Scan {source.scan_id} completed {source.completed_at}." }
+                    }
+                }
+            } else {
+                div { class: "hardening-current-actions",
+                    button {
+                        class: "btn btn-ghost focus-ring",
+                        disabled: check_now_disabled,
+                        title: "{check_now_title}",
+                        "data-testid": "hardening-check-now",
+                        onclick: move |_| on_check_now.call(()),
+                        Icon { name: IconName::Sync, size: 13 }
+                        match lifecycle_state {
+                            HardeningLifecycleState::Scanning => " Scanning…",
+                            HardeningLifecycleState::Queued => " Queued…",
+                            _ if checking => " Checking…",
+                            _ => " Check now",
+                        }
+                    }
+                }
+            }
+        }
         // Main content
         div { class: "space-y-4",
             div { class: "hd-stat-row",
@@ -8513,11 +10181,22 @@ fn HardeningTab(
                             d: "M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"
                         }
                     }
-                    h3 { class: "text-lg font-semibold {theme::text::PRIMARY}", "No scan results yet" }
+                    h3 { class: "text-lg font-semibold {theme::text::PRIMARY}",
+                        match (read_only, lifecycle_state) {
+                            (_, HardeningLifecycleState::Queued) => "Hardening scan queued",
+                            (_, HardeningLifecycleState::Scanning) => "Hardening scan running",
+                            (_, HardeningLifecycleState::Failed) => "Hardening scan failed",
+                            (true, _) => "No hardening scan for this revision",
+                            (false, _) => "No scan results yet",
+                        }
+                    }
                     p { class: "{theme::text::SECONDARY}",
-                        "Run a hardening scan using the ",
-                        span { class: "font-semibold {theme::text::PRIMARY}", "\"Run Hardening Scan\"" },
-                        " button above to analyze systemd service security configurations."
+                        match (read_only, lifecycle_state) {
+                            (_, HardeningLifecycleState::Queued | HardeningLifecycleState::Scanning) => lifecycle_detail.clone(),
+                            (_, HardeningLifecycleState::Failed) => lifecycle_detail.clone(),
+                            (true, _) => "No completed hardening scan exists for the selected historical target. Current results are not substituted.".to_string(),
+                            (false, _) => "Use Check now above to analyze the current systemd service security configuration.".to_string(),
+                        }
                     }
                 }
             } else {
@@ -8623,7 +10302,7 @@ fn HardeningTab(
                                             }
                                             td { style: "text-align:right;",
                                                 div { class: "row-actions",
-                                                    button {
+                                                    if allow_mutations { button {
                                                         class: "btn-icon focus-ring",
                                                         aria_label: "Open justification notes",
                                                         title: "Open justification notes",
@@ -8647,7 +10326,7 @@ fn HardeningTab(
                                                                 d: "M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
                                                             }
                                                         }
-                                                    }
+                                                    } }
                                                     button {
                                                         class: "btn-icon focus-ring",
                                                         aria_label: "View details",
@@ -8812,9 +10491,13 @@ fn HardeningTab(
                                         }
                                     }
                                     div { style: "font-size:13px;line-height:1.5;color:var(--cf-text-secondary);",
-                                        "Directives that aren’t enforced can be "
-                                        strong { style: "color:var(--cf-text-primary);font-weight:800;", "justified with a waiver" }
-                                        " (e.g. compensating control, not applicable). Waivers flow into the compliance evidence export."
+                                        if read_only {
+                                            "This historical audit is immutable. Current-system waiver records are not applied to historical evidence."
+                                        } else {
+                                            "Directives that aren’t enforced can be "
+                                            strong { style: "color:var(--cf-text-primary);font-weight:800;", "justified with a waiver" }
+                                            " (e.g. compensating control, not applicable). Waivers flow into the compliance evidence export."
+                                        }
                                     }
                                 }
 
@@ -10552,20 +12235,25 @@ fn map_agent_events_to_logs(events: Vec<SystemAgentEvent>) -> Vec<DeploymentLogE
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigRevision, EvaluatedOptionsPage, HistoryEventKind, SafeOptionValue, SnapshotLifecycle,
-        SnapshotRevisionMode, Tab, build_history_events, classify_history_entry,
-        config_observation_request_allowed, config_selection_is_historical,
-        fitted_config_page_size, map_agent_events_to_logs, map_commit_infos_to_commit_history,
+        ConfigRevision, EvaluatedOptionsPage, HistoryEventKind, RevisionScopeMode,
+        RevisionScopeSelectionState, SafeOptionValue, SnapshotLifecycle, SnapshotRevisionMode, Tab,
+        automatic_revision_scope_update, build_history_events, classify_history_entry,
+        config_observation_request_allowed, config_selection_is_historical, cve_mode_from_query,
+        cve_page_matches_request, cve_selection_from_query, fitted_config_page_size,
+        map_agent_events_to_logs, map_commit_infos_to_commit_history,
         map_history_entries_to_commit_history, natural_config_side_height,
         newest_config_inspectable_commit, observational_current_timeline_commit,
         overview_commit_identity, package_identities, query_value, query_with_parameter,
-        render_safe_option_value, selected_config_revision, snapshot_lifecycle_label,
-        snapshot_lifecycle_message, tab_from_query, tab_from_route, unavailable_generation_commit,
-        visible_config_response,
+        render_safe_option_value, revision_scope_choices, revision_scope_default,
+        revision_scope_transition, selected_config_revision, selection_after_scope_mode_change,
+        snapshot_lifecycle_label, snapshot_lifecycle_message, tab_from_query, tab_from_route,
+        unavailable_generation_commit, visible_config_response,
     };
     use crate::api::models::{
         AuthContext, AuthMode, AuthUser, CommitInfo, Role, SafeEvaluationError, SafePackageValue,
-        SystemAgentEvent, SystemCommitHistory, SystemGeneration, SystemHistoryEntry,
+        SystemAgentEvent, SystemCommitHistory, SystemCveInventoryCandidate,
+        SystemCveInventoryPageResponse, SystemCveInventorySelection, SystemGeneration,
+        SystemHistoryEntry,
     };
     use chrono::{Duration, Utc};
 
@@ -10585,6 +12273,139 @@ mod tests {
             config_identity: None,
             config_inspectable: inspectable,
         }
+    }
+
+    fn inventory_candidate(
+        selection: SystemCveInventorySelection,
+        derivation_id: Option<i32>,
+        is_current: bool,
+        is_latest_per_flake: bool,
+    ) -> SystemCveInventoryCandidate {
+        SystemCveInventoryCandidate {
+            selection,
+            generation: None,
+            commit_hash: None,
+            derivation_id,
+            is_current,
+            is_latest_per_flake,
+            source: None,
+            evidence_representation: None,
+            scan_available: false,
+            read_only: false,
+        }
+    }
+
+    #[test]
+    fn revision_scope_cve_intent_is_independent_of_presentation_and_other_query_state() {
+        let retained = SystemCveInventorySelection::RetainedGeneration {
+            generation_snapshot_id: uuid::Uuid::from_u128(71),
+        };
+        let query = query_with_parameter(
+            "?tab=cves&poam=00000000-0000-0000-0000-000000000003&config_mode=commit&revision=abc",
+            "cve_target",
+            Some(&super::selection_key(retained)),
+        );
+        let query = query_with_parameter(&query, "cve_mode", Some("commit"));
+        assert_eq!(cve_selection_from_query(&query), retained);
+        assert_eq!(cve_mode_from_query(&query), RevisionScopeMode::Commits);
+        assert!(query.contains("poam=00000000-0000-0000-0000-000000000003"));
+        assert!(query.contains("config_mode=commit"));
+        let generations = query_with_parameter(&query, "cve_mode", None);
+        assert_eq!(cve_selection_from_query(&generations), retained);
+        assert_eq!(
+            cve_mode_from_query(&generations),
+            RevisionScopeMode::Generations
+        );
+        let current = query_with_parameter(&generations, "cve_target", None);
+        assert_eq!(
+            cve_selection_from_query(&current),
+            SystemCveInventorySelection::Current
+        );
+        assert_eq!(
+            cve_selection_from_query("?cve_target=derivation:-2"),
+            SystemCveInventorySelection::Current
+        );
+    }
+
+    #[test]
+    fn revision_scope_cve_response_requires_system_target_source_and_read_tier() {
+        let system_id = uuid::Uuid::from_u128(19);
+        let page: SystemCveInventoryPageResponse = serde_json::from_value(serde_json::json!({
+            "system_id": system_id,
+            "selection": { "kind": "current" },
+            "authority": "mapped_running",
+            "current_state": "mapped_running_read_only_scan",
+            "exact_authority_failure": "retained_generation_unavailable",
+            "running_target": { "derivation_id": 41, "generation": 7, "commit_hash": "a".repeat(40), "reported_at": "2026-09-14T20:00:00Z" },
+            "source": { "scan_id": uuid::Uuid::from_u128(55), "scanner_name": "vulnix", "scanner_version": "1.10.1", "completed_at": "2026-09-14T21:00:00Z" },
+            "evidence_representation": "schema1_observations",
+            "read_only": true,
+            "vulnerabilities": [],
+            "metadata": { "total_findings": 0, "total_cves": 0, "total_packages": 0, "severity": { "critical":0,"high":0,"medium":0,"low":0,"unknown":0 } },
+            "inventory_revision": "revision-a", "has_more": false, "next_cursor": null
+        }))
+        .expect("mapped-running response should parse");
+        assert!(cve_page_matches_request(
+            system_id,
+            SystemCveInventorySelection::Current,
+            &page
+        ));
+        assert!(!cve_page_matches_request(
+            uuid::Uuid::from_u128(20),
+            SystemCveInventorySelection::Current,
+            &page
+        ));
+        assert!(!cve_page_matches_request(
+            system_id,
+            SystemCveInventorySelection::ExactDerivation { derivation_id: 41 },
+            &page
+        ));
+        let mut changed = page.clone();
+        changed.read_only = false;
+        assert!(!cve_page_matches_request(
+            system_id,
+            SystemCveInventorySelection::Current,
+            &changed
+        ));
+        changed = page.clone();
+        changed.source = None;
+        assert!(!cve_page_matches_request(
+            system_id,
+            SystemCveInventorySelection::Current,
+            &changed
+        ));
+        changed = page.clone();
+        changed.system_id = None;
+        assert!(!cve_page_matches_request(
+            system_id,
+            SystemCveInventorySelection::Current,
+            &changed
+        ));
+        changed = page;
+        changed.authority = crate::api::models::SystemCveInventoryAuthority::Exact;
+        assert!(!cve_page_matches_request(
+            system_id,
+            SystemCveInventorySelection::Current,
+            &changed
+        ));
+    }
+
+    #[test]
+    fn current_response_from_a_previous_selection_epoch_cannot_replace_new_current() {
+        let selection = SystemCveInventorySelection::Current;
+        let stale = super::VulnerabilitiesLoad {
+            system_id: uuid::Uuid::from_u128(19).to_string(),
+            refresh_nonce: 1,
+            detail_nonce: 0,
+            selection,
+            inventory: None,
+            error: None,
+            redirect_to_login: false,
+        };
+        assert!(stale.matches_request(&stale.system_id, selection, 1, 0));
+        assert!(!stale.matches_request(&stale.system_id, selection, 3, 0));
+        assert!(!stale.matches_request(&stale.system_id, selection, 1, 1));
+        assert!(!stale.matches_request(&uuid::Uuid::from_u128(20).to_string(), selection, 1, 0));
     }
 
     #[test]
@@ -10607,6 +12428,7 @@ mod tests {
             author: "test".into(),
             timestamp: Utc::now().to_rfc3339(),
             config_inspectable: true,
+            deployed_here: false,
         }];
         assert!(
             !map_commit_infos_to_commit_history(&commits, Some("aaaaaaa".into()))[0].is_current
@@ -10650,6 +12472,404 @@ mod tests {
             true,
             true,
         ));
+    }
+
+    #[test]
+    fn revision_scope_default_uses_tracked_current_without_scan_or_candidate_ordering() {
+        let candidates = [
+            inventory_candidate(
+                SystemCveInventorySelection::ExactDerivation { derivation_id: 9 },
+                Some(9),
+                false,
+                true,
+            ),
+            inventory_candidate(SystemCveInventorySelection::Current, Some(7), true, false),
+        ];
+
+        assert_eq!(
+            revision_scope_default(&candidates),
+            super::RevisionScopeDefault {
+                selection: SystemCveInventorySelection::Current,
+                mode: RevisionScopeMode::Generations,
+                message: None,
+                head_unavailable: false,
+            }
+        );
+    }
+
+    #[test]
+    fn revision_scope_default_uses_authoritative_head_for_out_of_band_runtime() {
+        let candidates = [
+            inventory_candidate(SystemCveInventorySelection::Current, None, true, false),
+            inventory_candidate(
+                SystemCveInventorySelection::ExactDerivation { derivation_id: 12 },
+                Some(12),
+                false,
+                false,
+            ),
+            inventory_candidate(
+                SystemCveInventorySelection::ExactDerivation { derivation_id: 13 },
+                Some(13),
+                false,
+                true,
+            ),
+        ];
+
+        assert_eq!(
+            revision_scope_default(&candidates),
+            super::RevisionScopeDefault {
+                selection: SystemCveInventorySelection::ExactDerivation { derivation_id: 13 },
+                mode: RevisionScopeMode::Commits,
+                message: Some(
+                    "Showing flake head because the running configuration is out of band."
+                ),
+                head_unavailable: false,
+            }
+        );
+    }
+
+    #[test]
+    fn revision_scope_default_never_substitutes_retained_evidence_for_missing_head() {
+        let candidates = [
+            inventory_candidate(SystemCveInventorySelection::Current, None, true, false),
+            inventory_candidate(
+                SystemCveInventorySelection::ExactDerivation { derivation_id: 12 },
+                Some(12),
+                false,
+                false,
+            ),
+        ];
+
+        let default = revision_scope_default(&candidates);
+        assert_eq!(default.selection, SystemCveInventorySelection::Current);
+        assert_eq!(default.mode, RevisionScopeMode::Commits);
+        assert!(default.head_unavailable);
+    }
+
+    #[test]
+    fn explicit_revision_scope_choices_survive_refresh_and_reset_for_navigation() {
+        let default = super::RevisionScopeDefault {
+            selection: SystemCveInventorySelection::Current,
+            mode: RevisionScopeMode::Generations,
+            message: None,
+            head_unavailable: false,
+        };
+        let mut state = RevisionScopeSelectionState::default();
+        assert_eq!(
+            automatic_revision_scope_update(&mut state, "system-a", &default),
+            Some(default.clone())
+        );
+
+        state.is_explicit = true;
+        assert!(automatic_revision_scope_update(&mut state, "system-a", &default).is_none());
+
+        assert_eq!(
+            automatic_revision_scope_update(&mut state, "system-b", &default),
+            Some(default)
+        );
+        assert!(!state.is_explicit);
+    }
+
+    #[test]
+    fn revision_scope_uses_server_owned_candidate_identity_and_disables_gaps() {
+        let generation_snapshot_id = uuid::Uuid::from_u128(73);
+        let generations = [
+            SystemGeneration {
+                generation: 73,
+                store_path: None,
+                commit_hash: Some("b".repeat(40)),
+                timestamp: Utc::now(),
+                is_current: false,
+                generation_snapshot_id: Some(generation_snapshot_id),
+                rollback_eligible: false,
+            },
+            SystemGeneration {
+                generation: 72,
+                store_path: None,
+                commit_hash: Some("a".repeat(40)),
+                timestamp: Utc::now(),
+                is_current: false,
+                generation_snapshot_id: None,
+                rollback_eligible: false,
+            },
+        ];
+        let candidates = [SystemCveInventoryCandidate {
+            selection: SystemCveInventorySelection::RetainedGeneration {
+                generation_snapshot_id,
+            },
+            generation: Some(73),
+            commit_hash: Some("b".repeat(40)),
+            derivation_id: Some(41),
+            is_current: false,
+            is_latest_per_flake: false,
+            source: None,
+            evidence_representation: None,
+            scan_available: false,
+            read_only: true,
+        }];
+
+        let choices = revision_scope_choices(
+            super::RevisionScopeMode::Generations,
+            &candidates,
+            &generations,
+            &[],
+            None,
+        );
+        assert_eq!(choices.len(), 2);
+        assert_eq!(
+            choices[0].selection,
+            Some(SystemCveInventorySelection::RetainedGeneration {
+                generation_snapshot_id
+            })
+        );
+        assert!(choices[1].selection.is_none());
+    }
+
+    #[test]
+    fn revision_scope_mode_change_links_production_shaped_historical_candidates() {
+        let snapshot_id = uuid::Uuid::from_u128(73);
+        let retained = SystemCveInventorySelection::RetainedGeneration {
+            generation_snapshot_id: snapshot_id,
+        };
+        let exact = SystemCveInventorySelection::ExactDerivation { derivation_id: 41 };
+        let historical_commit = "b".repeat(40);
+        let current_commit = "c".repeat(40);
+        let candidates = [
+            SystemCveInventoryCandidate {
+                selection: SystemCveInventorySelection::Current,
+                generation: Some(74),
+                commit_hash: Some(current_commit.clone()),
+                derivation_id: Some(42),
+                is_current: true,
+                is_latest_per_flake: true,
+                source: None,
+                evidence_representation: None,
+                scan_available: true,
+                read_only: false,
+            },
+            SystemCveInventoryCandidate {
+                selection: retained,
+                generation: Some(73),
+                commit_hash: Some(historical_commit.clone()),
+                derivation_id: Some(41),
+                is_current: false,
+                is_latest_per_flake: false,
+                source: None,
+                evidence_representation: None,
+                scan_available: true,
+                read_only: true,
+            },
+            SystemCveInventoryCandidate {
+                selection: exact,
+                generation: None,
+                commit_hash: Some(historical_commit.clone()),
+                derivation_id: Some(41),
+                is_current: false,
+                is_latest_per_flake: false,
+                source: None,
+                evidence_representation: None,
+                scan_available: true,
+                read_only: true,
+            },
+        ];
+        let generations = [
+            SystemGeneration {
+                generation: 74,
+                store_path: None,
+                commit_hash: Some(current_commit.clone()),
+                timestamp: Utc::now(),
+                is_current: true,
+                generation_snapshot_id: None,
+                rollback_eligible: false,
+            },
+            SystemGeneration {
+                generation: 73,
+                store_path: None,
+                commit_hash: Some(historical_commit.clone()),
+                timestamp: Utc::now(),
+                is_current: false,
+                generation_snapshot_id: Some(snapshot_id),
+                rollback_eligible: false,
+            },
+        ];
+        let commits = [
+            CommitInfo {
+                sha: "d".repeat(40),
+                short_sha: "dddddddd".to_string(),
+                message: "Undeployed revision".to_string(),
+                author: "Operator".to_string(),
+                timestamp: Utc::now().to_rfc3339(),
+                config_inspectable: true,
+                deployed_here: false,
+            },
+            CommitInfo {
+                sha: current_commit.clone(),
+                short_sha: "cccccccc".to_string(),
+                message: "Current revision".to_string(),
+                author: "Operator".to_string(),
+                timestamp: Utc::now().to_rfc3339(),
+                config_inspectable: true,
+                deployed_here: true,
+            },
+            CommitInfo {
+                sha: historical_commit.clone(),
+                short_sha: "bbbbbbbb".to_string(),
+                message: "Historical revision".to_string(),
+                author: "Operator".to_string(),
+                timestamp: Utc::now().to_rfc3339(),
+                config_inspectable: true,
+                deployed_here: true,
+            },
+        ];
+        let generation_choices = revision_scope_choices(
+            super::RevisionScopeMode::Generations,
+            &candidates,
+            &generations,
+            &commits,
+            Some(&current_commit),
+        );
+        let commit_choices = revision_scope_choices(
+            super::RevisionScopeMode::Commits,
+            &candidates,
+            &generations,
+            &commits,
+            Some(&current_commit),
+        );
+        assert_eq!(
+            commit_choices[0].state,
+            super::RevisionTargetState::NeverDeployed,
+            "newest-first position must not imply deployment state",
+        );
+        assert_eq!(commit_choices[1].state, super::RevisionTargetState::Running);
+        assert_eq!(
+            commit_choices[2].state,
+            super::RevisionTargetState::Historical
+        );
+
+        assert_eq!(
+            selection_after_scope_mode_change(&commit_choices, &candidates, retained),
+            Some(exact)
+        );
+        assert_eq!(
+            selection_after_scope_mode_change(&generation_choices, &candidates, exact),
+            Some(retained)
+        );
+        assert_eq!(
+            revision_scope_transition(
+                super::RevisionScopeMode::Commits,
+                &commit_choices,
+                &candidates,
+                SystemCveInventorySelection::Current,
+            ),
+            super::RevisionScopeTransition {
+                mode: super::RevisionScopeMode::Commits,
+                selection: Some(SystemCveInventorySelection::Current),
+            },
+        );
+        assert_eq!(
+            revision_scope_transition(
+                super::RevisionScopeMode::Generations,
+                &generation_choices,
+                &candidates,
+                retained,
+            ),
+            super::RevisionScopeTransition {
+                mode: super::RevisionScopeMode::Generations,
+                selection: Some(retained),
+            },
+        );
+        assert_eq!(
+            revision_scope_transition(
+                super::RevisionScopeMode::Commits,
+                &commit_choices,
+                &candidates,
+                exact,
+            ),
+            super::RevisionScopeTransition {
+                mode: super::RevisionScopeMode::Commits,
+                selection: Some(exact),
+            },
+        );
+
+        let unlinked = SystemCveInventoryCandidate {
+            selection: SystemCveInventorySelection::ExactDerivation { derivation_id: 99 },
+            generation: None,
+            commit_hash: Some("d".repeat(40)),
+            derivation_id: Some(99),
+            is_current: false,
+            is_latest_per_flake: false,
+            source: None,
+            evidence_representation: None,
+            scan_available: true,
+            read_only: true,
+        };
+        let mut candidates_with_unlinked = candidates.to_vec();
+        candidates_with_unlinked.push(unlinked.clone());
+        assert_eq!(
+            selection_after_scope_mode_change(
+                &generation_choices,
+                &candidates_with_unlinked,
+                unlinked.selection,
+            ),
+            None,
+            "an unlinked historical selection must not fall back to mutable current",
+        );
+        assert_eq!(
+            revision_scope_transition(
+                super::RevisionScopeMode::Generations,
+                &generation_choices,
+                &candidates_with_unlinked,
+                unlinked.selection,
+            ),
+            super::RevisionScopeTransition {
+                mode: super::RevisionScopeMode::Generations,
+                selection: None,
+            },
+            "the presentation mode must change while the unrepresented target stays selected",
+        );
+
+        let unlinked_snapshot_id = uuid::Uuid::from_u128(99);
+        let unlinked_retained = SystemCveInventoryCandidate {
+            selection: SystemCveInventorySelection::RetainedGeneration {
+                generation_snapshot_id: unlinked_snapshot_id,
+            },
+            generation: Some(99),
+            commit_hash: None,
+            derivation_id: None,
+            is_current: false,
+            is_latest_per_flake: false,
+            source: None,
+            evidence_representation: None,
+            scan_available: true,
+            read_only: true,
+        };
+        candidates_with_unlinked.push(unlinked_retained.clone());
+        assert_eq!(
+            revision_scope_transition(
+                super::RevisionScopeMode::Commits,
+                &commit_choices,
+                &candidates_with_unlinked,
+                unlinked_retained.selection,
+            ),
+            super::RevisionScopeTransition {
+                mode: super::RevisionScopeMode::Commits,
+                selection: None,
+            },
+        );
+
+        let mut malformed_historical = unlinked;
+        malformed_historical.read_only = false;
+        let mut malformed_candidates = candidates.to_vec();
+        malformed_candidates.push(malformed_historical.clone());
+        assert_eq!(
+            selection_after_scope_mode_change(
+                &generation_choices,
+                &malformed_candidates,
+                malformed_historical.selection,
+            ),
+            None,
+            "historical identity must not fall back to Current when metadata is malformed",
+        );
     }
 
     #[test]
@@ -11176,5 +13396,130 @@ mod tests {
             None
         );
         assert_eq!(visible_config_response(None, None, None), None);
+    }
+}
+
+#[cfg(test)]
+mod evidence_resolution_tests {
+    use super::{
+        EvidenceResolution, FindingEvidenceTarget, finding_evidence_targets,
+        resolve_finding_evidence,
+    };
+    use crate::api::models::SystemComplianceBundle;
+    use crate::state::navigation_focus::FindingEvidenceFocus;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    fn id(value: u128) -> Uuid {
+        Uuid::from_u128(value)
+    }
+
+    /// Builds a bundle through the real \`Deserialize\` impl so the fixture matches
+    /// the API shape. \`versions\` are \`(version id, label)\` pairs.
+    fn bundle(bundle_id: u128, name: &str, versions: &[(u128, &str)]) -> SystemComplianceBundle {
+        serde_json::from_value(json!({
+            "bundle": {
+                "id": id(bundle_id), "name": name, "framework": "stig", "version": "1",
+                "description": null, "layer": "base", "owner": "ops", "last_review": null,
+                "policy_ids": [], "required_envs": [], "control_count": 1,
+                "environment_count": 1,
+                "versions": versions.iter().map(|(version_id, label)| json!({
+                    "id": id(*version_id), "bundle_id": id(bundle_id), "version": label,
+                    "publication_state": "published", "semantic_digest": "digest",
+                    "created_at": "2026-09-01T00:00:00Z", "published_at": null,
+                    "derived_from_version_id": null, "control_count": 1
+                })).collect::<Vec<_>>()
+            },
+            "rollup": {
+                "system_id": id(99), "hostname": "host", "environment": null,
+                "applies": true, "total": 1, "pass": 0, "warn": 0, "fail": 1,
+                "waiver": 0, "score": 0
+            }
+        }))
+        .expect("bundle fixture should deserialize")
+    }
+
+    fn finding(bundle_ids: &[u128], version_ids: &[u128]) -> FindingEvidenceFocus {
+        FindingEvidenceFocus {
+            finding_id: id(1),
+            system_id: id(99),
+            policy_lineage_id: id(7),
+            policy_name: "SSH hardening".into(),
+            bundle_ids: bundle_ids.iter().map(|value| id(*value)).collect(),
+            bundle_version_ids: version_ids.iter().map(|value| id(*value)).collect(),
+        }
+    }
+
+    #[test]
+    fn no_visible_bundle_revision_is_explicitly_unavailable() {
+        // The finding names bundle 10, but the user's bundles do not include it.
+        let visible = [bundle(20, "Other", &[(200, "1.0")])];
+        assert_eq!(
+            resolve_finding_evidence(&finding(&[10], &[100]), &visible),
+            EvidenceResolution::Unavailable
+        );
+        // No bundles at all, as when the user may see none, is the same outcome.
+        assert_eq!(
+            resolve_finding_evidence(&finding(&[10], &[100]), &[]),
+            EvidenceResolution::Unavailable
+        );
+    }
+
+    #[test]
+    fn one_exact_revision_opens_directly_and_focuses_the_linked_policy() {
+        let visible = [bundle(10, "STIG", &[(100, "1.0"), (101, "2.0")])];
+        // Only revision 100 is linked to the finding, so 101 must not be offered.
+        assert_eq!(
+            resolve_finding_evidence(&finding(&[10], &[100]), &visible),
+            EvidenceResolution::Single(FindingEvidenceTarget {
+                bundle_id: id(10),
+                bundle_version_id: id(100),
+                bundle_name: "STIG".into(),
+                bundle_version: "1.0".into(),
+                policy_id: id(7),
+            })
+        );
+    }
+
+    #[test]
+    fn several_exact_revisions_require_an_explicit_choice() {
+        let visible = [
+            bundle(10, "STIG", &[(100, "1.0"), (101, "2.0")]),
+            bundle(11, "CIS", &[(110, "3.0")]),
+        ];
+        let EvidenceResolution::Choose(targets) =
+            resolve_finding_evidence(&finding(&[10, 11], &[100, 101, 110]), &visible)
+        else {
+            panic!("several linked revisions must produce a choice");
+        };
+        // Sorted by bundle name, then version, so the picker order is stable.
+        let labels = targets
+            .iter()
+            .map(|target| format!("{} {}", target.bundle_name, target.bundle_version))
+            .collect::<Vec<_>>();
+        assert_eq!(labels, vec!["CIS 3.0", "STIG 1.0", "STIG 2.0"]);
+        assert!(targets.iter().all(|target| target.policy_id == id(7)));
+    }
+
+    #[test]
+    fn a_revision_the_finding_does_not_name_is_never_substituted() {
+        // The user can see bundle 10, but only revision 105 is linked to the
+        // finding and 105 is not among the visible revisions. No other revision
+        // of the same bundle may stand in for it.
+        let visible = [bundle(10, "STIG", &[(100, "1.0"), (101, "2.0")])];
+        assert!(finding_evidence_targets(&finding(&[10], &[105]), &visible).is_empty());
+        assert_eq!(
+            resolve_finding_evidence(&finding(&[10], &[105]), &visible),
+            EvidenceResolution::Unavailable
+        );
+    }
+
+    #[test]
+    fn a_linked_revision_in_a_bundle_the_finding_does_not_name_is_ignored() {
+        let visible = [bundle(10, "STIG", &[(100, "1.0")])];
+        assert_eq!(
+            resolve_finding_evidence(&finding(&[11], &[100]), &visible),
+            EvidenceResolution::Unavailable
+        );
     }
 }

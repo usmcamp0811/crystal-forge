@@ -41,18 +41,13 @@ pub struct BundleCatalogProps {
     pub selected_version_id: Option<uuid::Uuid>,
     #[props(default)]
     pub on_select_version: EventHandler<uuid::Uuid>,
-    /// Provides server-computed POA&M counts for each bundle lineage.
-    #[props(default)]
-    pub poam_rollups: Vec<poam_api::Rollup>,
-    /// Indicates that POA&M roll-ups are still loading.
-    #[props(default)]
-    pub poam_rollups_loading: bool,
 }
 
 #[component]
 pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
     let mut query = use_signal(String::new);
     let mut framework = use_signal(|| "all".to_string());
+    let mut expanded = use_signal(std::collections::BTreeSet::<uuid::Uuid>::new);
     let query_value = query.read().trim().to_ascii_lowercase();
     let frameworks = {
         let mut counts = std::collections::BTreeMap::<String, usize>::new();
@@ -105,18 +100,20 @@ pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
                 } else {
                 table { class: "sys-table sys-table-fixed",
                     colgroup {
-                        col { style: "width:38%;" }
-                        col { style: "width:16%;" }
-                        col { style: "width:18%;" }
+                        col { style: "width:20px;" }
+                        col { style: "width:37%;" }
+                        col { style: "width:15%;" }
+                        col { style: "width:17%;" }
                         col { style: "width:18%;" }
                         col { style: "width:10%;" }
                     }
-                    thead { tr { th { "Bundle" } th { "Framework" } th { "Version" } th { "Score" } th { "" } } }
+                    thead { tr { th { "" } th { "Bundle" } th { "Framework" } th { "Version" } th { "Score" } th { "" } } }
                     tbody {
                 for bundle in visible.iter() {
                     {
                         let id = bundle.id;
                         let selected = props.selected_id == Some(id);
+                        let is_expanded = expanded.read().contains(&id);
                         let framework = bundle.framework.clone();
                         let revisions = bundle.versions.clone();
                         let summary_version_id = bundle
@@ -136,35 +133,70 @@ pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
                         let score_color = score.map_or("var(--cf-text-muted)", |score| if score >= 90 { "#34d399" } else if score >= 70 { "#fbbf24" } else { "#f87171" });
                         let score_label = score.map_or_else(|| "—".to_string(), |score| format!("{score}%"));
                         let system_count_label = format!("{} system{}", bundle.applicable_system_count, if bundle.applicable_system_count == 1 { "" } else { "s" });
-                        let poam_rollup = props.poam_rollups.iter().find(|rollup| rollup.scope_id == id);
                         rsx! {
+                            // Catalog rows represent lineages. Only the server's current
+                            // pointer supplies the summary; other versions keep their IDs.
                             tr {
                                 class: if selected { "selected" } else { "" },
                                 "data-testid": "compliance-bundle-row",
                                 "data-bundle-id": "{id}",
                                 onclick: move |_| props.on_select.call(id),
+                                td { style: "text-align:center;",
+                                    if revisions.len() > 1 {
+                                        button {
+                                            class: "btn-icon focus-ring",
+                                            "data-testid": "bundle-versions-toggle",
+                                            title: if is_expanded { "Hide other versions" } else { "Show other versions" },
+                                            aria_label: if is_expanded { "Hide other versions" } else { "Show other versions" },
+                                            aria_expanded: is_expanded,
+                                            onclick: move |event| {
+                                                event.stop_propagation();
+                                                expanded.with_mut(|ids| { if !ids.insert(id) { ids.remove(&id); } });
+                                            },
+                                            Icon { name: if is_expanded { IconName::ChevronDown } else { IconName::ChevronRight }, size: 13 }
+                                        }
+                                    }
+                                }
                                 td {
                                     div { style: "display:flex;align-items:center;gap:8px;min-width:0;",
                                         span { style: "width:7px;height:7px;border-radius:50%;flex-shrink:0;background:{score_color};" }
                                         span { style: "font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;", "{name}" }
                                     }
                                     div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;",
-                                        "{bundle.requirement_count} requirements · {bundle.policy_count} policies"
-                                        if revisions.len() > 1 { " · {revisions.len()} revisions" }
-                                    }
-                                    if let Some(rollup) = poam_rollup {
-                                        div { "data-testid": "bundle-poam-summary", style: "font-size:10px;color:var(--cf-text-muted);margin-top:3px;",
-                                            span { style: "color:#f87171;font-weight:700;", "{rollup.open_findings} open" }
-                                            " · {rollup.on_poam_findings} on POA&M · {rollup.no_poam_findings} unassigned"
-                                        }
-                                    } else if props.poam_rollups_loading {
-                                        div { style: "font-size:10px;color:var(--cf-text-muted);margin-top:3px;", "Loading POA&M roll-up…" }
+                                        "{bundle.policy_count} controls"
+                                        if revisions.len() > 1 { " · {revisions.len()} versions" }
                                     }
                                 }
                                 td { span { class: "chip chip-info", "{framework}" } }
                                  td { div { class: "mono", style: "font-size:12px;", "{version}" } div { style: "margin-top:3px;", span { class: "chip", style: "font-size:9px;padding:1px 6px;", "{publication_state}" } } }
                                 td { span { class: "mono", style: "font-size:13px;font-weight:600;color:{score_color};", "{score_label}" } div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;", "{system_count_label}" } }
-                                td { style: "text-align:right;", div { class: "row-actions", style: "opacity:1;justify-content:flex-end;", button { class: "btn-icon focus-ring", title: "View bundle", onclick: move |event| { event.stop_propagation(); props.on_select.call(id); }, Icon { name: IconName::ArrowRight, size: 14 } } } }
+                                td { style: "text-align:right;", div { class: "row-actions", style: "opacity:1;justify-content:flex-end;",
+                                    button { class: "btn-icon focus-ring", title: "View bundle", onclick: move |event| { event.stop_propagation(); props.on_select.call(id); }, Icon { name: IconName::ArrowRight, size: 14 } }
+                                } }
+                            }
+                            if is_expanded {
+                                for revision in revisions.iter().filter(|revision| Some(revision.id) != summary_version_id) {
+                                    {
+                                        let version_id = revision.id;
+                                        let version_label = revision.version.clone();
+                                        let state = revision.publication_state.clone();
+                                        let date = revision.published_at.unwrap_or(revision.created_at).format("%Y-%m-%d").to_string();
+                                        rsx! {
+                                            tr {
+                                                class: if selected && props.selected_version_id == Some(version_id) { "cf-rev-row selected" } else { "cf-rev-row" },
+                                                "data-testid": "compliance-bundle-version-row",
+                                                "data-version-id": "{version_id}",
+                                                onclick: move |_| props.on_select_version.call(version_id),
+                                                td {}
+                                                td { style: "padding-left:28px;font-size:12px;color:var(--cf-text-secondary);", Icon { name: IconName::History, size: 11 } " {version_label}" }
+                                                td { style: "font-size:11px;color:var(--cf-text-muted);", "{framework}" }
+                                                td { span { class: "chip", "{state}" } div { style: "font-size:10px;color:var(--cf-text-muted);margin-top:3px;", "{date}" } }
+                                                td { style: "font-size:11px;color:var(--cf-text-muted);", "Exact version" }
+                                                td { style: "text-align:right;", button { class: "btn-icon focus-ring", title: "View this version", onclick: move |event| { event.stop_propagation(); props.on_select_version.call(version_id); }, Icon { name: IconName::ArrowRight, size: 13 } } }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -186,6 +218,10 @@ fn env_count_suffix(n: i64) -> &'static str {
 pub struct BundleHeaderProps {
     pub bundle: ComplianceBundleSummary,
     pub on_edit: EventHandler<()>,
+    /// Displays the exact revision selected in the drawer rather than the
+    /// bundle lineage's current published or draft version.
+    #[props(default)]
+    pub selected_version: Option<String>,
     /// When false the Edit button is hidden — non-admin users get a read-only view.
     #[props(default = false)]
     pub is_admin: bool,
@@ -198,13 +234,15 @@ pub fn BundleHeader(props: BundleHeaderProps) -> Element {
     let last_review = props
         .bundle
         .last_review
-        .map(|dt| dt.format("%Y-%m-%d").to_string())
-        .unwrap_or_else(|| "never".to_string());
+        .map(|dt| dt.format("%Y-%m-%d").to_string());
     let description = props.bundle.description.clone().unwrap_or_default();
     let owner = props.bundle.owner.clone();
     let name = props.bundle.name.clone();
     let framework = props.bundle.framework.clone();
-    let version = props.bundle.version.clone();
+    let version = props
+        .selected_version
+        .clone()
+        .unwrap_or_else(|| props.bundle.version.clone());
     let layer = props.bundle.layer.clone();
 
     rsx! {
@@ -220,11 +258,16 @@ pub fn BundleHeader(props: BundleHeaderProps) -> Element {
                         span { class: "chip chip-info", "{framework}" }
                         span { class: "chip chip-unknown", "{version}" }
                         span { class: "chip chip-unknown", "{layer}" }
-                        span {
-                            style: "font-size:11px;color:var(--cf-text-muted);",
-                            "Owned by "
-                            span { class: "mono", "{owner}" }
-                            " · Last reviewed {last_review}"
+                        if !owner.trim().is_empty() {
+                            span { style: "font-size:11px;color:var(--cf-text-muted);",
+                                "Owned by " span { class: "mono", "{owner}" }
+                            }
+                        }
+                        if let Some(reviewed) = last_review {
+                            span { style: "font-size:11px;color:var(--cf-text-muted);",
+                                if !owner.trim().is_empty() { "· " }
+                                "Last reviewed {reviewed}"
+                            }
                         }
                     }
                 }
@@ -274,7 +317,9 @@ pub struct ScoreStripProps {
 #[component]
 pub fn ScoreStrip(props: ScoreStripProps) -> Element {
     let score = props.totals.overall_score;
-    let score_color = if score >= 90 {
+    let score_color = if props.totals.evaluated_controls == 0 {
+        "var(--cf-text-muted)"
+    } else if score >= 90 {
         "#34d399"
     } else if score >= 70 {
         "#fbbf24"
@@ -286,7 +331,9 @@ pub fn ScoreStrip(props: ScoreStripProps) -> Element {
         div { class: "stat-strip stat-strip-flush",
             div { class: "stat",
                 div { class: "stat-label", "Overall score" }
-                div { class: "stat-value", style: "color:{score_color};", "{score}%" }
+                div { class: "stat-value", style: "color:{score_color};",
+                    if props.totals.evaluated_controls == 0 { "—" } else { "{score}%" }
+                }
             }
             ScoreStat { label: "Pass",          value: props.totals.pass,          color: "#34d399" }
             ScoreStat { label: "Warn",          value: props.totals.warn,          color: "#fbbf24" }
@@ -368,7 +415,7 @@ pub fn SystemsMatrix(props: SystemsMatrixProps) -> Element {
                 span { class: "filter-count", "{visible.len()} hosts" }
             }
             // Info callout
-            div {
+            if !props.systems.is_empty() { div {
                 class: "sd-callout sd-callout-info",
                 style: "margin:12px 16px 0;",
                 Icon { name: IconName::Shield, size: 13 }
@@ -378,6 +425,9 @@ pub fn SystemsMatrix(props: SystemsMatrixProps) -> Element {
                     strong { "per-control evidence" }
                     " — the proof Crystal Forge collected that each control is satisfied."
                 }
+            } }
+            if props.systems.is_empty() {
+                p { class: "poam-muted", style: "padding:10px 16px;margin:0;", "No systems are assigned to this bundle revision." }
             }
             if viewing_non_current_revision && pinned_system_count > 0 {
                 div { class: "sd-callout sd-callout-warn", style: "margin:10px 16px 0;",
@@ -787,6 +837,7 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
         aside {
             id: "compliance-evidence-dialog",
             class: if expanded() { "fl-tray compliance-drawer-expanded" } else { "fl-tray" },
+            "data-coach-target": "evidence-drawer",
             role: "dialog",
             aria_modal: "true",
             aria_labelledby: "compliance-evidence-title",
@@ -864,7 +915,7 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                         }
                         Link {
                             class: "btn btn-ghost xs focus-ring",
-                            to: Route::SystemDetailView { id: system.system_id.to_string(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new() },
+                            to: Route::SystemDetailView { id: system.system_id.to_string(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new(), cve_target: String::new(), cve_mode: String::new() },
                             "Open system"
                             Icon { name: IconName::ArrowRight, size: 12 }
                         }
@@ -918,6 +969,8 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                                 div {
                                     button {
                                         class: "focus-ring",
+                                        "data-testid": "evidence-policy-group-toggle",
+                                        "data-group-key": "{key}",
                                         style: "all:unset;cursor:pointer;display:flex;align-items:center;gap:6px;width:100%;box-sizing:border-box;padding:9px 14px 5px;font-size:9.5px;text-transform:uppercase;letter-spacing:0.06em;font-weight:700;color:var(--cf-text-muted);",
                                         onclick: move |_| {
                                             let mut next = collapsed.read().clone();
@@ -944,23 +997,20 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                                                 let is_sel = index == *active_idx.read();
                                                 let dot_color = control_status_color(&control.status);
                                                 let policy_name = control.policy_name.clone();
-                                                rsx! {
-                                                    button {
-                                                        class: "focus-ring",
-                                                        style: if is_sel { "all:unset;cursor:pointer;display:block;padding:10px 14px;width:100%;box-sizing:border-box;border-left:3px solid var(--cf-brand-purple);background:color-mix(in oklab,var(--cf-brand-purple) 8%,transparent);border-bottom:1px solid var(--cf-divider);" } else { "all:unset;cursor:pointer;display:block;padding:10px 14px;width:100%;box-sizing:border-box;border-left:3px solid transparent;background:transparent;border-bottom:1px solid var(--cf-divider);" },
-                                                        "data-testid": "evidence-policy-target",
-                                                        "data-policy-id": "{control.policy_id}",
-                                                        aria_current: if is_sel { "true" } else { "false" },
+                                                    rsx! {
+                                                        button {
+                                                            class: "focus-ring compliance-evidence-control",
+                                                            "data-testid": "evidence-policy-target",
+                                                            "data-policy-id": "{control.policy_id}",
+                                                            aria_current: if is_sel { "true" } else { "false" },
                                                         onclick: move |_| {
                                                             active_idx.set(index);
                                                             props.on_active_policy.call(control.policy_id);
                                                         },
-                                                        div { style: "display:flex;justify-content:space-between;align-items:center;gap:8px;",
-                                                            span { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);", "{index+1:02}" }
-                                                            span { style: "width:8px;height:8px;border-radius:50%;background:{dot_color};" }
+                                                            span { "data-testid": "evidence-policy-ordinal", class: "mono compliance-evidence-control-ordinal", "{index+1:02}" }
+                                                            span { "data-testid": "evidence-policy-name", class: "compliance-evidence-control-name", "{policy_name}" }
+                                                            span { "data-testid": "evidence-policy-status-dot", class: "compliance-evidence-control-status", style: "--status-color:{dot_color};" }
                                                         }
-                                                        div { style: if is_sel { "font-size:12px;color:var(--cf-text-primary);margin-top:4px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" } else { "font-size:12px;color:var(--cf-text-primary);margin-top:4px;font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" }, "{policy_name}" }
-                                                    }
                                                 }
                                             }
                                         }

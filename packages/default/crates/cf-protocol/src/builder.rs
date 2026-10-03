@@ -16,6 +16,14 @@ pub const CVE_SCAN_MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
 pub const CVE_SCAN_MAX_ENTRIES: usize = 50_000;
 /// Maximum package-to-CVE observations accepted in one CVE result.
 pub const CVE_SCAN_MAX_OBSERVATIONS: usize = 250_000;
+/// Maximum diagnostic events accepted in one CVE lease heartbeat.
+pub const CVE_SCAN_MAX_HEARTBEAT_DIAGNOSTICS: usize = 16;
+/// Maximum encoded CVE heartbeat request size accepted by the protocol.
+pub const CVE_SCAN_HEARTBEAT_MAX_BODY_BYTES: u64 = 64 * 1024;
+/// Maximum Unicode scalar count accepted in one CVE diagnostic message.
+pub const CVE_SCAN_MAX_DIAGNOSTIC_CHARS: usize = 2048;
+/// Maximum Unicode scalar count accepted in one CVE diagnostic label.
+pub const CVE_SCAN_MAX_DIAGNOSTIC_LABEL_CHARS: usize = 64;
 /// Current structured CVE result schema advertised by capable builders.
 pub const CVE_SCAN_SCHEMA_VERSION: u32 = 1;
 /// Current evaluator contract understood by verified-source builders.
@@ -822,6 +830,12 @@ pub struct CveScanHeartbeatRequest {
     pub entries_collected: usize,
     /// Package-to-CVE observations collected so far.
     pub observations_collected: usize,
+    /// New or retried phase diagnostics observed since the prior heartbeat.
+    ///
+    /// Older builders omit this field. The server deduplicates phase events by
+    /// execution identity and event type before it acknowledges the heartbeat.
+    #[serde(default, deserialize_with = "deserialize_cve_heartbeat_diagnostics")]
+    pub diagnostics: Vec<CveScanDiagnostic>,
 }
 
 /// Reports the server decision for a CVE lease heartbeat.
@@ -919,7 +933,7 @@ pub struct CveScanDiagnostic {
     pub level: String,
     /// Producer: `builder`, `vulnix`, or `nix`.
     pub source: String,
-    /// Lifecycle or output event kind.
+    /// Lifecycle, execution phase, or output event kind.
     pub event_type: String,
     /// Bounded diagnostic text. The server redacts this field before storage.
     pub message: String,
@@ -980,6 +994,61 @@ where
         )));
     }
     Ok(values)
+}
+
+fn deserialize_cve_heartbeat_diagnostics<'de, D>(
+    deserializer: D,
+) -> Result<Vec<CveScanDiagnostic>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Vec::deserialize(deserializer)?;
+    if values.len() > CVE_SCAN_MAX_HEARTBEAT_DIAGNOSTICS {
+        return Err(serde::de::Error::custom(format!(
+            "CVE heartbeat has more than {CVE_SCAN_MAX_HEARTBEAT_DIAGNOSTICS} diagnostics"
+        )));
+    }
+    for value in &values {
+        validate_cve_heartbeat_diagnostic(value).map_err(serde::de::Error::custom)?;
+    }
+    Ok(values)
+}
+
+fn validate_cve_heartbeat_diagnostic(value: &CveScanDiagnostic) -> Result<(), String> {
+    if !matches!(value.level.as_str(), "info" | "warning" | "error") {
+        return Err("CVE heartbeat diagnostic has an invalid level".to_string());
+    }
+    if !matches!(value.source.as_str(), "builder" | "vulnix" | "nix") {
+        return Err("CVE heartbeat diagnostic has an invalid source".to_string());
+    }
+    if !matches!(
+        value.event_type.as_str(),
+        "attempt_started"
+            | "materialization_started"
+            | "materialization_completed"
+            | "scanner_started"
+            | "scanner_completed"
+            | "evidence_resolution_started"
+            | "evidence_resolution_completed"
+    ) {
+        return Err("CVE heartbeat diagnostic has an invalid phase event type".to_string());
+    }
+    if value.level.chars().count() > CVE_SCAN_MAX_DIAGNOSTIC_LABEL_CHARS
+        || value.source.chars().count() > CVE_SCAN_MAX_DIAGNOSTIC_LABEL_CHARS
+        || value.event_type.chars().count() > CVE_SCAN_MAX_DIAGNOSTIC_LABEL_CHARS
+    {
+        return Err("CVE heartbeat diagnostic label exceeds the protocol limit".to_string());
+    }
+    if value.message.trim().is_empty()
+        || value.message.chars().count() > CVE_SCAN_MAX_DIAGNOSTIC_CHARS
+        || value.message.chars().any(char::is_control)
+    {
+        return Err(
+            "CVE heartbeat diagnostic message is empty, multiline, or exceeds the protocol limit"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Completes an owned CVE scan execution with deterministic evidence.
@@ -1384,6 +1453,84 @@ mod tests {
         let decoded: CveScanFailRequest =
             serde_json::from_value(value).expect("legacy failure payload should deserialize");
         assert!(decoded.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn cve_heartbeat_diagnostics_are_backward_compatible_and_bounded() {
+        let legacy = serde_json::json!({
+            "lease": {
+                "scan_id": Uuid::nil(),
+                "execution_id": Uuid::nil(),
+                "builder_id": Uuid::nil(),
+                "builder_session_id": Uuid::nil()
+            },
+            "entries_collected": 0,
+            "observations_collected": 0
+        });
+        let decoded: CveScanHeartbeatRequest =
+            serde_json::from_value(legacy.clone()).expect("legacy heartbeat should deserialize");
+        assert!(decoded.diagnostics.is_empty());
+
+        let diagnostic = serde_json::json!({
+            "occurred_at": "2026-09-21T00:00:00Z",
+            "level": "info",
+            "source": "vulnix",
+            "event_type": "scanner_started",
+            "message": "scanner started",
+            "truncated": false
+        });
+        let mut current = legacy.clone();
+        current["diagnostics"] = serde_json::Value::Array(vec![diagnostic.clone()]);
+        let decoded: CveScanHeartbeatRequest =
+            serde_json::from_value(current).expect("a bounded phase diagnostic should deserialize");
+        assert_eq!(decoded.diagnostics.len(), 1);
+
+        let mut oversized = legacy;
+        oversized["diagnostics"] = serde_json::Value::Array(vec![
+            diagnostic.clone();
+            CVE_SCAN_MAX_HEARTBEAT_DIAGNOSTICS
+                + 1
+        ]);
+        let error = serde_json::from_value::<CveScanHeartbeatRequest>(oversized)
+            .expect_err("oversized heartbeat diagnostics must be rejected");
+        assert!(error.to_string().contains("more than"));
+
+        let invalid_messages = [
+            "line one\nline two".to_string(),
+            "x".repeat(CVE_SCAN_MAX_DIAGNOSTIC_CHARS + 1),
+        ];
+        for message in invalid_messages {
+            let mut invalid = serde_json::json!({
+                "lease": {
+                    "scan_id": Uuid::nil(),
+                    "execution_id": Uuid::nil(),
+                    "builder_id": Uuid::nil(),
+                    "builder_session_id": Uuid::nil()
+                },
+                "entries_collected": 0,
+                "observations_collected": 0,
+                "diagnostics": [diagnostic.clone()]
+            });
+            invalid["diagnostics"][0]["message"] = serde_json::Value::String(message);
+            serde_json::from_value::<CveScanHeartbeatRequest>(invalid)
+                .expect_err("invalid heartbeat diagnostic text must be rejected");
+        }
+
+        let mut invalid_type = serde_json::json!({
+            "lease": {
+                "scan_id": Uuid::nil(),
+                "execution_id": Uuid::nil(),
+                "builder_id": Uuid::nil(),
+                "builder_session_id": Uuid::nil()
+            },
+            "entries_collected": 0,
+            "observations_collected": 0,
+            "diagnostics": [diagnostic]
+        });
+        invalid_type["diagnostics"][0]["event_type"] =
+            serde_json::Value::String("output".to_string());
+        serde_json::from_value::<CveScanHeartbeatRequest>(invalid_type)
+            .expect_err("heartbeat output diagnostics must be rejected");
     }
 
     #[test]

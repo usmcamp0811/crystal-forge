@@ -209,7 +209,7 @@ function EvalsView({ focus, onClearFocus, onOpenSystem, onOpenPolicy, onOpenFind
             Active Queue <span className="sd-tab-badge">{evals.length}</span>
           </button>
           <button className={`sd-tab focus-ring${tab==="history"?" active":""}${flashTab?" attention-flash-tab":""}`} onClick={()=>setTab("history")}>
-            History <span className="sd-tab-badge">{arc.include ? HISTORY_EVALS.length : HISTORY_EVALS.length - arc.archived.size}</span>
+            Completed <span className="sd-tab-badge">{arc.include ? HISTORY_EVALS.length : HISTORY_EVALS.length - arc.archived.size}</span>
           </button>
           {((tab==="active" && evals.some(e=>e.canCancel)) || tab==="history") && <MultiSelectHint />}
           <button className={`btn btn-ghost xs focus-ring${latestOnly?" active-filter":""}`} onClick={()=>setLatestOnly(v=>!v)} title="Show only the most recent evaluation per flake">
@@ -217,7 +217,7 @@ function EvalsView({ focus, onClearFocus, onOpenSystem, onOpenPolicy, onOpenFind
           </button>
           <div className="q-search">
             <Icon name="search" size={13} />
-            <input className="q-search-input" placeholder={`Search ${tab==="active"?"queue":"history"}…`}
+            <input className="q-search-input" placeholder={`Search ${tab==="active"?"queue":"completed"}…`}
               value={query} onChange={e=>setQuery(e.target.value)} />
             {q && <span className="q-search-count">{(tab==="active"?evalsShown.length:historyFiltered.length)} of {tab==="active"?evals.length:HISTORY_EVALS.length}</span>}
             {q && <button className="btn-icon xs focus-ring" title="Clear search" onClick={()=>setQuery("")}><Icon name="x" size={13}/></button>}

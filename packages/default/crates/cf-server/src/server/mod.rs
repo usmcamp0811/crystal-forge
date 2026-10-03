@@ -46,13 +46,12 @@ use crate::queries::commits::{
     reset_stuck_commit_evaluations,
 };
 use crate::queries::deployment_policies::{
-    get_deployment_policies_by_versions, list_enabled_deployment_policies,
-    list_enabled_policies_for_flake, list_policy_rows_by_configuration_for_flake,
+    get_deployment_policies_by_versions, list_enabled_policies_for_flake,
+    list_policy_rows_by_configuration_for_flake,
 };
 use crate::queries::derivations::{
     cleanup_partial_derivations, reset_stuck_builds, set_closure_counts,
 };
-use crate::services::hardening_scans::trigger_commit_hardening_scans;
 
 const CLOSURE_COUNT_MAX_CONCURRENT: usize = 2;
 static CLOSURE_COUNT_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
@@ -213,9 +212,10 @@ async fn handle_evaluation_attempt_failure(
     error: &str,
     failure_class: crate::models::retry_policy::RetryFailureClass,
 ) -> Result<()> {
-    // SECURITY: This function logs and persists the failure. Redact once at
-    // entry so no branch can expose the raw evaluator diagnostic.
-    let error = crate::security::snapshot_redaction::redact_evaluation_error(error);
+    // SECURITY: This function logs, persists, and broadcasts the failure.
+    // Redact and bound once at entry so no branch can expose untrusted source
+    // diagnostics or turn an oversized Nix trace into durable API data.
+    let error = bounded_redacted_evaluation_error(error);
     error!(
         "❌ Failed to evaluate commit {}: {}",
         commit.git_commit_hash, error
@@ -333,6 +333,27 @@ async fn handle_evaluation_attempt_failure(
 
     crate::handlers::api::commits::cleanup_eval_channel(cf_state, commit.id).await;
     Ok(())
+}
+
+/// Maximum persisted evaluation diagnostic length after redaction.
+///
+/// Source-materialization errors can contain a complete Git or Nix trace. The
+/// bounded chain preserves the actionable cause without making `commits`,
+/// `evaluation_attempts`, or streamed logs unbounded.
+const MAX_PERSISTED_EVALUATION_ERROR_CHARS: usize = 4096;
+
+fn bounded_redacted_evaluation_error(error: &str) -> String {
+    let redacted = crate::security::snapshot_redaction::redact_evaluation_error(error);
+    if redacted.chars().count() > MAX_PERSISTED_EVALUATION_ERROR_CHARS {
+        let mut bounded = redacted
+            .chars()
+            .take(MAX_PERSISTED_EVALUATION_ERROR_CHARS - 1)
+            .collect::<String>();
+        bounded.push('…');
+        bounded
+    } else {
+        redacted
+    }
 }
 
 pub(crate) fn parse_deployment_policy_record(
@@ -1216,22 +1237,6 @@ pub(crate) async fn load_policies_by_configuration_for_eval_test(
     load_policies_by_configuration_for_eval(pool, flake_id).await
 }
 
-/// Load enabled `require_cve_check` policies from the database.
-/// Called by the deployment manager to evaluate post-build CVE gates.
-pub async fn load_cve_policies(pool: &PgPool) -> Vec<DeploymentPolicy> {
-    match list_enabled_deployment_policies(pool).await {
-        Ok(records) => records
-            .iter()
-            .filter_map(parse_deployment_policy_record)
-            .filter(|p| matches!(p, DeploymentPolicy::RequireCveCheck { .. }))
-            .collect(),
-        Err(err) => {
-            error!("Failed to load CVE deployment policies from DB: {:#}", err);
-            vec![]
-        }
-    }
-}
-
 /// Spawn all server background tasks and register controllable jobs in the
 /// provided [`BackgroundJobRegistry`].
 ///
@@ -1289,6 +1294,49 @@ pub fn spawn_background_tasks(
             attention_reconciliation_pool,
         ),
     );
+    // CONCURRENCY: Bounded pages advance past unprovable systems instead of
+    // repeatedly locking the same first page. Each candidate rechecks the
+    // latest observation under the snapshot-writer lock before insertion.
+    let external_reconciliation_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut cursor = None;
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            match crate::queries::evaluation_snapshots::reconcile_external_current_generation_page(
+                &external_reconciliation_pool,
+                cursor,
+            )
+            .await
+            {
+                Ok(next) => cursor = next,
+                Err(error) => tracing::warn!(
+                    error = %error,
+                    "External Current generation reconciliation will retry next cycle"
+                ),
+            }
+        }
+    });
+    let scheduled_cve_reconciliation_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut cursor = None;
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(90));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            match crate::services::poam::reconcile_scheduled_environment_cve_page(
+                &scheduled_cve_reconciliation_pool,
+                cursor,
+            )
+            .await
+            {
+                Ok(next) => cursor = next,
+                Err(error) => tracing::warn!(error = ?error,
+                    "Scheduled CVE membership reconciliation will retry next cycle"),
+            }
+        }
+    });
     let attention_cleanup_pool = pool.clone();
     tokio::spawn(
         crate::tasks::attention_reconciliation::run_attention_cleanup_loop(attention_cleanup_pool),
@@ -1983,30 +2031,14 @@ async fn process_pending_commits(
 
                         run_post_finalize_derivation_side_effects(pool, &derivations).await;
 
-                        if server_config.auto_hardening_scans {
-                            match trigger_commit_hardening_scans(
-                                pool.clone(),
-                                commit.id,
-                                &flake.repo_url,
-                                &commit.git_commit_hash,
-                            )
-                            .await
-                            {
-                                Ok(count) if count > 0 => {
-                                    info!(
-                                        "🛡️ Queued {} hardening scans for commit {}",
-                                        count, commit.git_commit_hash
-                                    );
-                                }
-                                Ok(_) => {}
-                                Err(err) => {
-                                    warn!(
-                                        "Failed to queue hardening scans for commit {}: {}",
-                                        commit.git_commit_hash, err
-                                    );
-                                }
-                            }
-                        }
+                        // Automatic hardening admission deliberately does not
+                        // happen here. Evaluation proves only that a
+                        // configuration exists, not that it was built, and
+                        // admitting one scan per evaluated derivation was the
+                        // fan-out that caused the 2026-07-28 memory incident.
+                        // Admission now belongs to the transaction that records
+                        // a successful exact NixOS build. See
+                        // `queries::hardening_scans::enqueue_post_build_hardening_scan_tx`.
 
                         let total = results.len();
                         let with_agent = policy_checks
@@ -2065,14 +2097,12 @@ async fn process_pending_commits(
                 // SECURITY: The support error can contain evaluator-controlled
                 // values and URLs. Redact before failure handling can log,
                 // persist, or broadcast the diagnostic.
-                let error_text =
-                    crate::security::snapshot_redaction::redact_evaluation_error(&e.to_string());
                 return handle_evaluation_attempt_failure(
                     pool,
                     &cf_state,
                     &commit,
                     attempt,
-                    &error_text,
+                    &e.diagnostic_chain(),
                     e.class,
                 )
                 .await;
@@ -2090,9 +2120,10 @@ fn select_next_pending_commit_id_for_cycle(
 #[cfg(test)]
 mod tests {
     use super::{
-        EvaluationPolicyLoadSafetyError, EvaluationPolicyRecord, builder_stale_timeout_secs,
-        classify_policy_loader_failure, evaluation_due_delay, evaluation_policy_digest,
-        is_nix_policy_execution_eligible, new_cve_scan_background_job,
+        EvaluationPolicyLoadSafetyError, EvaluationPolicyRecord,
+        MAX_PERSISTED_EVALUATION_ERROR_CHARS, bounded_redacted_evaluation_error,
+        builder_stale_timeout_secs, classify_policy_loader_failure, evaluation_due_delay,
+        evaluation_policy_digest, is_nix_policy_execution_eligible, new_cve_scan_background_job,
         normalize_custom_policy_expression, parse_deployment_policy_record,
         parse_effective_policy_record, parse_executable_policy_record,
         select_next_pending_commit_id_for_cycle,
@@ -2105,6 +2136,18 @@ mod tests {
     use chrono::Utc;
     use serde_json::json;
     use uuid::Uuid;
+
+    #[test]
+    fn evaluation_failure_diagnostic_is_bounded_after_redaction() {
+        let error = "a".repeat(MAX_PERSISTED_EVALUATION_ERROR_CHARS + 1);
+        let bounded = bounded_redacted_evaluation_error(&error);
+
+        assert_eq!(
+            bounded.chars().count(),
+            MAX_PERSISTED_EVALUATION_ERROR_CHARS
+        );
+        assert!(bounded.ends_with('…'));
+    }
 
     #[tokio::test]
     async fn registered_cve_scan_job_starts_enabled() {

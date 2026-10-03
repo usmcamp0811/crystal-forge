@@ -18,6 +18,7 @@ mod latest_filter;
 pub mod login;
 pub mod not_found;
 pub mod poam_api;
+pub mod poams;
 pub mod policies;
 pub mod policies_api;
 pub mod profile;

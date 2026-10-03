@@ -1,0 +1,18 @@
+flowchart TD
+    A["Fleet CVEs route /cves"] --> B["Six summary cards"]
+    A --> C["Severity, fix, triage, package, search, sort"]
+    A --> D{"Presentation"}
+    D --> E["Package groups with nested CVE rows"]
+    D --> F["Flat CVE/package table"]
+    E --> G["Fleet inventory drawer"]
+    F --> G
+    G --> H["Advisory and authority metadata"]
+    G --> I["Environment decisions"]
+    G --> J["Current / scheduled / historical host rows"]
+    G --> K["Nested fleet triage editor"]
+    K --> L["Shared triage draft and typed assignee controls"]
+    L --> M["System Detail host/environment editor"]
+    I --> N["POA&M detail in Compliance"]
+    J --> O["System Detail CVEs tab"]
+    A --> P["Inventory CSV export"]
+    A --> Q["Admin-only fleet rescan"]

@@ -76,17 +76,6 @@ pub fn BuildersView() -> Element {
         div {
             style: "display: flex; flex-direction: column; gap: 16px;",
 
-            // Setup coach guidance
-            if from_setup() {
-                div {
-                    "data-testid": "setup-coach-builders-callout",
-                    style: "background:rgba(30,58,138,0.22); border:1px solid rgba(96,165,250,0.55); border-radius:8px; padding:12px 16px;",
-                    p { style: "color:#dbeafe; font-size:12px; font-weight:700; margin:0; letter-spacing:0.03em; text-transform:uppercase;", "Setup Tour - Step 3 of 6" }
-                    p { style: "color:#dbeafe; font-size:14px; font-weight:600; margin:4px 0 0 0;", "Connect a builder" }
-                    p { style: "color:#bfdbfe; font-size:13px; margin:4px 0 0 0;", "Use Add Builder to register a worker that evaluates and builds your flake changes." }
-                }
-            }
-
             // Page head
             div {
                 class: "page-head",

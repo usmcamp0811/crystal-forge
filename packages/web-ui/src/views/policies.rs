@@ -671,6 +671,7 @@ pub fn PoliciesView() -> Element {
                             },
                         }
                         button {
+                            "data-coach-target": "policy",
                             class: "btn btn-primary focus-ring",
                             onclick: move |_| {
                                 editing_policy_id.set(None);
@@ -760,7 +761,7 @@ pub fn PoliciesView() -> Element {
                 }
             }
 
-            div { class: "pol-domain-tabs", role: "tablist", "aria-label": "Policy domain",
+            div { class: "pol-domain-tabs", role: "tablist", "aria-label": "Policy domain", "data-coach-target": "policy-domain-tabs",
                 for (domain_id, label, count, color, blurb) in [
                     ("platform", "Platform", all_policies.iter().filter(|policy| policy_domain(policy) == "platform").count(), "var(--cf-policy-blue)", "Deployment modes, pipeline gates, and rollout controls."),
                     ("security", "Security controls", all_policies.iter().filter(|policy| policy_domain(policy) == "security").count(), "var(--cf-policy-red)", "Framework-owned controls for security and compliance."),
@@ -1793,7 +1794,7 @@ pub fn PolicyDrawer(
                                         for system in usage.systems.iter() {
                                             {
                                                 let environment = system.environment.as_deref().unwrap_or("No environment");
-                                                rsx! { Link { key: "{system.bundle_version_id}-{system.system_id}", class: "policy-revision-row focus-ring", to: Route::SystemDetailView { id: system.system_id.to_string(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new() },
+                                                rsx! { Link { key: "{system.bundle_version_id}-{system.system_id}", class: "policy-revision-row focus-ring", to: Route::SystemDetailView { id: system.system_id.to_string(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new(), cve_target: String::new(), cve_mode: String::new() },
                                                     div {
                                                         div { class: "mono", style: "font-weight:700;", "{system.hostname}" }
                                                         div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:3px;", "{environment} · {system.bundle_name} rev {system.bundle_version}" }

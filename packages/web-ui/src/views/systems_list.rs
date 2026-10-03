@@ -10,7 +10,6 @@ use crate::alerts::{
     occurrence_id_for_subject, should_flash,
 };
 
-use crate::api::client::set_setup_wizard_agent_acknowledged;
 use crate::api::models::{
     DeploymentStatus, HealthStatus, SystemDetail, SystemHistoryEntry, SystemSummary,
     SystemsListParams, UpdateUserPreferences,
@@ -362,7 +361,6 @@ pub fn SystemsListView() -> Element {
     let registered_flakes_for_submit = registered_flakes.clone();
 
     let from_setup = use_signal(came_from_setup);
-    let mut dismiss_add_target_callout = use_signal(|| false);
 
     // Attention/flash state for alerting systems (TASK-385 follow-up).
     let has_attention_systems = filtered_systems.iter().any(|s| {
@@ -405,20 +403,6 @@ pub fn SystemsListView() -> Element {
         div {
             class: "space-y-6",
             id: "{container_id}",
-
-            if from_setup() {
-                div {
-                    "data-testid": "setup-coach-systems-callout",
-                    style: "background:rgba(30,58,138,0.22); border:1px solid rgba(96,165,250,0.55); border-radius:8px; padding:12px 16px;",
-                    div {
-                        style: "display:flex; flex-direction:column; gap:6px;",
-                        p { style: "color:#dbeafe; font-size:12px; font-weight:700; margin:0; letter-spacing:0.03em; text-transform:uppercase;", "Setup Tour - Step 5 of 6" }
-                        p { style: "color:#dbeafe; font-size:14px; font-weight:600; margin:0;", "Register a system and its agent" }
-                        p { style: "color:#bfdbfe; font-size:13px; margin:0;", "Use Add System to register a machine in this fleet and connect it to environment + flake." }
-                        p { style: "color:#93c5fd; font-size:12px; margin:0;", "Agents are lightweight clients installed on systems so Crystal Forge can evaluate and apply deployments." }
-                    }
-                }
-            }
 
             if let Some(ref reminder) = *onboarding_agent_reminder.read() {
                 div {
@@ -561,6 +545,7 @@ pub fn SystemsListView() -> Element {
                         class: "relative z-40",
                         button {
                             "data-testid": "add-system-button",
+                            "data-coach-target": "system",
                             class: if from_setup() && !*show_add_form.read() {
                                 "btn btn-primary focus-ring animate-pulse"
                             } else {
@@ -570,23 +555,9 @@ pub fn SystemsListView() -> Element {
                                 let next = !*show_add_form.read();
                                 show_add_form.set(next);
                                 add_error.set(None);
-                                if next {
-                                    dismiss_add_target_callout.set(true);
-                                }
                             },
                             Icon { name: IconName::Plus, size: 14 }
                             if *show_add_form.read() { "Close" } else { "Add system" }
-                        }
-                        if from_setup() && !*show_add_form.read() && !dismiss_add_target_callout() {
-                            div {
-                                "data-testid": "setup-coach-systems-target-callout",
-                                style: "position:absolute; z-index:70; right:0; top:calc(100% + 10px); background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; width:220px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
-                                div {
-                                    style: "position:absolute; top:-6px; right:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
-                                }
-                                p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
-                                p { style: "margin:2px 0 0 0;", "Click Add system to register your first managed machine." }
-                            }
                         }
                     }
                 }
@@ -661,9 +632,8 @@ pub fn SystemsListView() -> Element {
                                     add_error.set(None);
                                     show_add_form.set(false);
                                     if first_system_in_setup {
-                                        let _ = set_setup_wizard_agent_acknowledged(true).await;
                                         onboarding_agent_reminder.set(Some(
-                                            "System record created. Next, ensure this host config enables the Crystal Forge agent module, apply/rebuild that config, and confirm the agent service is running before expecting heartbeats or deployment status.".to_string(),
+                                            "System record created. Next, install the Crystal Forge agent and wait for its first signed report. An administrator must then acknowledge the agent in the Setup track.".to_string(),
                                         ));
                                     }
                                 }
@@ -995,7 +965,7 @@ pub fn SystemsListView() -> Element {
                             },
                             on_open_detail: move |_| {
                                 preview_system.set(None);
-                                nav.push(Route::SystemDetailView { id: detail_for_open_detail.id.to_string(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new() });
+                                nav.push(Route::SystemDetailView { id: detail_for_open_detail.id.to_string(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new(), cve_target: String::new(), cve_mode: String::new() });
                             },
                             on_deploy: move |_| {
                                 #[cfg(target_arch = "wasm32")]

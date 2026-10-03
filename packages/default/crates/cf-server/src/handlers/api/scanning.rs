@@ -9,13 +9,19 @@ use tracing::error;
 use crate::api::models::{
     ScanSchedulePolicyResponse, ScanningActivityItemResponse, ScanningDeployedResponse,
     ScanningQueueItemResponse, ScanningScanDetailResponse, ScanningScanDiagnosticEventResponse,
-    ScanningStatsResponse, ScanningSystemsItemResponse, UpdateScanSchedulePolicyRequest,
+    ScanningScanRecordResponse, ScanningScanRecordsResponse, ScanningStatsResponse,
+    ScanningSystemsItemResponse, UpdateScanSchedulePolicyRequest, UpdateScanningArchiveRequest,
+    UpdateScanningArchiveResponse,
 };
+use crate::auth::extractors::RequireAdmin;
+use crate::handlers::api::auth_session::RequireCsrf;
 use crate::handlers::api::rbac::require_admin;
 use crate::queries::scanning::{
-    InvalidCursorError, ScanSchedulePolicyRow, get_scan_activity, get_scan_deployed,
-    get_scan_queue, get_scan_queue_for_system, get_scan_schedule_policy, get_scan_stats,
-    get_scan_systems, update_scan_schedule_policy,
+    InvalidCursorError, InvalidScanRecordCursor, ScanRecordCollection, ScanRecordDirection,
+    ScanRecordRequest, ScanRecordRevision, ScanRecordSort, ScanRecordStatus, ScanSchedulePolicyRow,
+    get_post_build_recovery_window, get_scan_activity, get_scan_deployed, get_scan_queue,
+    get_scan_queue_for_system, get_scan_records, get_scan_schedule_policy, get_scan_stats,
+    get_scan_systems, set_scan_archive_state, update_scan_schedule_policy_with_recovery,
 };
 
 #[derive(Debug, Deserialize, Default)]
@@ -26,6 +32,129 @@ pub struct ScanningListParams {
     /// from the previous response to retrieve the next page.
     #[serde(default)]
     pub after: Option<String>,
+}
+
+/// Controls exact scan lifecycle history returned to an administrator.
+#[derive(Debug, Deserialize)]
+pub struct ScanningRecordParams {
+    /// Selects `active`, `completed`, or `history` rows.
+    #[serde(default = "default_record_collection")]
+    pub collection: String,
+    /// Includes archive-marked terminal rows when true.
+    #[serde(default)]
+    pub include_archived: bool,
+    /// Restricts history to one active system's exact flake and configuration.
+    #[serde(default)]
+    pub system_id: Option<uuid::Uuid>,
+    /// Bounds the response size.
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+    /// Searches configuration, flake, commit, scan UUID, and derivation ID.
+    #[serde(default, alias = "search")]
+    pub q: Option<String>,
+    /// Selects `all`, `completed`, or `failed` terminal rows.
+    #[serde(default = "default_all")]
+    pub status: String,
+    /// Selects `all`, `deployed`, `recent`, or `superseded` revisions.
+    #[serde(default = "default_all")]
+    pub revision: String,
+    /// Requires the latest ready commit for each flake when true.
+    #[serde(default)]
+    pub latest_only: bool,
+    /// Selects `configuration`, `revision`, `status`, `severity`, or `timestamp`.
+    #[serde(default = "default_record_sort")]
+    pub sort: String,
+    /// Selects `asc` or `desc` primary ordering.
+    #[serde(default = "default_record_direction")]
+    pub direction: String,
+    /// Continues from the opaque cursor returned by the previous page.
+    #[serde(default)]
+    pub after: Option<String>,
+}
+
+fn default_record_collection() -> String {
+    "active".to_string()
+}
+
+fn default_all() -> String {
+    "all".to_string()
+}
+
+fn default_record_sort() -> String {
+    "timestamp".to_string()
+}
+
+fn default_record_direction() -> String {
+    "desc".to_string()
+}
+
+fn parse_scanning_record_request(
+    params: ScanningRecordParams,
+) -> Result<ScanRecordRequest, &'static str> {
+    let collection = match params.collection.as_str() {
+        "active" => ScanRecordCollection::Active,
+        "completed" => ScanRecordCollection::Completed,
+        "history" => ScanRecordCollection::History,
+        _ => return Err("collection must be active, completed, or history"),
+    };
+    if !(1..=500).contains(&params.limit) {
+        return Err("limit must be between 1 and 500");
+    }
+    let search = params.q.and_then(|value| {
+        let normalized = value
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        (!normalized.is_empty()).then_some(normalized)
+    });
+    if search
+        .as_ref()
+        .is_some_and(|value| value.chars().count() > 200)
+    {
+        return Err("q must be 200 characters or less after normalization");
+    }
+    let status = match params.status.as_str() {
+        "all" => ScanRecordStatus::All,
+        "completed" => ScanRecordStatus::Completed,
+        "failed" => ScanRecordStatus::Failed,
+        _ => return Err("status must be all, completed, or failed"),
+    };
+    let revision = match params.revision.as_str() {
+        "all" => ScanRecordRevision::All,
+        "deployed" => ScanRecordRevision::Deployed,
+        "recent" => ScanRecordRevision::Recent,
+        "superseded" => ScanRecordRevision::Superseded,
+        _ => return Err("revision must be all, deployed, recent, or superseded"),
+    };
+    let sort = match params.sort.as_str() {
+        "configuration" => ScanRecordSort::Configuration,
+        "revision" => ScanRecordSort::Revision,
+        "status" => ScanRecordSort::Status,
+        "severity" => ScanRecordSort::Severity,
+        "timestamp" => ScanRecordSort::Timestamp,
+        _ => {
+            return Err("sort must be configuration, revision, status, severity, or timestamp");
+        }
+    };
+    let direction = match params.direction.as_str() {
+        "asc" => ScanRecordDirection::Asc,
+        "desc" => ScanRecordDirection::Desc,
+        _ => return Err("direction must be asc or desc"),
+    };
+    Ok(ScanRecordRequest {
+        collection,
+        include_archived: params.include_archived,
+        system_id: params.system_id,
+        limit: params.limit as u16,
+        search,
+        status,
+        revision,
+        latest_only: params.latest_only,
+        sort,
+        direction,
+        after: params.after,
+    })
 }
 
 fn default_limit() -> i64 {
@@ -46,6 +175,8 @@ pub async fn get_scanning_stats(
             Json(ScanningStatsResponse {
                 scanning: row.scanning,
                 queued: row.queued,
+                awaiting_build: row.awaiting_build,
+                awaiting_closure: row.awaiting_closure,
                 stale: row.stale,
                 never_scanned: row.never_scanned,
                 failed: row.failed,
@@ -60,6 +191,106 @@ pub async fn get_scanning_stats(
     }
 }
 
+/// Returns exact active, completed, or complete scan history for administrators.
+pub async fn get_scanning_scan_records(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Query(params): Query<ScanningRecordParams>,
+) -> impl IntoResponse {
+    if require_admin(&pool, &headers).await.is_none() {
+        return forbidden_admin();
+    }
+    let request = match parse_scanning_record_request(params) {
+        Ok(request) => request,
+        Err(message) => return validation_error(message.into()).into_response(),
+    };
+    match get_scan_records(&pool, &request).await {
+        Ok(result) => (
+            StatusCode::OK,
+            Json(ScanningScanRecordsResponse {
+                items: result
+                    .rows
+                    .into_iter()
+                    .map(|row| ScanningScanRecordResponse {
+                        scan_id: row.scan_id,
+                        derivation_id: row.derivation_id,
+                        hostname: row.hostname,
+                        flake_name: row.flake_name,
+                        commit_hash: row.commit_hash,
+                        is_current: row.is_current,
+                        is_latest_per_flake: row.is_latest_per_flake,
+                        status: row.status,
+                        source_trigger: row.source_trigger,
+                        created_at: row.created_at,
+                        scheduled_at: row.scheduled_at,
+                        started_at: row.started_at,
+                        completed_at: row.completed_at,
+                        scanner_name: row.scanner_name,
+                        scanner_version: row.scanner_version,
+                        executor: row.executor,
+                        failure: row.failure,
+                        wait_reason: row.wait_reason,
+                        total_packages: row.total_packages,
+                        total_vulnerabilities: row.total_vulnerabilities,
+                        critical_count: row.critical_count,
+                        high_count: row.high_count,
+                        medium_count: row.medium_count,
+                        low_count: row.low_count,
+                        scan_duration_ms: row.scan_duration_ms,
+                        attempts: row.attempts,
+                        archived_at: row.archived_at,
+                        cancellable: row.cancellable,
+                    })
+                    .collect(),
+                total: result.total,
+                hidden_archived: result.hidden_archived,
+                has_more: result.has_more,
+                next_cursor: result.next_cursor,
+            }),
+        )
+            .into_response(),
+        Err(error) if error.downcast_ref::<InvalidScanRecordCursor>().is_some() => {
+            validation_error("Invalid or request-incompatible pagination cursor.".into())
+                .into_response()
+        }
+        Err(error) => {
+            error!("scan record query failed: {error:#}");
+            internal_error("Failed to load scan records")
+        }
+    }
+}
+
+/// Applies bounded idempotent archive or restore state to terminal scans.
+pub async fn update_scanning_archive(
+    State(pool): State<PgPool>,
+    RequireAdmin(user): RequireAdmin,
+    _csrf: RequireCsrf,
+    Json(payload): Json<UpdateScanningArchiveRequest>,
+) -> impl IntoResponse {
+    let mut scan_ids = payload.scan_ids;
+    scan_ids.sort_unstable();
+    scan_ids.dedup();
+    if scan_ids.is_empty() || scan_ids.len() > 100 {
+        return validation_error("scan_ids must contain between 1 and 100 unique values".into())
+            .into_response();
+    }
+    match set_scan_archive_state(&pool, &scan_ids, payload.archived, user.user_id).await {
+        Ok(changed) => (
+            StatusCode::OK,
+            Json(UpdateScanningArchiveResponse {
+                requested: scan_ids.len(),
+                changed,
+                archived: payload.archived,
+            }),
+        )
+            .into_response(),
+        Err(error) => {
+            error!("scan archive update failed: {error:#}");
+            internal_error("Failed to update scan archive state")
+        }
+    }
+}
+
 pub async fn get_scanning_queue(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -69,7 +300,7 @@ pub async fn get_scanning_queue(
         return forbidden_admin();
     }
 
-    match get_scan_queue(&pool, params.limit.clamp(1, 500)).await {
+    match get_scan_queue(&pool, params.limit.clamp(1, 10_000)).await {
         Ok(rows) => (
             StatusCode::OK,
             Json(
@@ -158,7 +389,7 @@ pub async fn get_scanning_systems(
         return forbidden_admin();
     }
 
-    match get_scan_systems(&pool, params.limit.clamp(1, 500)).await {
+    match get_scan_systems(&pool, params.limit.clamp(1, 10_000)).await {
         Ok(rows) => (
             StatusCode::OK,
             Json(
@@ -166,6 +397,7 @@ pub async fn get_scanning_systems(
                     .map(|r| ScanningSystemsItemResponse {
                         system_id: r.system_id,
                         hostname: r.hostname,
+                        flake_name: r.flake_name,
                         environment: r.environment,
                         total_configs: r.total_configs,
                         scanned: r.scanned,
@@ -174,6 +406,10 @@ pub async fn get_scanning_systems(
                         unscanned: r.unscanned,
                         current_crit: r.current_crit,
                         current_high: r.current_high,
+                        current_medium: r.current_medium,
+                        current_low: r.current_low,
+                        current_scan_id: r.current_scan_id,
+                        historical_evidence: r.historical_evidence,
                         current_derivation_id: r.current_derivation_id,
                     })
                     .collect::<Vec<_>>(),
@@ -197,7 +433,7 @@ pub async fn get_scanning_system_scans(
         return forbidden_admin();
     }
 
-    match get_scan_queue_for_system(&pool, system_id, params.limit.clamp(1, 500)).await {
+    match get_scan_queue_for_system(&pool, system_id, params.limit.clamp(1, 10_000)).await {
         Ok(rows) => (
             StatusCode::OK,
             Json(
@@ -260,10 +496,33 @@ pub async fn get_scanning_scan_detail(
             StatusCode::OK,
             Json(ScanningScanDetailResponse {
                 scan_id,
+                derivation_id: detail.derivation_id,
+                hostname: detail.hostname,
+                flake_name: detail.flake_name,
+                commit_hash: detail.commit_hash,
                 status: detail.status,
                 scanner_name: detail.scanner_name,
                 scanner_version: detail.scanner_version,
                 source_trigger: detail.source_trigger,
+                created_at: detail.created_at,
+                scheduled_at: detail.scheduled_at,
+                started_at: detail.started_at,
+                completed_at: detail.completed_at,
+                scan_duration_ms: detail.scan_duration_ms,
+                attempts: detail.attempts,
+                total_packages: detail.total_packages,
+                total_vulnerabilities: detail.total_vulnerabilities,
+                critical_count: detail.critical_count,
+                high_count: detail.high_count,
+                medium_count: detail.medium_count,
+                low_count: detail.low_count,
+                failure: detail.failure,
+                wait_reason: detail.wait_reason,
+                build_job_id: detail.build_job_id,
+                build_status: detail.build_status,
+                executor: detail.executor,
+                archived_at: detail.archived_at,
+                cancellable: false,
                 events: detail
                     .events
                     .into_iter()
@@ -303,8 +562,11 @@ pub async fn get_scanning_schedule(
         return forbidden_admin();
     }
 
-    match get_scan_schedule_policy(&pool).await {
-        Ok(p) => (
+    match (
+        get_scan_schedule_policy(&pool).await,
+        get_post_build_recovery_window(&pool).await,
+    ) {
+        (Ok(p), Ok(post_build_recovery_window)) => (
             StatusCode::OK,
             Json(ScanSchedulePolicyResponse {
                 on_build: p.on_build,
@@ -313,11 +575,12 @@ pub async fn get_scanning_schedule(
                 archived_interval: p.archived_interval,
                 archived_enabled: p.archived_enabled,
                 rebuild_to_scan: p.rebuild_to_scan,
+                post_build_recovery_window,
                 updated_at: p.updated_at,
             }),
         )
             .into_response(),
-        Err(e) => {
+        (Err(e), _) | (_, Err(e)) => {
             error!("scanning schedule get failed: {e:#}");
             internal_error("Failed to load scan schedule")
         }
@@ -365,6 +628,26 @@ fn validation_error(msg: String) -> (StatusCode, Json<serde_json::Value>) {
     )
 }
 
+fn valid_recovery_window(window: &str) -> bool {
+    window.len() <= 16
+        && window.len() >= 2
+        && matches!(window.as_bytes().last(), Some(b'h' | b'd'))
+        && window.as_bytes()[..window.len() - 1]
+            .iter()
+            .all(u8::is_ascii_digit)
+        && window[..window.len() - 1]
+            .parse::<u64>()
+            .is_ok_and(|count| {
+                count > 0
+                    && count
+                        <= if window.ends_with('d') {
+                            36_500
+                        } else {
+                            876_000
+                        }
+            })
+}
+
 pub async fn put_scanning_schedule(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -384,6 +667,14 @@ pub async fn put_scanning_schedule(
     if let Err(e) = validate_scan_interval(&payload.archived_interval, "archived_interval") {
         return e.into_response();
     }
+    if let Some(window) = &payload.post_build_recovery_window {
+        if !valid_recovery_window(window) {
+            return validation_error(
+                "Invalid post_build_recovery_window: expected a positive number of hours or days (at most 100 years)".to_string(),
+            )
+            .into_response();
+        }
+    }
 
     let row = ScanSchedulePolicyRow {
         on_build: payload.on_build,
@@ -395,9 +686,18 @@ pub async fn put_scanning_schedule(
         updated_at: chrono::Utc::now(),
     };
 
-    match update_scan_schedule_policy(&pool, &row).await {
-        Ok(_) => match get_scan_schedule_policy(&pool).await {
-            Ok(p) => (
+    match update_scan_schedule_policy_with_recovery(
+        &pool,
+        &row,
+        payload.post_build_recovery_window.as_deref(),
+    )
+    .await
+    {
+        Ok(_) => match (
+            get_scan_schedule_policy(&pool).await,
+            get_post_build_recovery_window(&pool).await,
+        ) {
+            (Ok(p), Ok(post_build_recovery_window)) => (
                 StatusCode::OK,
                 Json(ScanSchedulePolicyResponse {
                     on_build: p.on_build,
@@ -406,11 +706,12 @@ pub async fn put_scanning_schedule(
                     archived_interval: p.archived_interval,
                     archived_enabled: p.archived_enabled,
                     rebuild_to_scan: p.rebuild_to_scan,
+                    post_build_recovery_window,
                     updated_at: p.updated_at,
                 }),
             )
                 .into_response(),
-            Err(e) => {
+            (Err(e), _) | (_, Err(e)) => {
                 error!("scanning schedule reload failed after update: {e:#}");
                 internal_error("Failed to reload scan schedule")
             }
@@ -550,6 +851,7 @@ mod tests {
             archived_interval: "168h".to_string(),
             archived_enabled: true,
             rebuild_to_scan: false,
+            post_build_recovery_window: None,
         };
         let response = put_scanning_schedule(State(lazy_pool()), HeaderMap::new(), Json(payload))
             .await
@@ -558,7 +860,103 @@ mod tests {
     }
 
     #[test]
+    fn recovery_window_rejects_nonpositive_and_invalid_units() {
+        for value in [
+            "0h",
+            "00d",
+            "never",
+            "1m",
+            "-1d",
+            "1 d",
+            "1234567890123456h",
+            "876001h",
+            "36501d",
+            "123456789012345d",
+        ] {
+            assert!(!valid_recovery_window(value), "{value} must be rejected");
+        }
+        for value in ["1h", "7d", "0007h", "876000h", "36500d"] {
+            assert!(valid_recovery_window(value), "{value} must be accepted");
+        }
+    }
+
+    #[test]
     fn default_limit_is_fifty() {
         assert_eq!(default_limit(), 50);
+    }
+
+    fn record_params() -> ScanningRecordParams {
+        ScanningRecordParams {
+            collection: "completed".to_string(),
+            include_archived: false,
+            system_id: None,
+            limit: 50,
+            q: None,
+            status: "all".to_string(),
+            revision: "all".to_string(),
+            latest_only: false,
+            sort: "timestamp".to_string(),
+            direction: "desc".to_string(),
+            after: None,
+        }
+    }
+
+    #[test]
+    fn record_params_normalize_search_and_validate_bounds() {
+        let request = parse_scanning_record_request(ScanningRecordParams {
+            q: Some("  Mixed   CASE  ".to_string()),
+            ..record_params()
+        })
+        .expect("valid Completed parameters should parse");
+        assert_eq!(request.search.as_deref(), Some("mixed case"));
+        assert_eq!(request.limit, 50);
+
+        assert_eq!(
+            parse_scanning_record_request(ScanningRecordParams {
+                limit: 501,
+                ..record_params()
+            })
+            .expect_err("oversized pages must fail"),
+            "limit must be between 1 and 500"
+        );
+    }
+
+    #[test]
+    fn record_params_reject_unvalidated_sql_controls() {
+        for (field, params) in [
+            (
+                "status",
+                ScanningRecordParams {
+                    status: "failed DESC".to_string(),
+                    ..record_params()
+                },
+            ),
+            (
+                "revision",
+                ScanningRecordParams {
+                    revision: "current".to_string(),
+                    ..record_params()
+                },
+            ),
+            (
+                "sort",
+                ScanningRecordParams {
+                    sort: "completed_at; DROP TABLE cve_scans".to_string(),
+                    ..record_params()
+                },
+            ),
+            (
+                "direction",
+                ScanningRecordParams {
+                    direction: "sideways".to_string(),
+                    ..record_params()
+                },
+            ),
+        ] {
+            assert!(
+                parse_scanning_record_request(params).is_err(),
+                "invalid {field} must fail before query construction"
+            );
+        }
     }
 }

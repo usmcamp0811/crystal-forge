@@ -278,14 +278,28 @@ function TweaksPanel({ open, onClose, theme, onTheme, density, onDensity, defaul
         { value: "rail", label: "Rail" }]
         } />
         {coach &&
+        <>
+        <Row label="Coach role" value={coach.role} onChange={coach.setRole} opts={[
+        { value: "admin", label: "Admin" },
+        { value: "operator", label: "Operator" },
+        { value: "viewer", label: "Viewer" }]
+        } />
         <div className="tweaks-row">
-          <label>Setup Coach</label>
+          <label>Coach demo state</label>
+          <select className="input focus-ring" style={{ fontSize: 12 }} value="" onChange={(e) => { if (e.target.value) coach.applyDemo(e.target.value); }}>
+            <option value="">Choose a reference state…</option>
+            {COACH_DEMO_STATES.map((d) => <option key={d.id} value={d.id}>{d.label}</option>)}
+          </select>
+        </div>
+        <div className="tweaks-row">
+          <label>Mock server</label>
           <div className="tweaks-opts" style={{ flexWrap: "wrap" }}>
-            <button onClick={() => coach.relaunch()}>Relaunch</button>
-            <button onClick={() => coach.reset()}>Reset progress</button>
-            <button onClick={() => coach.fill()}>Mark all done</button>
+            <button onClick={() => coach.relaunch()}>Relaunch coach</button>
+            <button onClick={() => coach.simulateAgentReport()} title="Stand-in for the agent's first signed report arriving">Agent first report</button>
+            <button onClick={() => coach.restartWalkthroughs()}>Restart walkthroughs</button>
           </div>
         </div>
+        </>
         }
       </div>
     </div>);
@@ -310,6 +324,7 @@ function App() {
   const [sysTag, setSysTag] = React.useState("all");
   const [editTarget, setEditTarget] = React.useState(null);
   const [complianceBundleId, setComplianceBundleId] = React.useState(null);
+  const [poamFocus, setPoamFocus] = React.useState(null);
   const [pendingDeploy, setPendingDeploy] = React.useState(null);
   const [flakeFocus, setFlakeFocus] = React.useState(null);
   // Where to return when the flake drawer closes (set when opened from elsewhere).
@@ -333,6 +348,8 @@ function App() {
   const [topView, setTopView] = React.useState("dashboard"); // dashboard | systems | builds | evals | flakes | environments | caches | cves
   const coach = useCoach();
   React.useEffect(() => { window.__cfCoach = coach; }, [coach]);
+  // Remount key for the page body — the coach navigates from a clean page state per stop.
+  const [pageNonce, setPageNonce] = React.useState(0);
   const [classif, setClassif] = React.useState(() => {
     try { const r = localStorage.getItem("cf.classification"); if (r) return JSON.parse(r); } catch {}
     return { enabled: false, level: "UNCLASSIFIED", text: "" };
@@ -356,6 +373,25 @@ function App() {
   }, []);
 
   React.useEffect(() => {document.documentElement.setAttribute("data-theme", theme);}, [theme]);
+
+  // Coach navigation: views and read-only drawers only. Never submits anything.
+  React.useEffect(() => {
+    window.__cfSetTheme = (v) => { setTheme(v); persist("theme", v); };
+    window.cfCoachGo = (g) => {
+      if (!g) return;
+      window.dispatchEvent(new CustomEvent("cf-poam-open", { detail: null }));
+      setPageNonce((n) => n + 1);
+      setDetailSystem(null);
+      setTopView(g.view);
+      if (g.view === "cves" && g.cve) setCveFocus({ id: g.cve });
+      if (g.view === "systems" && g.sysId) { const s = SYSTEMS.find((x) => x.id === g.sysId); if (s) openDetail(s, g.tab || "overview"); }
+      if (g.view === "compliance") { if (g.finding) setComplianceFinding(g.finding); else if (g.bundleId) { setComplianceBundleId(g.bundleId); setComplianceBundleView(g.bundleView || null); } }
+      if (g.view === "poams" && g.focus) setPoamFocus(g.focus);
+      if (g.poamId) setTimeout(() => window.openPoamDetail?.(g.poamId), 160);
+    };
+    const m = /coach=([\w-]+)/.exec(location.hash || "");
+    if (m) setTimeout(() => window.__cfCoach?.applyDemo(m[1]), 700);
+  }, []);
 
   // Edit-mode wire-up
   React.useEffect(() => {
@@ -389,8 +425,9 @@ function App() {
           theme={theme}
           onTheme={() => sw.theme(theme === "dark" ? "light" : "dark")}
           onTweaks={() => setTweaksOpen((o) => !o)}
+          guide={<CoachGuideButton coach={coach} />}
           onNavigate={(v, focus) => { setTopView(v); setDetailSystem(null); setPolicyBackTo(null);
-            if (focus) { if (v === "builds") setBuildFocus(focus); else if (v === "evals") setEvalFocus(focus); else if (v === "cves") setCveFocus(focus); else if (v === "policies") setPolicyFocus(focus.id); } }}
+            if (focus) { if (v === "builds") setBuildFocus(focus); else if (v === "evals") setEvalFocus(focus); else if (v === "cves") setCveFocus(focus); else if (v === "policies") setPolicyFocus(focus.id); else if (v === "poams") setPoamFocus(focus); } }}
           onSearchResult={(r) => {
             if (r.type === "system") { setTopView("systems"); openDetail(r.data); }
             else if (r.type === "flake") { setFlakeFocus({ flake: r.data.name }); setDetailSystem(null); setTopView("flakes"); }
@@ -407,7 +444,8 @@ function App() {
           topView === "caches" ? { current: "Caches" } :
           topView === "builders" ? { current: "Builders" } :
           topView === "policies" ? { current: "Policies" } :
-          topView === "compliance" ? { current: "Compliance" } :
+          topView === "compliance" ? { current: "Bundles" } :
+          topView === "poams" ? { current: "POA&M" } :
           topView === "cves" ? { current: "CVEs" } :
           topView === "dashboard" ? { current: "Dashboard" } :
           topView === "admin" ? { current: "Server Management" } :
@@ -419,14 +457,16 @@ function App() {
         
         <div className="content" data-screen-label={detailSystem ? `SystemDetail-${detailSystem.hostname}` : topView}>
           <CoachCallout coach={coach} topView={topView} onNavigate={goTo} />
+          <React.Fragment key={pageNonce}>
           {topView === "builds" && <BuildsView focus={buildFocus} onClearFocus={() => setBuildFocus(null)} />}
           {topView === "evals" && <EvalsView focus={evalFocus} onClearFocus={() => setEvalFocus(null)} onOpenFinding={(f) => { setDetailSystem(null); setComplianceFinding(f); setComplianceReturn({ view:"evals", focus:{ sha: f.evalSha, restoreState: f.restoreState } }); setTopView("compliance"); }} onOpenSystem={(s, sha) => { setTopView("systems"); openDetail(s, sha ? "config" : "overview", sha); }} onOpenPolicy={(id) => { setPolicyFocus(id); setTopView("policies"); }} />}
           {topView === "flakes" && <FlakesView onNavigate={(v) => setTopView(v)} defaultView={defaultView} focus={flakeFocus} onClearFocus={() => setFlakeFocus(null)} onTrayClose={() => { if (flakeReturn) { setEnvFocus(flakeReturn.env); setTopView(flakeReturn.view); setFlakeReturn(null); } }} onOpenEval={(c) => { setEvalFocus(c); setTopView("evals"); }} onOpenBuild={(c) => { setBuildFocus(c); setTopView("builds"); }} onOpenSystems={(flakeName) => { setSysFlake(flakeName); setTopView("systems"); }} onOpenSystem={(sys, rev) => { setTopView("systems"); openDetail(sys, "config", rev); }} />}
-          {topView === "environments" && <EnvironmentsView focusEnv={envFocus} onClearFocusEnv={() => setEnvFocus(null)} onOpenFlake={(name, envName) => { setFlakeFocus({ flake: name }); setFlakeReturn(envName ? { view: "environments", env: envName } : null); setDetailSystem(null); setTopView("flakes"); }} defaultView={defaultView} onOpenCache={(c) => { setCacheFocus(c); setTopView("caches"); }} onOpenSystem={(s) => { setTopView("systems"); openDetail(s, s._tab); }} onOpenBundle={(id) => { setComplianceBundleId(id); setTopView("compliance"); }} />}
+          {topView === "environments" && <EnvironmentsView focusEnv={envFocus} onClearFocusEnv={() => setEnvFocus(null)} onOpenFlake={(name, envName) => { setFlakeFocus({ flake: name }); setFlakeReturn(envName ? { view: "environments", env: envName } : null); setDetailSystem(null); setTopView("flakes"); }} defaultView={defaultView} onOpenCache={(c) => { setCacheFocus(c); setTopView("caches"); }} onOpenSystem={(s) => { setTopView("systems"); openDetail(s, s._tab); }} onOpenBundle={(id) => { setComplianceBundleId(id); setTopView("compliance"); }}  onNavigate={(v, focus) => { setTopView(v); setDetailSystem(null); if (focus) setPoamFocus(focus); }}/>}
           {topView === "caches" && <CachesView focus={cacheFocus} onClearFocus={() => setCacheFocus(null)} onOpenSystem={(s) => { setTopView("systems"); openDetail(s); }} />}
           {topView === "builders" && <BuildersView defaultView={defaultView} />}
           {topView === "policies" && <PoliciesView onOpenSystem={(s)=>{ setTopView("systems"); openDetail(s); }} focus={policyFocus} onClearFocus={() => setPolicyFocus(null)} backTo={policyBackTo} onBack={() => { const bt = policyBackTo; setPolicyBackTo(null); if (bt) { setComplianceBundleId(bt.bundleId); setComplianceBundleView("coverage"); setTopView("compliance"); } }} onClearBack={() => setPolicyBackTo(null)} />}
-          {topView === "compliance" && <ComplianceView selectedBundleId={complianceBundleId} onClearBundle={() => setComplianceBundleId(null)} selectedBundleView={complianceBundleView} onClearBundleView={() => setComplianceBundleView(null)} selectedFinding={complianceFinding} onClearFinding={() => setComplianceFinding(null)} onReturn={() => { if (complianceReturn) { setTopView(complianceReturn.view); if (complianceReturn.view === "evals") setEvalFocus(complianceReturn.focus); setComplianceReturn(null); } }} onOpenSystem={(s)=>{ setTopView("systems"); openDetail(s); }} onOpenPolicy={(id, bundleId) => { setPolicyFocus(id); setPolicyBackTo({ bundleId, label:"Back to compliance" }); setTopView("policies"); }}/>}
+          {topView === "compliance" && <ComplianceView selectedBundleId={complianceBundleId} onClearBundle={() => setComplianceBundleId(null)} selectedBundleView={complianceBundleView} onClearBundleView={() => setComplianceBundleView(null)} selectedFinding={complianceFinding} onClearFinding={() => setComplianceFinding(null)} onReturn={() => { if (complianceReturn) { setTopView(complianceReturn.view); if (complianceReturn.view === "evals") setEvalFocus(complianceReturn.focus); setComplianceReturn(null); } }} onOpenSystem={(s)=>{ setTopView("systems"); openDetail(s); }} onOpenPolicy={(id, bundleId) => { setPolicyFocus(id); setPolicyBackTo({ bundleId, label:"Back to compliance" }); setTopView("policies"); }} onNavigate={(v, focus) => { setTopView(v); setDetailSystem(null); if (focus) setPoamFocus(focus); }}/>}
+          {topView === "poams" && <PoamsView focus={poamFocus} onClearFocus={() => setPoamFocus(null)} onOpenSystem={(s) => { setTopView("systems"); openDetail(s, "compliance"); }}/>}
           {topView === "cves" && <CvesView focus={cveFocus} onClearFocus={() => setCveFocus(null)} onOpenSystem={(s)=>{ setTopView("systems"); openDetail(s); }}/>}
           {topView === "dashboard" && <DashboardView onNavigate={(r, focus) => { setTopView(r); setDetailSystem(null); if (focus && r === "evals") setEvalFocus(focus); if (focus && r === "builds") setBuildFocus(focus); }}/>}
           {topView === "admin" && <AdminView onNavigate={(r) => { setTopView(r); setDetailSystem(null); }} coach={coach} classif={classif} onClassif={setClassif}/>}
@@ -469,6 +509,7 @@ function App() {
 
 
           }
+          </React.Fragment>
         </div>
         {editTarget &&
         <EditSystemModal sys={editTarget} onClose={() => setEditTarget(null)} />

@@ -9,7 +9,9 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::api::client::{ApiClientError, base_url, encode_uri_component, send_request_with_csrf};
-use crate::api::models::{CveAffectedSystemDetail, CveDetail};
+use crate::api::models::{
+    CveAffectedSystemDetail, CveDetail, FleetCveInventorySection, SystemCveInventoryAuthority,
+};
 pub use crate::api::models::{FindingObservationReference, FindingObservationSource};
 
 const PAGE_SIZE: i64 = 100;
@@ -238,6 +240,15 @@ pub struct CveAffectedEnvironment {
     /// Counts systems visible only through legacy inventory.
     #[serde(default)]
     pub legacy_affected_system_count: i64,
+    /// Counts exact current deployment findings when supplied by the server.
+    #[serde(default)]
+    pub current_affected_system_count: Option<i64>,
+    /// Counts exact active scheduled deployment targets when supplied.
+    #[serde(default)]
+    pub scheduled_deployment_target_count: Option<i64>,
+    /// Counts retained historical inventory systems when supplied.
+    #[serde(default)]
+    pub historical_inventory_system_count: Option<i64>,
     /// Lists the bounded server-resolved host details.
     #[serde(default)]
     pub systems: Vec<CveAffectedSystemDetail>,
@@ -266,6 +277,15 @@ pub struct FleetCveDetail {
     /// Counts visible systems backed only by legacy inventory.
     #[serde(default)]
     pub legacy_affected_system_count: i64,
+    /// Counts exact current deployment findings when supplied by the server.
+    #[serde(default)]
+    pub current_affected_system_count: Option<i64>,
+    /// Counts exact active scheduled deployment targets when supplied.
+    #[serde(default)]
+    pub scheduled_deployment_target_count: Option<i64>,
+    /// Counts retained historical inventory systems when supplied.
+    #[serde(default)]
+    pub historical_inventory_system_count: Option<i64>,
     /// Counts visible active systems without a usable completed scan.
     #[serde(default)]
     pub no_scan_system_count: i64,
@@ -280,31 +300,258 @@ pub struct FleetCveDetail {
     pub environments: Vec<CveAffectedEnvironment>,
 }
 
+/// Identifies one exact fleet CVE/package pair without exposing host identities.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CveBatchPairIdentity {
+    /// Gives the canonical CVE ID.
+    pub cve_id: String,
+    /// Gives the canonical package name.
+    pub canonical_package_name: String,
+}
+
+/// Requests metadata for the entire exact selection, including unloaded rows.
+#[derive(Debug, Clone, Serialize)]
+pub struct FleetCveBatchDetailRequest {
+    /// Lists the selected exact pairs.
+    pub pairs: Vec<CveBatchPairIdentity>,
+}
+
+/// Describes an existing decision on an applicable pair and environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CveBatchExistingState {
+    /// Risk is already accepted.
+    Accepted,
+    /// Remediation is already scheduled and cannot be overwritten in bulk.
+    Scheduled,
+}
+
+/// Describes the current exact applicability of one environment.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CveBatchEnvironmentSummary {
+    /// Identifies the environment.
+    pub environment_id: Uuid,
+    /// Gives the environment's display name.
+    pub environment_name: String,
+    /// Counts current exact affected hosts, without disclosing their IDs.
+    pub exact_affected_system_count: i64,
+    /// Describes an existing decision, if present.
+    pub existing_state: Option<CveBatchExistingState>,
+    /// Binds the server-derived subject set, including an empty set.
+    pub evidence_token: String,
+}
+
+/// Identifies whether an exact selected pair is currently actionable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CveBatchDetailState {
+    /// Has current exact evidence for triage.
+    Actionable,
+    /// Cannot be triaged from current exact evidence.
+    Unavailable,
+}
+
+/// Explains why a selected pair cannot be mutated without revealing hidden evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CveBatchUnavailableReason {
+    /// Has only scheduled-target or historical inventory.
+    InventoryOnly,
+    /// Has no visible current inventory, or evidence is inaccessible.
+    StaleOrInaccessible,
+}
+
+/// Contains authoritative display metadata for one requested exact pair.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FleetCveBatchDetailItem {
+    /// Gives the canonical CVE ID.
+    pub cve_id: String,
+    /// Gives the canonical package name.
+    pub canonical_package_name: String,
+    /// Indicates whether this pair can be included in an atomic batch write.
+    pub state: CveBatchDetailState,
+    /// Gives the reason for an unavailable pair; absent for actionable pairs.
+    pub unavailable_reason: Option<CveBatchUnavailableReason>,
+    /// Gives advisory severity.
+    pub severity: String,
+    /// Gives the optional CVSS score.
+    pub cvss_v3_score: Option<f32>,
+    /// Lists all zero-subject tokens for actionable pairs; unavailable pairs have none.
+    pub environments: Vec<CveBatchEnvironmentSummary>,
+}
+
+/// Contains hydrated detail for the selected exact pairs.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FleetCveBatchDetailResponse {
+    /// Lists every requested pair, including those without actionable evidence.
+    pub items: Vec<FleetCveBatchDetailItem>,
+}
+
+/// Selects the boundary of newly created remediation plans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum CveBatchScheduleGrouping {
+    /// Creates one plan for all writable pairs.
+    One,
+    /// Creates one plan per package.
+    PerPackage,
+    /// Creates one plan per environment.
+    PerEnvironment,
+}
+
+/// Applies one shared decision through the atomic batch endpoint.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum CveBatchDisposition {
+    /// Accepts risk with a shared rationale and optional review date.
+    AcceptRisk {
+        /// Gives the rationale for each written decision.
+        justification: String,
+        /// Gives the optional review date.
+        review_date: Option<NaiveDate>,
+    },
+    /// Schedules remediation using server-generated plans when plan is empty.
+    SchedulePatch {
+        /// Chooses the plan grouping.
+        grouping: CveBatchScheduleGrouping,
+        /// Selects a server-validated typed assignee.
+        assignee: PoamAssigneeRequest,
+        /// Gives the completion target date.
+        target_date: NaiveDate,
+        /// Gives optional plan text.
+        plan: String,
+        /// Requests standard patch milestones.
+        default_milestones: bool,
+    },
+}
+
+/// Binds one pair/environment combination to server-issued exact evidence.
+#[derive(Debug, Clone, Serialize)]
+pub struct CveBatchEvidenceToken {
+    /// Identifies the exact pair.
+    pub pair: CveBatchPairIdentity,
+    /// Identifies the selected environment.
+    pub environment_id: Uuid,
+    /// Contains the opaque server-issued token.
+    pub evidence_token: String,
+}
+
+/// Requests one atomic batch mutation across the complete selected scope.
+#[derive(Debug, Clone, Serialize)]
+pub struct FleetCveBatchTriageRequest {
+    /// Lists all exact selected pairs.
+    pub pairs: Vec<CveBatchPairIdentity>,
+    /// Lists selected environments.
+    pub environment_ids: Vec<Uuid>,
+    /// Covers every selected pair/environment combination, even empty ones.
+    pub expected_tokens: Vec<CveBatchEvidenceToken>,
+    /// Leaves existing accepted decisions unchanged when true.
+    pub skip_existing: bool,
+    /// Selects the shared action.
+    pub disposition: CveBatchDisposition,
+}
+
+/// Reports one exact pair actually changed by the transaction.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CveBatchAppliedPair {
+    /// Identifies the changed pair.
+    pub pair: CveBatchPairIdentity,
+    /// Lists environments changed for the pair.
+    pub environment_ids: Vec<Uuid>,
+}
+
+/// Reports the committed atomic batch result.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FleetCveBatchTriageResponse {
+    /// Lists changed pairs and environments.
+    pub applied: Vec<CveBatchAppliedPair>,
+    /// Lists pairs with no writable selected environment.
+    pub skipped: Vec<CveBatchPairIdentity>,
+    /// Lists newly created POA&M identities.
+    pub poam_ids: Vec<Uuid>,
+}
+
 impl FleetCveDetail {
     // COMPATIBILITY: Servers from before inventory-authority rollout emitted
     // exact-only rows without the additive authority counters.
-    fn normalize_inventory_counts(&mut self) {
-        if self.exact_affected_system_count == 0
-            && self.legacy_affected_system_count == 0
-            && self.affected_system_count > 0
-        {
-            self.exact_affected_system_count = self.affected_system_count;
+    pub(crate) fn normalize_inventory_counts(&mut self) {
+        let has_relation_counts = self.current_affected_system_count.is_some()
+            || self.scheduled_deployment_target_count.is_some()
+            || self.historical_inventory_system_count.is_some();
+        if has_relation_counts {
+            self.current_affected_system_count.get_or_insert_default();
+            self.scheduled_deployment_target_count
+                .get_or_insert_default();
+            self.historical_inventory_system_count
+                .get_or_insert_default();
+        } else {
+            self.current_affected_system_count = Some(self.exact_affected_system_count);
+            self.scheduled_deployment_target_count = Some(0);
+            self.historical_inventory_system_count = Some(self.legacy_affected_system_count);
+            normalize_legacy_inventory_sections(&mut self.unassigned_systems);
         }
         for environment in &mut self.environments {
-            if environment.exact_affected_system_count == 0
-                && environment.legacy_affected_system_count == 0
-                && environment.affected_system_count > 0
-            {
-                environment.exact_affected_system_count = environment.affected_system_count;
+            let has_environment_relation_counts =
+                environment.current_affected_system_count.is_some()
+                    || environment.scheduled_deployment_target_count.is_some()
+                    || environment.historical_inventory_system_count.is_some();
+            if has_environment_relation_counts {
+                environment
+                    .current_affected_system_count
+                    .get_or_insert_default();
+                environment
+                    .scheduled_deployment_target_count
+                    .get_or_insert_default();
+                environment
+                    .historical_inventory_system_count
+                    .get_or_insert_default();
+            } else {
+                environment.current_affected_system_count =
+                    Some(environment.exact_affected_system_count);
+                environment.scheduled_deployment_target_count = Some(0);
+                environment.historical_inventory_system_count =
+                    Some(environment.legacy_affected_system_count);
+                normalize_legacy_inventory_sections(&mut environment.systems);
             }
         }
-        if self.exact_mutation_target_count == 0 {
+        if self.exact_mutation_target_count == 0 && !has_relation_counts {
             self.exact_mutation_target_count = self
                 .environments
                 .iter()
                 .map(|environment| environment.exact_affected_system_count)
                 .sum();
         }
+    }
+
+    /// Returns normalized current, scheduled-target, and historical counts.
+    pub(crate) fn inventory_counts(&self) -> (i64, i64, i64) {
+        (
+            self.current_affected_system_count.unwrap_or_default(),
+            self.scheduled_deployment_target_count.unwrap_or_default(),
+            self.historical_inventory_system_count.unwrap_or_default(),
+        )
+    }
+}
+
+fn normalize_legacy_inventory_sections(systems: &mut [CveAffectedSystemDetail]) {
+    for system in systems {
+        system.inventory_section = match system.inventory_authority {
+            SystemCveInventoryAuthority::Legacy => FleetCveInventorySection::Historical,
+            SystemCveInventoryAuthority::Exact
+            | SystemCveInventoryAuthority::MappedRunning
+            | SystemCveInventoryAuthority::NoScan => FleetCveInventorySection::Current,
+        };
+    }
+}
+
+impl CveAffectedEnvironment {
+    /// Returns normalized current, scheduled-target, and historical counts.
+    pub(crate) fn inventory_counts(&self) -> (i64, i64, i64) {
+        (
+            self.current_affected_system_count.unwrap_or_default(),
+            self.scheduled_deployment_target_count.unwrap_or_default(),
+            self.historical_inventory_system_count.unwrap_or_default(),
+        )
     }
 }
 
@@ -380,6 +627,120 @@ pub struct FleetCveTriageResponse {
     pub poam_id: Option<Uuid>,
     /// Indicates whether the server reused a compatible active POA&M.
     #[serde(default)]
+    pub poam_reused: bool,
+}
+
+/// Selects one disposition for a server-derived System Detail scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum SystemCveTriageAction {
+    /// Removes the selected scope's disposition.
+    LeaveOpen,
+    /// Accepts risk without creating remediation or verification evidence.
+    AcceptRisk {
+        /// Gives the required environment-specific rationale.
+        justification: String,
+        /// Gives the optional date on which the risk must be reviewed.
+        review_date: Option<NaiveDate>,
+    },
+    /// Schedules the exact subjects in the selected scope.
+    SchedulePatch,
+}
+
+/// Selects the server-derived scope changed by a System Detail request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemCveTriageScopeChoice {
+    /// Changes only the selected system's direct override.
+    Host,
+    /// Changes the selected system's current environment default.
+    Environment,
+}
+
+/// Applies one disposition to a scope derived by the server.
+///
+/// The request intentionally contains no environment or host identifiers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveTriageRequest {
+    /// Gives the canonical package identity selected by the inventory row.
+    pub canonical_package_name: String,
+    /// Selects the path host or its current environment.
+    pub scope: SystemCveTriageScopeChoice,
+    /// Selects the disposition for the server-derived scope.
+    #[serde(flatten)]
+    pub action: SystemCveTriageAction,
+    /// Supplies POA&M metadata exactly when patching is scheduled.
+    pub poam: Option<FleetCvePoamRequest>,
+}
+
+/// Identifies the server-owned scope of a System Detail triage operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemCveTriageScopeKind {
+    /// Includes all current exact affected hosts in the derived environment.
+    CurrentExactAffectedHostsInEnvironment,
+}
+
+/// Identifies which active disposition supplies the effective host state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemCveEffectiveDispositionSource {
+    /// The selected system has a direct host override.
+    Host,
+    /// The selected system inherits its current environment default.
+    Environment,
+    /// Neither scope has an active disposition.
+    None,
+}
+
+/// Describes the environment scope derived from the selected system.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveTriageScope {
+    /// Identifies the fixed server-owned scope rule.
+    pub kind: SystemCveTriageScopeKind,
+    /// Identifies the system from which the server derived the environment.
+    pub selected_system_id: Uuid,
+    /// Gives the visible hostname for the selected system.
+    pub selected_system_hostname: String,
+    /// Identifies the derived environment.
+    pub environment_id: Uuid,
+    /// Gives the server-derived environment name.
+    pub environment_name: String,
+    /// Counts all current exact affected hosts included in the scope.
+    pub exact_affected_system_count: i64,
+}
+
+/// Reports direct and effective triage state for a System Detail row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemCveTriageDetail {
+    /// Gives the canonical CVE identity.
+    pub canonical_cve_id: String,
+    /// Gives the canonical package identity.
+    pub canonical_package_name: String,
+    /// Describes the environment-wide exact mutation scope.
+    pub scope: SystemCveTriageScope,
+    /// Lists every current exact affected host included in the scope.
+    pub systems: Vec<CveAffectedSystemDetail>,
+    /// Gives the selected system's direct host override.
+    pub host_disposition: Option<CveEnvironmentDisposition>,
+    /// Gives the selected system's current environment default.
+    pub environment_disposition: Option<CveEnvironmentDisposition>,
+    /// Gives the host-precedence effective disposition. `None` means open.
+    pub effective_disposition: Option<CveEnvironmentDisposition>,
+    /// Identifies the scope that supplies `effective_disposition`.
+    pub effective_source: SystemCveEffectiveDispositionSource,
+    /// Gives the effective disposition for compatibility with older clients.
+    pub disposition: Option<CveEnvironmentDisposition>,
+}
+
+/// Reports the result of one System Detail scope mutation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemCveTriageResponse {
+    /// Gives transaction-owned direct and effective state after the mutation.
+    pub detail: SystemCveTriageDetail,
+    /// Identifies the created or reused POA&M when patching was scheduled.
+    pub poam_id: Option<Uuid>,
+    /// Indicates whether the server reused a compatible active POA&M.
     pub poam_reused: bool,
 }
 
@@ -566,6 +927,51 @@ pub struct PoamSummary {
     pub closed_at: Option<DateTime<Utc>>,
     /// Identifies the verification attempt that authorized closure.
     pub closure_attempt_id: Option<Uuid>,
+}
+
+/// Adds visible, page-scoped register context to a POA&M summary.
+///
+/// Scope IDs come from the authenticated server projection. They are not
+/// catalog-wide memberships or a complete count of all accessible records.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PoamRegisterSummary {
+    /// Contains the existing lifecycle summary.
+    #[serde(flatten)]
+    pub summary: PoamSummary,
+    /// Identifies visible current environments or schedules.
+    pub environment_ids: Vec<Uuid>,
+    /// Identifies visible current systems or assignment contexts.
+    pub system_ids: Vec<Uuid>,
+    /// Lists only actor-visible current systems for name and group presentation.
+    #[serde(default)]
+    pub systems: Vec<RegisterSystemScope>,
+    /// Identifies explicitly linked bundle lineages.
+    pub bundle_ids: Vec<Uuid>,
+    /// Identifies explicitly linked bundle versions.
+    pub bundle_version_ids: Vec<Uuid>,
+    /// Identifies immutable assignment versions.
+    pub assignment_version_ids: Vec<Uuid>,
+    /// Contains the first visible policy requirement, if available.
+    pub first_requirement: Option<String>,
+    /// Contains the first visible linked CVE, if available.
+    pub first_cve: Option<String>,
+    /// Counts attached milestones.
+    pub milestone_count: i64,
+    /// Counts completed milestones.
+    pub completed_milestone_count: i64,
+    /// Contains the latest scope-neutral activity time, if available.
+    pub last_activity_at: Option<DateTime<Utc>>,
+}
+
+/// Identifies one authorized current host in a register plan's context.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RegisterSystemScope {
+    /// Identifies the system independently of its display name.
+    pub system_id: Uuid,
+    /// Contains the source-backed current hostname.
+    pub hostname: String,
+    /// Contains current membership, not a link-time environment snapshot.
+    pub environment_id: Option<Uuid>,
 }
 
 /// Identifies one immutable occurrence in current exact-CVE scan evidence.
@@ -1520,6 +1926,229 @@ pub async fn list_poams(query: &PoamListQuery) -> Result<Page<PoamSummary>, Poam
     Ok(page)
 }
 
+/// Fetches one validated page with the server's register projection.
+///
+/// # Errors
+///
+/// Returns [`PoamApiError`] on request, decoding, or pagination failure.
+pub async fn list_poam_register(
+    query: &PoamListQuery,
+) -> Result<Page<PoamRegisterSummary>, PoamApiError> {
+    let requested_offset = query.offset.unwrap_or(0);
+    let page: Page<PoamRegisterSummary> =
+        request("GET", &with_query("/poams", query)?, None::<&()>).await?;
+    page.validate(requested_offset)?;
+    Ok(page)
+}
+
+/// Identifies which existing service owns a register acceptance decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcceptanceSource {
+    /// A policy finding waiver.
+    PolicyWaiver,
+    /// A direct host CVE disposition.
+    CveHost,
+    /// An environment CVE disposition.
+    CveEnvironment,
+}
+
+impl AcceptanceSource {
+    /// Returns the source-specific route segment used by the server command.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::PolicyWaiver => "policy_waiver",
+            Self::CveHost => "cve_host",
+            Self::CveEnvironment => "cve_environment",
+        }
+    }
+}
+
+/// Describes one source-owned risk decision without granting mutation authority.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AcceptanceEntry {
+    /// Names the owning decision family.
+    pub source: AcceptanceSource,
+    /// Gives the source-assigned RA chain identifier for display and search.
+    /// Commands still use `source` and `source_id` to identify the exact revision.
+    pub human_id: String,
+    /// Exact UUID of the source decision row.
+    pub source_id: Uuid,
+    /// Source waiver's status-change timestamp; CVE row UUIDs version decisions.
+    pub waiver_updated_at: Option<DateTime<Utc>>,
+    /// Source-specific stored status, not inferred technical evidence.
+    pub status: String,
+    /// Stable finding identity for policy waivers.
+    pub finding_id: Option<Uuid>,
+    /// Exact host identity for a host decision or policy waiver.
+    pub system_id: Option<Uuid>,
+    /// Contains the current hostname for an authorized host-scoped decision.
+    #[serde(default)]
+    pub system_hostname: Option<String>,
+    /// Current name of the direct environment scope, when resolved.
+    #[serde(default)]
+    pub environment_name: Option<String>,
+    /// Original environment identity for an environment decision.
+    pub environment_id: Option<Uuid>,
+    /// Policy lineage identity for a policy waiver.
+    pub policy_lineage_id: Option<Uuid>,
+    /// Exact policy version covered by a waiver.
+    pub policy_version_id: Option<Uuid>,
+    /// Exact policy-version name in the waiver's finding lineage.
+    #[serde(default)]
+    pub policy_title: Option<String>,
+    /// First trusted mapped requirement identifier for that exact version.
+    #[serde(default)]
+    pub requirement_external_id: Option<String>,
+    /// Canonical CVE ID for a CVE decision.
+    pub canonical_cve_id: Option<String>,
+    /// Canonical package identity for a CVE decision.
+    pub canonical_package_name: Option<String>,
+    /// Original decision justification.
+    pub justification: String,
+    /// Persisted CVE review date, if present.
+    pub review_date: Option<NaiveDate>,
+    /// Persisted policy-waiver review deadline, separate from authorization.
+    pub review_due_at: Option<NaiveDate>,
+    /// Policy-waiver authorization expiry, not its review deadline.
+    pub expires_at: Option<DateTime<Utc>>,
+    /// User who accepted the decision, if accepted.
+    pub accepted_by: Option<Uuid>,
+    /// Original acceptance time, if accepted.
+    pub accepted_at: Option<DateTime<Utc>>,
+    /// Retirement time for a historical CVE decision.
+    pub retired_at: Option<DateTime<Utc>>,
+    /// User who retired a CVE decision.
+    pub retired_by: Option<Uuid>,
+    /// Persisted reason for a retired CVE decision.
+    pub retirement_reason: Option<String>,
+    /// Plan ID only when committed replacement history identifies that plan.
+    pub replacement_poam_id: Option<Uuid>,
+    /// Source decision creation or acceptance time.
+    pub recorded_at: DateTime<Utc>,
+}
+
+/// Contains an authorized page of source-owned decisions and its full total.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AcceptancePage {
+    /// Entries in stable, newest-first server order.
+    pub items: Vec<AcceptanceEntry>,
+    /// Complete filtered count before server pagination.
+    pub total: i64,
+    /// Maximum entries returned for this request.
+    pub limit: i64,
+    /// Zero-based offset of this page.
+    pub offset: i64,
+    /// Whether the scoped result has a following page.
+    pub has_more: bool,
+}
+
+/// Fetches one authenticated register page without mutating decisions.
+///
+/// # Errors
+///
+/// Returns a request, permission, decoding, or inconsistent-page error.
+pub async fn list_acceptances(
+    offset: i64,
+    environment_id: Option<Uuid>,
+    search: &str,
+) -> Result<AcceptancePage, PoamApiError> {
+    let mut url = format!(
+        "{}/acceptances?status=accepted_or_converted&limit=100&offset={offset}",
+        base_url()
+    );
+    if let Some(id) = environment_id {
+        url.push_str(&format!("&environment_id={id}"));
+    }
+    if !search.trim().is_empty() {
+        url.push_str("&search=");
+        url.push_str(&encode_uri_component(search.trim()));
+    }
+    let page: AcceptancePage = request("GET", &url, None::<&()>).await?;
+    if page.limit != 100
+        || page.offset != offset
+        || page.total < 0
+        || page.items.len() > 100
+        || page.total < offset + page.items.len() as i64
+        || page.has_more != (offset + (page.items.len() as i64) < page.total)
+    {
+        return Err(PoamApiError::Deserialize(
+            "Invalid acceptance pagination".into(),
+        ));
+    }
+    Ok(page)
+}
+
+/// Returns the source-specific committed review successor or replacement plan.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AcceptanceCommandResult {
+    /// Names the source-family decision.
+    pub source: AcceptanceSource,
+    /// Identifies the original acceptance row.
+    pub predecessor_id: Uuid,
+    /// Identifies the new effective CVE decision or policy approval, if any.
+    pub successor_id: Option<Uuid>,
+    /// Gives the new review deadline, only for a renewal.
+    pub review_deadline: Option<NaiveDate>,
+    /// Gives the replacement plan, only for a conversion.
+    pub poam_id: Option<Uuid>,
+    /// Reports source-approved plan reuse after conversion.
+    pub poam_reused: Option<bool>,
+}
+
+fn acceptance_command_url(entry: &AcceptanceEntry, command: &str) -> String {
+    format!(
+        "{}/acceptances/{}/{}/{}",
+        base_url(),
+        entry.source.key(),
+        entry.source_id,
+        command
+    )
+}
+
+/// Re-reviews one current accepted decision through its owning service.
+///
+/// # Errors
+///
+/// Returns source-specific permission, stale revision, or evidence failures.
+pub async fn renew_acceptance(
+    entry: &AcceptanceEntry,
+) -> Result<AcceptanceCommandResult, PoamApiError> {
+    request(
+        "POST",
+        &acceptance_command_url(entry, "renew"),
+        Some(&serde_json::json!({
+            "expected_source_id":entry.source_id,
+            "expected_waiver_updated_at":entry.waiver_updated_at,
+        })),
+    )
+    .await
+}
+
+/// Replaces one accepted decision with source-compatible tracked remediation.
+///
+/// # Errors
+///
+/// Returns source-specific permission, stale evidence, incompatible plan, or
+/// request errors; a rejected conversion has no committed partial result.
+pub async fn convert_acceptance<T: Serialize>(
+    entry: &AcceptanceEntry,
+    poam: &T,
+    reuse_poam_id: Option<Uuid>,
+) -> Result<AcceptanceCommandResult, PoamApiError> {
+    request(
+        "POST",
+        &acceptance_command_url(entry, "convert"),
+        Some(&serde_json::json!({
+            "expected_source_id":entry.source_id,
+            "expected_waiver_updated_at":entry.waiver_updated_at,
+            "reuse_poam_id":reuse_poam_id,
+            "poam":poam,
+        })),
+    )
+    .await
+}
+
 /// Fetches the server-computed POA&M dashboard summary.
 ///
 /// # Errors
@@ -1646,6 +2275,39 @@ pub async fn fetch_fleet_cve_detail(
     Ok(detail)
 }
 
+/// Hydrates exactly the named CVE/package pairs for batch triage.
+///
+/// # Errors
+///
+/// Returns [`PoamApiError`] on authorization, transport, validation, or decode failure.
+pub async fn fetch_fleet_cve_batch_detail(
+    body: &FleetCveBatchDetailRequest,
+) -> Result<FleetCveBatchDetailResponse, PoamApiError> {
+    request(
+        "POST",
+        &format!("{}/cves/batch-detail", base_url()),
+        Some(body),
+    )
+    .await
+}
+
+/// Commits one atomic, evidence-bound batch triage decision.
+///
+/// # Errors
+///
+/// Returns [`PoamApiError`] on stale evidence, authorization, validation,
+/// transport, or decode failure. No per-item browser retries occur.
+pub async fn triage_fleet_cve_batch(
+    body: &FleetCveBatchTriageRequest,
+) -> Result<FleetCveBatchTriageResponse, PoamApiError> {
+    request(
+        "POST",
+        &format!("{}/cves/batch-triage", base_url()),
+        Some(body),
+    )
+    .await
+}
+
 /// Applies one atomic fleet triage request for an exact CVE/package pair.
 ///
 /// # Errors
@@ -1667,6 +2329,55 @@ pub async fn triage_fleet_cve(
     )
     .await?;
     Ok(response)
+}
+
+/// Fetches authoritative host and environment triage detail for a System Detail row.
+///
+/// # Errors
+///
+/// Returns [`PoamApiError`] when the row lacks current exact authority, is not
+/// visible, the request fails, or the response does not match the contract.
+pub async fn fetch_system_cve_triage_detail(
+    system_id: Uuid,
+    cve_id: &str,
+    package: &str,
+) -> Result<SystemCveTriageDetail, PoamApiError> {
+    request(
+        "GET",
+        &format!(
+            "{}/systems/{}/cves/{}/triage?package={}",
+            base_url(),
+            system_id,
+            encode_uri_component(cve_id),
+            encode_uri_component(package)
+        ),
+        None::<&()>,
+    )
+    .await
+}
+
+/// Applies one server-derived scope action from a System Detail row.
+///
+/// # Errors
+///
+/// Returns [`PoamApiError`] for validation, authorization, stale evidence,
+/// active-remediation conflicts, transport failures, or invalid responses.
+pub async fn triage_system_cve(
+    system_id: Uuid,
+    cve_id: &str,
+    body: &SystemCveTriageRequest,
+) -> Result<SystemCveTriageResponse, PoamApiError> {
+    request(
+        "POST",
+        &format!(
+            "{}/systems/{}/cves/{}/triage",
+            base_url(),
+            system_id,
+            encode_uri_component(cve_id)
+        ),
+        Some(body),
+    )
+    .await
 }
 
 macro_rules! poam_body_mutation {
@@ -2263,11 +2974,38 @@ mod tests {
             },
             "canonical_package_name": "openssl",
             "rollup": "outstanding",
-            "affected_system_count": 1,
+            "affected_system_count": 3,
+            "exact_affected_system_count": 2,
+            "legacy_affected_system_count": 1,
             "environments": [{
                 "environment_id": Uuid::from_u128(1),
                 "environment_name": "Production",
-                "affected_system_count": 1,
+                "affected_system_count": 3,
+                "exact_affected_system_count": 2,
+                "legacy_affected_system_count": 1,
+                "systems": [{
+                    "system_id": Uuid::from_u128(2),
+                    "hostname": "exact-host",
+                    "environment": "Production",
+                    "primary_ip_address": null,
+                    "flake_name": "platform",
+                    "flake_id": 1,
+                    "commit_hash": null,
+                    "deployment_policy": "manual",
+                    "current_package_version": "3.4.1",
+                    "inventory_authority": "exact"
+                }, {
+                    "system_id": Uuid::from_u128(3),
+                    "hostname": "legacy-host",
+                    "environment": "Production",
+                    "primary_ip_address": null,
+                    "flake_name": "platform",
+                    "flake_id": 1,
+                    "commit_hash": null,
+                    "deployment_policy": "manual",
+                    "current_package_version": "3.4.0",
+                    "inventory_authority": "legacy"
+                }],
                 "future_server_field": { "ignored": true }
             }],
             "future_top_level_field": "ignored"
@@ -2275,17 +3013,72 @@ mod tests {
         .unwrap();
 
         assert_eq!(detail.environments[0].disposition, None);
-        assert!(detail.environments[0].systems.is_empty());
+        assert_eq!(detail.environments[0].systems.len(), 2);
         detail.normalize_inventory_counts();
-        assert_eq!(detail.exact_affected_system_count, 1);
-        assert_eq!(detail.legacy_affected_system_count, 0);
-        assert_eq!(detail.exact_mutation_target_count, 1);
-        assert_eq!(detail.environments[0].exact_affected_system_count, 1);
+        assert_eq!(detail.inventory_counts(), (2, 0, 1));
+        assert_eq!(detail.exact_mutation_target_count, 2);
+        assert_eq!(detail.environments[0].inventory_counts(), (2, 0, 1));
+        assert_eq!(
+            detail.environments[0].systems[0].inventory_section,
+            FleetCveInventorySection::Current
+        );
+        assert_eq!(
+            detail.environments[0].systems[1].inventory_section,
+            FleetCveInventorySection::Historical
+        );
 
         detail.environments.clear();
         detail.exact_mutation_target_count = 0;
         detail.normalize_inventory_counts();
-        assert_eq!(detail.exact_affected_system_count, 1);
+        assert_eq!(detail.exact_affected_system_count, 2);
+        assert_eq!(detail.exact_mutation_target_count, 0);
+    }
+
+    #[test]
+    fn fleet_detail_does_not_promote_explicit_inventory_only_relations() {
+        let mut detail: FleetCveDetail = serde_json::from_value(serde_json::json!({
+            "cve": {
+                "cve_id": "CVE-2026-1002",
+                "cvss_v3_score": null,
+                "severity": "medium",
+                "title": "Inventory-only vulnerability",
+                "cvss_vector": null,
+                "cwe_id": null,
+                "published_date": null,
+                "modified_date": null,
+                "exploited": false,
+                "package_name": "openssl",
+                "installed_version": "3.4.1",
+                "fixed_version": null,
+                "detection_method": "vulnix",
+                "fix_status": "pending"
+            },
+            "canonical_package_name": "openssl",
+            "rollup": "outstanding",
+            "affected_system_count": 1,
+            "exact_affected_system_count": 1,
+            "exact_mutation_target_count": 0,
+            "legacy_affected_system_count": 0,
+            "current_affected_system_count": 0,
+            "scheduled_deployment_target_count": 1,
+            "historical_inventory_system_count": 1,
+            "environments": [{
+                "environment_id": Uuid::from_u128(2),
+                "environment_name": "Production",
+                "affected_system_count": 1,
+                "exact_affected_system_count": 1,
+                "legacy_affected_system_count": 0,
+                "current_affected_system_count": 0,
+                "scheduled_deployment_target_count": 1,
+                "historical_inventory_system_count": 1
+            }]
+        }))
+        .unwrap();
+
+        detail.normalize_inventory_counts();
+
+        assert_eq!(detail.inventory_counts(), (0, 1, 1));
+        assert_eq!(detail.environments[0].inventory_counts(), (0, 1, 1));
         assert_eq!(detail.exact_mutation_target_count, 0);
     }
 

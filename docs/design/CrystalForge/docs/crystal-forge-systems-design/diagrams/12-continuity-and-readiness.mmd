@@ -1,0 +1,13 @@
+flowchart LR
+    A["A: affected; operator starts plan"] --> BASE["Immutable baseline A"]
+    A --> PLAN["Same system, finding, and open POAM"]
+    B["B: newer deployed state; pair persists"] --> PLAN
+    D["D: newer deployed state; sufficient scan lacks pair"] --> READY["Candidate remediated"]
+    PLAN --> READY
+    READY --> ALL{"All required subjects ready?"}
+    ALL -->|"Yes: working mapping"| WAIT["Awaiting verification"]
+    ALL -->|"No or unknown"| OPEN["Plan remains unresolved"]
+    WAIT --> VERIFY["Authoritative verification and closure"]
+    VERIFY --> DONE["Completed with retained evidence"]
+    BASE --> VERIFY
+    E["New evaluated commit, not deployed"] -.-> ONLY["Browsing evidence only; no Current resolution"]
