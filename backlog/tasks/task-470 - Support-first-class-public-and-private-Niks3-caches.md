@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-03 23:21'
+updated_date: '2026-10-03 23:28'
 labels: []
 dependencies: []
 references:
@@ -288,6 +288,8 @@ Verified task PostgreSQL PID30524 and rechecked through psql: current_user mcamp
 Commands through nix develop, SQLX_OFFLINE=true, packages/default/Cargo.toml, -p cf-server, --message-format short: cargo test --lib niks3_publication_ -- --include-ignored --test-threads=1 PASSED exit0 (12 passed:10 publication SQLx tests +1 new read-plane unit test +1 existing builder fingerprint unit test); cargo test --test composite_policy PASSED exit0 (all38 tests); cargo check --all-targets PASSED exit0; cargo test --doc queries::cache_publication_reads PASSED exit0 (1 doctest). Final discriminating gate fixture uses a public Http global, so missing Niks3 capability cannot explain away global rejection; exact rerun queries::cache_publication_reads::tests::niks3_publication_assigned_gates_never_downgrade_to_proven_global -- --ignored --exact PASSED exit0 (1 test). Rustfmt check and scoped git diff --check passed. Logs: /tmp/opencode/task470-publication-evidence-scope.log; task470-publication-composite-corrected.log; task470-publication-evidence-scope-check.log; task470-publication-evidence-scope-doc.log; task470-publication-assigned-gate-final.log. This supersedes the preceding two-test composite blocker.
 
 New CI-qualified SQLx test: queries::cache_publication_reads::tests::niks3_publication_assigned_gates_never_downgrade_to_proven_global. New ordinary unit test: queries::cache_publication_reads::tests::niks3_publication_read_plane_gates_and_redaction. The prior nine SQLx qualified names remain unchanged. No services, staging, or commits; owner retains broader VM/CI/documentation and staging responsibilities.
+
+P2 CI final membership now27 exact TASK470 tests:24 ignored (prior14 plus all10 user-specified queries::cache_publication_reads::tests::niks3_publication_* names verified as actual ignored SQLx functions) and3 nonignored. Full qualified list is synchronized in checks/server-regressions/README.md and default.nix. Evaluated current Git-backed server-regressions and builder-evaluator-packaging drvPath passed; evaluated server-regressions.checkPhase | bash -n and owned git diff --check passed. Local /dev/kvm readable/writable. Actual full-check execution remains BLOCKED: owner never staged cache_publication_reads.rs during bounded10minute wait; git ls-files --error-unmatch still failed at2026-10-03T23:26:31Z. Both supervisors exited125 before Nix build started;125 is supervisor staging-block status, not Nix/Cargo failure. Retained logs/exit files: /tmp/opencode/task470-p2-builder-evaluator-packaging.{log,exit} and /tmp/opencode/task470-p2-server-regressions.{log,exit}. Logs explicitly state no build started. Supervisors are stopped. To unblock, owner must stage helper or authorize CI agent to stage that file, then rerun full Git-backed checks. Exact GitLab blocking jobs confirmed via prior lint/dry run; physical runner/KVM remains unknown until push/job execution. No current gate pass is claimed; no commits, pushes, host services or host DB operations.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
