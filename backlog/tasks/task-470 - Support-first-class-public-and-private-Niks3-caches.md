@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-03 23:28'
+updated_date: '2026-10-03 23:41'
 labels: []
 dependencies: []
 references:
@@ -290,6 +290,8 @@ Commands through nix develop, SQLX_OFFLINE=true, packages/default/Cargo.toml, -p
 New CI-qualified SQLx test: queries::cache_publication_reads::tests::niks3_publication_assigned_gates_never_downgrade_to_proven_global. New ordinary unit test: queries::cache_publication_reads::tests::niks3_publication_read_plane_gates_and_redaction. The prior nine SQLx qualified names remain unchanged. No services, staging, or commits; owner retains broader VM/CI/documentation and staging responsibilities.
 
 P2 CI final membership now27 exact TASK470 tests:24 ignored (prior14 plus all10 user-specified queries::cache_publication_reads::tests::niks3_publication_* names verified as actual ignored SQLx functions) and3 nonignored. Full qualified list is synchronized in checks/server-regressions/README.md and default.nix. Evaluated current Git-backed server-regressions and builder-evaluator-packaging drvPath passed; evaluated server-regressions.checkPhase | bash -n and owned git diff --check passed. Local /dev/kvm readable/writable. Actual full-check execution remains BLOCKED: owner never staged cache_publication_reads.rs during bounded10minute wait; git ls-files --error-unmatch still failed at2026-10-03T23:26:31Z. Both supervisors exited125 before Nix build started;125 is supervisor staging-block status, not Nix/Cargo failure. Retained logs/exit files: /tmp/opencode/task470-p2-builder-evaluator-packaging.{log,exit} and /tmp/opencode/task470-p2-server-regressions.{log,exit}. Logs explicitly state no build started. Supervisors are stopped. To unblock, owner must stage helper or authorize CI agent to stage that file, then rerun full Git-backed checks. Exact GitLab blocking jobs confirmed via prior lint/dry run; physical runner/KVM remains unknown until push/job execution. No current gate pass is claimed; no commits, pushes, host services or host DB operations.
+
+Final production-policy rerun supersedes temporary-snapshot VM evidence: executed exactly nix build --no-link -L .#checks.x86_64-linux.niks3-cache directly in /home/mcamp/code/crystal-forge/TASK-470-niks3-cache-support with staged/tracked cache_publication_reads.rs and current exact-completed-publication assigned/global policy. PASS actual exit0, recorded in /tmp/opencode/task470-publication-vm-actual-worktree.exit. Full raw log /tmp/opencode/task470-publication-vm-actual-worktree.log; persistent supervisor /tmp/opencode/task470-publication-vm-actual-worktree.sh. Built VM drv a8m294ijsb04aznljbnjyskvgf055677-vm-test-run-crystal-forge-niks3-cache.drv. VM script89.74s; all four QEMU processes cleaned up. No source/fixture/test-semantic changes were needed. All five real remote publication/auth variants, discriminating later-created earlier assigned unpublished destination, rename, disable/reassign/delete pending preservation, signed capability/private-transport gating, actual packaged agent pulls and credential audits passed. Proven token-public secondary CLI upload completed as native Niks3 upload9; fresh server signature-required import and exact output materialization passed before fixture completion evidence/failover assertion. Existing no-op activation and NVD-unavailable CVE-analysis limits remain. No temporary source snapshot for this run, host service/DB operations, commits or pushes.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
