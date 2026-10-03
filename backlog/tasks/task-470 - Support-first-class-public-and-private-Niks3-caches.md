@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-03 22:21'
+updated_date: '2026-10-03 22:24'
 labels: []
 dependencies: []
 references:
@@ -82,6 +82,8 @@ Focused VM review regression ownership: checks/niks3-cache/default.nix and READM
 Final narrow P1 canonical-selection correction: own only queries/builders.rs lock_eligible_cache_destination plus new regression tests and queries/cache_push.rs shared environment resolver. Reuse one executor-generic active-system/commit-flake/configuration-name-before-hostname candidate query and ambiguity decision in pool and transaction paths. Preserve destination/assignment locks, fingerprints and rebased auto_hardening completion policy. Add migration-backed dispatch ambiguity and post-dispatch ambiguity rollback tests for verified publication and no-push completion. Verify authorized task PostgreSQL data_directory/socket/admin role before ephemeral SQLx databases; run focused tests, offline server all-targets and query doctests through Nix. No migrations, handlers, UI, Nix tests, services or commits.
 
 Remaining maintainer P1/P2 plan: preserve historical deployability/retained-lineage semantics and enforce current readability at final delivery. Resolve completed publication rows for exact authorized derivation and exact output path inside the existing SERIALIZABLE system/pending-claim authorization transaction. Use durable database ID first and eligible unambiguous legacy evidence only where compatible; no static/unpublished/name-only fallback. Reuse canonical current environment eligibility and destination/assignment locks, parse read-only config and capability/confidentiality, and return target+source together only after commit; unavailable sources cannot mutate delivery or consume legacy bridge. Deterministically inspect alternative completed evidence if a recorded destination is unusable. Share publication resolution concepts with CVE without coupling transport or workers; require exact output path in any shared publication query. Add discriminating PostgreSQL and VM regressions for reordered/new/renamed/disabled/reassigned/deleted destinations, secondary published source, assigned/global precedence, legacy capability/private transport and retryable pending work across auto/manual/pinned/rollback/retained flows. Add blocking niks3-cache and builder-evaluator-packaging flake matrix jobs plus explicitly named TASK470 ignored DB tests in server-regressions; update README/operatordocs without changing accepted baseline exceptions. Run changed Rust formatting/diffcheck, targeted protocol/config/agent/server/SQLx, packageVMgates before push; then inspect newexactheadCI including runner/KVM failure and report genuinelypendingitems. No migration edits or unrelatedbaselinechanges.
+
+Delegated P2 CI ownership at b52fbe67: edit .gitlab-ci.yml, checks/server-regressions/{default.nix,README.md}, checks/builder-evaluator-packaging/README.md and only CI membership prose in checks/niks3-cache/README.md. Add blocking niks3-cache and builder-evaluator-packaging to existing nix-tag flake matrix. Add exact qualified rollback, signed capability, assigned-first selection and dispatch ambiguity lib tests with one-test execution protection in sandbox PostgreSQL; coordinate forthcoming niks3_publication_* names with publication owner before final membership. Verify flake drv attributes, read-only GitLab CI lint/dry run, packaging build and owned diff. No commits, host DB or services.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
