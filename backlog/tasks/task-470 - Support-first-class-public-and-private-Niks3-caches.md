@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-03 19:31'
+updated_date: '2026-10-03 19:46'
 labels: []
 dependencies: []
 references:
@@ -72,6 +72,8 @@ Final local enqueue fix: retain Option<Option<i32>> for completed remote dispatc
 Rolling-upgrade correction ownership approved: protocol builder capabilities/next-job request; builder runtime advertisement and signed API request wiring; handler preclaim cache gate; query exact-candidate claim for both strategies; minimal compile initializer edits. Preview the eligible candidate with existing queue policy/order, resolve cache configuration before claim, reject Niks3 without advertised capability using additive 409 unsupported_cache_type, and dispatch the preflight configuration only to that exact candidate. Preserve legacy cache dispatch and auth defaults. Verify focused protocol/builder/server tests plus offline server all-targets through Nix; no services or commits. User permits existing task PostgreSQL PID20668 only for ephemeral SQLx test databases after socket/data_directory verification.
 
 Review revision: first resolve rebase onto origin/dev3b23d36f and verify both scanning/CVE and cache semantics. Then fix P1 scope atomically by putting selected environment_ids in create/update requests and removing second Save assignment request; prove transaction rollback. Add authenticated default-absent agent Niks3 capability and fence deployment for legacy/incapable agents. Share assigned-before-global selection with builder publication and send only selected read cache; test global name sorting first. Share authoritative Ed25519 public-key validation across manual create/update/discovery. Preserve common Add-form state on Niks3 switch and align design interaction/order/header/rail. Correct erroneous MR329 contract link, add durable MR notes of prior user verification exceptions and current exact-head CI evidence. Reuse isolated task preview before UI edits; regression tests plus relevant VM checks/SQLx preparation. Applied0269–0271 remain immutable; add a new migration only if revised persistence needs it. Rebase rewrites published history; obtain explicit force-with-lease push authorization before updating remote branch.
+
+P1#2/#3 focused revision at rebased78b3dbc7: preserve SystemState wire/source shape using additive flattened CurrentSystemRequest with default-absent AgentCapabilities.supports_niks3. Advertise in signed agent JSON and parse only VerifiedAgentRequest.body. Resolve enabled assigned-first/global fallback in cache_destinations query helper with stable name/ID ordering; reuse canonical derivation eligibility in builder resolver and local/CVE paths. Deliver only first selected read cache; capability, unreadable configuration, DB/decryption failure or unverified private transport suppress both cache and target before deployment claim, preserving ingestion and pending request. Add authenticated signed-body and selection/delivery regressions; run protocol/agent/server checks/tests and authorized ephemeral SQLx tests after verifying socket/user/data_directory. Owned paths only; no migrations, services or commits.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
