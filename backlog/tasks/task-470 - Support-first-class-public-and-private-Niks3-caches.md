@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-03 23:06'
+updated_date: '2026-10-03 23:13'
 labels: []
 dependencies: []
 references:
@@ -278,4 +278,14 @@ Final Python AST via nix develop and owned-path git diff --check passed exit0. P
 Database identity clarification: the verified current_user is exactly `mcamp`; the spaces in the preceding note are a transcription error. Final handlers::agent::heartbeat::tests run executed 16 tests with 16 passed and 0 failed.
 
 Verified raw heartbeat log correction: /tmp/opencode/task470-publication-heartbeat-final.log lines171–190 reports 17 tests and `17 passed; 0 failed; 0 ignored`; this supersedes the preceding 16-test count.
+
+Owner-requested final correction is implemented and verified. Publication scope precedence now uses only enabled currently scoped identities resolved from completed evidence for the exact derivation/output. Legacy ambiguity is resolved before choosing the group. Unpublished assigned caches, deleted-ID replacements, and ambiguous legacy evidence cannot displace proven globals. Assigned publication identities choose the assigned group before read-configuration, capability, or confidentiality gates; those failures cannot downgrade to a global, while alternatives in the same group remain allowed. Durable database provenance and stable publication-ID ordering are preserved within the group. Removed the configured-destination has_assigned SQL predicate entirely; publication/destination/assignment shared-lock reads supply all candidate facts. Updated helper rustdoc and adjacent invariant comments.
+
+Under explicit scope expansion, edited only the two authorized tests in tests/composite_policy.rs. Historical authorization still asserts Pass and desired state is preserved; delivery asserts None/no read source and pending status/delivered_at remain pending/NULL. Positive upgrade test now supplies a valid enabled Http destination and completed database publication for the exact derivation/store path, asserts returned source identity and Pass, and retains all upgrade bridge and pending delivery assertions.
+
+Verified task PostgreSQL PID30524 and rechecked through psql: current_user mcamp; control DB postgres; exact data_directory /home/mcamp/code/crystal-forge/TASK-470-niks3-cache-support/.devenv/state/postgres; port5432; CREATEDB true. SQLx used isolated ephemeral test databases only.
+
+Commands through nix develop, SQLX_OFFLINE=true, packages/default/Cargo.toml, -p cf-server, --message-format short: cargo test --lib niks3_publication_ -- --include-ignored --test-threads=1 PASSED exit0 (12 passed:10 publication SQLx tests +1 new read-plane unit test +1 existing builder fingerprint unit test); cargo test --test composite_policy PASSED exit0 (all38 tests); cargo check --all-targets PASSED exit0; cargo test --doc queries::cache_publication_reads PASSED exit0 (1 doctest). Final discriminating gate fixture uses a public Http global, so missing Niks3 capability cannot explain away global rejection; exact rerun queries::cache_publication_reads::tests::niks3_publication_assigned_gates_never_downgrade_to_proven_global -- --ignored --exact PASSED exit0 (1 test). Rustfmt check and scoped git diff --check passed. Logs: /tmp/opencode/task470-publication-evidence-scope.log; task470-publication-composite-corrected.log; task470-publication-evidence-scope-check.log; task470-publication-evidence-scope-doc.log; task470-publication-assigned-gate-final.log. This supersedes the preceding two-test composite blocker.
+
+New CI-qualified SQLx test: queries::cache_publication_reads::tests::niks3_publication_assigned_gates_never_downgrade_to_proven_global. New ordinary unit test: queries::cache_publication_reads::tests::niks3_publication_read_plane_gates_and_redaction. The prior nine SQLx qualified names remain unchanged. No services, staging, or commits; owner retains broader VM/CI/documentation and staging responsibilities.
 <!-- SECTION:NOTES:END -->
