@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-03 04:30'
+updated_date: '2026-10-03 04:32'
 labels: []
 dependencies: []
 references:
@@ -61,6 +61,8 @@ Delegated server/agent scope: builders handler, agent heartbeat, local cache wor
 Focused local-worker correction ownership: only cf-server/src/builder/cache_worker.rs (cache_push queries only if required). Resolve persisted cache_destination reference and derivation environment on every attempt using current enabled/decrypted rows and remote-builder eligibility rules. Reject ambiguous references/environments and mismatches; preserve static-only legacy jobs. Route batch attempts through the same resolution without stale in-process retries. Use a shared Niks3 execution gate across entry points and refresh after waiting. Restrict automatic legacy job creation to static-only configuration. Verify focused destination/current-config/concurrency tests and server cargo check through nix develop; no services or commits.
 
 Review correction scope: handlers/api/builders.rs and related builder job query/model code only plus additive migration 0270 (0269 already applied; immutable). Persist selected cache destination ID with a dispatch timestamp on the exact claimed builder/session before response; reset on each claim. Niks3 completion requires that exact persisted ID, enabled/eligible rechecks and authoritative evaluated/persisted output. Preverify once before atomic success, with transactional identity/output rechecks and atomic confirmed-publication persistence to preserve recovery on all failures. Keep Nix path-info as reachability probe; Niks3 additionally copies the remote closure into a fresh temporary local?root store with require-sigs=true, configured keys only, refreshed metadata and bounded kill/reap ownership. Verify pinned Nix 2.34.8 source/flags, add identity/order/fake-signature/timeout tests. Map forthcoming protocol parallel_uploads Option<u32> explicitly, remove attic_jobs concurrency reuse. No service startups or commits; owner preview backend may remain stale.
+
+Second focused local-publication correction: own builder/cache_worker.rs, queries/cache_push.rs (CachePushJob model/query API), builder/worker.rs and next-free additive migration 0271 only. Persist cache_destination_id without FK and source database/static/legacy (default legacy). Keep legacy rows uncertain; resolve eligible names/URLs unambiguously and pin DB identity before attempting publication, never infer static provenance. Move canonical environment/current-destination resolution into cache_push shared helpers. Export enqueue_cache_push_for_derivation(pool, derivation_id, static_config)->Result<Option<i32>> and ID-specific enqueue helper for server-handler owner. DB-config-only local builds and periodic missing-job generation use canonical resolver, not a startup URL/name; local enqueue occurs after output persistence. Queue insertion serializes per derivation and never retargets existing jobs. Verify offline targeted tests for DB-only selection, remote missing-push queue path, durable deleted ID rejection, legacy name ambiguity, environment isolation and existing single CLI gate; no services/commits; 0269/0270 unchanged.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
