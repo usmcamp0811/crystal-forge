@@ -3,9 +3,11 @@ id: TASK-478
 title: >-
   Migrate repository documentation into an Open Knowledge Format knowledge
   corpus
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - claude-agent
 created_date: '2026-10-04 03:43'
+updated_date: '2026-10-04 03:43'
 labels:
   - documentation
   - okf
