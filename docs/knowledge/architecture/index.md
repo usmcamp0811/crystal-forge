@@ -1,0 +1,7 @@
+# Architecture
+
+* [Crystal Forge backend workspace architecture](backend-cargo-workspace.md) - Describes the Cargo workspace crate split (cf-protocol, cf-config, cf-agent, cf-builder, cf-keygen, cf-server), dependency direction, forbidden dependencies, targeted checks and Nix builds, and SQLx metadata; open it before adding a crate dependency or running a targeted check.
+* [Data Flows](data-flows.md) - Describes the four core data flows (state monitoring, CVE scanning, drift detection, evaluation and flake snapshots) between agent, server, builder, PostgreSQL, and Grafana; open it to trace how data moves through the system.
+* [Derivation processing loops and integration points](derivation-processing-loops.md) - Describes the evaluation, build, cache push, CVE scanning, and deployment policy loops (what each picks, interval, action) and how they integrate with system state, flakes, and security; open it when tuning or debugging a loop.
+* [Ecosystem architecture summary](ecosystem-architecture-summary.md) - Shows the high-level flowchart of agent, server, builder, binary cache, PostgreSQL, Grafana, and web UI, and a four-row component table; open it for the one-page picture before the detailed architecture concepts.
+* [Event-Driven Queue Architecture](event-driven-queues.md) - Describes the QueueNotifier bounded MPSC wakeup channels, the eval queue and build queue flows, notification guarantees, and fallback polling; open it when changing queue wakeups or worker loops.

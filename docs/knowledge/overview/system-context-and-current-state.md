@@ -1,0 +1,59 @@
+---
+type: Concept
+title: "Crystal Forge system context and current state"
+description: "Describes the system context, upstream dependencies, components, communication patterns, scaling model, and a point-in-time current state of Crystal Forge; open it for orientation and treat the Current State section as dated."
+tags:
+  - crystal-forge
+  - overview
+  - context
+  - status
+implementation_status: partial
+sources:
+  - id: origin
+    resource: "Crystal Forge repository file docs/context.md at commit 3b23d36f"
+    title: "Crystal Forge Context & Current State"
+---
+
+# Crystal Forge Context & Current State
+
+## System Context
+
+Crystal Forge is a distributed monitoring, build coordination, and compliance tooling system for NixOS fleets. The long-term goal is auditability and control in regulated environments; the current release is functional for homelab and self-hosted use while that story matures.
+
+### Upstream Dependencies
+
+- **Nix ecosystem**: Leverages Nix evaluation engine and flake system
+- **NixOS systems**: Monitors and manages NixOS machine configurations
+- **PostgreSQL**: Central database for state, compliance data, and build coordination
+
+### System Components
+
+- **Server**: HTTP API for agent communication, compliance reporting, coordination
+- **Builder**: Evaluates NixOS configurations, tracks derivations, performs builds
+- **Agent**: Runs on monitored NixOS systems, reports state, receives deployment commands
+
+### Current State
+
+> **Status:** stale-risk. The Current State section is a point-in-time statement. The version `0.3.0` matches `packages/default/crates/cf-server/Cargo.toml`. The commit count and the feature lists have not been rechecked. The "Shared database" scaling statement and the Builder description may not match the API-only builder boundary (`packages/default/crates/cf-builder/src/builder/api_client.rs`). These are verification candidates.
+
+- **v0.3.0** — functional web UI, aimed at homelabbers and NixOS enthusiasts; compliance and regulated-environment story still in progress
+- **2600+ commits** with active development
+- **Working features**: system fingerprinting, Ed25519 auth, change detection, web dashboard (Dioxus), OIDC/local auth, RBAC, build coordination, CVE scanning with deduplication, deployment policy enforcement, evaluation cancellation and history
+- **Still rough**: UI polish, several views incomplete, many planned features not yet implemented
+- **In development**: UI polish, advanced compliance reporting, multi-tenant support
+
+### Communication Patterns
+
+- Agents → Server: HTTP POST with Ed25519 signed payloads
+- Shared database: Enables horizontal scaling of servers and builders
+- Server → Agent: Deployment triggers for configuration updates (operational)
+
+### Scaling Model
+
+Multiple servers and builders can share the same PostgreSQL instance, enabling distributed processing while maintaining centralized compliance state and coordination.
+
+## Related concepts
+
+- [System overview](system-overview.md) - what the platform is and how it is composed
+- [Core components](../components/core-components.md) - the agent, server, and builder in detail
+- [Roadmap](roadmap.md) - where the product is going

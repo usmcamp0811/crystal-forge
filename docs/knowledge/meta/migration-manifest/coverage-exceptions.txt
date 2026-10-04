@@ -1,0 +1,2 @@
+docs/design/FIGMA_CLAUDE_WORKFLOW.md	- Code: `/home/mcamp/code/crystal-forge/dev/packages/web-ui/`
+# Absolute local filesystem path replaced by the repository-relative path `packages/web-ui/` (the OKF validator forbids absolute local paths in concepts).
