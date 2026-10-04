@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-10-04 03:43'
-updated_date: '2026-10-04 17:06'
+updated_date: '2026-10-04 18:19'
 labels:
   - documentation
   - okf
@@ -45,6 +45,12 @@ Crystal Forge documentation is spread across docs/, root Markdown files, package
 <!-- SECTION:PLAN:BEGIN -->
 Continue MR !332 at current branch HEAD 045f4582eb0fdc76e7f8d57d1111be0d212b852e. Preserve this clean worktree and all existing migration changes. First establish pinned source/spec/CI state. Then independently build inventories from original commit 3b23d36f and current tree, replace line-set coverage with block-level source/destination mappings, classify and convert every authored documentation text diagram, repair link/navigation validation and add fixtures. Integrate checks into Nix/CI using explicit baseline material or a CI job with history; pin Mermaid rendering tooling. Independently review implementation claims and design preservation. Run exact focused checks, record failures/unverified renderer comparisons honestly, and update MR !332 without merge. No runtime behavior changes and no Git history rewriting.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+MR continuation state independently checked. Current HEAD and pipeline SHA: 045f4582eb0fdc76e7f8d57d1111be0d212b852e; source branch TASK-478-okf-knowledge-migration; target dev; merge-base and migration baseline 3b23d36f24fbf9ba05045c43b5325fd000dbd9b2; pinned OKF repo commit ad30107c31c06aec8a7d5636e0d1058118604e6f, SPEC.md blob c06e3eede0c910d0ecf12524c34204156f8795ac. MR !332 discussions endpoint returned []. Current diff worktree was clean at takeover. Original pipeline !2991 SHA 045f4582, status success-with-warnings; web-ui-check failed but allow_failure=true. Existing flake package registered no required check or CI job; default.nix source is `./.` relative to checks/okf-knowledge and is incorrect. Current coverage audit remains whitespace-normalized set membership and is not integrated with the Nix check. Added immutable-baseline inventory tool; 825 Markdown-family source paths and 583 selected image/diagram assets inventoried at baseline 3b23d36f. It currently reports all entries classified; block-preservation and current-file inventory remain to implement. Three disjoint diagram conversion groups created 73 audited Mermaid replacements; scanner currently reports zero candidates, render pending. Full CI/Nix integration and semantic verification remain outstanding.
+<!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
