@@ -3,11 +3,11 @@ id: TASK-478
 title: >-
   Migrate repository documentation into an Open Knowledge Format knowledge
   corpus
-status: Review
+status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-10-04 03:43'
-updated_date: '2026-10-04 14:17'
+updated_date: '2026-10-04 17:06'
 labels:
   - documentation
   - okf
@@ -39,6 +39,12 @@ Crystal Forge documentation is spread across docs/, root Markdown files, package
 - [ ] #9 References in remaining repository files (README.md, TESTING.md, CONTRIBUTING.md, flake check READMEs, AGENTS.md pointers) resolve to the new locations. AGENTS.md and CLAUDE.md execution instructions are not converted into knowledge concepts.
 - [ ] #10 A final audit report records files migrated, split, merged and retained, stale documentation corrected, unresolved conflicts, and validation performed, with the real commands and exit statuses.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Continue MR !332 at current branch HEAD 045f4582eb0fdc76e7f8d57d1111be0d212b852e. Preserve this clean worktree and all existing migration changes. First establish pinned source/spec/CI state. Then independently build inventories from original commit 3b23d36f and current tree, replace line-set coverage with block-level source/destination mappings, classify and convert every authored documentation text diagram, repair link/navigation validation and add fixtures. Integrate checks into Nix/CI using explicit baseline material or a CI job with history; pin Mermaid rendering tooling. Independently review implementation claims and design preservation. Run exact focused checks, record failures/unverified renderer comparisons honestly, and update MR !332 without merge. No runtime behavior changes and no Git history rewriting.
+<!-- SECTION:PLAN:END -->
 
 ## Final Summary
 
