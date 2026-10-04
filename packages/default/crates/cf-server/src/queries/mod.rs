@@ -1,5 +1,5 @@
-pub mod admin;
 pub mod acceptance_register;
+pub mod admin;
 pub mod agent_heartbeat;
 pub mod attention;
 pub mod auth_identity;
@@ -7,6 +7,7 @@ pub mod build_jobs;
 pub mod build_reservations;
 pub mod builders;
 pub mod cache_destinations;
+pub mod cache_publication_reads;
 pub mod cache_push;
 pub mod commits;
 pub mod commits_artifacts;

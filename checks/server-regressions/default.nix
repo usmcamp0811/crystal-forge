@@ -52,6 +52,8 @@ pkgs.rustPlatform.buildRustPackage {
 
     export DATABASE_URL="postgresql://$PGUSER@127.0.0.1/$PGDATABASE"
     export CRYSTAL_FORGE_TEST_DATABASE_URL="$DATABASE_URL"
+    # Public sandbox-only fixture key. Never inherit deployment credentials.
+    export CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY="server-regressions-public-fixture-key"
 
     # Shared-database tests (resolver/deletion and selected live lib tests)
     # expect the schema to exist before they start. sqlx::test targets create
@@ -655,6 +657,61 @@ SQL
     cargo test --offline --package cf-server --lib \
       exact_build_lookup_plan_stays_primary_key_bounded_at_production_scale \
       -- --ignored --test-threads=1
+
+    echo "=== TASK-470 cache scope, signed capability, selection, and dispatch contracts ==="
+    # --exact alone succeeds when a test is renamed or removed. Require both
+    # the named success line and exactly one executed test. pipefail preserves
+    # Cargo failures through tee; ignored tests are enabled only by name.
+    runExactCacheRegression() {
+      local testName="$1"
+      shift
+      local testLog="$TMPDIR/task470-exact-test.log"
+      if ! (set -o pipefail; cargo test --offline --package cf-server --lib "$testName" \
+        -- --exact --test-threads=1 --color=never "$@" 2>&1 | tee "$testLog"); then
+        return 1
+      fi
+      if ! grep -Fxq "test $testName ... ok" "$testLog" || \
+        ! grep -Fq "test result: ok. 1 passed; 0 failed; 0 ignored;" "$testLog"; then
+        echo "Expected exactly one successful test: $testName" >&2
+        return 1
+      fi
+    }
+
+    for testName in \
+      queries::cache_destinations::atomic_scope_tests::create_scope_failure_leaves_no_cache_credentials_or_global_fallback \
+      queries::cache_destinations::atomic_scope_tests::update_scope_failure_preserves_entire_config_ciphertext_and_assignments \
+      queries::cache_destinations::tests::niks3_selection_assigned_first_disabled_fallback_and_stable_order \
+      queries::cache_destinations::tests::niks3_assignment_writers_wait_for_publication_snapshot \
+      handlers::agent::heartbeat::tests::niks3_signed_handler_preserves_pending_deployment_and_delivers_only_selected_reads \
+      handlers::api::builders::tests::niks3_builder_and_agent_selection_share_assigned_first_policy \
+      queries::builders::tests::niks3_canonical_environment_dispatch_rejects_ambiguity_before_credentials \
+      queries::builders::tests::niks3_canonical_environment_completion_rejects_post_dispatch_ambiguity \
+      queries::builders::tests::niks3_preclaim_handler_rejects_legacy_and_allows_capable_builder \
+      queries::builders::tests::niks3_exact_candidate_claim_never_substitutes_after_queue_races \
+      queries::builders::tests::niks3_dispatch_identity_and_completion_transaction_rechecks \
+      queries::builders::tests::niks3_missing_push_queues_exact_id_and_requires_authoritative_output \
+      queries::cache_push::niks3_tests::niks3_recorded_no_cache_dispatch_differs_from_unrecorded_enqueue \
+      queries::cache_push::niks3_tests::niks3_queue_persists_provenance_pins_legacy_and_retains_deleted_identity \
+      queries::cache_publication_reads::tests::niks3_publication_exact_identity_rename_and_secondary_source \
+      queries::cache_publication_reads::tests::niks3_publication_private_capability_and_current_scope_retry \
+      queries::cache_publication_reads::tests::niks3_publication_deleted_id_legacy_and_global_evidence \
+      queries::cache_publication_reads::tests::niks3_publication_database_precedes_legacy_and_ambiguity_fails_closed \
+      queries::cache_publication_reads::tests::niks3_publication_manual_pinned_auto_latest_retained_archive \
+      queries::cache_publication_reads::tests::niks3_publication_unknown_historical_and_bridge_remain_retryable \
+      queries::cache_publication_reads::tests::niks3_publication_rotation_race_before_claim_locks \
+      queries::cache_publication_reads::tests::niks3_publication_assignment_race_before_claim_locks \
+      queries::cache_publication_reads::tests::niks3_publication_deletion_race_before_claim_locks \
+      queries::cache_publication_reads::tests::niks3_publication_assigned_gates_never_downgrade_to_proven_global
+    do
+      runExactCacheRegression "$testName" --ignored
+    done
+    for testName in \
+      handlers::agent_request::tests::niks3_capability_requires_authenticated_body_and_ignores_unsigned_headers \
+      handlers::agent::heartbeat::tests::niks3_selected_cache_never_drops_private_or_unsupported_first_for_fallback \
+      handlers::api::builders::tests::niks3_preclaim_capability_gate_preserves_legacy_cache_dispatch
+    do
+      runExactCacheRegression "$testName"
+    done
 
     runHook postCheck
   '';

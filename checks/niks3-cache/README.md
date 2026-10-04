@@ -15,6 +15,16 @@ The pinned package is **Niks3 1.6.0**. Crystal Forge overrides its `nix`
 dependency with `pkgs.nix-eval-jobs.nix`. This retains Niks3's upstream version
 and preserves the exact evaluator Nix when the CLI starts a child process.
 
+## CI
+
+The `.gitlab-ci.yml` `flake-check` matrix includes `CHECK_NAME: niks3-cache`.
+The generated job `flake-check: [niks3-cache]` is blocking on merge requests and
+`main`, uses the existing `nix` runner tag, and builds
+`.#checks.x86_64-linux.niks3-cache`. The assigned runner must provide KVM to the
+Nix builder. Report the exact job's runner or KVM failure; a fixture run or
+another check does not replace this gate. Matrix membership and earlier local
+runs do not establish a pass for the exact commit under review.
+
 ## Full integration gate
 
 The check uses four isolated NixOS VMs: cache, server, remote API builder, and

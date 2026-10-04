@@ -19,3 +19,12 @@ reported by `nix-eval-jobs` itself.
 
 The Niks3 override changes only its Nix dependency. The pinned upstream Niks3
 version remains 1.6.0.
+
+## CI
+
+The `.gitlab-ci.yml` `flake-check` matrix includes
+`CHECK_NAME: builder-evaluator-packaging`. The generated job
+`flake-check: [builder-evaluator-packaging]` is blocking on merge requests and
+`main`, uses the existing `nix` runner tag, and builds
+`.#checks.x86_64-linux.builder-evaluator-packaging`. Matrix membership does not
+establish a pass; review the job result for the exact commit under review.

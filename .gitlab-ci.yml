@@ -186,6 +186,8 @@ flake-check:
           - oidc-auth
           - run-ui-dev-db-check
           - server-regressions
+          - niks3-cache
+          - builder-evaluator-packaging
           - web-ui-test-runner
           - okf-knowledge
   before_script:

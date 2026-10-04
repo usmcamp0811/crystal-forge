@@ -48,16 +48,20 @@ def run_matrix(machines, targets, builder_public_key, credentials):
         # credentials. A timeout is a test failure, not a skipped scenario.
         raise AssertionError(f"Timed out: {description}")
 
-    def request_target(target):
+    def request_target(target, derivation_id, commit_id):
         # A fresh desired target and pending request are one queue operation.
         # The heartbeat handler still performs the real authorization/claim.
+        sql("""UPDATE pending_system_deployments SET status='superseded',completed_at=NOW()
+            WHERE system_id=(SELECT id FROM systems WHERE hostname='agent') AND status='pending'""")
         return sql("""WITH requested AS (
             UPDATE systems SET desired_target=%s,desired_target_set_at=NOW()
             WHERE hostname='agent' RETURNING id
-        ) INSERT INTO pending_system_deployments(system_id,target_store_path,source)
-          SELECT id,%s,'niks3-vm-fixture' FROM requested RETURNING id""", (target, target))[0][0]
+        ) INSERT INTO pending_system_deployments
+          (system_id,target_store_path,source,request_action,requested_derivation_id,requested_commit_id)
+          SELECT id,%s,'manual_deploy','deploy',%s,%s FROM requested RETURNING id""",
+          (target, target, derivation_id, commit_id))[0][0]
 
-    def heartbeat(capable=False):
+    def heartbeat(capable=False, confidential=True):
         # Sign the exact legacy flat body, not a current packaged agent request.
         # Spoofed capability headers must not override the signed absent flag.
         state = {"hostname": "agent", "change_reason": "startup",
@@ -69,7 +73,8 @@ def run_matrix(machines, targets, builder_public_key, credentials):
             "+/GIbrjuyb3Hf2es5w+vWSlDUhEsAIojiyyfgskC7QA="
         )).sign(body).signature).decode()
         agent.succeed(f"umask 077; printf %s {shlex.quote(body.decode())} > /tmp/heartbeat.json")
-        agent.succeed("curl --fail --silent --show-error https://server/agent/heartbeat "
+        endpoint = "https://server" if confidential else "http://server:8000"
+        agent.succeed(f"curl --fail --silent --show-error {endpoint}/agent/heartbeat "
                       "-H 'Content-Type: application/json' -H 'X-Key-ID: agent' "
                       "-H 'X-Agent-Supports-Niks3: true' "
                       "-H 'X-Agent-Capabilities: {\"supports_niks3\":true}' "
@@ -80,6 +85,17 @@ def run_matrix(machines, targets, builder_public_key, credentials):
         response = json.loads(agent.succeed("jq '{desired_target, runtime_caches: [.runtime_caches[] | {cache_url, cache_type}]}' /tmp/heartbeat-response.json"))
         agent.succeed("rm /tmp/heartbeat.json /tmp/heartbeat-response.json")
         return response
+
+    def assert_withheld(pending_id, description, capable=True, confidential=True):
+        response = heartbeat(capable=capable, confidential=confidential)
+        assert response == {"desired_target": None, "runtime_caches": []}, description
+        assert sql("SELECT status,delivered_at,completed_at,request_action FROM pending_system_deployments WHERE id=%s",
+                   (pending_id,))[0] == ("pending", None, None, "deploy"), f"{description}: request consumed"
+
+    def assert_delivered(target, read_url, description):
+        response = heartbeat(capable=True)
+        assert response == {"desired_target": target, "runtime_caches": [
+            {"cache_url": read_url, "cache_type": "Niks3"}]}, description
 
     counter = 0
 
@@ -97,7 +113,7 @@ def run_matrix(machines, targets, builder_public_key, credentials):
     other_environment_id = sql("SELECT id FROM environments WHERE name='unrelated'")[0][0]
     sql("INSERT INTO builder_environment_assignments(builder_id, environment_id) VALUES (%s,%s)", (builder_id, environment_id))
     flake_id = sql("INSERT INTO flakes(name,repo_url) VALUES ('niks3-fixture','https://example.invalid/niks3') RETURNING id")[0][0]
-    sql("UPDATE systems SET flake_id=%s WHERE hostname='agent'", (flake_id,))
+    sql("UPDATE systems SET flake_id=%s,deployment_policy='manual' WHERE hostname='agent'", (flake_id,))
     sql("UPDATE scan_schedule_policy SET on_build=false WHERE id=1")
 
     # This usable public fallback sorts before every assigned destination. It
@@ -121,6 +137,7 @@ def run_matrix(machines, targets, builder_public_key, credentials):
     wait_row("SELECT current_session_id FROM builders WHERE id=%s", (builder_id,), lambda rows: rows and rows[0][0] is not None, "remote builder session")
 
     for variant, target in targets.items():
+        published_name = f"z-published-{variant}"
         commit_id = sql("INSERT INTO commits(flake_id,git_commit_hash,commit_timestamp,evaluation_status) VALUES (%s,%s,NOW(),'complete') RETURNING id", (flake_id, hashlib.sha1(variant.encode()).hexdigest()))[0][0]
         # The evaluated identity is seeded; background metadata hydration must
         # not try to fetch the intentionally nonexistent fixture repository.
@@ -136,7 +153,7 @@ def run_matrix(machines, targets, builder_public_key, credentials):
              niks3_read_client_cert,niks3_read_client_key,niks3_read_ca_cert,
              require_sigs,parallel_uploads,max_retries)
             VALUES (%s,'Niks3',true,%s,'https://cache:5751',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true,2,0)
-            RETURNING id""", (variant, read_url, signing_keys,
+            RETURNING id""", (published_name, read_url, signing_keys,
                 "mtls" if mtls_write else "token", None if mtls_write else encrypt(TOKEN),
                 pem("write.crt") if mtls_write else None, encrypt(pem("write.key")) if mtls_write else None,
                 pem("ca.crt") if mtls_write else None, "mtls" if private else "none", pem("read.crt") if private else None,
@@ -160,7 +177,7 @@ def run_matrix(machines, targets, builder_public_key, credentials):
         dispatch = sql("SELECT dispatched_cache_destination_id,cache_dispatch_recorded_at FROM build_jobs WHERE id=%s", (job_id,))[0]
         assert dispatch[0] == cache_id and dispatch[1] is not None, f"{variant}: dispatch identity was not bound"
         publication = sql("SELECT status,cache_destination,cache_destination_id,cache_destination_source FROM cache_push_jobs WHERE derivation_id=%s", (derivation_id,))
-        assert publication and all(row == ("completed", variant, cache_id, "database") for row in publication), f"{variant}: server did not verify selected destination"
+        assert publication and all(row == ("completed", published_name, cache_id, "database") for row in publication), f"{variant}: server did not verify selected destination"
         assert dispatch[0] != global_id
         print(f"Niks3 {variant}: remote completion, dispatch binding, and selected publication verified")
         builder.succeed(f"test -e {shlex.quote(target['out'])}")
@@ -197,36 +214,104 @@ def run_matrix(machines, targets, builder_public_key, credentials):
         scan_status = sql("SELECT status FROM cve_scans WHERE id=%s", (scan_id,))[0][0]
         print(f"Niks3 {variant}: CVE output materialized; scanner terminal status={scan_status}")
 
+        # Add a new assigned identity only AFTER the real build publishes. Its
+        # distinct usable read URL sorts first but has no publication evidence.
+        # Endpoint object presence alone must not invent publication for an ID.
+        earlier_url = "https://cache:5751" if read_port == 5753 else "https://cache:5753"
+        earlier_id = sql("""INSERT INTO cache_destinations
+            (name,cache_type,enabled,push_to,attic_public_key,require_sigs)
+            VALUES (%s,'Http',true,%s,%s,true) RETURNING id""",
+            (f"b-unpublished-{variant}", earlier_url, signing_keys[0]))[0][0]
+        sql("INSERT INTO cache_destination_environments(cache_destination_id,environment_id) VALUES (%s,%s)",
+            (earlier_id, environment_id))
+        assert not sql("SELECT id FROM cache_push_jobs WHERE cache_destination_id=%s AND status='completed'", (earlier_id,))
+
         if variant == "mtls-private":
-            # The same agent in an unrelated environment must receive that
-            # environment's unusable read identity, not the valid private one.
+            # Moving the agent cannot authorize an unpublished unrelated cache
+            # or consume the request. No pull should be instructed at all.
             sql("UPDATE systems SET environment_id=%s WHERE hostname='agent'", (other_environment_id,))
-            request_target(target["out"])
-            agent.succeed("systemctl restart crystal-forge-agent.service")
-            agent.wait_until_succeeds("journalctl -u crystal-forge-agent --no-pager | grep -F 'Cache copy failed after'", timeout=120)
+            isolated_pending = request_target(target["out"], derivation_id, commit_id)
+            assert_withheld(isolated_pending, "unrelated environment received publication")
             agent.fail(f"test -e {shlex.quote(target['out'])}")
-            print("Niks3 mtls-private: unrelated-environment agent pull correctly rejected")
-            agent.succeed("systemctl stop crystal-forge-agent.service")
+            print("Niks3 mtls-private: unrelated-environment delivery withheld without claim")
             sql("UPDATE systems SET environment_id=%s WHERE hostname='agent'", (environment_id,))
 
-        # The real agent obtains environment-scoped read configuration from a
-        # signed heartbeat over verified TLS and pulls before its no-op switch.
-        selected = heartbeat(capable=True)
-        assert selected["runtime_caches"] == [{"cache_url": read_url, "cache_type": "Niks3"}], f"{variant}: agent did not select assigned cache exclusively"
-        pending_id = request_target(target["out"])
-        legacy = heartbeat()
-        assert legacy["desired_target"] is None and legacy["runtime_caches"] == [], f"{variant}: legacy body received Niks3 or global fallback"
-        assert sql("SELECT status,delivered_at,completed_at FROM pending_system_deployments WHERE id=%s", (pending_id,))[0] == ("pending", None, None), f"{variant}: incapable agent claimed deployment"
+        pending_id = request_target(target["out"], derivation_id, commit_id)
+        assert_withheld(pending_id, f"{variant}: legacy body received target/cache", capable=False)
+        if private:
+            assert_withheld(pending_id, f"{variant}: private reads crossed unverified transport", confidential=False)
         assert sql("SELECT desired_target FROM systems WHERE hostname='agent'")[0][0] == target["out"]
         agent.fail(f"test -e {shlex.quote(target['out'])}")
-        print(f"Niks3 {variant}: assigned cache beats earlier global; signed capability-absent body preserves pending deployment")
+        assert_delivered(target["out"], read_url, f"{variant}: earlier assigned cache replaced published ID")
+        assert sql("SELECT delivered_at IS NOT NULL FROM pending_system_deployments WHERE id=%s", (pending_id,))[0][0]
+        sql("UPDATE cache_destinations SET name=%s WHERE id=%s", (f"zz-renamed-{variant}", cache_id))
+        pending_id = request_target(target["out"], derivation_id, commit_id)
+        assert_delivered(target["out"], read_url, f"{variant}: rename broke durable publication")
+        assert sql("SELECT cache_destination,cache_destination_id FROM cache_push_jobs WHERE derivation_id=%s", (derivation_id,))[0] == (published_name, cache_id)
+
+        pending_id = request_target(target["out"], derivation_id, commit_id)
+        sql("UPDATE cache_destinations SET enabled=false WHERE id=%s", (cache_id,))
+        assert_withheld(pending_id, f"{variant}: disabled source delivered unpublished fallback")
+        sql("UPDATE cache_destinations SET enabled=true WHERE id=%s", (cache_id,))
+        sql("UPDATE cache_destination_environments SET environment_id=%s WHERE cache_destination_id=%s",
+            (other_environment_id, cache_id))
+        assert_withheld(pending_id, f"{variant}: reassigned source delivered unpublished fallback")
+        sql("UPDATE cache_destination_environments SET environment_id=%s WHERE cache_destination_id=%s",
+            (environment_id, cache_id))
+
+        if variant == "token-public":
+            # The secondary is backed by the same real Niks3 object store, not
+            # an invented completed row. Publish again with the packaged CLI,
+            # then independently import the exact closure on the SERVER into a
+            # fresh signature-required store before recording fixture evidence.
+            # Workers were disabled at startup (no destination then existed),
+            # so this fixture records completion only after these real probes.
+            secondary_url = "https://cache:5753"
+            secondary_id = sql("""INSERT INTO cache_destinations
+                (name,cache_type,enabled,push_to,niks3_server_url,niks3_public_keys,
+                 niks3_write_auth_mode,niks3_auth_token,niks3_read_auth_mode,require_sigs)
+                VALUES ('y-secondary-published','Niks3',true,%s,'https://cache:5751',%s,
+                        'token',%s,'none',true) RETURNING id""",
+                (secondary_url, signing_keys, encrypt(TOKEN)))[0][0]
+            sql("INSERT INTO cache_destination_environments(cache_destination_id,environment_id) VALUES (%s,%s)",
+                (secondary_id, environment_id))
+            builder.succeed(f"umask 077; printf %s {shlex.quote(TOKEN)} > /tmp/niks3-secondary-token")
+            builder.succeed(f"niks3 push --server-url https://cache:5751 --auth-token-path /tmp/niks3-secondary-token {shlex.quote(target['out'])} >/dev/null 2>&1")
+            builder.succeed("rm /tmp/niks3-secondary-token")
+            probe_root = "/tmp/niks3-secondary-read"
+            server.succeed(f"nix copy --refresh --from {secondary_url} --to 'local?root={probe_root}' "
+                           f"--option trusted-public-keys {shlex.quote(' '.join(signing_keys))} "
+                           f"--option require-sigs true {shlex.quote(target['out'])}")
+            server.succeed(f"test -e {probe_root}{shlex.quote(target['out'])}")
+            server.succeed(f"chmod -R u+w {probe_root}; rm -rf {probe_root}")
+            sql("""INSERT INTO cache_push_jobs
+                (derivation_id,store_path,cache_destination,cache_destination_id,cache_destination_source,status,completed_at)
+                VALUES (%s,%s,'y-secondary-published',%s,'database','completed',NOW())""",
+                (derivation_id, target["out"], secondary_id))
+            sql("UPDATE cache_destinations SET enabled=false WHERE id=%s", (cache_id,))
+            assert_delivered(target["out"], secondary_url, "verified secondary publication did not permit failover")
+            assert sql("SELECT delivered_at IS NOT NULL FROM pending_system_deployments WHERE id=%s", (pending_id,))[0][0]
+            sql("UPDATE cache_destinations SET enabled=false WHERE id=%s", (secondary_id,))
+            sql("UPDATE cache_destinations SET enabled=true WHERE id=%s", (cache_id,))
+            pending_id = request_target(target["out"], derivation_id, commit_id)
+        print(f"Niks3 {variant}: published identity survives earlier assigned cache/rename; unavailable source preserves request")
+
+        # The packaged capable agent still performs the actual pull and no-op
+        # switch through the primary's original public/private read endpoint.
         agent.succeed("systemctl restart crystal-forge-agent.service")
         agent.wait_until_succeeds(f"test -e {shlex.quote(target['out'])}", timeout=120)
         assert sql("SELECT delivered_at IS NOT NULL FROM pending_system_deployments WHERE id=%s", (pending_id,))[0][0], f"{variant}: packaged agent did not claim deployment"
         print(f"Niks3 {variant}: real agent pulled previously absent output")
         agent.succeed("systemctl stop crystal-forge-agent.service")
+        pending_id = request_target(target["out"], derivation_id, commit_id)
+        sql("DELETE FROM cache_destinations WHERE id=%s", (cache_id,))
+        assert_withheld(pending_id, f"{variant}: deleted ID delivered unpublished fallback")
+        assert sql("SELECT cache_destination_id FROM cache_push_jobs WHERE derivation_id=%s AND cache_destination_id=%s",
+                   (derivation_id, cache_id)), f"{variant}: deletion lost historical publication ID"
+        print(f"Niks3 {variant}: deleted primary withholds target and leaves pending request unclaimed")
         sql("UPDATE systems SET desired_target=NULL,desired_target_set_at=NULL WHERE hostname='agent'")
-        sql("UPDATE cache_destinations SET enabled=false WHERE id=%s", (cache_id,))
+        sql("UPDATE pending_system_deployments SET status='superseded',completed_at=NOW() WHERE id=%s", (pending_id,))
+        sql("UPDATE cache_destinations SET enabled=false WHERE id=%s", (earlier_id,))
 
     # Invalid write identity must fail against the real native-mTLS server.
     # Keep tokens in protected files and suppress output, including URLs.

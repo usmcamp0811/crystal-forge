@@ -3,8 +3,8 @@ use crate::handlers::agent_request::{
     deserialize_system_state_versioned,
 };
 use crate::models::agent_heartbeats::AgentHeartbeat;
+#[cfg(test)]
 use crate::models::cache_destination::CacheDestination;
-use crate::queries::cache_destinations::eligible_cache_destinations_for_environment;
 use crate::queries::systems::{
     BootIdChange, deactivate_duplicate_active_systems_by_public_key,
     get_agent_desired_target_by_hostname, get_system_heartbeat_interval_secs, update_boot_id_tx,
@@ -30,6 +30,7 @@ use uuid::Uuid;
 //   use crystal_forge::handlers::agent::heartbeat::{LogResponse, RuntimeCacheConfig};
 pub use cf_protocol::agent::{LogResponse, RuntimeCacheConfig};
 
+#[cfg(test)]
 fn destination_to_runtime_cache(
     destination: CacheDestination,
     confidential: bool,
@@ -53,21 +54,9 @@ fn destination_to_runtime_cache(
     })
 }
 
-async fn load_runtime_caches_for_agent(
-    pool: &PgPool,
-    environment_id: Option<uuid::Uuid>,
-    confidential: bool,
-    capabilities: cf_protocol::agent::AgentCapabilities,
-) -> anyhow::Result<Vec<RuntimeCacheConfig>> {
-    selected_runtime_cache(
-        eligible_cache_destinations_for_environment(pool, environment_id).await?,
-        confidential,
-        capabilities,
-    )
-}
-
-// INVARIANT: Select before checking capability or transport. Failure must not
-// retarget a deployment to another eligible cache or local/static settings.
+// These fixtures exercise one nominated source without unrelated fallback.
+// Completed alternatives are resolved by the transactional publication helper.
+#[cfg(test)]
 fn selected_runtime_cache(
     destinations: Vec<CacheDestination>,
     confidential: bool,
@@ -116,9 +105,10 @@ fn handle_duplicate_active_system_cleanup_result(
 /// Handles `/agent/heartbeat` and delivers read-only cache settings.
 /// Verifies the body signature using headers, parses the payload, and
 /// stores system state info in the database.
-/// Delivers only the canonical first selected cache. Niks3 requires capability
-/// in the verified body. Private reads require a trusted HTTPS proxy. A selected
-/// cache failure suppresses the target before claiming a pending deployment;
+/// Delivers only a completed publication for the exact authorized target.
+/// Niks3 requires capability in the verified body. Private reads require a
+/// trusted HTTPS proxy. An exact
+/// publication source failure suppresses the target before claiming deployment;
 /// heartbeat ingestion still commits and the deployment remains retryable.
 pub async fn log(
     State(state): State<CFState>,
@@ -436,33 +426,24 @@ pub async fn log(
         &headers,
         peer.map(|peer| peer.0),
     );
-    // SECURITY: Withhold the instruction before the one-shot deployment claim.
-    // An empty response after a selected-cache error cannot authorize fallback.
-    let runtime_caches = match load_runtime_caches_for_agent(
-        &pool,
-        agent_request.system.environment_id,
-        confidential,
-        capabilities,
-    )
-    .await
-    {
-        Ok(caches) => caches,
-        Err(_) => {
-            warn!("Selected agent cache unavailable; deployment delivery withheld");
-            desired_target = None;
-            Vec::new()
-        }
-    };
+    let mut runtime_caches = Vec::new();
 
     if let Some(target) = desired_target.clone() {
-        match crate::services::composite_enforcement::authorize_and_claim_desired_target(
+        match crate::services::composite_enforcement::authorize_and_claim_desired_target_with_read(
             &pool,
             agent_request.system.id,
             &target,
+            confidential,
+            capabilities,
         )
         .await
         {
             Ok(delivery) if delivery.target.is_some() => {
+                runtime_caches = delivery
+                    .publication_read
+                    .into_iter()
+                    .map(|read| read.into_runtime_cache())
+                    .collect();
                 desired_target = delivery.target;
             }
             Ok(delivery) => {
@@ -471,7 +452,7 @@ pub async fn log(
                     target = %target,
                     outcome = ?delivery.authorization.outcome,
                     detail = %delivery.authorization.detail,
-                    "Composite policy or desired-target guard blocked final deployment target delivery"
+                    "Composite policy, publication source, or desired-target guard blocked delivery"
                 );
                 desired_target = None;
             }
@@ -658,6 +639,22 @@ mod tests {
             .fetch_one(&pool).await.unwrap();
         sqlx::query("INSERT INTO cache_destination_environments (cache_destination_id, environment_id) VALUES ($1, $2)")
             .bind(selected_id).bind(environment).execute(&pool).await.unwrap();
+        let flake: i32 = sqlx::query_scalar("INSERT INTO flakes (name, repo_url, branch) VALUES ('signed-flake', 'https://example.invalid/signed', 'main') RETURNING id")
+            .fetch_one(&pool).await.unwrap();
+        let commit: i32 = sqlx::query_scalar("INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, 'signed-target', now()) RETURNING id")
+            .bind(flake).fetch_one(&pool).await.unwrap();
+        let derivation: i32 = sqlx::query_scalar("INSERT INTO derivations (commit_id, derivation_name, derivation_type, derivation_path, store_path, status_id, cf_agent_enabled, policy_requirements_met) VALUES ($1, 'signed-host', 'nixos', '/nix/store/signed.drv', '/nix/store/target', 10, TRUE, TRUE) RETURNING id")
+            .bind(commit).fetch_one(&pool).await.unwrap();
+        sqlx::query("UPDATE systems SET flake_id = $2 WHERE id = $1")
+            .bind(system_id)
+            .bind(flake)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE pending_system_deployments SET requested_commit_id = $2, requested_derivation_id = $3 WHERE id = $1")
+            .bind(pending_id).bind(commit).bind(derivation).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO cache_push_jobs (derivation_id, store_path, status, cache_destination_id, cache_destination_source) VALUES ($1, '/nix/store/target', 'completed', $2, 'database')")
+            .bind(derivation).bind(selected_id).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO cache_destinations (name, cache_type, enabled, push_to) VALUES ('a-global', 'Nix', TRUE, 'https://fallback.example')")
             .execute(&pool).await.unwrap();
         let mut config = crate::config::ServerConfig::default();
@@ -786,13 +783,12 @@ mod tests {
         let response = send(&state, &key, &current, false).await;
         assert!(response.desired_target.is_none());
         assert!(response.runtime_caches.is_empty());
-        // Keep positive read-delivery checks independent of composite target evidence.
-        sqlx::query("UPDATE systems SET desired_target = NULL WHERE id = $1")
-            .bind(system_id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        // The capable response must pair the exact target and its publication.
         let response = send(&state, &key, &current, true).await;
+        assert_eq!(
+            response.desired_target.as_deref(),
+            Some("/nix/store/target")
+        );
         assert_eq!(response.runtime_caches.len(), 1);
         assert_eq!(
             response.runtime_caches[0].cache_url,

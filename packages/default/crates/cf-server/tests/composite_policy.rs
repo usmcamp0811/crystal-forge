@@ -3142,7 +3142,22 @@ async fn historical_store_path_without_derivation_is_preserved_without_composite
     let delivery = authorize_and_claim_desired_target(&pool, system_id, &store_path)
         .await
         .unwrap();
-    assert_eq!(delivery.target.as_deref(), Some(store_path.as_str()));
+    // Historical authorization does not establish current publication evidence.
+    assert_eq!(delivery.authorization.outcome, EnforcementOutcome::Pass);
+    assert_eq!(delivery.target, None);
+    assert!(delivery.publication_read.is_none());
+    let pending: (String, Option<DateTime<Utc>>, Option<String>) = sqlx::query_as(
+        "SELECT pending.status, pending.delivered_at, system.desired_target
+         FROM pending_system_deployments pending
+         JOIN systems system ON system.id = pending.system_id
+         WHERE pending.system_id = $1 AND pending.target_store_path = $2",
+    )
+    .bind(system_id)
+    .bind(&store_path)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pending, ("pending".into(), None, Some(store_path)));
 }
 
 #[sqlx::test]
@@ -3421,10 +3436,35 @@ async fn upgrade_target_gets_pending_delivery_only_after_exact_authorization(poo
             .unwrap();
     assert_eq!(before, 0);
 
+    let destination_id: i32 = sqlx::query_scalar(
+        "INSERT INTO cache_destinations (name, cache_type, push_to, enabled)
+         VALUES ('upgrade-publication', 'Http', 'https://upgrade.example/cache', TRUE)
+         RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO cache_push_jobs (derivation_id, store_path, status,
+             cache_destination_id, cache_destination_source)
+         VALUES ($1, $2, 'completed', $3, 'database')",
+    )
+    .bind(context.derivation_id)
+    .bind(&context.store_path)
+    .bind(destination_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
     let claimed = authorize_and_claim_desired_target(&pool, context.system_id, &context.store_path)
         .await
         .unwrap();
     assert_eq!(claimed.target.as_deref(), Some(context.store_path.as_str()));
+    assert_eq!(claimed.authorization.outcome, EnforcementOutcome::Pass);
+    assert_eq!(
+        claimed.publication_read.unwrap().destination_id,
+        destination_id
+    );
     let pending: (String, bool, bool) = sqlx::query_as(
         r#"
         SELECT source, delivered_at IS NOT NULL,

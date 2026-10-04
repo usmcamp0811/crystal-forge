@@ -1387,9 +1387,11 @@ async fn completed_materialization_sources(
     let references = sqlx::query_as::<_, CompletedCacheReference>(
         "SELECT cache_destination, cache_destination_id, cache_destination_source
          FROM cache_push_jobs WHERE derivation_id = $1 AND status = 'completed'
+           AND store_path = $2
          ORDER BY id",
     )
     .bind(derivation.id)
+    .bind(derivation.store_path.as_deref())
     .fetch_all(pool)
     .await
     .context("Failed to query completed publications for materialization")?;
@@ -1820,7 +1822,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires verified task PostgreSQL and ephemeral database creation privileges"]
     async fn materialization_completed_provenance_identity_and_eligibility(pool: PgPool) {
-        let derivation = crate::queries::derivations::insert_derivation_with_target(
+        let mut derivation = crate::queries::derivations::insert_derivation_with_target(
             &pool,
             None,
             "materialization-identity",
@@ -1830,6 +1832,13 @@ mod tests {
         )
         .await
         .unwrap();
+        derivation.store_path = Some("/nix/store/materialization-identity".into());
+        sqlx::query("UPDATE derivations SET store_path = $2 WHERE id = $1")
+            .bind(derivation.id)
+            .bind(&derivation.store_path)
+            .execute(&pool)
+            .await
+            .unwrap();
         let destination_id: i32 = sqlx::query_scalar(
             "INSERT INTO cache_destinations (name, cache_type, push_to, enabled, niks3_server_url,
                 niks3_public_keys, niks3_read_auth_mode, niks3_write_auth_mode, niks3_auth_token)
@@ -1845,11 +1854,12 @@ mod tests {
         .unwrap();
         let job_id: i32 = sqlx::query_scalar(
             "INSERT INTO cache_push_jobs (derivation_id, status, cache_destination,
-                cache_destination_id, cache_destination_source)
-             VALUES ($1, 'completed', 'original', $2, 'database') RETURNING id",
+                cache_destination_id, cache_destination_source, store_path)
+             VALUES ($1, 'completed', 'original', $2, 'database', $3) RETURNING id",
         )
         .bind(derivation.id)
         .bind(destination_id)
+        .bind(&derivation.store_path)
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -1873,6 +1883,20 @@ mod tests {
             .unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].label, "renamed");
+        sqlx::query("UPDATE cache_push_jobs SET store_path = '/nix/store/wrong-publication-output' WHERE id = $1")
+            .bind(job_id).execute(&pool).await.unwrap();
+        assert!(
+            completed_materialization_sources(&pool, &derivation, &static_config)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        sqlx::query("UPDATE cache_push_jobs SET store_path = $2 WHERE id = $1")
+            .bind(job_id)
+            .bind(&derivation.store_path)
+            .execute(&pool)
+            .await
+            .unwrap();
         assert_eq!(
             sources[0].cache_config.as_ref().unwrap().niks3_public_keys,
             [
@@ -1942,8 +1966,9 @@ mod tests {
             "INSERT INTO cache_destinations (name, cache_type, push_to, enabled, niks3_server_url,
                 niks3_public_keys, niks3_read_auth_mode, niks3_write_auth_mode, niks3_auth_token)
              VALUES ('original', 'Niks3', 'https://read.example', TRUE, 'https://write.example',
-                ARRAY['replacement:key'], 'none', 'token', 'fixture-token') RETURNING id",
+                 $1, 'none', 'token', 'fixture-token') RETURNING id",
         )
+        .bind(vec![nix_public_key_fixture("replacement")])
         .fetch_one(&pool)
         .await
         .unwrap();

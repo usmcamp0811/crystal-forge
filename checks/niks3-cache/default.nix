@@ -50,7 +50,9 @@ in pkgs.testers.runNixOSTest {
         server = {
           enable = lib.mkForce true;
           package = pkgs.crystal-forge.default.cf-server-core-drv;
-          host = "127.0.0.1";
+          # Direct VM HTTP is an authenticated but unverified transport probe.
+          # Only nginx's loopback peer can attest confidential HTTPS delivery.
+          host = "0.0.0.0";
           port = 8000;
           trust_forwarded_builder_https = true;
           trustedProxyCidrs = ["127.0.0.1/32"];

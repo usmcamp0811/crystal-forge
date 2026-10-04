@@ -52,6 +52,8 @@ impl CompositeAuthorization {
 pub struct TargetDeliveryAuthorization {
     /// Contains the claimed target, or `None` when no target was delivered.
     pub target: Option<String>,
+    /// Contains the exact publication read source only after delivery commits.
+    pub publication_read: Option<crate::queries::cache_publication_reads::PublicationRead>,
     /// Contains the composite-policy decision made while claiming the target.
     pub authorization: CompositeAuthorization,
 }
@@ -1983,6 +1985,18 @@ async fn authorize_target_at(
     now: DateTime<Utc>,
     action: AuthorizationAction<'_>,
 ) -> Result<TargetDeliveryAuthorization> {
+    authorize_target_with_read_at(pool, system_id, target, now, action, false, false).await
+}
+
+async fn authorize_target_with_read_at(
+    pool: &PgPool,
+    system_id: Uuid,
+    target: &str,
+    now: DateTime<Utc>,
+    action: AuthorizationAction<'_>,
+    confidential: bool,
+    supports_niks3: bool,
+) -> Result<TargetDeliveryAuthorization> {
     let mut constrained_derivation_id = match &action {
         AuthorizationAction::SetDesired {
             expected_derivation_id,
@@ -2008,18 +2022,20 @@ async fn authorize_target_at(
     .bind(system_id)
     .execute(&mut *tx)
     .await?;
-    let current_desired = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT desired_target FROM systems WHERE id = $1 FOR UPDATE",
-    )
-    .bind(system_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    .context("Composite authorization system was not found")?;
+    let (current_desired, current_environment) =
+        sqlx::query_as::<_, (Option<String>, Option<Uuid>)>(
+            "SELECT desired_target, environment_id FROM systems WHERE id = $1 FOR UPDATE",
+        )
+        .bind(system_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .context("Composite authorization system was not found")?;
     if let AuthorizationAction::ClaimDelivery { expected_target } = action {
         if current_desired.as_deref() != Some(expected_target) {
             tx.commit().await?;
             return Ok(TargetDeliveryAuthorization {
                 target: None,
+                publication_read: None,
                 authorization: CompositeAuthorization {
                     outcome: EnforcementOutcome::NotChecked,
                     assessments: Vec::new(),
@@ -2138,6 +2154,7 @@ async fn authorize_target_at(
                 tx.commit().await?;
                 return Ok(TargetDeliveryAuthorization {
                     target: None,
+                    publication_read: None,
                     authorization: CompositeAuthorization {
                         outcome: EnforcementOutcome::Fail,
                         assessments: Vec::new(),
@@ -2165,6 +2182,7 @@ async fn authorize_target_at(
                 tx.commit().await?;
                 return Ok(TargetDeliveryAuthorization {
                     target: None,
+                    publication_read: None,
                     authorization: CompositeAuthorization {
                         outcome: EnforcementOutcome::Fail,
                         assessments: Vec::new(),
@@ -2192,6 +2210,7 @@ async fn authorize_target_at(
                 tx.commit().await?;
                 return Ok(TargetDeliveryAuthorization {
                     target: None,
+                    publication_read: None,
                     authorization: CompositeAuthorization {
                         outcome: EnforcementOutcome::Fail,
                         assessments: Vec::new(),
@@ -2396,6 +2415,32 @@ async fn authorize_target_at(
             outcome_str(outcome)
         ),
     };
+    // SECURITY: Historical authorization remains valid independently of current
+    // readability. Delivery alone requires exact publication evidence, before
+    // either the upgrade bridge or pending delivered_at can change.
+    let publication_read =
+        if authorization.allowed() && matches!(action, AuthorizationAction::ClaimDelivery { .. }) {
+            let read = crate::queries::cache_publication_reads::resolve_publication_read_tx(
+                &mut tx,
+                exact_target.0,
+                &exact_target.1,
+                current_environment,
+                confidential,
+                supports_niks3,
+            )
+            .await?;
+            if read.is_none() {
+                tx.commit().await?;
+                return Ok(TargetDeliveryAuthorization {
+                    target: None,
+                    publication_read: None,
+                    authorization,
+                });
+            }
+            read
+        } else {
+            None
+        };
     let mut delivered_target = None;
     if authorization.allowed() {
         match action {
@@ -2474,6 +2519,7 @@ async fn authorize_target_at(
                 {
                     tx.commit().await?;
                     return Ok(TargetDeliveryAuthorization {
+                        publication_read: None,
                         target: None,
                         authorization,
                     });
@@ -2582,6 +2628,11 @@ async fn authorize_target_at(
     }
     tx.commit().await?;
     Ok(TargetDeliveryAuthorization {
+        publication_read: if delivered_target.is_some() {
+            publication_read
+        } else {
+            None
+        },
         target: delivered_target,
         authorization,
     })
@@ -2709,6 +2760,9 @@ pub async fn authorize_and_set_system_target_with_artifact(
 /// Authorizes and claims delivery of the expected desired target atomically.
 ///
 /// A changed desired target or non-passing decision returns no claimed target.
+/// Requires a currently readable exact publication. This legacy entry point
+/// assumes public transport and no Niks3 capability, so it cannot bypass the
+/// publication gate used by authenticated agent delivery.
 ///
 /// # Errors
 ///
@@ -2725,6 +2779,51 @@ pub async fn authorize_and_claim_desired_target(
         expected_target,
         Utc::now(),
         AuthorizationAction::ClaimDelivery { expected_target },
+    )
+    .await
+}
+
+/// Claims an exact desired target and its current evidenced read source.
+///
+/// Capability must come from the verified request body. Confidentiality must
+/// come from verified transport. Both outputs become usable only after the
+/// SERIALIZABLE authorization and pending-claim transaction commits. Conflicts
+/// produce no instructions; callers retry with a new transaction.
+///
+/// # Errors
+/// Returns policy, evidence, database, or serialization errors without consuming
+/// pending work. No network operation occurs while locks are held.
+///
+/// # Examples
+/// ```no_run
+/// # async fn deliver(pool: &sqlx::PgPool, system: uuid::Uuid) -> anyhow::Result<()> {
+/// use crystal_forge::services::composite_enforcement::
+///     authorize_and_claim_desired_target_with_read;
+/// let delivery = authorize_and_claim_desired_target_with_read(
+///     pool, system, "/nix/store/authorized-output", false,
+///     cf_protocol::agent::AgentCapabilities::default(),
+/// ).await?;
+/// if let (Some(target), Some(source)) = (delivery.target, delivery.publication_read) {
+///     let read_settings = source.into_runtime_cache();
+///     // Send the committed target and read settings together.
+/// }
+/// # Ok(()) }
+/// ```
+pub async fn authorize_and_claim_desired_target_with_read(
+    pool: &PgPool,
+    system_id: Uuid,
+    expected_target: &str,
+    confidential: bool,
+    capabilities: cf_protocol::agent::AgentCapabilities,
+) -> Result<TargetDeliveryAuthorization> {
+    authorize_target_with_read_at(
+        pool,
+        system_id,
+        expected_target,
+        Utc::now(),
+        AuthorizationAction::ClaimDelivery { expected_target },
+        confidential,
+        capabilities.supports_niks3,
     )
     .await
 }
