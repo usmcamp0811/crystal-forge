@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-04 17:28'
+updated_date: '2026-10-04 17:32'
 labels: []
 dependencies: []
 references:
@@ -96,6 +96,8 @@ Additional user-approved UI scope: preserve completed provenance/CI implementati
 User-requested focused GitGuardian fixture cleanup: fetch/live-MR/local head verification before edits, inspect reported caches.rs cfg(test) base_input and audit all72MR-changedfiles for provider-shaped markers. Replace only AWS-shaped accessID and paired arbitrary validation markers; preserve assertions and cryptographically/native-protocol-required public test fixtures. Run focusedcacheUItests/format/diffcheck and exactliteralabsence searches; inspect existingsecret-scanneravailability. One cleanup commit and normalpush to existingMR only, no historyrewrite/suppressions/merge; distinguish sourceoccurrenceremoval from unavailableGitGuardianincidentstatus.
 
 Proxy upgrade remediation approved by user: add NixOS fail-fast assertion trust_forwarded_builder_https -> nonempty trustedProxyCidrs and correct optiondocumentation. Audit generated TOML and actual serviceCRYSTAL_FORGE_CONFIG path/environment; add evaluation/runtime regression verifying camelCaseCIDR option maps trusted_proxy_cidrs alongsidetrustflag. Keep one productionHTTPStrustdecision helper and derive credential-safe diagnostics (directpeerIP, flag, match, XFPheadercount, exacthttpsbool) without credential/headerbody logging. Update all stale reverseproxycontract docs including multi-builder-api; operator immediateTraefikrepair requires itsactualdirectbackendpeer narrowCIDR+one overwritten XFPhttps. Add direct gate matrix false/empty/wrongpeer/missing/duplicate/http/singlehttps and real authenticatedsignedHTTP builder next-job claim path for Attic/S3/Niks3secret/public configs via TLS reverseproxy. Extend Niks3VMfixture existingrealHTTP path withlegacy cachetypes and loadedmoduleconfig evidence; verify successfulcache-backedclaim notonlyhelper. Run moduleeval/assert/TOMLchecks focusedRust tests and actualproxyVM gate beforepushing. No source/schema/provenance/agentcapability/securitytests weakened and no MRmerge.
+
+Real proxy VM claim regression owner: only checks/niks3-cache/default.nix, packages/cf-test-suite/cf_test/tests/cache/test_niks3_cache.py and VM coverage README prose. Verify generated module TOML through actual server process CRYSTAL_FORGE_CONFIG without trust environment overrides; isolated scratch environment/cache/job/session fixtures exercise signed HTTPS claims for Attic/S3/Niks3, public HTTP claim, spoof overwrite and real direct-path negative matrix using reversible VM-local runtime TOML overrides. Preserve existing five execution/publication/agent/CVE variants. Start retained-log focused niks3-cache gate after shared Rust/module edits stabilize; no host services/DB, commits or native legacy upload claims.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
