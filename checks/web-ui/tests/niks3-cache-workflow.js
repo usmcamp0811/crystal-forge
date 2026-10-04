@@ -83,7 +83,7 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
   });
   await page.route(environmentsRoute, async route => {
     if (route.request().method() === "GET" && failEnvironmentRead
-      && await page.getByRole("dialog", { name: "Niks3 cache destination" }).count() > 0) {
+      && await page.getByRole("dialog", { name: "Cache destination" }).count() > 0) {
       failEnvironmentRead = false;
       return route.fulfill({ status: 503, json: { error: "fixture assignment read failure" } });
     }
@@ -118,7 +118,7 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     await page.goto(`${baseUrl}/caches`);
     await page.getByText(name, { exact: true }).click();
     await page.getByRole("button", { name: "Edit cache", exact: true }).click();
-    const dialog = page.getByRole("dialog", { name: "Niks3 cache destination" });
+    const dialog = page.getByRole("dialog", { name: "Cache destination" });
     await expect(dialog).toBeVisible();
     return dialog;
   };
@@ -136,12 +136,14 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     assert(envs.length > 0, "fixture requires an environment");
     const selected = envs[0];
     await page.getByRole("button", { name: "Add cache", exact: true }).click();
-    await page.getByPlaceholder("e.g. crystal-forge-prod-cache").fill(name);
+    await page.getByLabel("Name", { exact: true }).fill(name);
     await page.getByRole("button", { name: "Nix HTTPS", exact: true }).click();
-    await page.getByPlaceholder("https://cache.nixos.org").fill("https://retained-read.example.com");
+    await page.getByLabel("URL", { exact: true }).fill("https://retained-read.example.com");
+    await page.getByRole("button", { name: "Environments", exact: true }).click();
     await page.getByRole("button", { name: selected.name, exact: true }).click();
+    await page.getByRole("button", { name: "Destination", exact: true }).click();
     await page.getByRole("button", { name: "Niks3", exact: true }).click();
-    let dialog = page.getByRole("dialog", { name: "Niks3 cache destination" });
+    let dialog = page.getByRole("dialog", { name: "Cache destination" });
     await expect(dialog).toBeVisible();
     await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue(name);
     await expect(dialog.getByLabel("Read / substituter URL", { exact: true })).toHaveValue("https://retained-read.example.com");
@@ -151,8 +153,10 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     assert(destinationOrder.indexOf("Read / substituter URL") < destinationOrder.indexOf("Write / API URL"), "Read precedes Write in Destination");
     for (const section of ["Destination", "Credentials", "Environments"]) await expect(dialog.getByRole("button", { name: section, exact: true })).toBeVisible();
     await dialog.getByLabel("Name", { exact: true }).fill("");
-    await dialog.getByRole("button", { name: "Add cache", exact: true }).click();
-    await expect(dialog.getByRole("alert")).toContainText("Enter a cache name");
+    await expect(dialog.getByRole("button", { name: "Add cache", exact: true })).toBeDisabled();
+    await expect(dialog.getByTestId("cache-save-blocked")).toBeVisible();
+    await expect(dialog.getByTestId("cache-save-blocked")).toContainText("Enter a cache name");
+    assert(!requests.some(r => r.method() === "POST" && /\/caches$/.test(r.url())), "invalid Niks3 draft makes no create request");
     await dialog.getByLabel("Name", { exact: true }).fill(name);
     await dialog.getByLabel("Write / API URL", { exact: true }).fill("https://write.example.com");
     await dialog.getByRole("button", { name: "Discover configuration" }).click();
@@ -160,10 +164,14 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     await dialog.getByRole("button", { name: "Discover configuration" }).click();
     await expect(dialog.getByRole("button", { name: "Discovering…", exact: true })).toBeDisabled();
     await expect(dialog.getByLabel("Write / API URL")).toBeDisabled();
+    await expect(dialog.getByRole("button", { name: "Attic", exact: true })).toBeDisabled();
+    await expect(dialog.getByRole("button", { name: "Credentials", exact: true })).toBeDisabled();
+    await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeDisabled();
+    await expect(dialog.getByRole("button", { name: "Close", exact: true })).toBeDisabled();
     releaseDiscovery();
     await expect(dialog.getByLabel("Read / substituter URL")).toHaveValue("https://read.example.com");
     await expect(dialog.getByLabel("Signing public keys")).toHaveValue(keys.join("\n"));
-    await expect(dialog.getByRole("status")).toContainText("Review URLs and all keys before saving");
+    await expect(dialog.getByRole("status").filter({ hasText: "Review URLs and all keys before saving" })).toBeVisible();
     assert.equal(discoveryCount, 2);
     // Discovery must not persist anything or transport any credentials.
     assert(!requests.some(r => r.method() === "POST" && /\/caches$/.test(r.url())));
@@ -194,6 +202,7 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     const own = list.filter(c => c.name === name);
     assert.equal(own.length, 0, "failed scoped create leaves no global cache");
     if (screenshot) await page.screenshot({ path: screenshot.replace(/\.png$/, "-create-rollback.png"), fullPage: true, animations: "disabled" });
+    if (captureState) await captureState("niks3-create-rollback");
     const createResponse = page.waitForResponse(r => /\/api\/v1\/caches$/.test(r.url()) && r.request().method() === "POST");
     await dialog.getByRole("button", { name: "Add cache", exact: true }).click();
     createdId = (await (await createResponse).json()).id;
@@ -222,6 +231,7 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     assert.deepEqual(await (await api("GET", `/caches/${createdId}/environments`)).json(), [selected.id], "failed update retains existing scope");
     assert.equal(requests.filter(r => r.method() === "PUT").length, beforeUpdateCount + 1);
     if (screenshot) await page.screenshot({ path: screenshot.replace(/\.png$/, "-update-rollback.png"), fullPage: true, animations: "disabled" });
+    if (captureState) await captureState("niks3-update-rollback");
     await expect(dialog.getByLabel("Read / substituter URL", { exact: true })).toHaveValue("https://changed-read.example.com");
     await dialog.getByLabel("Read / substituter URL", { exact: true }).fill("https://read.example.com");
     await save(dialog);
@@ -241,8 +251,11 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     await dialog.getByRole("button", { name: "Credentials", exact: true }).click();
     await dialog.getByLabel("Write authentication").selectOption("mtls");
     await dialog.getByLabel("Read authentication").selectOption("mtls");
-    await dialog.getByRole("button", { name: "Save changes", exact: true }).click();
-    await expect(dialog.getByRole("alert")).toContainText("Write mTLS requires");
+    const updatesBeforeInvalidIdentity = requests.filter(r => r.method() === "PUT").length;
+    await expect(dialog.getByRole("button", { name: "Save changes", exact: true })).toBeDisabled();
+    await expect(dialog.getByTestId("cache-save-blocked")).toBeVisible();
+    await expect(dialog.getByTestId("cache-save-blocked")).toContainText("Write mTLS requires");
+    assert.equal(requests.filter(r => r.method() === "PUT").length, updatesBeforeInvalidIdentity, "invalid mTLS edit makes no update request");
     for (const plane of ["Write", "Read"]) {
       await dialog.getByLabel(`${plane} client certificate`, { exact: true }).fill(cert);
       await dialog.getByLabel(`${plane} private key`, { exact: true }).fill(privateKey);
@@ -291,6 +304,7 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     await expect(dialog.getByRole("button", { name: "Save changes", exact: true })).toBeDisabled();
     await expect(dialog.locator("footer")).toContainText("Scope not loaded");
     await expect(dialog.locator("footer")).not.toContainText("Global scope");
+    if (captureState) await captureState("niks3-scope-load-error");
     await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
     dialog = await openEdit();
     await expect(dialog.getByRole("button", { name: "Save changes", exact: true })).toBeEnabled();
@@ -357,6 +371,7 @@ if (require.main === module) {
       await page.waitForURL(url => !url.pathname.includes("login"));
       const status = await page.request.get(`${apiBaseUrl}/status`);
       assert.equal(status.status(), 200);
+      await require("./shared-cache-modal-workflow.js").sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, path.join(outputDir, "task470-shared.png"));
       await niks3CacheWorkflow(page, baseUrl, apiBaseUrl, path.join(outputDir, "task470-review-ui.png"));
       result = { name: "task470-niks3-cache", ok: true };
       console.log("TASK-470 Niks3 browser workflow passed against", apiBaseUrl);

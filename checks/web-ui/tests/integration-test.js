@@ -20952,7 +20952,7 @@ security.audit.enable = true;</fixtext>
       await page.locator("[role='dialog']").first().waitFor({ timeout: 5000 });
 
       const dialog = page.locator("[role='dialog']").first();
-      await dialog.getByRole("button", { name: "S3" }).click();
+      await dialog.getByRole("button", { name: "S3-compatible", exact: true }).click();
       await page.waitForTimeout(1200);
     },
   },
@@ -20960,8 +20960,11 @@ security.audit.enable = true;</fixtext>
     name: "25-caches-modal-attic",
     description: "Add cache modal with Attic type selected",
     action: async (page) => {
-      // TASK-470: add isolated Niks3 assertions to the cache workflow. Restore
-      // the original Attic capture below after the owned fixture is cleaned up.
+      // TASK-470: shared-shell real creates plus Niks3 security/scope regressions.
+      await require("./shared-cache-modal-workflow.js").sharedCacheModalWorkflow(
+        page, baseUrl, apiBaseUrl, undefined,
+        state => captureWorkflowState(page, "25-caches-modal-attic", state),
+      );
       await require("./niks3-cache-workflow.js").niks3CacheWorkflow(
         page, baseUrl, apiBaseUrl, undefined,
         state => captureWorkflowState(page, "25-caches-modal-attic", state),
@@ -20971,7 +20974,7 @@ security.audit.enable = true;</fixtext>
       await page.getByRole("button", { name: "Add cache", exact: true }).click();
       await expect(page.getByRole("heading", { name: "Add cache destination", exact: true })).toBeVisible();
       await page.getByRole("button", { name: "Attic", exact: true }).click();
-      await expect(page.getByPlaceholder("attic://host/cache", { exact: true })).toBeVisible();
+      await expect(page.getByLabel("Attic server URL", { exact: true })).toBeVisible();
     },
   },
   // ── TASK-273: Evaluation cancellation and history ────────────────────────

@@ -73,13 +73,18 @@ static write token is a Niks3 API bearer token; it does not add OIDC support.
 
 ### Caches form workflow
 
-Selecting **Niks3** in the common Add form retains the entered name, read URL,
-and selected environments. The Niks3 form has a header showing the destination
-name, type, and draft status, plus a **Destination**, **Credentials**, and
-**Environments** navigation rail. Destination fields show the read/substituter
-URL before the write/API URL; credential settings show read authentication
-before write authentication. Rail badges describe draft validation and scope,
-not verified connectivity.
+**Add cache** opens one shared form for S3-compatible, Attic, Nix HTTPS, and
+Niks3. Selecting a type does not replace the dialog. Name and selected environments
+remain common, while each type retains its URL, credential, signing, and compression
+draft during switches. Nothing is saved by changing type.
+
+The common header shows the destination name, type, and draft status. All types
+use the same **Destination**, **Credentials**, and **Environments** navigation rail
+and scope-aware footer. Niks3 shows read/substituter fields before write/API fields,
+with independent read and write authentication. Rail badges describe draft
+validation and scope, not verified connectivity. Credential dialogs hold local
+drafts; they do not create a reusable server-side credential inventory. Unsupported
+authentication modes are not advertised as working capabilities.
 
 Discovery populates URLs and signing keys for review before saving. Editing
 loads existing environment assignments before enabling Save. If assignments
@@ -132,15 +137,44 @@ agent replaces its runtime cache list on each heartbeat, rejects unknown types,
 and rejects static Niks3 deployment when server-provided read settings are absent.
 Agents receive only enabled read URLs, signing keys, and read authentication.
 
-Builder publication, agent reads, local publication, and CVE materialization
-share canonical environment eligibility: use enabled destinations assigned to
-the environment first; use enabled global destinations only when no enabled
-assigned destination applies. Disabled assignments do not block global fallback.
-The eligible set is ordered by name, then ID. Agent heartbeats deliver only its
-first destination. A capability, transport, or read-configuration failure after
-selection cannot substitute another destination. Local jobs and completed CVE
-publication references retain their recorded destination identity and must still
-satisfy this eligibility policy.
+Builder and local publication use canonical environment eligibility: enabled
+assigned destinations precede global destinations, with stable name/ID ordering.
+Local jobs and CVE materialization retain recorded publication identity rather
+than reinterpret a deleted ID by its former name or URL.
+
+Deployment reads start from completed publication evidence for the exact
+authorized derivation and exact output path, not today's first configured cache.
+The server resolves database provenance by durable destination ID. A rename
+preserves identity; deletion never redirects evidence to a replacement cache.
+Unambiguous legacy evidence is compatible, but static or unpublished settings
+cannot supply deployment credentials.
+
+Assigned-before-global precedence applies among enabled, currently scoped,
+publication-backed candidates. Adding an unpublished assigned cache cannot
+displace an existing proven source. Within that scope group, database evidence
+precedes legacy evidence, then publication ID orders candidates. If a recorded
+source is disabled, deleted, reassigned, unreadable, or fails its capability or
+transport gate, another completed publication in the eligible scope group may
+serve the target. Failed assigned gates cannot downgrade to global sources.
+
+The server sends only the selected read source together with the desired target.
+Without a usable publication, both fields are withheld and pending work remains
+unclaimed and retryable. A cache name, URL, or completed row for a different
+derivation or output path cannot satisfy this requirement.
+
+Artifact deployability remains historical. Auto-latest and retained deployable
+commits can remain selectable after source archival or cache changes. Actual
+delivery rechecks current publication readability and policy authorization for
+auto-latest, manual, pinned, rollback, and retained-generation targets. Historical
+authorization without an exact resolvable publication does not permit delivery.
+
+Read resolution and the pending-delivery claim share one SERIALIZABLE transaction
+using the locked system's current environment. Shared publication, destination,
+and assignment locks retain the selected configuration through commit; conflicting
+writers and serialization failures cannot yield a claimed target with stale read
+settings. No network probe occurs while those locks are held. Changes after
+commit cannot revoke credentials already sent in an HTTP response; credential
+rotation must overlap identities while in-flight operations drain.
 
 ## Secret storage and rotation
 
