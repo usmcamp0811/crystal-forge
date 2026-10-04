@@ -96,6 +96,44 @@ production module's current string-duration serialization mismatch; the Rust
 deployment config expects integer seconds. Standalone agent tmpfiles also need
 the fixture-supplied `crystal-forge` user.
 
+## Real proxy claim regression
+
+Before the five Niks3 builds, a separate scratch environment, registered builder,
+signed session, evaluated derivation identity and one selected cache at a time
+exercise the real `next-job` and `/start` handlers. Attic, S3 and Niks3 each require
+HTTP 200 through the real HTTPS Nginx proxy, the expected decrypted write
+credential in a protected response file, the exact persisted destination and
+builder/session binding, and HTTP 202 from `/start`. Nginx connects from
+`127.0.0.1` and overwrites client-supplied duplicate/spoofed protocol headers with
+one `X-Forwarded-Proto: https`. This is the same immediate-peer trust contract
+required of Traefik.
+
+The fixture reads the running server's `/proc/<pid>/environ`, follows its actual
+`CRYSTAL_FORGE_CONFIG` path, parses generated TOML, and records only the path,
+PID, ExecStart script, effective Nix path/version, trust flag and CIDRs. It
+checks that ExecStart exports the same config path and rejects server-section
+environment overrides.
+The module configuration must load `trust_forwarded_builder_https = true` and
+`trusted_proxy_cidrs = ["127.0.0.1/32"]`.
+
+Each credential-bearing type must fail through the real claim path for a
+missing, duplicate or HTTP protocol header, a spoofed header from the wrong
+socket peer, a false trust flag, an empty CIDR list and an unmatched CIDR list.
+The check requires HTTP 404, the persisted `[dispatch:cache_config]` transport
+failure, absent dispatch identity, a service diagnostic and no publication row.
+A nonsecret `Http` or `Nix` cache must still claim successfully over direct HTTP
+without a protocol header when the flag is false.
+
+Negative runtime configurations use a reversible bind mount of VM-local raw
+TOML at the module-generated config path, followed by a controlled server
+restart. A guest-local systemd drop-in temporarily clears `ExecStartPre` so the
+module's regeneration step cannot overwrite the raw fixture; `ExecStart` and
+its config-path export remain intact. They do not construct an invalid NixOS
+configuration: the module's
+fail-fast assertion prohibits a true flag with an empty CIDR list. The fixture
+restores the generated configuration, restarts and verifies it, then removes
+the scratch SQL identities before the original five builds begin.
+
 ## Fixture diagnosis
 
 This smaller command can run while shared Rust integration is incomplete:
@@ -117,6 +155,10 @@ logging is disabled. These fixtures must never be used on deployed systems.
 
 ## Limits
 
+- Legacy Attic and S3 coverage here proves authenticated cache-backed claims and
+  accepted `/start` before execution. It does not prove native Attic/S3 uploads
+  or a pass of their separate upload suites. The five Niks3 variants still run
+  complete builds, publication verification and agent pulls.
 - The target has a no-op activation script. Agent pull is tested; a complete
   NixOS generation switch and reboot are not tested.
 - CVE materialization covers the server-local worker. Remote scanner credential

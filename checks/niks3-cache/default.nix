@@ -26,7 +26,9 @@
     security.pki.certificateFiles = ["${credentials}/ca.crt"];
     environment.etc."niks3-fixtures".source = credentials;
     environment.etc."agent.key".source = key;
-    environment.systemPackages = [evaluatorNix pkgs.curl pkgs.jq pkgs.busybox];
+    # Inspect protected responses and generated TOML inside the isolated guests.
+    # Trust tests use the production loader without environment overrides.
+    environment.systemPackages = [evaluatorNix pkgs.curl pkgs.jq pkgs.busybox pkgs.python3];
     services.crystal-forge = {
       enable = true;
       client.enable = false;

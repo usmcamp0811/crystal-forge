@@ -13,6 +13,8 @@ import hashlib
 import json
 import shlex
 import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import psycopg2
@@ -22,6 +24,197 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 TOKEN = "niks3-nonproduction-static-token-470-00000000"
 ENCRYPTION_KEY = "niks3-vm-only-cache-encryption-key-470"
+
+
+def run_proxy_claims(server, builder, sql, encrypt, target, public_key, signing_keys):
+    """Exercises signed dispatch through the real loader, socket and TLS proxy.
+
+    Scratch jobs stop at authenticated /start. No legacy cache upload is
+    fabricated. Raw invalid TOML cases bypass only the Nix evaluation assertion,
+    through a reversible VM-only bind mount at the module's real config path.
+    """
+    def guest_python(source):
+        return server.succeed("python3 -c " + shlex.quote(source))
+
+    def config_evidence():
+        return json.loads(guest_python("""
+import json, pathlib, re, shutil, subprocess, tomllib
+pid = subprocess.check_output(['systemctl','show','-p','MainPID','--value','crystal-forge-server']).decode().strip()
+env = dict(item.split('=',1) for item in pathlib.Path('/proc/'+pid+'/environ').read_bytes().decode().split('\\0') if '=' in item)
+assert not any(k.startswith('CRYSTAL_FORGE__SERVER__') for k in env), 'server environment masks TOML'
+assert not any('TRUST_FORWARDED_BUILDER_HTTPS' in k or 'TRUSTED_PROXY_CIDRS' in k for k in env), 'trust environment masks TOML'
+path = env['CRYSTAL_FORGE_CONFIG']
+cfg = tomllib.loads(pathlib.Path(path).read_text())['server']
+unit = subprocess.check_output(['systemctl','show','-p','ExecStart','--value','crystal-forge-server']).decode()
+script = re.search(r'path=([^ ;]+)',unit).group(1)
+assert 'export CRYSTAL_FORGE_CONFIG="'+path+'"' in pathlib.Path(script).read_text()
+nix = shutil.which('nix',path=env['PATH'])
+version = subprocess.check_output([nix,'--version']).decode().strip()
+print(json.dumps({'path':path,'pid':int(pid),'exec_start':script,'nix':nix,'nix_version':version,'flag':cfg['trust_forwarded_builder_https'],'cidrs':cfg['trusted_proxy_cidrs']}))
+"""))
+
+    original = config_evidence()
+    assert original["flag"] is True and original["cidrs"] == ["127.0.0.1/32"]
+    print("Proxy claim loaded module config: " + json.dumps(original, sort_keys=True))
+    config_path = original["path"]
+    server.succeed(f"cp {shlex.quote(config_path)} /run/proxy-claim-original.toml")
+
+    def runtime_config(flag, cidrs):
+        # Keep the module ExecStart and CRYSTAL_FORGE_CONFIG unchanged. A mount
+        # changes only this disposable guest's view of its generated config.
+        guest_python(f"""
+import pathlib, re, shutil
+text = pathlib.Path('/run/proxy-claim-original.toml').read_text()
+text, n = re.subn(r'(?m)^trust_forwarded_builder_https\\s*=.*$', 'trust_forwarded_builder_https = {str(flag).lower()}', text)
+assert n == 1
+text, n = re.subn(r'(?m)^trusted_proxy_cidrs\\s*=.*$', 'trusted_proxy_cidrs = {json.dumps(cidrs)}', text)
+assert n == 1
+runtime = pathlib.Path('/run/proxy-claim-runtime.toml')
+runtime.write_text(text)
+shutil.chown(runtime, user='crystal-forge', group='crystal-forge')
+runtime.chmod(0o600)
+# The module regenerates TOML in ExecStartPre. Disable that one guest-local
+# step while the explicit raw fixture is mounted; ExecStart remains intact.
+dropin = pathlib.Path('/run/systemd/system/crystal-forge-server.service.d/proxy-claim.conf')
+dropin.parent.mkdir(parents=True, exist_ok=True)
+dropin.write_text('[Service]\\nExecStartPre=\\n')
+""")
+        server.succeed(f"mount --bind /run/proxy-claim-runtime.toml {shlex.quote(config_path)}")
+        server.succeed("systemctl daemon-reload")
+        server.succeed("systemctl restart crystal-forge-server")
+        server.wait_for_unit("crystal-forge-server.service")
+        server.wait_for_open_port(8000)
+        evidence = config_evidence()
+        assert evidence["path"] == config_path and evidence["flag"] == flag and evidence["cidrs"] == cidrs
+        print("Proxy claim isolated raw-TOML runtime: " + json.dumps(evidence, sort_keys=True))
+
+    env_id = sql("INSERT INTO environments(name) VALUES ('proxy-claim-scratch') RETURNING id")[0][0]
+    builder_id = sql("INSERT INTO builders(name,public_key,status,arch) VALUES ('proxy-claim-scratch',%s,'active','x86_64-linux') RETURNING id", (public_key,))[0][0]
+    sql("INSERT INTO builder_environment_assignments(builder_id,environment_id) VALUES (%s,%s)", (builder_id, env_id))
+    flake_id = sql("INSERT INTO flakes(name,repo_url) VALUES ('proxy-claim-scratch','https://example.invalid/proxy-claim') RETURNING id")[0][0]
+    sql("INSERT INTO systems(hostname,environment_id,public_key,flake_id,derivation) VALUES ('proxy-claim-scratch',%s,%s,%s,'proxy-claim-scratch')", (env_id, public_key, flake_id))
+    session_id = str(uuid.uuid4())
+    key = SigningKey(base64.b64decode("+/GIbrjuyb3Hf2es5w+vWSlDUhEsAIojiyyfgskC7QA="))
+
+    def signed_request(machine, endpoint, suffix, payload, headers=()):
+        path = f"/api/v1/builders/{builder_id}/{suffix}"
+        body = json.dumps(payload, separators=(",", ":"))
+        timestamp = datetime.now(timezone.utc).isoformat()
+        signature = base64.b64encode(key.sign(f"POST\n{path}\n{timestamp}\n{body}".encode()).signature).decode()
+        auth = ["Content-Type: application/json", f"X-Builder-ID: {builder_id}",
+                f"X-Builder-Session-ID: {session_id}", f"X-Timestamp: {timestamp}", f"X-Signature: {signature}"]
+        machine.succeed(f"umask 077; printf %s {shlex.quote(body)} > /tmp/proxy-claim-body")
+        status = machine.succeed(f"curl --silent --show-error -X POST {shlex.quote(endpoint + path)} "
+                                 + " ".join("-H " + shlex.quote(h) for h in auth + list(headers))
+                                 + " --data-binary @/tmp/proxy-claim-body -o /tmp/proxy-claim-response -w '%{http_code}'").strip()
+        # Never print a credential-bearing response through the VM driver.
+        response = json.loads(machine.succeed("python3 -c " + shlex.quote("""
+import json, pathlib
+text = pathlib.Path('/tmp/proxy-claim-response').read_text()
+try:
+    data = json.loads(text)
+except ValueError:
+    data = {}
+cache = data.get('derivation',{}).get('cache_push',{})
+print(json.dumps({'job':data.get('job',{}).get('id'),'type':cache.get('cache_type'),
+    'destination':cache.get('cache_destination_id'), 'push':cache.get('push_after_build'),
+    'attic':cache.get('attic_token') == 'proxy-claim-attic-secret',
+    's3':cache.get('s3_secret_access_key') == 'proxy-claim-s3-secret',
+    'niks3':cache.get('niks3_write_auth') == {'kind':'token','token':'proxy-claim-niks3-secret'},
+    'no_secrets':not any(cache.get(k) for k in ('attic_token','s3_access_key_id','s3_secret_access_key','s3_session_token','signing_key','niks3_write_auth'))}))
+""")))
+        machine.succeed("rm /tmp/proxy-claim-body /tmp/proxy-claim-response")
+        return int(status), response
+
+    # Both request origins need the bounded response inspector.
+    status, _ = signed_request(server, "https://server", "session", {"session_id": session_id, "capabilities": {"niks3_cache": True}})
+    assert status == 200, "signed scratch session establishment failed"
+    assert str(sql("SELECT current_session_id FROM builders WHERE id=%s", (builder_id,))[0][0]) == session_id
+    commit_id = sql("INSERT INTO commits(flake_id,git_commit_hash,commit_timestamp,evaluation_status) VALUES (%s,%s,NOW(),'complete') RETURNING id", (flake_id, hashlib.sha1(b"proxy-claim-scratch").hexdigest()))[0][0]
+    sql("INSERT INTO commit_artifacts_cache(commit_id,nixos_configurations) VALUES (%s,ARRAY['proxy-claim-scratch'])", (commit_id,))
+    derivation_id = sql("""INSERT INTO derivations
+        (commit_id,derivation_type,derivation_name,derivation_target,derivation_path,store_path,status_id,
+         cf_agent_enabled,policy_requirements_met,scheduled_at)
+        VALUES (%s,'nixos','proxy-claim-scratch','proxy-claim-scratch',%s,%s,5,true,true,NOW()) RETURNING id""", (commit_id, target["drv"], target["out"]))[0][0]
+    caches = {}
+    for cache_type in ("Attic", "S3", "Niks3", "Http", "Nix"):
+        cache_id = sql("""INSERT INTO cache_destinations
+            (name,cache_type,enabled,push_to,attic_cache_name,attic_token,s3_region,s3_access_key_id,s3_secret_access_key,
+             niks3_server_url,niks3_public_keys,niks3_write_auth_mode,niks3_auth_token,niks3_read_auth_mode)
+            VALUES (%s,%s,false,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+            (f"proxy-claim-{cache_type}", cache_type, "s3://proxy-claim" if cache_type == "S3" else "https://cache:5753",
+             "proxy-claim" if cache_type == "Attic" else None, encrypt("proxy-claim-attic-secret") if cache_type == "Attic" else None,
+             "us-east-1" if cache_type == "S3" else None, "proxy-claim-access-id" if cache_type == "S3" else None,
+             encrypt("proxy-claim-s3-secret") if cache_type == "S3" else None,
+             "https://cache:5751" if cache_type == "Niks3" else None, signing_keys if cache_type == "Niks3" else [],
+             "token" if cache_type == "Niks3" else None, encrypt("proxy-claim-niks3-secret") if cache_type == "Niks3" else None,
+             "none" if cache_type == "Niks3" else None))[0][0]
+        sql("INSERT INTO cache_destination_environments(cache_destination_id,environment_id) VALUES (%s,%s)", (cache_id, env_id))
+        caches[cache_type] = cache_id
+
+    def claim(cache_type, label, machine=server, endpoint="http://127.0.0.1:8000", headers=(), allowed=False):
+        sql("UPDATE cache_destinations SET enabled=(id=%s) WHERE id=ANY(%s)", (caches[cache_type], list(caches.values())))
+        sql("UPDATE derivations SET status_id=5 WHERE id=%s", (derivation_id,))
+        # Exhaust the scratch row's retry budget without changing global policy.
+        job_id = sql("INSERT INTO build_jobs(derivation_id,environment_id,status,queue_position,max_retries,retry_count) VALUES (%s,%s,'queued',1000,0,100000) RETURNING id", (derivation_id, env_id))[0][0]
+        cursor = server.succeed("journalctl -u crystal-forge-server -n 0 --show-cursor --no-pager").strip().split("-- cursor: ")[-1]
+        status, response = signed_request(machine, endpoint, "next-job", {"capabilities": {"niks3_cache": True}, "supported_execution_strategies": ["server_derivation"]}, headers)
+        print(f"Proxy claim safe response {label}/{cache_type}: status={status}; {json.dumps(response, sort_keys=True)}")
+        row = sql("SELECT status,builder_id,builder_session_id,dispatched_cache_destination_id,cache_dispatch_recorded_at,logs FROM build_jobs WHERE id=%s", (job_id,))[0]
+        if allowed:
+            assert status == 200 and response["job"] == str(job_id), f"{label}/{cache_type}: claim failed ({status})"
+            assert response["type"] == cache_type and response["destination"] == caches[cache_type] and response["push"] is True
+            assert response[{"Attic": "attic", "S3": "s3", "Niks3": "niks3", "Http": "no_secrets", "Nix": "no_secrets"}[cache_type]], f"{label}/{cache_type}: payload mismatch"
+            assert row[:2] == ("building", builder_id) and str(row[2]) == session_id
+            assert row[3] == caches[cache_type] and row[4] is not None
+            assert row[5] is None or "[dispatch:cache_config]" not in row[5]
+            start_status, _ = signed_request(machine, endpoint, f"jobs/{job_id}/start", {}, headers)
+            assert start_status == 202
+            assert sql("SELECT status FROM build_jobs WHERE id=%s", (job_id,))[0][0] == "building"
+        else:
+            assert status == 404, f"{label}/{cache_type}: expected confidentiality refusal, got {status}"
+            assert row[0] in ("queued", "failed") and row[3:5] == (None, None)
+            assert "[dispatch:cache_config]" in (row[5] or "") and "not verified HTTPS" in row[5]
+            logs = server.succeed(f"journalctl -u crystal-forge-server --after-cursor={shlex.quote(cursor)} --no-pager")
+            assert "refusing to send cache push credentials" in logs
+        assert not sql("SELECT id FROM cache_push_jobs WHERE derivation_id=%s", (derivation_id,)), "claim fabricated publication"
+        sql("DELETE FROM build_jobs WHERE id=%s", (job_id,))
+        print(f"Proxy real signed claim {label}/{cache_type}: status={status}; {'dispatch bound and /start accepted' if allowed else 'cache_config refusal before dispatch'}")
+
+    try:
+        for cache_type in ("Attic", "S3", "Niks3"):
+            claim(cache_type, "module-HTTPS", endpoint="https://server", allowed=True)
+            claim(cache_type, "proxy-overwrites-spoof", endpoint="https://server", headers=("X-Forwarded-Proto: http", "X-Forwarded-Proto: attacker"), allowed=True)
+            claim(cache_type, "missing-header")
+            claim(cache_type, "duplicate-header", headers=("X-Forwarded-Proto: https", "X-Forwarded-Proto: https"))
+            claim(cache_type, "http-header", headers=("X-Forwarded-Proto: http",))
+            claim(cache_type, "wrong-peer", machine=builder, endpoint="http://server:8000", headers=("X-Forwarded-Proto: https",))
+        for label, flag, cidrs in (("flag-false", False, ["127.0.0.1/32"]), ("empty-CIDR", True, []), ("untrusted-CIDR", True, ["192.0.2.1/32"])):
+            runtime_config(flag, cidrs)
+            for cache_type in ("Attic", "S3", "Niks3"):
+                claim(cache_type, label, endpoint="https://server")
+            if not flag:
+                claim("Http", "nonsecret-direct-HTTP-flag-false", allowed=True)
+                claim("Nix", "nonsecret-direct-HTTP-flag-false", allowed=True)
+            server.succeed(f"umount {shlex.quote(config_path)}")
+    finally:
+        server.execute(f"mountpoint -q {shlex.quote(config_path)} && umount {shlex.quote(config_path)}")
+        server.succeed("rm -f /run/systemd/system/crystal-forge-server.service.d/proxy-claim.conf; systemctl daemon-reload")
+        server.succeed("systemctl restart crystal-forge-server")
+        server.wait_for_unit("crystal-forge-server.service")
+        server.wait_for_open_port(8000)
+        restored = config_evidence()
+        assert restored["flag"] is True and restored["cidrs"] == ["127.0.0.1/32"]
+        print("Proxy claim restored module config: " + json.dumps(restored, sort_keys=True))
+        sql("DELETE FROM build_jobs WHERE derivation_id=%s", (derivation_id,))
+        sql("DELETE FROM derivations WHERE id=%s", (derivation_id,))
+        sql("DELETE FROM systems WHERE hostname='proxy-claim-scratch'")
+        sql("DELETE FROM commits WHERE id=%s", (commit_id,))
+        sql("DELETE FROM flakes WHERE id=%s", (flake_id,))
+        sql("DELETE FROM cache_destinations WHERE id=ANY(%s)", (list(caches.values()),))
+        sql("DELETE FROM builders WHERE id=%s", (builder_id,))
+        sql("DELETE FROM environments WHERE id=%s", (env_id,))
+        server.succeed("rm -f /run/proxy-claim-original.toml /run/proxy-claim-runtime.toml")
 
 
 def run_matrix(machines, targets, builder_public_key, credentials):
@@ -108,6 +301,7 @@ def run_matrix(machines, targets, builder_public_key, credentials):
 
     pem = lambda name: (credentials / name).read_text()
     signing_keys = [pem(f"signing-{index}.pub").strip() for index in range(2)]
+    run_proxy_claims(server, builder, sql, encrypt, next(iter(targets.values())), builder_public_key, signing_keys)
     builder_id = sql("INSERT INTO builders(name, public_key, status, arch) VALUES ('niks3-remote', %s, 'active', 'x86_64-linux') RETURNING id", (builder_public_key,))[0][0]
     environment_id = sql("SELECT id FROM environments WHERE name='niks3'")[0][0]
     other_environment_id = sql("SELECT id FROM environments WHERE name='unrelated'")[0][0]
@@ -323,7 +517,8 @@ def run_matrix(machines, targets, builder_public_key, credentials):
     builder.succeed("rm /tmp/niks3-invalid-token")
 
     # Audit service logs in memory; do not print a failing secret or full log.
-    secrets = [TOKEN, "unrelated-environment-token-470-00000000"]
+    secrets = [TOKEN, "unrelated-environment-token-470-00000000",
+               "proxy-claim-attic-secret", "proxy-claim-s3-secret", "proxy-claim-niks3-secret"]
     secrets += [pem(f"{name}.key").splitlines()[1] for name in ("write", "read", "wrong")]
     for name, machine in machines.items():
         logs = machine.succeed("journalctl --no-pager -u crystal-forge-server -u crystal-forge-builder -u crystal-forge-agent -u niks3 -u nginx -u garage")

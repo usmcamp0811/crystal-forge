@@ -26,6 +26,138 @@
     ];
   };
   moduleConfig = moduleSystem.config;
+  proxyAssertionMessage = "services.crystal-forge.server.trust_forwarded_builder_https requires nonempty services.crystal-forge.server.trustedProxyCidrs when services.crystal-forge.enable and services.crystal-forge.server.enable are true. Set narrow CIDRs for the reverse proxy's direct backend socket peer (Traefik peer IP /32 or /128), not builder/client IPs; no automatic or broad CIDR fallback is provided.";
+  # Execute the real module wrapper with a recording binary, not a live server.
+  # This avoids Rust builds, network listeners and database access in this proof.
+  probeServer = pkgs.writeShellScriptBin "server" ''
+    ${pkgs.jq}/bin/jq -n \
+      --arg config "$CRYSTAL_FORGE_CONFIG" \
+      --arg trustOverride "''${CRYSTAL_FORGE__SERVER__TRUST_FORWARDED_BUILDER_HTTPS-}" \
+      '{config: $config, trustOverride: $trustOverride}'
+  '';
+  mkProxySystem = settings:
+    inputs.nixpkgs.lib.nixosSystem {
+      inherit system;
+      modules = [
+        inputs.self.nixosModules.crystal-forge
+        {
+          system.stateVersion = "26.05";
+          boot.loader.grub.enable = false;
+          fileSystems."/" = {
+            device = "none";
+            fsType = "tmpfs";
+          };
+          services.crystal-forge =
+            lib.recursiveUpdate {
+              enable = true;
+              server = {
+                enable = true;
+                package = probeServer;
+              };
+              client.enable = false;
+              build.enable = false;
+              # Disable runtime key generation in the config-copy probe.
+              auth.ssh_key_path = "/unused-module-probe-key";
+            }
+            settings;
+        }
+      ];
+    };
+  proxySystems = {
+    falseEmpty = mkProxySystem {};
+    trueEmpty = mkProxySystem {server.trust_forwarded_builder_https = true;};
+    trueAllowed = mkProxySystem {
+      server = {
+        trust_forwarded_builder_https = true;
+        trustedProxyCidrs = ["127.0.0.1/32" "::1/128"];
+      };
+    };
+    globalDisabled = mkProxySystem {
+      enable = false;
+      server.trust_forwarded_builder_https = true;
+    };
+    serverDisabled = mkProxySystem {
+      server = {
+        enable = false;
+        trust_forwarded_builder_https = true;
+      };
+      build.enable = true;
+    };
+  };
+  failedAssertions = host:
+    map (entry: entry.message)
+    (lib.filter (entry: !entry.assertion) host.config.assertions);
+  proxyCases =
+    lib.mapAttrs (_: host: {
+      failures = failedAssertions host;
+      # Force the NixOS host assertion consumer, not only the assertions list.
+      evaluates = (builtins.tryEval host.config.system.build.toplevel.drvPath).success;
+    })
+    proxySystems;
+  validProxyConfigs = {
+    falseEmpty = proxySystems.falseEmpty.config;
+    trueAllowed = proxySystems.trueAllowed.config;
+  };
+  moduleValidation = assert proxyCases.falseEmpty.failures == [] && proxyCases.falseEmpty.evaluates;
+  assert proxyCases.trueEmpty.failures == [proxyAssertionMessage] && !proxyCases.trueEmpty.evaluates;
+  assert proxyCases.trueAllowed.failures == [] && proxyCases.trueAllowed.evaluates;
+  assert proxyCases.globalDisabled.failures == [] && proxyCases.globalDisabled.evaluates;
+  assert proxyCases.serverDisabled.failures == [] && proxyCases.serverDisabled.evaluates;
+    pkgs.runCommand "crystal-forge-proxy-module-validation" {
+      nativeBuildInputs = [pkgs.bash pkgs.coreutils pkgs.jq pkgs.remarshal];
+      passthru.evaluationResults = proxyCases;
+    } ''
+      mkdir -p "$out"
+      cp ${pkgs.writeText "proxy-assertion-results.json" (builtins.toJSON proxyCases)} "$out/assertions.json"
+      # Intercept only config-copy filesystem operations. Run the generated
+      # module script unchanged; never write to the host's /var/lib paths.
+      mkdir() { test "$*" = '-p /var/lib/crystal-forge'; }
+      cp() {
+        test "$#" = 2
+        test "$2" = /var/lib/crystal-forge/config.toml
+        command cp "$1" "$PROBE_CONFIG"
+        printf '%s\n' "$2" > "$PROBE_DESTINATION"
+      }
+      chmod() {
+        test "$*" = '600 /var/lib/crystal-forge/config.toml'
+        command chmod 600 "$PROBE_CONFIG"
+      }
+      export -f mkdir cp chmod
+      ${lib.concatStringsSep "\n" (lib.mapAttrsToList (name: hostConfig: let
+          service = hostConfig.systemd.services.crystal-forge-server;
+          preStart = pkgs.writeText "${name}-server-pre-start" service.preStart;
+        in ''
+          export PROBE_CONFIG="$out/${name}.toml"
+          export PROBE_DESTINATION="$out/${name}-destination"
+          generated=0
+          while read -r command; do
+            case "$command" in
+              /nix/store/*-generate-crystal-forge-config-*)
+                bash "$command"
+                generated=$((generated + 1))
+                ;;
+            esac
+          done < ${preStart}
+          test "$generated" = 1
+          toml2json "$PROBE_CONFIG" > "$out/${name}.json"
+          test "$(command cat "$PROBE_DESTINATION")" = '${toString hostConfig.services.crystal-forge.configPath}'
+          env CRYSTAL_FORGE_CONFIG=/ignored-inherited-config.toml \
+            ${service.serviceConfig.ExecStart} > "$out/${name}-runtime.json"
+          jq -e --arg path "$(command cat "$PROBE_DESTINATION")" \
+            '.config == $path and .trustOverride == ""' "$out/${name}-runtime.json"
+          env CRYSTAL_FORGE_CONFIG=/ignored-inherited-config.toml \
+            CRYSTAL_FORGE__SERVER__TRUST_FORWARDED_BUILDER_HTTPS=false \
+            ${service.serviceConfig.ExecStart} > "$out/${name}-override.json"
+          jq -e '.config == "/var/lib/crystal-forge/config.toml" and .trustOverride == "false"' \
+            "$out/${name}-override.json"
+        '')
+        validProxyConfigs)}
+      jq -e '.server.trust_forwarded_builder_https == false and .server.trusted_proxy_cidrs == []
+        and (.server | has("trustedProxyCidrs") | not)' "$out/falseEmpty.json"
+      jq -e '.server.trust_forwarded_builder_https == true
+        and .server.trusted_proxy_cidrs == ["127.0.0.1/32", "::1/128"]
+        and (.server | has("trustedProxyCidrs") | not)' "$out/trueAllowed.json"
+    '';
 in
   # INVARIANT: Both colocated services and the default builder package use the
   # Nix CLI linked to nix-eval-jobs. A package wrapper must not shadow this CLI.
@@ -38,10 +170,12 @@ in
   assert lib.elem niks3 moduleConfig.systemd.services.crystal-forge-server.path;
     pkgs.runCommand "crystal-forge-builder-evaluator-packaging" {
       nativeBuildInputs = [pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.jq pkgs.bash];
+      passthru = {inherit moduleValidation;};
     } ''
       export HOME="$TMPDIR/home"
       export XDG_CACHE_HOME="$TMPDIR/cache"
       mkdir -p "$HOME" "$XDG_CACHE_HOME"
+      test -f ${moduleValidation}/assertions.json
 
       component_wrapper=${componentBuilder}/bin/builder
       public_wrapper=${publicBuilder}/bin/builder

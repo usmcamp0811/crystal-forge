@@ -67,8 +67,8 @@
           notification_email_digest_schedule = cfg.server.notificationEmail.digestSchedule;
           session_last_seen_throttle_seconds =
             cfg.server.sessionLastSeenThrottleSeconds;
-           session_retention_days = cfg.server.sessionRetentionDays;
-           trusted_proxy_cidrs = cfg.server.trustedProxyCidrs;
+          session_retention_days = cfg.server.sessionRetentionDays;
+          trusted_proxy_cidrs = cfg.server.trustedProxyCidrs;
           remote_build_execution_strategy = cfg.build.remote_execution_strategy;
           source_delivery_mode = cfg.build.source_delivery_mode;
           source_archive_root = toString cfg.build.source_archive_root;
@@ -1850,22 +1850,24 @@ in {
         type = lib.types.bool;
         default = false;
         description = lib.mdDoc ''
-          Trust the `X-Forwarded-Proto: https` / `Forwarded: proto=https`
-          headers set by a reverse proxy when sending cache-push credentials
-          to remote builders.
+          Permit forwarded HTTPS verification for builder cache-push secrets
+          and private agent cache-read credentials. Verification requires the
+          actual direct socket peer to match `trustedProxyCidrs` and exactly
+          one `X-Forwarded-Proto` header with the value `https`. `Forwarded`
+          and protocol lists do not establish verified HTTPS.
 
-          When `false` (the default), the server refuses to send any
-          credential-bearing cache-push config to builders and returns
-          `426 Upgrade Required`, regardless of forwarded-proto headers.
+          When `false` (the default), forwarded headers cannot authorize secret
+          delivery. Builder requests that require secrets return
+          a transient `dispatch:cache_config` failure and HTTP 404 (no work for
+          that poll); unverified private agent delivery is withheld.
 
-          **Only set this to `true` when your reverse proxy unconditionally
-          strips and re-sets these headers itself.** Builders that can reach
-          the server directly over plaintext HTTP could otherwise spoof the
-          header and receive real cache credentials.
-
-          Typical deployment: set this to `true` when Crystal Forge is behind
-          an HTTPS-terminating reverse proxy (e.g. nginx, Caddy) that you
-          control, and builders only reach the server through that proxy.
+          Enable only behind a controlled HTTPS-terminating proxy that strips
+          incoming `X-Forwarded-Proto` and sets one value itself. An enabled
+          server requires an explicit nonempty `trustedProxyCidrs` list.
+          Allow only narrow CIDRs for the proxy's direct backend socket peer,
+          not builder or client addresses. Same-host loopback connections can
+          use `127.0.0.1/32` and `::1/128`; remote proxies require their actual
+          peer IP as `/32` or `/128`. No proxy CIDRs are added automatically.
         '';
       };
 
@@ -1987,11 +1989,19 @@ in {
         type = lib.types.listOf lib.types.str;
         default = [];
         description = lib.mdDoc ''
-          CIDR ranges of trusted reverse proxies. X-Forwarded-For is used only
-          when the direct peer is in one of these ranges; otherwise the direct
-          peer address is recorded for active sessions.
+          Explicit CIDRs for trusted reverse proxies' direct socket peers.
+          Active-session address recording uses `X-Forwarded-For` only when
+          the direct peer matches; otherwise it records the direct peer.
+
+          Builder secret delivery and private agent cache-read delivery also
+          require a matching direct peer, `trust_forwarded_builder_https`, and
+          exactly one `X-Forwarded-Proto: https` header. A nonempty list alone
+          does not authorize secret delivery. Missing or unmatched peers fail
+          closed. Use narrow proxy peer `/32` or `/128` CIDRs, not builder or
+          client IPs or broad network ranges. Loopback examples apply only when
+          the proxy connects to the backend over same-host loopback.
         '';
-        example = [ "127.0.0.1/32" "10.0.0.0/8" ];
+        example = ["127.0.0.1/32" "::1/128"];
       };
 
       role_mapping = lib.mkOption {
@@ -3049,6 +3059,15 @@ in {
     };
 
     assertions = [
+      {
+        # SECURITY: This list identifies the proxy's direct backend peer.
+        # The enclosing cfg.enable gate and server.enable scope exclude
+        # inactive servers; runtime verification still checks the actual peer.
+        assertion =
+          (cfg.server.enable && cfg.server.trust_forwarded_builder_https)
+          -> cfg.server.trustedProxyCidrs != [];
+        message = "services.crystal-forge.server.trust_forwarded_builder_https requires nonempty services.crystal-forge.server.trustedProxyCidrs when services.crystal-forge.enable and services.crystal-forge.server.enable are true. Set narrow CIDRs for the reverse proxy's direct backend socket peer (Traefik peer IP /32 or /128), not builder/client IPs; no automatic or broad CIDR fallback is provided.";
+      }
       {
         assertion = cfg.client.enable -> (cfg.client.private_key != null);
         message = "Crystal Forge client requires a private key file";

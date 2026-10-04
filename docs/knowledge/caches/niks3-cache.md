@@ -118,14 +118,23 @@ The server's current confidentiality gate requires all of the following:
 
 - `server.trust_forwarded_builder_https = true`.
 - `server.trusted_proxy_cidrs` includes the actual direct socket peer's address.
-- Exactly one `X-Forwarded-Proto` header with the exact value `https`.
+- Exactly one `X-Forwarded-Proto` header with the exact value bytes `https`.
 
-The HTTPS-terminating proxy must overwrite the header and protect its backend
-connection. Restrict the allowlist to that proxy and prevent clients from reaching
-the trusted backend path directly. The server checks the direct peer, not
-`X-Forwarded-For`. The opt-in alone is insufficient. Missing peer information,
-untrusted peers, duplicate headers, and protocol chains fail closed. Signed
-requests establish identity, not confidentiality.
+The controlled HTTPS-terminating proxy must strip client forwarding assertions,
+overwrite the header, and protect its backend connection. Restrict the allowlist
+to that proxy and prevent untrusted direct access to the backend. The server checks
+the direct socket peer, not `X-Forwarded-For`. The opt-in alone is insufficient.
+Missing peer information, empty or unmatched CIDRs, duplicate headers, and protocol
+chains fail closed. Header names are case-insensitive. The value is case-sensitive:
+`HTTPS`, `http`, whitespace, and `https,http` are rejected. `Forwarded: proto=https`
+and `X-Forwarded-SSL: on` are not alternate assertions for this cache credential
+gate. Signed requests establish identity, not confidentiality.
+
+The gate covers existing Attic tokens and S3 access/session keys as well as Niks3
+write tokens/private keys and agent private mTLS reads. Public cache config without
+credentials does not require this gate. The default flag value `false` withholds
+private material. The server listener uses HTTP and does not terminate native TLS.
+An HTTPS client URL alone is insufficient; use the controlled TLS proxy boundary.
 
 Builder secrets are withheld without verified transport. If the selected agent
 cache requires private reads, unverified transport suppresses both its cache
@@ -136,6 +145,105 @@ and target delivery, preserving the pending deployment for retry. The updated
 agent replaces its runtime cache list on each heartbeat, rejects unknown types,
 and rejects static Niks3 deployment when server-provided read settings are absent.
 Agents receive only enabled read URLs, signing keys, and read authentication.
+
+### Proxy upgrade repair and loaded configuration
+
+An upgrade can expose a previous flag-only configuration. For same-host Traefik
+that connects to the Crystal Forge backend through loopback, configure both fields:
+
+```nix
+services.crystal-forge.server = {
+  trust_forwarded_builder_https = true;
+  trustedProxyCidrs = [ "127.0.0.1/32" "::1/128" ];
+};
+```
+
+Use these CIDRs only when the observed direct backend peer is loopback. For a
+remote or container proxy, use the actual observed backend-facing proxy IP as
+`/32` for IPv4 or `/128` for IPv6. IPv4 CIDRs do not match IPv6 peers, including
+IPv4-mapped IPv6 addresses. Do not trust the public client/builder address, the
+proxy's public endpoint, or an entire container network. Do not use
+`0.0.0.0/0`, `::/0`, or another broad CIDR to bypass the check. An allowlisted
+peer must not relay an untrusted plaintext request with an HTTPS assertion.
+
+On the HTTPS route, Traefik must overwrite `X-Forwarded-Proto` with one `https`
+value, even when the client supplies spoofed forwarding headers. Configure the
+header at the trusted TLS terminator; appending to a client value is insufficient.
+Protect the backend path as well as the external HTTPS route.
+
+For a manually managed TOML file, the equivalent same-host loopback settings are:
+
+```toml
+[server]
+trust_forwarded_builder_https = true
+trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128"]
+```
+
+The Nix field `trustedProxyCidrs` maps to TOML `trusted_proxy_cidrs`.
+`trust_forwarded_builder_https` retains its spelling. Verify the file used by the
+running process, not only the Nix source or a generated store artifact. The module
+normally generates `/var/lib/crystal-forge/config.toml` and exports its path as
+`CRYSTAL_FORGE_CONFIG` in the service wrapper. Outside the module, the loader's
+default is `/var/lib/crystal_forge/config.toml` (underscore). Environment settings
+with the `CRYSTAL_FORGE__SERVER__` prefix can override TOML values. The loader does
+not enable environment-list parsing; configure the CIDR array in TOML rather
+than treating an environment string as a supported array override.
+
+For an externally managed service, `CRYSTAL_FORGE_CONFIG` selects the manual
+configuration file instead of the generated file. The module wrapper explicitly
+exports its generated path; a service environment setting alone cannot override
+that export. The current module exposes read-only `configPath`, not a writable
+`configFile` option. If a deployment wrapper supplies a manual `configFile`, verify
+that wrapper's selected path in the running process. Editing generated TOML is
+not a durable module repair because the next generation can replace it.
+
+Inspect only the service properties and process fields required for this check:
+
+```sh
+systemctl show crystal-forge-server.service --property=MainPID --property=ExecStart --property=FragmentPath
+pid=$(systemctl show crystal-forge-server.service --property=MainPID --value)
+sudo grep -z -E '^(CRYSTAL_FORGE_CONFIG|CRYSTAL_FORGE__SERVER__(TRUST_FORWARDED_BUILDER_HTTPS|TRUSTED_PROXY_CIDRS))=' "/proc/$pid/environ" | tr '\0' '\n'
+```
+
+Use a live, nonzero PID. From the reported `CRYSTAL_FORGE_CONFIG` path, inspect
+only the two safe TOML keys and the section heading:
+
+```sh
+config_path=/var/lib/crystal-forge/config.toml
+sudo grep -nE '^[[:space:]]*(\[server\]|trust_forwarded_builder_https[[:space:]]*=|trusted_proxy_cidrs[[:space:]]*=)' "$config_path"
+```
+
+Replace `config_path` with the observed path. This command assumes single-line
+values as in the example; a multiline CIDR array needs a restricted TOML inspector
+that outputs only these two `[server]` fields. Do not print the whole configuration,
+service environment, environment file, or request headers. A file edit does not
+prove that the running server loaded it. After applying the configuration through
+the normal operator rollout, verify a new server PID and a real credential-bearing
+builder claim through the HTTPS proxy.
+
+The updated NixOS module fails evaluation when the Crystal Forge service and
+server are enabled with `trust_forwarded_builder_https = true` and empty
+`trustedProxyCidrs`. The assertion does not add CIDRs automatically or prove that
+a nonempty list matches the proxy. Raw/non-Nix TOML has no Nix assertion. An empty
+or unmatched list still fails the runtime credential gate and dispatch.
+
+The credential-safe denial warning includes `direct_peer_ip`,
+`trust_forwarded_builder_https`, `peer_cidr_match`, `x_forwarded_proto_count`, and
+`exact_https`, alongside job, derivation, and builder IDs. `direct_peer_ip` is
+absent when connection metadata is unavailable. A valid private dispatch requires
+the controlled proxy IP, `true`, `true`, `1`, and `true`, respectively. The count
+is the number of header values, not the number of comma-separated tokens.
+These are decision facts, not raw header contents. Do not log tokens, private
+keys, signed URLs, raw headers, or request bodies to diagnose this boundary.
+
+Older documentation promised HTTP `426 Upgrade Required`. The current builder
+gate runs after claim and records a transient `[dispatch:cache_config]` failure
+before returning HTTP 404 (no work this poll). No credentials reach the builder.
+A build can fail at zero seconds without executing Nix. Automatic retries use
+the configured backoff and budget; exhausted or disabled retries need operator
+requeue. Repair and verify the loaded proxy configuration first, then requeue
+affected failed work. Agent private-read rejection instead withholds cache and
+target before pending deployment claim, preserving retryable work.
 
 Builder and local publication use canonical environment eligibility: enabled
 assigned destinations precede global destinations, with stable name/ID ordering.

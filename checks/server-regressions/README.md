@@ -35,6 +35,14 @@ is meant to be consumed as a package.
   library test names. Each TASK-470 invocation uses `--exact` and requires one
   successful test with zero ignored tests; a missing or renamed test fails the
   check. Only the selected database tests receive `--ignored`.
+- Signed builder next-job requests use a real loopback TCP listener and Axum
+  `ConnectInfo`. Credentialed Attic, S3, and Niks3 dispatch requires the trust
+  flag, an allowed actual direct peer, and one exact `https` protocol header.
+  The matrix rejects missing peer/header, duplicate headers, protocol chains,
+  HTTP, and case variants. Public Http/Nix dispatch still succeeds in each
+  negative proxy case. Successful claims record the exact builder session and
+  cache identity. Anonymous requests and unsigned capability headers cannot
+  authorize claims. TLS termination is exercised by the separate Niks3 VM check.
 - Exact completed publication evidence binds deployment reads to the authorized
   derivation and output. The selected PostgreSQL regressions cover renamed and
   secondary sources, capability/private-read gates, current environment scope,
@@ -68,6 +76,7 @@ handlers::api::builders::tests::niks3_builder_and_agent_selection_share_assigned
 queries::builders::tests::niks3_canonical_environment_dispatch_rejects_ambiguity_before_credentials
 queries::builders::tests::niks3_canonical_environment_completion_rejects_post_dispatch_ambiguity
 queries::builders::tests::niks3_preclaim_handler_rejects_legacy_and_allows_capable_builder
+handlers::api::builders::proxy_dispatch_tests::proxy_credential_dispatch_signed_tcp_next_job
 queries::builders::tests::niks3_exact_candidate_claim_never_substitutes_after_queue_races
 queries::builders::tests::niks3_dispatch_identity_and_completion_transaction_rechecks
 queries::builders::tests::niks3_missing_push_queues_exact_id_and_requires_authoritative_output

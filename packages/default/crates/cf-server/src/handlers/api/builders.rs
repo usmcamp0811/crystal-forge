@@ -66,8 +66,30 @@ pub(crate) fn builder_https_verified_by_trusted_proxy(
     headers: &HeaderMap,
     peer: Option<std::net::SocketAddr>,
 ) -> bool {
-    if !server_config.trust_forwarded_builder_https
-        || !peer.is_some_and(|peer| {
+    BuilderHttpsEvidence::from_request(server_config, headers, peer).verified()
+}
+
+/// Records only credential-free evidence for the direct-peer HTTPS decision.
+///
+/// The decision and denial diagnostics use the same snapshot. Header contents,
+/// CIDR strings, URLs, and request bodies must never enter this type.
+#[derive(Debug, PartialEq, Eq)]
+struct BuilderHttpsEvidence {
+    direct_peer_ip: Option<std::net::IpAddr>,
+    trust_forwarded_builder_https: bool,
+    peer_cidr_match: bool,
+    x_forwarded_proto_count: usize,
+    exact_https: bool,
+}
+
+impl BuilderHttpsEvidence {
+    fn from_request(
+        server_config: &crate::config::ServerConfig,
+        headers: &HeaderMap,
+        peer: Option<std::net::SocketAddr>,
+    ) -> Self {
+        let direct_peer_ip = peer.map(|peer| peer.ip());
+        let peer_cidr_match = direct_peer_ip.is_some_and(|ip| {
             server_config.trusted_proxy_cidrs.iter().any(|cidr| {
                 let Some((network, prefix)) = cidr.split_once('/') else {
                     return false;
@@ -77,7 +99,7 @@ pub(crate) fn builder_https_verified_by_trusted_proxy(
                 else {
                     return false;
                 };
-                match (peer.ip(), network) {
+                match (ip, network) {
                     (std::net::IpAddr::V4(ip), std::net::IpAddr::V4(network)) if prefix <= 32 => {
                         let mask = u32::MAX.checked_shl(u32::from(32 - prefix)).unwrap_or(0);
                         u32::from(ip) & mask == u32::from(network) & mask
@@ -89,13 +111,26 @@ pub(crate) fn builder_https_verified_by_trusted_proxy(
                     _ => false,
                 }
             })
-        })
-    {
-        return false;
+        });
+        let values = headers.get_all("x-forwarded-proto");
+        let x_forwarded_proto_count = values.iter().count();
+        let exact_https = x_forwarded_proto_count == 1
+            && values
+                .iter()
+                .next()
+                .is_some_and(|value| value.as_bytes() == b"https");
+        Self {
+            direct_peer_ip,
+            trust_forwarded_builder_https: server_config.trust_forwarded_builder_https,
+            peer_cidr_match,
+            x_forwarded_proto_count,
+            exact_https,
+        }
     }
-    let values = headers.get_all("x-forwarded-proto");
-    values.iter().count() == 1
-        && values.iter().next().and_then(|v| v.to_str().ok()) == Some("https")
+
+    fn verified(&self) -> bool {
+        self.trust_forwarded_builder_https && self.peer_cidr_match && self.exact_https
+    }
 }
 
 fn build_log_append_status_allowed(status: &str) -> bool {
@@ -2620,21 +2655,23 @@ pub async fn get_next_job(
     }
 
     let cache_push = Some(cache_push);
+    let https_evidence =
+        BuilderHttpsEvidence::from_request(&state.server_config, &headers, peer.map(|p| p.0));
 
     if cache_push
         .as_ref()
         .is_some_and(cache_push_config_contains_credentials)
-        && !builder_https_verified_by_trusted_proxy(
-            &state.server_config,
-            &headers,
-            peer.map(|p| p.0),
-        )
+        && !https_evidence.verified()
     {
         tracing::warn!(
             job_id = %job.id,
             derivation_id = derivation.id,
             builder_id = %builder_id,
-            trust_forwarded = state.server_config.trust_forwarded_builder_https,
+            direct_peer_ip = ?https_evidence.direct_peer_ip,
+            trust_forwarded_builder_https = https_evidence.trust_forwarded_builder_https,
+            peer_cidr_match = https_evidence.peer_cidr_match,
+            x_forwarded_proto_count = https_evidence.x_forwarded_proto_count,
+            exact_https = https_evidence.exact_https,
             "refusing to send cache push credentials: connection is not verified HTTPS"
         );
         // This is a transient configuration mismatch (server config / TLS termination),
@@ -2646,7 +2683,7 @@ pub async fn get_next_job(
             session_id,
             "cache_config",
             DispatchFailureClass::Transient,
-            "cache push credentials refused: builder connection is not verified HTTPS",
+            "cache push credentials refused: builder connection is not verified HTTPS; configure services.crystal-forge.server.trust_forwarded_builder_https and services.crystal-forge.server.trustedProxyCidrs for the actual direct backend proxy peer, and have that proxy overwrite X-Forwarded-Proto with exactly one https value",
         )
         .await;
         return Err(status);
@@ -4937,6 +4974,10 @@ async fn record_build_stream_message(state: &CFState, job_id: Uuid, msg: &BuildS
         }
     }
 }
+
+#[cfg(test)]
+#[path = "builders_proxy_dispatch_tests.rs"]
+mod proxy_dispatch_tests;
 
 #[cfg(test)]
 mod tests {

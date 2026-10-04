@@ -687,6 +687,7 @@ SQL
       queries::builders::tests::niks3_canonical_environment_dispatch_rejects_ambiguity_before_credentials \
       queries::builders::tests::niks3_canonical_environment_completion_rejects_post_dispatch_ambiguity \
       queries::builders::tests::niks3_preclaim_handler_rejects_legacy_and_allows_capable_builder \
+      handlers::api::builders::proxy_dispatch_tests::proxy_credential_dispatch_signed_tcp_next_job \
       queries::builders::tests::niks3_exact_candidate_claim_never_substitutes_after_queue_races \
       queries::builders::tests::niks3_dispatch_identity_and_completion_transaction_rechecks \
       queries::builders::tests::niks3_missing_push_queues_exact_id_and_requires_authoritative_output \
