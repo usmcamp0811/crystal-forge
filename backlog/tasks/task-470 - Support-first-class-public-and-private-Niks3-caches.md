@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-04 17:14'
+updated_date: '2026-10-04 17:28'
 labels: []
 dependencies: []
 references:
@@ -94,6 +94,8 @@ Owner-approved final publication scope correction: resolve durable-ID and unambi
 Additional user-approved UI scope: preserve completed provenance/CI implementation; replace legacy Add->separateNiks3transition with one shared design-style Add shell containing common header/typebadge/status/subtitle/close, Destination/Credentials/Environments rail with icons/validation, common footer/scope/busylocks, and type-specific fields/retaineddrafts. Preserve all existing S3/Attic/Nix capabilities and secret editsemantics; use backend atomicenvironment_ids contract where supported, Niks3 never secondassignmentPUT. Prefer reuse shell forAdd/Edit if safe, no unrelatedcache-viewredesign. Reuse verified persistent taskpreview beforeUIedits; add authoritative realcreate workflowsforalltypes plus stable-dialog/state-retention/loading/error/rollback tests and desktop/narrowcaptures. LoadDioxus/design/Playwrightskills; explicit parityreview against CachesView.jsx informationarchitecture notcoloronly. UIrequiredgatebeforepush alongsidealreadycompletedtargetpublication andblockingCIgates; no acceptedverificationexception changes.
 
 User-requested focused GitGuardian fixture cleanup: fetch/live-MR/local head verification before edits, inspect reported caches.rs cfg(test) base_input and audit all72MR-changedfiles for provider-shaped markers. Replace only AWS-shaped accessID and paired arbitrary validation markers; preserve assertions and cryptographically/native-protocol-required public test fixtures. Run focusedcacheUItests/format/diffcheck and exactliteralabsence searches; inspect existingsecret-scanneravailability. One cleanup commit and normalpush to existingMR only, no historyrewrite/suppressions/merge; distinguish sourceoccurrenceremoval from unavailableGitGuardianincidentstatus.
+
+Proxy upgrade remediation approved by user: add NixOS fail-fast assertion trust_forwarded_builder_https -> nonempty trustedProxyCidrs and correct optiondocumentation. Audit generated TOML and actual serviceCRYSTAL_FORGE_CONFIG path/environment; add evaluation/runtime regression verifying camelCaseCIDR option maps trusted_proxy_cidrs alongsidetrustflag. Keep one productionHTTPStrustdecision helper and derive credential-safe diagnostics (directpeerIP, flag, match, XFPheadercount, exacthttpsbool) without credential/headerbody logging. Update all stale reverseproxycontract docs including multi-builder-api; operator immediateTraefikrepair requires itsactualdirectbackendpeer narrowCIDR+one overwritten XFPhttps. Add direct gate matrix false/empty/wrongpeer/missing/duplicate/http/singlehttps and real authenticatedsignedHTTP builder next-job claim path for Attic/S3/Niks3secret/public configs via TLS reverseproxy. Extend Niks3VMfixture existingrealHTTP path withlegacy cachetypes and loadedmoduleconfig evidence; verify successfulcache-backedclaim notonlyhelper. Run moduleeval/assert/TOMLchecks focusedRust tests and actualproxyVM gate beforepushing. No source/schema/provenance/agentcapability/securitytests weakened and no MRmerge.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -308,6 +310,8 @@ Final P2 rerun after owner-only queries/mod.rs declaration formatting PASSED bot
 GitGuardian cleanup verified/pushed commit9296a73f53c9398630e581fb230c2fafa2ce8940 (exactliveMRheadconfirmed). Only packages/web-ui/src/views/caches.rs changed:3syntheticfixturevalues, assertionsunchanged. OldreportedAWS-prefixedliteralabsentcurrenttree; pairedoldliteralmarkersabsentreportedfile. MR-wide72fileaudit no othertype4tuplecleanup; nativeGarage/TLS/Ed25519publicVMfixtures cryptorequired isolatedtestconsumers retained. Unchanged evaluation_snapshots.rs outsideMRdiff intentionally uses AWSdocumentationEXAMPLEkey/JWT-lookingdummy in redactiontest; retained to avoidweakenedsensitivepatterncoverage. Noactualproductionsecretidentified orsuppressionadded.
 
 Focused currenthead nix develop -c cargo test --locked --manifest-path packages/web-ui/Cargo.toml views::caches::tests --message-format short PASSED13/13,0failed; rustfmtchangedfile/diffcheckpassed. ggshield/gitguardian/gitleaksnotonPATH and noexistingrepositoryscannercheck/config found; no authenticGGscan/incidentstatusclaim. CleanupMRnoteadded. Pipeline2911138876 currentheadrunning https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2911138876 . Worktreeclean; MR331 openedunmerged. OverallTASK470 remainsInProgresspendingexactheadCI/re-review; focusedfixturecleanupimplementedverifiedlocallypushed.
+
+UserreportedP1 deployedupgrade regression acceptedTASK470scope. Verifiedfreshremote/liveMR/localhead9296a73f53c9398630e581fb230c2fafa2ce8940 clean; target3b23d36f alreadyancestor. Preservecurrenthardening directpeer allowlist+exactsingleXFPhttps; no reversion to unsignedheaders orcatchallCIDRs. CurrentNixmodule emitsbothtrustflag/CIDRs but lacksassertion when flagtrue/listempty; optionprose/multi-builder-api docs stale. Currentdispatchdiagnostic lacks peer/headertrustdetails. Taskowner lock resumed sameworktree; preserveintegrationotherTASK478lock/sessionchanges.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
