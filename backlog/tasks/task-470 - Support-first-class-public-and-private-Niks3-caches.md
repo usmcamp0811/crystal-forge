@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-04 17:56'
+updated_date: '2026-10-04 18:33'
 labels: []
 dependencies: []
 references:
@@ -102,6 +102,8 @@ Real proxy VM claim regression owner: only checks/niks3-cache/default.nix, packa
 Docs-only proxy upgrade delegation: own docs/multi-builder-api.md and docs/operator/niks3-cache.md plus stale cache credential boundary in docs/builder-security-architecture.md. Verify current direct-peer CIDR/exact X-Forwarded-Proto helper and post-claim failure path. Add conditional loopback Nix/TOML repair, safe loaded-config inspection, alternate-header rejection, legacy secret/agent read coverage and recovery. Confirm forthcoming Nix assertion/configFile override and credential-safe diagnostics before describing them as implemented. No source, README, CI, services, commits or task lifecycle changes.
 
 Focused Nix proxy remediation ownership at 9296a73f: only modules/nixos/crystal-forge/default.nix and checks/builder-evaluator-packaging/{default.nix,README.md}. Add enabled-server assertion requiring explicit nonempty trustedProxyCidrs for trust_forwarded_builder_https; correct direct-peer/X-Forwarded-Proto and session/builder/private-agent option contracts. Extend existing sandbox check with independently runnable real-NixOS evaluation cases and parsed generated TOML plus executed service-wrapper config-path proof. Preserve exact evaluator CLI checks. Audit Rust config source precedence read-only. No Rust, other docs, Python, VM fixture, CI, service/database, commits or pushes. Reuse parent task lock/worktree; dev has owner-preserved untracked session and unrelated TASK-478 lock; no main worktree registered.
+
+Focused proxy P1 delegation at 9296a73f: own handlers/api/builders.rs and a scoped Rust test module plus server-regressions membership/README only. Preserve flag + actual direct-peer CIDR + exactly one byte-exact HTTPS assertion. Compute credential-safe evidence once for dispatch decision and diagnostics; improve static transient cache_config failure guidance with both Nix settings. Add discriminating helper matrix and real signed TCP Axum next-job SQLx regression for credentialed Attic/S3/Niks3 denial/success and public HttpNix success; verify existing PID1799 task PostgreSQL/socket/data_directory/CREATEDB before ephemeral tests. Run targeted Rust tests, formatting and integration, stage new module for flake source inclusion; no host stack, preview DB mutation or commits.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
