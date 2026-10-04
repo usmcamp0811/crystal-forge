@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-04 17:32'
+updated_date: '2026-10-04 17:36'
 labels: []
 dependencies: []
 references:
@@ -318,6 +318,8 @@ GitGuardian cleanup verified/pushed commit9296a73f53c9398630e581fb230c2fafa2ce89
 Focused currenthead nix develop -c cargo test --locked --manifest-path packages/web-ui/Cargo.toml views::caches::tests --message-format short PASSED13/13,0failed; rustfmtchangedfile/diffcheckpassed. ggshield/gitguardian/gitleaksnotonPATH and noexistingrepositoryscannercheck/config found; no authenticGGscan/incidentstatusclaim. CleanupMRnoteadded. Pipeline2911138876 currentheadrunning https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2911138876 . Worktreeclean; MR331 openedunmerged. OverallTASK470 remainsInProgresspendingexactheadCI/re-review; focusedfixturecleanupimplementedverifiedlocallypushed.
 
 UserreportedP1 deployedupgrade regression acceptedTASK470scope. Verifiedfreshremote/liveMR/localhead9296a73f53c9398630e581fb230c2fafa2ce8940 clean; target3b23d36f alreadyancestor. Preservecurrenthardening directpeer allowlist+exactsingleXFPhttps; no reversion to unsignedheaders orcatchallCIDRs. CurrentNixmodule emitsbothtrustflag/CIDRs but lacksassertion when flagtrue/listempty; optionprose/multi-builder-api docs stale. Currentdispatchdiagnostic lacks peer/headertrustdetails. Taskowner lock resumed sameworktree; preserveintegrationotherTASK478lock/sessionchanges.
+
+Docs-only proxy upgrade handoff: updated docs/multi-builder-api.md, docs/builder-security-architecture.md and docs/operator/niks3-cache.md. Reviewed real helper (same-family direct CIDR + opt-in + one case-sensitive https value), HTTP listener, config loader/environment precedence and post-claim cache_config Transient failure returning404. Added conditional same-host loopback Nix/TOML examples; actual observed remote/container /32 or /128 guidance; alternate Forwarded/X-Forwarded-SSL rejection; legacy Attic/S3 and private agent read scope; safe restricted systemd/proc/TOML inspection; retry exhaustion/requeue guidance. Confirmed concurrently landed enabled-server Nix empty-CIDR assertion. git diff --check on all three docs passed exit0; all-doc Markdown searches found no remaining alternate-header acceptance claims. Remaining source contract mismatches for owners: module trust option still promises426 while helper returns404; no writable module configFile override exists (read-only configPath and wrapper export select generated path); expanded credential-safe Rust diagnostic fields not landed at handoff, so docs label them pending and state expected model without invented field names. Server does not support nativeTLS; docs require controlled TLS proxy/direct-peer trust. No source/README/CI/VM edits, commits or services; no changes to provenance or user verification exceptions.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
