@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-05 02:27'
+updated_date: '2026-10-05 12:59'
 labels: []
 dependencies: []
 references:
@@ -116,6 +116,8 @@ Retained-credential frontend delegation at 6d3e7374: own web-ui views/caches.rs 
 User option-1 URL audit correction: preserve server-only Http/Nix Basic userinfo probes while redacting every API URL field with a shared fail-closed sanitizer and expanded decoded AWS query-name recognition. Add response-only http_basic_auth_configured and legacy_query_credentials_configured flags. Reject recognized credential-query probes before callback/network with a static migration reason. Shared effective URL merge retains same-type sanitized GET round trips, never carries URI credentials to a different explicit URL, and strips inherited URI auth on type conversion; Save binds the effective URLs. Add exact ephemeral SQLx and pure security regressions and blocking CI membership. Preserve prior Attic/S3/Niks3, no migration/services/preview writes/commits; native Basic proof and preview refresh remain owner-managed.
 
 User legacy decision option1 extends fixture-owned scope only: add runtime Basic ACL/native TLS static metadata routes on cache9444 and cache-alt DNS authority with fixture SAN, no production HTTP credential subsystem. Runtime Python constructs and realAPI-seeds Nix/Http userinfo URLs, exposing only safe URLs+IDs under nix_basic/http_basic. Add legacy_query raw URL seeded with runtime token; GET safe URL/configured flags and storedID Test400/no-request proof. Native access observer logs only URI path and Authorization presence; changed-authority probes must contain no oldBasic Authorization and legacy-query path count must remain zero. Private DB hashes prove retained rawURL non-mutation and unrelated legacySave preserves rawURI. Preserve public nix and native Attic/Garage/Niks3 fixtures; frontend owns readiness/new-ID UI workflows and backend owns sanitizer/flags/refusal behavior.
+
+User-approved fixture-only checkpoint sequencing correction: own retained-cache-credential-workflow.js choreography plus native-cache-fixture.py/driver wiring and focused README. Run all seven original source retained/replacement draft Tests and Cancels before any intentional Save, then exchange mode0600 runtime nonsecret phase/ID request+ack markers with independent Python verifier. Pre-Save checkpoint compares complete raw destination rows and assignments including ciphertext/timestamps byte-identically for all seven. Post-Save permits only explicit name/updated_at changes for Nix/Http Basic and legacyquery while preserving every other rawfield, URI and assignments. Ephemeral Attic/S3 replacement clones receive private baseline, unchanged-before-Save and retained-after-Save checkpoints. Capture blank credential dialogs only; run stable focused authoritative step25 including existingAdd/security workflows and nativeobserver proofs. No production/assertion/baseline/renderer changes, hostservices/DB or commits.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
