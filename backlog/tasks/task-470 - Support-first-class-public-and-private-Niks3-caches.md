@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-05 15:15'
+updated_date: '2026-10-05 15:34'
 labels: []
 dependencies: []
 references:
@@ -438,5 +438,15 @@ New native fixture JSON contract adds nix_basic and http_basic {id,url,authority
 created: 2026-10-05 15:15
 ---
 Persistent-preview provider support: prepared external-only /tmp/opencode/task470-native-preview-providers.nix, task470-native-preview-driver.py and task470-native-preview-start.sh; supervised provider VM launch now running. No CF hoststack/DB/backend config started or changed. All host forwards explicitly loopback-only: Attic127.0.0.1:19445; GarageTLS127.0.0.1:19443 (literal externalHost preserved fornativeSigV4); Niks3write15751/privateRead15752/publicRead15753 with nativecache-config advertisedreadURLexact https://127.0.0.1:15752; Basic/query19444 and changed authority localhost:19444. ExistingSAN127.0.0.1/localhost means nohostDNSwrites. Owner restart recipe: wait /tmp/opencode/task470-native-preview/ready.json; use SSL_CERT_FILE=/tmp/opencode/task470-native-preview/ca-bundle.pem (retains currentsystemCA+publicfixtureCA; no globalCA change). If Nixchild reads needed set NIX_SSL_CERT_FILE to samepath. CurrentPID16929 read-only inspection confirmedtaskcwd/configpath and DBnamecrystal_forge_review/usercrystal_forge/host127.0.0.1/port5432; no SSL_CERT_FILE and no private_test_targets optin found in selectedconfig/env. Owner must retain/verify task-only allow_private_cache_test_targets=true at refreshed backend before nativehostprobes. Need owner's ready/fresh backendPID and authorizedreviewDB/data_directory verification before realAPIseed; no reviewDBseeding done yet. Public marker/endpoints only; providers.json and runtimeJWT/basicseedfiles stay0600.
+---
+
+created: 2026-10-05 15:34
+---
+Persistent native providers now READY with corrected fully task-private XDG_RUNTIME_DIR/TMPDIR=/tmp/opencode/task470-native-preview/state. Current driverPID19568, AtticQEMU19692, cacheQEMU19721; loopbackhighports19445/19443/19444/15751/15752/15753 verified byss and actualhost TLS/auth/SigV4/privateRead probes. Public ready marker /tmp/opencode/task470-native-preview/ready.json; sameCA bundle path /tmp/opencode/task470-native-preview/ca-bundle.pem complete. Owner recipe /tmp/opencode/task470-native-preview/OWNER-RECIPE.md. Currentlog /tmp/opencode/task470-native-preview-supervisor-isolated.log; driverGCroot retained and onlystopmarker shuts downownedVMs. NohostDNS/globalCA/server3447/frontend8081/PG5432 changes. OldPID16929 stillrunning; nativeproviders awaitingownerfreshbackend/SSL/privateoptin readiness before seeding.
+---
+
+created: 2026-10-05 15:34
+---
+Prepared external-only guarded realAPIseed/rawDBproof /tmp/opencode/task470-native-preview-proof.py and nonmockconfigured-only browser /tmp/opencode/task470-native-preview-browser.js (syntaxverified). Owner provide mode0600 owner-ready.json with owner_ready:true, newbackend_pid, verifieddatabase_admin_user, verifiedtaskdatabase_data_directory, mode0600 localfixturelogin_file path. Guards requiretaskcwd/config ownership, exactreviewDB, SSLbundle, privateoptin, readonlyPG admin/data_directory and actual APIAdminrole BEFOREseed. Onlynewdisabledscopedtask470-live-native-* rows through realAPI; originals unchanged. Browser targets8081+3447explicitly, no routes/mocks/replace/Save/secretreentry; screenshots currentconfiguredAttic/S3/Niks3/Basic/query; completeRawDBhashcheck+nativequerycounter after. Providers leavealive24h runtimeJWTlimit. Needownerready marker/newPID toexecute; no APIseed norreviewDBread/write performed yet.
 ---
 <!-- COMMENTS:END -->
