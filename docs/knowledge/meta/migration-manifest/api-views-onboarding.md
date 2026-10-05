@@ -85,21 +85,22 @@ tags:
 - Sections:
   | Source section | Destination |
   | --- | --- |
-  | Title, `## Introduction` (What This Guide Covers, Prerequisites, Overview of the Setup Track) | [operations/onboarding-first-time-setup-prerequisites.md](../../operations/onboarding-first-time-setup-prerequisites.md) |
-  | `## Before You Begin` | [../../operations/onboarding-first-time-setup-prerequisites.md#before-you-begin](../../operations/onboarding-first-time-setup-prerequisites.md#before-you-begin) |
-  | `## The Guided Setup Coach` | [../../ui/guided-setup-coach.md#the-guided-setup-coach](../../ui/guided-setup-coach.md#the-guided-setup-coach) |
-  | `## POA&M Dashboard and Notifications` | [../../ui/guided-setup-coach.md#poam-dashboard-and-notifications](../../ui/guided-setup-coach.md#poam-dashboard-and-notifications) |
-  | `## Step 1: Create Environment` | [../../operations/onboarding-step-1-environment.md](../../operations/onboarding-step-1-environment.md) |
-  | `## Step 2: Add Flake` | [../../operations/onboarding-step-2-flake.md](../../operations/onboarding-step-2-flake.md) |
-  | `## Step 3: Register Builder` | [../../operations/onboarding-step-3-builder.md](../../operations/onboarding-step-3-builder.md) |
-  | `## Step 4: Configure Cache` | [../../operations/onboarding-step-4-cache-destinations.md](../../operations/onboarding-step-4-cache-destinations.md) |
-  | `## Step 5: Register System` | [../../operations/onboarding-step-5-system.md](../../operations/onboarding-step-5-system.md) |
-  | `## Step 6: Deploy Agent` (including `### Onboarding Complete!`) | [../../operations/onboarding-step-6-agent-deployment.md](../../operations/onboarding-step-6-agent-deployment.md) |
+  | Title, `## Introduction` (What This Guide Covers, Prerequisites, Overview of the Setup Track) | [operations/onboarding-first-time-setup-prerequisites.md#what-this-guide-covers](../../operations/onboarding-first-time-setup-prerequisites.md#what-this-guide-covers) |
+  | `## Introduction` | [operations/onboarding-first-time-setup-prerequisites.md#what-this-guide-covers](../../operations/onboarding-first-time-setup-prerequisites.md#what-this-guide-covers) |
+  | `## Before You Begin` | [operations/onboarding-first-time-setup-prerequisites.md#before-you-begin](../../operations/onboarding-first-time-setup-prerequisites.md#before-you-begin) |
+  | `## The Guided Setup Coach` | [ui/guided-setup-coach.md#the-guided-setup-coach](../../ui/guided-setup-coach.md#the-guided-setup-coach) |
+  | `## POA&M Dashboard and Notifications` | [ui/guided-setup-coach.md#poam-dashboard-and-notifications](../../ui/guided-setup-coach.md#poam-dashboard-and-notifications) |
+  | `## Step 1: Create Environment` | [operations/onboarding-step-1-environment.md#why-environments-matter](../../operations/onboarding-step-1-environment.md#why-environments-matter), [operations/onboarding-step-1-environment.md#create-the-environment](../../operations/onboarding-step-1-environment.md#create-the-environment) |
+  | `## Step 2: Add Flake` | [operations/onboarding-step-2-flake.md#why-flakes-matter](../../operations/onboarding-step-2-flake.md#why-flakes-matter), [operations/onboarding-step-2-flake.md#guided-tour-add-flake-form](../../operations/onboarding-step-2-flake.md#guided-tour-add-flake-form) |
+  | `## Step 3: Register Builder` | [operations/onboarding-step-3-builder.md#why-builders-matter](../../operations/onboarding-step-3-builder.md#why-builders-matter), [operations/onboarding-step-3-builder.md#guided-tour-add-builder-form](../../operations/onboarding-step-3-builder.md#guided-tour-add-builder-form), [operations/onboarding-step-3-builder.md#enabling-the-builder-in-nixos-config](../../operations/onboarding-step-3-builder.md#enabling-the-builder-in-nixos-config) |
+  | `## Step 4: Configure Cache` | [operations/onboarding-step-4-cache-destinations.md#why-cache-destinations-matter](../../operations/onboarding-step-4-cache-destinations.md#why-cache-destinations-matter), [operations/onboarding-step-4-cache-destinations.md#guided-tour-add-cache-destination-form](../../operations/onboarding-step-4-cache-destinations.md#guided-tour-add-cache-destination-form) |
+  | `## Step 5: Register System` | [operations/onboarding-step-5-system.md#why-systems-matter](../../operations/onboarding-step-5-system.md#why-systems-matter), [operations/onboarding-step-5-system.md#guided-tour-add-system-form](../../operations/onboarding-step-5-system.md#guided-tour-add-system-form) |
+  | `## Step 6: Deploy Agent` (including `### Onboarding Complete!`) | [operations/onboarding-step-6-agent-deployment.md#enabling-the-agent-in-nixos-config](../../operations/onboarding-step-6-agent-deployment.md#enabling-the-agent-in-nixos-config), [operations/onboarding-step-6-agent-deployment.md#apply-and-rebuild-the-target-system](../../operations/onboarding-step-6-agent-deployment.md#apply-and-rebuild-the-target-system), [operations/onboarding-step-6-agent-deployment.md#onboarding-complete](../../operations/onboarding-step-6-agent-deployment.md#onboarding-complete) |
   | `### Steps 7–9: Policies, compliance bundles and POA&Ms` (inside Step 6) | [ui/guided-setup-coach.md#steps-79-policies-compliance-bundles-and-poams](../../ui/guided-setup-coach.md#steps-79-policies-compliance-bundles-and-poams) |
-  | `## Security Workflows track` | [../../ui/guided-setup-coach.md#security-workflows-track](../../ui/guided-setup-coach.md#security-workflows-track) |
-  | `## After Onboarding` | [../../operations/onboarding-after-setup-and-next-steps.md#after-onboarding](../../operations/onboarding-after-setup-and-next-steps.md#after-onboarding) |
-  | `## Troubleshooting` | [../../operations/onboarding-troubleshooting.md](../../operations/onboarding-troubleshooting.md) |
-  | `## Next Steps` and closing line | [operations/onboarding-after-setup-and-next-steps.md#next-steps](../../operations/onboarding-after-setup-and-next-steps.md#next-steps) |
+  | `## Security Workflows track` | [ui/guided-setup-coach.md#security-workflows-track](../../ui/guided-setup-coach.md#security-workflows-track) |
+  | `## After Onboarding` | [operations/onboarding-after-setup-and-next-steps.md#after-onboarding](../../operations/onboarding-after-setup-and-next-steps.md#after-onboarding) |
+  | `## Troubleshooting` | [operations/onboarding-troubleshooting.md#troubleshooting](../../operations/onboarding-troubleshooting.md#troubleshooting) |
+  | `## Next Steps` | [operations/onboarding-after-setup-and-next-steps.md#next-steps](../../operations/onboarding-after-setup-and-next-steps.md#next-steps) |
 - Unmapped content: none. Image links keep their original `./screenshots/` targets for the lead's link remapping.
 
 ### `FRONTEND_TODO.md`

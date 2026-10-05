@@ -273,16 +273,16 @@ tags:
   | Source section | Destination |
   | --- | --- |
   | Title and introduction | [data-model/views/view-buildable-derivations.md](../../data-model/views/view-buildable-derivations.md) |
-  | `## Overview` | [../../data-model/views/view-buildable-derivations.md](../../data-model/views/view-buildable-derivations.md), [../cleanup-record.md](../cleanup-record.md) |
-  | `## Example Output` | [../../data-model/views/view-buildable-derivations.md](../../data-model/views/view-buildable-derivations.md), [../cleanup-record.md](../cleanup-record.md) |
-  | `## Purpose` | [../../data-model/views/view-buildable-derivations.md](../../data-model/views/view-buildable-derivations.md), [../cleanup-record.md](../cleanup-record.md) |
-  | `## Core Logic` | [../../data-model/views/view-buildable-derivations.md](../../data-model/views/view-buildable-derivations.md), [../cleanup-record.md](../cleanup-record.md) |
-  | `## Key Fields` | [../../data-model/views/view-buildable-derivations.md](../../data-model/views/view-buildable-derivations.md), [../cleanup-record.md](../cleanup-record.md) |
+  | `## Overview` | [../../data-model/views/view-buildable-derivations.md#status](../../data-model/views/view-buildable-derivations.md#status) |
+  | `## Example Output` | [../../data-model/views/view-buildable-derivations.md#current-definition](../../data-model/views/view-buildable-derivations.md#current-definition) |
+  | `## Purpose` | [../../data-model/views/view-buildable-derivations.md#status](../../data-model/views/view-buildable-derivations.md#status) |
+  | `## Core Logic` | [../../data-model/views/view-buildable-derivations.md#current-definition](../../data-model/views/view-buildable-derivations.md#current-definition) |
+  | `## Key Fields` | [../../data-model/views/view-buildable-derivations.md#current-definition](../../data-model/views/view-buildable-derivations.md#current-definition) |
   | `## Example Queries` | [../../data-model/views/view-buildable-derivations.md#example-queries](../../data-model/views/view-buildable-derivations.md#example-queries) |
-  | `## Operational Context` | [../../data-model/views/view-buildable-derivations.md](../../data-model/views/view-buildable-derivations.md), [../cleanup-record.md](../cleanup-record.md) |
-  | `## Performance Notes` | [../../data-model/views/view-buildable-derivations.md](../../data-model/views/view-buildable-derivations.md), [../cleanup-record.md](../cleanup-record.md) |
-  | `## Related Tables and Views` | [../../data-model/views/view-buildable-derivations.md#related-tables](../../data-model/views/view-buildable-derivations.md#related-tables), [../cleanup-record.md](../cleanup-record.md) |
-  | `## Migration Notes` | [../../data-model/views/view-buildable-derivations.md](../../data-model/views/view-buildable-derivations.md), [../cleanup-record.md](../cleanup-record.md) |
+  | `## Operational Context` | [../../data-model/views/view-buildable-derivations.md#legacy-claim-sequence](../../data-model/views/view-buildable-derivations.md#legacy-claim-sequence) |
+  | `## Performance Notes` | [../../data-model/views/view-buildable-derivations.md#current-definition](../../data-model/views/view-buildable-derivations.md#current-definition) |
+  | `## Related Tables and Views` | [../../data-model/views/view-buildable-derivations.md#relationship-to-other-views](../../data-model/views/view-buildable-derivations.md#relationship-to-other-views) |
+  | `## Migration Notes` | [../../data-model/views/view-buildable-derivations.md#status](../../data-model/views/view-buildable-derivations.md#status) |
 - Unmapped content: none
 
 ### `docs/views/view_build_queue_status.md`
@@ -431,14 +431,14 @@ tags:
   | Source section | Destination |
   | --- | --- |
   | Title and introduction | [data-model/views/view-nixos-derivation-build-queue.md](../../data-model/views/view-nixos-derivation-build-queue.md) |
-  | `## Overview` | [../../data-model/views/view-nixos-derivation-build-queue.md#overview](../../data-model/views/view-nixos-derivation-build-queue.md#overview) |
+  | `## Overview` | [../../data-model/views/view-nixos-derivation-build-queue.md#status](../../data-model/views/view-nixos-derivation-build-queue.md#status) |
   | `## Example Output` | [../../data-model/views/view-nixos-derivation-build-queue.md#example-output](../../data-model/views/view-nixos-derivation-build-queue.md#example-output) |
-  | `## Purpose` | [../../data-model/views/view-nixos-derivation-build-queue.md](../../data-model/views/view-nixos-derivation-build-queue.md), [../cleanup-record.md](../cleanup-record.md) |
-  | `## Core Logic` | [../../data-model/views/view-nixos-derivation-build-queue.md](../../data-model/views/view-nixos-derivation-build-queue.md), [../cleanup-record.md](../cleanup-record.md) |
-  | `## Key Fields` | [../../data-model/views/view-nixos-derivation-build-queue.md](../../data-model/views/view-nixos-derivation-build-queue.md), [../cleanup-record.md](../cleanup-record.md) |
+  | `## Purpose` | [../../data-model/views/view-nixos-derivation-build-queue.md#status](../../data-model/views/view-nixos-derivation-build-queue.md#status) |
+  | `## Core Logic` | [../../data-model/views/view-nixos-derivation-build-queue.md#definition](../../data-model/views/view-nixos-derivation-build-queue.md#definition) |
+  | `## Key Fields` | [../../data-model/views/view-nixos-derivation-build-queue.md#definition](../../data-model/views/view-nixos-derivation-build-queue.md#definition) |
   | `## Example Queries` | [../../data-model/views/view-nixos-derivation-build-queue.md#example-queries](../../data-model/views/view-nixos-derivation-build-queue.md#example-queries) |
-  | `## Operational Context` | [../../data-model/views/view-nixos-derivation-build-queue.md](../../data-model/views/view-nixos-derivation-build-queue.md), [../cleanup-record.md](../cleanup-record.md) |
-  | `## Performance Notes` | [../../data-model/views/view-nixos-derivation-build-queue.md](../../data-model/views/view-nixos-derivation-build-queue.md), [../cleanup-record.md](../cleanup-record.md) |
+  | `## Operational Context` | [../../data-model/views/view-nixos-derivation-build-queue.md#definition](../../data-model/views/view-nixos-derivation-build-queue.md#definition) |
+  | `## Performance Notes` | [../../data-model/views/view-nixos-derivation-build-queue.md#definition](../../data-model/views/view-nixos-derivation-build-queue.md#definition) |
   | `## Related Views` | [../../data-model/views/view-nixos-derivation-build-queue.md#related-views](../../data-model/views/view-nixos-derivation-build-queue.md#related-views) |
 - Unmapped content: none
 

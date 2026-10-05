@@ -16,3 +16,4 @@ docs/design/CrystalForge/uploads/CLA.md	duplicate-legal	Byte-identical uploaded 
 docs/design/CrystalForge/uploads/crystal-forge-xccdf-interchange-profile-v0.1.md	duplicate-source	Uploaded duplicate of docs/design/CrystalForge/docs/crystal-forge-xccdf-interchange-profile-v0.1.md; canonical source and destination are inventoried separately.
 docs/design/CrystalForge/uploads/system-cves-sc1-review.md	duplicate-source	Uploaded duplicate of docs/design/CrystalForge/fixtures/system-cves-sc1-review.md; canonical source and destination are inventoried separately.
 schemas/oscal-1.1.2/poam-provenance.txt	standards-provenance	Provenance metadata accompanies the pinned OSCAL schema package and is not a standalone Crystal Forge concept.
+docs/ai-sprint-planning.md	process	Internal AI sprint planning template; not durable product knowledge

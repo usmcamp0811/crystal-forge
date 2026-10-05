@@ -16,7 +16,6 @@ tags:
 | `docs/web-ui-check.md` | [testing/web-ui-check.md](../../testing/web-ui-check.md) | moved | complete |
 | `docs/fixture-seeding.md` | [testing/fixture-seeding.md](../../testing/fixture-seeding.md) | moved | complete |
 | `TESTING.md` | [historical/multi-builder-api-testing-guide.md](../../historical/multi-builder-api-testing-guide.md) | moved | complete |
-| `docs/ai-sprint-planning.md` | [operations/ai-sprint-planning.md](../../operations/ai-sprint-planning.md) | moved | complete |
 | `docs/mock-execution-mode.md` | [operations/mock-execution-mode.md](../../operations/mock-execution-mode.md) | moved | complete |
 | `checks/integration/README.md` | retained in place; see [integration section](../../testing/flake-checks.md#integration) | retained | complete |
 | `checks/nixos-options-metadata/README.md` | retained in place; see [nixos-options-metadata section](../../testing/flake-checks.md#nixos-options-metadata) | retained | complete |
@@ -135,29 +134,6 @@ tags:
   | `## Test Results` | [historical/multi-builder-api-testing-guide.md#test-results](../../historical/multi-builder-api-testing-guide.md#test-results) |
   | `## Feedback` | [historical/multi-builder-api-testing-guide.md#feedback](../../historical/multi-builder-api-testing-guide.md#feedback) |
 - Unmapped content: none. The migration added a `Status:` note that lists differences from the code.
-
-### `docs/ai-sprint-planning.md`
-
-- Title: AI Sprint Planning & Backlog Grooming Guide
-- Purpose: Defines the compressed AI-executed sprint process and the backlog grooming prompt.
-- Action: moved (kept whole because the sections form one process)
-- Sections:
-  | Source section | Destination |
-  | --- | --- |
-  | Title and introduction | [operations/ai-sprint-planning.md](../../operations/ai-sprint-planning.md) |
-  | `# Sprint Model` | [operations/ai-sprint-planning.md#sprint-model](../../operations/ai-sprint-planning.md#sprint-model) |
-  | `# Roles` | [operations/ai-sprint-planning.md#roles](../../operations/ai-sprint-planning.md#roles) |
-  | `# Sprint Lifecycle` | [operations/ai-sprint-planning.md#sprint-lifecycle](../../operations/ai-sprint-planning.md#sprint-lifecycle) |
-  | `# Backlog Grooming Prompt` | [operations/ai-sprint-planning.md#backlog-grooming-prompt](../../operations/ai-sprint-planning.md#backlog-grooming-prompt) |
-  | `# Task Format Standard` | [operations/ai-sprint-planning.md#task-format-standard](../../operations/ai-sprint-planning.md#task-format-standard) |
-  | `# AI-Safe Task Design Principles` | [operations/ai-sprint-planning.md#ai-safe-task-design-principles](../../operations/ai-sprint-planning.md#ai-safe-task-design-principles) |
-  | `# Sprint Definition of Done` | [operations/ai-sprint-planning.md#sprint-definition-of-done](../../operations/ai-sprint-planning.md#sprint-definition-of-done) |
-  | `# Risk Control Guidelines` | [operations/ai-sprint-planning.md#risk-control-guidelines](../../operations/ai-sprint-planning.md#risk-control-guidelines) |
-  | `# Explicit Out-of-Scope Section` | [operations/ai-sprint-planning.md#explicit-out-of-scope-section](../../operations/ai-sprint-planning.md#explicit-out-of-scope-section) |
-  | `# Recommended Documentation Pattern` | [operations/ai-sprint-planning.md#recommended-documentation-pattern](../../operations/ai-sprint-planning.md#recommended-documentation-pattern) |
-  | `# Guiding Principle` | [operations/ai-sprint-planning.md#guiding-principle](../../operations/ai-sprint-planning.md#guiding-principle) |
-  | `# Summary` | [operations/ai-sprint-planning.md#summary](../../operations/ai-sprint-planning.md#summary) |
-- Unmapped content: none. The migration demoted source H1 headings to H2 so the concept has one H1, and added a `Status:` note.
 
 ### `docs/mock-execution-mode.md`
 

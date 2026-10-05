@@ -1,5 +1,5 @@
 ---
-type: Operator Guide
+type: Reference
 title: AI sprint planning and backlog grooming guide
 description: Defines the compressed AI-executed sprint model, roles, lifecycle, planning prompt, task format, task-design principles, risk rules, and sprint definition of done; open it when grooming a backlog or planning a sprint.
 tags:
