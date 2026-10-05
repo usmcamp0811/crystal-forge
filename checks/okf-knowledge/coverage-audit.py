@@ -15,11 +15,13 @@ import argparse
 import csv
 import fnmatch
 import hashlib
+import json
 import re
 import subprocess
 import sys
 from collections import Counter
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import NamedTuple
 
 import diagram_scan
 from validate import slugify
@@ -169,11 +171,31 @@ def preserved(source: str, destinations: list[str]) -> bool:
     return True
 
 
-def load_source_adjustments(path: Path) -> dict[tuple[str, str], tuple[str, str, str]]:
-    """Loads exact, hash-bound transformations authorized by cleanup records."""
-    adjustments: dict[tuple[str, str], tuple[str, str, str]] = {}
+class Adjustment(NamedTuple):
+    """One hash-bound transformation of one baseline block.
+
+    ``old_text`` and ``new_text`` are used only by ``replace-exact-text``.
+    """
+
+    digest: str
+    adjustment_id: str
+    transformation: str
+    old_text: str = ""
+    new_text: str = ""
+
+
+def load_source_adjustments(path: Path) -> dict[tuple[str, str], Adjustment]:
+    """Loads exact, hash-bound transformations authorized by cleanup records.
+
+    The optional columns ``old_text`` and ``new_text`` hold JSON strings. They
+    are required for ``replace-exact-text`` and forbidden for every other
+    transformation.
+    """
+    adjustments: dict[tuple[str, str], Adjustment] = {}
     with path.open(encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle, delimiter="\t")
+        # QUOTE_NONE: the JSON text columns contain double quotes that must
+        # reach ``json.loads`` unchanged.
+        reader = csv.DictReader(handle, delimiter="\t", quoting=csv.QUOTE_NONE)
         required = {
             "source_path", "source_heading", "baseline_block_sha256",
             "adjustment_id", "transformation", "reason",
@@ -184,21 +206,42 @@ def load_source_adjustments(path: Path) -> dict[tuple[str, str], tuple[str, str,
             key = (row["source_path"], row["source_heading"])
             if key in adjustments:
                 raise ValueError(f"{path}: duplicate source adjustment {key}")
-            if not all(row[name].strip() for name in required):
+            if not all((row[name] or "").strip() for name in required):
                 raise ValueError(f"{path}: incomplete source adjustment {key}")
-            adjustments[key] = (
-                row["baseline_block_sha256"],
-                row["adjustment_id"],
-                row["transformation"],
+            texts = []
+            for column in ("old_text", "new_text"):
+                raw = row.get(column) or ""
+                try:
+                    texts.append(json.loads(raw) if raw else "")
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"{path}: {key}: {column} is not a JSON string: {exc}") from exc
+                if raw and not isinstance(texts[-1], str):
+                    raise ValueError(f"{path}: {key}: {column} must be a JSON string")
+            exact = row["transformation"] == "replace-exact-text"
+            if exact and not texts[0]:
+                raise ValueError(f"{path}: {key}: replace-exact-text needs a non-empty old_text")
+            if not exact and any(texts):
+                raise ValueError(f"{path}: {key}: old_text and new_text apply only to replace-exact-text")
+            adjustments[key] = Adjustment(
+                row["baseline_block_sha256"], row["adjustment_id"], row["transformation"], *texts
             )
     return adjustments
 
 
-def apply_source_adjustment(source: str, adjustment: tuple[str, str, str], block: str) -> str:
-    """Applies one named transformation to its exact baseline block only."""
-    digest, _adjustment_id, transformation = adjustment
+def apply_source_adjustment(source: str, adjustment: tuple, block: str) -> str:
+    """Applies one named transformation to its exact baseline block only.
+
+    ``replace-exact-text`` replaces one stale claim by its corrected text. The
+    claim MUST occur exactly once in the block. Every other part of the block
+    stays subject to the normal preservation comparison.
+    """
+    digest, _adjustment_id, transformation, old_text, new_text = Adjustment(*adjustment)
     if hashlib.sha256(block.encode("utf-8")).hexdigest() != digest:
         raise ValueError("baseline block hash does not match the authorized adjustment")
+    if transformation == "replace-exact-text":
+        if block.count(old_text) != 1:
+            raise ValueError(f"expected exactly one occurrence of the corrected claim, found {block.count(old_text)}")
+        return block.replace(old_text, new_text)
     if transformation != "normalize-absolute-web-ui-path" or source != "docs/design/FIGMA_CLAUDE_WORKFLOW.md":
         if transformation == "normalize-contributing-test-routes" and source == "CONTRIBUTING.md":
             replacements = (
@@ -598,11 +641,16 @@ def mapped_destinations_for(
     return destinations, allowed
 
 
-def audit(base: str, bundle: Path, scope_file: Path, root: Path) -> int:
+def audit(base: str, bundle: Path, scope_file: Path, root: Path, only: tuple[str, ...] = ()) -> int:
     """Checks every baseline document against the migration manifests.
 
     Returns 0 when preservation is proven, 1 when any block is lost or any
-    ledger is invalid, and raises for unreadable inputs (see ``main``).
+    ledger is invalid, 5 when ``only`` limited the run and no error was found,
+    and raises for unreadable inputs (see ``main``).
+
+    ``only`` is a development aid. It limits checking to baseline paths that
+    contain one of the given substrings. A limited run is never a preservation
+    proof, so it never returns 0. CI MUST NOT pass ``only``.
     """
     require_revision(base)
     errors: list[str] = []
@@ -620,6 +668,8 @@ def audit(base: str, bundle: Path, scope_file: Path, root: Path) -> int:
     used_adjustments: set[tuple[str, str]] = set()
     used_semantic: set[tuple[str, str]] = set()
     baseline = baseline_paths(base)
+    if only:
+        baseline = [p for p in baseline if any(token in p for token in only)]
     scoped_patterns = []
     for line_no, line in enumerate(scope_file.read_text(encoding="utf-8").splitlines(), 1):
         if not line or line.startswith("#"):
@@ -711,7 +761,7 @@ def audit(base: str, bundle: Path, scope_file: Path, root: Path) -> int:
             key = (source, heading)
             raw_block = block
             if key in adjustments:
-                _digest, adjustment_id, _transformation = adjustments[key]
+                adjustment_id = adjustments[key].adjustment_id
                 if f"| {adjustment_id} |" not in cleanup_text:
                     errors.append(f"{source}: adjustment {adjustment_id} is not recorded in cleanup-record.md")
                     continue
@@ -745,9 +795,10 @@ def audit(base: str, bundle: Path, scope_file: Path, root: Path) -> int:
             if not preserved(block, destinations_without_diagrams):
                 errors.append(f"{source}: content/order/punctuation lost in H2 {heading!r}")
 
-    for key in sorted(adjustments.keys() - used_adjustments):
+    in_scope = lambda path: not only or any(token in path for token in only)  # noqa: E731
+    for key in sorted(k for k in adjustments.keys() - used_adjustments if in_scope(k[0])):
         errors.append(f"{key[0]}: stale source adjustment for H2 {key[1]!r}")
-    for key in sorted(semantic_by_key.keys() - used_semantic):
+    for key in sorted(k for k in semantic_by_key.keys() - used_semantic if in_scope(k[0])):
         row = semantic_by_key[key]
         # A row whose verification failed already has a specific diagnostic.
         if not any(f"semantic replacement {row['adjustment_id']}:" in e for e in errors):
@@ -760,6 +811,9 @@ def audit(base: str, bundle: Path, scope_file: Path, root: Path) -> int:
         print("\n".join(errors))
         print(f"FAILED: {len(errors)} source-block preservation error(s)", file=sys.stderr)
         return 1
+    if only:
+        print(f"PARTIAL (--only): {len(baseline)} document(s) had no error; this is NOT a preservation proof")
+        return 5
     print(f"OK: {len(baseline)} baseline Markdown documents checked against source-block maps")
     return 0
 
@@ -770,10 +824,12 @@ def main() -> int:
     parser.add_argument("--bundle", default="docs/knowledge")
     parser.add_argument("--scope", default="checks/okf-knowledge/source-scope.tsv")
     parser.add_argument("--repo-root", default=".")
+    parser.add_argument("--only", action="append", default=[],
+                        help="development aid: check only baseline paths containing this text")
     args = parser.parse_args()
     root = Path(args.repo_root).resolve()
     try:
-        return audit(args.base, root / args.bundle, root / args.scope, root)
+        return audit(args.base, root / args.bundle, root / args.scope, root, tuple(args.only))
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
         print(f"coverage audit error: {exc}", file=sys.stderr)
         return 2

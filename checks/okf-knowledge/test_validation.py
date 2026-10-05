@@ -595,6 +595,59 @@ class SemanticReplacementTests(AuditFixture):
         self.assert_audit_fails(base, "overlaps a source adjustment")
 
 
+class ReplaceExactTextTests(AuditFixture):
+    """``replace-exact-text`` corrects one claim and still proves the rest."""
+
+    SOURCE = "## Guide\nKeep this accurate sentence. The server wakes builders instantly.\nAlso keep this.\n"
+    OLD = "The server wakes builders instantly."
+    NEW = "Builders poll the server."
+
+    def scenario(self, dest_body: str, *, old=None, new=None, digest=None, extra="", transformation="replace-exact-text"):
+        base = self.commit_baseline({"source.md": self.SOURCE})
+        self.write("docs/knowledge/concept.md", "## Guide\n" + dest_body)
+        self.write_manifest([{"source": "source.md", "dest": "concept.md", "sections": [("Guide", "concept.md", "guide")]}])
+        self.write_support()
+        import json as _json
+        old = self.OLD if old is None else old
+        new = self.NEW if new is None else new
+        self.write(
+            "checks/okf-knowledge/source-adjustments.tsv",
+            "source_path\tsource_heading\tbaseline_block_sha256\tadjustment_id\ttransformation\treason\told_text\tnew_text\n"
+            f"source.md\tGuide\t{digest or sha(self.SOURCE.split(chr(10), 1)[0] + chr(10) + self.SOURCE.split(chr(10), 1)[1])}\tC-001\t{transformation}\tCorrection.\t"
+            f"{_json.dumps(old)}\t{_json.dumps(new)}\n" + extra,
+        )
+        return base
+
+    def test_corrected_claim_with_rest_preserved_passes(self):
+        base = self.scenario("Keep this accurate sentence. Builders poll the server.\nAlso keep this.\n")
+        code, out, err = self.audit(base)
+        self.assertEqual(code, 0, f"{out}\n{err}")
+
+    def test_rest_of_the_block_is_still_compared(self):
+        base = self.scenario("Keep this accurate sentence. Builders poll the server.\n")
+        self.assert_audit_fails(base, "content/order/punctuation lost in H2 'Guide'")
+
+    def test_stale_claim_must_not_survive_as_the_only_proof(self):
+        # The destination keeps the old claim instead of the correction.
+        base = self.scenario("Keep this accurate sentence. The server wakes builders instantly.\nAlso keep this.\n")
+        self.assert_audit_fails(base, "content/order/punctuation lost in H2 'Guide'")
+
+    def test_claim_must_occur_exactly_once(self):
+        base = self.scenario("Keep this accurate sentence. Builders poll the server.\nAlso keep this.\n", old="no such claim")
+        self.assert_audit_fails(base, "expected exactly one occurrence of the corrected claim, found 0")
+
+    def test_wrong_block_hash_fails(self):
+        base = self.scenario("Keep this accurate sentence. Builders poll the server.\nAlso keep this.\n", digest=sha("x"))
+        self.assert_audit_fails(base, "baseline block hash does not match")
+
+    def test_text_columns_are_rejected_for_other_transformations(self):
+        base = self.scenario("Keep this accurate sentence. Builders poll the server.\nAlso keep this.\n",
+                             transformation="normalize-contributing-doc-path")
+        code, out, err = self.audit(base)
+        self.assertEqual(code, 2)
+        self.assertIn("apply only to replace-exact-text", err)
+
+
 class CleanupRecordIsNotADestinationTests(AuditFixture):
     def test_text_quoted_in_cleanup_record_does_not_satisfy_preservation(self):
         base = self.commit_baseline({"source.md": "## Old Title\nOld content here.\n"})
