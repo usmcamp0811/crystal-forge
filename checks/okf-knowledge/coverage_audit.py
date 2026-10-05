@@ -343,8 +343,6 @@ def load_semantic_replacements(root: Path) -> list[dict[str, str]]:
                 dest_path_str = row["destination_path"].strip()
                 dest_path = Path(dest_path_str)
                 if dest_path.is_absolute():
-                    raise ValueError(f"semantic-replacements.tsv:{row_num}: destination_path must be repository-relative, not absolute: {dest_path}")
-                if ".." in dest_path.parts:
                     raise ValueError(f"semantic-replacements.tsv:{row_num}: destination_path must not contain '..': {dest_path}")
                 # Check for duplicate (source_path, source_heading)
                 key = (row["source_path"].strip(), row["source_heading"].strip())

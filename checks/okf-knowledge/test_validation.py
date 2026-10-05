@@ -335,5 +335,726 @@ class MermaidLedgerTests(unittest.TestCase):
         self.assertTrue(report["errors"])
 
 
+class SemanticReplacementTests(unittest.TestCase):
+    """Tests for the semantic replacement verifier in coverage-audit.py"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        # Create minimal repo structure
+        (self.root / "checks/okf-knowledge").mkdir(parents=True)
+        (self.root / "docs/knowledge/meta/migration-manifest").mkdir(parents=True)
+        (self.root / "docs/knowledge/concepts").mkdir(parents=True)
+        (self.root / "docs/knowledge/api").mkdir(parents=True)
+        (self.root / "docs/knowledge/security").mkdir(parents=True)
+        (self.root / "docs/knowledge/deployment").mkdir(parents=True)
+        (self.root / "docs/knowledge/architecture").mkdir(parents=True)
+        (self.root / "docs/knowledge/ui").mkdir(parents=True)
+        (self.root / "docs/knowledge/operations").mkdir(parents=True)
+        (self.root / "docs/knowledge/testing").mkdir(parents=True)
+        (self.root / "docs/knowledge/builders").mkdir(parents=True)
+        (self.root / "docs/knowledge/overview").mkdir(parents=True)
+        (self.root / "packages/default").mkdir(parents=True)
+        # Create baseline commit
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=self.root, check=True)
+        subprocess.run(["git", "config", "user.name", "OKF test"], cwd=self.root, check=True)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _write_baseline_and_commit(self, files: dict[str, str]) -> str:
+        """Write files and commit them as baseline. Only source files go in baseline."""
+        for path, content in files.items():
+            if path.startswith("docs/knowledge/"):
+                # Destination files - create them after baseline
+                continue
+            (self.root / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / path).write_text(content)
+        subprocess.run(["git", "add", "-A"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "baseline"], cwd=self.root, check=True)
+        base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, check=True,
+                               capture_output=True, text=True).stdout.strip()
+        # Now create destination files (not in baseline)
+        for path, content in files.items():
+            if path.startswith("docs/knowledge/"):
+                (self.root / path).parent.mkdir(parents=True, exist_ok=True)
+                (self.root / path).write_text(content)
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, check=True,
+                               capture_output=True, text=True).stdout.strip()
+
+    def _write_manifest(self, source_path: str, dest_path: str, heading: str, action: str = "moved"):
+        """Write migration manifest with source inventory."""
+        manifest = self.root / "docs/knowledge/meta/migration-manifest/test.md"
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        dest_anchor = heading.lower().replace(" ", "-").replace("(", "").replace(")", "").replace("/", "").replace("`", "").replace(".", "")
+        manifest_content = f"""| Original | Destination | Action | Coverage |
+|---|---|---|---|
+| `{source_path}` | [Concept](../../concept.md) | {action} | complete |
+
+## Source inventory
+
+### `{source_path}`
+
+| Source section | Destination |
+|---|---|
+| `## {heading}` | [Concept](../../concept.md#{heading.lower().replace(" ", "-").replace("`", "").replace("/", "").replace("(", "").replace(")", "").replace(".", "")}) |
+"""
+        (self.root / "docs/knowledge/meta/migration-manifest/test.md").write_text(manifest_content)
+
+    def _write_scope(self):
+        (self.root / "checks/okf-knowledge/source-scope.tsv").write_text("# pattern\tclass\treason\n")
+
+    def _write_cleanup_record(self, ids: list[str]):
+        """Write cleanup record with given correction IDs."""
+        content = """# Knowledge cleanup record
+
+## Corrections
+
+### Architecture and queues
+
+"""
+        for cid in ids:
+            # Handle both integer and string IDs
+            if isinstance(cid, int):
+                cid_str = f"{cid:03d}"
+            else:
+                cid_str = cid
+            content += f"| C-{cid_str} | Old claim | Correction | Destination | Evidence |\n"
+        (self.root / "docs/knowledge/meta/cleanup-record.md").write_text(content)
+
+    def _write_semantic_ledger(self, rows: list[dict]):
+        """Write semantic-replacements.tsv with given rows."""
+        path = self.root / "checks/okf-knowledge/semantic-replacements.tsv"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f, delimiter="\t")
+            writer.writerow([
+                "source_path", "source_heading", "baseline_block_sha256",
+                "adjustment_id", "destination_path", "destination_heading",
+                "destination_block_sha256", "transformation", "reason"
+            ])
+            for row in rows:
+                writer.writerow([
+                    row["source_path"], row["source_heading"], row["baseline_block_sha256"],
+                    row["adjustment_id"], row["destination_path"], row["destination_heading"],
+                    row["destination_block_sha256"], row["transformation"], row["reason"]
+                ])
+
+    def _run_audit(self, base: str) -> tuple[int, str, str]:
+        """Run coverage-audit.py and return (returncode, stdout, stderr)."""
+        completed = subprocess.run(
+            [sys.executable, str(HERE / "coverage-audit.py"), "--base", base,
+             "--repo-root", str(self.root), "--bundle", "docs/knowledge",
+             "--scope", "checks/okf-knowledge/source-scope.tsv"],
+            cwd=self.root, capture_output=True, text=True,
+        )
+        return completed.returncode, completed.stdout, completed.stderr
+
+    def test_valid_semantic_replacement_passes(self):
+        """A valid semantic replacement passes the audit."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            # Create baseline file
+            source_content = "## Old Title\nOld content here.\n"
+            dest_content = "## New Title\nNew content here.\n"
+            files = {
+                "source.md": source_content,
+                "docs/knowledge/concept.md": dest_content,
+            }
+            base = self._write_baseline_and_commit(files)
+            self._write_manifest("source.md", "concept.md", "Old Title")
+            self._write_scope()
+            self._write_cleanup_record(["001"])
+            
+            # Calculate hashes
+            source_block = "## Old Title\nOld content here.\n"
+            dest_block = "## New Title\nNew content here.\n"
+            source_hash = hashlib.sha256(source_block.encode()).hexdigest()
+            dest_hash = hashlib.sha256(dest_block.encode()).hexdigest()
+            
+            self._write_semantic_ledger([{
+                "source_path": "source.md",
+                "source_heading": "Old Title",
+                "baseline_block_sha256": hashlib.sha256(source_block.encode()).hexdigest(),
+                "adjustment_id": "C-001",
+                "destination_path": "docs/knowledge/concept.md",
+                "destination_heading": "New Title",
+                "destination_block_sha256": hashlib.sha256(dest_block.encode()).hexdigest(),
+                "transformation": "semantic-replacement",
+                "reason": "Test replacement"
+            }])
+            
+            self._write_scope()
+            base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+            rc, out, err = self._run_audit(base)
+            self.assertEqual(rc, 0, f"Audit failed: {err}\n{out}")
+
+    def test_wrong_baseline_source_hash_fails(self):
+        """Wrong baseline source hash fails the audit."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_content = "## Old Title\nOld content here.\n"
+            dest_content = "## New Title\nNew content here.\n"
+            files = {
+                "source.md": source_content,
+                "docs/knowledge/concept.md": dest_content,
+            }
+            base = self._write_baseline_and_commit(files)
+            self._write_manifest("source.md", "concept.md", "Old Title")
+            self._write_scope()
+            self._write_cleanup_record(["001"])
+            
+            # Wrong hash
+            self._write_semantic_ledger([{
+                "source_path": "source.md",
+                "source_heading": "Old Title",
+                "baseline_block_sha256": "0" * 64,  # Wrong hash
+                "adjustment_id": "C-001",
+                "destination_path": "docs/knowledge/concept.md",
+                "destination_heading": "New Title",
+                "destination_block_sha256": hashlib.sha256("## New Title\nNew content here.\n".encode()).hexdigest(),
+                "transformation": "semantic-replacement",
+                "reason": "Test replacement"
+            }])
+            
+            self._write_scope()
+            base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+            rc, out, err = self._run_audit(base)
+            self.assertEqual(rc, 1, "Audit should fail with wrong source hash")
+            self.assertIn("semantic replacement source hash mismatch", out)
+
+    def test_wrong_destination_hash_fails(self):
+        """Wrong destination hash fails the audit."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_content = "## Old Title\nOld content here.\n"
+            dest_content = "## New Title\nNew content here.\n"
+            files = {
+                "source.md": source_content,
+                "docs/knowledge/concept.md": dest_content,
+            }
+            base = self._write_baseline_and_commit(files)
+            self._write_manifest("source.md", "concept.md", "Old Title")
+            self._write_scope()
+            self._write_cleanup_record(["001"])
+            
+            # Wrong destination hash
+            self._write_semantic_ledger([{
+                "source_path": "source.md",
+                "source_heading": "Old Title",
+                "baseline_block_sha256": hashlib.sha256("## Old Title\nOld content here.\n".encode()).hexdigest(),
+                "adjustment_id": "C-001",
+                "destination_path": "docs/knowledge/concept.md",
+                "destination_heading": "New Title",
+                "destination_block_sha256": "0" * 64,  # Wrong hash
+                "transformation": "semantic-replacement",
+                "reason": "Test replacement"
+            }])
+            
+            self._write_scope()
+            base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+            rc, out, err = self._run_audit(base)
+            self.assertEqual(rc, 1, "Audit should fail with wrong destination hash")
+            self.assertIn("semantic replacement destination hash mismatch", out)
+
+    def test_missing_cleanup_record_id_fails(self):
+        """Missing cleanup record ID fails the audit."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_content = "## Old Title\nOld content here.\n"
+            dest_content = "## New Title\nNew content here.\n"
+            files = {
+                "source.md": source_content,
+                "docs/knowledge/concept.md": dest_content,
+            }
+            base = self._write_baseline_and_commit(files)
+            self._write_manifest("source.md", "concept.md", "Old Title")
+            self._write_scope()
+            # No cleanup record written
+            
+            self._write_semantic_ledger([{
+                "source_path": "source.md",
+                "source_heading": "Old Title",
+                "baseline_block_sha256": hashlib.sha256("## Old Title\nOld content here.\n".encode()).hexdigest(),
+                "adjustment_id": "C-999",  # Not in cleanup record
+                "destination_path": "docs/knowledge/concept.md",
+                "destination_heading": "New Title",
+                "destination_block_sha256": hashlib.sha256("## New Title\nNew content here.\n".encode()).hexdigest(),
+                "transformation": "semantic-replacement",
+                "reason": "Test replacement"
+            }])
+            
+            self._write_scope()
+            base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+            rc, out, err = self._run_audit(base)
+            self.assertEqual(rc, 1, "Audit should fail with missing cleanup ID")
+            self.assertIn("is not recorded in cleanup-record.md", out)
+
+    def test_missing_destination_heading_fails(self):
+        """Missing destination heading fails the audit."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_content = "## Old Title\nOld content here.\n"
+            dest_content = "## Different Title\nNew content here.\n"
+            files = {
+                "source.md": source_content,
+                "docs/knowledge/concept.md": dest_content,
+            }
+            base = self._write_baseline_and_commit(files)
+            self._write_manifest("source.md", "concept.md", "Old Title")
+            self._write_scope()
+            self._write_cleanup_record(["001"])
+            
+            # Destination heading doesn't exist
+            self._write_semantic_ledger([{
+                "source_path": "source.md",
+                "source_heading": "Old Title",
+                "baseline_block_sha256": hashlib.sha256("## Old Title\nOld content here.\n".encode()).hexdigest(),
+                "adjustment_id": "C-001",
+                "destination_path": "docs/knowledge/concept.md",
+                "destination_heading": "Wrong Heading",  # Doesn't exist
+                "destination_block_sha256": hashlib.sha256("## Different Title\nNew content here.\n".encode()).hexdigest(),
+                "transformation": "semantic-replacement",
+                "reason": "Test replacement"
+            }])
+            
+            self._write_scope()
+            base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+            rc, out, err = self._run_audit(base)
+            self.assertEqual(rc, 1, "Audit should fail with missing destination heading")
+            self.assertIn("destination heading", out.lower())
+
+    def test_duplicate_destination_heading_fails_as_ambiguous(self):
+        """Duplicate destination heading fails as ambiguous."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_content = "## Old Title\nOld content here.\n"
+            dest_content = "## Duplicate Heading\nFirst content.\n\n## Duplicate Heading\nSecond content.\n"
+            files = {
+                "source.md": source_content,
+                "docs/knowledge/concept.md": dest_content,
+            }
+            base = self._write_baseline_and_commit(files)
+            self._write_manifest("source.md", "concept.md", "Old Title")
+            self._write_scope()
+            self._write_cleanup_record(["001"])
+            
+            self._write_semantic_ledger([{
+                "source_path": "source.md",
+                "source_heading": "Old Title",
+                "baseline_block_sha256": hashlib.sha256("## Old Title\nOld content here.\n".encode()).hexdigest(),
+                "adjustment_id": "C-001",
+                "destination_path": "docs/knowledge/concept.md",
+                "destination_heading": "Duplicate Heading",  # Appears twice
+                "destination_block_sha256": hashlib.sha256("## Duplicate Heading\nFirst content.\n".encode()).hexdigest(),
+                "transformation": "semantic-replacement",
+                "reason": "Test replacement"
+            }])
+            
+            self._write_scope()
+            base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+            rc, out, err = self._run_audit(base)
+            self.assertEqual(rc, 1, "Audit should fail with duplicate destination heading")
+            self.assertTrue("ambiguous" in out.lower() or "multiple" in out.lower() or "duplicate" in out.lower() or "unique" in out.lower() or "exactly one" in out.lower() or "exactly 1" in out.lower(), f"Expected ambiguous/multiple/duplicate/unique/exactly one, got: {out}")
+
+    def test_duplicate_semantic_ledger_key_fails(self):
+        """Duplicate semantic ledger key (source_path, source_heading) fails."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_content = "## Old Title\nOld content here.\n"
+            dest_content = "## New Title\nNew content here.\n"
+            files = {
+                "source.md": source_content,
+                "docs/knowledge/concept.md": dest_content,
+            }
+            base = self._write_baseline_and_commit(files)
+            self._write_manifest("source.md", "concept.md", "Old Title")
+            self._write_scope()
+            self._write_cleanup_record(["001", "002"])
+            
+            # Duplicate ledger entries
+            self._write_semantic_ledger([
+                {
+                    "source_path": "source.md",
+                    "source_heading": "Old Title",
+                    "baseline_block_sha256": hashlib.sha256("## Old Title\nOld content here.\n".encode()).hexdigest(),
+                    "adjustment_id": "C-001",
+                    "destination_path": "docs/knowledge/concept.md",
+                    "destination_heading": "New Title",
+                    "destination_block_sha256": hashlib.sha256("## New Title\nNew content here.\n".encode()).hexdigest(),
+                    "transformation": "semantic-replacement",
+                    "reason": "Test replacement 1"
+                },
+                {
+                    "source_path": "source.md",
+                    "source_heading": "Old Title",
+                    "baseline_block_sha256": hashlib.sha256("## Old Title\nOld content here.\n".encode()).hexdigest(),
+                    "adjustment_id": "C-002",
+                    "destination_path": "docs/knowledge/concept.md",
+                    "destination_heading": "New Title",
+                    "destination_block_sha256": hashlib.sha256("## New Title\nNew content here.\n".encode()).hexdigest(),
+                    "transformation": "semantic-replacement",
+                    "reason": "Test replacement 2"
+                }
+            ])
+            
+            self._write_scope()
+            base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+            rc, out, err = self._run_audit(base)
+            self.assertEqual(rc, 1, "Audit should fail with duplicate ledger key")
+            self.assertIn("duplicate", out.lower())
+
+    def test_missing_required_tsv_field_fails(self):
+        """Missing required TSV field fails on load."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_content = "## Old Title\nOld content here.\n"
+            dest_content = "## New Title\nNew content here.\n"
+            files = {
+                "source.md": source_content,
+                "docs/knowledge/concept.md": dest_content,
+            }
+            base = self._write_baseline_and_commit(files)
+            self._write_manifest("source.md", "concept.md", "Old Title")
+            self._write_scope()
+            self._write_cleanup_record(["001"])
+            
+            # Missing required field
+            path = self.root / "checks/okf-knowledge/semantic-replacements.tsv"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f, delimiter="\t")
+                writer.writerow([
+                    "source_path", "source_heading", "baseline_block_sha256",
+                    "adjustment_id", "destination_path", "destination_heading",
+                    "destination_block_sha256", "transformation", "reason"
+                ])
+                writer.writerow([
+                    "source.md", "Old Title",  # Missing baseline_block_sha256
+                    "C-001", "docs/knowledge/concept.md", "New Title",
+                    hashlib.sha256("## New Title\nNew content here.\n".encode()).hexdigest(),
+                    "semantic-replacement", "Test replacement"
+                ])
+            
+            self._write_scope()
+            base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+            rc, out, err = self._run_audit(base)
+            self.assertEqual(rc, 1, "Audit should fail with missing required field")
+            self.assertTrue(
+                "incomplete" in out.lower() or "missing" in out.lower() or "required" in out.lower(),
+                f"Expected error about incomplete/missing/required, got: {out}"
+            )
+
+    def test_empty_required_tsv_field_fails(self):
+        """Empty required TSV field fails on load."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_content = "## Old Title\nOld content here.\n"
+            dest_content = "## New Title\nNew content here.\n"
+            files = {
+                "source.md": source_content,
+                "docs/knowledge/concept.md": dest_content,
+            }
+            base = self._write_baseline_and_commit(files)
+            self._write_manifest("source.md", "concept.md", "Old Title")
+            self._write_scope()
+            self._write_cleanup_record(["001"])
+            
+            # Empty required field
+            path = self.root / "checks/okf-knowledge/semantic-replacements.tsv"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f, delimiter="\t")
+                writer.writerow([
+                    "source_path", "source_heading", "baseline_block_sha256",
+                    "adjustment_id", "destination_path", "destination_heading",
+                    "destination_block_sha256", "transformation", "reason"
+                ])
+                writer.writerow([
+                    "source.md", "Old Title", 
+                    hashlib.sha256("## Old Title\nOld content here.\n".encode()).hexdigest(),
+                    "",  # Empty adjustment_id
+                    "docs/knowledge/concept.md", "New Title",
+                    hashlib.sha256("## New Title\nNew content here.\n".encode()).hexdigest(),
+                    "semantic-replacement", "Test replacement"
+                ])
+            
+            self._write_scope()
+            base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+            rc, out, err = self._run_audit(base)
+            self.assertEqual(rc, 1, "Audit should fail with empty required field")
+            self.assertTrue(
+                "incomplete" in out.lower() or "empty" in out.lower() or "required" in out.lower() or "missing" in out.lower(),
+                f"Expected error about incomplete/empty/required/missing, got: {out}"
+            )
+
+    def test_transformation_other_than_semantic_replacement_fails(self):
+        """Transformation other than 'semantic-replacement' fails."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_content = "## Old Title\nOld content here.\n"
+            dest_content = "## New Title\nNew content here.\n"
+            files = {
+                "source.md": source_content,
+                "docs/knowledge/concept.md": dest_content,
+            }
+            base = self._write_baseline_and_commit(files)
+            self._write_manifest("source.md", "concept.md", "Old Title")
+            self._write_scope()
+            self._write_cleanup_record(["001"])
+            
+            # Wrong transformation
+            self._write_semantic_ledger([{
+                "source_path": "source.md",
+                "source_heading": "Old Title",
+                "baseline_block_sha256": hashlib.sha256("## Old Title\nOld content here.\n".encode()).hexdigest(),
+                "adjustment_id": "C-001",
+                "destination_path": "docs/knowledge/concept.md",
+                "destination_heading": "New Title",
+                "destination_block_sha256": hashlib.sha256("## New Title\nNew content here.\n".encode()).hexdigest(),
+                "transformation": "wrong-transformation",  # Wrong!
+                "reason": "Test replacement"
+            }])
+            
+            self._write_scope()
+            base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+            rc, out, err = self._run_audit(base)
+            self.assertEqual(rc, 1, "Audit should fail with wrong transformation")
+            self.assertTrue("transformation" in out.lower() or "semantic-replacement" in out.lower() or "unsupported" in out.lower(), f"Expected transformation/semantic-replacement/unsupported error, got: {out}")
+
+    def test_unused_stale_ledger_row_fails(self):
+        """Unused/stale ledger row fails."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_content = "## Old Title\nOld content here.\n"
+            dest_content = "## New Title\nNew content here.\n"
+            files = {
+                "source.md": source_content,
+                "docs/knowledge/concept.md": dest_content,
+            }
+            base = self._write_baseline_and_commit(files)
+            self._write_manifest("source.md", "concept.md", "Old Title")
+            self._write_scope()
+            self._write_cleanup_record(["001", "002"])  # C-002 not used
+            
+            self._write_semantic_ledger([
+                {
+                    "source_path": "source.md",
+                    "source_heading": "Old Title",
+                    "baseline_block_sha256": hashlib.sha256("## Old Title\nOld content here.\n".encode()).hexdigest(),
+                    "adjustment_id": "C-001",
+                    "destination_path": "docs/knowledge/concept.md",
+                    "destination_heading": "New Title",
+                    "destination_block_sha256": hashlib.sha256("## New Title\nNew content here.\n".encode()).hexdigest(),
+                    "transformation": "semantic-replacement",
+                    "reason": "Test replacement"
+                },
+                {
+                    "source_path": "source.md",
+                    "source_heading": "Unused Heading",
+                    "baseline_block_sha256": hashlib.sha256("## Unused Heading\nContent.\n".encode()).hexdigest(),
+                    "adjustment_id": "C-002",
+                    "destination_path": "docs/knowledge/concept.md",
+                    "destination_heading": "New Title",
+                    "destination_block_sha256": hashlib.sha256("## New Title\nNew content here.\n".encode()).hexdigest(),
+                    "transformation": "semantic-replacement",
+                    "reason": "Unused entry"
+                }
+            ])
+            
+            self._write_scope()
+            base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+            rc, out, err = self._run_audit(base)
+            self.assertEqual(rc, 1, "Audit should fail with unused ledger entry")
+            self.assertIn("stale semantic replacement", out)
+
+    def test_source_a_h2_a_cannot_authorize_source_a_h2_b(self):
+        """Source A/H2 A authorization cannot authorize Source A/H2 B."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_content = "## Heading A\nContent A.\n\n## Heading B\nContent B.\n"
+            dest_content = "## New Title\nNew content here.\n"
+            files = {
+                "source.md": source_content,
+                "docs/knowledge/concept.md": dest_content,
+            }
+            base = self._write_baseline_and_commit(files)
+            self._write_manifest("source.md", "concept.md", "Heading A")
+            self._write_scope()
+            self._write_cleanup_record(["001"])
+            
+            # Ledger entry for Heading A but destination is for Heading B
+            self._write_semantic_ledger([{
+                "source_path": "source.md",
+                "source_heading": "Heading A",
+                "baseline_block_sha256": hashlib.sha256("## Heading A\nContent A.\n".encode()).hexdigest(),
+                "adjustment_id": "C-001",
+                "destination_path": "docs/knowledge/concept.md",
+                "destination_heading": "New Title",
+                "destination_block_sha256": hashlib.sha256("## New Title\nNew content here.\n".encode()).hexdigest(),
+                "transformation": "semantic-replacement",
+                "reason": "Test replacement"
+            }])
+            
+            self._write_scope()
+            base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+            rc, out, err = self._run_audit(base)
+            # Should fail because the semantic replacement for Heading A doesn't match Heading B
+            self.assertEqual(rc, 1, "Audit should fail - H2 mismatch")
+            self.assertTrue("stale semantic replacement" in out.lower() or "unmapped" in out.lower(), f"Expected stale/unmapped error, got: {out}")
+
+    def test_source_a_cannot_authorize_source_b(self):
+        """Source A authorization cannot authorize Source B."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_content_a = "## Heading A\nContent A.\n"
+            source_content_b = "## Heading B\nContent B.\n"
+            dest_content = "## New Title\nNew content here.\n"
+            files = {
+                "source_a.md": source_content_a,
+                "source_b.md": source_content_b,
+                "docs/knowledge/concept.md": dest_content,
+            }
+            base = self._write_baseline_and_commit(files)
+            self._write_manifest("source_a.md", "concept.md", "Heading A")
+            self._write_manifest("source_b.md", "concept.md", "Heading B")
+            self._write_scope()
+            self._write_cleanup_record(["001"])
+            
+            # Ledger entry for source_a but destination for source_b's mapping
+            self._write_semantic_ledger([{
+                "source_path": "source_a.md",
+                "source_heading": "Heading A",
+                "baseline_block_sha256": hashlib.sha256("## Heading A\nContent A.\n".encode()).hexdigest(),
+                "adjustment_id": "C-001",
+                "destination_path": "docs/knowledge/concept.md",
+                "destination_heading": "New Title",
+                "destination_block_sha256": hashlib.sha256("## New Title\nNew content here.\n".encode()).hexdigest(),
+                "transformation": "semantic-replacement",
+                "reason": "Test replacement"
+            }])
+            
+            self._write_scope()
+            base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+            rc, out, err = self._run_audit(base)
+            self.assertEqual(rc, 1, "Audit should fail - source A cannot authorize source B")
+            self.assertTrue("stale semantic replacement" in out.lower() or "unmapped" in out.lower(), f"Expected stale/unmapped error, got: {out}")
+
+    def test_destination_outside_repository_rejected(self):
+        """Destination outside the repository is rejected."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_content = "## Old Title\nOld content here.\n"
+            dest_content = "## New Title\nNew content here.\n"
+            files = {
+                "source.md": source_content,
+                "docs/knowledge/concept.md": dest_content,
+            }
+            base = self._write_baseline_and_commit(files)
+            self._write_manifest("source.md", "concept.md", "Old Title")
+            self._write_scope()
+            self._write_cleanup_record(["001"])
+            
+            # Destination outside repo
+            self._write_semantic_ledger([{
+                "source_path": "source.md",
+                "source_heading": "Old Title",
+                "baseline_block_sha256": hashlib.sha256("## Old Title\nOld content here.\n".encode()).hexdigest(),
+                "adjustment_id": "C-001",
+                "destination_path": "/etc/passwd",  # Outside repo
+                "destination_heading": "New Title",
+                "destination_block_sha256": hashlib.sha256("## New Title\nNew content here.\n".encode()).hexdigest(),
+                "transformation": "semantic-replacement",
+                "reason": "Test replacement"
+            }])
+            
+            self._write_scope()
+            base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+            rc, out, err = self._run_audit(base)
+            self.assertEqual(rc, 1, "Audit should fail with destination outside repo")
+            self.assertTrue(
+                "destination" in out.lower() or "resolve" in out.lower() or "outside" in out.lower(),
+                f"Expected error about destination/resolve/outside, got: {out}"
+            )
+
+    def test_semantic_destination_inconsistent_with_migration_manifest_fails(self):
+        """Semantic destination inconsistent with migration manifest fails."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_content = "## Old Title\nOld content here.\n"
+            dest_content_correct = "## New Title\nNew content here.\n"
+            dest_content_wrong = "## Wrong Destination\nWrong content.\n"
+            files = {
+                "source.md": source_content,
+                "docs/knowledge/concept.md": dest_content_correct,
+                "docs/knowledge/wrong.md": dest_content_wrong,
+            }
+            base = self._write_baseline_and_commit(files)
+            # Manifest points to concept.md
+            self._write_manifest("source.md", "concept.md", "Old Title")
+            self._write_scope()
+            self._write_cleanup_record(["001"])
+            
+            # Ledger points to wrong.md instead of concept.md
+            self._write_semantic_ledger([{
+                "source_path": "source.md",
+                "source_heading": "Old Title",
+                "baseline_block_sha256": hashlib.sha256("## Old Title\nOld content here.\n".encode()).hexdigest(),
+                "adjustment_id": "C-001",
+                "destination_path": "docs/knowledge/wrong.md",  # Wrong destination per manifest
+                "destination_heading": "Wrong Destination",
+                "destination_block_sha256": hashlib.sha256("## Wrong Destination\nWrong content.\n".encode()).hexdigest(),
+                "transformation": "semantic-replacement",
+                "reason": "Test replacement"
+            }])
+            
+            self._write_scope()
+            base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+            rc, out, err = self._run_audit(base)
+            self.assertEqual(rc, 1, "Audit should fail with manifest-inconsistent destination")
+            self.assertTrue("destination" in out.lower() or "manifest" in out.lower() or "mapping" in out.lower(), f"Expected destination/manifest/mapping error, got: {out}")
+
+    def test_ordinary_unapproved_changed_prose_still_fails(self):
+        """Ordinary unapproved changed prose still fails."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_content = "## Old Title\nOld content here.\n"
+            dest_content = "## New Title\nNew content here.\n"
+            files = {
+                "source.md": source_content,
+                "docs/knowledge/concept.md": dest_content,
+            }
+            base = self._write_baseline_and_commit(files)
+            self._write_manifest("source.md", "concept.md", "Old Title")
+            self._write_scope()
+            self._write_cleanup_record(["001"])
+            
+            # No semantic ledger entry - just changed prose
+            self._write_semantic_ledger([])
+            
+            self._write_scope()
+            base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+            rc, out, err = self._run_audit(base)
+            self.assertEqual(rc, 1, "Audit should fail with unapproved changed prose")
+            self.assertIn("content/order/punctuation lost", out)
+
+
 if __name__ == "__main__":
     unittest.main()
