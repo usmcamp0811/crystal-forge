@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-05 02:07'
+updated_date: '2026-10-05 02:11'
 labels: []
 dependencies: []
 references:
@@ -114,6 +114,8 @@ Native retained-credential fixture delegation at 6d3e7374: own checks/web-ui/def
 Retained-credential frontend delegation at 6d3e7374: own web-ui views/caches.rs and api/{models,client}.rs plus cache JS workflows and cache-only integration invocation. Preserve the four-type shared shell, focus and atomic scope behavior. Add default-false safe configured flags and an ID-scoped Update-shaped non-mutating probe client; secrets omitted when absent. Use current configured selector entries and independent local replacement modal drafts for Attic/S3 and Niks3 read/write. Tests must use real ID probes with CF_CACHE_CREDENTIAL_FIXTURE JSON mapping attic/s3/niks3/nix to seeded destination IDs. Verify native DTO/state tests, WASM check and host browser workflow; authoritative native fixture verification remains owner-managed. UI edits wait for owner backend refresh as explicitly requested; current 8081 preview responds HTTP 200 but backend is reported stale.
 
 User option-1 URL audit correction: preserve server-only Http/Nix Basic userinfo probes while redacting every API URL field with a shared fail-closed sanitizer and expanded decoded AWS query-name recognition. Add response-only http_basic_auth_configured and legacy_query_credentials_configured flags. Reject recognized credential-query probes before callback/network with a static migration reason. Shared effective URL merge retains same-type sanitized GET round trips, never carries URI credentials to a different explicit URL, and strips inherited URI auth on type conversion; Save binds the effective URLs. Add exact ephemeral SQLx and pure security regressions and blocking CI membership. Preserve prior Attic/S3/Niks3, no migration/services/preview writes/commits; native Basic proof and preview refresh remain owner-managed.
+
+User legacy decision option1 extends fixture-owned scope only: add runtime Basic ACL/native TLS static metadata routes on cache9444 and cache-alt DNS authority with fixture SAN, no production HTTP credential subsystem. Runtime Python constructs and realAPI-seeds Nix/Http userinfo URLs, exposing only safe URLs+IDs under nix_basic/http_basic. Add legacy_query raw URL seeded with runtime token; GET safe URL/configured flags and storedID Test400/no-request proof. Native access observer logs only URI path and Authorization presence; changed-authority probes must contain no oldBasic Authorization and legacy-query path count must remain zero. Private DB hashes prove retained rawURL non-mutation and unrelated legacySave preserves rawURI. Preserve public nix and native Attic/Garage/Niks3 fixtures; frontend owns readiness/new-ID UI workflows and backend owns sanitizer/flags/refusal behavior.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -394,5 +396,10 @@ Frontend fixture contract proposal: CF_CACHE_CREDENTIAL_FIXTURE points to /run/c
 created: 2026-10-05 01:12
 ---
 Fixture owner coordination: final runtime schema remains version1 with native credential fields previously listed and ADDS attic.id, s3.id, nix.id, niks3.id plus seed_complete=true. A VM-local background seed waits for browser-owned cf-ui-admin registration, then creates disabled environment-scoped destinations through actual API and atomically publishes IDs. Frontend retained workflow MUST poll CF_CACHE_CREDENTIAL_FIXTURE for seed_complete before reading IDs (bounded 30s). Attic seeded push_to is exact https://atticCache:9443/web-ui-private/nix-cache-info; attic.server_url is only root and must not be used as auth proof. Native replacements available as attic.replacement_token and s3.replacement_* keys. Current post-browser verifier compares seed raw DB hashes for retained Test/Cancel non-mutation, then independently proves replacement Test non-mutation / Save rotation / retained Test using saved pair. If frontend saves native seed replacements, coordinate a per-Test DB snapshot arrangement rather than changing seed rows before this compare. Owner files implemented; drv evaluation passed. First native fixture build hit configured external binary caches401/503 and120s tool timeout; retrying with cache.nixos.org only.
+---
+
+created: 2026-10-05 02:11
+---
+New native fixture JSON contract adds nix_basic and http_basic {id,url,authority_change_url}, legacy_query {id,sanitized_url,query_parameter:'token',query_value_local_only:true}. No Basic username/password or rawlegacyquerytoken is needed by browser or returned in GET. Basic protected endpoint https://cache:9444/basic/nix-cache-info; changed DNS authority https://cache-alt:9444/authority/nix-cache-info (runtime isolated VM DNS alias; public fixture SAN cache-alt). Legacy query safe endpoint https://cache:9444/legacy-query/nix-cache-info?fixture=legacy; raw token exists only protected runtime seedfile/serverDB. Seed_complete is published atomically AFTER all seven IDs exist. Frontend new Basic workflows must use storedID retained Test and sanitized URL; no Basic replacementUI. Legacy query allows unrelated Save; fixture raw projection excludes name/updated_at only for this row while preserving every other field/assignment plus a separate rawURI hash. Postbrowser native observer proves changedauthority noAuthorization and legacyquery zeroHTTPrequests. New native infrastructure proof running before authoritative browser stability.
 ---
 <!-- COMMENTS:END -->
