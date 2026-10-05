@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-05 01:25'
+updated_date: '2026-10-05 02:07'
 labels: []
 dependencies: []
 references:
@@ -112,6 +112,8 @@ Retained-credential backend owner: resume clean 6d3e7374 task worktree and exist
 Native retained-credential fixture delegation at 6d3e7374: own checks/web-ui/default.nix and focused README, lib/cache-test-node/default.nix optional credential SAN/cacheUrl parameters, and new runtime Python fixture driver only. Boot native Attic and new cache (Garage/Niks3) VMs whenever the selected workflow includes 25-caches-modal-attic or full manifest. Use trusted fixture CA, private Attic runtime JWTs, native imported Garage credentials and separate Niks3 advertised private read URL. Write mode-0600 CF_CACHE_CREDENTIAL_FIXTURE JSON inside disposable machine VM; communicate schema before frontend consumption. Preserve helper defaults, proxy/CI/Rust/frontend ownership and existing security workflows. Evaluate targeted derivations and run focused authoritative workflow only after sibling backend/frontend implementations stabilize; rerun existing native fixture proof if helper defaults change.
 
 Retained-credential frontend delegation at 6d3e7374: own web-ui views/caches.rs and api/{models,client}.rs plus cache JS workflows and cache-only integration invocation. Preserve the four-type shared shell, focus and atomic scope behavior. Add default-false safe configured flags and an ID-scoped Update-shaped non-mutating probe client; secrets omitted when absent. Use current configured selector entries and independent local replacement modal drafts for Attic/S3 and Niks3 read/write. Tests must use real ID probes with CF_CACHE_CREDENTIAL_FIXTURE JSON mapping attic/s3/niks3/nix to seeded destination IDs. Verify native DTO/state tests, WASM check and host browser workflow; authoritative native fixture verification remains owner-managed. UI edits wait for owner backend refresh as explicitly requested; current 8081 preview responds HTTP 200 but backend is reported stale.
+
+User option-1 URL audit correction: preserve server-only Http/Nix Basic userinfo probes while redacting every API URL field with a shared fail-closed sanitizer and expanded decoded AWS query-name recognition. Add response-only http_basic_auth_configured and legacy_query_credentials_configured flags. Reject recognized credential-query probes before callback/network with a static migration reason. Shared effective URL merge retains same-type sanitized GET round trips, never carries URI credentials to a different explicit URL, and strips inherited URI auth on type conversion; Save binds the effective URLs. Add exact ephemeral SQLx and pure security regressions and blocking CI membership. Preserve prior Attic/S3/Niks3, no migration/services/preview writes/commits; native Basic proof and preview refresh remain owner-managed.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
