@@ -193,7 +193,7 @@ tags:
   | `## Combined Lifecycle (Sequence)` | [../../concepts/derivation-status-lifecycle.md#current-lifecycle](../../concepts/derivation-status-lifecycle.md#current-lifecycle) |
   | `## Status Table` | [../../concepts/derivation-status-lifecycle.md#derivation-statuses](../../concepts/derivation-status-lifecycle.md#derivation-statuses) |
   | `## Processing Loops` | [../../architecture/derivation-processing-loops.md](../../architecture/derivation-processing-loops.md), [../cleanup-record.md](../cleanup-record.md) |
-  | `## Deployment Flow` | [../../deployment/deployment-flow.md](../../deployment/deployment-flow.md) |
+  | `## Deployment Flow` | [../../deployment/deployment-flow.md#applying-the-target](../../deployment/deployment-flow.md#applying-the-target) |
   | `## Cache Push Process` | [../../caches/cache-push-process.md](../../caches/cache-push-process.md) |
   | `## Retry Logic` | [../../concepts/derivation-status-lifecycle.md#retry-rules](../../concepts/derivation-status-lifecycle.md#retry-rules) |
   | `## Terminal States` | [../../concepts/derivation-status-lifecycle.md#terminal-states](../../concepts/derivation-status-lifecycle.md#terminal-states) |

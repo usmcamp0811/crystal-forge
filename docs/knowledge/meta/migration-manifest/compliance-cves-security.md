@@ -112,7 +112,7 @@ tags:
   | Source section | Destination |
   | --- | --- |
   | `## Roles` | [security/oidc-role-mapping.md#roles](../../security/oidc-role-mapping.md#roles) |
-  | `## Configuration` | [security/oidc-role-mapping.md#configuration](../../security/oidc-role-mapping.md#configuration) |
+  | `## Configuration` | [security/oidc-role-mapping.md#what-happens-at-login](../../security/oidc-role-mapping.md#what-happens-at-login) |
   | `## Role Selection Logic` | [security/oidc-role-mapping.md#what-happens-at-login](../../security/oidc-role-mapping.md#what-happens-at-login) |
   | `## Role Synchronization` | [security/oidc-role-mapping.md#role-synchronization](../../security/oidc-role-mapping.md#role-synchronization) |
   | `## Safe-Deny Behavior` | [security/oidc-role-mapping.md#what-happens-at-login](../../security/oidc-role-mapping.md#what-happens-at-login) |

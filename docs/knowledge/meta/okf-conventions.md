@@ -216,6 +216,13 @@ the pinned Mermaid parser without launching Chromium. Include source-block and
 Mermaid-block SHA-256 fingerprints. A parser or renderer pass verifies syntax
 only; it does not verify semantic equivalence.
 
+For both fingerprints, decode the block as UTF-8, normalize line endings to
+LF, and omit the final line ending before hashing. The source fingerprint covers
+the diagram content without its Markdown fence. The Mermaid fingerprint covers
+the content between the Mermaid fence delimiters, including the `diagram-id`
+comment. When one ledger row represents several adjacent source sketch lines,
+join those lines in source order with LF before hashing.
+
 For a full SVG review, use the pinned Mermaid CLI outside the Nix build sandbox:
 
 ```sh
