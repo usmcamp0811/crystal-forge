@@ -192,21 +192,20 @@ None
 
 ## Example Filter UI
 
-```
-Systems View Toolbar:
-┌──────────────────────────────────────────────────┐
-│ [Grid] [Table]  |  Filter by: [Flake: nixpkgs ×] │
-└──────────────────────────────────────────────────┘
+```mermaid
+%% diagram-id: backlog-task206-systems-filter-toolbar-wireframe
+flowchart TD
+    toolbar["Systems View Toolbar"] --> grid["[Grid]"]
+    toolbar --> table["[Table]"]
+    toolbar --> filter["Filter by: [Flake: nixpkgs ×]"]
 ```
 
-```
-Flake Card:
-┌────────────────────────────────────┐
-│ nixpkgs                            │
-│ github:NixOS/nixpkgs/abc123        │
-│                                    │
-│ 24 systems using this flake →      │  ← clickable link
-└────────────────────────────────────┘
+```mermaid
+%% diagram-id: backlog-task206-flake-card-crosslink-wireframe
+flowchart TD
+    card["Flake Card"] --> name["nixpkgs"]
+    card --> ref["github:NixOS/nixpkgs/abc123"]
+    card --> link["24 systems using this flake → — clickable link"]
 ```
 
 ## State Management

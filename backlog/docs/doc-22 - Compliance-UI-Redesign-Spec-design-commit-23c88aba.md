@@ -16,7 +16,6 @@ Compliance view (Dioxus `web-ui`) to match the refreshed design example.
 
 **Design source of truth (read these files at this commit):**
 
-```text
 23c88aba  MC ◯ refinement of the compliance ui/ux
 ```
 
@@ -180,11 +179,16 @@ selected bundle):
 
 ### 4.4 Score colour function (`ComplianceView.jsx:177-182`)
 
-```text
-score == null  → var(--cf-text-muted)
-score >= 90    → #34d399
-score >= 70    → #fbbf24
-otherwise      → #f87171
+```mermaid
+%% diagram-id: backlog-doc22-compliance-score-colors
+flowchart TD
+    Score["Score"] --> IsNull{"Score is null?"}
+    IsNull -->|yes| Muted["var(--cf-text-muted)"]
+    IsNull -->|no| AtLeast90{"Score >= 90?"}
+    AtLeast90 -->|yes| Green["#34d399"]
+    AtLeast90 -->|no| AtLeast70{"Score >= 70?"}
+    AtLeast70 -->|yes| Amber["#fbbf24"]
+    AtLeast70 -->|no| Red["#f87171"]
 ```
 
 ### 4.5 Publication-state chip (`ComplianceView.jsx:171-175`)
@@ -192,9 +196,13 @@ otherwise      → #f87171
 `span.chip`, `font-size:9`, `padding:"1px 6px"`, `color: C`,
 `background: color-mix(in oklab, C 16%, transparent)` where
 
-```text
-current → #34d399   accepted → #60a5fa   deprecated → #6b7280   draft → #fbbf24   fallback → #6b7280
-```
+| Publication state | Color |
+| --- | --- |
+| current | `#34d399` |
+| accepted | `#60a5fa` |
+| deprecated | `#6b7280` |
+| draft | `#fbbf24` |
+| fallback | `#6b7280` |
 
 ---
 
@@ -463,14 +471,14 @@ per-bundle database query*; it does **not** require duplicating the evaluation s
 
 Required tests (server/API level):
 
-```text
-no applicable systems           → applicable_system_count 0, aggregate_score None
-applicable but none evaluated   → count N, aggregate_score None
-all pass                        → aggregate_score 100
-mixed pass/warn/fail/waiver     → equals systems-endpoint totals for the same version
-published + draft versions      → published is selected
-draft only                      → draft version is selected
-```
+| Case | Required result |
+| --- | --- |
+| No applicable systems | `applicable_system_count 0`, `aggregate_score None` |
+| Applicable but none evaluated | `count N`, `aggregate_score None` |
+| All pass | `aggregate_score 100` |
+| Mixed pass/warn/fail/waiver | Equals systems-endpoint totals for the same version |
+| Published + draft versions | Published is selected |
+| Draft only | Draft version is selected |
 
 Mirror the fields in `packages/web-ui/src/api/models.rs`.
 

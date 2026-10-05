@@ -798,7 +798,7 @@ sequenceDiagram
     participant E as Selected evidence read
     U->>V: Open system without explicit security target
     V->>I: Load running identity and required target metadata
-    V-->>U: Loading identity; no clean or out-of-band conclusion
+    V-->>U: Loading identity. No clean or out-of-band conclusion.
     I-->>V: Facts plus read revision
     V->>V: Resolve default once from complete facts
     V->>E: Request exact selected target

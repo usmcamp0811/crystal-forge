@@ -110,15 +110,13 @@ Add visual indicator for flakes with errors:
 - Display error message when commit is expanded or in timeline view
 
 **Suggested UI Pattern**:
-```
-┌─ Flake: my-nixos-config ⚠️ Evaluation Failed ──────┐
-│ Latest Commit: abc123 (2 hours ago)                 │
-│ ❌ Evaluation Error:                                │
-│ ┌──────────────────────────────────────────────┐   │
-│ │ error: undefined variable 'pkgs'             │   │
-│ │        at /flake.nix:42:5                    │   │
-│ └──────────────────────────────────────────────┘   │
-└──────────────────────────────────────────────────────┘
+```mermaid
+%% diagram-id: backlog-task209-flake-evaluation-error-wireframe
+flowchart TD
+    flake["Flake: my-nixos-config ⚠️ Evaluation Failed"] --> latest["Latest Commit: abc123 (2 hours ago)"]
+    flake --> error_title["❌ Evaluation Error:"]
+    error_title --> message["error: undefined variable 'pkgs'"]
+    message --> location["at /flake.nix:42:5"]
 ```
 
 ---

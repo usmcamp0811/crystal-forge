@@ -219,6 +219,81 @@ Example:
 // supported agents advertise protocol version 3.
 ```
 
+### Crystal Forge knowledge base
+
+`docs/knowledge/` is the canonical maintainer-facing knowledge base for
+Crystal Forge. Start at `docs/knowledge/index.md`.
+
+When a change affects documented behavior, architecture, configuration,
+operations, security, APIs, data models, UI behavior, or workflows, update
+the applicable knowledge concepts in the same change.
+
+Follow these rules:
+
+- Treat current implementation, approved design, proposed behavior, and
+  historical behavior as different states. Do not present historical or
+  superseded behavior as current.
+- Verify current-behavior claims against the implementation. Do not copy
+  stale documentation forward merely to preserve text.
+- Preserve useful historical rationale in a historical or deprecated concept
+  with a clear successor link when appropriate.
+- Do not leave known-wrong instructions or diagrams in current guidance with
+  only a note saying they are stale. Correct the main text.
+- Keep `implementation_status` and other OKF metadata accurate when behavior
+  changes.
+- Update related indexes and cross-links when concepts are added, renamed,
+  split, consolidated, deprecated, or removed.
+- Do not invent provenance, verification, approval, timestamps, or
+  implementation status.
+- Keep operational control files such as `AGENTS.md` separate from ordinary
+  knowledge concepts.
+
+#### Architecture and diagrams
+
+All authored architecture, workflow, state, sequence, relationship, and UI
+structure diagrams in project documentation MUST use Mermaid.
+
+Do not add new ASCII or Unicode box-and-arrow diagrams.
+
+When replacing or modifying a diagram:
+
+- preserve meaningful nodes, relationships, direction, labels, conditions,
+  retries, failure paths, trust boundaries, and authority boundaries;
+- choose the Mermaid diagram type that matches the semantics;
+- verify the diagram against the current implementation or the approved design
+  that owns the behavior;
+- do not simplify away important behavior only to make the diagram easier to
+  render.
+
+Literal command output, source code, configuration examples, logs, and test
+fixtures are not diagrams and MUST remain literal when their exact text matters.
+
+#### Current architecture boundaries
+
+Documentation MUST preserve these current Crystal Forge boundaries unless an
+approved design explicitly changes them:
+
+- The server owns persistence, authorization, authoritative evaluation,
+  coordination, and server-side domain policy.
+- API-only builders do not access PostgreSQL directly.
+- Builders obtain work and report results through authenticated server APIs.
+- Builder-side source re-evaluation, when configured, verifies the
+  server-authorized build plan; it does not replace server-authoritative
+  evaluation.
+- Agents communicate with the server, not builders.
+- The Dioxus Web UI communicates through Crystal Forge APIs. It does not read
+  PostgreSQL directly.
+- Grafana is not the primary Crystal Forge product UI or architectural control
+  surface. Any remaining Grafana support must be described as optional,
+  legacy, testing, or historical according to its actual status.
+
+#### Documentation verification
+
+For changes that affect `docs/knowledge/`, run the repository-owned
+documentation validation through Nix:
+
+```bash
+nix build .#checks.x86_64-linux.okf-knowledge -L
 #### Technical writing standard
 
 Technical prose MUST follow ASD-STE100 principles to the extent that they are compatible with exact software terminology.
@@ -343,3 +418,4 @@ Be precise and concise. Distinguish among:
 For browser-visible work, include `Preview: ready | rebuilding | blocked | stopped` in meaningful progress reports and handoff. When ready, include the URL and review path. State when the browser still shows the last successful build. Preview health does not change the backlog task status or establish merge readiness.
 
 Never fabricate command output, test results, task state, commits, pushes, MR state, or screenshots.
+```

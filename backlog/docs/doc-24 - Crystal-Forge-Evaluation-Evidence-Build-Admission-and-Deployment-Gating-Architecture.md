@@ -56,17 +56,16 @@ The intended operational flow is:
 
 The design goal is therefore:
 
-```text
-fast eval -> drift known + candidate build admitted
-                |                     |
-                |                     +------> build/cache work
-                |
-                +------> deep Config inspection -> policy assessment
-
-Deployment happens when BOTH:
-  build/cache readiness
-  AND required policy/evidence readiness
-are satisfied.
+```mermaid
+%% diagram-id: backlog-doc24-user-intent-build-policy-branches
+flowchart TD
+    fast["fast eval"] --> drift["drift known"]
+    fast --> admitted["candidate build admitted"]
+    admitted --> build_cache["build/cache work"]
+    fast --> deep["deep Config inspection"] --> policy["policy assessment"]
+    build_cache --> gate{"Deployment gate: BOTH readiness conditions?"}
+    policy --> gate
+    gate -->|"build/cache readiness AND required policy/evidence readiness"| deploy["Deployment"]
 ```
 
 ---
@@ -180,38 +179,15 @@ Characteristics:
 
 The target execution graph is:
 
-```text
-                            COMMIT / REVISION
-                                  |
-                                  v
-                         FAST IDENTITY EVAL
-                                  |
-                    +-------------+-------------+
-                    |                           |
-                    v                           v
-             DRIFT CLASSIFICATION          BUILD ADMISSION
-             expected vs running               |
-                                                v
-                                             BUILD
-                                                |
-                                                v
-                                              CACHE
-
-                    +---------------------------+
-                    |
-                    v
-             DEEP CONFIG INSPECTION
-                    |
-                    v
-             CONFIG EVIDENCE READY
-                    |
-                    v
-              POLICY ASSESSMENT
-                    |
-                    +---------------------------+
-                                                |
-                                                v
-                                      FINAL DEPLOYMENT GATE
+```mermaid
+%% diagram-id: backlog-doc24-parallel-evaluation-build-policy-pipeline
+flowchart TD
+    commit["COMMIT / REVISION"] --> fast["FAST IDENTITY EVAL"]
+    fast --> drift["DRIFT CLASSIFICATION<br/>expected vs running"]
+    fast --> admission["BUILD ADMISSION"] --> build["BUILD"] --> cache["CACHE"]
+    fast --> inspect["DEEP CONFIG INSPECTION"] --> evidence["CONFIG EVIDENCE READY"] --> policy["POLICY ASSESSMENT"]
+    cache --> gate["FINAL DEPLOYMENT GATE"]
+    policy --> gate
 ```
 
 The critical-path target is:
@@ -247,12 +223,12 @@ The first useful answer Crystal Forge should provide after a commit arrives is w
 
 Conceptually:
 
-```text
-running_store_path == expected_selected_store_path
-    -> matches selected configuration
-
-running_store_path != expected_selected_store_path
-    -> drifted / behind / different configuration
+```mermaid
+%% diagram-id: backlog-doc-24-store-path-comparison
+flowchart TD
+    Compare{"running_store_path vs expected_selected_store_path"}
+    Compare -->|equal| Match["Matches selected configuration"]
+    Compare -->|not equal| Drift["Drifted, behind, or different configuration"]
 ```
 
 This classification must depend only on Tier 1 identity facts and persisted agent-reported state.
@@ -410,23 +386,15 @@ Build eligibility should be represented by explicit states/reasons rather than o
 
 Conceptual progression:
 
-```text
-Evaluated
-   |
-   v
-Candidate
-   |
-   v
-CF-capable
-   |
-   v
-Policy-qualified
-   |
-   v
-Build-ready / Build-running
-   |
-   v
-Deployment-qualified
+```mermaid
+%% diagram-id: backlog-doc24-progressive-build-admission-states
+stateDiagram-v2
+    [*] --> Evaluated
+    Evaluated --> Candidate
+    Candidate --> CF_capable: CF-capable
+    CF_capable --> Policy_qualified: Policy-qualified
+    Policy_qualified --> Build_ready_or_running: Build-ready / Build-running
+    Build_ready_or_running --> Deployment_qualified: Deployment-qualified
 ```
 
 Possible decision reasons:
@@ -458,27 +426,15 @@ A scheduler may admit several candidates but prefer work backed by stronger evid
 
 Example priority model:
 
-```text
-highest priority:
-  build already needed by explicit deployment request
-  + config evidence ready
-  + policies pass
-
-high priority:
-  auto-latest target
-  + config policies pass
-
-normal priority:
-  cfAgentEnabled verified
-  + deep Config inspection pending
-
-low/speculative priority:
-  build-all mode
-  + no policy evidence yet
-
-held:
-  known strict pre-build policy failure
-  or selected mode requires missing evidence
+```mermaid
+%% diagram-id: backlog-doc24-example-priority-model
+flowchart TD
+    Highest["Highest priority<br/>Build already needed by explicit deployment request<br/>+ Config evidence ready<br/>+ Policies pass"]
+    High["High priority<br/>Auto-latest target<br/>+ Config policies pass"]
+    Normal["Normal priority<br/>cfAgentEnabled verified<br/>+ Deep Config inspection pending"]
+    Speculative["Low / speculative priority<br/>Build-all mode<br/>+ No policy evidence yet"]
+    Held["Held<br/>Known strict pre-build policy failure<br/>OR selected mode requires missing evidence"]
+    Highest --> High --> Normal --> Speculative --> Held
 ```
 
 The exact scheduler values are implementation details. The design requirement is that stronger evidence can **promote** a build and policy failure can **hold/deprioritize** future work without requiring the build farm to wait for all deep inspection before doing anything.
@@ -497,17 +453,13 @@ carry overlapping policy/evaluator meaning.
 
 The future source of truth should instead be reproducible from:
 
-```text
-immutable evidence artifacts
-        +
-exact policy-set/version
-        |
-        v
-PolicyAssessment
-        |
-        +--> BuildAdmissionDecision
-        |
-        +--> DeploymentDecision
+```mermaid
+%% diagram-id: backlog-doc24-policy-assessment-decision-source
+flowchart LR
+    Evidence["immutable evidence artifacts"] --> Assessment["PolicyAssessment"]
+    PolicySet["exact policy-set/version"] --> Assessment
+    Assessment --> Build["BuildAdmissionDecision"]
+    Assessment --> Deploy["DeploymentDecision"]
 ```
 
 `policy_requirements_met` may remain temporarily as a materialized compatibility/cache field during migration, but it should not remain the authoritative irreducible fact.
@@ -581,13 +533,14 @@ These answer different questions:
 
 Long-term artifact family may look like:
 
-```text
-EvaluationArtifact
-├── ConfigArtifact
-├── FlakeOutputArtifact
-├── CveArtifact
-├── BuildClosureArtifact
-└── PolicyAssessmentArtifact
+```mermaid
+%% diagram-id: backlog-doc24-evaluation-artifact-family
+flowchart TD
+    evaluation["EvaluationArtifact"] --> config["ConfigArtifact"]
+    evaluation --> flake["FlakeOutputArtifact"]
+    evaluation --> cve["CveArtifact"]
+    evaluation --> closure["BuildClosureArtifact"]
+    evaluation --> policy["PolicyAssessmentArtifact"]
 ```
 
 They should share infrastructure where sensible:
@@ -616,12 +569,13 @@ Do not reintroduce a whole-flake semantic inspection that forces all sibling con
 
 Desired behavior:
 
-```text
-flake revision
-├── config A -> targeted inspection A
-├── config B -> targeted inspection B
-├── config C -> targeted inspection C
-└── broken config D -> failure isolated to D
+```mermaid
+%% diagram-id: backlog-doc24-per-configuration-isolation
+flowchart TD
+    revision["flake revision"] --> config_a["config A"] --> inspect_a["targeted inspection A"]
+    revision --> config_b["config B"] --> inspect_b["targeted inspection B"]
+    revision --> config_c["config C"] --> inspect_c["targeted inspection C"]
+    revision --> config_d["broken config D"] --> fail_d["failure isolated to D"]
 ```
 
 One broken/lazy/poisoned configuration or unrelated exported module must not contaminate another configuration's fast evaluation or inspection.
@@ -671,36 +625,34 @@ The follow-up implementation should make performance an explicit acceptance crit
 
 A healthy common-case pipeline should resemble:
 
-```text
-T+0s      revision discovered
-
-T+1-2s    fast evaluation complete
-           - drvPath / expected store identity known
-           - drift classification known
-           - cfAgentEnabled known
-           - eligible builds admitted according to mode
-
-T+2s      build starts
-           deep Config inspection starts
-
-T+5-15s   policy-ready Config evidence complete
-           config policies assessed
-           queued builds promoted/held/deprioritized
-
-T+10-20s  rich Config provenance completes
-           UI/audit enrichment available
-
-T+30-120s build/cache finishes
-
-           required policy evidence is already ready
-
-           deployment proceeds immediately if authorized
+```mermaid
+%% diagram-id: backlog-doc24-healthy-pipeline-timeline
+timeline
+    title Healthy common-case pipeline
+    T+0s : revision discovered
+    T+1-2s : fast evaluation complete
+          : drvPath / expected store identity known
+          : drift classification known
+          : cfAgentEnabled known
+          : eligible builds admitted according to mode
+    T+2s : build starts
+         : deep Config inspection starts
+    T+5-15s : policy-ready Config evidence complete
+            : config policies assessed
+            : queued builds promoted / held / deprioritized
+    T+10-20s : rich Config provenance completes
+             : UI/audit enrichment available
+    T+30-120s : build/cache finishes
+              : required policy evidence is already ready
+              : deployment proceeds immediately if authorized
 ```
 
 With **Build all** enabled:
 
-```text
-fast eval -> build immediately
+```mermaid
+%% diagram-id: backlog-doc24-build-all-override
+flowchart LR
+    Fast["Fast evaluation"] --> Build["Build immediately"]
 ```
 
 without waiting for any build-admission policy, while deployment remains policy-gated.
@@ -899,27 +851,16 @@ This design does not require:
 
 The future Crystal Forge evaluation pipeline should be:
 
-```text
-FAST EVAL
-  -> exact config/build identity
-  -> expected store path
-  -> instant drift classification
-  -> cfAgentEnabled
-  -> early build admission
-
-IN PARALLEL
-  BUILD/CACHE
-  DEEP CONFIG INSPECTION
-
-CONFIG EVIDENCE
-  -> typed policy assessment
-  -> promote / hold / deprioritize queued work
-
-FINAL DEPLOYMENT
-  requires build readiness
-  + exact Config evidence
-  + policy assessment
-  + CVE / approval / runtime gates
+```mermaid
+%% diagram-id: backlog-doc24-short-version-future-pipeline
+flowchart TD
+    fast["FAST EVAL"] --> identity["exact config/build identity"] --> path["expected store path"] --> drift["instant drift classification"] --> enabled["cfAgentEnabled"] --> admission["early build admission"]
+    admission --> build["BUILD/CACHE"]
+    admission --> inspect["DEEP CONFIG INSPECTION"]
+    inspect --> evidence["CONFIG EVIDENCE"] --> policy["typed policy assessment"] --> queue["promote / hold / deprioritize queued work"]
+    build --> deployment["FINAL DEPLOYMENT"]
+    queue --> deployment
+    deployment --> readiness["requires build readiness + exact Config evidence + policy assessment + CVE / approval / runtime gates"]
 ```
 
 The result should use compute more intelligently **without sacrificing the fast eval loop** and should eliminate duplicated config-policy evaluation by making immutable Config evidence the canonical semantic input to policy decisions.

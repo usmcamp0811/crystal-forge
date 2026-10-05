@@ -169,12 +169,13 @@ So you want:
 
 Imagine:
 
-```
-CM-2
- ├─ flake.lock pinned
- ├─ Git commit signed
- ├─ CI reproducible build
- └─ Immutable image digest
+```mermaid
+%% diagram-id: backlog-task128-cm2-traceability-graph
+flowchart TD
+    cm2["CM-2"] --> lock["flake.lock pinned"]
+    cm2 --> signed["Git commit signed"]
+    cm2 --> ci["CI reproducible build"]
+    cm2 --> digest["Immutable image digest"]
 ```
 
 Each node clickable. Each node verifiable.

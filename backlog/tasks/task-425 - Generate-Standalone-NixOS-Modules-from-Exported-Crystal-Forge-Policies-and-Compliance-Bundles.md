@@ -127,11 +127,12 @@ A skipped policy must never be silently treated as implemented.
 
 Single policy -> one module with comments carrying policy name, version identity, source, plus the Nix assignments. Multiple policies -> preferred layout:
 
-```text
-generated-hardening/
-├── default.nix        # imports = [ ./policies/... ]
-├── policies/          # one .nix file per policy
-└── manifest.json
+```mermaid
+%% diagram-id: backlog-task425-generated-module-tree
+flowchart TD
+    root["generated-hardening/"] --> default["default.nix — imports = [ ./policies/... ]"]
+    root --> policies["policies/ — one .nix file per policy"]
+    root --> manifest["manifest.json"]
 ```
 
 The output must not require Crystal Forge-specific Nix modules unless those dependencies are explicitly included in the generated artifact; prefer ordinary NixOS module expressions depending only on standard NixOS module infrastructure.

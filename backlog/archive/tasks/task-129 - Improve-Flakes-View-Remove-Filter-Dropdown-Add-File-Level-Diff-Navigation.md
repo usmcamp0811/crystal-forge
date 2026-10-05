@@ -41,47 +41,49 @@ The flakes view currently has:
 
 ### Visual Mockup
 
+```mermaid
+%% diagram-id: backlog-task129-flake-registry-and-diff-mockup
+flowchart TD
+    subgraph registry["Flake Registry"]
+        controls["[Search...] [Filter by env ▼] [Filter by commit ▼] [Filter by size ▼] [+ Add Flake]"]
+        columns["Flake Name | Systems | Latest Commit"]
+        prod["production | 12 | abc1234 (2 hours ago)"]
+        staging["staging | 5 | def5678 (1 day ago)"]
+        dev["dev | 3 | ghi9012 (3 days ago)"]
+        controls --> columns --> prod --> staging --> dev
+    end
+    subgraph history["Git Commit History - production"]
+        timeline["Timeline: ○──○──○──● (selected: abc1234)"]
+        committed["Committed: 2 hours ago by john@example.com"]
+        file_count["Files Changed (5)"]
+        f1["[+] hosts/production/default.nix (+12, -4)"]
+        f2["[+] modules/networking.nix (+8, -2)"]
+        f3["[+] flake.nix (+2, -0)"]
+        f4["[+] .github/workflows/ci.yml (+15, -1)"]
+        f5["[+] README.md (+3, -1)"]
+        expanded["▼ hosts/production/default.nix (12 additions, 4 deletions)"]
+        diff["Diff content shown below"]
+        timeline --> committed --> file_count
+        file_count --> f1 & f2 & f3 & f4 & f5
+        f1 --> expanded --> diff
+    end
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│ Flake Registry                                                   │
-│ [Search...] [Filter by env ▼] [Filter by commit ▼] [Filter by size ▼]  [+ Add Flake] │
-├──────────────────────┬──────────────────────────────────────────┤
-│ Flake Name │ Systems │ Latest Commit                            │
-├──────────────────────┼──────────────────────────────────────────┤
-│ production  │   12    │ abc1234  (2 hours ago)                  │
-│ staging    │    5    │ def5678  (1 day ago)                     │
-│ dev        │    3    │ ghi9012  (3 days ago)                    │
-└──────────────────────┴──────────────────────────────────────────┘
 
-┌─────────────────────────────────────────────────────────────────┐
-│ Git Commit History - production                                  │
-├─────────────────────────────────────────────────────────────────┤
-│ Timeline: ○──○──○──● (selected: abc1234)                       │
-│ Committed: 2 hours ago by john@example.com                      │
-├─────────────────────────────────────────────────────────────────┤
-│ Files Changed (5):                                              │
-│ [+] hosts/production/default.nix  (+12, -4)                   │
-│ [+] modules/networking.nix          (+8, -2)                   │
-│ [+] flake.nix                       (+2, -0)                    │
-│ [+] .github/workflows/ci.yml       (+15, -1)                   │
-│ [+] README.md                       (+3, -1)                   │
-├─────────────────────────────────────────────────────────────────┤
-│ ▼ hosts/production/default.nix (12 additions, 4 deletions)      │
-├─────────────────────────────────────────────────────────────────┤
-│ diff --git a/hosts/production/default.nix...                   │
-│ @@ -18,8 +18,12 @@ in {                                        │
-│    services.openssh.enable = true;                              │
-│ -  services.openssh.settings.PasswordAuthentication = true;     │
-│ +  services.openssh.settings.PasswordAuthentication = false;    │
-│ +  services.openssh.settings.KbdInteractiveAuthentication =... │
-│ +  services.openssh.ports = [ 22 2222 ];                       │
-│                                                                    │
-│    environment.systemPackages = with pkgs; [                    │
-│      git                                                        │
-│ +    htop                                                       │
-│    ];                                                           │
-└─────────────────────────────────────────────────────────────────┘
-```
+The expanded file diff shows these visible lines:
+
+| Diff line | Visible content |
+| --- | --- |
+| File header | `diff --git a/hosts/production/default.nix...` |
+| Hunk header | `@@ -18,8 +18,12 @@ in {` |
+| Context | `services.openssh.enable = true;` |
+| Removed | `services.openssh.settings.PasswordAuthentication = true;` |
+| Added | `services.openssh.settings.PasswordAuthentication = false;` |
+| Added, truncated in mockup | `services.openssh.settings.KbdInteractiveAuthentication =...` |
+| Added | `services.openssh.ports = [ 22 2222 ];` |
+| Context | `environment.systemPackages = with pkgs; [` |
+| Context | `git` |
+| Added | `htop` |
+| Context | `];` |
 
 ## Non-Goals
 
