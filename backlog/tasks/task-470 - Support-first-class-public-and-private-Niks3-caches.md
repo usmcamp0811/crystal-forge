@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-05 01:07'
+updated_date: '2026-10-05 01:12'
 labels: []
 dependencies: []
 references:
@@ -375,5 +375,10 @@ P2 CI handoff dependency: all ten verified queries::cache_publication_reads::tes
 created: 2026-10-05 01:00
 ---
 Frontend fixture contract proposal: CF_CACHE_CREDENTIAL_FIXTURE points to /run/cf-cache-credential-fixture.json in the disposable web-ui machine. Version 1 JSON will contain attic {server_url, cache_name, token, replacement_token}, s3 {endpoint, region, bucket, access_key_id, secret_access_key, replacement_access_key_id, replacement_secret_access_key}, nix {url}, niks3 {server_url, substituter_url, public_keys, token, write_client_cert, write_client_key, read_client_cert, read_client_key, ca_cert}. Values are runtime-only; do not log fixture or include secret values in assertion messages/screenshots. Endpoints: Attic https://atticCache:9443/web-ui-private; Garage https://cache:9443; Niks3 write https://cache:5751 and private read https://cache:5752; public Nix https://cache:5753. Will confirm final schema in handoff.
+---
+
+created: 2026-10-05 01:12
+---
+Fixture owner coordination: final runtime schema remains version1 with native credential fields previously listed and ADDS attic.id, s3.id, nix.id, niks3.id plus seed_complete=true. A VM-local background seed waits for browser-owned cf-ui-admin registration, then creates disabled environment-scoped destinations through actual API and atomically publishes IDs. Frontend retained workflow MUST poll CF_CACHE_CREDENTIAL_FIXTURE for seed_complete before reading IDs (bounded 30s). Attic seeded push_to is exact https://atticCache:9443/web-ui-private/nix-cache-info; attic.server_url is only root and must not be used as auth proof. Native replacements available as attic.replacement_token and s3.replacement_* keys. Current post-browser verifier compares seed raw DB hashes for retained Test/Cancel non-mutation, then independently proves replacement Test non-mutation / Save rotation / retained Test using saved pair. If frontend saves native seed replacements, coordinate a per-Test DB snapshot arrangement rather than changing seed rows before this compare. Owner files implemented; drv evaluation passed. First native fixture build hit configured external binary caches401/503 and120s tool timeout; retrying with cache.nixos.org only.
 ---
 <!-- COMMENTS:END -->
