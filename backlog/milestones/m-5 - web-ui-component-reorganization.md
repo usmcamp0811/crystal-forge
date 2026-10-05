@@ -38,69 +38,59 @@ Reorganize the web-ui crate to follow best practices for component/view separati
 ## Component Directory Structure
 
 ### After Reorganization
-```
-components/
-├── charts/
-│   ├── mod.rs
-│   └── donut.rs              ✓ Already complete
-├── dashboard/
-│   ├── mod.rs
-│   ├── build_queue.rs        ✓ Already exists
-│   ├── build_summary.rs      ✓ Already exists
-│   ├── cve_summary.rs        ✓ Already exists
-│   ├── deployment_status.rs  ✓ Already exists
-│   ├── fleet_health.rs       ✓ Already exists
-│   └── recent_deployments.rs ✓ Already exists
-├── diff/
-│   ├── mod.rs
-│   ├── diff_viewer.rs        ← From system_detail.rs
-│   └── friendly_diff.rs      ← From flakes_list.rs
-├── filters/
-│   ├── mod.rs
-│   ├── dropdown.rs           ✓ Already exists
-│   ├── view_toggle.rs        ✓ Already exists
-│   ├── environment_dropdown.rs ← From systems_list.rs
-│   ├── health_dropdown.rs    ← From systems_list.rs
-│   └── deployment_dropdown.rs ← From systems_list.rs
-├── forms/
-│   ├── mod.rs
-│   ├── add_system.rs         ← From systems_list.rs
-│   └── add_flake.rs          ← From flakes_list.rs
-├── flake/
-│   ├── mod.rs
-│   ├── flake_timeline.rs     ← Move from components/
-│   ├── flake_card.rs         ← From flakes_list.rs
-│   └── flake_history.rs      ← From flakes_list.rs
-├── layout/
-│   ├── mod.rs                ← Rename from layout.rs
-│   ├── app_shell.rs
-│   ├── card.rs
-│   ├── sidebar.rs
-│   └── topbar.rs
-├── modals/
-│   ├── mod.rs
-│   ├── confirm_dialog.rs     ✓ Already exists
-│   ├── key_pair.rs           ← From systems_list.rs
-│   └── remove_system.rs      ← From systems_list.rs
-├── policy/
-│   ├── mod.rs
-│   ├── policy_card.rs        ← From policies.rs
-│   └── policy_editor.rs      ← From policies.rs
-├── system/
-│   ├── mod.rs
-│   ├── system_card.rs        ✓ Already exists
-│   └── (others from system_detail.rs)
-├── tables/
-│   ├── mod.rs
-│   ├── sortable_header.rs    ✓ Already exists
-│   └── systems_table.rs      ← From systems_list.rs
-├── builds/
-│   ├── mod.rs
-│   └── (components from builds.rs)
-├── loading.rs                ✓ Generic utility
-├── stat_card.rs              ✓ Generic utility
-├── status_badge.rs           ✓ Generic utility
-└── widget_grid.rs            ✓ Generic utility
+```mermaid
+%% diagram-id: backlog-milestone5-component-reorganization-tree
+flowchart TD
+    root["components/"]
+    root --> charts["charts/"] --> charts_mod["mod.rs"]
+    charts --> donut["donut.rs — ✓ Already complete"]
+    root --> dashboard["dashboard/"] --> dashboard_mod["mod.rs"]
+    dashboard --> queue["build_queue.rs — ✓ Already exists"]
+    dashboard --> summary["build_summary.rs — ✓ Already exists"]
+    dashboard --> cve["cve_summary.rs — ✓ Already exists"]
+    dashboard --> deployment["deployment_status.rs — ✓ Already exists"]
+    dashboard --> health["fleet_health.rs — ✓ Already exists"]
+    dashboard --> recent["recent_deployments.rs — ✓ Already exists"]
+    root --> diff["diff/"] --> diff_mod["mod.rs"]
+    diff --> viewer["diff_viewer.rs — From system_detail.rs"]
+    diff --> friendly["friendly_diff.rs — From flakes_list.rs"]
+    root --> filters["filters/"] --> filters_mod["mod.rs"]
+    filters --> dropdown["dropdown.rs — ✓ Already exists"]
+    filters --> toggle["view_toggle.rs — ✓ Already exists"]
+    filters --> env_filter["environment_dropdown.rs — From systems_list.rs"]
+    filters --> health_filter["health_dropdown.rs — From systems_list.rs"]
+    filters --> deploy_filter["deployment_dropdown.rs — From systems_list.rs"]
+    root --> forms["forms/"] --> forms_mod["mod.rs"]
+    forms --> add_system["add_system.rs — From systems_list.rs"]
+    forms --> add_flake["add_flake.rs — From flakes_list.rs"]
+    root --> flake["flake/"] --> flake_mod["mod.rs"]
+    flake --> timeline["flake_timeline.rs — Move from components/"]
+    flake --> card["flake_card.rs — From flakes_list.rs"]
+    flake --> history["flake_history.rs — From flakes_list.rs"]
+    root --> layout["layout/"] --> layout_mod["mod.rs — Rename from layout.rs"]
+    layout --> shell["app_shell.rs"]
+    layout --> layout_card["card.rs"]
+    layout --> sidebar["sidebar.rs"]
+    layout --> topbar["topbar.rs"]
+    root --> modals["modals/"] --> modals_mod["mod.rs"]
+    modals --> confirm["confirm_dialog.rs — ✓ Already exists"]
+    modals --> key_pair["key_pair.rs — From systems_list.rs"]
+    modals --> remove["remove_system.rs — From systems_list.rs"]
+    root --> policy["policy/"] --> policy_mod["mod.rs"]
+    policy --> policy_card["policy_card.rs — From policies.rs"]
+    policy --> editor["policy_editor.rs — From policies.rs"]
+    root --> system["system/"] --> system_mod["mod.rs"]
+    system --> system_card["system_card.rs — ✓ Already exists"]
+    system --> others["(others from system_detail.rs)"]
+    root --> tables["tables/"] --> tables_mod["mod.rs"]
+    tables --> sortable["sortable_header.rs — ✓ Already exists"]
+    tables --> systems_table["systems_table.rs — From systems_list.rs"]
+    root --> builds["builds/"] --> builds_mod["mod.rs"]
+    builds --> build_components["(components from builds.rs)"]
+    root --> loading["loading.rs — ✓ Generic utility"]
+    root --> stat["stat_card.rs — ✓ Generic utility"]
+    root --> badge["status_badge.rs — ✓ Generic utility"]
+    root --> grid["widget_grid.rs — ✓ Generic utility"]
 ```
 
 ## Success Criteria

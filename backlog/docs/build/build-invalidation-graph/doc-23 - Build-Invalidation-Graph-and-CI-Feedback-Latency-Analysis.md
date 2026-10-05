@@ -157,43 +157,23 @@ position.
 
 ## Target architecture
 
-```text
-                         Cargo.lock and manifests
-                                  |
-                                  v
-                        +--------------------+
-                        | backend cargo deps |
-                        +---------+----------+
-                                  |
-              +-------------------+-------------------+
-              v                   v                   v
-        cf-server-core        cf-builder           cf-agent
-              |
-              +---------------> unit and regression tests
-              +---------------> integration check
-              +---------------> oidc-auth check
+```mermaid
+%% diagram-id: core-build-invalidation-target
+flowchart TD
+    backend_meta["Cargo.lock and manifests"] --> backend_deps["backend cargo deps"]
+    backend_deps --> server["cf-server-core"]
+    backend_deps --> builder["cf-builder"]
+    backend_deps --> agent["cf-agent"]
+    server --> tests["unit and regression tests"]
+    server --> integration["integration check"]
+    server --> oidc["oidc-auth check"]
 
-
-               web-ui Cargo.lock
-                      |
-                      v
-               web-ui cargo deps
-                      |
-                      v
-                    web-ui
-                      |
-              +-------+--------+
-              v                v
-       ui-screenshots     web-ui-fast
-
-
-                    web-ui
-                      |
-                      v
-            cf-server-embedded-ui
-                      |
-                      v
-              full review gate
+    ui_lock["web-ui Cargo.lock"] --> ui_deps["web-ui cargo deps"]
+    ui_deps --> web_ui["web-ui"]
+    web_ui --> screenshots["ui-screenshots"]
+    web_ui --> web_fast["web-ui-fast"]
+    web_ui --> embedded["cf-server-embedded-ui"]
+    embedded --> review["full review gate"]
 ```
 
 Two principles control the target design:

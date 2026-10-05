@@ -35,13 +35,36 @@ Currently, builds that are stopped get stuck in a "Stopping" status with no way 
 - Users cannot recover from interrupted builds
 
 ## Current State Flow Issues
-- Queue → Building → (stuck in "Stopping")
+
+```mermaid
+%% diagram-id: backlog-task-248-current-flow
+stateDiagram-v2
+    [*] --> Queue
+    Queue --> Building
+    Building --> Stopping
+    note right of Stopping: Stuck. No path to Cancelled or Stopped.
+```
+
 - No path to Cancelled/Stopped final states
 - No restart/retry mechanism
 
 ## Desired State Flow
-- Queue → Building → Cancelled/Stopped (terminal states)
-- Queue → Building → Completed (terminal states)
+
+```mermaid
+%% diagram-id: backlog-task-248-desired-flow
+stateDiagram-v2
+    [*] --> Queue
+    Queue --> Building
+    Building --> Cancelled
+    Building --> Stopped
+    Building --> Completed
+    Cancelled --> Queue: restart
+    Stopped --> Queue: restart
+```
+
+- `Cancelled`, `Stopped`, and `Completed` are terminal states. The restart
+  transition from `Cancelled` or `Stopped` back to `Queue` is the separate
+  restart ability listed below.
 - Ability to restart from Cancelled/Stopped → Queue
 - Ability to force-cancel stuck builds
 <!-- SECTION:DESCRIPTION:END -->

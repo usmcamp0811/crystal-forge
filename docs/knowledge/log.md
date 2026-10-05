@@ -1,0 +1,8 @@
+# Bundle Update Log
+
+## 2026-10-04
+* **Creation**: Initial OKF knowledge bundle migration from Crystal Forge documentation.
+* **Owner-authorized semantic cleanup**: Corrected queue, builder, cache, deployment, and view contracts against code at `3b23d36f`; converted reviewed source diagrams to Mermaid and repaired incorrect Mermaid; added the cleanup record and exact diagram audit. Updated the lossless-migration rules to separate authorized semantic cleanup from source-preserving migration. No runtime code, NixOS option, SQL view, or migration was removed.
+* **Continued cleanup**: Corrected CVE/POA&M authority and verification language; reconciled authentication, onboarding, UI routes, development paths, and test-package guidance; replaced `coverage-exceptions.txt` with one hash-bound source adjustment for a developer-local path redaction.
+* **Main-body correction pass**: Rewrote the derivation lifecycle, deployment flow, API overview, queue and dashboard API, API authentication, OIDC role mapping, onboarding, endpoint and development guides, frontend navigation, builder protocol details, design-system code examples, STIG modules, and testing guides so that each states current behavior in its main text. Removed the notes that said the main text was wrong. Recorded each old claim in the [cleanup record](meta/cleanup-record.md) (C-088 to C-113) and added gaps G-006 to G-008.
+* **Mermaid verification**: The blocking `okf-knowledge` check parses every Mermaid block with the pinned parser and needs no browser. `nix run .#okf-mermaid-renderer` renders SVG by hand.

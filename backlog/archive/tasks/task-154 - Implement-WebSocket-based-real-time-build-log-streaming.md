@@ -49,21 +49,30 @@ Implement WebSocket-based log streaming so users can watch build progress in rea
 
 ### Architecture
 
-```
-Builder Process
-  ├─ Captures nix-store stdout/stderr (already done)
-  ├─ Sends lines via WebSocket to server
-  └─ Falls back to batched HTTP POST if WebSocket unavailable
-
-Server
-  ├─ WebSocket endpoint: /api/v1/builders/:id/jobs/:job_id/logs/stream
-  ├─ Stores logs in database (append)
-  └─ Broadcasts to UI clients watching the job
-
-UI
-  ├─ Connects to WebSocket when viewing build details
-  ├─ Streams logs in real-time
-  └─ Auto-scrolls / follows mode
+```mermaid
+%% diagram-id: backlog-task154-proposed-log-stream-architecture
+flowchart LR
+    subgraph builder["Builder Process"]
+        capture["Captures nix-store stdout/stderr (already done)"]
+        send["Sends lines via WebSocket to server"]
+        fallback["Falls back to batched HTTP POST if WebSocket unavailable"]
+        capture --> send
+        capture --> fallback
+    end
+    subgraph server["Server"]
+        endpoint["WebSocket endpoint: /api/v1/builders/:id/jobs/:job_id/logs/stream"]
+        store["Stores logs in database (append)"]
+        broadcast["Broadcasts to UI clients watching the job"]
+        endpoint --> store --> broadcast
+    end
+    subgraph ui["UI"]
+        connect["Connects to WebSocket when viewing build details"]
+        stream["Streams logs in real-time"]
+        scroll["Auto-scrolls / follows mode"]
+        connect --> stream --> scroll
+    end
+    send --> endpoint
+    broadcast --> connect
 ```
 
 ## Non-Goals
@@ -154,12 +163,12 @@ UI
 
 ### 🔨 Architecture Implemented
 
-```
-Builder → WebSocket → Server → UI
-   │                      │
-   ├─ Plain text logs ────┼─→ Database (build_jobs.logs)
-   └─ JSON metrics ───────┼─→ Broadcast only (not stored)
-                          └─→ All connected clients
+```mermaid
+%% diagram-id: backlog-task154-implemented-log-and-metric-routing
+flowchart LR
+    builder["Builder"] --> ws["WebSocket"] --> server["Server"] --> ui["UI"]
+    builder --> plain["Plain text logs"] --> database["Database (build_jobs.logs)"]
+    builder --> metrics["JSON metrics"] --> broadcast["Broadcast only (not stored)"] --> clients["All connected clients"]
 ```
 
 ### ⏳ Remaining Work
@@ -400,14 +409,16 @@ Marked 'failed' (no more auto-retry)
 ```
 
 **Manual retry flow:**
-```
-User: POST /api/v1/commits/123/re-evaluate
-  ↓
-Server: Resets attempt count to 0
-  ↓
-Eval loop: Picks up commit on next cycle (< 30s)
-  ↓
-Eval runs again (fresh attempts)
+```mermaid
+%% diagram-id: backlog-task-154-manual-retry
+sequenceDiagram
+    participant User
+    participant Server
+    participant EvalLoop as Eval loop
+    User->>Server: POST /api/v1/commits/123/re-evaluate
+    Server->>Server: Reset attempt count to 0
+    EvalLoop->>Server: Pick up commit on next cycle (under 30 seconds)
+    EvalLoop->>EvalLoop: Run evaluation again (fresh attempts)
 ```
 
 ### UI Integration (Future)
@@ -529,25 +540,19 @@ border-red-500/50 bg-red-900/30 text-red-200
 
 ### Architecture Diagram
 
-```
-nix-eval-jobs (parallel evaluation)
-       │
-       │ stdout: {"attr":"chesty", "drvPath":"..."}
-       ↓
-  eval_with_nix_eval_jobs()
-       │
-       ├── Parse result
-       ├── Broadcast: {type:"system_status", system:"chesty", status:"success"}
-       ├── Mark derivation DryRunComplete
-       └── Create build job
-       │
-       ↓ WebSocket
-       │
-   UI (FlakeHistoryExplorer)
-       │
-       ├── Receives system_status message
-       ├── Updates system_status HashMap
-       └── Re-renders chip with green color
+```mermaid
+%% diagram-id: backlog-task154-evaluation-status-websocket-flow
+flowchart TD
+    eval["nix-eval-jobs (parallel evaluation)"] --> stdout["stdout: attr chesty; drvPath ..."]
+    stdout --> function["eval_with_nix_eval_jobs()"]
+    function --> parse["Parse result"]
+    function --> broadcast["Broadcast system_status: system chesty, status success"]
+    function --> mark["Mark derivation DryRunComplete"]
+    function --> create["Create build job"]
+    broadcast --> websocket["WebSocket"] --> ui["UI (FlakeHistoryExplorer)"]
+    ui --> receive["Receives system_status message"]
+    receive --> update["Updates system_status HashMap"]
+    update --> render["Re-renders chip with green color"]
 ```
 
 ### Commits Summary

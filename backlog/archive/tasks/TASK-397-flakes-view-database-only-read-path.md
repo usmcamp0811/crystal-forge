@@ -69,23 +69,20 @@ Remote branch ordering and force-push visibility must not be discarded. Instead,
 
 Target request flow:
 
-```text
-Open /flakes
-  -> GET /api/v1/flakes
-     -> PostgreSQL only
-     -> registry fields + environments + latest visible commit summary
-
-Open one flake tray
-  -> GET /api/v1/flakes/timelines?ids=<id>&limit=<bounded limit>
-     -> PostgreSQL only
-     -> commit history for that flake
-     -> configuration/path enrichment only for returned commits
-
-Synchronize a flake
-  -> background/mutation sync path performs Git work
-  -> commits new metadata
-  -> atomically replaces the flake's branch-visibility snapshot
-  -> readers continue seeing the previous complete snapshot until commit
+```mermaid
+%% diagram-id: backlog-task397-flake-read-sync-flows
+flowchart TD
+    open_list["Open /flakes"] --> get_list["GET /api/v1/flakes"]
+    get_list --> postgres_list["PostgreSQL only"]
+    postgres_list --> list_data["Registry fields + environments + latest visible commit summary"]
+    open_tray["Open one flake tray"] --> get_timeline["GET /api/v1/flakes/timelines?ids=<id>&limit=<bounded limit>"]
+    get_timeline --> postgres_timeline["PostgreSQL only"]
+    postgres_timeline --> history["Commit history for that flake"]
+    history --> enrichment["Configuration/path enrichment only for returned commits"]
+    sync["Synchronize a flake"] --> git["Background/mutation sync path performs Git work"]
+    git --> metadata["Commits new metadata"]
+    metadata --> snapshot["Atomically replaces flake branch-visibility snapshot"]
+    snapshot --> readers["Readers see previous complete snapshot until commit"]
 ```
 
 ## Required Design

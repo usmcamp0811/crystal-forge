@@ -23,25 +23,27 @@ ordinal: 55000
 The components/layout module uses an inconsistent pattern compared to other component modules.
 
 ## Current Structure (Inconsistent)
-```
-components/
-├── layout.rs          # Module declaration file (alternate pattern)
-├── layout/
-│   ├── app_shell.rs
-│   ├── card.rs
-│   ├── sidebar.rs
-│   └── topbar.rs
+```mermaid
+%% diagram-id: backlog-task48-current-layout-module-tree
+flowchart TD
+    components["components/"] --> layout_rs["layout.rs — Module declaration file (alternate pattern)"]
+    components --> layout_dir["layout/"]
+    layout_dir --> app_shell["app_shell.rs"]
+    layout_dir --> card["card.rs"]
+    layout_dir --> sidebar["sidebar.rs"]
+    layout_dir --> topbar["topbar.rs"]
 ```
 
 ## Target Structure (Standard)
-```
-components/
-├── layout/
-│   ├── mod.rs         # Module declaration (standard pattern)
-│   ├── app_shell.rs
-│   ├── card.rs
-│   ├── sidebar.rs
-│   └── topbar.rs
+```mermaid
+%% diagram-id: backlog-task48-target-layout-module-tree
+flowchart TD
+    components["components/"] --> layout["layout/"]
+    layout --> mod_rs["mod.rs — Module declaration (standard pattern)"]
+    layout --> app_shell["app_shell.rs"]
+    layout --> card["card.rs"]
+    layout --> sidebar["sidebar.rs"]
+    layout --> topbar["topbar.rs"]
 ```
 
 ## Other modules use the standard pattern:
