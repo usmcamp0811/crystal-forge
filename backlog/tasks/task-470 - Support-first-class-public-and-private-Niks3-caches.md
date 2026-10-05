@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-05 17:36'
+updated_date: '2026-10-05 18:02'
 labels: []
 dependencies: []
 references:
@@ -432,6 +432,8 @@ Fresh exact-head artifact /nix/store/k3a9s25bk83701n5x6prkh08wn5pnyai-vm-test-ru
 Uploaded8 inspected exact-head configured-only PNGs toproject70402481 using nix run nixpkgs#glab api projects/70402481/uploads --form file=@path (currentglab multipartflag). ActualMDlinks/SHA256manifest saved /tmp/opencode/task470-exact-69f27e0-web-ui/uploads.md and uploads.json; upload-current.log records8successfulresponses. SelectedAtticdesktop+narrow,S3desktop+narrow,Niks3desktop+narrow,Basicdesktop,querydesktop; nonecontainssecretvalues orpopulatedreplacementdialogs. MRdescription untouched. One initialupload completedbeforeaURL-prefixguard rejectedGitLab'sactual/-/project/70402481/full_path; leftthatunreferenceduploadalone andcorrectedexternaluploaderroutevalidation, then8selectedMDlinkscompleted. Captures reviewedas-is: narrowS3statuspartlyunderfixedfooterandNiks3summarybelowfoldrequiresscrolling; no renderer/baseline/assertionchanges.
 
 Persistentpreview/providerprocesses remainaliveunchanged PIDs19568/19692/19721 and3514/3415/3942; verifiedloopbackproviders +frontend8081/API3447/PG5433 listeners. No servicesrestarted/stopped, repo/prodchanges, commits/pushes orMRdescriptionwrites bythisowner. UploadlinksreadyforparentMRdescription. Currentgitworktreestillclean69f27e0.
+
+User requested rebase after new dev merge. Fetched origin/dev ec71ca0c8fe965f87cb414264c05232e579a8bb6 (OKF knowledge migration). Replayed all seven TASK-470 commits, resolving documentation-only location/content/modify-delete conflicts into canonical docs/knowledge nodes; did not restore deleted legacy docs. Added doc-only commit d8ae6ace754956673ca6bb9cf2a47bcb065280db registering Niks3/operator decisions indexes and two task check README manifest/catalog entries. Official okf-knowledge passed exit 0 (58 validator tests, 186 concepts, 215 Mermaid blocks). git diff --check passed; comparison of committed backend/protocol/config/agent/builder/UI/module/cache/check sources against 69f27e0d is identical. Latest remote task branch remains 69f27e0df66943521ea1c39eeb66fa2694a2b1d8; rebased head has NOT been pushed. Explicit force-with-lease publication authorization required. Four interrupted fixture timing files preserved in task-labelled stash and restored unchanged as uncommitted WIP; no assertions relaxed or work discarded. Preview task unit remains active, running last verified backend/native providers. Earlier exact-head results apply only to 69f27e0d, not new rebased head; full browser triage and finalization remain pending.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
