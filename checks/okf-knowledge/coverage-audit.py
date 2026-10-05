@@ -34,6 +34,7 @@ RULE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")
 # Name of the synthetic block that holds the content before the first H2.
 # INVARIANT: no real H2 may use this name; ``split_document`` rejects it.
 PREAMBLE_HEADING = "__preamble__"
+CLEANUP_RECORD = "docs/knowledge/meta/cleanup-record.md"
 
 
 def git(*args: str, binary: bool = False):
@@ -576,9 +577,14 @@ def mapped_destinations_for(
         target, _, anchor = link.partition("#")
         if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", target):
             continue
+        resolved = (manifest.parent / target).resolve()
+        if resolved == (root / CLEANUP_RECORD).resolve():
+            # SECURITY: The cleanup record documents corrections. It is
+            # evidence for an annotation, never a destination that can
+            # satisfy preservation of a source block.
+            continue
         if not anchor:
             errors.append(f"{source}: H2 {heading!r} mapping lacks an exact destination anchor")
-        resolved = (manifest.parent / target).resolve()
         if not resolved.is_file():
             errors.append(f"{source}: H2 {heading!r} destination is missing: {target}")
             continue

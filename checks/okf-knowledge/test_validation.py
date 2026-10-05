@@ -595,6 +595,25 @@ class SemanticReplacementTests(AuditFixture):
         self.assert_audit_fails(base, "overlaps a source adjustment")
 
 
+class CleanupRecordIsNotADestinationTests(AuditFixture):
+    def test_text_quoted_in_cleanup_record_does_not_satisfy_preservation(self):
+        base = self.commit_baseline({"source.md": "## Old Title\nOld content here.\n"})
+        self.write("docs/knowledge/concept.md", "## New Title\nNew content here.\n")
+        self.write_support()
+        # The old claim is quoted in the cleanup record, which the annotated
+        # cell links to. The link must not count as a destination.
+        self.write("docs/knowledge/meta/cleanup-record.md", "| C-001 | ## Old Title Old content here. | x | y | z |\n")
+        self.write(
+            "docs/knowledge/meta/migration-manifest/test.md",
+            "| Original | Destination | Action | Coverage |\n|---|---|---|---|\n"
+            "| `source.md` | [Concept](../../concept.md) | moved | complete |\n\n"
+            "## Source inventory\n\n### `source.md`\n\n| Source section | Destination |\n|---|---|\n"
+            "| `## Old Title` | [Concept](../../concept.md#new-title) (rewritten; see "
+            "[cleanup record](../cleanup-record.md)) |\n",
+        )
+        self.assert_audit_fails(base, "content/order/punctuation lost in H2 'Old Title'")
+
+
 class PreambleTests(AuditFixture):
     """The content before the first H2 is a preservation block."""
 
