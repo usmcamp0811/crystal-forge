@@ -11,7 +11,7 @@ tags:
 implementation_status: implemented
 generated:
   by: opencode/claude-sonnet-5-5
-  at: 2026-10-03T22:54:29-05:00
+  at: 2026-10-04T21:00:00-05:00
 sources:
   - id: origin
     resource: "Crystal Forge repository file docs/onboarding-guide.md at commit 3b23d36f"
@@ -46,9 +46,9 @@ This guide describes the nine-step Setup track and five Security Workflows walkt
 Before you begin, you should have:
 
 - **NixOS knowledge**: Familiarity with NixOS modules, flakes, and basic system administration
-- **A NixOS server**: Where you'll run the Crystal Forge server, database, and builders
+- **A NixOS server**: Where you'll run the Crystal Forge server and its database. Builders can run on the same host or on separate hosts. A builder reaches the server only through its API.
 - **Git repository**: Containing your NixOS configurations as a flake
-- **Network access**: Ability to reach your managed systems over SSH/HTTP
+- **Network access**: Your managed systems must be able to reach the server's port. The agent on each system initiates all communication. The server does not connect to managed systems.
 - **Basic understanding of**:
   - NixOS flakes and how they work
   - Ed25519 cryptographic keys
@@ -64,18 +64,20 @@ The server reports Setup completion from saved resources. Opening a page never c
 
 ### Server Requirements
 
-**Minimum recommended specifications for the Crystal Forge server:**
+**Starting-point sizing for the Crystal Forge server.** These figures are guidance, not limits that the software enforces:
 
-- **CPU**: 4+ cores (for concurrent builds)
+- **CPU**: 4+ cores. The server runs `nix-eval-jobs` to evaluate each commit. If a builder shares the host, builds use the same cores.
 - **RAM**: 8GB minimum, 16GB+ recommended
-- **Disk**: 50GB+ for PostgreSQL, Nix store, and build artifacts
-- **NixOS**: Version 23.11 or later
+- **Disk**: 50GB+ for PostgreSQL, the Nix store, and evaluation artifacts. A colocated builder also stores build outputs there.
+- **NixOS**: A release with flakes support. The module enables the `nix-command` and `flakes` features. This guide states no minimum release because none is tested or enforced.
 
 **Network requirements:**
 
-- Inbound HTTP/HTTPS access on port 3000 (or your configured port)
+- Inbound HTTP access on port 3000 (or your configured port) from the browsers of your users, from managed systems (agents), and from builders. The server speaks plain HTTP, so terminate TLS in a reverse proxy.
 - Outbound access to your Git repositories
-- SSH or HTTP access to managed NixOS systems
+- For a builder on a separate host: outbound access to the server API and to the binary cache
+
+**Optional colocated builder.** The module example below also enables a builder on the server host. A builder on a separate host needs its own NixOS configuration (see [Step 3: Register Builder](onboarding-step-3-builder.md)). It does not need database access.
 
 ### Database Setup
 
@@ -139,7 +141,8 @@ Add Crystal Forge to your server's NixOS configuration:
       auth_mode = "local";  # Use local username/password auth
     };
 
-    # Builder (for building server-evaluated derivations)
+    # Optional colocated builder (builds server-evaluated derivations).
+    # Remove this block if builders run on other hosts.
     build = {
       enable = true;
       max_concurrent_derivations = 2;

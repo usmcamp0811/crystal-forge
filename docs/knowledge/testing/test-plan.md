@@ -251,14 +251,15 @@ package builds and NixOS VM checks.
 
 ### Coverage Verification
 
-```bash
-# Rust coverage
-cd packages/default
-cargo tarpaulin --out Html
+**Current workflow.** The repository owns one coverage command. It runs `cargo tarpaulin` over the `packages/default` workspace and writes HTML and JSON reports plus a summary:
 
+```bash
+nix run .#coverage.coverage-report
 ```
 
-_TODO: Need to figure out how to validate integration tests cover all the things they should cover_
+The GitLab job `coverage-check` runs this command on merge requests, keeps `coverage-report/` as an artifact, and posts the summary to the merge request. The command reports coverage. It does not enforce the numeric targets above.
+
+**Proposed.** A gate that fails when coverage falls below the targets does not exist. A way to prove that the integration tests cover everything they should is also an open item.
 
 ## Test Documentation
 
@@ -278,7 +279,7 @@ Each test should include:
 - Expected behavior
 - Cleanup verification
 
-Example:
+Example (an illustration of the documentation style, not an existing test):
 
 ```python
 def test_deployment_rollback_scenario(cf_client):
@@ -294,12 +295,16 @@ def test_deployment_rollback_scenario(cf_client):
 
 ### Benchmarks
 
+> **Proposed.** No benchmark framework measures these figures.
+
 - View query execution: < 10 seconds
 - Agent heartbeat processing: < 100ms
 - Webhook processing: < 5 seconds
 - Build evaluation trigger: < 30 seconds
 
 ### Load Testing
+
+> **Proposed.** The example below is an illustration. No such test exists.
 
 ```python
 def test_concurrent_heartbeats(server_vm, num_agents=100):
@@ -318,6 +323,8 @@ def test_concurrent_heartbeats(server_vm, num_agents=100):
 - Privilege escalation prevention
 
 ### Security Test Examples
+
+> **Proposed.** The examples below are illustrations. No tests with these names exist.
 
 ```python
 def test_unsigned_heartbeat_rejected(server_vm, agent_vm):
@@ -354,10 +361,10 @@ def test_sql_injection_prevention(cf_client):
 
 ### Adding New Tests
 
-1. **Database View Tests**: Add to `packages/cf-test-suite/cf_test/tests/test_view_<name>.py`
-2. **Scenarios**: Extend `packages/cf-test-suite/cf_test/scenarios/`
-3. **Integration Tests**: Create `packages/cf-test-suite/cf_test/tests/test_integration_<feature>.py`
-4. **Unit Tests**: Add to relevant Rust modules with `#[test]`
+1. **Database view tests**: Add `packages/cf-test-suite/cf_test/tests/database/test_view_<name>.py`.
+2. **Scenarios**: Extend `packages/cf-test-suite/cf_test/scenarios/`.
+3. **Server, builder, cache, and dashboard tests**: Add the test to the matching folder under `packages/cf-test-suite/cf_test/tests/` (`server/`, `builder/`, `cache/`, or `dashboard/`). Name the file `test_<area>_<feature>.py`.
+4. **Unit tests**: Add `#[test]` functions in a `#[cfg(test)]` module of the relevant Rust source file.
 
 ### Running Tests During Development
 

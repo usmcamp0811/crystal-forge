@@ -10,7 +10,7 @@ tags:
 implementation_status: partial
 generated:
   by: opencode/claude-sonnet-5-5
-  at: 2026-10-03T22:57:15-05:00
+  at: 2026-10-04T21:00:00-05:00
 sources:
   - id: origin
     resource: "Crystal Forge repository file docs/specs/00-system-overview.md at commit 3b23d36f"
@@ -67,15 +67,15 @@ fixture and port details.
 ```mermaid
 %% diagram-id: core-local-development-request-path
 flowchart TD
-    Request["HTTP Request"] --> Middleware["Middleware (logging, auth)"]
-    Middleware --> Handler["Handler (route logic)"]
+    Request["HTTP Request"] --> Layers["Router layers (CORS, body limits)"]
+    Layers --> Handler["Handler (session and role check, route logic)"]
     Handler --> Query["Query (database access)"]
     Query --> Response["Response (JSON)"]
 ```
 
 ### Error Handling
 
-- All errors return JSON: `{"error": {"code": "...", "message": "..."}}`
+- API errors return flat JSON: `{"error": "<lowercase_code>", "message": "...", "details": ...}`. `details` is optional. See [API overview](../api/api-overview-errors-and-streaming.md).
 - Use `anyhow::Result` for fallible operations
 - `?` operator for error propagation
 - No `unwrap()` in production code
@@ -96,10 +96,10 @@ flowchart TD
 
 ### Adding a New UI View
 
-1. **Create component** in `views/`
-2. **Add route** in `packages/web-ui/src/routes.rs`
-3. **Add navigation** in `AppShell`
-4. **Add API calls** in `api/client.rs`
+1. **Create the view** in `packages/web-ui/src/views/` and declare it in `views/mod.rs`.
+2. **Add the route** in `packages/web-ui/src/routes.rs`.
+3. **Add the sidebar link** in `packages/web-ui/src/components/layout/sidebar.rs`. `components/layout/app_shell.rs` renders the shell and does not hold the link list.
+4. **Add API calls** in `packages/web-ui/src/api/client.rs`, with matching DTOs in `api/models.rs`.
 
 ### Database Migration
 

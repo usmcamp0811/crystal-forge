@@ -1,182 +1,227 @@
 ---
 type: Concept
 title: "Derivation status lifecycle"
-description: "Defines the derivation status IDs and names, the combined lifecycle sequence, terminal states, and retry rules; open it when reading or changing derivation status handling."
+description: "Defines the derivation status IDs and names, the build job statuses, the current commit-to-deploy lifecycle, terminal states, and retry rules; open it when reading or changing derivation, build job, or retry status handling."
 tags:
   - crystal-forge
   - concept
   - derivation
   - status
   - retry
-implementation_status: partial
+implementation_status: implemented
 generated:
   by: opencode/claude-sonnet-5-5
-  at: 2026-10-03T22:57:15-05:00
+  at: 2026-10-04T21:00:00-05:00
 sources:
   - id: origin
     resource: "Crystal Forge repository file docs/derivation-status.md at commit 3b23d36f"
-    title: "Crystal Forge Derivation Status Flow"
+    title: "Crystal Forge Derivation Status Flow (original document)"
+  - id: code-1
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/migrations/0026_make_derivation_statuses.sql at commit 3b23d36f"
+    title: Seeded derivation statuses 1 to 13
+  - id: code-2
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/migrations/0052_create_cache_push_table.sql at commit 3b23d36f"
+    title: Seeded derivation status 14
+  - id: code-3
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/queries/builders.rs at commit 3b23d36f"
+    title: Build job completion, failure, and automatic retry
+  - id: code-4
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/queries/derivations.rs at commit 3b23d36f"
+    title: EvaluationStatus enum and startup reset
+  - id: code-5
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/migrations/0189_automatic_retry_policy.sql at commit 3b23d36f"
+    title: Automatic retry policy singleton
 ---
 
-# Crystal Forge Derivation Status Flow
+# Derivation status lifecycle
 
-This document explains the statuses that derivations go through in Crystal Forge and how they transition during processing, including deployment and cache operations.
+Crystal Forge tracks one unit of work in four places. Each place answers a
+different question.
 
-> **Status:** partial. IDs 1 to 13 match the seeded `derivation_statuses` rows (`packages/default/crates/cf-server/migrations/0026_make_derivation_statuses.sql`). The database names are `dry-run-inprogress`, `build-inprogress`, and `in-progress`, while this document writes `dry-run-in-progress`, `build-in-progress`, and `in-progress (legacy)`. The seed also marks `dry-run-failed` and `build-failed` terminal without the retry exception, and does not seed `cache-pushed (14)` in that migration. These are verification candidates. `reset_non_terminal_derivations()` exists in `packages/default/crates/cf-server/src/queries/derivations.rs`.
+| Record | Column | Question it answers |
+| --- | --- | --- |
+| `commits` | `evaluation_status` | Has the server evaluated this commit? |
+| `derivations` | `status_id` | Did evaluation produce this derivation, and did a build finish? |
+| `build_jobs` | `status` | Where is the build attempt in the builder queue? |
+| `cache_push_jobs` | `status` | Is the output published to a binary cache? |
 
-## Combined Lifecycle (Sequence)
+> **Scope:** This document describes the code at commit `3b23d36f`. The
+> `derivations.status_id` column keeps the 14 seeded statuses, but the current
+> server writes only a subset of them. The tables below mark which statuses are
+> written today.
+
+## Current lifecycle
+
+The server evaluates a commit as a whole with `nix-eval-jobs`. API-only builders
+build the result and publish it to the binary cache. Agents deploy from the
+cache. The database never receives writes from a builder directly.
 
 ```mermaid
 sequenceDiagram
-    participant Commit as New Commit
-    participant Eval as Evaluation Loop
-    participant Build as Build Loop
-    participant Cache as Cache Push Loop
-    participant CVE as CVE Scanner
-    participant Deploy as Deployment Manager
-    participant Agent as Agent
-    participant DB as Database
+    participant G as Git source
+    participant S as Server
+    participant DB as PostgreSQL
+    participant B as API-only builder
+    participant C as Binary cache
+    participant A as Agent
 
-    %% Commit discovery
-    Commit->>DB: Insert NixOS derivations
-    Note over DB: Set status = (dry-run-pending)
-
-    %% Evaluation loop
-    Eval->>DB: Find status = dry-run-pending
-    DB-->>Eval: Return rows
-    Eval->>DB: Update → (dry-run-in-progress)
-    Eval->>Eval: nix build --dry-run
-
-    alt Evaluation succeeded
-        Eval->>DB: Update → (dry-run-complete)
-        Eval->>DB: Insert discovered package deps
-        Note over DB: Packages initially at (build-pending)
-    else Evaluation failed
-        Eval->>DB: Update → (dry-run-failed)
+    G->>S: Webhook or sync finds a new commit
+    S->>DB: Insert commit, evaluation_status pending
+    S->>DB: Mark commit in_progress, one commit at a time
+    S->>S: nix-eval-jobs evaluates all systems
+    alt Evaluation of a system succeeds
+        S->>DB: Insert or update derivation, status dry-run-complete 5
+        S->>DB: Insert build_jobs row, status queued
+    else Evaluation of a system fails
+        S->>DB: Record derivation, status dry-run-failed 6
     end
+    S->>DB: Mark commit complete or failed
 
-    %% Build loop
-    Build->>DB: Find status IN (dry-run-complete,build-pending)
-    DB-->>Build: Return rows
-    Build->>DB: Update → (build-in-progress)
-    Build->>Build: nix-store --realise
-
-    alt Build succeeded
-        Build->>DB: Update → (build-complete)
-        
-        %% Cache push flow
-        Cache->>DB: Find derivations needing cache push
-        Cache->>DB: Create cache push job
-        Cache->>DB: Mark cache job in-progress
-        Cache->>Cache: Push to cache (S3/Attic/Nix)
-        
-        alt Cache push succeeded
-            Cache->>DB: Mark cache job completed
-            Cache->>DB: Update → (cache-pushed)
-        else Cache push failed
-            Cache->>DB: Mark cache job failed
-            Note over Cache: Retries with exponential backoff
+    loop Builder polls every builder.poll_interval
+        B->>S: Claim next job, signed request
+        S->>DB: build_jobs queued to building
+        S-->>B: Job payload
+    end
+    B->>B: nix build
+    B->>C: Sign and push the output
+    alt Build and push succeed
+        B->>S: Complete job with store path and cache reference
+        S->>DB: build_jobs building to success
+        S->>DB: Derivation to build-complete 10, store_path set
+        S->>C: nix path-info probe
+        S->>DB: cache_push_jobs row completed
+    else Build or push fails
+        B->>S: Fail job with phase and failure class
+        S->>DB: build_jobs building to failed
+        opt Retry budget remains and the failure class is eligible
+            S->>DB: Insert child build_jobs row, queued, available_at in the future
         end
-        
-    else Build failed
-        Build->>DB: Update → (build-failed)
     end
 
-    %% CVE Scanning
-    CVE->>DB: Find build-complete derivations
-    CVE->>CVE: Run vulnix scan
-    CVE->>DB: Save CVE scan results
-    
-    %% Deployment Policy Management
-    Deploy->>DB: Find systems with auto_latest policy
-    Deploy->>DB: Get latest successful derivation per flake
-    Deploy->>DB: Update system desired_target
-    
-    %% Agent Deployment Flow
-    Agent->>Agent: Heartbeat to server
-    Agent-->>Deploy: Receive desired_target
-    
-    alt Agent needs deployment
-        Agent->>Agent: Check if same derivation path
-        alt Different derivation path
-            Agent->>Agent: Execute deployment (nixos-rebuild)
-            alt Deployment succeeded
-                Agent->>DB: Report new system state
-                Note over Agent: change_reason = "cf_deployment"
-            else Deployment failed
-                Agent->>DB: Report deployment failure
-            end
-        else Same derivation path
-            Note over Agent: Skip deployment - already current
-        end
-    else No deployment needed
-        Agent->>DB: Regular heartbeat
-        Note over Agent: change_reason = "heartbeat"
-    end
-
-    %% Retry handler
-    loop While attempt_count < 5
-        Retry->>DB: Reset (dry-run-failed → pending)
-        Retry->>DB: Reset (build-failed → build-pending)
-    end
-    Note over DB: attempt_count >= 5 → terminal
-
-    %% Alternative entry via CVE scanning
-    CVE->>DB: Insert packages from scan
-    Note over DB: Set status = (complete)
+    A->>S: Heartbeat
+    S-->>A: desired_target when policy gates allow it
+    A->>C: nix copy the store path
+    A->>A: switch-to-configuration through systemd-run
+    A->>S: Report deployment-started or deployment-failed
 ```
 
-## Status Table
+Key properties:
 
-|  ID | Name                 | Description               | Terminal | Next Step |
-| --: | -------------------- | ------------------------- | -------- | --------- |
-|   1 | pending              | Should not be used        | ❌       | → dry-run-pending |
-|   2 | queued               | Reserved for future use   | ❌       | → dry-run-pending |
-|   3 | dry-run-pending      | Ready for dry-run         | ❌       | → evaluation loop |
-|   4 | dry-run-in-progress  | Running nix dry-run       | ❌       | → dry-run-complete/failed |
-|   5 | dry-run-complete     | Dry-run succeeded         | ❌       | → build loop |
-|   6 | dry-run-failed       | Dry-run failed            | ✅\*     | → retry or terminal |
-|   7 | build-pending        | Ready for build           | ❌       | → build loop |
-|   8 | build-in-progress    | Building                  | ❌       | → build-complete/failed |
-|   9 | in-progress (legacy) | Generic in-progress       | ❌       | → legacy handling |
-|  10 | build-complete       | Build succeeded           | ❌       | → cache push |
-|  11 | complete             | Fully complete (packages) | ✅       | → CVE scanning |
-|  12 | build-failed         | Build failed              | ✅\*     | → retry or terminal |
-|  13 | failed               | Generic failure           | ✅       | N/A |
-|  14 | cache-pushed         | Pushed to binary cache    | ✅       | → CVE scanning |
+- Evaluation is commit-level. The server does not run a per-derivation
+  `nix build --dry-run` loop, and `dry-run-complete` means that
+  `nix-eval-jobs` produced the derivation path.
+- The server starts neither a build loop nor a cache push worker. A builder
+  claims jobs through the API and reports results through the API. See
+  [Builder architecture](../builders/builder-architecture-and-job-scheduling.md).
+- Build progress lives on `build_jobs.status`. The claim and the failure
+  transition do not change `derivations.status_id`.
+- A completed build changes the derivation to `build-complete` in the same
+  transaction that marks the job `success`.
+- Deployment starts from a heartbeat response. See
+  [Deployment flow](../deployment/deployment-flow.md).
 
-\* Terminal only if maximum retry attempts reached.
+## Derivation statuses
 
-## Retry Logic
+The `derivation_statuses` table holds these rows. IDs 1 to 13 come from migration
+`0026`. ID 14 comes from migration `0052`. The `Name` column shows the database
+spelling.
 
-### **Automatic Retries**
-- **Max attempts:** 5 (configurable)
-- **Reset conditions:**
-  - `dry-run-failed` → `dry-run-pending` if attempts < 5
-  - `build-failed` → `build-pending` if attempts < 5
-- **Reset trigger:** `reset_non_terminal_derivations()` on startup
-- **Backoff:** Exponential delay between retries for cache operations
+| ID | Name | Terminal in seed | Written by current code |
+| --: | --- | :-: | --- |
+| 1 | `pending` | No | No |
+| 2 | `queued` | No | No |
+| 3 | `dry-run-pending` | No | Only as an upsert starting value and by startup reset |
+| 4 | `dry-run-inprogress` | No | No |
+| 5 | `dry-run-complete` | No | Yes. Evaluation inserts rows directly in this status. |
+| 6 | `dry-run-failed` | Yes | Yes. Evaluation failure records it. |
+| 7 | `build-pending` | No | Only by startup reset |
+| 8 | `build-inprogress` | No | Only by the server-side build worker code, which the server does not start |
+| 9 | `in-progress` | No | No |
+| 10 | `build-complete` | No | Yes. Job completion writes it with `store_path`. |
+| 11 | `complete` | Yes | No |
+| 12 | `build-failed` | Yes | Only by startup reset. `mark_derivation_failed` has no production caller. |
+| 13 | `failed` | Yes | No |
+| 14 | `cache-pushed` | Yes | Only by dormant server cache worker code |
 
-### **Manual Intervention**
-- Reset attempt count to force retry
-- Update derivation target for different commit
-- Modify build configuration for resource issues
+The Rust `EvaluationStatus` enum covers IDs 3, 4, 5, 6, 7, 8, 10, and 12. The
+dashboard queries (`queries/dashboard.rs`) still read IDs 10, 11, 12, and 14
+when they classify a derivation as built or cached.
 
-## Terminal States
+**The seed marks `dry-run-failed` and `build-failed` as terminal without a retry
+exception.** The retry rules below are enforced by queries, not by these flags.
 
-### **Successful Completion**
-- **build-complete (10)**: Ready for cache push and CVE scanning
-- **cache-pushed (14)**: Successfully cached, ready for deployment
-- **complete (11)**: Fully processed (typically for packages)
+## Build job statuses
 
-### **Failure States**
-- **dry-run-failed (6)**: Configuration invalid, requires code fix
-- **build-failed (12)**: Build errors, may need dependency updates
-- **failed (13)**: Generic failure state
+`build_jobs.status` accepts these values. The check constraint comes from
+migration `0083` and migration `0103`.
+
+| Status | Meaning | Next |
+| --- | --- | --- |
+| `queued` | Waiting for a builder. A job with a future `available_at` cannot be claimed yet. | `building`, `cancelled` |
+| `building` | A builder owns the job under a session lease. | `success`, `failed`, `cancelling` |
+| `cancelling` | An operator requested a stop. The builder has not stopped yet. | `cancelled` |
+| `cancelled` | Stopped by an operator. Terminal. | None |
+| `success` | The builder completed the job. Terminal. | None |
+| `failed` | The attempt failed. Terminal for this attempt. | A new child job, if retry applies |
+
+## Retry rules
+
+### Automatic build retry
+
+When a builder fails a job, one transaction marks that attempt `failed` and
+decides on a retry. The decision reads the singleton `automatic_retry_policy`
+row (migration `0189`):
+
+| Column | Default | Allowed values | Effect |
+| --- | --- | --- | --- |
+| `max_build_retries` | 2 | 0 to 5 | Number of child attempts after the first attempt |
+| `max_evaluation_retries` | 1 | 0 to 5 | Same limit for evaluation retries |
+| `backoff_seconds` | 30 | 0, 10, 30, 60, 120, 300 | Delay before the child job becomes claimable |
+| `transient_only` | true | true or false | When true, only failure classes that can recover cause a retry |
+
+A retry inserts a **new** `build_jobs` row with `parent_job_id`, `root_job_id`,
+`attempt_number + 1`, and a future `available_at`. It does not reopen the failed
+row. A unique key on `automatic_retry_source_id` prevents duplicate children.
+When no retry applies, the server also opens an attention item for the failed
+job.
+
+### Startup reset
+
+At server start, `reset_non_terminal_derivations` runs once. It changes
+derivations as follows:
+
+- A derivation with `attempt_count >= 5` becomes `dry-run-failed` (6) when it
+  has no `derivation_path`, or `build-failed` (12) when it has one.
+- A derivation with `attempt_count < 5` and a status other than
+  `dry-run-complete` (5) and `build-complete` (10) returns to `dry-run-pending`
+  (3) without a path, or `build-pending` (7) with a path.
+
+The API builder path does not increment `attempt_count`, so this reset mostly
+affects rows that the older server-side build path touched. The evaluation loop
+runs its own startup recovery. See
+[Evaluation and build queue pipeline](../workflows/evaluation-and-build-queue-pipeline.md).
+
+### Manual intervention
+
+- Requeue or cancel a build job through the build job API.
+- Re-evaluate a commit to produce a fresh derivation row.
+- Change the retry policy with `PUT /api/v1/admin/automatic-retry-policy`.
+
+## Terminal states
+
+- **Derivation `build-complete` (10):** The artifact exists. It is deployable
+  only when a `completed` `cache_push_jobs` row matches `derivations.store_path`.
+  See [Store path flow](../workflows/store-path-flow.md).
+- **Derivation `dry-run-failed` (6):** Evaluation failed. A new evaluation of the
+  commit is required.
+- **Build job `failed` with no child job:** The retry budget is spent or the
+  failure class is not eligible. An operator may requeue the job.
+- **Build job `success` and `cancelled`:** Final. No transition leaves them.
 
 ## Related concepts
 
-- [Derivation processing loops](../architecture/derivation-processing-loops.md) - the loops that move derivations between statuses
-- [Cache push process](../caches/cache-push-process.md) - the cache-pushed transition
-- [Evaluation and build queue pipeline](../workflows/evaluation-and-build-queue-pipeline.md) - status IDs in the two-stage pipeline
-- [Observability and troubleshooting](../operations/observability-and-troubleshooting.md) - diagnosing derivations stuck in a status
+- [Derivation processing loops](../architecture/derivation-processing-loops.md) - the loops that run on the server
+- [Cache push process](../caches/cache-push-process.md) - builder-side publication and the server probe
+- [Evaluation and build queue pipeline](../workflows/evaluation-and-build-queue-pipeline.md) - the two-stage pipeline and its queue APIs
+- [Deployment flow](../deployment/deployment-flow.md) - how an agent applies a target
+- [Observability and troubleshooting](../operations/observability-and-troubleshooting.md) - diagnosing work stuck in a status

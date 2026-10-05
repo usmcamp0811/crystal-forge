@@ -10,7 +10,7 @@ tags:
 implementation_status: partial
 generated:
   by: opencode/claude-sonnet-5-5
-  at: 2026-10-04T08:25:07-05:00
+  at: 2026-10-04T21:00:00-05:00
 sources:
   - id: origin
     resource: "Crystal Forge repository file README.md at commit 3b23d36f"
@@ -19,7 +19,7 @@ sources:
 
 # Project introduction and key features
 
-> **Status:** partial. This concept holds the `What is Crystal Forge?`, `Key Features`, `Data Model`, and `Security Model` sections of the repository `README.md`. The feature claims were written for v0.3.0 and are verification candidates. Examples: the `30+` STIG count (`modules/nixos/stig-modules/`), the deployment policy and strategy names (`packages/default/crates/cf-server/src/models/deployment_policies.rs`), the cache types (`modules/nixos/crystal-forge/default.nix`), and the claim "HTTPS required" under `Security Model`.
+> **Status:** partial. This concept holds the `What is Crystal Forge?`, `Key Features`, `Data Model`, and `Security Model` sections of the repository `README.md`. The feature list was written for v0.3.0. The STIG count and the `Security Model` bullets are corrected below. The deployment policy names and the cache types were not re-checked in this pass.
 
 > **Status:** historical. The original `README.md` header at commit 3b23d36f used the logo path shown below. That path (`../docs/cf-logo-transparent.png`) was stale because the logo is at `docs/cf-logo-transparent.png`. The migrated `README.md` uses `./docs/cf-logo-transparent.png`.
 >
@@ -42,7 +42,7 @@ Crystal Forge is a self-hosted monitoring, compliance, and build system purpose-
 - **Configuration drift detection**: Compare running systems against evaluated configurations
 - **Intelligent heartbeats**: Distinguish between liveness signals and actual state changes
 - **Agent health monitoring**: Track agent connectivity and state reporting frequency
-- **STIG Compliance Modules**: Declarative security controls with 30+ NixOS-native STIG implementations
+- **STIG Compliance Modules**: Declarative security controls. The flake exports 25 control modules and four presets (`high`, `medium`, `low`, `off`). See [STIG modules](../compliance/stig-modules.md).
 
 ### Build Coordination
 
@@ -86,13 +86,11 @@ Crystal Forge is a self-hosted monitoring, compliance, and build system purpose-
 
 - **Ed25519 signatures**: All agent-server communication verified
 - **Hardware fingerprints**: Unique system identification
-- **Encrypted transport**: HTTPS required
-- **Secure by default**: STIG modules enabled unless explicitly disabled
+- **Encrypted transport**: Run the server behind HTTPS. The server binds plain HTTP on `0.0.0.0` and does not enforce HTTPS itself, so terminate TLS in a reverse proxy. The session cookies use the `Secure` attribute and the `__Host-` prefix, which browsers accept only from a secure context. An agent connects with `https` only when its `server_port` is 443. Otherwise it uses `http`.
+- **Secure by default per imported STIG control**: A STIG control module that a system imports is enabled unless the configuration disables it with a justification. The `crystal-forge` NixOS module does not import the controls, so a system is hardened only when it imports them.
 - **Authentication**: OIDC or local with secure sessions
-- **Authorization**: RBAC with permission guards on all endpoints
-- **Session security**: HttpOnly cookies, CSRF protection, JIT provisioning
-
-> **Status:** The `Secure by default` bullet is a verification candidate. The NixOS module presets in `modules/nixos/stig/` include an `off` preset, so STIG controls may not be enabled by default.
+- **Authorization**: Viewer, Operator, and Admin roles, enforced by role checks in the API handlers
+- **Session security**: HttpOnly session cookies, a double-submit CSRF token (checked by the handlers that call `require_csrf`), JIT provisioning
 
 ## Related concepts
 

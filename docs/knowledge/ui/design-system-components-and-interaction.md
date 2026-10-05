@@ -11,7 +11,7 @@ tags:
 implementation_status: partial
 generated:
   by: opencode/claude-sonnet-5-5
-  at: 2026-10-03T22:54:52-05:00
+  at: 2026-10-04T21:00:00-05:00
 sources:
   - id: origin
     resource: "Crystal Forge repository file docs/ui-ux-design-system.md at commit 3b23d36f"
@@ -131,10 +131,12 @@ tr { class: "animate-pulse",
 ### Error Handling
 
 ```rust
-// Error toast (via notification system)
+// Error toast. The owning view keeps the message in a signal and renders
+// the component while the signal holds a value.
 Toast {
-    variant: ToastVariant::Error,
-    message: "Failed to deploy: connection timeout"
+    message: "Failed to deploy: connection timeout".to_string(),
+    is_success: false,
+    on_dismiss: move |_| toast.set(None),
 }
 
 // Inline error (forms)
@@ -218,14 +220,16 @@ For destructive actions, always use ConfirmDialog:
 
 ```rust
 ConfirmDialog {
-    title: "Remove System",
-    message: "Are you sure you want to remove 'atlas-01'? This cannot be undone.",
-    confirm_label: "Remove",
-    confirm_variant: ButtonVariant::Danger,
+    title: "Remove System".to_string(),
+    description: "Are you sure you want to remove 'atlas-01'? This cannot be undone.".to_string(),
+    confirm_label: "Remove".to_string(),
+    danger: true,
     on_confirm: move |_| { /* delete */ },
     on_cancel: move |_| { /* close */ },
 }
 ```
+
+`danger: true` styles the confirm button as destructive. `ConfirmDialog` lives in `components/modals/confirm_dialog.rs`.
 
 **Required for:**
 - Delete/Remove operations
@@ -249,28 +253,41 @@ if !error.is_empty() {
 
 ### Toast Notifications
 
+#### Current behavior
+
+`Toast(message, is_success, on_dismiss)` in `components/notifications/toast.rs` shows one toast. The view that owns the toast renders it and clears it in `on_dismiss`, for example `views/system_detail.rs` and `views/cves.rs`.
+
 ```rust
-// Success
+if let Some((message, is_success)) = toast.read().clone() {
+    Toast {
+        message,
+        is_success,
+        on_dismiss: move |_| toast.set(None),
+    }
+}
+```
+
+- The toast is fixed at the top right with `z-index: 220`.
+- A success toast has `role="status"` and `aria-live="polite"`. A failure toast has `role="alert"` and `aria-live="assertive"`.
+- No shared toast stack exists. Each view manages its own toast.
+
+#### Target design (not implemented)
+
+The design calls for one shared notification system. The names below, `ToastVariant` and `show_toast`, are the **target API**. They do not exist in the code. Do not copy them into a view.
+
+```rust
+// Target API (pseudocode)
 show_toast(ToastVariant::Success, "System deployed successfully");
-
-// Error
 show_toast(ToastVariant::Error, "Deployment failed: {reason}");
-
-// Warning
 show_toast(ToastVariant::Warning, "System is already up to date");
-
-// Info
 show_toast(ToastVariant::Info, "Syncing flake...");
 ```
 
-**Toast Rules:**
+**Target toast rules:**
 - Success: Auto-dismiss after 3 seconds
 - Error: Persist until dismissed
 - Maximum 3 toasts visible
 - Stack from bottom-right
-
-> **Status:** Implementation incomplete relative to this design. `packages/web-ui/src/components/notifications/toast.rs` defines `Toast(message, is_success, on_dismiss)`, rendered at fixed top-right (`z-index: 220`) by the owning view (for example `views/system_detail.rs`, `views/cves.rs`). No `ToastVariant`, no `show_toast` helper, no shared toast stack, no maximum of three toasts, and no bottom-right stacking exist. `ConfirmDialog` (`components/modals/confirm_dialog.rs`) takes `title`, `description`, `confirm_label`, `danger: bool`, `on_confirm`, `on_cancel`; it has no `message`, `confirm_variant`, or `ButtonVariant`. The toast and ConfirmDialog examples above describe the intended API.
-
 
 ---
 
@@ -287,14 +304,6 @@ show_toast(ToastVariant::Info, "Syncing flake...");
 
 ## Migration verification notes
 
-- Claim: Toast API (`ToastVariant`, `show_toast`), 3 s success auto-dismiss, max 3 toasts, bottom-right stack.
-  Finding: Only a single-message `Toast(message, is_success, on_dismiss)` component exists, positioned top-right; no stack or variants.
-  Evidence: components/notifications/toast.rs
-  Case: implementation incomplete
-- Claim: ConfirmDialog examples use `message`, `confirm_variant: ButtonVariant`.
-  Finding: Actual props are `description` and `danger: bool`.
-  Evidence: components/modals/confirm_dialog.rs ConfirmDialogProps
-  Case: documentation stale (example props); API intent kept as status note
 - Claim: Button classes `cf-primary-btn`, `cf-success-btn`, `cf-danger-btn`, `cf-hover-bg`; chips `cf-chip-info`, `cf-chip-warning`, `cf-eval-chip-complete`, `cf-eval-chip-failed`; inputs `cf-input`, `cf-focus-ring`.
   Finding: All classes are defined in app.css; `theme::interactive::PRIMARY_BTN = cf-primary-btn`.
   Evidence: assets/app.css; src/theme.rs

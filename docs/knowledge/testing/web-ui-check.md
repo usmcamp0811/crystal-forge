@@ -72,22 +72,29 @@ authoritative check, which renders the packaged UI in a fixed environment. Set
 `CF_UI_BASELINES_DIR` to opt in locally, and expect environment-related
 differences.
 
-The `settings.devStackWorkflows` list in `coverage-manifest.json` contains the
-workflows that are repeat-safe against the persistent development stack. The
-initial list contains `12-systems` and `12a-systems-empty-state`. These
-workflows use a new browser context on each invocation and do not mutate
-persistent server state. A workflow that is not in this list fails with the
-command for the authoritative VM harness.
+The `settings.devStackWorkflows` object in `coverage-manifest.json` lists the
+workflows that are repeat-safe against the persistent development stack. It is
+an object keyed by workflow name. Each entry has a `category`:
+
+- **`mock`** (15 workflows): The workflow reads only data that `page.route()`
+  intercepts, or sets its own account-preference precondition before it
+  asserts. It never touches persistent server state and needs no reset.
+- **`fixture`** (2 workflows, `12l-task440-config-lifecycle` and
+  `12ha-system-detail-cve-inventory-fallbacks`): The workflow creates new rows
+  through `runFixtureSql` or the real REST API with a fresh `randomUUID`
+  identity on every invocation, so repeated runs never collide. The runner
+  checks that the base fixture data exists before each run. It does not delete
+  rows. Several fixture tables use `ON DELETE RESTRICT` foreign keys as a
+  deliberate audit-trail invariant, which a delete-based reset would violate.
+
+At commit `3b23d36f` the object lists 17 workflows, for example `12-systems`,
+`12a-systems-empty-state`, `16-cves`, and `06i-security-workflows-role-coach`.
+Read the manifest for the current list. A workflow that is not in the object
+fails with the command for the authoritative VM harness. Every other workflow
+is VM-only.
+
 Add a workflow only after confirming that it does not depend on VM services,
 ordered predecessor workflows, or state left by an earlier run.
-
-> **Status:** the paragraphs above describe an initial list of two workflows
-> in a `settings.devStackWorkflows` list. At the migration base commit,
-> `checks/web-ui/coverage-manifest.json` defines `settings.devStackWorkflows`
-> as an object keyed by workflow name, each with a `category` of `mock` or
-> `fixture`, and it lists 17 workflows (for example `16-cves` and
-> `12l-task440-config-lifecycle`). The `$note` in that manifest describes the
-> `mock` and `fixture` categories. This document keeps the original text.
 
 > `web-ui-test` is the fast development feedback loop. The NixOS Web UI check
 > remains the reproducible authoritative verification boundary.

@@ -11,7 +11,7 @@ tags:
 implementation_status: partial
 generated:
   by: opencode/claude-sonnet-5-5
-  at: 2026-10-03T22:54:29-05:00
+  at: 2026-10-04T21:00:00-05:00
 sources:
   - id: origin
     resource: "Crystal Forge repository file docs/onboarding-guide.md at commit 3b23d36f"
@@ -148,12 +148,15 @@ sudo -u crystal-forge git clone <repo_url>
 
 If this fails, check SSH keys (for SSH URLs) or network access (for HTTPS).
 
-**STIG control mismatch:**
+**A deployment target is not delivered (policy gate):**
 
-If you configured required policies in an environment, but a system's flake doesn't enable those controls, Crystal Forge will block deployment. Check:
+If an environment has **gate policies** or **required compliance bundles**, the server evaluates them before it delivers a deployment target to an agent. An **enforced** assignment that fails blocks the target. A **report-only** assignment never blocks. A policy that is merely assigned does not block anything. Check:
 
-- Environment required policies (Environments page)
-- System's flake configuration (does it enable those STIG modules?)
+- The environment's gate policies and bundle assignments (Environments page)
+- The assignment mode (`enforce` or `report_only`) and the recorded assessment for the system
+- The system's flake configuration (does it satisfy the policy, for example by enabling the required STIG modules?)
+
+See [Compliance assignments, overlays, and report-only enforcement](../compliance/assignments-and-report-only-enforcement.md) and [Composite policy enforcement](../deployment/composite-policy-enforcement.md).
 
 ## Related concepts
 

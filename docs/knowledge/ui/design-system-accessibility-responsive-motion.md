@@ -11,7 +11,7 @@ tags:
 implementation_status: partial
 generated:
   by: opencode/claude-sonnet-5-5
-  at: 2026-10-03T22:54:52-05:00
+  at: 2026-10-04T21:00:00-05:00
 sources:
   - id: origin
     resource: "Crystal Forge repository file docs/ui-ux-design-system.md at commit 3b23d36f"
@@ -85,14 +85,9 @@ The `cf-focus-ring` class provides:
 .cf-focus-ring:focus,
 .cf-focus-ring:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px var(--cf-focus-ring-color);
+  box-shadow: 0 0 0 2px var(--cf-focus-ring);
 }
 ```
-
-> **Status:** Documentation stale, resolved in verification. `packages/web-ui/assets/app.css` defines `.cf-focus-ring` with `box-shadow: 0 0 0 2px var(--cf-focus-ring)`. The custom property is named `--cf-focus-ring`, not `--cf-focus-ring-color` as shown above.
->
-> **Status:** Implementation differs from the z-index table. `app.css` and component classes use other layers (for example toast `z-index: 220`, modal overlays `z-50`, and values of 180-240 for overlays and popovers); the 0/10/20/30/50/60/70/80 scale is not enforced. Sidebar width is `16rem`/`4rem` (collapsed), not a fixed 256px; below 768px the sidebar is replaced by a mobile drawer opened from the topbar (`aria-label` "Open navigation menu").
-
 
 ### Screen Reader Considerations
 
@@ -121,7 +116,7 @@ Crystal Forge is **desktop-first** with mobile support.
 
 | Component | Desktop | Mobile |
 |-----------|---------|--------|
-| Sidebar | Fixed 256px | Hidden (hamburger menu) |
+| Sidebar | `16rem` expanded, `4rem` collapsed rail | Replaced below 768px by a drawer (`w-64`) that opens from the topbar menu button (`aria-label` "Open navigation menu") |
 | Grid | 3-4 columns | 1 column |
 | Tables | Horizontal scroll | Card view or horizontal scroll |
 | Modals | Centered, max-width | Full width, bottom sheet |
@@ -129,16 +124,23 @@ Crystal Forge is **desktop-first** with mobile support.
 
 ### Z-Index Layering System
 
-| Layer | Z-Index | Usage |
-|-------|---------|-------|
-| Base | 0 | Normal content |
-| Sticky | 10 | Sticky headers |
-| Dropdown | 20 | Dropdown menus |
-| Sidebar | 30 | Fixed sidebar |
-| Modal overlay | 50 | Modal backdrop |
-| Modal content | 60 | Modal dialogs |
-| Toast | 70 | Notifications |
-| Tooltip | 80 | Tooltips |
+The UI uses named bands, not a fixed 0 to 80 scale. Pick the band that matches the role of the element. Do not invent a new value when an existing band fits.
+
+| Band | Z-index | Examples |
+|------|---------|----------|
+| Page content | 0 to 6 | Sticky table headers, timeline rails |
+| Sidebar rail | 20 | `components/layout/sidebar.rs` |
+| Popovers and pickers | 30 to 60 | `.poams-picker` (30), bulk-action bars (55), coach bubble (60) |
+| Mobile drawer overlay and drawer | 40 and 50 | `components/layout/sidebar.rs` |
+| Modal overlays and dialogs | 50 | `ConfirmDialog` and the key modals (Tailwind `z-50`) |
+| Side drawers | 80 | `.compliance-evidence-drawer` |
+| Page-specific overlays and modals | 180 to 201 | CVE triage backdrop (200) and modal (201) |
+| Toast | 220 | `components/notifications/toast.rs` |
+| Setup coach | 225 to 240 | Spotlight (225), dock and pill (230), tour (240) |
+| Classification banner | 990 | `components/layout/app_shell.rs` |
+| Development banner | 1000 | `components/layout/dev_banner.rs` |
+
+A toast MUST stay above modals. A modal MUST stay above the sidebar and the mobile drawer.
 
 ---
 
@@ -189,14 +191,6 @@ Respect `prefers-reduced-motion`:
 
 ## Migration verification notes
 
-- Claim: `.cf-focus-ring` uses `var(--cf-focus-ring-color)`.
-  Finding: Code uses `var(--cf-focus-ring)`.
-  Evidence: assets/app.css lines 471-475
-  Case: documentation stale (noted in status block; code snippet left as source text)
-- Claim: Z-index layering table (toast 70, tooltip 80, modal 50/60).
-  Finding: Code uses a broader set of values (e.g. toast 220, overlays 180-240).
-  Evidence: assets/app.css z-index declarations; toast.rs
-  Case: implementation incomplete (scale not enforced)
 - Claim: Mobile: sidebar hidden with hamburger menu; <768px.
   Finding: Mobile drawer in sidebar.rs (`is_mobile_drawer_open`) toggled from topbar.rs.
   Evidence: components/layout/sidebar.rs, topbar.rs

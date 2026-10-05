@@ -1,161 +1,200 @@
 ---
 type: Operator Guide
 title: "OIDC Role Mapping Configuration"
-description: "Describes mapping OIDC groups to the Admin, Operator, and Viewer roles through environment variables, highest-privilege selection, safe-deny behavior, provider examples, and troubleshooting; read the status note before relying on it."
+description: "Describes how an OIDC login maps token groups to the Admin, Operator, and Viewer roles and to environment memberships through database group mappings, the bootstrap admin group, the Viewer default, and troubleshooting; open it when configuring OIDC access."
 tags:
   - crystal-forge
   - auth
   - oidc
   - rbac
-implementation_status: partial
+implementation_status: implemented
+generated:
+  by: opencode/claude-sonnet-5-5
+  at: 2026-10-04T21:00:00-05:00
 sources:
   - id: origin
     resource: "Crystal Forge repository file docs/auth-role-mapping.md at commit 3b23d36f"
-    title: "OIDC Role Mapping Configuration"
+    title: "OIDC Role Mapping Configuration (original document)"
+  - id: code-1
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/handlers/api/auth_oidc.rs at commit 3b23d36f"
+    title: OIDC callback role and environment assignment
+  - id: code-2
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/queries/auth_identity.rs at commit 3b23d36f"
+    title: Mapping lookup
+  - id: code-3
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/handlers/api/admin.rs at commit 3b23d36f"
+    title: Mapping administration routes
+  - id: code-4
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/auth/dev_mode.rs at commit 3b23d36f"
+    title: Bootstrap admin mapping
+  - id: code-5
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/auth/oidc/claims.rs at commit 3b23d36f"
+    title: Groups claim extraction
+  - id: code-6
+    resource: "Crystal Forge repository file modules/nixos/crystal-forge/default.nix at commit 3b23d36f"
+    title: NixOS OIDC options
 ---
+
 # OIDC Role Mapping Configuration
 
-> **Status:** partial. `packages/default/crates/cf-server/src/auth/role_mapping.rs` implements `RoleMappingConfig::from_env` (`CRYSTAL_FORGE_ROLE_MAPPING`, `CRYSTAL_FORGE_DEFAULT_ROLE`, safe-deny, Admin > Operator > Viewer), and `CRYSTAL_FORGE_OIDC_ROLES_CLAIM` is read by `config/oidc.rs`. However, the OIDC callback in `handlers/api/auth_oidc.rs` does not call `RoleMappingConfig`. It lowercases the groups, reads the `oidc_group_mappings` database table (`queries/auth_identity.rs::get_oidc_mapping_matches`), picks the highest mapped role, and replaces the user's role assignments only when a mapping matches. With no match it keeps existing roles, and it assigns Viewer to a user who has none. That differs from the "safe-deny" statements below. A verification pass must decide which behavior the text should describe. The text below is kept unchanged.
+Crystal Forge maps the groups in an OIDC token to a local role and to environment memberships on every OIDC login. The mapping lives in the **database table `oidc_group_mappings`**. An Admin edits it through the Web UI or the admin API.
 
-Crystal Forge maps OIDC groups to local RBAC roles on every login.
+> **Not used:** The environment variables `CRYSTAL_FORGE_ROLE_MAPPING` and `CRYSTAL_FORGE_DEFAULT_ROLE`, and any "safe-deny" behavior that they describe, do not affect login. The file `auth/role_mapping.rs` exists in the source tree, but `auth/mod.rs` does not declare it as a module, so the build does not compile it. Do not set those variables.
 
 ## Roles
 
-Three roles are supported:
-- **Admin**: Full system access
-- **Operator**: Can manage deployments and builds
-- **Viewer**: Read-only access
+Three roles exist:
+
+- **Admin**: full system access.
+- **Operator**: can manage deployments, builds, and systems.
+- **Viewer**: read-only access, limited to the user's environment memberships.
+
+## What happens at login
+
+```mermaid
+flowchart TD
+    A[OIDC callback with token claims] --> B[Read the roles claim]
+    B --> C[Trim and lowercase each group]
+    C --> D[Look up group_name in oidc_group_mappings]
+    D --> E{Any mapping with a role?}
+    E -- yes --> F[Replace all role assignments with the highest mapped role]
+    E -- no --> G{User has existing roles?}
+    G -- yes --> H[Keep existing roles]
+    G -- no --> I[Assign Viewer]
+    F --> J[Resolve mapped environments]
+    H --> J
+    I --> J
+    J --> K{Any mapping and every mapped environment exists?}
+    K -- yes --> L[Replace environment memberships]
+    K -- no --> M[Keep existing memberships]
+    L --> N[Create session]
+    M --> N
+```
+
+1. **Read groups.** The server reads the claim named by the OIDC `roles_claim` setting (default `groups`). It accepts an array of strings, a single string, or a comma-separated string. A dotted claim name such as `realm_access.roles` reads a nested value.
+2. **Normalize.** The server trims each group and converts it to lower case. It drops empty values.
+3. **Match.** The server selects the rows of `oidc_group_mappings` whose `group_name` equals a normalized group.
+4. **Assign the role.**
+   - If at least one matching row has a role, the server deletes **all** of the user's role assignments and assigns the highest mapped role. The order is Admin, then Operator, then Viewer.
+   - If no matching row has a role and the user has no roles, the server assigns **Viewer**.
+   - If no matching row has a role and the user has roles, the server keeps them unchanged.
+5. **Assign environments.** See [Environment memberships](#environment-memberships).
+6. **Create the session.** The server **never rejects** a login because no group matches. It rejects a login only for token or account errors, for example an invalid ID token (HTTP 401) or an email that the provider did not verify (HTTP 403).
+
+**Consequence:** A user whose groups match nothing signs in as Viewer with no environment membership. A Viewer with no membership sees no environment-scoped data. This is access control by scope, not a login denial.
+
+**Removed groups.** Roles change only when a mapping matches. A user who loses every mapped group keeps the last assigned role. To remove access, an Admin changes the user's roles directly.
+
+## Mapping records
+
+Each row of `oidc_group_mappings` has:
+
+| Column | Meaning |
+| --- | --- |
+| `group_name` | Normalized group name. Unique. |
+| `role` | `admin`, `operator`, `viewer`, or empty. An empty role leaves the role unchanged and may still map environments. |
+| `environments` | Environment names for membership. May be empty. |
+
+A group name has at most 128 characters. It may contain only letters, numbers, `-`, `_`, `.`, `:`, and `/`. **A group name with a space is invalid.** The server stores the name in lower case.
+
+### Manage mappings
+
+An Admin uses these routes (see [Builders, queues, environments, dashboard, and admin APIs](../api/builders-queues-environments-dashboard-admin-api.md)):
+
+- `GET /api/v1/admin/oidc-mappings` lists mappings.
+- `POST /api/v1/admin/oidc-mappings` creates or updates a mapping by `group_name`. The body is `{"group_name": "...", "role": "operator", "environments": ["staging"]}`. Every environment name must exist.
+- `DELETE /api/v1/admin/oidc-mappings/:id` deletes a mapping.
+
+Each change writes an audit event.
+
+### Bootstrap admin group
+
+The NixOS option `services.crystal-forge.server.oidc.bootstrapAdminGroup` sets `CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP`. When `auth_mode` is `oidc`, the server creates a mapping from that group to Admin at start, with no environments. The server trims and lowercases the name. If a mapping for the group exists, the server leaves it unchanged. Use this setting to get the first administrator without editing the database.
+
+## Environment memberships
+
+A mapping can list environment names. The server replaces the user's environment memberships only when **all** these conditions hold:
+
+- At least one mapping matched.
+- The matched mappings list at least one environment.
+- Every listed environment name exists.
+
+If a listed environment does not exist, the server logs a warning and keeps the existing memberships. If no mapping matched, or none lists an environment, the server also keeps them.
 
 ## Configuration
 
-### Environment Variables
+Configure the OIDC client with the NixOS options under `services.crystal-forge.server.oidc`. The claim that holds groups has this option:
 
-**`CRYSTAL_FORGE_ROLE_MAPPING`** (strongly recommended)  
-JSON object mapping OIDC group names to Crystal Forge roles.
+- `rolesClaim`: sets `CRYSTAL_FORGE_OIDC_ROLES_CLAIM`. The default is `groups`.
 
-Example:
-```bash
-export CRYSTAL_FORGE_ROLE_MAPPING='{"crystal-forge-admins":"admin","crystal-forge-operators":"operator","crystal-forge-viewers":"viewer"}'
-```
+Microsoft Entra ID commonly sends app roles in the `roles` claim, so set `rolesClaim = "roles"` for Entra. Keycloak can send nested realm roles in `realm_access.roles`.
 
-⚠️ **If JSON parsing fails**, the server will log an error and effectively lock everyone out unless `CRYSTAL_FORGE_DEFAULT_ROLE` is set.
+## Role synchronization
 
-**`CRYSTAL_FORGE_DEFAULT_ROLE`** (optional)  
-Default role assigned when user's OIDC groups don't match any mapping.
-
-Example:
-```bash
-export CRYSTAL_FORGE_DEFAULT_ROLE="viewer"
-```
-
-**Default behavior (production):**  
-If both `CRYSTAL_FORGE_ROLE_MAPPING` and `CRYSTAL_FORGE_DEFAULT_ROLE` are unset (or JSON parsing fails), **all OIDC logins will be denied** (safe-deny). The server will log a warning at startup.
-
-### Group Claim Source
-
-**`CRYSTAL_FORGE_OIDC_ROLES_CLAIM`** (optional, default: `groups`)  
-OIDC claim containing group/role information.
-
-Example:
-```bash
-export CRYSTAL_FORGE_OIDC_ROLES_CLAIM="roles"  # Use "roles" instead of "groups"
-```
-
-## Role Selection Logic
-
-When a user has multiple matching groups, the **highest privilege role** is assigned:
-
-1. Admin (highest)
-2. Operator
-3. Viewer (lowest)
-
-Example:
-```json
-{
-  "engineering": "operator",
-  "leadership": "admin"
-}
-```
-
-User in both `engineering` and `leadership` groups → assigned **Admin** role.
-
-## Role Synchronization
-
-Roles are synchronized **on every login**:
-- Old role assignments are removed
-- New role is assigned based on current OIDC groups
-- Changes take effect immediately on next login
-
-## Safe-Deny Behavior
-
-If no default role is configured and the user's groups don't match:
-- Login is **rejected**
-- HTTP 403 Forbidden: "No matching role for OIDC groups - access denied"
-
-This prevents unauthorized access when group memberships are misconfigured.
+The server applies mappings **on every login**. A group change takes effect at the user's next login, not in real time. The user must sign out and sign in again.
 
 ## Examples
 
-### Keycloak
+### Keycloak with top-level groups
 
-```bash
-export CRYSTAL_FORGE_OIDC_ROLES_CLAIM="groups"
-export CRYSTAL_FORGE_ROLE_MAPPING='{"cf-admins":"admin","cf-operators":"operator","cf-users":"viewer"}'
-export CRYSTAL_FORGE_DEFAULT_ROLE="viewer"
+```nix
+services.crystal-forge.server.oidc = {
+  rolesClaim = "groups";
+  bootstrapAdminGroup = "cf-admins";
+};
 ```
 
-### Microsoft Entra ID (Azure AD)
+Then add mappings through the admin API (the group names are lower case):
 
 ```bash
-export CRYSTAL_FORGE_OIDC_ROLES_CLAIM="roles"  # Azure uses "roles" claim
-export CRYSTAL_FORGE_ROLE_MAPPING='{"CrystalForge.Admins":"admin","CrystalForge.Operators":"operator"}'
-# No default role - deny users without explicit role assignment
+curl -X POST "$CF_URL/api/v1/admin/oidc-mappings" \
+  -H "Content-Type: application/json" \
+  -H "x-csrf-token: $CSRF" \
+  --cookie "__Host-cf-session=$SESSION; __Host-cf-csrf=$CSRF" \
+  -d '{"group_name": "cf-operators", "role": "operator", "environments": ["staging"]}'
+```
+
+### Microsoft Entra ID
+
+```nix
+services.crystal-forge.server.oidc = {
+  rolesClaim = "roles";
+  bootstrapAdminGroup = "CrystalForge.Admins";  # stored as crystalforge.admins
+};
 ```
 
 ### Authentik
 
-```bash
-export CRYSTAL_FORGE_OIDC_ROLES_CLAIM="groups"
-export CRYSTAL_FORGE_ROLE_MAPPING='{"authentik Admins":"admin","Crystal Forge Operators":"operator"}'
-export CRYSTAL_FORGE_DEFAULT_ROLE="viewer"
-```
+A group named `authentik Admins` contains a space and cannot be a mapping name. Rename the group in the identity provider, for example to `authentik-admins`, or send a different claim value.
 
-## Testing Role Mapping
+## Testing role mapping
 
-1. Log in with OIDC
-2. Check server logs for role assignment:
-   ```
-   Mapped OIDC groups ["cf-admins", "cf-users"] to role Admin for user <uuid>
-   ```
-3. Verify role in database:
+1. Log in with OIDC.
+2. Check the server log. The server logs the number of groups, the number of matched mappings, and the assigned role. It logs group names at debug level only.
+3. Check the database:
+
    ```sql
-   SELECT u.email, r.role 
-   FROM users u 
+   SELECT u.email, r.role
+   FROM users u
    JOIN user_role_assignments r ON u.id = r.user_id;
    ```
 
 ## Troubleshooting
 
-**Login fails with "No matching role for OIDC groups"**
-- Check OIDC groups claim is being sent by provider
-- Verify `CRYSTAL_FORGE_OIDC_ROLES_CLAIM` matches provider's claim name
-- Check `CRYSTAL_FORGE_ROLE_MAPPING` includes user's groups
-- Consider setting `CRYSTAL_FORGE_DEFAULT_ROLE` for fallback
+**The user signs in as Viewer and sees nothing**
+- The token carries no groups, or no group matches a mapping. The server logs `No groups found in OIDC token claims` or `no matching group-to-role mappings found`.
+- Check that the provider sends the claim, and that `rolesClaim` names it.
+- Check that `oidc_group_mappings.group_name` equals the lower-case group value.
 
-**Role doesn't update after group change**
-- Roles update on login, not in real-time
-- User must log out and log back in
-- Check server logs for role mapping decision
+**The role does not update after a group change**
+- Roles update on login. The user must sign out and sign in.
+- A removed group does not lower a role (see [Removed groups](#what-happens-at-login)).
 
-**Invalid JSON in CRYSTAL_FORGE_ROLE_MAPPING**
-- Role mapping will be empty (safe-deny)
-- All logins will fail unless `CRYSTAL_FORGE_DEFAULT_ROLE` is set
-- Check JSON syntax with `jq`:
-  ```bash
-  echo "$CRYSTAL_FORGE_ROLE_MAPPING" | jq .
-  ```
+**Environment access does not change**
+- Every environment name in the mapping must exist. One unknown name keeps the old memberships.
 
 ## Related concepts
 
 - [Session cookies and CSRF](session-cookies-and-csrf.md): the session created after a successful login.
 - [OIDC provider compatibility validation](oidc-provider-compatibility-validation.md): provider claim shapes tested against role extraction.
+- [API authentication, sessions, and role-based authorization](api-authentication-and-authorization.md): roles and environment scoping.

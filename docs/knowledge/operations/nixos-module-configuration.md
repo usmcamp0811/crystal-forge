@@ -10,7 +10,7 @@ tags:
 implementation_status: partial
 generated:
   by: opencode/claude-sonnet-5-5
-  at: 2026-10-04T08:25:07-05:00
+  at: 2026-10-04T21:00:00-05:00
 sources:
   - id: origin
     resource: "Crystal Forge repository file README.md at commit 3b23d36f"
@@ -19,7 +19,7 @@ sources:
 
 # NixOS module configuration quick start
 
-> **Status:** partial. This concept holds the `Quick Start` introduction, the `NixOS Module Configuration` section, and the `STIG Compliance Modules` section of the repository `README.md`. The option names exist in `modules/nixos/crystal-forge/default.nix` (`database`, `server`, `build`, `client`, `flakes.watched`, `systems`, `cache`), but the example values and the `30+` STIG count are verification candidates. The STIG module directories are under `modules/nixos/stig-modules/` and the STIG levels under `modules/nixos/stig/`. The options under `crystal-forge.stig` in the second example are set by the preset modules in `modules/nixos/stig/*/default.nix`; the exact control names are unchecked. The README text does not mention the `crystal-forge.stig-presets.*` options.
+> **Status:** partial. The option names in the first example exist in `modules/nixos/crystal-forge/default.nix` (`database`, `server`, `build`, `client`, `flakes.watched`, `systems`, `cache`). The example values are illustrative. The STIG section below uses the current control and preset names.
 
 **New to Crystal Forge?** See the **[Onboarding Guide](onboarding-first-time-setup-prerequisites.md)** for a complete step-by-step walkthrough using the built-in guided setup coach.
 
@@ -96,22 +96,27 @@ sources:
 
 ## STIG Compliance Modules
 
-Crystal Forge provides 30+ NixOS-native STIG implementations:
+Crystal Forge exports 25 NixOS-native STIG control modules and four presets (`high`, `medium`, `low`, `off`):
 
 ```nix
-# In your flake's nixosModule:
+# In your flake: import the control modules you need and one preset
 inputs.crystal-forge.nixosModules.crystal-forge
+inputs.crystal-forge.nixosModules."stig-modules/environment/login"
+inputs.crystal-forge.nixosModules."stig-modules/environment/account"
+# ... every control that your preset sets (see the STIG modules guide)
+inputs.crystal-forge.nixosModules."stig/medium"
 
-# Enable specific controls
-crystal-forge.stig = {
-  banner.enable = true;
-  # Disable with justification
-  account_expiry = {
-    enable = false;
-    justification = ["Not applicable in development environment"];
-  };
+# Choose a preset
+crystal-forge.stig-presets.medium.enable = true;
+
+# Adjust one control. Presets set every control, so override with mkForce.
+crystal-forge.stig.account = {
+  enable = lib.mkForce false;
+  justification = ["Not applicable in development environment"];
 };
 ```
+
+Each preset sets all 25 controls, so import every control module when you use a preset. The control names are listed in [STIG modules](../compliance/stig-modules.md).
 
 ## Related concepts
 

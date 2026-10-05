@@ -12,7 +12,7 @@ tags:
 implementation_status: partial
 generated:
   by: opencode/claude-sonnet-5-5
-  at: 2026-10-03T22:54:29-05:00
+  at: 2026-10-04T21:00:00-05:00
 sources:
   - id: origin
     resource: "Crystal Forge repository file docs/specs/01-frontend-views.md at commit 3b23d36f"
@@ -144,36 +144,36 @@ sequenceDiagram
 
 #### Builder Workers Panel
 - List of registered builders
-- Each builder shows:
-  - Name
-  - Status (idle 🟢, building 🟡, paused 🔴)
-  - Current job (if building)
-  - CPU/RAM allocated
+- Each builder card shows:
+  - Name and host
+  - Status chip (`running`, `paused`, or `draining`)
+  - Architecture, CPU cores, and memory
+  - Slot use (active slots out of total slots)
 
 #### Build Queue Sections
 
-1. **Pending** - Builds waiting to be picked up
-2. **In Progress** - Currently building
-3. **Recently Completed** - Last 10 builds with status
+1. **Active queue** - Builds that wait for a builder (`Queued`), build now (`Building`), or are stopping (`Stopping`)
+2. **Build history** - Finished attempts (`Complete`, `Failed`, `Cancelled`), loaded in pages
 
 ### Build States
 
-A derivation goes through these states:
+The UI shows the state of a **build job** (`build_jobs.status`). A failed attempt that the retry policy repeats becomes a new job. See [Derivation status lifecycle](../concepts/derivation-status-lifecycle.md).
 
 ```mermaid
 %% diagram-id: ui-build-state-machine
 stateDiagram-v2
-  state "cache-pushing" as cache_pushing
-  state "cache-pushed" as cache_pushed
-  state "cache-failed" as cache_failed
-  pending --> building
-  building --> built
-  built --> cache_pushing
-  cache_pushing --> cache_pushed
-  building --> failed
-  built --> cache_failed
-  cache_pushing --> cache_failed
+  state "Stopping" as stopping
+  [*] --> queued
+  queued --> building: a builder claims the job
+  queued --> cancelled: cancel
+  building --> complete: the builder completes the job (job status success)
+  building --> failed: the builder fails the job
+  building --> stopping: cancel
+  stopping --> cancelled
+  failed --> queued: retry creates a new job
 ```
+
+The server reports the job status `success` as the API status `complete`. The UI labels the API status `cancelling` as **Stopping**. Cache publication has its own record (`cache_push_jobs`). It is not a build state.
 
 ### What Is a "Build"?
 
@@ -192,15 +192,14 @@ sequenceDiagram
   participant Frontend
   participant Backend
   Frontend->>Backend: GET /api/v1/builders (Get builder status)
-  Frontend->>Backend: GET /api/v1/build-queue (Get pending/in-progress)
+  Frontend->>Backend: GET /api/v1/build-jobs (Get queued and in-progress jobs)
+  Frontend->>Backend: GET /api/v1/build-jobs/recent (Get finished attempts)
 ```
 
 ### How to Modify
 
 - **Backend:** `handlers/api/builders.rs`, `builder/mod.rs`
 - **Frontend:** `views/builds.rs`
-
-> **Status:** The Builds data flow above reads `/api/v1/build-queue`; the server registers the build listing as `/api/v1/build-jobs`. Not reconciled in this migration.
 
 ## Evaluations (`/evaluations`)
 

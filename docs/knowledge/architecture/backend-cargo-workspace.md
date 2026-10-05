@@ -175,31 +175,23 @@ After split (incremental, no changes):
 The targeted agent and builder checks no longer compile the server crate
 dependency set (sqlx, axum, openidconnect, argon2, etc.).
 
-> **Status:** proposed. The follow-ups below were deferred at the TASK-395 split. Follow-up 1 is partly stale: `cf-protocol` no longer holds a `DeploymentPolicy` copy (see Migration verification notes). Follow-up 2 is still open: `cf-server/src/models/system_states.rs` and `cf-protocol/src/agent.rs` each define `SystemState`.
+## Known follow-ups
 
-## Known follow-ups (outside this MR)
-
-- **Deployment-policy schema deduplication**: The `DeploymentPolicy` struct and
-  `DeploymentPolicyKind` enum are currently duplicated in both `cf-protocol`
-  and `cf-server`. After the `cf-server` row type is separated from the
-  serializable DTO, the protocol copy can become the single canonical
-  definition. (P2, not blocking merge.)
-
-- **SystemState unification**: `cf-server/src/models/system_states.rs` contains
+- **SystemState unification** (open): `cf-server/src/models/system_states.rs` contains
   a second `SystemState` definition (with `sqlx::FromRow`). Once server row
   types are cleanly split from protocol DTOs, the server copy should delegate
-  to `cf_protocol::agent::SystemState`. (P1, deferred to keep this MR focused.)
+  to `cf_protocol::agent::SystemState`. (P1, deferred at the TASK-395 split.)
 
 ## SQLx offline metadata
 
-> **Status:** stale-risk. Both `packages/default/.sqlx` and `packages/default/crates/cf-server/.sqlx` exist and their file lists differ. The Nix server build reads the workspace-root `packages/default/.sqlx`. TASK-451 in the Backlog tracks the reconciliation. The preparation command was not rechecked.
+Two SQLx metadata directories exist, and their file lists differ:
 
-Server SQLx query metadata lives at `crates/cf-server/.sqlx/`. When modifying
-server queries, regenerate with:
+- `packages/default/.sqlx` (workspace root). The Nix server build reads this directory.
+- `packages/default/crates/cf-server/.sqlx` (crate directory).
 
-```bash
-nix develop -c bash -c 'cd packages/default && cargo sqlx prepare --workspace'
-```
+**Unresolved:** TASK-451 in the Backlog tracks the reconciliation. Until it closes, a change to a checked server query MUST keep the directory that the Nix build reads current. Verify with the Nix server build, and do not assume that the crate-level directory is the source of truth.
+
+The preparation command `cargo sqlx prepare --workspace` from `packages/default` was not rechecked against the two directories. Run SQLx preparation only against an isolated local database that this repository started.
 
 ## Related concepts
 
@@ -225,7 +217,7 @@ Scope: crate layout, dependency direction, forbidden dependencies, binaries, Nix
 - Claim: Follow-up 1: `DeploymentPolicy` and `DeploymentPolicyKind` are duplicated in `cf-protocol` and `cf-server`.
   Finding: `cf-protocol` holds no `DeploymentPolicy` or `DeploymentPolicyKind`. `cf-server` defines `DeploymentPolicy` twice (`models/systems.rs` and `models/deployment_policies.rs`).
   Evidence: `rg DeploymentPolicy crates/cf-protocol` (no match); `crates/cf-server/src/models/systems.rs`, `models/deployment_policies.rs`.
-  Case: documentation stale (the original follow-up text is kept as design history; status note updated).
+  Case: documentation stale (the completed follow-up is removed from the body).
 - Claim: Follow-up 2: a second `SystemState` exists in `cf-server`.
   Finding: Still true. `cf-server` `SystemState` derives `FromRow`; it does not delegate to `cf_protocol::agent::SystemState`.
   Evidence: `crates/cf-server/src/models/system_states.rs`, `crates/cf-protocol/src/agent.rs`.
@@ -233,4 +225,4 @@ Scope: crate layout, dependency direction, forbidden dependencies, binaries, Nix
 - Claim: Server SQLx metadata lives at `crates/cf-server/.sqlx/`.
   Finding: Both `packages/default/.sqlx` (141 entries) and `crates/cf-server/.sqlx` (138 entries) exist and differ. The Nix server build requires the workspace-root `.sqlx`.
   Evidence: `packages/default/default.nix` (`serverRootPaths`, COMPATIBILITY comment), TASK-451.
-  Case: documentation stale (status note updated).
+  Case: documentation stale (the SQLx section now states both directories and the unresolved TASK-451 reconciliation).

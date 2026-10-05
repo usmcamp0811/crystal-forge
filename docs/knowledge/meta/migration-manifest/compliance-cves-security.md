@@ -113,9 +113,9 @@ tags:
   | --- | --- |
   | `## Roles` | [security/oidc-role-mapping.md#roles](../../security/oidc-role-mapping.md#roles) |
   | `## Configuration` | [security/oidc-role-mapping.md#configuration](../../security/oidc-role-mapping.md#configuration) |
-  | `## Role Selection Logic` | [security/oidc-role-mapping.md#role-selection-logic](../../security/oidc-role-mapping.md#role-selection-logic) |
+  | `## Role Selection Logic` | [security/oidc-role-mapping.md#what-happens-at-login](../../security/oidc-role-mapping.md#what-happens-at-login) |
   | `## Role Synchronization` | [security/oidc-role-mapping.md#role-synchronization](../../security/oidc-role-mapping.md#role-synchronization) |
-  | `## Safe-Deny Behavior` | [security/oidc-role-mapping.md#safe-deny-behavior](../../security/oidc-role-mapping.md#safe-deny-behavior) |
+  | `## Safe-Deny Behavior` | [security/oidc-role-mapping.md#what-happens-at-login](../../security/oidc-role-mapping.md#what-happens-at-login) |
   | `## Examples` | [security/oidc-role-mapping.md#examples](../../security/oidc-role-mapping.md#examples) |
   | `## Testing Role Mapping` | [security/oidc-role-mapping.md#testing-role-mapping](../../security/oidc-role-mapping.md#testing-role-mapping) |
   | `## Troubleshooting` | [security/oidc-role-mapping.md#troubleshooting](../../security/oidc-role-mapping.md#troubleshooting) |

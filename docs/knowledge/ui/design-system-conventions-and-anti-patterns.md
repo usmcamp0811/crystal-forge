@@ -11,7 +11,7 @@ tags:
 implementation_status: partial
 generated:
   by: opencode/claude-sonnet-5-5
-  at: 2026-10-03T22:54:52-05:00
+  at: 2026-10-04T21:00:00-05:00
 sources:
   - id: origin
     resource: "Crystal Forge repository file docs/ui-ux-design-system.md at commit 3b23d36f"
@@ -51,11 +51,10 @@ This concept holds the Naming Conventions, Anti-Patterns, and Decision Framework
 |------|------------|---------|
 | View (page) | `{Name}View` | `DashboardView`, `SystemsView` |
 | Component | `PascalCase` | `StatusBadge`, `ConfirmDialog` |
-| Hook | `use_{name}` | `use_websocket`, `use_theme` |
+| Hook | `use_{name}` | `use_websocket_eval_stream`, `use_infinite_scroll` |
 | Props | `{Component}Props` | `StatusBadgeProps` |
 
-> **Status:** Disagreement with code. `packages/web-ui/src/hooks/websocket.rs` defines `use_websocket_logs`, `use_websocket_eval_stream`, `use_websocket_metrics`, and `use_websocket_build_stream`. No `use_websocket` or `use_theme` function exists in `packages/web-ui/src`. Theme state lives in `packages/web-ui/src/state/theme.rs`. The hook examples in the table above illustrate the naming rule only.
-
+Hooks live in `hooks/` (`websocket.rs`, `infinite_scroll.rs`). Theme state lives in `state/theme.rs`.
 
 ### File Organization
 
@@ -66,9 +65,11 @@ flowchart TB
   src --> views[views/: Page-level components]
   views --> dashboard[dashboard.rs]
   src --> components[components/: Reusable components]
-  components --> layout[layout/: AppShell, Card, Sidebar]
-  components --> forms[forms/: Input, Select, Button]
-  components --> status[status/: Badges, indicators]
+  components --> layout[layout/: app_shell.rs, sidebar.rs, topbar.rs, card.rs]
+  components --> forms[forms/: form components such as add_system_form.rs]
+  components --> modals[modals/: ConfirmDialog and other dialogs]
+  components --> shared[Shared files: status_badge.rs, chips.rs, stat_card.rs]
+  components --> domain[Domain folders: builds/, system/, onboarding/, ...]
   src --> hooks[hooks/: Custom hooks]
   src --> state[state/: Global state]
   src --> api[api/: API client, models]
@@ -220,14 +221,6 @@ If you create a new pattern:
 
 ## Migration verification notes
 
-- Claim: Hook naming examples `use_websocket`, `use_theme`.
-  Finding: Real hooks are `use_websocket_logs`, `use_websocket_eval_stream`, `use_websocket_metrics`, `use_websocket_build_stream`, `use_infinite_scroll`, `use_tour_runner`; no `use_theme`. Naming rule `use_{name}` holds.
-  Evidence: hooks/websocket.rs; hooks/infinite_scroll.rs; state/theme.rs
-  Case: documentation stale (examples; status note kept)
-- Claim: File organization tree (`components/forms`, `components/status`).
-  Finding: `components/` has `forms/`, `layout/` but no `status/` directory (`status_badge.rs`, `chips.rs` are files); many additional component directories exist (`builders`, `builds`, `system`, `onboarding`, ...). `adapter.rs` modules live under `dashboard/`, `environments/`, `systems/`.
-  Evidence: packages/web-ui/src/components, src/*/adapter.rs
-  Case: documentation stale
 - Claim: Anti-patterns (hardcoded colors, inline static styles) are prohibited.
   Finding: Not enforced everywhere: sources still contain many static inline `style:` strings and Tailwind gray/white utilities with light-theme overrides in app.css.
   Evidence: src (about 2450 `style: "` literals); assets/app.css ~521-550

@@ -289,12 +289,14 @@ catalog entry in the bundle with a description and implementation status.
 ## Maintenance rules
 
 - Change behavior and documentation in the same change. A stale concept is a
-  defect.
+  defect. A current guide MUST NOT keep a claim that is known to be false in its
+  main text because a nearby note says the claim is false. Correct the main text
+  and record the old claim in the [cleanup record](cleanup-record.md).
 - Update `implementation_status` when a proposed or partial design ships.
 - Add an entry to [the update log](../log.md) for each structural change.
 - Run the `okf-knowledge` flake check before review. It enforces
   frontmatter, taxonomy, reserved names, the version declaration, links,
-  asset paths, manifest completeness, the diagram ledger, Mermaid rendering,
+  asset paths, manifest completeness, the diagram ledger, Mermaid syntax parsing,
   and the absence of absolute paths. The CI preservation job compares source
   blocks against the immutable MR merge-base after fetching the required Git
   object; the pure Nix build does not depend on Git history or the network.

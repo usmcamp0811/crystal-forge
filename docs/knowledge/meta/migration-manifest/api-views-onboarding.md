@@ -45,7 +45,7 @@ tags:
   | `## Cache API (Future - TASK-141)` | [api/agent-and-cache-api.md#cache-administration-api](../../api/agent-and-cache-api.md#cache-administration-api) |
   | `## Common Error Codes` | [api/api-overview-errors-and-streaming.md#common-error-codes](../../api/api-overview-errors-and-streaming.md#common-error-codes) |
   | `## Adding a New API Endpoint` | [operations/adding-a-backend-api-endpoint.md](../../operations/adding-a-backend-api-endpoint.md) |
-  | `## File Organization` | [operations/adding-a-backend-api-endpoint.md#file-organization](../../operations/adding-a-backend-api-endpoint.md#file-organization) |
+  | `## File Organization` | [operations/adding-a-backend-api-endpoint.md#where-things-live](../../operations/adding-a-backend-api-endpoint.md#where-things-live) |
   | `## WebSocket Streaming` | [api/api-overview-errors-and-streaming.md#websocket-streaming](../../api/api-overview-errors-and-streaming.md#websocket-streaming) |
   | `## Summary` | [api/api-overview-errors-and-streaming.md#summary](../../api/api-overview-errors-and-streaming.md#summary) |
 - Unmapped content: none. Horizontal rules between sections were not carried over. Sections were reordered only at concept level (Common Error Codes, WebSocket Streaming, and Summary follow API Overview).

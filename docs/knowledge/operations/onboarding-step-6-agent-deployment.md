@@ -11,7 +11,7 @@ tags:
 implementation_status: implemented
 generated:
   by: opencode/claude-sonnet-5-5
-  at: 2026-10-03T22:54:29-05:00
+  at: 2026-10-04T21:00:00-05:00
 sources:
   - id: origin
     resource: "Crystal Forge repository file docs/onboarding-guide.md at commit 3b23d36f"
@@ -20,21 +20,15 @@ sources:
 
 # Step 6: Deploy Agent
 
-The **Crystal Forge Agent** runs on each managed NixOS system. It reports system state, receives deployment instructions, and executes NixOS activations. Without the agent running, Crystal Forge cannot monitor or deploy to the system.
+The **Crystal Forge Agent** runs on each managed NixOS system as `root`. It reports system state, receives deployment targets, and activates them. Without the agent running, Crystal Forge cannot monitor or deploy to the system.
 
-## Agent Deployment Reminder
+## Before you start
 
-After creating your first system, a modal appears with explicit instructions:
+You need a registered system and the private key that matches the public key you saved during Step 5. To start tracking the system, you must:
 
-**"System Registered — Enable the Agent"**
-
-To start tracking this system, you must:
-
-1. **Enable the Crystal Forge agent module** in the system's NixOS configuration
-2. **Apply the configuration** on the target system (`nixos-rebuild switch`)
-3. **Verify the agent service is running** (`systemctl status crystal-forge-agent`)
-
-![Agent Deployment Reminder](../../screenshots/06h-onboarding-coach-all-configured.png)
+1. **Enable the Crystal Forge agent module** in the system's NixOS configuration.
+2. **Apply the configuration** on the target system (`nixos-rebuild switch`).
+3. **Verify the agent service is running** (`systemctl status crystal-forge-agent`).
 
 ## Enabling the Agent in NixOS Config
 
@@ -49,21 +43,25 @@ On the **target system** (the NixOS host you want to manage), add this to its co
     server_host = "crystal-forge.example.com";
     server_port = 3000;
     
-    # Private key (the one you generated/saved during system registration)
+    # Private key (the one you generated during system registration).
+    # Use a string path to a file outside the Nix store.
     private_key = "/var/lib/crystal-forge/host.key";
   };
 }
 ```
 
-**Save the private key** to the target system:
+**Save the private key** to the target system. The agent service runs as `root`, so `root` owns the key file. The `crystal-forge` user does not exist on a host that runs only the agent.
 
 ```bash
-# On the target system (e.g., web-server-1)
-sudo mkdir -p /var/lib/crystal-forge
-sudo echo "YOUR_PRIVATE_KEY_HERE" > /var/lib/crystal-forge/host.key
-sudo chmod 600 /var/lib/crystal-forge/host.key
-sudo chown crystal-forge:crystal-forge /var/lib/crystal-forge/host.key
+# On the target system (for example, web-server-1)
+sudo install -d -m 0700 -o root -g root /var/lib/crystal-forge
+# The shell below runs as root with umask 077, so the file is never group- or world-readable.
+sudo sh -c 'umask 077 && cat > /var/lib/crystal-forge/host.key'
+# Paste the private key, press Enter, then press Ctrl-D.
+sudo chown root:root /var/lib/crystal-forge/host.key
 ```
+
+Do not put the key on a command line with `echo`. The shell would keep the key in its history. A secrets manager that writes the file at activation time also works.
 
 ## Apply and Rebuild the Target System
 
@@ -100,31 +98,29 @@ Check the logs for successful connection:
 sudo journalctl -u crystal-forge-agent -f
 ```
 
-Look for log entries indicating:
-- Successful Ed25519 signature verification
-- System fingerprint reported
-- Heartbeat acknowledged by server
+The agent signs each report with its private key. If the server rejects a report, the log shows an HTTP error status. Check these causes first:
+
+- The private key does not match the public key registered for the system.
+- The `server_host` or `server_port` value is wrong, or the host cannot reach the server.
 
 ## What to Expect After Agent Connects
 
 Once the agent connects, Crystal Forge will:
 
 1. **Record System Fingerprint**: Hardware, OS version, network interfaces, security status
-2. **Track Heartbeats**: Liveness signals every 60 seconds (configurable)
+2. **Track Heartbeats**: Liveness signals every 600 seconds (10 minutes) by default. The server setting `heartbeat_interval_secs` accepts 15 to 900 seconds, and a per-system value overrides it. The server returns the interval in each heartbeat response.
 3. **Monitor State Changes**: Configuration drift, software updates, deployments
 4. **Enable Deployments**: The system is now eligible to receive deployment instructions
 
 In the Crystal Forge web UI:
 
-- The **Dashboard** will show the system in the Fleet Health panel
-- The **Systems** page will show connection status, deployed configuration, and health
-- The **Builds** page will show which derivations are available for deployment
+- The **Dashboard** shows the system in the fleet health summary.
+- The **Systems** page shows connection status, deployed configuration, and health.
+- The **Builds** page shows the build queue and recent build attempts.
 
 ## Onboarding Complete!
 
 After the agent sends its first signed report, an Administrator can select **Acknowledge agent setup** in the Setup track. A heartbeat alone does not complete the step. The acknowledgement is saved through the existing setup-progress API.
-
-![All Steps Configured](../../screenshots/06h-onboarding-coach-all-configured.png)
 
 When all nine setup steps are complete, the Coach shows the setup-complete card and offers **Explore security workflows**. The top-bar **Guide** remains available. Administrators can relaunch Setup from Server Management.
 

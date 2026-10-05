@@ -49,9 +49,9 @@ graph LR
 
 ## 8. Firewall Rules Required per Strategy
 
-### 8.1 ServerDerivation (Recommended Default)
+### 8.1 ServerDerivation (Rust configuration default)
 
-> **Status:** The heading label `Recommended Default` on this subsection disagrees with the recommended default in [remote-build-execution-strategies.md](../builders/remote-build-execution-strategies.md), which recommends `source_re_evaluate_verified` with `server_bundled_archive`. The migration kept both statements. Section 8.2 below carries the same firewall rules for the recommended default.
+`server_derivation` is the default of the Rust configuration structs. The NixOS module defaults to `source_re_evaluate_verified` with `server_bundled_archive`, which section 8.2 covers. See [Remote build execution strategies](../builders/remote-build-execution-strategies.md) for which layer sets which default. Both strategies use the same firewall rules.
 
 ```
 # Builder host outbound rules

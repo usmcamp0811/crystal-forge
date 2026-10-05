@@ -10,10 +10,10 @@ tags:
   - environments
   - dashboard
   - admin
-implementation_status: partial
+implementation_status: implemented
 generated:
   by: opencode/claude-sonnet-5-5
-  at: 2026-10-03T22:54:29-05:00
+  at: 2026-10-04T21:00:00-05:00
 sources:
   - id: origin
     resource: "Crystal Forge repository file docs/specs/02-backend-api.md at commit 3b23d36f"
@@ -63,7 +63,7 @@ All paths below are relative to `/api/v1` and are registered in `packages/defaul
 
 Builder-authenticated routes (`/builders/resolve-id`, `/builders/:id/session`, `/builders/:id/heartbeat`, `/builders/:id/next-job`, `/builders/:id/jobs/...`, `/builders/:id/cve-scans/...`) use signed builder requests, not browser sessions. See [Builder request authentication](../security/builder-request-authentication-and-data-in-transit.md).
 
-> **Status (documentation stale, corrected):** The source listed `/builders/:id/pause`, `/builders/:id/resume`, `/builders/:id/jobs`, and Viewer+ read access. None of those routes is registered, and list and get require Admin. See the verification notes.
+No route pauses or resumes a builder, and no per-builder job-list route exists. List and get require Admin. To stop a builder from receiving work, an operator deactivates it or updates it with `PATCH /builders/:id`.
 
 ### Builder States
 
@@ -74,7 +74,7 @@ Builder-authenticated routes (`/builders/resolve-id`, `/builders/:id/session`, `
 | offline | Set by the offline-builder sweep in `queries/builders.rs` |
 | draining | Allowed by the CHECK constraint and `BuilderStatus::Draining`; no code path that sets it was found |
 
-> **Status (documentation stale, corrected):** The source listed `idle`, `building`, and `paused`. The `builders.status` CHECK constraint allows `active`, `inactive`, `offline`, and `draining` (`migrations/0083_create_builders_infrastructure.sql`, `migrations/0124_add_builder_ui_fields.sql`).
+The `builders.status` CHECK constraint allows exactly these four values (`migrations/0083_create_builders_infrastructure.sql`, `migrations/0124_add_builder_ui_fields.sql`).
 
 ---
 
@@ -95,38 +95,51 @@ The evaluation queue manages commit evaluations (nix-eval-jobs runs).
 | GET | `/commits/:commit_id/eval/stream` | Viewer+ | Live evaluation log stream |
 | GET | `/commits/:commit_id/eval/logs` | Viewer+ | Stored evaluation log history |
 
-> **Status (documentation stale, response shape):** The example response below is the source's original shape. The registered handler `list_eval_queue` (`handlers/api/commits.rs`) returns `EvalQueueSummary` (`api/models.rs`): `active_count`, `completed_count`, `successful_count`, `failed_count`, `domain_total`, `filtered_total`, `execution_mode`, and `items[]` (`commit_id`, `flake_id`, `flake_name`, `branch`, `commit_hash`, `commit_message`, `author`, `committed_at`, `enqueued_at`, `is_latest_per_flake`, `evaluation_status`, `queue_position`, `systems`, ...). Query parameters are `limit`, `status`, `flake`, `search`, and `latest_only`. The example is kept as the historical source text. The full item field list was not compared.
-
 ### GET /commits/eval-queue
 
-**Response (original source example, superseded by the status note above):**
+Query parameters (`EvalQueueParams`): `limit` (default 200, clamped to the server maximum), `status`, `flake`, `search`, and `latest_only`.
+
+The response is an `EvalQueueSummary`. Counts describe the filtered domain. `items[]` holds one entry per commit.
+
 ```json
 {
-  "active_queue": [
+  "active_count": 1,
+  "completed_count": 40,
+  "successful_count": 38,
+  "failed_count": 2,
+  "domain_total": 1,
+  "filtered_total": 1,
+  "execution_mode": "real",
+  "items": [
     {
       "commit_id": 123,
       "flake_id": 1,
       "flake_name": "nixos-configs",
-      "git_commit_hash": "abc123...",
+      "branch": "main",
+      "commit_hash": "abc123...",
       "commit_message": "Update system configs",
-      "commit_timestamp": "2024-03-02T12:00:00Z",
+      "author": "Example Author",
+      "committed_at": "2026-03-02T12:00:00Z",
+      "enqueued_at": "2026-03-02T12:00:05Z",
+      "is_latest_per_flake": true,
       "evaluation_status": "in_progress",
-      "eval_queue_position": 1,
-      "system_statuses": [
-        {
-          "system_name": "nixos-desktop",
-          "status": "evaluating"
-        },
-        {
-          "system_name": "nixos-server",
-          "status": "policy_passed"
-        }
-      ]
+      "queue_position": 1,
+      "systems": ["nixos-desktop", "nixos-server"],
+      "system_count": 2,
+      "passed_count": 1,
+      "policy_failed_count": 0,
+      "eval_failed_count": 0,
+      "attempt_number": 1,
+      "parent_attempt_id": null,
+      "root_attempt_id": null,
+      "available_at": null
     }
   ],
-  "completed_queue": [...]
+  "timestamp": "2026-03-02T12:01:00Z"
 }
 ```
+
+`execution_mode` is `real` or `mock`. Per-system results appear as counts (`passed_count`, `policy_failed_count`, `eval_failed_count`) and as `systems` names. The queue does not list per-system status values. The live stream carries those (see [WebSocket Streaming](api-overview-errors-and-streaming.md#websocket-streaming)).
 
 ### POST /commits/eval-queue/reorder
 
@@ -137,24 +150,26 @@ The evaluation queue manages commit evaluations (nix-eval-jobs runs).
 }
 ```
 
-> **Status (documentation stale, corrected):** The source described `{"commit_id": 123, "new_position": 2}`, which moves one commit. The handler accepts `ordered_commit_ids`, a complete ordered list, and returns `400` for an invalid reorder request (`handlers/api/commits.rs`, `reorder_eval_queue`).
+The handler accepts `ordered_commit_ids`, a complete ordered list, and returns `400` for an invalid reorder request (`handlers/api/commits.rs`, `reorder_eval_queue`).
 
 ### Evaluation States
 
-```
-pending → in_progress → complete
-            ↓
-          failed
+`commits.evaluation_status` takes these values (`commits_evaluation_status_check`, migration `0113_add_eval_cancellation_support.sql`):
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending
+    pending --> in_progress
+    in_progress --> complete
+    in_progress --> failed
+    in_progress --> cancelling: cancel requested
+    cancelling --> cancelled
+    pending --> cancelled: cancel requested
 ```
 
-> **Status (documentation stale):** The `commits_evaluation_status_check` constraint also allows `cancelling` and `cancelled` (`migrations/0113_add_eval_cancellation_support.sql`).
+`complete`, `failed`, and `cancelled` end an attempt. `POST /commits/:commit_id/re-evaluate` (Admin) queues the commit again. It answers `queued: false` when an evaluation is already active. At server start, `cancelling` becomes `cancelled`, and `in_progress` returns to `pending`.
 
-**Per-System States** (during in_progress):
-```
-pending → evaluating → eval_complete → policy_check
-                 ↓              ↓
-            eval_failed    policy_passed / policy_failed
-```
+**Per-system results** are not stored as a status on the queue item. The live stream reports `pending`, `evaluating`, `success`, `failed`, `policy_failed`, and `queued_for_build` for each system.
 
 **Key Invariant:** Only ONE commit can have `evaluation_status = 'in_progress'` at a time. The unique index `idx_commits_single_in_progress` enforces this across `in_progress` and `cancelling` (`migrations/0113_add_eval_cancellation_support.sql`).
 
@@ -180,7 +195,7 @@ The build queue manages Nix derivation builds.
 | POST | `/build-queue/reorder` | Operator+ | Reorder the queue (`{"ordered_job_ids": [...]}`) |
 | GET | `/build-jobs/:job_id/logs/stream` | Viewer+ | Live build log stream |
 
-> **Status (documentation stale, corrected):** The source listed `POST /build-queue` (queue a derivation) and `DELETE /build-queue/:id`. Neither is registered. No registered route queues a derivation directly. Non-Admin callers see only jobs in their environment memberships (`visibility_user_id` in `list_build_queue`).
+No registered route queues a derivation directly. The server creates a build job when evaluation succeeds. Non-Admin callers see only jobs in their environment memberships (`visibility_user_id` in `list_build_queue`).
 
 The exact build-attempt endpoint applies the caller's environment visibility in
 the primary-key query. It returns `404 Not Found` for both missing attempts and
@@ -190,13 +205,23 @@ not treat a UUID as ordinary text search.
 
 ### Build States
 
-```
-pending → building → built → cache-pushing → cache-pushed
-            ↓            ↓           ↓
-          failed    cache-failed  cache-failed
+`build_jobs.status` takes these values (`migrations/0103_expand_build_job_status_for_cancellation.sql`):
+
+```mermaid
+stateDiagram-v2
+    [*] --> queued
+    queued --> building: builder claims
+    queued --> cancelled: cancel
+    building --> success: builder completes
+    building --> failed: builder fails
+    building --> cancelling: cancel
+    cancelling --> cancelled: builder stops or force-cancel
+    failed --> queued: automatic retry inserts a child job
 ```
 
-> **Status (documentation stale, partially checked):** The `build_jobs.status` CHECK constraint allows `queued`, `building`, `cancelling`, `cancelled`, `success`, and `failed` (`migrations/0103_expand_build_job_status_for_cancellation.sql`). The diagram above is the source text. The server also registers `/api/v1/cache-push-jobs` routes for cache push work. The diagram state names were not mapped to code.
+A failed attempt stays `failed`. An automatic retry inserts a **new** `queued` job that links to its parent (see [Derivation status lifecycle](../concepts/derivation-status-lifecycle.md)).
+
+Cache publication has its own record. `cache_push_jobs.status` takes `pending`, `in_progress`, `completed`, `failed`, `cancelled`, and `permanently_failed` (`migrations/0092_enhance_cache_push_jobs_for_ui.sql`). The server registers `/api/v1/cache-push-jobs` routes to list, inspect, retry, and cancel those jobs. See [Cache push process](../caches/cache-push-process.md).
 
 ---
 
@@ -218,7 +243,7 @@ Environments group systems logically.
 | GET | `/environments/policies-map` | Authenticated (membership-scoped) | Environment-to-policy map |
 | GET | `/policies` | Authenticated | List policies |
 
-The environment handlers use `authenticated_user_roles`, `highest_role`, and `Role::can_manage_environments` (Admin only) in `handlers/api/environments.rs`. The Viewer+ gate of the other endpoints was checked for the list/get handlers only through the membership filter; `list_policies_handler` was not read.
+The environment handlers use `authenticated_user_roles`, `highest_role`, and `Role::can_manage_environments` (Admin only) in `handlers/api/environments.rs`. List and get filter by environment membership for non-Admin callers. `GET /policies` requires a valid session and no particular role.
 
 ---
 
@@ -233,31 +258,44 @@ Aggregated fleet data.
 | GET | `/dashboard/summary` | Viewer+ (environment-scoped for non-Admin) | Fleet summary |
 | GET | `/dashboard/activity` | Viewer+ (environment-scoped for non-Admin) | Recent activity |
 
-> **Status (documentation stale, corrected):** The source listed `/dashboard`, `/dashboard/builds`, and `/dashboard/flakes`. Only `/api/v1/dashboard/summary` and `/api/v1/dashboard/activity` are registered. The CVE dashboard routes (`/cves/summary`, `/cves/vulnerabilities`, `/cves/top-systems`, `/cves/scan-freshness`) are Admin-only (`handlers/api/dashboard.rs`).
+Only `/api/v1/dashboard/summary` and `/api/v1/dashboard/activity` are registered. The CVE dashboard routes (`/cves/summary`, `/cves/vulnerabilities`, `/cves/top-systems`, `/cves/scan-freshness`) are Admin-only (`handlers/api/dashboard.rs`).
 
-### Example Response (original source example; the registered response shape was not compared)
+### GET /dashboard/summary
+
+The response is a `DashboardSummary`:
 
 ```json
 {
-  "data": {
-    "systems": {
-      "total": 10,
-      "online": 8,
-      "offline": 2
-    },
-    "environments": {
-      "production": 5,
-      "staging": 3,
-      "development": 2
-    },
-    "builds": {
-      "pending": 3,
-      "building": 1,
-      "recent": [...]
-    }
-  }
+  "fleet_health": { "healthy": 8, "warning": 1, "critical": 0, "offline": 1 },
+  "deployment_status": { "up_to_date": 7, "behind": 2, "never_deployed": 1, "unknown": 0 },
+  "cve_summary": { "critical": 0, "high": 3, "medium": 12, "low": 20 },
+  "total_systems": 10,
+  "active_builds": 1,
+  "build_queue": {
+    "building_count": 1,
+    "queued_count": 3,
+    "failed_24h_count": 0,
+    "active_workers": 2,
+    "total_workers": 2
+  },
+  "cache_health": {
+    "status": "healthy",
+    "destination_count": 1,
+    "enabled_destination_count": 1,
+    "successful_pushes_24h": 12,
+    "failed_pushes_24h": 0,
+    "last_activity_at": "2026-03-02T12:00:00Z"
+  },
+  "recent_deployments": [],
+  "timestamp": "2026-03-02T12:01:00Z"
 }
 ```
+
+`build_queue` has more worker-slot fields than this example shows. `cache_health` is absent when no cache reports data. The `cache_health.status` values are defined by `CacheHealthStatus` in `api/models.rs`. Non-Admin callers see counts for their environments only.
+
+### GET /dashboard/activity
+
+The response is a JSON array of `DashboardActivity` items. Each item has a stable `id`, a `kind` (`deployment`, `build`, or `evaluation`), a `status`, `occurred_at`, `title`, and optional links (`system_id`, `flake_id`, `commit_id`, `commit_hash`, `build_job_id`, `deployment_id`, `evaluation_attempt_id`). The `limit` query parameter defaults to 30.
 
 ---
 
@@ -295,9 +333,9 @@ GET /api/v1/admin/audit-events?from=2024-01-01&to=2024-01-31&actor=john&action=.
 
 ### Other registered admin routes
 
-`GET /admin/server-info`, `GET`/`PUT /admin/classification-config`, `GET`/`PUT /admin/automatic-retry-policy`, `GET /admin/setup-progress`, `POST /admin/setup-wizard/dismiss`, `POST /admin/setup-wizard/agent-acknowledge`, and `GET /admin/config-health`. These were not in the source and were not read beyond their `require_admin` gates for `server-info`, `classification-config`, and `automatic-retry-policy`.
+`GET /admin/server-info`, `GET`/`PUT /admin/classification-config`, `GET`/`PUT /admin/automatic-retry-policy`, `GET /admin/setup-progress`, `POST /admin/setup-wizard/dismiss`, `POST /admin/setup-wizard/agent-acknowledge`, and `GET /admin/config-health`. The `server-info`, `classification-config`, and `automatic-retry-policy` routes require the Admin role (`require_admin`).
 
-> **Status (documentation stale, corrected):** The source routes `/admin/users/:id` (GET), `/admin/audit` and `/admin/audit/export`, and `PATCH /admin/oidc-mappings/:id` are not registered in `packages/default/crates/cf-server/src/bin/server.rs`. The audit query parameters are `from`, `to`, `actor`, `action`, `page`, and `per_page`, not `start_date` and `end_date`. The role label `Admin+` in the source means Admin; no higher role exists (`AuthRole` has Admin, Operator, and Viewer).
+The audit query parameters are `from`, `to`, `actor`, `action`, `page`, and `per_page`. The role label `Admin` is the highest role. `AuthRole` has Admin, Operator, and Viewer.
 
 ## Related concepts
 
@@ -305,44 +343,3 @@ GET /api/v1/admin/audit-events?from=2024-01-01&to=2024-01-31&actor=john&action=.
 - [Systems API](systems-api.md)
 - [Fleet CVE Triage](fleet-cve-triage-api.md)
 - [API authentication, sessions, and role-based authorization](../security/api-authentication-and-authorization.md)
-
-## Migration verification notes
-
-Checked against commit `3b23d36f`: route registration, role gates of builders, build-queue, eval-queue, environments, dashboard, and admin handlers. Not checked: response payload shapes other than the eval queue, dashboard summary shape, and the `Viewer+` gate of `list_policies_handler`. No `verified` field is set because the response examples were not compared.
-
-- Claim: builders API exposes Viewer+ list/get, `pause`, `resume`, and `/builders/:id/jobs`.
-  Finding: list/get require Admin; no pause, resume, or jobs route exists; extra routes (`permanent`, `public-key`, `regenerate-keypair`, `environments`, `metrics`) exist.
-  Evidence: `bin/server.rs` route table; `handlers/api/builders.rs` (`require_admin`).
-  Case: documentation stale.
-- Claim: builder states are idle/building/paused.
-  Finding: CHECK allows active/inactive/offline/draining.
-  Evidence: `migrations/0083_create_builders_infrastructure.sql`, `0124_add_builder_ui_fields.sql`; `queries/builders.rs` `mark_stale_builders_offline`.
-  Case: documentation stale.
-- Claim: `POST /commits/eval-queue/reorder` takes `{commit_id, new_position}`.
-  Finding: it takes `ordered_commit_ids`.
-  Evidence: `api/models.rs` `ReorderEvalQueueRequest`; `handlers/api/commits.rs`.
-  Case: documentation stale.
-- Claim: eval queue response is `active_queue`/`completed_queue`.
-  Finding: response is `EvalQueueSummary` with `items`.
-  Evidence: `api/models.rs`.
-  Case: documentation stale.
-- Claim: `POST /build-queue`, `DELETE /build-queue/:id`.
-  Finding: not registered; `/build-jobs/:id/{cancel,force-cancel,requeue,prioritize,move-up,move-down}` and `/build-queue/reorder` are registered.
-  Evidence: `bin/server.rs`; `handlers/api/builders.rs`.
-  Case: documentation stale.
-- Claim: single in-progress evaluation invariant.
-  Finding: holds, unique index spans `in_progress` and `cancelling`.
-  Evidence: `migrations/0113_add_eval_cancellation_support.sql`.
-  Case: implemented.
-- Claim: dashboard routes `/dashboard`, `/dashboard/builds`, `/dashboard/flakes`.
-  Finding: only `/dashboard/summary` and `/dashboard/activity`.
-  Evidence: `bin/server.rs`; `handlers/api/dashboard.rs`.
-  Case: documentation stale.
-- Claim: admin routes `/admin/audit`, `/admin/audit/export`, `GET /admin/users/:id`, `PATCH /admin/oidc-mappings/:id`.
-  Finding: not registered; `/admin/audit-events` with `from`/`to`/`actor`/`action`/`page`/`per_page` is registered; OIDC mappings use POST upsert.
-  Evidence: `bin/server.rs`; `handlers/api/admin.rs` (`AuditEventsQuery`, `upsert_oidc_mapping`).
-  Case: documentation stale.
-- Claim: exact build-attempt lookup returns 404 for invisible attempts.
-  Finding: not checked in the query; handler applies `visibility_user_id` for non-Admin.
-  Evidence: `handlers/api/builders.rs` `get_build_attempt`.
-  Case: not fully checked.

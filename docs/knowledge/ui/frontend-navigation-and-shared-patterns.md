@@ -11,7 +11,7 @@ tags:
 implementation_status: partial
 generated:
   by: opencode/claude-sonnet-5-5
-  at: 2026-10-03T22:54:29-05:00
+  at: 2026-10-04T21:00:00-05:00
 sources:
   - id: origin
     resource: "Crystal Forge repository file docs/specs/01-frontend-views.md at commit 3b23d36f"
@@ -131,40 +131,39 @@ Used for:
 %% diagram-id: ui-frontend-file-organization
 flowchart TB
   root[web-ui/src/]
-  root --> main[main.rs: App entry, routing]
-  root --> shell[AppShell.rsx: Layout with sidebar]
+  root --> main[main.rs: App entry]
+  root --> routes[routes.rs: Route enum and page titles]
+  root --> theme[theme.rs: Theme tokens]
   root --> api[api/]
   api --> client[client.rs: API fetch functions]
-  api --> models[models.rs: TypeScript types]
-  root --> views[views/]
+  api --> models[models.rs: Rust DTOs]
+  root --> views[views/: one page per route]
   views --> dashboard[dashboard.rs]
-  views --> systems[systems_list.rs]
-  views --> detail[system_detail.rs]
+  views --> systems[systems_list.rs and system_detail.rs]
   views --> flakes[flakes_list.rs]
   views --> environments[environments_list.rs]
-  views --> builds[builds.rs]
-  views --> admin[admin.rs]
-  views --> login[login.rs]
-  root --> components[components/]
-  components --> systems_component[systems/]
-  components --> flakes_component[flakes/]
-  components --> builds_component[builds/]
-  components --> admin_component[admin/]
-  root --> adapters[adapters/: Data fetching + state]
-  adapters --> systems_adapter[systems_adapter.rs]
-  adapters --> flakes_adapter[flakes_adapter.rs]
-  adapters --> more[...]
+  views --> builds[builds.rs and evaluations.rs]
+  views --> more_views[compliance.rs, poams.rs, scanning.rs, ...]
+  root --> components[components/: reusable UI]
+  components --> layout[layout/: app_shell.rs, sidebar.rs, topbar.rs]
+  components --> domain[domain folders: system/, flake/, builds/, environments/, ...]
+  root --> adapters[Per-domain adapters]
+  adapters --> dashboard_adapter[dashboard/adapter.rs]
+  adapters --> environments_adapter[environments/adapter.rs]
+  adapters --> systems_adapter[systems/adapter.rs]
+  root --> support[hooks/, state/, bootstrap/, alerts/, utils/, export/]
+  root --> showcase[showcase/: component isolation surface]
 ```
 
-> **Status:** Documentation stale; the file organization above is the source text and does not match `packages/web-ui/src/`. Current layout: routes in `src/routes.rs` (not `main.rs`), shell in `components/layout/app_shell.rs` (not `AppShell.rsx`), no `adapters/` directory (adapters are `src/dashboard/adapter.rs`, `src/environments/adapter.rs`, `src/systems/adapter.rs`), `api/models.rs` holds Rust types (not TypeScript), plus `hooks/`, `state/`, `bootstrap/`, `alerts/`, `showcase/`, and many more views (`compliance.rs`, `poams.rs`, `scanning.rs`, `caches.rs`, `setup.rs`, `builders.rs`, and others). The `Adding a New View` steps should read: view in `views/`, route in `routes.rs`, nav item in `components/layout/sidebar.rs` (and its mobile drawer), API functions in `api/client.rs`.
+`routes.rs` holds the `Route` enum. `components/layout/app_shell.rs` renders the shell. `components/layout/sidebar.rs` holds the sidebar links and the mobile drawer.
 
 ## Adding a New View
 
-1. **Create component** in `views/`
-2. **Add route** in `main.rs`
-3. **Add nav item** in `AppShell.rsx`
-4. **Add API functions** in `api/client.rs`
-5. **Add adapter** in `adapters/` (if needed)
+1. **Create the view** in `views/` and declare it in `views/mod.rs`.
+2. **Add the route** to the `Route` enum in `routes.rs`, with its page title.
+3. **Add the nav item** in `components/layout/sidebar.rs`. Add it to the mobile drawer list as well.
+4. **Add API functions** in `api/client.rs`, with matching DTOs in `api/models.rs`.
+5. **Add an adapter** (`<domain>/adapter.rs`) when the view needs state mapping that does not belong in markup.
 
 ## Summary Table
 
@@ -204,10 +203,6 @@ flowchart TB
 - Claim: Route mapping and summary table.
   Finding: Route enum has 23 variants (including the 404 catch-all); `/policies` is actually `/deployment-policies`; additional routes exist. Lists corrected.
   Evidence: src/routes.rs Route enum
-  Case: documentation stale
-- Claim: File organization and adding-a-view steps.
-  Finding: Do not match tree (routes in routes.rs, nav in sidebar.rs, no adapters/ dir). Status note records the actual layout; source tree left as text.
-  Evidence: src/ tree; components/layout/sidebar.rs
   Case: documentation stale
 - Claim: Sidebar navigation with Dash/Systems/Flakes/Environ/Builds/Admin.
   Finding: Sidebar has sections Fleet (Dashboard, Systems, Flakes, Environments), Pipeline (Evaluations, Builds, Scanning), Compliance (CVEs, Policies, Bundles, POA&M), System (Builders, Caches, Server), Dev Tools (Component Showcase), and a profile link; Scanning and Server appear only when `show_admin` is true.

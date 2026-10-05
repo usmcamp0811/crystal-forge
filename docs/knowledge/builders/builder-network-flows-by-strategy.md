@@ -82,7 +82,7 @@ sequenceDiagram
         Note over S: computes nix-store --query --requisites<br/>from persisted drv_path<br/>returns sorted, deduped path list
         S-->>B: {job_id, drv_path, paths: [...]}
 
-        Note over B: 3b. Check local validity of each manifest path<br/>(chunked 256/batch, per-path fallback)
+        Note over B: 3b. Find missing manifest paths<br/>(nix-store --check-validity --print-invalid,<br/>1024 paths per batch, no per-path fallback)
 
         B->>S: 3c. POST /derivation-archive {paths: [missing...]}
         Note over S: validates each path ∈ authorized manifest<br/>403 if any outside,<br/>400 if malformed,<br/>204 if empty

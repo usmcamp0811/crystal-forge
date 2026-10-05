@@ -1,17 +1,17 @@
 ---
 type: API
 title: "Backend API overview, error codes, and WebSocket streaming"
-description: "Describes the REST base URL, request and response envelopes, common error codes, the evaluation-log WebSocket stream, and the per-resource endpoint summary table; open it first when working with the Crystal Forge HTTP API."
+description: "Describes the REST base URL, authentication, response and error shapes, common error codes, the evaluation-log WebSocket stream, and the per-resource endpoint summary table; open it first when working with the Crystal Forge HTTP API."
 tags:
   - crystal-forge
   - api
   - rest
   - websocket
   - errors
-implementation_status: partial
+implementation_status: implemented
 generated:
   by: opencode/claude-sonnet-5-5
-  at: 2026-10-03T22:54:29-05:00
+  at: 2026-10-04T21:00:00-05:00
 sources:
   - id: origin
     resource: "Crystal Forge repository file docs/specs/02-backend-api.md at commit 3b23d36f"
@@ -32,150 +32,142 @@ sources:
 
 # Backend API Specification
 
-This document describes Crystal Forge's HTTP API. It's written for developers who need to understand how the backend works, what endpoints exist, and how to add new ones.
+This document describes Crystal Forge's HTTP API. It is written for developers who need to know how the server responds, which endpoints exist, and how to add new ones.
 
-**Assumption:** You understand HTTP (GET, POST, etc.), REST APIs, and basic database concepts.
+**Assumption:** You understand HTTP, REST APIs, and basic database concepts.
 
 ## API Overview
 
-The API is a **REST API** that the frontend uses to talk to the backend.
+The server exposes a **REST API** that the Dioxus Web UI uses. Agents and builders use separate signed-request routes on the same server.
 
-**Base URL:** `http://localhost:8080/api/v1/`
+**Base URL:** `http://<server-host>:<port>/api/v1/`
 
-### Request Format
+The port is deployment configuration. The NixOS module option `services.crystal-forge.server.port` defaults to `3000`. The server binds `0.0.0.0` and speaks plain HTTP. TLS termination is a deployment concern, normally a reverse proxy.
 
-- **Headers:** `Content-Type: application/json`
-- **Body:** JSON for POST/PATCH requests
-- **Authentication:** Cookie-based sessions
+### Route families
 
-### Response Format
+| Prefix | Caller | Authentication |
+| --- | --- | --- |
+| `/api/v1/...` | Web UI and API clients | Browser session cookie |
+| `/api/auth/...` | Web UI | Login, logout, and session routes. See [API authentication](../security/api-authentication-and-authorization.md). |
+| `/api/v1/builders/:id/...` | Builders | Signed builder request |
+| `/agent/...`, `/system_state` | Agents | Signed agent request |
+| `/webhook`, `/status` | Git forges, probes | See [Core components](../components/core-components.md) |
 
-**Success:**
+### Request format
+
+- **Headers:** `Content-Type: application/json`.
+- **Body:** JSON for `POST`, `PUT`, and `PATCH` requests.
+- **Authentication:** The `__Host-cf-session` cookie. See [Session cookies and CSRF](../security/session-cookies-and-csrf.md).
+- **CSRF:** The Web UI sends the `x-csrf-token` header on requests that change state. Its value must equal the `__Host-cf-csrf` cookie. A handler enforces this check only when it calls `require_csrf`, and a mismatch returns HTTP 403 with `csrf_validation_failed`. No global layer applies the check, and the role guard extractors do not apply it. Do not assume that a mutating route rejects a request without the header.
+
+### Response format
+
+**Success.** A handler returns its response DTO as the JSON body. There is no `data` wrapper. For example, the evaluation queue returns an `EvalQueueSummary` object (see [Builders, queues, environments, dashboard, and admin APIs](builders-queues-environments-dashboard-admin-api.md)).
+
+**Pagination.** There is no shared pagination envelope. Each list endpoint defines its own query parameters and count fields in `api/models.rs`. For example, `GET /api/v1/admin/audit-events` takes `page` and `per_page`, and the evaluation queue returns `filtered_total` with `items[]`.
+
+**Error.** Errors use the flat `ApiError` DTO:
+
 ```json
 {
-  "data": {
-    "id": "123",
-    "name": "example"
-  }
+  "error": "not_found",
+  "message": "System not found",
+  "details": null
 }
 ```
 
-**Paginated:**
-```json
-{
-  "data": [...],
-  "pagination": {
-    "page": 1,
-    "per_page": 20,
-    "total": 100
-  }
-}
-```
-
-**Error:**
-```json
-{
-  "error": {
-    "code": "NOT_FOUND",
-    "message": "System not found"
-  }
-}
-```
-
-> **Status:** The Base URL above uses port 8080. The NixOS module default for the server port is 3000 (`services.crystal-forge.server.port` in `modules/nixos/crystal-forge/default.nix`). The port is deployment configuration, so 8080 is an example, not a fixed default.
-
-> **Status (documentation stale, corrected):** The `{"data": ...}` success envelope, the `pagination.page/per_page/total` envelope, and the `{"error": {"code": "NOT_FOUND", ...}}` error envelope above are the source text and do not match the registered handlers. Handlers return the response DTO directly with no `data` wrapper (for example `queue_system_config_inspection` returns `Json(response)`), and each paginated endpoint defines its own pagination fields in `api/models.rs`. Errors use the flat `ApiError` DTO: `{"error": "<lowercase_code>", "message": "...", "details": <optional>}` (`api/models.rs`, `ApiError`). Observed codes include `forbidden`, `not_found`, `validation_error`, `conflict`, and `internal_error`; some compliance handlers use upper-case domain codes such as `POLICY_INTERCHANGE_INVALID` and `ASSIGNMENT_TARGET_NOT_FOUND`.
+`error` is a lowercase machine code. `message` is human-readable text. `details` is optional, and the server omits it when empty.
 
 ## Common Error Codes
 
-| Code | Meaning | When Used |
-|------|---------|-----------|
-| UNAUTHORIZED | No valid session | Not logged in |
-| FORBIDDEN | Insufficient permissions | Logged in but wrong role |
-| NOT_FOUND | Resource doesn't exist | ID is wrong |
-| VALIDATION_ERROR | Invalid input | Bad request data |
-| CONFLICT | Resource already exists | Duplicate create |
+| HTTP | `error` | Meaning | When used |
+| --- | --- | --- | --- |
+| 400 | `validation_error` | Invalid input | Bad request data |
+| 401 | `unauthorized` | No valid session | Handlers that use the `RequireAuth`, `RequireOperator`, or `RequireAdmin` extractors, and signed agent or builder verification |
+| 403 | `forbidden` | Not allowed | Insufficient role. Handlers that use the `authenticated_user_roles` helpers also answer 403 for a missing, expired, or invalidated session. |
+| 403 | `csrf_validation_failed` | CSRF check failed | State-changing browser request without a matching token |
+| 404 | `not_found` | Resource is missing or hidden | The ID is wrong, or environment scope hides the resource |
+| 409 | `conflict` | State conflict | Duplicate create, or a request that conflicts with current state |
+| 500 | `internal_error` | Server failure | Unexpected persistence or service error |
 
-> **Status (documentation stale, corrected):** The registered handlers emit lowercase codes `forbidden`, `not_found`, `validation_error` (HTTP 400), `conflict` (HTTP 409), and `internal_error`. The API-handler authentication helpers (`authenticated_user_roles`, `require_*` in `handlers/api/rbac.rs`) return `None` for a missing, expired, or invalidated session, and the handlers that use them (builders, commits, environments, dashboard, admin, systems) respond with HTTP 403 `forbidden`. HTTP 401 (`StatusCode::UNAUTHORIZED`) is used by the signed agent and builder request verification (`handlers/agent_request.rs`, `handlers/builder_request.rs`), and by `handlers/api/{caches,user_sessions,deployments,auth_local,auth_oidc}.rs`. Handlers deliberately return `not_found` for resources hidden by environment scope.
+Some compliance handlers use upper-case domain codes such as `POLICY_INTERCHANGE_INVALID` and `ASSIGNMENT_TARGET_NOT_FOUND`.
+
+**Hidden resources.** Handlers return `not_found`, not `forbidden`, for a resource that environment scope hides from the caller. A caller therefore cannot learn that the resource exists.
+
 ## WebSocket Streaming
 
-### Evaluation Logs (Real-Time)
+### Evaluation logs
 
-**Endpoint:** `ws://localhost:8080/ws/eval-stream/:commit_id`
+**Endpoint:** `GET /api/v1/commits/:commit_id/eval/stream` (WebSocket upgrade)
 
-**Purpose:** Stream evaluation logs in real-time as nix-eval-jobs runs.
+**Purpose:** Stream evaluation logs while `nix-eval-jobs` runs. Handler: `stream_eval_logs` in `handlers/api/commits.rs`.
+
+**Authorization:** A valid session with the Viewer, Operator, or Admin role. Otherwise the server answers HTTP 403 before the upgrade.
 
 **Protocol:**
-1. Client connects with commit ID
-2. Server checks if commit evaluation is in progress
-3. If yes: streams log lines as they appear
-4. If no: closes connection with "not found" message
 
-**Message Format:**
-```json
-{
-  "type": "log",
-  "data": "evaluating system: nixos-desktop",
-  "timestamp": "2024-03-02T12:34:56Z"
-}
-```
+1. The client opens the WebSocket for a commit ID.
+2. The server replays buffered history, up to 2000 messages per commit (`EVAL_LOG_HISTORY_BUFFER`).
+3. The server then streams live messages and sends a ping every 20 seconds.
+4. When 1024 evaluation channels already exist (`MAX_EVAL_LOG_CHANNELS`), the server closes with code 1013.
 
-**System Status Updates:**
+The server keeps a commit's channel for 10 minutes after evaluation completes, so a late client still receives history. The server does not close the connection with a "not found" message when no evaluation runs.
+
+**Messages.** Each message is a JSON object tagged by `type` (the `EvalLogMessage` enum):
+
 ```json
-{
-  "type": "system_status",
-  "system": "nixos-desktop",
-  "status": "evaluating",
-  "data": null
-}
+{ "type": "log", "message": "evaluating system: nixos-desktop" }
 ```
 
 ```json
-{
-  "type": "system_status",
-  "system": "nixos-desktop",
-  "status": "policy_passed",
-  "data": {
-    "queued_for_build": true
-  }
-}
+{ "type": "system_status", "system": "nixos-desktop", "status": "evaluating" }
 ```
 
-**Status Values:**
-- `pending` - Waiting to evaluate
-- `evaluating` - Currently running nix-eval-jobs
-- `eval_complete` - Evaluation succeeded
-- `eval_failed` - Evaluation failed
-- `policy_passed` - CF enabled, added to build queue
-- `policy_failed` - CF disabled, skipped
+```json
+{ "type": "system_status", "system": "nixos-desktop", "status": "failed", "error": "..." }
+```
 
-**Key Files:**
-- `src/handlers/websocket.rs` - WebSocket handler
-- `src/models/evaluate_with_policies.rs` - Broadcasts status updates
+```json
+{ "type": "eval_status", "status": "complete", "message": "..." }
+```
 
-> **Status (documentation stale, corrected):** The WebSocket route is `GET /api/v1/commits/:commit_id/eval/stream` (`stream_eval_logs`, `handlers/api/commits.rs`), not `/ws/eval-stream/:commit_id`. It requires a valid session with Viewer, Operator, or Admin role (otherwise HTTP 403) and then upgrades the connection. The server replays buffered history (up to 2000 messages per commit, `EVAL_LOG_HISTORY_BUFFER`), then streams live messages, and sends a ping every 20 seconds. It closes with code 1013 when 1024 evaluation channels already exist (`MAX_EVAL_LOG_CHANNELS`). A channel is kept for 10 minutes after evaluation completes so late clients receive history (`cleanup_eval_channel`). The server does not close with a "not found" message when no evaluation is running. A second stream, `GET /api/v1/build-jobs/:job_id/logs/stream`, serves build logs. The message shapes are the tagged `EvalLogMessage` enum: `{"type":"log","message":...}`, `{"type":"system_status","system":...,"status":...,"error"?:...}`, and `{"type":"eval_status","status":...,"message"?:...}`. The `system_status` values are `pending`, `evaluating`, `success`, `failed`, `policy_failed`, and `queued_for_build` (`SystemEvalStatus`). The `timestamp` and `data` fields and the status names `eval_complete`, `eval_failed`, and `policy_passed` in the source text above are not part of the current messages. The key-file paths above are original-document paths; the crate layout is `packages/default/crates/cf-server/src/`, and no `handlers/websocket.rs` exists in the current tree.
+`error` and `message` are optional and absent when empty. Messages carry no timestamp.
+
+**`system_status` values** (`SystemEvalStatus`):
+
+- `pending`: waiting to evaluate.
+- `evaluating`: `nix-eval-jobs` is running for this system.
+- `success`: evaluation succeeded.
+- `failed`: evaluation failed.
+- `policy_failed`: Crystal Forge is disabled for this system, so the server skips it.
+- `queued_for_build`: the system passed policy and has a build job.
+
+**Related stream.** `GET /api/v1/build-jobs/:job_id/logs/stream` streams build logs.
+
+**Key files** (under `packages/default/crates/cf-server/src/`):
+
+- `handlers/api/commits.rs`: WebSocket handler, `EvalLogMessage`, `SystemEvalStatus`.
+- `models/evaluate_with_policies.rs`: broadcasts status updates.
 
 ## Summary
 
 | Resource | Endpoints | Auth |
 |----------|-----------|------|
-| Systems | CRUD + deploy/rollback | Viewer+ |
-| Flakes | CRUD + sync | Viewer+ |
-| Builders | CRUD (no pause/resume route) | Admin |
-| Build Queue | list, cancel, requeue, reorder | Viewer+ read; Operator+ or Admin mutate |
-| Eval Queue | GET + reorder | Viewer+ |
-| Environments | CRUD | Read membership-scoped; mutate Admin |
-| Dashboard | GET (`/dashboard/summary`, `/dashboard/activity`) | Viewer+ |
-| Admin Users | list/create/update/delete | Admin |
+| Systems | list, detail, sync, deploy, and others | Viewer+ read. Admin or Operator for mutations (`can_mutate_systems`). Environment scope applies. |
+| Flakes | list, create, sync, refresh, and others | Viewer+ read. Operator+ for most mutations (`RequireOperator`), with at least one Admin-only route. |
+| Builders | list, register, update, deactivate (no pause or resume route) | Admin |
+| Build Queue | list, cancel, requeue, reorder | Viewer+ read. Operator+ or Admin mutate. |
+| Eval Queue | read, reorder, cancel, re-evaluate | Viewer+ read. Operator+ for reorder and cancel. Admin for re-evaluate. |
+| Environments | CRUD | Read is membership-scoped. Mutate is Admin. |
+| Dashboard | GET `/dashboard/summary`, `/dashboard/activity` | Viewer+ |
+| Admin Users | list, create, update, delete | Admin |
 | Admin Audit | GET `/admin/audit-events` | Admin |
 | Admin OIDC | list, upsert, delete | Admin |
-| Agent/Builder | Various | Key-based |
-| WebSocket | /api/v1/commits/:commit_id/eval/stream | Session (Viewer+) |
+| Agent and Builder | Various | Signed request |
+| WebSocket | `/api/v1/commits/:commit_id/eval/stream` | Session (Viewer+) |
 
-> **Status:** The Auth column in this table is a summary. Per-endpoint role gates for Builders, Build Queue, Eval Queue, Environments, Dashboard, and Admin are corrected in [builders-queues-environments-dashboard-admin-api.md](builders-queues-environments-dashboard-admin-api.md). The Systems and Flakes rows keep the source labels; mutation roles for those resources were not checked in this note.
-
-For frontend views, see `01-frontend-views.md`.
-For system overview, see `00-system-overview.md`.
+Per-endpoint role gates for Builders, Build Queue, Eval Queue, Environments, Dashboard, and Admin are in [builders-queues-environments-dashboard-admin-api.md](builders-queues-environments-dashboard-admin-api.md). Systems role gates are in [systems-api.md](systems-api.md).
 
 ## Related concepts
 
@@ -188,32 +180,3 @@ For system overview, see `00-system-overview.md`.
 - [Agent API (machine auth) and Cache API](agent-and-cache-api.md)
 - [Adding a New API Endpoint](../operations/adding-a-backend-api-endpoint.md)
 - [Web UI navigation, shared components, responsive behavior, and structure](../ui/frontend-navigation-and-shared-patterns.md)
-
-## Migration verification notes
-
-Checked against commit `3b23d36f`: `bin/server.rs` route registration, `handlers/api/commits.rs` WebSocket handler and message types, `api/models.rs` `ApiError`, `handlers/api/rbac.rs`, and the Admin/Viewer gates listed in the Summary rows for builders, commits, environments, dashboard, and admin. Not checked: Systems and Flakes mutation roles, any paginated response shape, and `Content-Type` handling. No `verified` field is set.
-
-- Claim: success responses are wrapped in `{"data": ...}` and paginated responses use `pagination.page/per_page/total`.
-  Finding: handlers return DTOs directly; pagination fields are defined per endpoint.
-  Evidence: `handlers/api/systems.rs` `queue_system_config_inspection`; `api/models.rs`.
-  Case: documentation stale.
-- Claim: errors are `{"error": {"code": "NOT_FOUND", "message": ...}}` with upper-case codes including UNAUTHORIZED.
-  Finding: flat `ApiError {error, message, details?}` with lowercase codes; the session helpers lead to HTTP 403, while signed agent/builder verification and some handlers emit 401.
-  Evidence: `api/models.rs` `ApiError`; `handlers/api/environments.rs`; `handlers/api/rbac.rs`.
-  Case: documentation stale.
-- Claim: WebSocket `ws://.../ws/eval-stream/:commit_id` with `type: log` messages carrying `timestamp`.
-  Finding: route is `/api/v1/commits/:commit_id/eval/stream`; message types are `log`, `system_status`, `eval_status`; history replay and ping exist.
-  Evidence: `bin/server.rs`; `handlers/api/commits.rs` (`EvalLogMessage`, `SystemEvalStatus`, `handle_eval_stream`).
-  Case: documentation stale.
-- Claim: `Key Files: src/handlers/websocket.rs`.
-  Finding: the file does not exist in the current tree.
-  Evidence: `cf-server/src/handlers/` listing.
-  Case: documentation stale.
-- Claim: Base URL port 8080.
-  Finding: port is configuration; the NixOS module default is 3000.
-  Evidence: `modules/nixos/crystal-forge/default.nix`.
-  Case: documentation stale (example value only).
-- Claim: Builders/Environments/Admin summary roles.
-  Finding: corrected in the Summary table; builders list/get are Admin only.
-  Evidence: `handlers/api/builders.rs`; `handlers/api/environments.rs`; `handlers/api/admin.rs`.
-  Case: documentation stale.

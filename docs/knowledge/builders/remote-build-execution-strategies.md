@@ -10,7 +10,7 @@ tags:
 implementation_status: implemented
 generated:
   by: opencode/claude-sonnet-5-5
-  at: 2026-10-03T22:57:42-05:00
+  at: 2026-10-04T21:00:00-05:00
 verified:
   by: opencode/claude-sonnet-5-5
   at: 2026-10-04T08:29:24-05:00
@@ -119,10 +119,16 @@ not be directly reachable by builders or untrusted clients over plaintext HTTP.
 The proxy must forward one of the HTTPS indicators recognized by the server,
 such as `X-Forwarded-Proto: https`, `Forwarded: proto=https`, or
 `X-Forwarded-SSL: on`. If this option is left at its secure default of `false`,
-credential-bearing builder cache-push jobs are rejected with HTTP `426 Upgrade
-Required` before any credentials are sent.
-
-> **Status:** The `426 Upgrade Required` status does not exist in the code. When the selected destination carries credentials and the request is not verified HTTPS, `get_next_job` does not send the credentials. It fails the just-claimed job as a transient `[dispatch:cache_config]` failure through `mark_job_failed_with_retry` (retry with backoff under the automatic retry policy) and returns HTTP `404 Not Found`, which the builder treats as "no work this cycle" (`fail_claimed_job_at_dispatch` in `packages/default/crates/cf-server/src/handlers/api/builders.rs`). The invariant that credentials are never sent over an unverified connection holds. The forwarded-HTTPS indicators the server recognizes also include `X-URL-Scheme: https` (`forwarded_header_asserts_https`).
+credential-bearing builder cache-push jobs are **not dispatched**. The server
+sends no credentials. Instead, `get_next_job` fails the just-claimed job as a
+transient `[dispatch:cache_config]` failure through `mark_job_failed_with_retry`.
+The automatic retry policy then retries the job with backoff. The server answers
+the builder with HTTP `404 Not Found`, which the builder treats as "no work this
+cycle" (`fail_claimed_job_at_dispatch` in
+`packages/default/crates/cf-server/src/handlers/api/builders.rs`). The server
+never sends credentials over a connection that it has not verified as HTTPS.
+The forwarded-HTTPS indicators that the server recognizes also include
+`X-URL-Scheme: https` (`forwarded_header_asserts_https`).
 
 Verified-source evaluator contract version 1 enables Nix
 import-from-derivation (IFD) to preserve the authoritative evaluation behavior.
@@ -173,9 +179,7 @@ The server evaluates the flake, records the authoritative `.drv` path, and sends
 
 1. Builder checks whether the `.drv` recursive closure is already valid locally via `nix-store --check-validity`.
 2. If not, it requests the derivation **manifest** — the server computes `nix-store --query --requisites` from the job's *persisted* drv_path (never a builder-supplied path) and returns the sorted, deduplicated list of store paths.
-3. Builder checks local validity of each manifest path (chunked 256/batch with per-path fallback within failed chunks) and requests **only the missing subset** via `POST /derivation-archive { "paths": [...] }`.
-
-   > **Status:** The batch size and fallback described in step 3 are stale. The builder runs `nix-store --check-validity --print-invalid` in batches of 1024 paths (`VALIDITY_CHECK_BATCH`) with no per-path fallback, and splits the missing subset into delta requests whose JSON body is at most 512 KiB (`DERIVATION_DELTA_ARCHIVE_REQUEST_MAX_BYTES`) (`packages/default/crates/cf-builder/src/bin/builder.rs`).
+3. The builder checks which manifest paths are missing locally. It runs `nix-store --check-validity --print-invalid` in batches of 1024 paths (`VALIDITY_CHECK_BATCH`), with no per-path fallback. It then requests **only the missing subset** via `POST /derivation-archive { "paths": [...] }`. It splits that subset into delta requests whose JSON body is at most 512 KiB (`DERIVATION_DELTA_ARCHIVE_REQUEST_MAX_BYTES`) (`packages/default/crates/cf-builder/src/bin/builder.rs`).
 4. Server validates every requested path against the authorized manifest and streams `nix-store --export` for exactly that subset. The builder pipes the response into `nix-store --import`.
 5. If the server does not support delta endpoints (404/405), the builder transparently falls back to the full closure archive GET.
 
@@ -199,14 +203,6 @@ Scope: every behavioral claim in this concept was compared with the code at comm
   Finding: True only for the NixOS module. The module defaults `remote_execution_strategy` and `supported_execution_strategies` to `source_re_evaluate_verified` and `source_delivery_mode` to `server_bundled_archive`. The Rust config structs default to `server_derivation` for both the server strategy and the builder's supported list. The module also asserts that a colocated builder supports the server's strategy and that `source_re_evaluate_verified` requires `server_bundled_archive`.
   Evidence: `modules/nixos/crystal-forge/default.nix` (`remote_execution_strategy`, `supported_execution_strategies`, `source_delivery_mode`, assertions near the end of the file); `packages/default/crates/cf-config/src/config/server.rs` (`default_remote_build_execution_strategy`, `default_source_delivery_mode`); `packages/default/crates/cf-config/src/config/builder.rs` (`BuilderConfig::default`).
   Case: documentation stale (default described as one global value; now qualified by layer).
-- Claim: credential-bearing cache push is rejected with HTTP 426 when HTTPS is not verified.
-  Finding: The server returns HTTP 404 after failing the claimed job as a transient `cache_config` dispatch failure. The code comment in `cf-config` `trust_forwarded_builder_https` still says 426; that comment is also stale.
-  Evidence: `fail_claimed_job_at_dispatch`, `get_next_job`, `builder_https_verified_by_trusted_proxy` in `packages/default/crates/cf-server/src/handlers/api/builders.rs`.
-  Case: documentation stale.
-- Claim: delta validity checks run in 256-path chunks with per-path fallback.
-  Finding: 1024-path `--print-invalid` batches, no per-path fallback; request chunks bounded to 512 KiB of JSON.
-  Evidence: `missing_store_paths_batched`, `chunk_paths_by_json_size` in `packages/default/crates/cf-builder/src/bin/builder.rs`.
-  Case: documentation stale.
 - Claim: `none`, `local_git_worktree`, and `builder_fetch_public_inputs` are not accepted for contract version 1; only `server_bundled_archive` claims a verified-source job.
   Finding: Confirmed. `source_delivery_conflict` returns the `incompatible_source_delivery` 409 before the queue lookup. The NixOS module option accepts only `local_git_worktree` and `server_bundled_archive`.
   Evidence: `source_delivery_conflict`, `source_archive_contract_is_authorized` in `builders.rs`; `SourceInputDeliveryMode` in `cf-protocol/src/builder.rs`.

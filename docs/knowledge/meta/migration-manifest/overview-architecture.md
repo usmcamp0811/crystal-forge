@@ -135,7 +135,7 @@ tags:
   | `## How It Works` (heading) | [overview/system-overview.md#how-it-works](../../overview/system-overview.md#how-it-works) |
   | `### 1. Registering a System` | [security/authentication-and-authorization-overview.md#1-registering-a-system](../../security/authentication-and-authorization-overview.md#1-registering-a-system) |
   | `### 2. Evaluation and Build Queue Pipeline` | [workflows/evaluation-and-build-queue-pipeline.md](../../workflows/evaluation-and-build-queue-pipeline.md) |
-  | `### 3. Deploying to a System` | [deployment/deployment-flow.md#3-deploying-to-a-system](../../deployment/deployment-flow.md#3-deploying-to-a-system) |
+  | `### 3. Deploying to a System` | [deployment/deployment-flow.md#automatic-deployment](../../deployment/deployment-flow.md#automatic-deployment) |
   | `### 4. Authentication`, `### 5. Authorization (RBAC)` | [security/authentication-and-authorization-overview.md](../../security/authentication-and-authorization-overview.md) |
   | `## Development Workflow` | [operations/local-development-workflow.md#development-workflow](../../operations/local-development-workflow.md#development-workflow) |
   | `## Configuration` | [operations/server-configuration-reference.md](../../operations/server-configuration-reference.md) |
@@ -190,12 +190,12 @@ tags:
   | Source section | Destination |
   | --- | --- |
   | Title and introduction | [concepts/derivation-status-lifecycle.md](../../concepts/derivation-status-lifecycle.md) |
-  | `## Combined Lifecycle (Sequence)` | [concepts/derivation-status-lifecycle.md#combined-lifecycle-sequence](../../concepts/derivation-status-lifecycle.md#combined-lifecycle-sequence) |
-  | `## Status Table` | [concepts/derivation-status-lifecycle.md#status-table](../../concepts/derivation-status-lifecycle.md#status-table) |
+  | `## Combined Lifecycle (Sequence)` | [concepts/derivation-status-lifecycle.md#current-lifecycle](../../concepts/derivation-status-lifecycle.md#current-lifecycle) |
+  | `## Status Table` | [concepts/derivation-status-lifecycle.md#derivation-statuses](../../concepts/derivation-status-lifecycle.md#derivation-statuses) |
   | `## Processing Loops` | [architecture/derivation-processing-loops.md](../../architecture/derivation-processing-loops.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
   | `## Deployment Flow` | [deployment/deployment-flow.md](../../deployment/deployment-flow.md) |
   | `## Cache Push Process` | [caches/cache-push-process.md](../../caches/cache-push-process.md) |
-  | `## Retry Logic` | [concepts/derivation-status-lifecycle.md#retry-logic](../../concepts/derivation-status-lifecycle.md#retry-logic) |
+  | `## Retry Logic` | [concepts/derivation-status-lifecycle.md#retry-rules](../../concepts/derivation-status-lifecycle.md#retry-rules) |
   | `## Terminal States` | [concepts/derivation-status-lifecycle.md#terminal-states](../../concepts/derivation-status-lifecycle.md#terminal-states) |
   | `## Integration Points` | [architecture/derivation-processing-loops.md](../../architecture/derivation-processing-loops.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
   | `## Common Issues` | [operations/observability-and-troubleshooting.md#common-issues](../../operations/observability-and-troubleshooting.md#common-issues) |
@@ -214,7 +214,7 @@ tags:
   | `## Targeted Cargo checks`, `## Targeted Nix builds` | [architecture/backend-cargo-workspace.md#targeted-cargo-checks](../../architecture/backend-cargo-workspace.md#targeted-cargo-checks) |
   | `## Forbidden dependency boundaries` | [architecture/backend-cargo-workspace.md#forbidden-dependency-boundaries](../../architecture/backend-cargo-workspace.md#forbidden-dependency-boundaries) |
   | `## Timing evidence` | [architecture/backend-cargo-workspace.md#timing-evidence](../../architecture/backend-cargo-workspace.md#timing-evidence) |
-  | `## Known follow-ups (outside this MR)` | [architecture/backend-cargo-workspace.md#known-follow-ups-outside-this-mr](../../architecture/backend-cargo-workspace.md#known-follow-ups-outside-this-mr) |
+  | `## Known follow-ups (outside this MR)` | [architecture/backend-cargo-workspace.md#known-follow-ups](../../architecture/backend-cargo-workspace.md#known-follow-ups) |
   | `## SQLx offline metadata` | [architecture/backend-cargo-workspace.md#sqlx-offline-metadata](../../architecture/backend-cargo-workspace.md#sqlx-offline-metadata) |
 - Unmapped content: none
 
