@@ -635,6 +635,19 @@ class ReplaceExactTextTests(AuditFixture):
         code, out, err = self.audit(base)
         self.assertEqual(code, 0, f"{out}\n{err}")
 
+    def test_several_claims_in_one_block_each_occur_exactly_once(self):
+        base = self.scenario(
+            "Keep this accurate sentence. Builders poll the server.\nAlso keep this too.\n",
+            old=[self.OLD, "Also keep this."], new=[self.NEW, "Also keep this too."],
+        )
+        code, out, err = self.audit(base)
+        self.assertEqual(code, 0, f"{out}\n{err}")
+        base = self.scenario(
+            "Keep this accurate sentence. Builders poll the server.\nAlso keep this.\n",
+            old=[self.OLD, "absent"], new=[self.NEW, "x"],
+        )
+        self.assert_audit_fails(base, "found 0")
+
     def test_rest_of_the_block_is_still_compared(self):
         base = self.scenario("Keep this accurate sentence. Builders poll the server.\n")
         self.assert_audit_fails(base, "content/order/punctuation lost in H2 'Guide'")

@@ -191,13 +191,15 @@ class Adjustment(NamedTuple):
     """One hash-bound transformation of one baseline block.
 
     ``old_text`` and ``new_text`` are used only by ``replace-exact-text``.
+    Each holds one string or, for several stale claims in one block, a list of
+    strings. The two lists have equal length and pair by position.
     """
 
     digest: str
     adjustment_id: str
     transformation: str
-    old_text: str = ""
-    new_text: str = ""
+    old_text: str | list[str] = ""
+    new_text: str | list[str] = ""
 
 
 def load_source_adjustments(path: Path) -> dict[tuple[str, str], Adjustment]:
@@ -224,18 +226,25 @@ def load_source_adjustments(path: Path) -> dict[tuple[str, str], Adjustment]:
                 raise ValueError(f"{path}: duplicate source adjustment {key}")
             if not all((row[name] or "").strip() for name in required):
                 raise ValueError(f"{path}: incomplete source adjustment {key}")
-            texts = []
+            texts: list = []
             for column in ("old_text", "new_text"):
                 raw = row.get(column) or ""
                 try:
                     texts.append(json.loads(raw) if raw else "")
                 except json.JSONDecodeError as exc:
-                    raise ValueError(f"{path}: {key}: {column} is not a JSON string: {exc}") from exc
-                if raw and not isinstance(texts[-1], str):
-                    raise ValueError(f"{path}: {key}: {column} must be a JSON string")
+                    raise ValueError(f"{path}: {key}: {column} is not valid JSON: {exc}") from exc
+                value = texts[-1]
+                if raw and not (isinstance(value, str) or (
+                    isinstance(value, list) and value and all(isinstance(v, str) for v in value)
+                )):
+                    raise ValueError(f"{path}: {key}: {column} must be a JSON string or a non-empty list of strings")
             exact = row["transformation"] == "replace-exact-text"
-            if exact and not texts[0]:
-                raise ValueError(f"{path}: {key}: replace-exact-text needs a non-empty old_text")
+            if exact and (not texts[0] or any(not o for o in ([texts[0]] if isinstance(texts[0], str) else texts[0]))):
+                raise ValueError(f"{path}: {key}: replace-exact-text needs non-empty old_text")
+            if exact and isinstance(texts[0], list) != isinstance(texts[1], list):
+                raise ValueError(f"{path}: {key}: old_text and new_text must both be strings or both be lists")
+            if exact and isinstance(texts[0], list) and len(texts[0]) != len(texts[1]):
+                raise ValueError(f"{path}: {key}: old_text and new_text lists must have equal length")
             if not exact and any(texts):
                 raise ValueError(f"{path}: {key}: old_text and new_text apply only to replace-exact-text")
             adjustments[key] = Adjustment(
@@ -255,9 +264,13 @@ def apply_source_adjustment(source: str, adjustment: tuple, block: str) -> str:
     if hashlib.sha256(block.encode("utf-8")).hexdigest() != digest:
         raise ValueError("baseline block hash does not match the authorized adjustment")
     if transformation == "replace-exact-text":
-        if block.count(old_text) != 1:
-            raise ValueError(f"expected exactly one occurrence of the corrected claim, found {block.count(old_text)}")
-        return block.replace(old_text, new_text)
+        olds = [old_text] if isinstance(old_text, str) else old_text
+        news = [new_text] if isinstance(new_text, str) else new_text
+        for old, new in zip(olds, news, strict=True):
+            if block.count(old) != 1:
+                raise ValueError(f"expected exactly one occurrence of the corrected claim, found {block.count(old)}")
+            block = block.replace(old, new)
+        return block
     if transformation != "normalize-absolute-web-ui-path" or source != "docs/design/FIGMA_CLAUDE_WORKFLOW.md":
         if transformation == "normalize-contributing-test-routes" and source == "CONTRIBUTING.md":
             replacements = (
