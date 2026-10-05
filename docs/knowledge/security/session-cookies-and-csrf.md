@@ -15,7 +15,7 @@ sources:
 ---
 # Auth Session Security Strategy
 
-> **Status:** implemented. Checked against `packages/default/crates/cf-server/src/auth/session.rs` (cookie names, attributes, `x-csrf-token`) and `handlers/api/auth_session.rs` (8 hour default, `CRYSTAL_FORGE_SESSION_TTL_SECONDS`). The code also clamps the override to a range of 60 seconds to 30 days and falls back to the default for invalid values. The text below does not state that clamp.
+> **Status:** implemented. Checked against `packages/default/crates/cf-server/src/auth/session.rs` (cookie names, attributes, `x-csrf-token`) and `handlers/api/auth_session.rs` (8 hour default and TTL override). The override is clamped to 60 seconds through 30 days; invalid values use the default.
 
 Crystal Forge uses server-authoritative sessions for browser authentication.
 
@@ -29,7 +29,9 @@ Crystal Forge uses server-authoritative sessions for browser authentication.
 ## Session Lifecycle
 
 - Created after successful OIDC callback or local username/password login
-- TTL defaults to 8h and can be overridden with `CRYSTAL_FORGE_SESSION_TTL_SECONDS`
+- TTL defaults to 8h and can be overridden with `CRYSTAL_FORGE_SESSION_TTL_SECONDS`.
+  The server clamps valid overrides to 60 seconds through 30 days and uses the
+  default for an invalid value.
 - Expiry is enforced by `expires_at` in `user_sessions`
 - Logout invalidates the server-side session by setting `invalidated_at`
 

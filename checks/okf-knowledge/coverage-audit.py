@@ -1,153 +1,498 @@
 #!/usr/bin/env python3
-"""Line-level content coverage audit for migrated documents.
+"""Validate immutable-baseline source blocks against migration mappings.
 
-For each migrated source document, reads the original from Git history and
-checks that every normalized, non-trivial line still occurs somewhere in the
-union of its destination files. The check ignores heading levels, link
-targets, blockquote markers, whitespace, code-fence markers, rules, and table
-separator rows, because migration legitimately changes those.
-
-This tool needs Git history, so it is a maintenance command. It is not part of
-the hermetic flake check. Run it from the repository root:
-
-    coverage-audit.py --base <commit> --source docs/x.md --dest a.md b.md
-    coverage-audit.py --base <commit> --manifest
-
-`--manifest` audits every moved, split, merged, or replaced source listed in
-docs/knowledge/meta/migration-manifest/*.md. A source passes when 100 percent
-of its normalized lines are found. Lines that are intentionally absent must be
-listed in docs/knowledge/meta/migration-manifest/coverage-exceptions.txt as
-`<source path>\t<normalized line>` with a reason on the following `#` line.
+The baseline is read from Git objects, never from the working tree. Every
+baseline Markdown document must have one manifest row or one narrow scope
+classification. Every H2 source block must then have an explicit destination
+entry in that row's detailed ``Source inventory`` section. Prose matching is
+ordered and multiplicity-aware; fenced blocks and Markdown tables retain their
+punctuation and content.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
+import fnmatch
+import hashlib
+import diagram_scan
 import re
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
-LINK_TARGET = re.compile(r"\]\([^)]*\)")
-FENCE_ONLY = re.compile(r"^(```|~~~)[\w-]*$")
-RULE = re.compile(r"^([-*_]\s*){3,}$")
-TABLE_SEP = re.compile(r"^\|?[\s:|-]+\|?$")
+DOC_SUFFIXES = {".md", ".mdx", ".rst", ".adoc", ".asciidoc"}
+HEADING = re.compile(r"^##\s+(.+?)\s*#*\s*$")
+LINK = re.compile(r"\]\(([^)\s]+)\)")
+FENCE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 
 
-def normalize(line: str) -> str | None:
-    text = LINK_TARGET.sub("]()", line)
-    text = re.sub(r"^[\s#>]+", "", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    if not text or FENCE_ONLY.match(text) or RULE.match(text) or TABLE_SEP.match(text):
-        return None
-    return text
+def git(*args: str, binary: bool = False):
+    return subprocess.run(["git", *args], check=True, capture_output=True,
+                          text=not binary).stdout
 
 
-def normalized_lines(text: str) -> list[str]:
-    out = []
-    for line in text.splitlines():
-        value = normalize(line)
-        if value is not None:
-            out.append(value)
-    return out
+def require_revision(revision: str) -> None:
+    git("cat-file", "-e", f"{revision}^{{commit}}")
 
 
-def strip_frontmatter(text: str) -> str:
-    if text.startswith("---\n"):
-        end = text.find("\n---\n", 4)
-        if end != -1:
-            return text[end + 5 :]
-    return text
+def baseline_paths(revision: str) -> list[str]:
+    raw = git("ls-tree", "-r", "--name-only", "-z", revision, binary=True)
+    return [p.decode("utf-8", "surrogateescape") for p in raw.split(b"\0") if p
+            and Path(p.decode("utf-8", "surrogateescape")).suffix.lower() in DOC_SUFFIXES]
 
 
-def git_show(base: str, path: str) -> str:
-    return subprocess.run(["git", "show", f"{base}:{path}"], check=True,
-                          capture_output=True, text=True).stdout
+def baseline_text(revision: str, path: str) -> str:
+    return git("show", f"{revision}:{path}")
 
 
-def audit(base: str, source: str, dests: list[Path], exceptions: set[str]) -> tuple[int, list[str]]:
-    src_lines = normalized_lines(strip_frontmatter(git_show(base, source)))
-    dest_set: set[str] = set()
-    for dest in dests:
-        dest_set.update(normalized_lines(strip_frontmatter(dest.read_text(encoding="utf-8"))))
-    missing = [ln for ln in src_lines if ln not in dest_set and ln not in exceptions]
-    return len(src_lines), missing
-
-
-def load_exceptions(path: Path) -> dict[str, set[str]]:
-    result: dict[str, set[str]] = {}
-    if not path.exists():
-        return result
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line or line.startswith("#"):
-            continue
-        source, _, text = line.partition("\t")
-        result.setdefault(source, set()).add(text)
+def split_blocks(text: str) -> list[tuple[str, str]]:
+    """Return H2 blocks including their heading, preserving source order."""
+    lines = text.splitlines(keepends=True)
+    starts = [i for i, line in enumerate(lines) if HEADING.match(line.rstrip("\r\n"))]
+    result = []
+    for n, start in enumerate(starts):
+        heading = HEADING.match(lines[start].rstrip("\r\n")).group(1)
+        end = starts[n + 1] if n + 1 < len(starts) else len(lines)
+        result.append((heading, "".join(lines[start:end])))
     return result
 
 
-def manifest_sources(bundle: Path):
-    manifest_dir = bundle / "meta" / "migration-manifest"
-    for group in sorted(manifest_dir.glob("*.md")):
-        if group.name in {"index.md", "log.md"}:
+def tokenize_prose(text: str) -> list[str]:
+    """Preserve punctuation and token order while permitting whitespace reflow."""
+    return re.findall(r"[^\W_]+(?:['’][^\W_]+)*|[^\s\w]", text, flags=re.UNICODE)
+
+
+def protected_blocks(text: str) -> list[str]:
+    """Return code fences and table rows as exact, ordered protected content."""
+    lines = text.splitlines()
+    found: list[str] = []
+    in_fence = False
+    marker = ""
+    table: list[str] = []
+    for line in lines:
+        fm = FENCE.match(line)
+        if fm:
+            if not in_fence:
+                in_fence, marker = True, fm.group(1)[0]
+                found.append("FENCE\n")
+            else:
+                in_fence = False
+                found.append("FENCE_END\n")
             continue
-        in_table = False
-        for line in group.read_text(encoding="utf-8").splitlines():
-            if re.match(r"^\|\s*Original\s*\|", line):
-                in_table = True
+        if in_fence:
+            found.append(line + "\n")
+            continue
+        if line.lstrip().startswith("|"):
+            found.append("TABLE:" + line + "\n")
+    return found
+
+
+def preserved(source: str, destinations: list[str]) -> bool:
+    joined = "\n".join(destinations)
+    src_tokens = tokenize_prose(source)
+    dest_tokens = tokenize_prose(joined)
+    cursor = 0
+    for token in src_tokens:
+        try:
+            cursor = dest_tokens.index(token, cursor) + 1
+        except ValueError:
+            return False
+    # Protected syntax is compared byte-for-byte, in order and with repeats.
+    protected = protected_blocks(source)
+    available = protected_blocks(joined)
+    cursor = 0
+    for block in protected:
+        try:
+            cursor = available.index(block, cursor) + 1
+        except ValueError:
+            return False
+    return True
+
+
+def load_source_adjustments(path: Path) -> dict[tuple[str, str], tuple[str, str, str]]:
+    """Loads exact, hash-bound transformations authorized by cleanup records."""
+    adjustments: dict[tuple[str, str], tuple[str, str, str]] = {}
+    with path.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        required = {
+            "source_path", "source_heading", "baseline_block_sha256",
+            "adjustment_id", "transformation", "reason",
+        }
+        if not reader.fieldnames or not required.issubset(reader.fieldnames):
+            raise ValueError(f"{path}: missing source-adjustment columns")
+        for row in reader:
+            key = (row["source_path"], row["source_heading"])
+            if key in adjustments:
+                raise ValueError(f"{path}: duplicate source adjustment {key}")
+            if not all(row[name].strip() for name in required):
+                raise ValueError(f"{path}: incomplete source adjustment {key}")
+            adjustments[key] = (
+                row["baseline_block_sha256"],
+                row["adjustment_id"],
+                row["transformation"],
+            )
+    return adjustments
+
+
+def apply_source_adjustment(source: str, adjustment: tuple[str, str, str], block: str) -> str:
+    """Applies one named transformation to its exact baseline block only."""
+    digest, _adjustment_id, transformation = adjustment
+    if hashlib.sha256(block.encode("utf-8")).hexdigest() != digest:
+        raise ValueError("baseline block hash does not match the authorized adjustment")
+    if transformation != "normalize-absolute-web-ui-path" or source != "docs/design/FIGMA_CLAUDE_WORKFLOW.md":
+        if transformation == "normalize-contributing-test-routes" and source == "CONTRIBUTING.md":
+            replacements = (
+                ("packages/cf-test-modules", "packages/cf-test-suite"),
+                ("nix build .#checks.x86_64-linux.database",
+                 "nix run .#cf-test-suite.runTests -- -vvv -m database"),
+                ("- Server tests: `nix build .#checks.x86_64-linux.server`",
+                 "- Server regression tests: `nix build .#checks.x86_64-linux.server-regressions`"),
+                ("- Builder tests: `nix build .#checks.x86_64-linux.builder`",
+                 "- Integration VM: `nix build .#checks.x86_64-linux.integration`"),
+                ("- Cache tests: `nix build .#checks.x86_64-linux.s3-cache` or `.#checks.x86_64-linux.attic-cache`",
+                 "- Python server, builder, cache, and database tests: `nix run .#cf-test-suite.runTests -- -vvv`"),
+                ("- Full test suite: `nix flake check`",
+                 "- Full flake checks: `nix flake check`"),
+                ("See the [Test Plan](docs/test_plan.md) for detailed testing guidance.",
+                 "See the [testing guide](docs/knowledge/testing/test-plan.md) and\n"
+                 "[flake-check catalog](docs/knowledge/testing/flake-checks.md) for current\n"
+                 "testing guidance."),
+            )
+            output = block
+            for old, new in replacements:
+                if old not in output:
+                    raise ValueError(f"expected contribution guidance text was not found: {old[:60]!r}")
+                output = output.replace(old, new)
+            return output
+        if transformation == "normalize-contributing-doc-path" and source == "CONTRIBUTING.md":
+            old = "docs/frontend-component-standards.md"
+            if block.count(old) != 1:
+                raise ValueError("expected one obsolete frontend standards path")
+            return block.replace(old, "docs/knowledge/ui/component-isolation-standards.md")
+        raise ValueError(f"unsupported source adjustment {transformation!r} for {source}")
+    normalized, count = re.subn(
+        r"(?m)^(- Code: )`/home/[^`\n]+/packages/web-ui/`$",
+        r"\1`packages/web-ui/`",
+        block,
+    )
+    if count != 1:
+        raise ValueError("expected exactly one absolute web-UI source path")
+    return normalized
+
+
+def remove_converted_diagrams(
+    source: str,
+    heading: str,
+    block: str,
+    destinations: list[tuple[Path, str]],
+    rows: list[dict[str, str]],
+) -> tuple[str, list[str]]:
+    """Removes only source figures with a matching semantic Mermaid record.
+
+    The diagram ledger MUST account for every structural diagram removed from
+    preservation comparison. Remaining prose, code, tables, and ordering stay
+    subject to the normal source-block comparison.
+    """
+    matching = [
+        row for row in rows
+        if row["source_path"] == source
+    ]
+    if not matching:
+        return block, [text for _path, text in destinations]
+    source_sections = {heading}
+    source_sections.update(
+        match.group(1).strip()
+        for line in block.splitlines()
+        if (match := re.match(r"^\s*#{1,6}\s+(.+?)\s*#*\s*$", line))
+    )
+    matching = [row for row in matching if row["source_heading"] in source_sections]
+    if not matching:
+        return block, [text for _path, text in destinations]
+    candidates = [
+        item for item in diagram_scan.scan_text(source, block)
+        if item.heading in source_sections and item.context in {"fenced code block", "unfenced figure"}
+    ]
+    if len(candidates) < len(matching):
+        # Some reviewed source diagrams are text-only priority or hierarchy
+        # blocks. The explicit ledger row classifies a text fence as a diagram
+        # when scanner shape heuristics alone cannot do so.
+        lines = block.splitlines()
+        fenced_text: list[diagram_scan.Candidate] = []
+        i = 0
+        active_heading = heading
+        while i < len(lines):
+            heading_match = re.match(r"^\s*#{1,6}\s+(.+?)\s*#*\s*$", lines[i])
+            if heading_match:
+                active_heading = heading_match.group(1).strip()
+            opened = FENCE.match(lines[i])
+            if not opened:
+                i += 1
                 continue
-            if not in_table:
+            marker = opened.group(1)
+            language = opened.group(2).strip().split(maxsplit=1)[0].lower() if opened.group(2).strip() else ""
+            j = i + 1
+            while j < len(lines) and not re.match(rf"^\s*{re.escape(marker[0])}{{{len(marker)},}}\s*$", lines[j]):
+                j += 1
+            if language in {"", "text", "plaintext", "ascii"} and active_heading in source_sections:
+                fenced_text.append(diagram_scan.Candidate(
+                    source, active_heading, i + 1, min(j + 1, len(lines)),
+                    "\n".join(lines[i + 1:j]), "fenced source block", True, language
+                ))
+            i = min(j + 1, len(lines))
+        missing_count = len(matching) - len(candidates)
+        if len(fenced_text) == missing_count:
+            candidates.extend(fenced_text)
+    if len(candidates) != len(matching):
+        raise ValueError(
+            f"diagram ledger has {len(matching)} rows for {len(candidates)} structural source figure(s)"
+        )
+
+    lines = block.splitlines(keepends=True)
+    remove: set[int] = set()
+    for item in candidates:
+        remove.update(range(item.start - 1, min(item.end, len(lines))))
+    source_without_figures = "".join(line for index, line in enumerate(lines) if index not in remove)
+
+    remaining_destinations = [text for _path, text in destinations]
+    used_destination_paths = {path for path, _text in destinations}
+    errors: list[str] = []
+    for row in matching:
+        target = Path(row["destination_path"])
+        if target not in used_destination_paths:
+            errors.append(f"diagram ledger destination {target} is not linked by the source-block map")
+            continue
+        if not row["source_entities_fields"].strip() or not row["source_relationships_order"].strip() or not row["semantic_review"].strip():
+            errors.append(f"diagram ledger row {row['mermaid_diagram_id']} lacks semantic review data")
+            continue
+        idx = next(i for i, (path, _text) in enumerate(destinations) if path == target)
+        remaining_destinations[idx] = remove_mermaid_block(
+            remaining_destinations[idx], row["mermaid_diagram_id"]
+        )
+    return source_without_figures, remaining_destinations
+
+
+def remove_mermaid_block(text: str, diagram_id: str) -> str:
+    """Removes one Mermaid fence only when its exact diagram id matches."""
+    lines = text.splitlines(keepends=True)
+    output: list[str] = []
+    i = 0
+    removed = False
+    while i < len(lines):
+        opened = FENCE.match(lines[i])
+        if not opened or opened.group(2).strip().split(maxsplit=1)[0:1] != ["mermaid"]:
+            output.append(lines[i])
+            i += 1
+            continue
+        marker = opened.group(1)
+        j = i + 1
+        while j < len(lines) and not re.match(rf"^\s*{re.escape(marker[0])}{{{len(marker)},}}\s*$", lines[j]):
+            j += 1
+        body = "".join(lines[i + 1:j])
+        if re.search(rf"^\s*%%\s*diagram-id:\s*{re.escape(diagram_id)}\s*$", body, re.M):
+            if removed:
+                raise ValueError(f"duplicate Mermaid diagram id {diagram_id}")
+            removed = True
+        else:
+            output.extend(lines[i:min(j + 1, len(lines))])
+        i = min(j + 1, len(lines))
+    if not removed:
+        raise ValueError(f"Mermaid diagram id {diagram_id} was not found in destination")
+    return "".join(output)
+
+
+def load_diagram_rows(root: Path) -> list[dict[str, str]]:
+    """Loads semantic conversion records for baseline source diagrams."""
+    rows = []
+    for path in sorted((root / "checks/okf-knowledge/diagram-audit").glob("*.tsv")):
+        if path.name == "exceptions.tsv":
+            continue
+        with path.open(encoding="utf-8", newline="") as handle:
+            rows.extend(csv.DictReader(handle, delimiter="\t"))
+    return rows
+
+
+def parse_manifest(bundle: Path) -> dict[str, tuple[Path, str, str, list[tuple[str, str]]]]:
+    rows = {}
+    manifest_dir = bundle / "meta" / "migration-manifest"
+    for manifest in sorted(manifest_dir.glob("*.md")):
+        if manifest.name in {"index.md", "log.md"}:
+            continue
+        lines = manifest.read_text(encoding="utf-8").splitlines()
+        source = None
+        for i, line in enumerate(lines):
+            if not re.match(r"^\|\s*Original\s*\|", line):
                 continue
-            if not line.startswith("|"):
-                in_table = False
+            for row in lines[i + 2:]:
+                if not row.startswith("|"):
+                    break
+                cells = [c.strip() for c in re.split(r"(?<!\\)\|", row.strip().strip("|"))]
+                if len(cells) != 4:
+                    raise ValueError(f"{manifest}: malformed source row")
+                path, dest, action, coverage = cells
+                path = path.strip("`")
+                if path in rows:
+                    raise ValueError(f"duplicate manifest source {path}")
+                if coverage != "complete":
+                    raise ValueError(f"{manifest}: {path} coverage is not complete")
+                rows[path] = (manifest, dest, action, [])
+            break
+
+        current_source = None
+        in_detail = False
+        for line in lines:
+            source_heading = re.match(r"^###\s+`([^`]+)`", line)
+            if source_heading:
+                current_source = source_heading.group(1)
                 continue
-            if re.match(r"^\|[\s:|-]+\|$", line):
+            if line.startswith("## Source inventory"):
+                in_detail = True
                 continue
-            cells = [c.strip() for c in line.strip().strip("|").split("|")]
-            if len(cells) != 4:
+            if in_detail and current_source in rows:
+                match = re.match(
+                    r"\s*\|\s*`##\s+(.+?)`(?:\s*\([^|]*\))?\s*\|\s*(.+?)\s*\|",
+                    line,
+                )
+                if match:
+                    rows[current_source][3].append(match.groups())
+    return rows
+
+
+def audit(base: str, bundle: Path, scope_file: Path, root: Path) -> int:
+    require_revision(base)
+    rows = parse_manifest(bundle)
+    diagram_rows = load_diagram_rows(root)
+    adjustment_file = root / "checks/okf-knowledge/source-adjustments.tsv"
+    adjustments = load_source_adjustments(adjustment_file) if adjustment_file.is_file() else {}
+    cleanup_record = bundle / "meta/cleanup-record.md"
+    cleanup_text = cleanup_record.read_text(encoding="utf-8") if cleanup_record.is_file() else ""
+    used_adjustments: set[tuple[str, str]] = set()
+    baseline = baseline_paths(base)
+    errors: list[str] = []
+    scoped_patterns = []
+    for line_no, line in enumerate(scope_file.read_text(encoding="utf-8").splitlines(), 1):
+        if not line or line.startswith("#"):
+            continue
+        cells = line.split("\t")
+        if len(cells) != 3 or not all(cells):
+            errors.append(f"{scope_file}:{line_no}: expected path pattern, classification, reason")
+            continue
+        scoped_patterns.append(cells[0])
+    for source in baseline:
+        if source not in rows:
+            matches = [pattern for pattern in scoped_patterns if fnmatch.fnmatchcase(source, pattern)]
+            if len(matches) != 1:
+                errors.append(f"{source}: baseline Markdown document has no migration row or exactly one narrow scope classification")
+            continue
+        manifest, dest_cell, action, detail = rows[source]
+        baseline_bytes = git("show", f"{base}:{source}", binary=True)
+        current_path = root / source
+        identical_retained = action == "retained" and current_path.is_file() and current_path.read_bytes() == baseline_bytes
+        if action == "retained" and not current_path.is_file():
+            errors.append(f"{source}: retained source is missing from the current tree")
+            continue
+        if identical_retained:
+            # Retained documents have not changed, so the immutable Git blob is
+            # itself the complete preservation proof. Requiring an H2 map here
+            # would make unchanged root entrypoints and check READMEs fail.
+            continue
+        if action == "excluded":
+            matches = [pattern for pattern in scoped_patterns if fnmatch.fnmatchcase(source, pattern)]
+            if len(matches) != 1:
+                errors.append(f"{source}: excluded disposition is not supported by exactly one scope rule")
+            continue
+        links = LINK.findall(dest_cell)
+        destinations = []
+        for link in links:
+            target, _, fragment = link.partition("#")
+            if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", target):
                 continue
-            original, dest, action, _cov = cells
-            if action not in {"moved", "split", "merged", "replaced"}:
+            path = (manifest.parent / target).resolve()
+            if not path.is_file():
+                errors.append(f"{source}: missing destination {target}")
                 continue
-            targets = [(group.parent / t.split("#")[0]).resolve()
-                       for t in re.findall(r"\]\(([^)\s]+)\)", dest)
-                       if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", t)]
-            yield original.strip("`"), action, targets
+            destinations.append(path.read_text(encoding="utf-8"))
+
+        blocks = split_blocks(baseline_text(base, source))
+        mapped = [heading for heading, _dest in detail]
+        retained_blocks: dict[str, str] = {}
+        if action == "retained" and current_path.is_file():
+            current_blocks = split_blocks(current_path.read_text(encoding="utf-8"))
+            retained_blocks = {heading: text for heading, text in current_blocks}
+            if len(retained_blocks) != len(current_blocks):
+                errors.append(f"{source}: retained source has duplicate H2 headings; cannot map blocks by heading")
+        if action != "retained" and Counter(mapped) != Counter(heading for heading, _block in blocks):
+            errors.append(f"{source}: detailed source map does not map each H2 block exactly once")
+        for heading, block in blocks:
+            if action == "retained" and heading in retained_blocks:
+                mapped_destinations = [(Path(source), retained_blocks[heading])]
+            elif mapped.count(heading) != 1:
+                errors.append(f"{source}: unmapped H2 source block {heading!r}")
+                continue
+            else:
+                mapped_destinations = []
+            adjustment_key = (source, heading)
+            if adjustment_key in adjustments:
+                digest, adjustment_id, _transformation = adjustments[adjustment_key]
+                if f"| {adjustment_id} |" not in cleanup_text:
+                    errors.append(f"{source}: adjustment {adjustment_id} is not recorded in cleanup-record.md")
+                    continue
+                try:
+                    block = apply_source_adjustment(source, adjustments[adjustment_key], block)
+                except ValueError as exc:
+                    errors.append(f"{source}: {heading!r}: {exc}")
+                    continue
+                used_adjustments.add(adjustment_key)
+            if not mapped_destinations:
+                map_cell = next(cell for name, cell in detail if name == heading)
+                for link in LINK.findall(map_cell):
+                    target, _, anchor = link.partition("#")
+                    if not anchor:
+                        errors.append(f"{source}: H2 {heading!r} mapping lacks an exact destination anchor")
+                    resolved = (manifest.parent / target).resolve()
+                    if resolved.is_file():
+                        mapped_destinations.append((resolved.relative_to(root), resolved.read_text(encoding="utf-8")))
+                    else:
+                        errors.append(f"{source}: H2 {heading!r} destination is missing: {target}")
+            if not mapped_destinations:
+                errors.append(f"{source}: H2 {heading!r} has no resolvable destination")
+            elif not identical_retained:
+                try:
+                    block, destinations_without_diagrams = remove_converted_diagrams(
+                        source, heading, block, mapped_destinations, diagram_rows
+                    )
+                except ValueError as exc:
+                    errors.append(f"{source}: H2 {heading!r}: {exc}")
+                    continue
+                if not preserved(block, destinations_without_diagrams):
+                    errors.append(f"{source}: content/order/punctuation lost in H2 {heading!r}")
+
+    for key in adjustments.keys() - used_adjustments:
+        errors.append(f"{key[0]}: stale source adjustment for H2 {key[1]!r}")
+
+    if errors:
+        print("\n".join(errors))
+        print(f"FAILED: {len(errors)} source-block preservation error(s)", file=sys.stderr)
+        return 1
+    print(f"OK: {len(baseline)} baseline Markdown documents checked against source-block maps")
+    return 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--base", required=True, help="commit that holds the original documents")
-    parser.add_argument("--source")
-    parser.add_argument("--dest", nargs="*", default=[])
-    parser.add_argument("--manifest", action="store_true")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--base", required=True)
     parser.add_argument("--bundle", default="docs/knowledge")
-    parser.add_argument("--show", type=int, default=15, help="max missing lines to print per source")
+    parser.add_argument("--scope", default="checks/okf-knowledge/source-scope.tsv")
+    parser.add_argument("--repo-root", default=".")
     args = parser.parse_args()
-
-    bundle = Path(args.bundle).resolve()
-    exceptions = load_exceptions(bundle / "meta" / "migration-manifest" / "coverage-exceptions.txt")
-    failed = 0
-    if args.manifest:
-        rows = list(manifest_sources(bundle))
-        for source, action, dests in rows:
-            total, missing = audit(args.base, source, dests, exceptions.get(source, set()))
-            pct = 100.0 * (total - len(missing)) / total if total else 100.0
-            print(f"{pct:6.2f}%  {len(missing):4d} missing of {total:5d}  {action:8s} {source}")
-            for line in missing[: args.show]:
-                print(f"           - {line[:140]}")
-            failed += 1 if missing else 0
-        print(f"\n{len(rows)} source(s) audited, {failed} with missing lines")
-    else:
-        total, missing = audit(args.base, args.source, [Path(d).resolve() for d in args.dest],
-                               exceptions.get(args.source, set()))
-        pct = 100.0 * (total - len(missing)) / total if total else 100.0
-        print(f"{pct:.2f}% covered, {len(missing)} missing of {total} normalized lines")
-        for line in missing[: args.show]:
-            print(f"  - {line[:160]}")
-        failed = 1 if missing else 0
-    return 1 if failed else 0
+    root = Path(args.repo_root).resolve()
+    try:
+        return audit(args.base, root / args.bundle, root / args.scope, root)
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        print(f"coverage audit error: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

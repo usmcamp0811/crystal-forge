@@ -33,13 +33,15 @@ The system consists of three layers:
 
 ### File Structure
 
-```
-modules/nixos/stig/
-├── default.nix           # Defines tracking options and imports all controls
-├── banner/
-│   └── default.nix       # Uses mkStigModule to define banner control
-└── account_expiry/
-    └── default.nix       # Uses mkStigModule to define account_expiry control
+```mermaid
+%% diagram-id: core-stig-modules-tree
+flowchart TD
+    root["modules/nixos/stig/"]
+    root --> default["default.nix — Defines tracking options and imports all controls"]
+    root --> banner["banner/"]
+    banner --> banner_default["default.nix — Uses mkStigModule to define banner control"]
+    root --> expiry["account_expiry/"]
+    expiry --> expiry_default["default.nix — Uses mkStigModule to define account_expiry control"]
 ```
 
 ## How It Works

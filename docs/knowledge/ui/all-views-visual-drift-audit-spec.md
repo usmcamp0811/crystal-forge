@@ -14,7 +14,7 @@ generated:
   at: 2026-10-03T22:54:52-05:00
 sources:
   - id: s1
-    resource: "Crystal Forge repository file backlog/docs/doc-19%20-%20Spec-All-views-visual-drift-audit-against-updated-design-example.md at commit 3b23d36f"
+    resource: "Crystal Forge repository file backlog/docs/specs/doc-19%20-%20Spec-All-views-visual-drift-audit-against-updated-design-example.md at commit 3b23d36f"
     title: "Spec: All-views visual drift audit against updated design example"
 ---
 # All-views visual drift audit specification

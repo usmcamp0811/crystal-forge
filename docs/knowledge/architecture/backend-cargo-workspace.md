@@ -37,17 +37,19 @@ by Cargo and independently buildable by Nix.
 
 ## Workspace layout
 
-```
-packages/default/
-├── Cargo.toml          # Virtual workspace manifest
-├── Cargo.lock          # Shared workspace lock file
-└── crates/
-    ├── cf-protocol/    # Wire protocol types (no server deps)
-    ├── cf-config/      # Configuration loading (no DB)
-    ├── cf-agent/       # Deployment agent
-    ├── cf-builder/     # Remote build worker
-    ├── cf-keygen/      # Key generation utility
-    └── cf-server/      # HTTP server, queries, migrations, tasks
+```mermaid
+%% diagram-id: core-backend-workspace-tree
+flowchart TD
+    root["packages/default/"]
+    root --> cargo["Cargo.toml — Virtual workspace manifest"]
+    root --> lock["Cargo.lock — Shared workspace lock file"]
+    root --> crates["crates/"]
+    crates --> protocol["cf-protocol/ — Wire protocol types (no server deps)"]
+    crates --> config["cf-config/ — Configuration loading (no DB)"]
+    crates --> agent["cf-agent/ — Deployment agent"]
+    crates --> builder["cf-builder/ — Remote build worker"]
+    crates --> keygen["cf-keygen/ — Key generation utility"]
+    crates --> server["cf-server/ — HTTP server, queries, migrations, tasks"]
 ```
 
 ## Crate boundaries
@@ -63,14 +65,26 @@ packages/default/
 
 ### Dependency direction
 
+```mermaid
+%% diagram-id: core-backend-workspace-dependencies
+flowchart LR
+    keygen["cf-keygen (no local deps)"]
+    protocol["cf-protocol (no local deps)"]
+    config["cf-config"]
+    agent["cf-agent"]
+    builder["cf-builder"]
+    server["cf-server"]
+    config --> protocol
+    agent --> config
+    agent --> protocol
+    builder --> config
+    builder --> protocol
+    server --> config
+    server --> protocol
 ```
-cf-keygen     (no local deps)
-cf-protocol   (no local deps)
-cf-config  ── cf-protocol
-cf-agent   ── cf-config, cf-protocol
-cf-builder ── cf-config, cf-protocol
-cf-server  ── cf-config, cf-protocol (cf-agent and cf-builder are separate)
-```
+
+`cf-keygen` and `cf-protocol` have no local crate dependencies. Their labels
+record that fact; the arrows represent only local dependency edges.
 
 `cf-server` does NOT depend on `cf-agent` or `cf-builder`. The Nix `server`
 output joins the server, builder, and keygen binaries, but each is built from

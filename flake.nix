@@ -77,6 +77,19 @@
           inherit inputs;
         };
 
+        # Manual full SVG rendering runs outside a build sandbox. The blocking
+        # okf-knowledge check uses the same pinned Mermaid parser without
+        # launching Chromium.
+        packages.okf-mermaid-renderer = channels.nixpkgs.writeShellApplication {
+          name = "okf-mermaid-renderer";
+          runtimeInputs = [ channels.nixpkgs.python3 channels.nixpkgs.mermaid-cli ];
+          text = ''
+            exec python3 ${./checks/okf-knowledge/render_mermaid.py} \
+              --repo-root "$PWD" --renderer mmdc "$@"
+          '';
+          meta.mainProgram = "okf-mermaid-renderer";
+        };
+
         # nix develop .#devenv (TASK-462.1): additive, alongside the
         # existing `devShells.default` (shells/default/default.nix), which
         # this output does not modify, replace, or remove. This shell only

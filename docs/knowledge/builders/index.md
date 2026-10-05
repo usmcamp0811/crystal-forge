@@ -2,7 +2,7 @@
 
 * [Builder network flows by execution strategy](builder-network-flows-by-strategy.md) - Shows the network sequence diagrams for the builder job lifecycle and for ServerDerivation, SourceReEvaluateVerified with ServerBundledArchive, and LocalGitWorktree, including the delta derivation protocol security properties.
 * [Builder trust boundaries and component definitions](builder-trust-boundaries-and-components.md) - Defines the purpose, trust levels, and component definitions (server, builder, agent) that bound what a Crystal Forge remote builder can reach, hold, and compromise; open it to approve or review builder network and credential exposure.
-* [Multi-Builder API architecture, scheduling, and environment assignment](builder-architecture-and-job-scheduling.md) - Describes the multi-builder architecture, environment assignment (wildcard and specific builders), heartbeat and offline detection, query performance, the migration from direct database access, and future enhancements.
+* [Multi-Builder API architecture, scheduling, and environment assignment](builder-architecture-and-job-scheduling.md) - Describes the API-only builder architecture: signed and session-checked requests, environment assignment (wildcard and specific builders), the atomic claim query and its ordering, heartbeat-based offline detection and job recovery, indexes, and which planned enhancements are not implemented.
 
 # Design Specification
 

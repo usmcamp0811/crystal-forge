@@ -94,14 +94,16 @@ Crystal Forge uses Tailwind's 4px base unit. These are the approved spacing valu
 
 Layouts follow a strict nesting hierarchy:
 
-```
-Page (p-8)
-└── Section (gap-6 between sections)
-    ├── Section Header (mb-4)
-    └── Content Grid (gap-4)
-        └── Card (p-6, rounded-xl)
-            ├── Card Header (mb-4)
-            └── Card Body (gap-3 between items)
+```mermaid
+%% diagram-id: ui-container-hierarchy
+flowchart TB
+  page[Page: p-8]
+  page --> section[Section: gap-6 between sections]
+  section --> header[Section Header: mb-4]
+  section --> grid[Content Grid: gap-4]
+  grid --> card[Card: p-6, rounded-xl]
+  card --> card_header[Card Header: mb-4]
+  card --> body[Card Body: gap-3 between items]
 ```
 
 **RULE:** Never skip levels. A Card must be inside a Section/Grid, never directly in Page.

@@ -1,7 +1,7 @@
 ---
 type: Testing Guide
 title: Crystal Forge flake checks catalog
-description: Catalogs each flake check that has a README (integration, oidc-auth, web-ui, server-regressions, schema and metadata checks, and the dev-script checks) plus the cf-test-suite scenario runner, saying what each verifies, how to run it, and where its README lives.
+description: "Catalogs the current Nix flake-check matrix, standalone Web UI job, documentation and schema checks, and the cf-test-suite scenario runner; states what each verifies, how to run it, and where its README lives."
 tags:
   - crystal-forge
   - testing
@@ -84,6 +84,7 @@ says otherwise. For the web UI check in depth, see the
 | `web-ui-test-runner` | No | The `web-ui-test` wrapper script logic | [README](../../../checks/web-ui-test-runner/README.md) |
 | `ui-screenshots` | No | Fixture-driven screenshots of every view in two themes | [README](../../../checks/ui-screenshots/README.md) |
 | `server-regressions` | No | PostgreSQL-backed Rust regression tests and a migration upgrade rehearsal | [README](../../../checks/server-regressions/README.md) |
+| `okf-knowledge` | No | OKF structural validation, exact diagram audit, and pinned Mermaid rendering | — |
 | `oscal-export` | No | OSCAL 1.1.2 schema validation of fixture output | [README](../../../checks/oscal-export/README.md) |
 | `xccdf-schema` | No | XCCDF 1.2 and `cf-xccdf-1` schema validation | [README](../../../checks/xccdf-schema/README.md) |
 | `stig` | No | `mkStigModule` override and merge semantics | [README](../../../checks/stig/README.md) |
@@ -185,19 +186,14 @@ procedural guide is the [Web UI check runbook](web-ui-check.md).
   `ci_fast`), `CF_UI_UPDATE_BASELINES=1`, and `CF_WEB_UI_RUN_MEGA_PHASES=1`
   (interactive only; boots Attic and S3 cache VMs and runs legacy pytest
   phases).
-- **CI.** The README says the check is in the `flake-check` matrix. See the
-  status note below.
+- **CI.** The check runs through the separate `web-ui-check` job. That job is
+  currently `allow_failure: true`.
 
-> **Status:** timeout and CI statements in the README differ from the code. The
-> README says the full manifest has a 2400-second global timeout and a
-> 1800-second `playwrightResultTimeout` default. At the migration base commit,
-> `checks/web-ui/default.nix` sets `globalTimeout = 3000` and
-> `playwrightResultTimeout ? 2700`. The README also says `web-ui` is in the
-> `flake-check` matrix, but `.gitlab-ci.yml` lists it as a separate
-> `web-ui-check` job with `allow_failure: true`, and the matrix names are
-> `integration`, `oidc-auth`, `run-ui-dev-db-check`, `server-regressions`, and
-> `web-ui-test-runner`. A later verification pass must reconcile these
-> statements.
+`checks/web-ui/default.nix` sets `globalTimeout = 3000` and
+`playwrightResultTimeout ? 2700`. `.gitlab-ci.yml` runs the Web UI check as a
+separate `web-ui-check` job with `allow_failure: true`. The `flake-check`
+matrix includes `integration`, `oidc-auth`, `run-ui-dev-db-check`,
+`server-regressions`, `web-ui-test-runner`, and `okf-knowledge`.
 
 ### `web-ui/baselines`
 
@@ -370,7 +366,7 @@ This README is not a flake check. It documents `cf-scenarios`, the command that
 populates a Crystal Forge database with preset test scenarios. Its content is a
 help command, a quick start, and examples:
 
-- `nix run .#cf-test-modules.scenarioRunner -- -h` prints help.
+- `nix run .#cf-test-suite.scenarioRunner -- -h` prints help.
 - `-s <scenario>` selects a scenario, for example `up_to_date`,
   `mixed_commit_lag`, `flake_time_series`, `behind`, `flaky_agent`,
   `latest_with_two_overdue`, `never_seen`, `agent_restart`, `rollback`, and
@@ -383,14 +379,9 @@ help command, a quick start, and examples:
 - Database connection overrides use `DB_HOST`, `DB_PORT`, `DB_USER`,
   `DB_PASSWORD`, and `DB_NAME`.
 
-> **Status:** the README's `.#cf-test-modules.scenarioRunner` attribute name does
-> not match the repository at the migration base commit. The package directory
-> is `packages/cf-test-suite/`, the Nix attribute is
-> `pkgs.crystal-forge.cf-test-suite` (with a `scenarioRunner` member that builds
-> `cf-scenarios`), and the development shell alias `run-db-test` runs
-> `.#cf-test-suite.runTests`. The test plan uses the same old `cf-test-modules`
-> name (see [the testing plan](test-plan.md)). A later verification pass must
-> confirm the correct `nix run` attribute path.
+The package is `packages/cf-test-suite/`. Its `scenarioRunner` member builds
+`cf-scenarios`; the development shell alias `run-db-test` runs
+`.#cf-test-suite.runTests`.
 
 ## Checks without a README
 

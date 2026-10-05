@@ -59,18 +59,20 @@ This concept holds the Naming Conventions, Anti-Patterns, and Decision Framework
 
 ### File Organization
 
-```
-src/
-├── views/           # Page-level components
-│   └── dashboard.rs
-├── components/      # Reusable components
-│   ├── layout/      # AppShell, Card, Sidebar
-│   ├── forms/       # Input, Select, Button
-│   └── status/      # Badges, indicators
-├── hooks/           # Custom hooks
-├── state/           # Global state
-├── api/             # API client, models
-└── theme.rs         # Design tokens
+```mermaid
+%% diagram-id: ui-design-system-file-organization
+flowchart TB
+  src[src/]
+  src --> views[views/: Page-level components]
+  views --> dashboard[dashboard.rs]
+  src --> components[components/: Reusable components]
+  components --> layout[layout/: AppShell, Card, Sidebar]
+  components --> forms[forms/: Input, Select, Button]
+  components --> status[status/: Badges, indicators]
+  src --> hooks[hooks/: Custom hooks]
+  src --> state[state/: Global state]
+  src --> api[api/: API client, models]
+  src --> theme[theme.rs: Design tokens]
 ```
 
 ---

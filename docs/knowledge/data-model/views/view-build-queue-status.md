@@ -1,14 +1,15 @@
 ---
 type: Data Model
 title: "Build Queue Status View (`view_build_queue_status`)"
-description: "Describes view_build_queue_status, the system-level monitoring view of the build queue with package counts, active workers, stale worker detection, cache push lag, example queries, and alert rules."
+description: "Describes view_build_queue_status, the SQL view that aggregates package progress, reservation-based worker counts, stale workers, and cache lag per NixOS system for the legacy build-reservation queue, which the server no longer starts; the live build queue is build_jobs."
 tags:
   - crystal-forge
   - view
   - build-queue
   - workers
-  - grafana
-implementation_status: implemented
+  - legacy
+implementation_status: historical
+status: deprecated
 sources:
   - id: origin
     resource: "Crystal Forge repository file docs/views/view_build_queue_status.md at commit 3b23d36f"
@@ -20,7 +21,11 @@ sources:
 
 `view_build_queue_status` provides **system-level monitoring** of the build queue, aggregating progress for each NixOS system including package completion counts, active worker assignments, and cache push status.
 
-This view is designed specifically for **Grafana dashboards and operational monitoring**, enabling Site Administrators to understand queue health, identify bottlenecks, detect stale workers, and track build progress across all systems at a glance.
+## Status
+
+> **Legacy queue.** The view still exists in the schema (defined by migration `0057_parallel_build_queue.sql`). It describes the legacy **build-reservation** queue: workers claim derivations through `build_reservations` rows. The server does not start that worker path. `run_build_loop` has no caller in the server startup code, and the Rust code that reads this view lives in `cf-server/src/queries/build_reservations.rs`, which only the legacy `builder/worker.rs` path calls. The live build queue is `build_jobs`, claimed by API-only builders. See [Wakeups and polling](../../architecture/event-driven-queues.md#build-queue). With no reservations, `active_workers` is 0 and `has_stale_workers` is false for every system.
+>
+> Other consumers: the database tests (`packages/cf-test-suite/cf_test/tests/database/test_view_build_queue_status.py`, `tests/builder/test_reservation_build_queue.py`). The Dioxus UI and the server API do not read this view.
 
 ## Example Output
 
@@ -57,10 +62,10 @@ The view returns:
 
 ## Purpose
 
-- **Queue Health Monitoring:** Understand build progress across all systems at once
+- **Queue Health Monitoring:** Understand reservation-based build progress across all systems at once
 - **Worker Distribution:** See how many workers are assigned to each system
 - **Bottleneck Detection:** Identify systems with many packages pending or slow cache pushes
-- **Stale Worker Detection:** Alert on workers that have stopped sending heartbeats
+- **Stale Worker Detection:** Identify workers that have stopped sending heartbeats
 - **Capacity Planning:** Track queue depth and worker utilization over time
 - **Cache Lag Monitoring:** See when systems are built but waiting for cache pushes
 
@@ -164,7 +169,7 @@ SELECT
 FROM view_build_queue_status;
 ```
 
-### Queue depth by commit (Grafana time series)
+### Queue depth by commit
 
 ```sql
 SELECT 
@@ -177,76 +182,13 @@ GROUP BY commit_timestamp
 ORDER BY commit_timestamp DESC;
 ```
 
-## Operational Context
-
-### Grafana Dashboard Panels
-
-**Panel 1: Systems Overview Table**
-- Show all systems with progress bars
-- Color code by status (green=ready, yellow=building, red=stale)
-- Sort by commit timestamp DESC
-
-**Panel 2: Worker Distribution**
-- Bar chart showing active workers per system
-- Identify systems with too few/many workers
-
-**Panel 3: Queue Depth Over Time**
-- Time series of total pending packages
-- Helps identify if queue is growing or shrinking
-
-**Panel 4: Stale Worker Alerts**
-- Table showing only systems with `has_stale_workers = true`
-- Alert threshold: >5 minutes since heartbeat
-
-**Panel 5: Cache Push Lag**
-- Gauge showing systems waiting for cache pushes
-- Important for distributed worker setups
-
-### Alerting Rules
-
-**Alert: Stale Workers Detected**
-```sql
-SELECT COUNT(*) FROM view_build_queue_status WHERE has_stale_workers = true
-```
-Trigger: count > 0 for >10 minutes
-
-**Alert: Queue Growing Unchecked**
-```sql
-SELECT SUM(pending_packages + building_packages) FROM view_build_queue_status
-```
-Trigger: sum > 500 packages pending
-
-**Alert: System Stuck Building**
-```sql
-SELECT * FROM view_build_queue_status 
-WHERE status = 'building' 
-  AND earliest_reservation < NOW() - INTERVAL '2 hours'
-```
-Trigger: any system building for >2 hours
-
-## Performance Notes
-
-- Aggregates across multiple tables but filtered to active work only
-- Uses LEFT JOINs to include systems with zero active workers
-- Window functions avoided - straight aggregation for speed
-- Indexes leveraged:
-  - `derivations(derivation_type, status_id)` - Filter NixOS systems
-  - `derivation_dependencies(derivation_id)` - Find packages per system
-  - `build_reservations(nixos_derivation_id)` - Count workers per system
-  - `build_reservations(heartbeat_at)` - Stale worker detection
-- Suitable for 1-second refresh in Grafana (even with 1000+ systems)
-
 ## Related Tables and Views
 
-- **`view_buildable_derivations`** - Worker-facing queue for claiming work (see `view_buildable_derivations.md`)
-- **`build_reservations`** - Active worker assignments
+- **`view_buildable_derivations`** - Reservation-queue source of claimable work ([Buildable Derivations View](view-buildable-derivations.md))
+- **`build_reservations`** - Legacy worker assignments
 - **`derivations`** - Core derivation table
 - **`derivation_dependencies`** - Package relationships
 - **`commits`** - Commit metadata
-
-## Migration Notes
-
-This is a new monitoring view introduced alongside the system-aware build queue. It does not replace any existing views but complements `view_buildable_derivations` by providing aggregated monitoring data rather than individual claimable work items.
 
 ## Related concepts
 

@@ -1,7 +1,7 @@
 ---
 type: API
 title: "Agent API (machine auth) and Cache API"
-description: "Describes key-signed agent and builder endpoints, the builder job example, and the proposed binary cache management endpoints; open it when working on machine-authenticated calls or cache management routes."
+description: "Describes the machine-authenticated agent routes, the API-only builder job endpoints, and the implemented cache-destination and cache-push-job APIs; open it when working on machine-authenticated calls or cache administration."
 tags:
   - crystal-forge
   - api
@@ -21,9 +21,10 @@ sources:
 
 # Agent API (machine auth) and Cache API
 
-## Agent API (Machine Auth)
+## Agent API (machine authentication)
 
-These endpoints use **key-based authentication** (not user sessions). They're for builders and agents to communicate with the server.
+Agent requests use machine authentication, not browser user sessions. Builder
+requests use the separate Ed25519-signed builder API and session checks below.
 
 ### How It Works
 
@@ -35,49 +36,43 @@ These endpoints use **key-based authentication** (not user sessions). They're fo
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
-| POST | `/agent/heartbeat` | Builder Key | Builder reports status |
-| POST | `/agent/state` | Agent Key | Agent reports state |
-| POST | `/agent/report` | Agent Key | Report build/deploy result |
-| GET | `/agent/job` | Builder Key | Get next build job |
-| POST | `/agent/job/:id/complete` | Builder Key | Report job complete |
+| POST | `/agent/heartbeat` | Agent machine auth | Report heartbeat |
+| POST | `/agent/state` | Agent machine auth | Report observed system state |
+| POST | `/system_state` | Agent machine auth | Compatibility state-report route |
+| POST | `/agent/deployment-started` | Agent machine auth | Report deployment start |
+| POST | `/agent/deployment-failed` | Agent machine auth | Report deployment failure |
 
-### Example: Builder Gets Job
+## Builder job API
 
-**Request:**
-```bash
-GET /api/v1/agent/job
-X-Builder-Key: builder-key-id
-X-Builder-Signature: signed-timestamp
-```
+Builder work uses `/api/v1/builders/:id/...`, not the agent namespace. The
+builder signs requests with `X-Builder-ID`, `X-Timestamp`, and `X-Signature`;
+it also sends its established `X-Builder-Session-ID` on session-bound calls.
+`GET` and `POST /api/v1/builders/:id/next-job` both request a job. Job
+completion and failure use
+`POST /api/v1/builders/:id/jobs/:job_id/complete` and `/fail`. The complete
+route records the derivation and verifies builder-reported cache publication.
+See [Builder job lifecycle API](builder-job-lifecycle-api.md) for the request
+contract and route details.
 
-**Response:**
-```json
-{
-  "data": {
-    "job_id": "job-123",
-    "derivation": "nixosConfigurations.production.system.built",
-    "store_path": "/nix/store/xxx-nixos-system-x86_64",
-    "system": "sys-456"
-  }
-}
-```
+## Cache administration API
 
-> **Status:** Only `/agent/heartbeat` and `/agent/state` were found among the agent routes registered in `packages/default/crates/cf-server/src/bin/server.rs`; `/agent/report`, `/agent/job`, and `/agent/job/:id/complete` were not found. Builder machine calls are registered under `/api/v1/builders/:id/...` (for example `next-job`, `heartbeat`, `jobs/:job_id/complete`), and the signature headers shown above were not compared with `handlers/builder_request.rs`. Not reconciled in this migration.
+The server registers the following cache-destination and cache-push-job routes.
+These routes are not a server-side cache-push worker; builder-side publication
+is described in [Cache push process](../caches/cache-push-process.md).
 
-## Cache API (Future - TASK-141)
-
-Binary cache management (not yet implemented).
-
-| Method | Endpoint | Role | Description |
-|--------|----------|------|-------------|
-| GET | `/caches` | Admin+ | List caches |
-| POST | `/caches` | Admin+ | Create cache |
-| GET | `/caches/:id` | Admin+ | Get cache |
-| PATCH | `/caches/:id` | Admin+ | Update cache |
-| DELETE | `/caches/:id` | Admin+ | Delete cache |
-| GET | `/environments/:id/cache-config` | Builder | Get cache for env |
-
-> **Status:** proposed. The section above is marked future in the source document (TASK-141). The server now registers cache routes such as `/api/v1/caches`, `/api/v1/caches/:id/environments`, and `/api/v1/cache-push-jobs`, so the "not yet implemented" statement may be stale and the listed endpoints may differ from the registered routes. Not reconciled in this migration.
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| GET, POST | `/api/v1/caches` | List or create cache destinations |
+| POST | `/api/v1/caches/test-credentials` | Test destination credentials |
+| GET, PUT, DELETE | `/api/v1/caches/:id` | Read, update, or delete a destination |
+| GET, PUT | `/api/v1/caches/:id/environments` | Read or assign destination environments |
+| GET | `/api/v1/environments/:id/caches` | List an environment's cache destinations |
+| GET | `/api/v1/cache-push-jobs` | List cache publication records |
+| GET | `/api/v1/cache-push-jobs/:id` | Read one cache publication record |
+| POST | `/api/v1/cache-push-jobs/:id/retry` | Request retry |
+| POST | `/api/v1/cache-push-jobs/:id/cancel` | Cancel a pending job |
+| POST | `/api/v1/cache-push-jobs/bulk-retry` | Retry selected jobs |
+| POST | `/api/v1/cache-push-jobs/bulk-cancel` | Cancel selected jobs |
 
 ## Related concepts
 

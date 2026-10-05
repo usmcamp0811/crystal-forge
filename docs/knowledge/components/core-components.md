@@ -1,86 +1,108 @@
 ---
 type: Component
 title: "Core Components"
-description: "Describes the Crystal Forge agent, server, and builder (location, responsibilities, interfaces) with the core infrastructure diagram; open it to see what each deployable part owns."
+description: "Describes what the Crystal Forge server, builder, agent, and web UI each own, their interfaces, and which connections each initiates; open it to see where authority and trust boundaries sit."
 tags:
   - crystal-forge
   - components
   - agent
   - server
   - builder
-implementation_status: partial
+  - web-ui
+implementation_status: implemented
 generated:
   by: opencode/claude-sonnet-5-5
-  at: 2026-10-03T22:57:15-05:00
+  at: 2026-10-04T15:55:00-05:00
 sources:
   - id: origin
     resource: "Crystal Forge repository file docs/architecture.md at commit 3b23d36f"
-    title: "ADR-000: Crystal Forge Architecture Overview"
+    title: "ADR-000: Crystal Forge Architecture Overview (original Core Components section)"
+  - id: code-1
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/bin/server.rs at commit 3b23d36f"
+    title: Server routes
+  - id: code-2
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/server/mod.rs at commit 3b23d36f"
+    title: Server background tasks
+  - id: code-3
+    resource: "Crystal Forge repository file packages/default/crates/cf-builder/src/bin/builder.rs at commit 3b23d36f"
+    title: Builder process
+  - id: code-4
+    resource: "Crystal Forge repository file packages/default/crates/cf-agent/src/deployment/agent.rs at commit 3b23d36f"
+    title: Agent target handling
 ---
 
 # Core Components
 
-> **Status:** partial. Split from [ADR-000](../decisions/adr-000-architecture-overview.md). The server routes `/agent/heartbeat` and `/agent/state` exist (`packages/default/crates/cf-server/src/bin/server.rs`). The Builder interface text ("Database coordination with server") is a verification candidate: API-only builders do not access the database directly, and `packages/default/crates/cf-builder/src/builder/api_client.rs` implements the builder API client.
+The one-page picture, with the meaning of every arrow, is in the
+[Ecosystem architecture summary](../architecture/ecosystem-architecture-summary.md).
+This page states what each component owns and which connections it starts.
 
-```mermaid
-flowchart LR
-    A[Agent<br/>NixOS hosts]
+## Server (Rust, `cf-server`)
 
-    subgraph "Core Infrastructure"
-        S[Server<br/>API/Coord]
-        B[Builder<br/>Eval/CVE scan]
-        P[PostgreSQL<br/>shared state]
-        G[Grafana<br/>dashboards/alerts]
-    end
+- **Location:** central coordination node.
+- **Owns:**
+  - authoritative evaluation of flake commits with `nix-eval-jobs`, policy
+    evaluation, and deployment decisions;
+  - all PostgreSQL access;
+  - authentication (local and OIDC sessions) and role-based authorization;
+  - the evaluation and build queues, builder session and job authorization,
+    and builder-liveness recovery;
+  - CVE scan scheduling and evidence, compliance, and POA&M workflows;
+  - the embedded Dioxus web UI assets.
+- **Interfaces:**
+  - `POST /agent/heartbeat` and `POST /agent/state` for signed agent reports.
+    The response can carry a `desired_target`.
+  - `/api/v1/builders/...` for API-only builders: signed, session-checked
+    registration, heartbeat, job claim, log, completion, and scan routes.
+  - `/api/v1/...` for the web UI and for administration.
+  - `POST /webhook` for Git push events.
+  - The embedded UI, served for every non-API path.
+- **Connections it starts:** Git remotes (flake polling and source
+  materialization), binary caches (a probe that confirms a builder-reported
+  path), and outbound notification email.
 
-    A -->|HTTP POST<br/>signed state| S
-    B --> P
-    S --> P
-    P --> G
+## Builder (Rust, `cf-builder`)
 
-    %% Styling to make boxes more rectangular
-    classDef default fill:#f9f9f9,stroke:#333,stroke-width:2px,color:#000
-```
+- **Location:** one or more build hosts.
+- **Owns:**
+  - realizing derivations with Nix (`nix-store --realise`); Nix resolves
+    dependencies;
+  - publishing build outputs to the configured binary cache and reporting the
+    cache reference;
+  - streaming logs and heartbeats;
+  - builder-side CVE scans that it claims through the API;
+  - verified-source re-evaluation when `source_re_evaluate_verified` is
+    configured. This verifies the server-authorized build plan; it does not
+    replace authoritative server evaluation.
+- **Does not own:** database access, authoritative evaluation, or policy.
+- **Connections it starts:** every connection to the server (polling and
+  heartbeat), to the binary cache, and, depending on the execution strategy,
+  to Git or the substituters needed to realize the derivation.
 
-## Agent (Rust)
+## Agent (Rust, `cf-agent`)
 
-- **Location**: Runs on each monitored NixOS system
-- **Responsibilities**:
-  - Monitor system configuration changes via inotify
-  - Collect system fingerprints (hardware, software, security status)
-  - Send Ed25519-signed state reports to server
-  - Heartbeat vs. state change intelligence
-- **Interfaces**: HTTP POST to server `/agent/heartbeat` and `/agent/state`
+- **Location:** each managed NixOS system.
+- **Owns:**
+  - detecting configuration changes and collecting a host fingerprint;
+  - sending Ed25519-signed heartbeat and state reports;
+  - reading `desired_target` from the server's response, pulling the closure
+    from the cache, and activating it locally;
+  - reporting deployment start and failure.
+- **Does not own:** choosing the target.
+- **Connections it starts:** to the server and to the binary cache.
 
-## Server (Rust)
+## Web UI (Dioxus, `packages/web-ui`)
 
-- **Location**: Central coordination node(s)
-- **Responsibilities**:
-  - Receive and verify agent reports
-  - Process Git webhooks for configuration updates
-  - Coordinate build requests
-  - Provide API for compliance queries
-- **Interfaces**:
-  - HTTP API for agents
-  - Webhook endpoints for Git repositories
-  - Database read/write operations
-
-## Builder (Rust)
-
-- **Location**: Build coordination node(s)
-- **Responsibilities**:
-  - Evaluate NixOS flakes on demand
-  - Build derivations for CVE scanning
-  - Run vulnix for vulnerability assessment
-  - Track configuration drift (current vs. latest)
-- **Interfaces**:
-  - Database coordination with server
-  - Nix evaluation engine integration
-  - vulnix CVE scanning integration
+- **Location:** browser, loaded from the server.
+- **Owns:** presentation and interaction. Every read and mutation goes through
+  the server API, which authorizes it.
+- **Does not own:** persistence, authorization decisions, or any direct
+  connection to PostgreSQL, builders, or agents.
 
 ## Related concepts
 
-- [System overview](../overview/system-overview.md) - product-level overview and web UI/API server/database view
+- [Ecosystem architecture summary](../architecture/ecosystem-architecture-summary.md) - the one-page diagram
+- [System overview](../overview/system-overview.md) - product-level overview
 - [Data flows](../architecture/data-flows.md) - how data moves between these components
-- [Event-driven queue architecture](../architecture/event-driven-queues.md) - how the server wakes evaluation and build work
-- [ADR-000 Architecture overview](../decisions/adr-000-architecture-overview.md) - the decision record these components belong to
+- [Wakeups and polling](../architecture/event-driven-queues.md) - how the server and builders discover queued work
+- [ADR-000 Architecture overview](../decisions/adr-000-architecture-overview.md) - the decision record these components came from

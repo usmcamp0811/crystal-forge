@@ -531,28 +531,28 @@ Implement transitions in one server-side service or query module.
 
 Allowed transitions:
 
-```text
-pending -> approved
-pending -> rejected
-pending -> expired
-pending -> cancelled
-pending -> superseded
-approved -> consumed
-approved -> cancelled
-approved -> superseded
+```mermaid
+%% diagram-id: backlog-task-415-approval-transitions
+stateDiagram-v2
+    pending --> approved
+    pending --> rejected
+    pending --> expired
+    pending --> cancelled
+    pending --> superseded
+    approved --> consumed
+    approved --> cancelled
+    approved --> superseded
 ```
 
 Do not allow other transitions.
 
 In particular:
 
-```text
-rejected -> approved
-expired -> approved
-cancelled -> approved
-superseded -> approved
-consumed -> pending
-```
+- `rejected` to `approved`
+- `expired` to `approved`
+- `cancelled` to `approved`
+- `superseded` to `approved`
+- `consumed` to `pending`
 
 must fail.
 

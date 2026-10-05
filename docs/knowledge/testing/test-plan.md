@@ -31,20 +31,14 @@ Crystal Forge requires comprehensive testing to ensure reliability, security, an
 
 ### Test Levels
 
-```
-┌─────────────────────────────────────────────┐
-│                System Tests                 │
-│         (Full VM fleet scenarios)           │
-├─────────────────────────────────────────────┤
-│            Integration Tests                │
-│    (Cross-component interactions in VMs)    │
-├─────────────────────────────────────────────┤
-│             Database Tests                  │
-│    (Direct DB operations & scenarios)       │
-├─────────────────────────────────────────────┤
-│               Unit Tests                    │
-│        (Rust function-level tests)          │
-└─────────────────────────────────────────────┘
+```mermaid
+%% diagram-id: core-test-level-stack
+flowchart TD
+    system["System Tests<br/>(Full VM fleet scenarios)"]
+    integration["Integration Tests<br/>(Cross-component interactions in VMs)"]
+    database["Database Tests<br/>(Direct DB operations & scenarios)"]
+    unit["Unit Tests<br/>(Rust function-level tests)"]
+    system --> integration --> database --> unit
 ```
 
 ### Test Infrastructure
@@ -56,55 +50,51 @@ Crystal Forge requires comprehensive testing to ensure reliability, security, an
 
 ## File Structure & Organization
 
-> **Status:** partial. This plan names `packages/cf-test-modules/`,
-> `checks/crystal-forge/default.nix`, `checks/database/default.nix`, and
-> `.#cf-test-modules.runTests`. In the repository at the migration base commit,
-> the pytest package is `packages/cf-test-suite/` (its tests are grouped under
-> `cf_test/tests/{builder,cache,dashboard,database,server}`), and no
-> `checks/crystal-forge/` or `checks/database/` directory exists. The Nix
-> checks that exist are listed in [Crystal Forge flake checks](flake-checks.md).
-> The paths below are kept as written.
-
 ### Test Locations
 
-```
-crystal-forge/
-├── checks/
-│   ├── crystal-forge/
-│   │   └── default.nix    # Core integration tests run from here
-│   └── database/
-│       └── default.nix    # Database tests run in this
-├── packages/
-│   ├── default/
-│   │   ├── src/           # Rust source with inline unit tests
-│   │   └── Cargo.toml
-│   ├── cf-test-modules/
-│   │   ├── cf_test/
-│   │   │   ├── __init__.py
-│   │   │   ├── client.py
-│   │   │   ├── scenarios/
-│   │   │   │   ├── __init__.py
-│   │   │   │   ├── core.py
-│   │   │   │   ├── single_system.py
-│   │   │   │   └── multi_system.py
-│   │   │   └── tests/     # All pytest tests go here
-│   │   │       ├── database/
-│   │   │       │   └── test_view_*.py
-│   │   │       ├── test_integration_*.py
-│   │   │       ├── test_fleet_*.py
-│   │   │       └── test_*_smoke.py
-│   │   ├── default.nix
-│   │   └── pyproject.toml
-│   └── ...
-└── docs/
-    └── test_plan.md       # This document
+```mermaid
+%% diagram-id: core-test-plan-file-tree
+flowchart TD
+    root["crystal-forge/"]
+    root --> checks["checks/"]
+    checks --> integration["integration/ — NixOS integration VM"]
+    integration --> integration_nix["default.nix"]
+    root --> packages["packages/"]
+    packages --> default["default/"]
+    default --> crates["crates/ — Rust workspace members"]
+    crates --> server_crate["cf-server/ — server unit tests"]
+    crates --> builder_crate["cf-builder/"]
+    default --> cargo["Cargo.toml"]
+    packages --> test_modules["cf-test-suite/"]
+    test_modules --> cf_test["cf_test/"]
+    cf_test --> init["__init__.py"]
+    cf_test --> client["client.py"]
+    cf_test --> scenarios["scenarios/"]
+    scenarios --> scenarios_init["__init__.py"]
+    scenarios --> core["core.py"]
+    scenarios --> single["single_system.py"]
+    scenarios --> multi["multi_system.py"]
+    cf_test --> tests["tests/ — All pytest tests go here"]
+    tests --> db_tests["database/"]
+    db_tests --> view_tests["test_view_*.py"]
+    tests --> builder_tests["builder/"]
+    tests --> cache_tests["cache/"]
+    tests --> dashboard_tests["dashboard/"]
+    tests --> database_tests["database/"]
+    tests --> server_tests["server/"]
+    tests --> harness["test_scenarios_harness.py"]
+    test_modules --> test_nix["default.nix"]
+    test_modules --> pyproject["pyproject.toml"]
+    packages --> package_ellipsis["..."]
+    root --> docs["docs/"]
+    docs --> plan["test_plan.md — This document"]
 ```
 
 ## Test Categories
 
 ### 1. Unit Tests (Rust)
 
-**Location**: Inline with Rust source code in `packages/default/src/` using `#[cfg(test)]` modules
+**Location**: Inline with Rust source code under `packages/default/crates/` using `#[cfg(test)]` modules
 
 **Scope**: Individual functions and modules
 
@@ -121,14 +111,13 @@ crystal-forge/
 # Automatically run during Nix build
 nix build
 
-# Or manually with cargo
-cd packages/default
-cargo test
+# Or manually with Cargo
+cargo test --manifest-path packages/default/Cargo.toml
 ```
 
 ### 2. Database Tests
 
-**Location**: `packages/cf-test-modules/cf_test/tests/test_view_*.py`
+**Location**: `packages/cf-test-suite/cf_test/tests/database/`
 
 **Scope**: Database views, queries, and data integrity
 
@@ -143,28 +132,15 @@ cargo test
 
 ```bash
 # Run all database tests in DevShell with DB running.
-nix run .#cf-test-modules.runTests -- -vvv -m database
+nix run .#cf-test-suite.runTests -- -vvv -m database
 ```
 
 ### 3. Integration Tests
 
-**Location**: `packages/cf-test-modules/cf_test/tests/test_integration_*.py`
-
-**Scope**: Component interactions within VMs
-
-**Test Patterns**:
-
-```python
-def test_agent_server_communication(agent_vm, server_vm):
-    # Start agent on VM
-    agent_vm.execute("systemctl start crystal-forge-agent")
-
-    # Verify heartbeat received
-    result = server_vm.wait_until_succeeds(
-        "curl -s localhost:3000/api/systems | jq '.systems | length'"
-    )
-    assert int(result) > 0
-```
+**Locations**: NixOS checks under `checks/` and server/API tests under
+`packages/cf-test-suite/cf_test/tests/server/`. Each NixOS check has its own
+VM definition and README. See [Crystal Forge flake checks](flake-checks.md) for
+the checks that currently run in CI.
 
 **Key Areas**:
 
@@ -173,25 +149,26 @@ def test_agent_server_communication(agent_vm, server_vm):
 - Builder coordination
 - CVE scanning pipeline
 
-### 4. System Tests
+### 4. Scenario Harness
 
-**Location**: `packages/cf-test-modules/cf_test/tests/test_fleet_*.py`
+**Location**: `packages/cf-test-suite/cf_test/tests/test_scenarios_harness.py`
 
-**Scope**: Full fleet behavior across multiple VMs
+**Scope**: Verify that reusable server-side database scenarios create the
+expected records.
 
-**Scenarios**:
+The current harness imports scenarios for:
 
-- Fleet-wide configuration updates
-- Rolling deployments
-- Failure recovery
-- Network partitions
-- Compliance drift detection
+- a system that is behind;
+- a failed evaluation;
+- a system that has never been seen;
+- an offline system;
+- a system that is up to date.
 
 ## Test Data Management
 
 ### Scenario System
 
-**Location**: `packages/cf-test-modules/cf_test/scenarios/`
+**Location**: `packages/cf-test-suite/cf_test/scenarios/`
 
 **Purpose**: Generate consistent, realistic test data
 
@@ -220,45 +197,34 @@ def test_deployment_behind(cf_client, clean_test_data):
 ### Local Development
 
 ```bash
-# Unit tests (automatic with build)
-nix build
+# PostgreSQL-backed Rust regression tests
+nix build .#checks.x86_64-linux.server-regressions
 
 # Database tests only
-nix build .#checks.x86_64-linux.database
+nix develop
+db-only up
+run-db-test -vvv -m database
 
 # Full test suite
 nix flake check
 
-# Run Database tests in DevShell (`nix develop`) against development database
-server-stack up
-run-db-test -vvv -m database
 ```
 
 ### CI Pipeline
 
-> **Status:** proposed. The `.gitlab-ci.yml` `flake-check` matrix at the
-> migration base commit runs the named checks `integration`, `oidc-auth`,
-> `run-ui-dev-db-check`, `server-regressions`, and `web-ui-test-runner`, plus
-> separate `web-ui` jobs. See [Crystal Forge flake checks](flake-checks.md) and
-> [Web UI check runbook](web-ui-check.md). The pipeline sketch below is this
-> plan's original design and is not the current pipeline.
-
-```yaml
-stages:
-  - unit: nix build # Unit tests run automatically
-  - database: pytest -m database
-  - integration: pytest -m integration
-  - system: pytest -m vm_only
-  - smoke: pytest -m smoke --maxfail=1
-```
+CI runs the `flake-check` matrix for merge requests and the configured
+integration branch. It also defines a separate `web-ui-check` job with
+`allow_failure: true`. See [Crystal Forge flake checks](flake-checks.md) and
+[Web UI check runbook](web-ui-check.md) for the current matrix and browser test
+workflow. CI job configuration is not a test level: the matrix combines
+package builds and NixOS VM checks.
 
 ### Test Markers
 
-> **Status:** partial. `packages/cf-test-suite/pyproject.toml` declares the
-> markers `database`, `views`, `integration`, `agent`, `smoke`, `slow`,
-> `vm_only`, `vm_internal`, `driver`, and `harness`. The `dashboard` and
-> `server` markers used by the `integration` check are not in that list at the
-> migration base commit. The list below is kept as written.
+`packages/cf-test-suite/pyproject.toml` declares the markers `database`,
+`views`, `integration`, `agent`, `smoke`, `slow`, `vm_only`, `vm_internal`,
+`driver`, and `harness`. The integration check also invokes `dashboard` and
+`server` markers; those two are not declared in the package marker list.
 
 - `@pytest.mark.smoke`: Critical path tests, run first
 - `@pytest.mark.database`: Direct database operations
@@ -388,9 +354,9 @@ def test_sql_injection_prevention(cf_client):
 
 ### Adding New Tests
 
-1. **Database View Tests**: Add to `packages/cf-test-modules/cf_test/tests/test_view_<name>.py`
-2. **Scenarios**: Extend `packages/cf-test-modules/cf_test/scenarios/`
-3. **Integration Tests**: Create `packages/cf-test-modules/cf_test/tests/test_integration_<feature>.py`
+1. **Database View Tests**: Add to `packages/cf-test-suite/cf_test/tests/test_view_<name>.py`
+2. **Scenarios**: Extend `packages/cf-test-suite/cf_test/scenarios/`
+3. **Integration Tests**: Create `packages/cf-test-suite/cf_test/tests/test_integration_<feature>.py`
 4. **Unit Tests**: Add to relevant Rust modules with `#[test]`
 
 ### Running Tests During Development
@@ -416,7 +382,7 @@ Before finalizing this test plan, please clarify:
 4. **Scale testing**: What's the expected maximum fleet size we should test?
 5. **CVE scanning**: Should we test with real CVE data or synthetic vulnerabilities?
 6. **Deployment testing**: Do we need tests for agent deployment/updates?
-7. **Monitoring integration**: Should we test Grafana dashboard queries?
+7. **Monitoring integration**: Which external monitoring consumers, if any, need query tests? The optional `dashboards` module configuration is a legacy surface.
 
 ## Success Metrics
 

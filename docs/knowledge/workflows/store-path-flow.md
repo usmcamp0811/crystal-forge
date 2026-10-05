@@ -1,141 +1,171 @@
 ---
 type: Workflow
 title: "Crystal Forge store path flow"
-description: "Shows how Crystal Forge evaluates a commit per nixosConfiguration, records expected store paths, builds and caches in parallel, and classifies agents as up-to-date, behind, or unknown; open it to understand per-system store path tracking."
+description: "Shows how Crystal Forge records an expected store path per nixosConfiguration at evaluation, sets the built store path at build completion, requires a completed cache push for a deployable artifact, and classifies each system as up_to_date, behind, ahead, unknown, or no_deployment; open it to understand per-system store path tracking."
 tags:
   - crystal-forge
   - workflow
   - store-path
   - evaluation
   - agent
-implementation_status: partial
+implementation_status: implemented
+generated:
+  by: opencode/claude-sonnet-5-5
+  at: 2026-10-04T19:20:00-05:00
 sources:
   - id: origin
     resource: "Crystal Forge repository file docs/store-path-flow.md at commit 3b23d36f"
-    title: "Crystal Forge Store Path Flow"
+    title: "Crystal Forge Store Path Flow (original document)"
+  - id: code-1
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/migrations/0291_prefer_deployable_running_path_identity.sql at commit 3b23d36f"
+    title: Current view_system_deployment_status definition
+  - id: code-2
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/queries/derivations.rs at commit 3b23d36f"
+    title: Deployable artifact selection
+  - id: code-3
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/server/mod.rs at commit 3b23d36f"
+    title: Evaluation finalization and build job creation
 ---
 
 # Crystal Forge Store Path Flow
 
-> **Status:** partial. The diagram shows a LIFO build queue and `nix eval --dry-run` per host. [Evaluation and build queue pipeline](evaluation-and-build-queue-pipeline.md) and [the sequence](commit-eval-build-cache-deploy-sequence.md) describe `nix-eval-jobs` and a leased job claim. Whether newest-first ordering is implemented is a verification candidate for `packages/default/crates/cf-server/src/queries/builders.rs`.
+This page shows how Crystal Forge tracks the store path of each system from
+evaluation to deployment. An arrow means "then". A cylinder is a database
+write.
 
-This diagram shows how Crystal Forge evaluates flake commits, tracks expected store paths per system, builds configurations in parallel, and keeps agents up-to-date.
+## Two store path columns
 
-## The Complete Flow
+A `derivations` row has two store path columns:
+
+| Column | Written when | Meaning |
+| --- | --- | --- |
+| `expected_store_path` | Evaluation (from the `nix-eval-jobs` outputs) | The path the system will have when built |
+| `store_path` | Build completion (`POST .../jobs/:job_id/complete`) | The path a builder reported as built |
+
+A system is deployable only when `store_path` is set **and** a completed cache
+push row exists for that exact path.
+
+## The complete flow
 
 ```mermaid
 flowchart TB
-    subgraph "1. Flake Commit Arrives"
-        COMMIT[New Flake Commit SHA]
+    subgraph S1["1. Commit arrives"]
+        COMMIT[New flake commit]
     end
 
-    subgraph "2. Parallel Evaluation (per nixosConfiguration)"
-        COMMIT --> EVAL1[Eval hostname1<br/>nix eval --dry-run]
-        COMMIT --> EVAL2[Eval hostname2<br/>nix eval --dry-run]
-        COMMIT --> EVAL3[Eval hostname3<br/>nix eval --dry-run]
-        
-        EVAL1 --> STORE1[Store Path:<br/>/nix/store/abc123...]
-        EVAL2 --> STORE2[Store Path:<br/>/nix/store/def456...]
-        EVAL3 --> STORE3[Store Path:<br/>/nix/store/ghi789...]
-        
-        STORE1 --> DB1[(DB: Save<br/>hostname1 → abc123<br/>commit → SHA)]
-        STORE2 --> DB2[(DB: Save<br/>hostname2 → def456<br/>commit → SHA)]
-        STORE3 --> DB3[(DB: Save<br/>hostname3 → ghi789<br/>commit → SHA)]
+    subgraph S2["2. Evaluation (parallel per nixosConfiguration)"]
+        COMMIT --> EVAL[nix-eval-jobs evaluates every configuration]
+        EVAL --> P1[(Save expected_store_path<br/>per configuration)]
+        P1 --> FIN[Commit finalization]
+        FIN --> JOBS[(Create build jobs<br/>for derivations that passed policy)]
     end
 
-    subgraph "3. Build Queue (LIFO - Newest First)"
-        DB1 --> QUEUE[Build Queue]
-        DB2 --> QUEUE
-        DB3 --> QUEUE
-        
-        QUEUE --> |Newest commits<br/>jump to front| QUEUENOTE[📋 LIFO Order:<br/>Latest commit builds first]
+    subgraph S3["3. Build queue"]
+        JOBS --> QUEUE[Queued by queue_position<br/>newest batch first]
+        QUEUE --> BUILD[Builder claims job and builds]
     end
 
-    subgraph "4. Build & Cache (Parallel, Independent Per System)"
-        QUEUE --> BUILD1[Build hostname1]
-        QUEUE --> BUILD2[Build hostname2]
-        QUEUE --> BUILD3[Build hostname3]
-        
-        BUILD1 --> CACHE1[Push to Cache<br/>hostname1/abc123]
-        BUILD2 --> CACHE2[Push to Cache<br/>hostname2/def456]
-        BUILD3 --> CACHE3[Push to Cache<br/>hostname3/ghi789]
-        
-        CACHE1 --> DBDONE1[(DB: Mark<br/>hostname1/abc123<br/>CACHED)]
-        CACHE2 --> DBDONE2[(DB: Mark<br/>hostname2/def456<br/>CACHED)]
-        CACHE3 --> DBDONE3[(DB: Mark<br/>hostname3/ghi789<br/>CACHED)]
+    subgraph S4["4. Cache publication"]
+        BUILD --> PUSH[Builder signs and pushes to cache]
+        PUSH --> REPORT[Builder reports store path and cache reference]
+        REPORT --> PROBE[Server probes cache with nix path-info]
+        PROBE --> DONE[(Save store_path<br/>and completed cache push)]
     end
 
-    subgraph "5. Agent Polling & Update"
-        AGENT[Agent<br/>hostname1]
-        
-        AGENT --> |Heartbeat:<br/>current store path| HEARTBEAT[CF: Compare<br/>Agent Path vs DB]
-        
-        HEARTBEAT --> UPTODATE{State?}
-        UPTODATE --> |Match| STATE1[✅ UP-TO-DATE<br/>Agent path = DB path]
-        UPTODATE --> |Mismatch| STATE2[⚠️ BEHIND<br/>DB has newer path]
-        UPTODATE --> |Not Found| STATE3[❓ UNKNOWN<br/>Path not in DB]
-        
-        AGENT --> |Poll CF| POLL[Check for<br/>new builds]
-        POLL --> DBDONE1
-        POLL --> |New cached build| PULL[Pull from Cache]
-        PULL --> ACTIVATE[Agent activates<br/>new config]
-        ACTIVATE --> NEWSTATE[Agent now:<br/>/nix/store/abc123]
+    subgraph S5["5. Deployment and status"]
+        DONE --> TARGET[Newest deployable artifact<br/>per configuration]
+        TARGET --> DPM[Policy manager sets desired_target<br/>auto_latest only, after policy gates]
+        DPM --> HB[Agent heartbeat response carries desired_target]
+        HB --> ACT[Agent copies from cache and switches]
+        ACT --> REP[Agent reports current system path]
+        REP --> VIEW[view_system_deployment_status<br/>compares current path with newest deployable]
+        VIEW --> ST{Classification}
+        ST --> UP[up_to_date]
+        ST --> BEH[behind]
+        ST --> AHD[ahead]
+        ST --> UNK[unknown]
+        ST --> NODEP[no_deployment]
     end
-
-    style COMMIT fill:#e1f5ff
-    style EVAL1 fill:#fff4e1
-    style EVAL2 fill:#fff4e1
-    style EVAL3 fill:#fff4e1
-    style QUEUE fill:#ffe1f5
-    style BUILD1 fill:#e1ffe1
-    style BUILD2 fill:#e1ffe1
-    style BUILD3 fill:#e1ffe1
-    style STATE1 fill:#90EE90
-    style STATE2 fill:#FFD700
-    style STATE3 fill:#FFB6C1
 ```
 
-## Key Points for Dumb Interns
+## Key points
 
-### Parallel Operations
-- **Each nixosConfiguration (hostname1, hostname2, etc.) flows INDEPENDENTLY**
-- hostname1 can be building while hostname2 is still evaluating
-- hostname3 can be caching while hostname1 is queued
-- NO waiting for all evals to finish before builds start
+### Evaluation is parallel, and builds start after finalization
 
-### LIFO Build Queue
-- **Newest commit's configs jump to the FRONT of the queue**
-- If commit A arrives, then commit B arrives:
-  - Commit B's configs build BEFORE commit A's remaining configs
-- Why? Because we want latest changes deployed fastest
+- `nix-eval-jobs` evaluates the configurations of one commit in parallel. The
+  server persists each system as its result arrives and stores its
+  `expected_store_path`.
+- The server creates the build jobs when it **finalizes** the commit
+  (`EvaluationFinalizeOutcome::Completed` in `server/mod.rs`). A build does
+  not start while another system of the same commit is still evaluating.
+- After the build jobs exist, each system builds and publishes independently.
+  One builder can build `hostname1` while another publishes `hostname3`.
 
-### System States (How We Know What's Happening)
+### Build order is newest batch first
 
-| State | Meaning | Agent Store Path | DB Store Path |
-|-------|---------|------------------|---------------|
-| ✅ **UP-TO-DATE** | Agent running latest | `/nix/store/abc123...` | `/nix/store/abc123...` (MATCH) |
-| ⚠️ **BEHIND** | Agent running old config | `/nix/store/old111...` | `/nix/store/abc123...` (NEWER) |
-| ❓ **UNKNOWN** | Agent path not tracked | `/nix/store/xyz999...` | NOT FOUND in DB |
+The claim query sorts by `queue_position DESC`. New jobs receive a position
+higher than every queued or building job. The newest batch is therefore claimed
+first unless an operator reorders the queue. Within a batch the later
+derivation id has the higher position. This order is not a FIFO. It is also
+not a strict LIFO per commit. See
+[Wakeups and polling](../architecture/event-driven-queues.md#claim-eligibility-and-ordering).
 
-### The Loop
-1. **Commit arrives** → CF starts eval for each hostname
-2. **Eval finishes** → Store path saved to DB immediately
-3. **Queue entry** → System added to build queue (LIFO)
-4. **Build starts** → Independent of other systems still evaluating
-5. **Build done** → Push to cache, mark in DB as CACHED
-6. **Agent polls** → Discovers new build available
-7. **Agent pulls** → Downloads from cache, activates config
-8. **Agent heartbeats** → Reports new store path, CF marks UP-TO-DATE
+### Deployable artifact
 
-### Why This Design?
-- **Parallel eval** = Fast feedback on which configs are changing
-- **Independent pipeline** = No blocking, max throughput
-- **LIFO queue** = Latest changes deploy first
-- **Store path in DB** = Single source of truth for "what should be running"
-- **Agent polling** = Agent pulls updates when ready (no push complexity)
+The newest deployable artifact for a configuration is the first row, by commit
+timestamp, completion time, and id, of a NixOS derivation that has:
+
+- a nonblank `store_path`;
+- `cf_agent_enabled` and `policy_requirements_met` set;
+- no error message;
+- a completed `cache_push_jobs` row with the same `store_path`.
+
+### System states
+
+The server computes the state in `view_system_deployment_status` (migration
+`0291`). The agent does not classify itself. The agent only sends its current
+system path and receives `desired_target`.
+
+| State | Meaning |
+| --- | --- |
+| `no_deployment` | The system is registered, but no system state record exists for its hostname. |
+| `up_to_date` | The current path equals the newest deployable artifact of the system. |
+| `behind` | The current path belongs to the system's own configuration but not to the newest deployable artifact. A newer deployable build is available. |
+| `ahead` | The current path belongs to a newer commit than the newest deployable artifact. |
+| `unknown` | The server cannot relate the current path to the system's flake and configuration, or the configuration has no deployable artifact yet. |
+
+A path that appears in no `derivations` row (neither `store_path` nor
+`expected_store_path`) falls into `unknown`.
+
+### The loop
+
+1. **Commit arrives.** The server evaluates each configuration.
+2. **Evaluation persists.** Each system's expected store path is saved as the
+   system completes.
+3. **Finalization queues builds.** Systems that passed policy get build jobs.
+4. **Build and publish.** A builder builds, pushes to the cache, and reports.
+5. **Server verifies.** The server probes the cache and records the completed
+   push and the built `store_path`.
+6. **Policy manager sets the target.** For an `auto_latest` system, after the
+   policy gates pass.
+7. **Agent heartbeats.** The heartbeat response carries `desired_target`. The
+   agent copies the path from the cache and switches.
+8. **Agent reports.** The next state report carries the new path. The view
+   then shows `up_to_date`.
+
+### Why this design
+
+- **Parallel evaluation** gives fast feedback on which configurations change.
+- **The cache requirement** prevents the server from pointing an agent at a
+  path that no cache can serve.
+- **Pull-based deployment** keeps the agent in control of when it switches. The
+  server never pushes to an agent.
+- **A server-computed state** gives one definition of "up to date" for every
+  view.
 
 ## Related concepts
 
-- [Commit to deploy flow](commit-eval-build-cache-deploy-flow.md) - flow chart with eval queue positions
+- [Commit to deploy flow](commit-eval-build-cache-deploy-flow.md) - flow chart with decisions
 - [Commit to deploy sequence](commit-eval-build-cache-deploy-sequence.md) - sequence diagram
 - [Evaluation and build queue pipeline](evaluation-and-build-queue-pipeline.md) - queue and invariant details
+- [System Deployment Status View](../data-model/views/view-system-deployment-status.md) - the view that classifies systems

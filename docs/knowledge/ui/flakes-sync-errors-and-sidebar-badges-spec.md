@@ -14,7 +14,7 @@ generated:
   at: 2026-10-03T22:54:52-05:00
 sources:
   - id: s1
-    resource: "Crystal Forge repository file backlog/docs/doc-18%20-%20Spec-Flakes-sync-error-surfaces-and-sidebar-alert-badge-system.md at commit 3b23d36f"
+    resource: "Crystal Forge repository file backlog/docs/specs/doc-18%20-%20Spec-Flakes-sync-error-surfaces-and-sidebar-alert-badge-system.md at commit 3b23d36f"
     title: "Spec: Flakes sync-error surfaces and sidebar alert badge system"
 ---
 # Flakes sync-error surfaces and sidebar alert badge specification

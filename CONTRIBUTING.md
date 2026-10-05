@@ -44,18 +44,21 @@ Crystal Forge has comprehensive testing across multiple levels. When contributin
 
 **For database changes**:
 
-- Add database tests in `packages/cf-test-modules/cf_test/tests/database/`
-- Test scenarios in `packages/cf-test-modules/cf_test/scenarios/`
-- Run with `nix build .#checks.x86_64-linux.database`
+- Add database tests in `packages/cf-test-suite/cf_test/tests/database/`
+- Test scenarios in `packages/cf-test-suite/cf_test/scenarios/`
+- Run with `nix run .#cf-test-suite.runTests -- -vvv -m database`
 
 **For component integration**:
 
-- Server tests: `nix build .#checks.x86_64-linux.server`
-- Builder tests: `nix build .#checks.x86_64-linux.builder`
-- Cache tests: `nix build .#checks.x86_64-linux.s3-cache` or `.#checks.x86_64-linux.attic-cache`
-- Full test suite: `nix flake check`
+- Server regression tests: `nix build .#checks.x86_64-linux.server-regressions`
+- Integration VM: `nix build .#checks.x86_64-linux.integration`
+- Python server, builder, cache, and database tests:
+  `nix run .#cf-test-suite.runTests -- -vvv`
+- Full flake checks: `nix flake check`
 
-See the [Test Plan](docs/test_plan.md) for detailed testing guidance.
+See the [testing guide](docs/knowledge/testing/test-plan.md) and
+[flake-check catalog](docs/knowledge/testing/flake-checks.md) for current
+testing guidance.
 
 ## Project Management & Process
 
@@ -87,7 +90,7 @@ When contributing, please:
 - Update the changelog if your change is user-facing
 - Include examples where appropriate
 
-**Frontend Contributors:** See [Frontend Component Isolation Standards](docs/frontend-component-standards.md) for component development workflow, state coverage requirements, and isolation-driven development practices.
+**Frontend Contributors:** See the [Frontend Component Isolation Standards](docs/knowledge/ui/component-isolation-standards.md) for component development workflow, state coverage requirements, and isolation-driven development practices.
 
 ## Code Style
 

@@ -1,12 +1,11 @@
 ---
 type: Data Model
 title: "Config Timeline View (`view_config_timeline`)"
-description: "Describes view_config_timeline, the Grafana config timeline view that labels each commit with the number of systems currently running it, derived from view_system_deployment_status and view_commit_deployment_timeline."
+description: "Describes view_config_timeline, the SQL view that labels each recent commit with the number of systems currently running it, derived from view_system_deployment_status and view_commit_deployment_timeline; its only consumers are the legacy dashboard JSON and the database test suite."
 tags:
   - crystal-forge
   - view
   - deployment-timeline
-  - grafana
   - commits
 implementation_status: implemented
 sources:
@@ -18,16 +17,16 @@ sources:
 
 ## Overview
 
-`view_config_timeline` produces a **commit-centric timeline** intended for Grafana’s bar/row “config timeline” panel. Each row represents a flake; each bar segment corresponds to a commit at a specific timestamp and encodes how many systems are **currently** running that commit.
+`view_config_timeline` produces a **commit-centric timeline**. Each row is one commit of a flake at its commit timestamp. It encodes how many systems are **currently** running that commit.
 
-![Grafana Config Timeline](../../../views/view_config_timeline.png)
+**Consumers at revision `3b23d36f`:** the legacy Grafana dashboard definition (`packages/dashboards/crystal-forge-dashboard.json`) and the database tests (`packages/cf-test-suite/cf_test/tests/database/test_view_config_timeline.py`). The Dioxus UI and the server API do not read this view. The view was last defined by migration `0067_update_more_views.sql`. No later migration drops it.
 
 ## What it Shows
 
 - For every commit (within the recent window), show:
-  - **`time`** — the commit timestamp (used as the X-axis).
-  - **`Config`** — a compact, parseable label used by Grafana.
-  - **`flake_name`** — the flake/repo the commit belongs to (used as series/row).
+  - **`time`** — the commit timestamp.
+  - **`Config`** — a compact, parseable label.
+  - **`flake_name`** — the flake/repo the commit belongs to.
 
 Counts are **live**: they’re recomputed from current system state, so if a system drifts to an _unknown_ derivation or reverts/advances to a different commit, the old commit’s count drops accordingly.
 
@@ -49,9 +48,9 @@ A `LEFT JOIN` keeps **all commits** in the output, even when **0 systems** are c
 
 | Column       | Type          | Description                                                                     |
 | ------------ | ------------- | ------------------------------------------------------------------------------- |
-| `time`       | `timestamptz` | Commit timestamp (X-axis).                                                      |
-| `Config`     | `text`        | Parseable label used by Grafana. Format: `"<N> deployed (<short_hash>)§<idx>"`. |
-| `flake_name` | `text`        | Flake/repository name (row/series key).                                         |
+| `time`       | `timestamptz` | Commit timestamp.                                                               |
+| `Config`     | `text`        | Parseable label. Format: `"<N> deployed (<short_hash>)§<idx>"`.                 |
+| `flake_name` | `text`        | Flake/repository name.                                                          |
 
 ### `Config` String Format
 
@@ -59,14 +58,14 @@ A `LEFT JOIN` keeps **all commits** in the output, even when **0 systems** are c
 
 - `<N>`: integer count of systems **currently** on this commit.
 - `<short_hash>`: first 7–8 chars of `git_commit_hash` (for concise labels).
-- `§<idx>`: zero-based rank of the commit **per flake by time desc** (handy for Grafana sorting/tracking).
+- `§<idx>`: zero-based rank of the commit **per flake by time desc**.
 
 ## Time Scope & Ordering
 
 - Inherits the **recent window** from `view_commit_deployment_timeline` (e.g., last 30 days).
 - Results ordered by `time DESC` (newest commits first per flake).
 
-## Typical Grafana Query
+## Example query
 
 ```sql
 SELECT
@@ -106,14 +105,6 @@ ORDER BY time DESC;
 - **Live counts** reflect the fleet’s _current_ state; historical bars don’t “freeze” counts.
 - Commits remain in the output with **`0 deployed`** when nothing currently runs them.
 - If a system’s deployment becomes **`unknown`**, it stops contributing to any commit’s count.
-
-## Performance Hints
-
-Ensure common indices exist in base tables (examples):
-
-- `commits(flake_id, commit_timestamp)`
-- `system_states(hostname, timestamp)`
-- `derivations(derivation_path)`, `derivations(commit_id)`
 
 ## Related Views
 

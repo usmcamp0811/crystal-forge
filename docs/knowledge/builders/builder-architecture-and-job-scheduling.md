@@ -1,169 +1,215 @@
 ---
 type: Architecture
 title: "Multi-Builder API architecture, scheduling, and environment assignment"
-description: "Describes the multi-builder architecture, environment assignment (wildcard and specific builders), heartbeat and offline detection, query performance, the migration from direct database access, and future enhancements."
+description: "Describes the API-only builder architecture: signed and session-checked requests, environment assignment (wildcard and specific builders), the atomic claim query and its ordering, heartbeat-based offline detection and job recovery, indexes, and which planned enhancements are not implemented."
 tags:
   - crystal-forge
   - builder
   - scheduling
   - heartbeat
   - environment
-implementation_status: partial
+implementation_status: implemented
 generated:
   by: opencode/claude-sonnet-5-5
-  at: 2026-10-03T22:57:42-05:00
+  at: 2026-10-04T18:00:00-05:00
 sources:
   - id: origin
     resource: "Crystal Forge repository file docs/multi-builder-api.md at commit 3b23d36f"
-    title: "Multi-Builder API Documentation"
+    title: "Multi-Builder API Documentation (original document)"
+  - id: code-1
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/queries/builders.rs at commit 3b23d36f"
+    title: Claim query and stale-builder recovery
+  - id: code-2
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/server/mod.rs at commit 3b23d36f"
+    title: Recovery loop
+  - id: code-3
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/handlers/builder_request.rs at commit 3b23d36f"
+    title: Request authentication headers
 ---
 
 # Multi-Builder API architecture, scheduling, and environment assignment
 
-## Multi-Builder API Documentation
-
-> **See also:** [`builder-security-architecture.md`](builder-trust-boundaries-and-components.md) for the
-> complete security architecture, trust boundary diagrams, threat model, and per-strategy
-> firewall rules.
+> **See also:** [Builder trust boundaries and components](builder-trust-boundaries-and-components.md)
+> for the security architecture, trust boundary diagrams, threat model, and
+> per-strategy firewall rules.
 
 ## Overview
 
-The Multi-Builder API enables distributed builder deployments with centralized management through the Crystal Forge server. Builders authenticate via Ed25519 signatures and communicate exclusively through REST API endpoints. Builders never access the database directly and never hold repository credentials. When builder-side cache push is enabled, builders may receive narrowly scoped per-job cache push credentials from the server as described in the security boundary notes below.
+The Multi-Builder API lets several builders run on separate hosts under one
+Crystal Forge server. A builder is an **API-only** process (`cf-builder`). It
+talks to the server through REST endpoints. It never opens a database
+connection and never holds repository credentials. When builder-side cache push
+is enabled, the server can give a builder narrowly scoped cache push credentials
+for one job. See the trust boundary document for those rules.
 
 ## Architecture
 
 ### Components
 
-- **Server**: Central coordinator managing builder registration, job assignment, and metrics
-- **Builder**: Remote build executor that polls for jobs and reports status via API
-- **Database**: PostgreSQL schema with builders, job queue, metrics, and environment assignments
+- **Server**: Owns persistence, authorization, builder registration, job
+  creation, job assignment, and recovery.
+- **Builder**: Polls the server for a job, runs the build, publishes the output
+  to the binary cache, and reports status through the API.
+- **Database**: PostgreSQL tables `builders`, `build_jobs`,
+  `builder_metrics`, and `builder_environment_assignments`. Only the server
+  reads and writes them.
 
-### Key Features
+### Key features
 
-- **Authentication**: Ed25519 signature per request (stateless)
-- **Authorization**: Admin-only builder management, builder-authenticated work queue
-- **Environment Filtering**: Builders assigned to specific environments (or wildcard for all)
-- **Concurrent Job Limits**: Configurable max_concurrent_jobs per builder
-- **Retry Logic**: Intelligent retry with priority weighting
-- **Heartbeat Tracking**: Automatic offline detection and job reassignment
+| Feature | Behavior |
+| --- | --- |
+| Authentication | Each request carries `X-Builder-ID`, `X-Timestamp`, and an Ed25519 signature. The timestamp provides replay resistance. |
+| Session binding | A builder process establishes a session (`POST /api/v1/builders/:id/session`) and sends `X-Builder-Session-ID`. The claim, complete, and fail paths reject a request whose session does not match the session stored on the builder row or the job. |
+| Authorization | Builder management is admin-only. The work queue accepts only authenticated builder requests. |
+| Environment filtering | A builder claims jobs for its assigned environments. A builder with no assignment claims every environment. |
+| Concurrency limit | `max_concurrent_jobs` limits the `building` jobs of one builder. |
+| Retry | Automatic retry follows the `automatic_retry_policy` row. See [Builder failure phases and retry](builder-failure-phases-and-retry.md). |
+| Offline detection | The server marks a builder `offline` after missed heartbeats and re-queues its jobs. See [Heartbeat and offline detection](#heartbeat-and-offline-detection). |
 
-## Environment Assignment
-
-### Wildcard Builders
-
-Builders with **zero environment assignments** receive jobs from all environments:
-
-```sql
--- Builder with no assignments (wildcard)
-SELECT COUNT(*) FROM builder_environment_assignments WHERE builder_id = 'uuid';
--- Returns 0
-
--- This builder receives ALL queued jobs, regardless of environment_id
+```mermaid
+sequenceDiagram
+    participant B as Builder (cf-builder)
+    participant S as Server API
+    participant DB as PostgreSQL
+    B->>S: POST /api/v1/builders/:id/session
+    loop every builder.poll_interval (default 5 s)
+        B->>S: GET or POST /api/v1/builders/:id/next-job (signed, session id)
+        S->>DB: claim_next_job_atomic
+        DB-->>S: job or none
+        S-->>B: job manifest or no work
+    end
+    B->>S: heartbeat, logs, progress (signed)
+    B->>S: complete or fail (signed)
 ```
 
-### Environment-Specific Builders
+## Environment assignment
 
-Builders assigned to specific environments only receive matching jobs:
+### Wildcard builders
+
+A builder with **no** rows in `builder_environment_assignments` is a wildcard
+builder. It can claim a job of any environment.
 
 ```sql
--- Builder assigned to env-1 and env-2
+SELECT COUNT(*) FROM builder_environment_assignments WHERE builder_id = 'uuid';
+-- 0 means: wildcard builder
+```
+
+### Environment-specific builders
+
+A builder with assignments claims only a job where the job environment is one
+of the assigned environments, or where the job has no environment.
+
+```sql
 INSERT INTO builder_environment_assignments (builder_id, environment_id)
 VALUES ('builder-uuid', 'env-1'), ('builder-uuid', 'env-2');
-
--- This builder only receives jobs where:
--- environment_id IN ('env-1', 'env-2') OR environment_id IS NULL
+-- Claimable jobs: environment_id IN ('env-1', 'env-2') OR environment_id IS NULL
 ```
 
-**Use Cases**:
-- **Wildcard**: Development builders that handle all environments
-- **Specific**: Production builders isolated to prod environment only
+Use a wildcard builder for development. Use environment-specific builders to
+keep production builds on isolated hosts.
 
-## Heartbeat and Offline Detection
+## Job claim
 
-### Heartbeat Interval
+`claim_next_job_atomic` (`queries/builders.rs`) runs in one transaction. It
+checks the builder session and the `max_concurrent_jobs` limit first. It then
+selects the first queued job that meets every eligibility rule, with
+`FOR UPDATE ... SKIP LOCKED`, so two builders never claim the same job.
 
-Recommended: 30 seconds
+Eligibility rules:
 
-**Server-Side**:
-- `last_heartbeat_at` updated on every heartbeat
-- Status → "active" if currently inactive
+- `status = 'queued'` and `available_at <= NOW()`;
+- the environment rule above;
+- the derivation has `cf_agent_enabled` and `policy_requirements_met` set.
 
-### Offline Detection
+Order among eligible jobs: `queue_position DESC NULLS LAST`, then
+`priority_weight DESC`, then the commit timestamp `DESC NULLS LAST`, then
+`created_at ASC`. The claim does not consider the CPU or memory load of a
+builder. [Wakeups and polling](../architecture/event-driven-queues.md#claim-eligibility-and-ordering)
+explains how `queue_position` is assigned and why the order is newest batch
+first.
 
-**Future Implementation** (not yet active):
-- Query: `SELECT * FROM builders WHERE last_heartbeat_at < now() - interval '90 seconds' AND status = 'active'`
-- Mark as "offline"
-- Re-queue in-progress jobs assigned to offline builder
+## Heartbeat and offline detection
 
-> **Status:** The source text above says automatic offline detection is not yet active. The server now marks stale `active` builders `offline` and re-queues orphaned `building` jobs (`mark_stale_builders_offline` in `packages/default/crates/cf-server/src/queries/builders.rs`, called from `recover_orphaned_build_jobs_cycle` in `packages/default/crates/cf-server/src/server/mod.rs`). The timeout there is `max(3 x heartbeat interval, 60 s)`, not the 90 seconds shown above. The migration did not edit the source text; see the verification candidates in the migration manifest report.
+A builder sends a heartbeat every `builder.heartbeat_interval` (default 30
+seconds). The server updates `last_heartbeat_at` and sets the status `active`.
 
-## Performance Considerations
+The server runs `run_builder_recovery_loop` from startup. The loop interval is
+`max(builder.heartbeat_interval, 15 s)`. Each cycle:
+
+1. Marks an `active` builder `offline` when `last_heartbeat_at` is older than
+   `max(3 x max(heartbeat interval, 15 s), 60 s)`. The default interval gives
+   90 seconds.
+2. Re-queues each `building` job whose builder row is missing, not `active`, or
+   disabled. The job loses its builder and session assignment, returns to
+   `queued`, and receives an audit line in its log.
+3. Re-queues build-eligible derivations that have no build job.
+
+A re-queued job follows the normal claim rules. Build jobs have no lease expiry
+column. Recovery depends only on builder heartbeats. (The `lease_expires_at`
+field in the protocol belongs to CVE scan leases.)
+
+## Performance
 
 ### Indexes
 
-Critical indexes for query performance:
+Migration `0083_create_builders_infrastructure.sql` creates these indexes.
+Migration `0192_build_jobs_queue_position.sql` adds the index that serves the
+current claim order. Migration `0145_add_builder_api_sessions.sql` adds the
+session index.
 
 ```sql
--- Job queue queries
+-- Original claim order (priority_weight, then age); the claim now sorts by queue_position first
 CREATE INDEX idx_build_jobs_queue ON build_jobs(status, priority_weight DESC, created_at ASC)
+    WHERE status = 'queued';
+
+-- Current claim order
+CREATE INDEX idx_build_jobs_queue_order ON build_jobs (queue_position DESC NULLS LAST)
     WHERE status = 'queued';
 
 -- Active jobs by builder (concurrency tracking)
 CREATE INDEX idx_build_jobs_builder_active ON build_jobs(builder_id)
     WHERE status = 'building';
 
+-- Active jobs by builder session
+CREATE INDEX idx_build_jobs_builder_session_active
+    ON build_jobs(builder_id, builder_session_id) WHERE status = 'building';
+
 -- Environment filtering
 CREATE INDEX idx_build_jobs_environment ON build_jobs(environment_id);
 ```
 
-### Query Optimization
+### Metrics retention
 
-**Atomic Job Assignment**:
-```sql
-SELECT * FROM build_jobs
-WHERE status = 'queued'
-  AND (environment_id = ANY($1) OR environment_id IS NULL)
-ORDER BY priority_weight DESC, created_at ASC
-LIMIT 1
-FOR UPDATE SKIP LOCKED;
-```
+The server keeps all `builder_metrics` rows. The server code at this revision
+contains no pruning or aggregation of that table.
 
-- `FOR UPDATE`: Locks the row for update
-- `SKIP LOCKED`: Skips locked rows (prevents race conditions with multiple builders)
+## History: migration from direct database access
 
-### Metrics Retention
+> **Status:** historical. TASK-140 introduced the builder API while the earlier
+> builder still read the database directly. The successor is the API-only
+> `cf-builder`. The legacy reservation worker (`build_reservations`,
+> `builder/worker.rs`) remains in the `cf-server` library, but the server does
+> not start it. See [Wakeups and polling](../architecture/event-driven-queues.md#which-workers-run).
 
-Default: Keep all metrics (no auto-pruning yet)
+The original rollout plan:
 
-**Future**: Configurable retention (e.g., 24 hours) with optional aggregation to hourly summaries.
+1. Keep the existing builder running with direct database access.
+2. Deploy the API infrastructure.
+3. Register builders in the UI.
+4. Switch the builder binary to the API client.
+5. Optionally migrate existing jobs to the `build_jobs` table.
 
-## Migration from Direct Database Access
+## Not implemented
 
-> **Status:** historical. This section describes the original rollout from direct database access to the builder API.
+TASK-140 proposed more enhancements. The code at this revision does not
+contain these three:
 
-### Gradual Rollout
+- load-based builder selection (the claim query ignores builder load);
+- aggregation or pruning of `builder_metrics`;
+- builder auto-scaling from queue depth.
 
-1. **Keep existing builder running**: Direct DB access continues working
-2. **Deploy API infrastructure**: Merge backend changes
-3. **Register builders in UI**: Create builder records
-4. **Update builder binary**: Switch to API client (Phase 6)
-5. **Migrate jobs**: Optional - move existing jobs to new build_jobs table
-
-### Backward Compatibility
-
-Current implementation:
-- New tables added (builders, build_jobs, etc.)
-- Existing tables unchanged (build_reservations extended with FK)
-- Existing builder can continue using direct DB access during transition
-
-## Future Enhancements
-
-- **Load-based assignment**: Select least busy builder (track CPU/memory usage)
-- **Heartbeat timeout automation**: Auto-mark offline, requeue jobs
-- **Metrics aggregation**: Hourly summaries for long-term storage
-- **Builder auto-scaling**: Spawn/terminate builders based on queue depth
-- **Build cache management**: Shared cache between builders
-- **Builder health checks**: Beyond heartbeat (e.g., test builds)
+The proposal also listed shared cache management between builders and builder
+health checks beyond the heartbeat. This document did not check those two.
 
 ## References
 

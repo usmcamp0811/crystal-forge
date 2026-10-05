@@ -1,6 +1,6 @@
 # API
 
-* [Agent API (machine auth) and Cache API](agent-and-cache-api.md) - Describes key-signed agent and builder endpoints, the builder job example, and the proposed binary cache management endpoints; open it when working on machine-authenticated calls or cache management routes.
+* [Agent API (machine auth) and Cache API](agent-and-cache-api.md) - Describes the machine-authenticated agent routes, the API-only builder job endpoints, and the implemented cache-destination and cache-push-job APIs; open it when working on machine-authenticated calls or cache administration.
 * [Agent POST types and deployment command response](agent-post-types-and-deployment-response.md) - Describes the change_reason values in agent SystemState POSTs, the older-agent state_delta compatibility rule, and how LogResponse returns desired_target after either write path, including the documented detached-deployment attribution limitation.
 * [Backend API overview, error codes, and WebSocket streaming](api-overview-errors-and-streaming.md) - Describes the REST base URL, request and response envelopes, common error codes, the evaluation-log WebSocket stream, and the per-resource endpoint summary table; open it first when working with the Crystal Forge HTTP API.
 * [Builder API: CVE scan endpoints](builder-cve-scan-api.md) - Documents the builder-signed CVE scan endpoints (claim, heartbeat, complete, fail), lease fencing, evidence provenance (server_local_verified and unverified_remote), diagnostics bounds, and scanner process-group rules.

@@ -94,26 +94,15 @@ The following invariants are mandatory:
 
 Config inspection follows the exact target through increasingly narrow work:
 
-```text
-exact commit/config/carrier
-          |
-          v
-shallow root inspection
-          |
-          v
-user expands prefix
-          |
-          v
-scoped prefix inspection
-          |
-          v
-user selects option
-          |
-          v
-value/metadata inspection
-          |
-          v
-optional provenance detail
+```mermaid
+%% diagram-id: core-config-explorer-inspection-path
+flowchart TD
+    Target["Exact commit / config / carrier"] --> Root["Shallow root inspection"]
+    Root --> Expand["User expands prefix"]
+    Expand --> Prefix["Scoped prefix inspection"]
+    Prefix --> Select["User selects option"]
+    Select --> Detail["Value / metadata inspection"]
+    Detail --> Provenance["Optional provenance detail"]
 ```
 
 The interface is REPL-like in interaction, but it is not an actual REPL. The

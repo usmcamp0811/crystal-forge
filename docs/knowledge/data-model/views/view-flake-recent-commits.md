@@ -1,13 +1,12 @@
 ---
 type: Data Model
 title: "Flake Recent Commits View (`view_flake_recent_commits`)"
-description: "Describes view_flake_recent_commits, the per-flake snapshot of the last three commits with attempt status (ok, retries, failed/stuck threshold) for Grafana health tables."
+description: "Describes view_flake_recent_commits, the SQL view of the last three commits per flake with an attempt status derived from the raw commits.attempt_count counter (ok, retries, failed/stuck at 5 or more); its only consumers are the legacy dashboard JSON and the database test suite."
 tags:
   - crystal-forge
   - view
   - flakes
   - commits
-  - grafana
 implementation_status: implemented
 sources:
   - id: origin
@@ -18,7 +17,11 @@ sources:
 
 ## Overview
 
-The `view_flake_recent_commits` provides a **per-flake snapshot of the most recent commits** (default: last 3). It highlights commit attempt activity while suppressing “retries” if the commit has progressed into the derivation stage. This view is designed for **Grafana dashboards** as a compact table for quick health/status checks.
+The `view_flake_recent_commits` provides a **per-flake snapshot of the most recent commits** (default: last 3). It highlights commit attempt activity while suppressing “retries” if the commit has progressed into the derivation stage.
+
+**Consumers at revision `3b23d36f`:** the legacy Grafana dashboard definition (`packages/dashboards/crystal-forge-dashboard.json`) and the database tests (`packages/cf-test-suite/cf_test/tests/database/test_view_flake_recent_commits.py`). The Dioxus UI and the server API do not read this view. It was defined once, by migration `0051_create_view_flake_recent_commits.sql`.
+
+**Attempt semantics:** the view reads the raw `commits.attempt_count` column and uses the fixed threshold 5. Evaluation retries are governed separately: the loop counts `evaluation_attempt_count` against the `automatic_retry_policy` limit (default 1 evaluation retry). The `failed/stuck threshold` label therefore does not mean that automatic retries are exhausted. See [Wakeups and polling](../../architecture/event-driven-queues.md#retry-delay).
 
 ## Key Behavior
 
@@ -40,7 +43,7 @@ The `view_flake_recent_commits` provides a **per-flake snapshot of the most rece
 | `commit_timestamp`     | When the commit was created                                          |
 | `attempt_count`        | Number of commit attempts (raw counter)                              |
 | `attempt_status`       | Status: `ok`, `retries`, or `⚠︎ failed/stuck threshold`             |
-| `minutes_since_commit` | Integer minutes since commit was created (for easy Grafana display)  |
+| `minutes_since_commit` | Integer minutes since commit was created                             |
 | `age_interval`         | Interval value (`NOW() - commit_timestamp`) for precise time display |
 
 ## Data Ordering
@@ -56,7 +59,6 @@ This makes it easy to group and scan per-flake activity.
 
 - **Commit Health Monitoring**: Quickly identify commits stuck in retry loops or at the failed/stuck threshold.
 - **Pipeline Progress Insight**: Verify that retries are only flagged when commits haven’t yet advanced to derivations.
-- **Grafana Dashboards**: Compact per-flake table panel showing latest commit health and timing.
 
 ## Example Queries
 

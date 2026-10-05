@@ -38,17 +38,12 @@ Server and UI changes must preserve both sides of this invariant.
 
 Crystal Forge generates its default option catalog reproducibly from the nixpkgs revision pinned by the Crystal Forge flake:
 
-```text
-Crystal Forge pinned nixpkgs
-        |
-        v
-NixOS module option evaluation
-        |
-        v
-generated option metadata
-        |
-        v
-CF policy editor
+```mermaid
+%% diagram-id: core-nixos-option-catalog-generation
+flowchart TD
+    Pinned["Crystal Forge pinned nixpkgs"] --> Evaluation["NixOS module option evaluation"]
+    Evaluation --> Metadata["Generated option metadata"]
+    Metadata --> Editor["CF policy editor"]
 ```
 
 The resulting artifact is packaged with Crystal Forge. It is an internally consistent baseline for that pinned NixOS module graph; the server does not run Nix or access the network to answer editor searches at runtime.
@@ -57,11 +52,13 @@ The resulting artifact is packaged with Crystal Forge. It is an internally consi
 
 Crystal Forge uses the catalog to make policy authoring faster and more precise. For example:
 
-```text
-services.openssh.enable  -> boolean editor
-an enum-valued option    -> dropdown with known values
-an integer-valued option -> numeric editor
-a string/lines option    -> short or multiline text editor
+```mermaid
+%% diagram-id: core-option-type-editor-mapping
+flowchart LR
+    Boolean["services.openssh.enable / boolean option"] --> BooleanEditor["Boolean editor"]
+    Enum["Enum-valued option"] --> Dropdown["Dropdown with known values"]
+    Integer["Integer-valued option"] --> Numeric["Numeric editor"]
+    StringLines["String / lines option"] --> Text["Short or multiline text editor"]
 ```
 
 This guidance helps construct a typed semantic rule:
@@ -122,16 +119,11 @@ The editor may offer `"c"` from the baseline, while the target evaluation reject
 
 The authority boundary is:
 
-```text
-CF packaged option metadata
-        |
-        v
-authoring assistance / best-known baseline schema
-
-Target flake evaluation
-        |
-        v
-authoritative truth for that target
+```mermaid
+%% diagram-id: core-option-metadata-authority-hierarchy
+flowchart TD
+    Baseline["CF packaged option metadata"] --> Assistance["Authoring assistance / best-known baseline schema"]
+    Target["Target flake evaluation"] --> Authority["Authoritative truth for that target"]
 ```
 
 Only evaluation of the target flake and its actual module composition determines whether:
@@ -164,12 +156,16 @@ Tests must preserve this distinction. Do not add a test that rejects a structura
 
 Phase 3 uses metadata to author and serialize typed semantic rules. Phase 4 must apply those rules to the real target evaluation:
 
-```text
-Phase 3:
-metadata -> author typed semantic rule
-
-Phase 4:
-typed semantic rule + actual target evaluation -> enforcement result
+```mermaid
+%% diagram-id: core-option-metadata-phases
+flowchart LR
+    subgraph Phase3["Phase 3"]
+        Metadata["Metadata"] --> Author["Author typed semantic rule"]
+    end
+    subgraph Phase4["Phase 4"]
+        Rule["Typed semantic rule"] --> Enforcement["Enforcement result"]
+        Target["Actual target evaluation"] --> Enforcement
+    end
 ```
 
 Phase 4 must not fail a policy solely because the packaged baseline did not recognize its option, and it must not treat a baseline-known option as proof of target compliance. Execution must obtain its authoritative answer from the actual target configuration evaluation.
@@ -178,19 +174,14 @@ Phase 4 must not fail a policy solely because the packaged baseline did not reco
 
 Target-specific option metadata is a possible future enhancement, not part of Phase 3:
 
-```text
-                         CF pinned metadata
-                         fast baseline
-                              |
-                              v
-Policy editor ----------------------------+
-                                          |
-                                          v
-                         target-specific metadata
-                         from actual flake evaluation
-                                          |
-                                          v
-                         authoritative target schema
+```mermaid
+%% diagram-id: core-target-specific-option-metadata
+flowchart TD
+    Pinned["CF pinned metadata"] --> Baseline["Fast baseline"]
+    Baseline --> Editor["Policy editor"]
+    Editor --> TargetMetadata["Target-specific metadata"]
+    Evaluation["Actual flake evaluation"] --> TargetMetadata
+    TargetMetadata --> Schema["Authoritative target schema"]
 ```
 
 Such metadata could include the target's exact nixpkgs revision, custom and third-party modules, option types, and enum values. Its generation and transport require a separate design and implementation.

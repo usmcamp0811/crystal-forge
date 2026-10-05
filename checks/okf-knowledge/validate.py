@@ -27,6 +27,7 @@ import hashlib
 import os
 import re
 import sys
+from urllib.parse import unquote, urlsplit
 from pathlib import Path
 
 import yaml
@@ -64,8 +65,8 @@ class Report:
 
 
 def slugify(heading: str) -> str:
-    """Returns the GitHub-style anchor slug for a heading."""
-    text = re.sub(r"[`*~]", "", heading.strip().lower())
+    """Returns GitLab Flavored Markdown's documented heading slug."""
+    text = heading.strip().lower()
     text = re.sub(r"[^\w\- ]", "", text, flags=re.UNICODE)
     return text.replace(" ", "-")
 
@@ -112,17 +113,39 @@ def parse_taxonomy(conventions: Path) -> set[str]:
 
 
 def iter_links(text: str):
-    """Yields (is_image, label, target, lineno) outside code fences/spans."""
+    """Yields inline, reference, image, and HTML resource links outside code."""
+    definitions: dict[str, str] = {}
+    visible_lines: list[str] = []
     in_fence = False
     for lineno, line in enumerate(text.splitlines(), 1):
+        # Markdown blockquotes may contain fenced code. Remove quote markers
+        # before fence detection so quoted HTML examples remain literal code.
+        line = re.sub(r"^\s*(?:>\s*)+", "", line)
         if FENCE.match(line):
             in_fence = not in_fence
+            visible_lines.append("")
             continue
         if in_fence:
+            visible_lines.append("")
             continue
-        stripped = re.sub(r"`[^`]*`", "", line)
+        definition = re.match(r"^\s*\[([^]]+)\]:\s*(\S+)", line)
+        if definition:
+            definitions[definition.group(1).casefold()] = definition.group(2).strip("<>")
+            visible_lines.append("")
+        else:
+            visible_lines.append(line)
+    for lineno, line in enumerate(visible_lines, 1):
+        stripped = re.sub(r"`+[^`]*`+", "", line)
         for match in LINK.finditer(stripped):
             yield bool(match.group(1)), match.group(2), match.group(3), lineno
+        # Reference links and shortcut references.
+        for match in re.finditer(r"(!?)\[([^]]+)\](?:\[([^]]*)\])?", stripped):
+            label = match.group(3) or match.group(2)
+            target = definitions.get(label.casefold())
+            if target:
+                yield bool(match.group(1)), match.group(2), target, lineno
+        for match in re.finditer(r"<(?:img|source|a)\b[^>]*?\b(src|href)\s*=\s*['\"]([^'\"]+)['\"][^>]*>", stripped, re.I):
+            yield match.group(1).lower() == "src", "HTML resource", match.group(2), lineno
 
 
 def check_timestamp(report: Report, path: Path, field: str, value) -> None:
@@ -221,6 +244,29 @@ def check_concept(report: Report, path: Path, rel: Path, taxonomy: set[str],
                 match = SOURCE_DESCRIPTOR.match(resource)
                 if not (match or resource.startswith(("http://", "https://"))):
                     report.error(rel, f"source resource {resource!r} must use the repository-file descriptor or an https URL")
+                elif match:
+                    source_path, source_rev = match.groups()
+                    decoded = unquote(source_path)
+                    if not re.fullmatch(r"[0-9a-f]{7,40}", source_rev):
+                        report.error(rel, f"source resource {resource!r} has an invalid commit prefix")
+                    if decoded.startswith("/") or ".." in Path(decoded).parts:
+                        report.error(rel, f"source resource path {decoded!r} is not repository-relative")
+                    candidate = (repo_root / decoded).resolve()
+                    try:
+                        candidate.relative_to(repo_root.resolve())
+                    except ValueError:
+                        report.error(rel, f"source resource {resource!r} leaves the repository")
+                    else:
+                        if Path(decoded).suffix.lower() in {".md", ".mdx", ".rst", ".adoc", ".asciidoc"}:
+                            inventory = repo_root / "docs/knowledge/meta/migration-manifest/source-inventory.tsv"
+                            if inventory.is_file():
+                                inventory_paths = {
+                                    line.split("\t", 1)[0]
+                                    for line in inventory.read_text(encoding="utf-8").splitlines()[1:]
+                                    if line and not line.startswith("#")
+                                }
+                                if decoded not in inventory_paths:
+                                    report.error(rel, f"source resource path {decoded!r} is absent from source inventory")
                 sid = entry.get("id")
                 if sid is not None:
                     if sid in ids:
@@ -232,8 +278,9 @@ def check_concept(report: Report, path: Path, rel: Path, taxonomy: set[str],
 
 
 def check_links(report: Report, path: Path, rel: Path, repo_root: Path,
-                slug_cache: dict[Path, set[str]]) -> None:
-    text = path.read_text(encoding="utf-8")
+                slug_cache: dict[Path, set[str]], text: str | None = None) -> None:
+    if text is None:
+        text = path.read_text(encoding="utf-8")
     for is_image, _label, target, lineno in iter_links(text):
         if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", target):
             if target.startswith("file:"):
@@ -245,8 +292,8 @@ def check_links(report: Report, path: Path, rel: Path, repo_root: Path,
             if target.startswith("/"):
                 report.error(f"{rel}:{lineno}", f"absolute link {target!r}; use a relative link")
                 continue
-            file_part, _, fragment = target.partition("#")
-            file_part = file_part.split("?")[0]
+            parsed = urlsplit(target)
+            file_part, fragment = unquote(parsed.path), unquote(parsed.fragment)
             anchor_file = (path.parent / file_part).resolve()
             try:
                 anchor_file.relative_to(repo_root.resolve())
@@ -257,6 +304,7 @@ def check_links(report: Report, path: Path, rel: Path, repo_root: Path,
                 kind = "image" if is_image else "link"
                 report.error(f"{rel}:{lineno}", f"broken {kind} target {target!r}")
                 continue
+        fragment = unquote(fragment)
         if fragment and anchor_file.is_file() and anchor_file.suffix == ".md":
             slugs = slug_cache.get(anchor_file)
             if slugs is None:
@@ -445,6 +493,54 @@ def check_duplicates(report: Report, concept_paths: list[Path], bundle: Path) ->
         digests[digest] = path
 
 
+def check_navigation_graph(report: Report, bundle: Path, repo_root: Path) -> None:
+    """Require parsed Markdown links to make every concept reachable from root."""
+    documents = {p.resolve() for p in bundle.rglob("*.md")}
+    root_index = (bundle / "index.md").resolve()
+    reached: set[Path] = set()
+    pending = [root_index]
+    while pending:
+        source = pending.pop()
+        if source in reached or not source.is_file():
+            continue
+        reached.add(source)
+        for _image, _label, target, _line in iter_links(source.read_text(encoding="utf-8")):
+            if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", target):
+                continue
+            parsed = urlsplit(target)
+            if parsed.path.startswith("/"):
+                continue
+            candidate = (source.parent / unquote(parsed.path)).resolve()
+            if candidate.is_dir():
+                candidate = candidate / "index.md"
+            if candidate in documents and candidate not in reached:
+                pending.append(candidate)
+    for concept in documents:
+        if concept.name not in RESERVED and concept not in reached:
+            report.error(concept.relative_to(bundle), "concept is not reachable from the root index through parsed Markdown links")
+
+
+def check_external_navigation(report: Report, repo_root: Path, bundle: Path,
+                              slug_cache: dict[Path, set[str]]) -> None:
+    """Validate links in retained entry points and README/pointer documents."""
+    selected = {"README.md", "CONTRIBUTING.md", "AGENTS.md", "CLAUDE.md", "TESTING.md"}
+    paths: set[Path] = {repo_root / name for name in selected}
+    for pattern in ("checks/**/README.md", "packages/**/README.md", "docs/design/**/*.md"):
+        paths.update(repo_root.glob(pattern))
+    for path in repo_root.glob("backlog/docs/**/*.md"):
+        text = path.read_text(encoding="utf-8")
+        if "docs/knowledge/" in text or "knowledge/index.md" in text:
+            paths.add(path)
+    for path in sorted(p for p in paths if p.is_file() and not p.resolve().is_relative_to(bundle.resolve())):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        # The retained-file contract concerns links into the migrated corpus.
+        # Unrelated legacy links remain outside this migration validator.
+        relevant = [line for line in lines if "docs/knowledge" in line or "knowledge/index" in line]
+        if relevant:
+            check_links(report, path, path.relative_to(repo_root), repo_root, slug_cache,
+                        "\n".join(relevant))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--repo-root", default=".")
@@ -490,6 +586,8 @@ def main() -> int:
         if not (bundle / "index.md").is_file():
             report.error(".", "missing root index.md")
         check_duplicates(report, concept_paths, bundle)
+        check_navigation_graph(report, bundle, repo_root)
+        check_external_navigation(report, repo_root, bundle, slug_cache)
         if not args.skip_manifest:
             check_manifest(report, bundle, repo_root)
 

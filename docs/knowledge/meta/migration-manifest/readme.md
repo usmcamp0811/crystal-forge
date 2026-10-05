@@ -34,7 +34,7 @@ tags:
   | `### Testing Infrastructure` | [overview/release-notes-v0-3-0.md#testing-infrastructure](../../overview/release-notes-v0-3-0.md#testing-infrastructure) |
   | `## What is Crystal Forge?` | [overview/project-introduction-and-key-features.md#what-is-crystal-forge](../../overview/project-introduction-and-key-features.md#what-is-crystal-forge) |
   | `## Key Features` (four H3 groups) | [overview/project-introduction-and-key-features.md#key-features](../../overview/project-introduction-and-key-features.md#key-features) |
-  | `## Architecture` | [architecture/ecosystem-architecture-summary.md#architecture](../../architecture/ecosystem-architecture-summary.md#architecture) |
+  | `## Architecture` | [architecture/ecosystem-architecture-summary.md](../../architecture/ecosystem-architecture-summary.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
   | `### Components` | [architecture/ecosystem-architecture-summary.md#components](../../architecture/ecosystem-architecture-summary.md#components) |
   | `## Quick Start` (introduction) | [operations/nixos-module-configuration.md](../../operations/nixos-module-configuration.md); `README.md` holds a new quick start pointer |
   | `### NixOS Module Configuration` | [operations/nixos-module-configuration.md#nixos-module-configuration](../../operations/nixos-module-configuration.md#nixos-module-configuration) |

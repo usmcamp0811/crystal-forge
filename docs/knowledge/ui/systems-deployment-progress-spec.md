@@ -14,7 +14,7 @@ generated:
   at: 2026-10-03T22:54:52-05:00
 sources:
   - id: s1
-    resource: "Crystal Forge repository file backlog/docs/doc-17%20-%20Spec-Systems-view-live-deployment-progress-real-recent-activity-working-rollback.md at commit 3b23d36f"
+    resource: "Crystal Forge repository file backlog/docs/specs/doc-17%20-%20Spec-Systems-view-live-deployment-progress-real-recent-activity-working-rollback.md at commit 3b23d36f"
     title: "Spec: Systems view live deployment progress, real recent activity, working rollback"
 ---
 # Systems deployment progress, real activity, and rollback specification

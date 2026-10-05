@@ -41,8 +41,8 @@ tags:
   | `## Admin API` | [api/builders-queues-environments-dashboard-admin-api.md#admin-api](../../api/builders-queues-environments-dashboard-admin-api.md#admin-api) |
   | `## CVE Scan Operations` | [api/cve-scan-operations-api.md](../../api/cve-scan-operations-api.md) |
   | `## Fleet CVE Triage` | [api/fleet-cve-triage-api.md](../../api/fleet-cve-triage-api.md) |
-  | `## Agent API (Machine Auth)` | [api/agent-and-cache-api.md#agent-api-machine-auth](../../api/agent-and-cache-api.md#agent-api-machine-auth) |
-  | `## Cache API (Future - TASK-141)` | [api/agent-and-cache-api.md#cache-api-future---task-141](../../api/agent-and-cache-api.md#cache-api-future---task-141) |
+  | `## Agent API (Machine Auth)` | [api/agent-and-cache-api.md#agent-api-machine-authentication](../../api/agent-and-cache-api.md#agent-api-machine-authentication) |
+  | `## Cache API (Future - TASK-141)` | [api/agent-and-cache-api.md#cache-administration-api](../../api/agent-and-cache-api.md#cache-administration-api) |
   | `## Common Error Codes` | [api/api-overview-errors-and-streaming.md#common-error-codes](../../api/api-overview-errors-and-streaming.md#common-error-codes) |
   | `## Adding a New API Endpoint` | [operations/adding-a-backend-api-endpoint.md](../../operations/adding-a-backend-api-endpoint.md) |
   | `## File Organization` | [operations/adding-a-backend-api-endpoint.md#file-organization](../../operations/adding-a-backend-api-endpoint.md#file-organization) |

@@ -23,19 +23,21 @@ ordinal: 54000
 The flake_timeline.rs component is at the top level of components/ but should be in the domain-specific components/flake/ directory.
 
 ## Current Location
-```
-components/
-├── flake_timeline.rs    # Should be in flake/
-├── flake/
-│   └── mod.rs           # Currently just has TODO comments
+```mermaid
+%% diagram-id: backlog-task49-current-flake-component-tree
+flowchart TD
+    components["components/"] --> timeline["flake_timeline.rs — Should be in flake/"]
+    components --> flake["flake/"]
+    flake --> mod_rs["mod.rs — Currently just has TODO comments"]
 ```
 
 ## Target Location
-```
-components/
-├── flake/
-│   ├── mod.rs           # Should export FlakeTimelineWidget
-│   └── flake_timeline.rs
+```mermaid
+%% diagram-id: backlog-task49-target-flake-component-tree
+flowchart TD
+    components["components/"] --> flake["flake/"]
+    flake --> mod_rs["mod.rs — Should export FlakeTimelineWidget"]
+    flake --> timeline["flake_timeline.rs"]
 ```
 
 ## Acceptance Criteria

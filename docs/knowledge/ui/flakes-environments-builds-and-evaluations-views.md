@@ -72,18 +72,16 @@ Clicking a flake shows its commit history:
 
 ### Data Flow
 
-```
-Frontend                  Backend
-   │                        │
-   ├─ GET /api/v1/flakes ─►│
-   │                        │
-   │◄─── { flakes: [...] }◄─│
-   │                        │
-   ├─ POST /api/v1/flakes ─►│ Add new flake
-   │                        │
-   ├─ POST /api/v1/flakes/:id/sync ──►│ Force sync
-   │                        │
-   ├─ GET /api/v1/flakes/:id/commits ──►│ Get timeline
+```mermaid
+%% diagram-id: ui-flakes-api-sequence
+sequenceDiagram
+  participant Frontend
+  participant Backend
+  Frontend->>Backend: GET /api/v1/flakes
+  Backend-->>Frontend: { flakes: [...] }
+  Frontend->>Backend: POST /api/v1/flakes (Add new flake)
+  Frontend->>Backend: POST /api/v1/flakes/:id/sync (Force sync)
+  Frontend->>Backend: GET /api/v1/flakes/:id/commits (Get timeline)
 ```
 
 ### How to Modify
@@ -122,12 +120,13 @@ An environment is a **logical grouping** for systems:
 
 ### Data Flow
 
-```
-Frontend                      Backend
-   │                            │
-   ├─ GET /api/v1/environments ►│
-   │                            │
-   │◄─── { environments: [...] }◄│
+```mermaid
+%% diagram-id: ui-environments-api-sequence
+sequenceDiagram
+  participant Frontend
+  participant Backend
+  Frontend->>Backend: GET /api/v1/environments
+  Backend-->>Frontend: { environments: [...] }
 ```
 
 ### How to Modify
@@ -161,10 +160,19 @@ Frontend                      Backend
 
 A derivation goes through these states:
 
-```
-pending → building → built → cache-pushing → cache-pushed
-                 ↓         ↓           ↓
-              failed   cache-failed  cache-failed
+```mermaid
+%% diagram-id: ui-build-state-machine
+stateDiagram-v2
+  state "cache-pushing" as cache_pushing
+  state "cache-pushed" as cache_pushed
+  state "cache-failed" as cache_failed
+  pending --> building
+  building --> built
+  built --> cache_pushing
+  cache_pushing --> cache_pushed
+  building --> failed
+  built --> cache_failed
+  cache_pushing --> cache_failed
 ```
 
 ### What Is a "Build"?
@@ -178,12 +186,13 @@ A build is a **Nix derivation** that needs to be built:
 
 ### Data Flow
 
-```
-Frontend                    Backend
-   │                         │
-   ├─ GET /api/v1/builders ─►│ Get builder status
-   │                         │
-   ├─ GET /api/v1/build-queue ─►│ Get pending/in-progress
+```mermaid
+%% diagram-id: ui-builds-api-sequence
+sequenceDiagram
+  participant Frontend
+  participant Backend
+  Frontend->>Backend: GET /api/v1/builders (Get builder status)
+  Frontend->>Backend: GET /api/v1/build-queue (Get pending/in-progress)
 ```
 
 ### How to Modify

@@ -77,7 +77,7 @@ tags:
 - Sections:
   | Source section | Destination |
   | --- | --- |
-  | `# Multi-Builder API Documentation` | [builders/builder-architecture-and-job-scheduling.md](../../builders/builder-architecture-and-job-scheduling.md#multi-builder-api-documentation) |
+  | `# Multi-Builder API Documentation` | [builders/builder-architecture-and-job-scheduling.md](../../builders/builder-architecture-and-job-scheduling.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
   | `## Overview` | [builders/builder-architecture-and-job-scheduling.md](../../builders/builder-architecture-and-job-scheduling.md#overview) |
   | `## Remote Build Execution Strategies` | [builders/remote-build-execution-strategies.md](../../builders/remote-build-execution-strategies.md#remote-build-execution-strategies) |
   | `### Recommended Default` | [builders/remote-build-execution-strategies.md](../../builders/remote-build-execution-strategies.md#recommended-default) |
@@ -108,11 +108,11 @@ tags:
   | `### Priority Weighting` | [builders/builder-failure-phases-and-retry.md](../../builders/builder-failure-phases-and-retry.md#priority-weighting) |
   | `### Max Retries` | [builders/builder-failure-phases-and-retry.md](../../builders/builder-failure-phases-and-retry.md#max-retries) |
   | `## Heartbeat and Offline Detection` | [builders/builder-architecture-and-job-scheduling.md](../../builders/builder-architecture-and-job-scheduling.md#heartbeat-and-offline-detection) |
-  | `### Heartbeat Interval` | [builders/builder-architecture-and-job-scheduling.md](../../builders/builder-architecture-and-job-scheduling.md#heartbeat-interval) |
-  | `### Offline Detection` | [builders/builder-architecture-and-job-scheduling.md](../../builders/builder-architecture-and-job-scheduling.md#offline-detection) |
-  | `## Performance Considerations` | [builders/builder-architecture-and-job-scheduling.md](../../builders/builder-architecture-and-job-scheduling.md#performance-considerations) |
+  | `### Heartbeat Interval` | [builders/builder-architecture-and-job-scheduling.md](../../builders/builder-architecture-and-job-scheduling.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
+  | `### Offline Detection` | [builders/builder-architecture-and-job-scheduling.md](../../builders/builder-architecture-and-job-scheduling.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
+  | `## Performance Considerations` | [builders/builder-architecture-and-job-scheduling.md](../../builders/builder-architecture-and-job-scheduling.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
   | `### Indexes` | [builders/builder-architecture-and-job-scheduling.md](../../builders/builder-architecture-and-job-scheduling.md#indexes) |
-  | `### Query Optimization` | [builders/builder-architecture-and-job-scheduling.md](../../builders/builder-architecture-and-job-scheduling.md#query-optimization) |
+  | `### Query Optimization` | [builders/builder-architecture-and-job-scheduling.md](../../builders/builder-architecture-and-job-scheduling.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
   | `### Metrics Retention` | [builders/builder-architecture-and-job-scheduling.md](../../builders/builder-architecture-and-job-scheduling.md#metrics-retention) |
   | `## Security` | [security/builder-credential-boundary-key-management-and-audit-logging.md](../../security/builder-credential-boundary-key-management-and-audit-logging.md#security) |
   | `### Authentication` | [security/builder-credential-boundary-key-management-and-audit-logging.md](../../security/builder-credential-boundary-key-management-and-audit-logging.md#authentication) |
@@ -124,10 +124,10 @@ tags:
   | `### Builder Not Receiving Jobs` | [operations/builder-deployment-and-troubleshooting.md](../../operations/builder-deployment-and-troubleshooting.md#builder-not-receiving-jobs) |
   | `### Authentication Failures` | [operations/builder-deployment-and-troubleshooting.md](../../operations/builder-deployment-and-troubleshooting.md#authentication-failures) |
   | `### Jobs Not Retrying` | [operations/builder-deployment-and-troubleshooting.md](../../operations/builder-deployment-and-troubleshooting.md#jobs-not-retrying) |
-  | `## Migration from Direct Database Access` | [builders/builder-architecture-and-job-scheduling.md](../../builders/builder-architecture-and-job-scheduling.md#migration-from-direct-database-access) |
-  | `### Gradual Rollout` | [builders/builder-architecture-and-job-scheduling.md](../../builders/builder-architecture-and-job-scheduling.md#gradual-rollout) |
-  | `### Backward Compatibility` | [builders/builder-architecture-and-job-scheduling.md](../../builders/builder-architecture-and-job-scheduling.md#backward-compatibility) |
-  | `## Future Enhancements` | [builders/builder-architecture-and-job-scheduling.md](../../builders/builder-architecture-and-job-scheduling.md#future-enhancements) |
+  | `## Migration from Direct Database Access` | [builders/builder-architecture-and-job-scheduling.md](../../builders/builder-architecture-and-job-scheduling.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
+  | `### Gradual Rollout` | [builders/builder-architecture-and-job-scheduling.md](../../builders/builder-architecture-and-job-scheduling.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
+  | `### Backward Compatibility` | [builders/builder-architecture-and-job-scheduling.md](../../builders/builder-architecture-and-job-scheduling.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
+  | `## Future Enhancements` | [builders/builder-architecture-and-job-scheduling.md](../../builders/builder-architecture-and-job-scheduling.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
   | `## References` | [builders/builder-architecture-and-job-scheduling.md](../../builders/builder-architecture-and-job-scheduling.md#references) |
 - Unmapped content: none
 

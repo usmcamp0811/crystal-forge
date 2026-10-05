@@ -1,7 +1,7 @@
 ---
 type: Testing Guide
 title: Fixture seeding developer guide
-description: Developer guide to fixture mode, where the server seeds its database from the golden fixture JSON for run-ui-dev and screenshot checks, including what is seeded, how to extend the seeder, and a FAQ.
+description: "Developer guide to fixture mode, where the server seeds its local development database from the golden fixture JSON for run-ui-dev; distinguishes this stack from the Playwright-mocked ui-screenshots check and documents the seeder's current contents."
 tags:
   - crystal-forge
   - testing
@@ -27,17 +27,11 @@ This gives you two things:
    fixture data, starts the server (background), and starts the Dioxus hot-reload
    dev server (foreground). Iterate on the frontend with real populated data.
 
-2. **`nix build .#ui-screenshots`** — a non-interactive Nix build that starts the
-   same stack headlessly and captures screenshots of every route.  Use this to
-   compare against the design targets.
-
-> **Status:** disagreement with the check. At the migration base commit,
-> `checks/ui-screenshots/capture.js` serves the production WASM bundle and
-> intercepts `/api/` calls with fixture JSON through Playwright routes. It
-> starts no server and no database (see [Crystal Forge flake
-> checks](flake-checks.md)). Item 2 above and the FAQ entry about mocking at
-> the Playwright layer describe a database-seeded stack instead. This document
-> keeps the original text.
+2. **`nix build .#checks.x86_64-linux.ui-screenshots`** — a non-interactive Nix
+   build that serves the production WASM bundle and captures each configured
+   route in two themes. Playwright fulfills API requests with fixture JSON. The
+   check starts no Crystal Forge server and no database. See
+   [Crystal Forge flake checks](flake-checks.md).
 
 ---
 
@@ -103,7 +97,7 @@ they set up the pinned toolchain for you.
 
 ## How the seeding works
 
-`packages/default/src/fixtures/seed.rs` reads the fixture JSON and INSERTs rows
+`packages/default/crates/cf-server/src/fixtures/seed.rs` reads the fixture JSON and INSERTs rows
 into the application tables in FK-safe order:
 
 | Step | Table(s) | Fixture section |
@@ -112,28 +106,28 @@ into the application tables in FK-safe order:
 | 2 | `flakes` | `flakes.registry[]` |
 | 3 | `commits` | `flakes.registry[].latest_commit` |
 | 4 | `deployment_policies` | `policies[]` |
-| 5 | `users` + `user_role_assignments` | `admin.users[]` |
-| 6 | `systems` | `systems[]` |
-| 7 | `system_states` + `agent_heartbeats` | `systems[]` hardware fields |
-| 8 | `cves` | `cves.list[]` |
-| 9 | `builders` | `builds.workers[]` |
+| 5 | Compliance framework versions and requirements | `compliance[]` |
+| 6 | `users` + `user_role_assignments` | `admin.users[]` |
+| 7 | `systems` | `systems[]` |
+| 8 | `system_states` + `agent_heartbeats` | `systems[]` hardware fields |
+| 9 | `system_events` + `pending_system_deployments` | `systems[]` |
+| 10 | `cves` + package vulnerabilities and scans | `cves.list[]` |
+| 11 | `builders` + `build_jobs` | `builds.active[]`, `builds.history[]`, `builds.workers[]` |
+| 12 | Hardening scans and results | `hardening[]` |
+| 13 | Setup wizard dismissed for seeded users | all seeded users |
 
 All INSERTs use `ON CONFLICT … DO UPDATE` so re-seeding is idempotent.
 
-> **Status:** stale paths and steps. At the migration base commit, the seeder
-> is `packages/default/crates/cf-server/src/fixtures/seed.rs`, not
-> `packages/default/src/fixtures/seed.rs`. Its `seed_from_fixture` function
-> also seeds compliance frameworks (`seed_compliance_frameworks`), system
-> events and pending deployments, and hardening scans (`seed_hardening`), and
-> it dismisses the onboarding coach for every user. The table above lists nine
-> steps. This document keeps the original text.
+The server seeder also reads `caches[]`, `scanning`, and `evaluations`, but
+`seed_from_fixture` does not seed those sections at this revision. The seeder
+explicitly dismisses the onboarding coach for seeded users.
 
 ### Env vars consumed at startup
 
 | Variable | Description |
 |----------|-------------|
 | `FIXTURE_JSON_PATH` | Absolute path to the fixture JSON. When set, seeding runs after migrations. |
-| `AUTH_MODE` | Set to `dev` for passwordless local auth (auto-login as fixture user). |
+| `AUTH_MODE` | Set to `dev` to enable development login for configured fixture users. |
 | `CRYSTAL_FORGE__SERVER__EXECUTION_MODE` | Set to `mock` to skip real nix-eval/build jobs. |
 | `RUST_LOG` | `info,crystal_forge::fixtures::seed=debug` shows per-table row counts. |
 
@@ -141,41 +135,35 @@ All INSERTs use `ON CONFLICT … DO UPDATE` so re-seeding is idempotent.
 
 ## What is seeded vs not yet implemented
 
-### ✅ Seeded (works out of the box)
+### Seeded by `seed_from_fixture`
 
 - System list, environment list, flake list
 - System health (derived from agent heartbeats)
 - CVE list and summary stats
 - Deployment policies
+- Compliance framework versions and requirements
 - Builder list
+- Build jobs and build history
+- System events and pending deployments
+- Hardening scans and results
 - Users / auth (dev-mode auto-login)
 
-### 🚧 Not yet seeded — shows empty / placeholder
+### Fixture sections not consumed by `seed_from_fixture`
 
-The following fixture sections are present in the JSON but have no seeding
-code yet, because the backing database tables require a `derivations` FK
-(a compiled NixOS derivation path) that doesn't naturally come from the fixture.
+The following fixture sections are present in the JSON, but the current server
+seeder does not consume them:
 
-| Fixture section | What you'll see | Tracking task |
-|-----------------|-----------------|---------------|
-| `builds.active` / `builds.history` | Build queue empty | TASK-380 |
-| `hardening[]` | Hardening summary zeroed | TASK-381 |
-| `compliance[]` | Compliance bundles empty | TASK-382 |
-| `caches[]` | Cache destination list empty | TASK-382 |
-| `scanning` | Scanning stats zeroed | TASK-382 |
-| `admin.auditLog` | Audit log empty | TASK-382 |
-| `evaluations` | Eval queue empty | TASK-380 |
+| Fixture section | Seeder behavior |
+|-----------------|-----------------|
+| `caches[]` | Not consumed by `seed_from_fixture`. |
+| `scanning` | Not consumed by `seed_from_fixture`. |
+| `admin.auditLog` | Not consumed by `seed_from_fixture`. |
+| `evaluations` | Not consumed by `seed_from_fixture`. |
 
-These are **intentional gaps** — they highlight unimplemented backend or seeding
-work. When you see a blank panel, that's the check telling you "this isn't wired
-yet."
-
-> **Status:** partly stale. `seed_from_fixture` calls `seed_hardening` and
-> `seed_compliance_frameworks`, and `seed_builders_and_jobs` takes the `builds`
-> section, so the `hardening[]`, `compliance[]`, and `builds.active` /
-> `builds.history` rows above may no longer be empty. The migration did not
-> run the seeder to confirm the current result for each row. The migration did
-> not check the tracking tasks TASK-380, TASK-381, and TASK-382.
+An empty panel is not proof that a feature is unwired. It can also mean that the
+fixture seeder does not create data for that panel or that the active check
+uses mocked API data. Check the relevant check's setup before treating an empty
+panel as a product gap.
 
 ---
 
@@ -187,7 +175,7 @@ section, wire it into `seed.rs` following this pattern:
 ### 1 — Add a struct to parse the fixture JSON
 
 ```rust
-// In packages/default/src/fixtures/seed.rs
+// In packages/default/crates/cf-server/src/fixtures/seed.rs
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -263,31 +251,28 @@ Open http://localhost:8080 and confirm the panel now shows data.
 ## Adding a new route to the screenshot check
 
 The `ui-screenshots` Nix derivation (`checks/ui-screenshots/default.nix`)
-captures a screenshot of each Dioxus route against the fixture-seeded server.
+serves the production WASM bundle and captures configured routes with Playwright
+API fixtures. It does not start the fixture-seeded server.
 
 To add a new route:
 
-1. Add an entry to `checks/ui-screenshots/capture.js` (the `ROUTES` array):
+1. Add an entry to the route list built by
+   `checks/ui-screenshots/routes.js`:
    ```js
    { path: '/my-new-route', name: 'my-new-route' },
    ```
 2. Run `nix build .#ui-screenshots` to capture a screenshot.
 3. The output is `result/my-new-route--dark.png` and `result/my-new-route--light.png`.
 
-> **Status:** unverified detail. `checks/ui-screenshots/capture.js` imports its
-> routes through `buildRoutes` from `checks/ui-screenshots/routes.js`. The
-> migration found no `ROUTES` array in `capture.js` at the migration base
-> commit. This document keeps the original text.
-
 ---
 
 ## FAQ
 
-**Q: Why not mock the API at the Playwright/HTTP layer?**
+**Q: Does the screenshot check use the fixture-seeded server?**
 
-We tried it — Playwright route handlers run in LIFO order and a catch-all
-registered last always wins, causing every request to return `{}`. Seeding the
-database is simpler, deterministic, and tests the real handlers.
+No. The `ui-screenshots` check uses Playwright route fixtures and serves the
+production WASM bundle. `run-ui-dev` is a separate workflow that starts
+PostgreSQL, seeds a task-owned local database, and runs the API server.
 
 **Q: Why does the server start so fast if it's running migrations and seeding?**
 
@@ -296,8 +281,9 @@ SQLx migrations are idempotent (skipped if already applied). Seeding uses
 
 **Q: Can I point `FIXTURE_JSON_PATH` at a different file?**
 
-Yes. Any JSON that matches the `FixtureRoot` struct in `seed.rs` works.
-All fields are `Option<…>` so a minimal stub with just a few systems is fine.
+Yes. The JSON must contain the required root fields in `FixtureRoot`.
+Some fields within those sections are optional. Use the Rust struct definitions
+in `packages/default/crates/cf-server/src/fixtures/seed.rs` as the schema.
 
 **Q: How do I reset the database to a clean fixture state?**
 

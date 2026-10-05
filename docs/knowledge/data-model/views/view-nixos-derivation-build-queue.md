@@ -1,45 +1,72 @@
 ---
 type: Data Model
 title: "NixOS Derivation Build Queue View (`view_nixos_derivation_build_queue`)"
-description: "Describes view_nixos_derivation_build_queue, the ordered build queue that places package derivations before their NixOS system derivation for the builder loop and Grafana."
+description: "Describes view_nixos_derivation_build_queue, the earliest queue view (migration 0056) that lists package derivations before their NixOS system derivation, newest commit first; nothing in the server reads it, and the live build queue is build_jobs."
 tags:
   - crystal-forge
   - view
   - build-queue
   - nixos
-  - grafana
-implementation_status: implemented
+  - legacy
+implementation_status: historical
+status: deprecated
+generated:
+  by: opencode/claude-sonnet-5-5
+  at: 2026-10-04T17:30:00-05:00
 sources:
   - id: origin
     resource: "Crystal Forge repository file docs/views/view_nixos_derivation_build_queue.md at commit 3b23d36f"
-    title: "NixOS Derivation Build Queue View (`view_nixos_derivation_build_queue`)"
+    title: "NixOS Derivation Build Queue View (`view_nixos_derivation_build_queue`) (original document)"
+  - id: code-1
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/migrations/0056_build_queue.sql at commit 3b23d36f"
+    title: View definition
+  - id: code-2
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/migrations/0026_make_derivation_statuses.sql at commit 3b23d36f"
+    title: Status ids
 ---
+
 # NixOS Derivation Build Queue View (`view_nixos_derivation_build_queue`)
+
+## Status
+
+The view exists in the schema. Migration `0056_build_queue.sql` defines it, and
+no later migration redefines or drops it. No Rust code in the server, builder,
+or UI reads it. Its only reader is the database test
+`packages/cf-test-suite/cf_test/tests/database/test_view_nixos_derivation_build_queue.py`.
+
+The view is the earliest queue design. Later work replaced it:
+
+1. [`view_buildable_derivations`](view-buildable-derivations.md) served the
+   legacy build-reservation worker. The server does not start that worker.
+2. The live build queue is `build_jobs`, claimed by API-only builders. See
+   [Wakeups and polling](../../architecture/event-driven-queues.md#claim-eligibility-and-ordering).
+
+Use the view only as a SQL report of derivations that are waiting for a first
+build or a retry.
 
 ## Overview
 
-`view_nixos_derivation_build_queue` exposes the **ordered build queue** for NixOS system and package derivations that are currently eligible for building.
-Because NixOS system derivations can include large transitive dependencies—such as Firefox or Chrome—that must be built from source, these builds are scheduled separately to ensure sufficient compute resources. The process first builds all required package derivations for a given system configuration, and only then proceeds to build the system itself.
+For each NixOS system derivation that matches the filter, the view lists the
+package derivations that the system depends on, then the system derivation. The
+design intent was to build large package dependencies before the system closure.
+The rows sort newest commit first.
 
-This view serves as the **primary scheduling source** for the Crystal Forge builder loop, determining build order based on commit recency and dependency relationships.
-It is also optimized for **Grafana dashboards**, enabling operators and Site Administrators (SAs) to monitor the real-time build queue—showing which NixOS systems and dependent packages are next in line for evaluation and build.
+## Example output
 
-## Example Output
+Two NixOS systems, each with package dependencies, all in `dry-run-complete`:
 
-Given two NixOS systems with their package dependencies:
-
+```mermaid
+flowchart TB
+  subgraph A["Commit A (2024-01-15 14:30)"]
+    SA["server-alpha (nixos)"] --> F["firefox-120.0 (package)"]
+    SA --> C["chromium-119.0 (package)"]
+  end
+  subgraph B["Commit B (2024-01-15 10:00)"]
+    SB["server-beta (nixos)"] --> N["nginx-1.24 (package)"]
+  end
 ```
-Commit A (2024-01-15 14:30:00):
-  - server-alpha (nixos, dry-run-complete)
-    - firefox-120.0 (package, dry-run-complete)
-    - chromium-119.0 (package, dry-run-complete)
 
-Commit B (2024-01-15 10:00:00):
-  - server-beta (nixos, dry-run-complete)
-    - nginx-1.24 (package, dry-run-complete)
-```
-
-The view returns (ordered by newest commit first, packages before their NixOS system):
+An arrow means "depends on". The view returns:
 
 | id  | derivation_name | derivation_type | nixos_id | nixos_commit_ts     | group_order |
 | --- | --------------- | --------------- | -------- | ------------------- | ----------- |
@@ -49,55 +76,62 @@ The view returns (ordered by newest commit first, packages before their NixOS sy
 | 202 | nginx-1.24      | package         | 201      | 2024-01-15 10:00:00 | 0           |
 | 201 | server-beta     | nixos           | 201      | 2024-01-15 10:00:00 | 1           |
 
-The builder processes rows top-to-bottom: packages are built first (group_order=0), then their NixOS system (group_order=1), starting with the newest commit.
+## Definition
 
-## Purpose
+The view builds three sets from `derivations` rows with `status_id IN (5, 12)`:
 
-- **Builder Integration:** Used by the Crystal Forge builder loop to fetch the next derivation to build (`SELECT ... LIMIT 1` from this view).
-- **Operations Monitoring:** Visualize the build queue in Grafana to see what will be built next, grouped by NixOS system and commit.
-- **Dependency Awareness:** Ensures packages associated with a NixOS build are shown first, maintaining correct build order.
+- Status `5` is `dry-run-complete`. Status `12` is `build-failed`. Migration
+  `0026_make_derivation_statuses.sql` defines both ids.
+- `roots` are the filtered `nixos` derivations with their commit timestamp.
+- `pkg_rows` are the filtered `package` derivations that a root depends on,
+  through `derivation_dependencies`.
+- `nixos_rows` are the roots themselves.
 
-## Core Logic
+The view returns the union of `pkg_rows` and `nixos_rows` where
+`attempt_count <= 5`. A failed derivation therefore returns to the list until it
+reaches six attempts. A `build-pending` derivation (status `7`) is **not**
+listed, because the filter excludes it.
 
-The view joins derivations, commits, and dependency relationships to produce a structured queue of upcoming builds:
+A package that two systems share appears once for each system, with a different
+`nixos_id`.
 
-1. Filters derivations to `status_id IN (5, 12)` — typically "dry-run-complete" or "build-failed" when `attempt_count` < 5.
-2. Identifies all **NixOS root derivations** and their **dependent packages**.
-3. Orders results by:
+### Columns
 
-   - Commit timestamp (**newest first**)
-   - NixOS ID grouping (packages + root)
-   - Within each group:
+| Field             | Description                                        |
+| ----------------- | -------------------------------------------------- |
+| `id`              | Derivation id                                      |
+| `commit_id`       | Commit id                                          |
+| `derivation_type` | `nixos` or `package`                               |
+| `derivation_name` | Derivation name                                    |
+| `derivation_path` | Store derivation path                              |
+| `status_id`       | `5` or `12` only                                   |
+| `attempt_count`   | Previous build attempts, at most 5                 |
+| `nixos_id`        | Id of the parent NixOS derivation (group key)      |
+| `nixos_commit_ts` | Commit timestamp of the parent NixOS derivation    |
+| `group_order`     | `0` for a package, `1` for the NixOS derivation    |
 
-     - **Packages first**, followed by their NixOS system derivation
+The view also exposes the remaining `derivations` columns that migration `0056`
+lists (timestamps, error message, build progress fields, `cf_agent_enabled`,
+`store_path`).
 
-## Key Fields
+### Ordering
 
-| Field             | Description                                         |
-| ----------------- | --------------------------------------------------- |
-| `id`              | Derivation ID                                       |
-| `commit_id`       | Associated commit ID                                |
-| `derivation_type` | `'nixos'` or `'package'`                            |
-| `derivation_name` | Name of the derivation                              |
-| `derivation_path` | Store path of the derivation                        |
-| `status_id`       | Derivation build status ID (restricted to 5 and 12) |
-| `attempt_count`   | Number of previous build attempts                   |
-| `nixos_id`        | Parent NixOS derivation ID (group key)              |
-| `nixos_commit_ts` | Commit timestamp of the associated NixOS build      |
-| `group_order`     | Sort order within group (0 = package, 1 = NixOS)    |
+The view orders rows as follows:
 
-### Ordering Summary
+| Level | Sort field        | Direction | Purpose                                |
+| ----- | ----------------- | --------- | -------------------------------------- |
+| 1     | `nixos_commit_ts` | DESC      | Newest commit first                    |
+| 2     | `nixos_id`        | ASC       | Keep one system's rows together        |
+| 3     | `group_order`     | ASC       | Packages before the NixOS derivation   |
+| 4     | `pname`, `id`     | ASC       | Stable order inside the group          |
 
-| Level | Sort Field        | Direction | Purpose                    |
-| ----- | ----------------- | --------- | -------------------------- |
-| 1️⃣    | `nixos_commit_ts` | DESC      | Newest NixOS commits first |
-| 2️⃣    | `nixos_id`        | ASC       | Group by NixOS build       |
-| 3️⃣    | `group_order`     | ASC       | Packages before NixOS      |
-| 4️⃣    | `pname`, `id`     | ASC       | Stable in-group ordering   |
+The view only sorts rows. It does not check that a package is built before its
+system, and it does not hide a system row while its packages are still listed.
+A consumer that needs that guarantee must check dependency status itself. The
+claim query of the live `build_jobs` queue has no dependency condition either.
+See [Wakeups and polling](../../architecture/event-driven-queues.md#claim-eligibility-and-ordering).
 
-## Example Queries
-
-### Get the next derivation to build
+## Example queries
 
 ```sql
 SELECT id, derivation_name, derivation_type, nixos_id, nixos_commit_ts
@@ -105,8 +139,6 @@ FROM view_nixos_derivation_build_queue
 ORDER BY nixos_commit_ts DESC, nixos_id, group_order, pname NULLS LAST, id
 LIMIT 1;
 ```
-
-### Show full queue for the newest commit
 
 ```sql
 SELECT derivation_name, derivation_type, nixos_id, group_order
@@ -120,55 +152,14 @@ WHERE nixos_id = (
 ORDER BY group_order, pname;
 ```
 
-### Visualize upcoming builds (Grafana table)
+## Related views
 
-```sql
-SELECT
-  nixos_commit_ts AS time,
-  derivation_name,
-  derivation_type,
-  CASE WHEN group_order = 0 THEN 'Package' ELSE 'NixOS' END AS queue_stage
-FROM view_nixos_derivation_build_queue
-ORDER BY nixos_commit_ts DESC, nixos_id, group_order;
-```
-
-## Operational Context
-
-### Builder Loop Usage
-
-The Crystal Forge builder service queries this view to obtain the next derivation to build, ensuring deterministic build ordering:
-
-- Packages dependent on a NixOS build are processed first.
-- Once all packages are built, the NixOS system derivation is scheduled.
-- This guarantees build consistency and avoids dependency deadlocks.
-
-### Grafana Dashboard Integration
-
-System Admins can visualize:
-
-- Which NixOS builds and packages are queued
-- The commit order of upcoming builds
-- Real-time updates as derivations complete or are retried
-
-## Performance Notes
-
-- Filters restrict to the minimal working set (`status_id IN (5, 12)`).
-- Leverages indices:
-
-  - `derivation_dependencies(derivation_id)`
-  - `derivation_dependencies(depends_on_id)`
-  - Partial index on `derivations(status_id IN (5, 12))`
-
-- Optimized for frequent polling by the builder service and live Grafana dashboards.
-
-## Related Views
-
-- **`view_derivation_status_breakdown`** – Global summary of all derivation statuses
-- **`view_commit_build_status`** – Commit-level aggregation of build results
-- **`view_commit_nixos_table`** – Compact NixOS-only per-commit progress
-- **`view_system_deployment_status`** – Current deployment position of each system
-
-> **Status:** This document says the filter `status_id IN (5, 12)` is "typically dry-run-complete or build-failed". [Buildable Derivations View](view-buildable-derivations.md) describes the same status ids 5 and 12 as "dry-run-complete" or "scheduled". It also says that view replaces this one. The status ids are defined by `derivation_statuses` data in `packages/default/crates/cf-server/migrations/`. This migration did not resolve the disagreement.
+- [`view_buildable_derivations`](view-buildable-derivations.md): the later
+  legacy queue view
+- [`view_build_queue_status`](view-build-queue-status.md): system-level progress
+  for the legacy reservation queue
+- [`view_commit_nixos_table`](view-commit-nixos-table.md): compact NixOS-only
+  progress per commit
 
 ## Related concepts
 

@@ -1,81 +1,88 @@
 ---
 type: Design Specification
 title: "Crystal Forge roadmap"
-description: "Lists planned Crystal Forge work (stabilization, deployment policy engine, CVE dashboard, STIG modules, reporting and attestation, Tvix) with a per-item implementation status note; open it to see intended direction."
+description: "Lists the capabilities that exist at revision 3b23d36f and the planned work that remains (policy approvals and attestation, CVE trending and alerting, STIG verification, reporting and attestation packages, Tvix); open it to see intended direction."
 tags:
   - crystal-forge
   - overview
   - roadmap
   - planning
 implementation_status: partial
+generated:
+  by: opencode/claude-sonnet-5-5
+  at: 2026-10-04T16:40:00-05:00
 sources:
   - id: origin
     resource: "Crystal Forge repository file ROADMAP.md at commit 3b23d36f"
     title: "Crystal Forge Roadmap"
+  - id: code-1
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/server/mod.rs at commit 3b23d36f"
+    title: Deployment policy type validation and background tasks
+  - id: code-2
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/bin/server.rs at commit 3b23d36f"
+    title: Server routes (UI, register export, compliance)
 ---
 
 # Crystal Forge Roadmap
 
-> **Status:** partial. Each roadmap item below carries a short status note based on cheap code checks. Items are not rewritten to match the implementation. All notes are verification candidates.
+The roadmap lists what exists at revision `3b23d36f` and what is still planned.
+A planned item is a requirement. It stays until it is delivered, even if it is
+old.
 
-## Where We Are
+## Delivered capabilities
 
-> **Status:** The "Where We Are" list has not been rechecked. The repository now also contains a Dioxus web UI (`packages/web-ui`), deployment policies (`packages/default/crates/cf-server/src/models/deployment_policies.rs`), and POA&M and compliance handlers (`packages/default/crates/cf-server/src/handlers/api/poam.rs`).
+- System monitoring and state tracking with Ed25519-signed agent communication.
+- Flake and commit tracking, with server-side evaluation of every
+  `nixosConfiguration`.
+- The Dioxus web UI, served by the server, and the HTTP API it uses.
+- Local and OIDC authentication with role-based access control.
+- API-only builders with signed, session-checked requests and builder-side cache
+  publication.
+- Deployment policies. The server accepts the `require_cve_check`,
+  `time_window`, `require_approvals`, `canary_rollout`, and `cve_threshold`
+  policy types.
+- CVE scanning with exact evidence, fleet triage, and POA&M workflows.
+- Compliance bundles and a register export, with OSCAL schema packaging.
+- STIG NixOS modules built with the `mkStigModule` pattern.
 
-Crystal Forge currently provides:
+## Planned work
 
-- System monitoring and state tracking with Ed25519 signed communication
-- Flake/commit tracking and evaluation
-- Basic deployment enforcement (with some bugs to work out)
-- Database views for fleet status
-- PostgreSQL coordination between server, builder, and agent components
+### 1. Stabilization (ongoing)
 
-## Where We're Going
+Make deployment tracking and enforcement production-ready:
 
-### 1. Stabilization
+- Reliable agent heartbeats and state reporting.
+- Accurate deployment status tracking, including failed and detached deployments.
+- Better error handling throughout the system.
+- Comprehensive test coverage.
 
-> **Status:** ongoing. This item is a quality goal and has no single code state.
+### 2. Deployment policy engine: approvals and overrides
 
-Fix the existing deployment tracking and enforcement to be production-ready. This means:
+Deployment policies and the CVE gate exist. These parts of the original goal
+remain open:
 
-- Reliable agent heartbeats and state reporting
-- Accurate deployment status tracking
-- Better error handling throughout the system
-- Comprehensive test coverage
+- Manual approval for production systems that is bound to the exact target
+  being deployed, with signed running-state attestations. This is tracked as
+  TASK-415 and is not delivered.
+- Emergency override mechanisms with audit trails.
 
-### 2. Deployment Policy Engine
+Time windows and canary rollouts are accepted policy types. This roadmap does
+not claim more than that about their end-to-end behavior. See
+[Deployment policies](../deployment/deployment-policies.md).
 
-> **Status:** partial. Deployment policies and a CVE gate exist (`packages/default/crates/cf-server/src/deployment/mod.rs`, `packages/default/crates/cf-server/src/handlers/api/deployment_policies.rs`). Manual approval, maintenance windows, and canary rollouts were not checked.
+### 3. CVE trending and alerting
 
-Build a system that lets you define rules for when systems should receive updates. Policies might include:
+The Dioxus CVE views, fleet inventory, and triage exist. These parts remain
+open:
 
-- Only deploy if CVE count is below a threshold
-- Require manual approval for production systems
-- Block deployments with critical security issues
-- Only deploy during maintenance windows
-- Gradual rollout strategies (canary deployments)
+- CVE severity trending over time.
+- Remediation tracking and velocity metrics.
+- Alert rules for new critical vulnerabilities.
+- Export functionality beyond the existing register export.
 
-The engine evaluates policies against systems/flakes and enforces them during deployment decisions. Include override mechanisms for emergencies with proper audit trails.
+### 4. STIG NixOS modules
 
-### 3. CVE Dashboard & Visualization
-
-> **Status:** partial. CVE scanning and CVE handlers exist (`packages/default/crates/cf-server/src/handlers/api/cves.rs`), and a Grafana dashboard definition exists (`packages/dashboards/crystal-forge-dashboard.json`). Trending, remediation metrics, alert rules, and export were not checked.
-
-Comprehensive CVE tracking across the fleet:
-
-- Fleet-wide CVE summary dashboards (Grafana)
-- Per-system and per-package vulnerability drill-down
-- CVE severity trending over time
-- Remediation tracking and velocity metrics
-- Alert rules for new critical vulnerabilities
-- Integration with deployment policies (block deploys with high CVEs)
-- Export functionality for compliance reporting
-
-### 4. STIG NixOS Modules
-
-> **Status:** partial. The `mkStigModule` pattern and STIG modules exist (`lib/stig/default.nix`, `modules/nixos/stig/`, `modules/nixos/stig-modules/`). Evaluation-time verification, dashboards, and the justification requirement were not checked.
-
-Build NixOS modules that implement DISA STIGs for automated compliance. Starting point is the `mkStigModule` pattern from dotfiles:
+The `mkStigModule` pattern and a set of modules exist. Planned expansion:
 
 ```nix
 mkStigModule {
@@ -86,60 +93,52 @@ mkStigModule {
 }
 ```
 
-Expand this to cover:
+- Base OS hardening controls.
+- Audit logging (auditd configuration).
+- Authentication and access control (PAM, SSH).
+- Network hardening (sysctl, firewall rules).
+- Filesystem security (permissions, mount options).
+- Application security templates.
+- Compliance verification in the evaluation process, and per-control status in
+  Crystal Forge.
+- Required justifications for disabled controls.
 
-- Base OS hardening controls
-- Audit logging (auditd configuration)
-- Authentication and access control (PAM, SSH)
-- Network hardening (sysctl, firewall rules)
-- Filesystem security (permissions, mount options)
-- Application security templates
+### 5. Standardized reporting and attestation
 
-Build compliance verification into the evaluation process and track STIG status in Crystal Forge. Create dashboards showing which systems meet which controls. Require justifications for disabled controls.
+Compliance, POA&M, and register-export handlers exist. The goal remains to make
+audit documentation trivial to generate:
 
-### 5. Standardized Reporting & Attestation
+- **Report templates** for common frameworks (DISA, NIST, ISO).
+- **Evidence collection** from system state, CVE scans, and STIG compliance.
+- **Attestation generation**: signed documents proving system compliance.
+- **Audit packages** bundling required documentation in standard formats.
+- **Continuous compliance** with historical evidence.
+- **Export formats**: PDF, CSV, JSON.
+- **Control mapping** from system state to control requirements.
 
-> **Status:** partial. Compliance, POA&M, and register-export handlers exist (`packages/default/crates/cf-server/src/handlers/api/compliance.rs`, `poam.rs`, `register_export.rs`), and OSCAL schema packages exist (`packages/oscal-1-1-2-schemas`). Signed attestation and the single-command audit package were not checked.
+### 6. Tvix/Rvix integration (proposed)
 
-Build automated compliance reporting and attestation generation to streamline security audits and accreditation processes:
+No Tvix code exists. The proposal is to replace Nix CLI calls with native Rust
+evaluation:
 
-- **Report templates**: Pre-built templates for common frameworks (DISA, NIST, ISO)
-- **Evidence collection**: Automatic gathering of system state, CVE scans, STIG compliance data
-- **Attestation generation**: Signed attestation documents proving system compliance
-- **Audit packages**: Bundle all required documentation for auditors in standard formats
-- **Continuous compliance**: Real-time compliance posture tracking with historical evidence
-- **Export formats**: PDF, CSV, JSON for different audit requirements
-- **Control mapping**: Automatic mapping of system state to security control requirements
+- Native Rust flake evaluation without spawning processes.
+- Better performance and error handling.
+- Tighter integration between Crystal Forge and Nix evaluation.
+- Reduced memory usage.
 
-The goal: make it trivial to generate all required documentation for passing security audits or accreditations with a single command.
+Start with an investigation of Tvix maturity, build a proof of concept, then
+migrate incrementally. Keep the Nix CLI as a fallback during the transition.
 
-### 6. Tvix/Rvix Integration
+## Future possibilities
 
-> **Status:** proposed. No Tvix reference exists in the code outside documentation.
-
-Replace system calls to Nix CLI with native Rust evaluation using Tvix. This means:
-
-- Native Rust flake evaluation without spawning processes
-- Better performance and error handling
-- Tighter integration between Crystal Forge and Nix evaluation
-- Reduced memory usage
-
-Start with investigation of Tvix maturity, build a proof of concept, then migrate incrementally. Keep Nix CLI as fallback during transition.
-
-## Future Possibilities
-
-> **Status:** partial. A custom web frontend exists (`packages/web-ui`). The remaining items were not checked.
-
-Beyond the core roadmap, potential directions include:
-
-- Custom web frontend to replace Grafana
-- TUI and/or CLI for management operations
-- Multi-tenancy for service providers
-- Additional compliance frameworks (NIST 800-53, SOC2, ISO 27001)
-- Remote management capabilities (pull-based deployments, fleet orchestration)
+- TUI or CLI for management operations.
+- Multi-tenancy for service providers.
+- Additional compliance frameworks (NIST 800-53, SOC2, ISO 27001).
+- Remote management capabilities (pull-based deployments, fleet orchestration).
 
 ## Related concepts
 
-- [System context and current state](system-context-and-current-state.md) - current state of the product
+- [System context](system-context-and-current-state.md) - how the platform is composed
 - [Constraints and policy](constraints-and-policy.md) - constraints every roadmap item must respect
 - [Problem statement](problem-statement.md) - the problem the roadmap addresses
+- [Release roadmap and milestones](release-roadmap-and-milestones.md) - the dated v0.3.0 release plan

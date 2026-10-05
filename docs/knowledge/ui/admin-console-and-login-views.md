@@ -29,7 +29,7 @@ sources:
 
 **Note:** Only accessible to users with **Admin** role.
 
-### Tab 1: Users (`/admin/users`)
+### Tab 1: Users (within `/admin`)
 
 **Purpose:** Manage user accounts.
 
@@ -47,7 +47,7 @@ sources:
 1. **Local** - Created in CF with email/password
 2. **IdP** - Created automatically from OIDC login
 
-### Tab 2: Audit Log (`/admin/audit`)
+### Tab 2: Audit Log (within `/admin`)
 
 **Purpose:** See who did what.
 
@@ -68,7 +68,7 @@ sources:
 - Actor (user)
 - Action type
 
-### Tab 3: OIDC Mappings (`/admin/oidc`)
+### Tab 3: OIDC Mappings (within `/admin`)
 
 **Purpose:** Map Identity Provider groups to CF roles.
 
@@ -85,16 +85,15 @@ sources:
 
 ### Data Flow
 
-```
-Frontend                     Backend
-   │                          │
-   ├─ GET /api/v1/admin/users ──►│
-   │                          │
-   ├─ POST /api/v1/admin/users ──►│ Create user
-   │                          │
-   ├─ GET /api/v1/admin/audit ──►│ Get audit log
-   │                          │
-   ├─ GET /api/v1/admin/oidc-mappings ──►│
+```mermaid
+%% diagram-id: ui-admin-api-sequence
+sequenceDiagram
+  participant Frontend
+  participant Backend
+  Frontend->>Backend: GET /api/v1/admin/users
+  Frontend->>Backend: POST /api/v1/admin/users (Create user)
+  Frontend->>Backend: GET /api/v1/admin/audit-events (Get audit log)
+  Frontend->>Backend: GET /api/v1/admin/oidc-mappings
 ```
 
 ### Authorization
@@ -106,7 +105,8 @@ All admin endpoints require `role = Admin`.
 - **Backend:** `handlers/api/admin.rs`
 - **Frontend:** `views/admin.rs`
 
-> **Status:** The tab routes above (`/admin/users`, `/admin/audit`, `/admin/oidc`) are not separate routes in `packages/web-ui/src/routes.rs`, which registers a single `/admin` route. The Data Flow lists `GET /api/v1/admin/audit`; the server registers `/api/v1/admin/audit-events`. The login routes `/login` and `/dev/login` are registered. Not reconciled in this migration.
+The Admin tabs are views inside `/admin`; they are not separate UI routes.
+The API requests shown above are separate server routes.
 
 ## Login Views
 
@@ -117,12 +117,14 @@ All admin endpoints require `role = Admin`.
 **Purpose:** Authenticate users via OIDC.
 
 **Flow:**
-1. User visits `/login`
-2. Redirected to Identity Provider (Google, Okta, etc.)
-3. User authenticates with IdP
-4. Redirect back to CF with tokens
-5. CF creates session, maps groups to roles
-6. Redirect to Dashboard
+1. User visits `/login` and selects **Sign in with OIDC**.
+2. The UI follows `GET /api/auth/oidc/login`.
+3. The server redirects to the configured identity provider.
+4. The identity provider returns an authorization code to
+   `GET /api/auth/oidc/callback`.
+5. The server exchanges the code, validates the identity, maps groups, and
+   creates the session.
+6. The callback redirects to `/`.
 
 ### Dev Mode Login (`/dev/login`)
 
@@ -132,10 +134,10 @@ All admin endpoints require `role = Admin`.
 
 **Flow:**
 1. User visits `/dev/login`
-2. Sees three buttons: "Login as Admin", "Login as Operator", "Login as Viewer"
-3. Clicks desired role
-4. Dev user created (in-memory)
-5. Redirect to Dashboard
+2. Selects one of the configured development fixture users.
+3. The UI submits that user's email to `POST /api/auth/dev/login`.
+4. The server authenticates the persisted fixture user and creates the session.
+5. The UI redirects to `/`.
 
 **Warning Banner:** Shows "Development Mode Only - Do Not Use in Production"
 

@@ -4,4 +4,4 @@
 
 # Workflow
 
-* [Cache Push Process](cache-push-process.md) - Describes cache types (Nix, S3, Attic, HTTP), cache push features, and cache push job semantics; open it when configuring or debugging pushes to a binary cache.
+* [Cache Push Process](cache-push-process.md) - Describes how a build output reaches the binary cache: builder-side signing and push with retry, the server's destination check and nix path-info probe, the cache_push_jobs record that makes an artifact deployable, the cache types, and the server-side worker that the server does not start; open it when configuring or debugging pushes to a binary cache.

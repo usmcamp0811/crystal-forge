@@ -34,20 +34,23 @@ sources:
 
 ## Relationships
 
+```mermaid
+%% diagram-id: core-entity-relationships-conceptual
+%% These are source-described conceptual relationships, not migration-derived
+%% ER cardinalities or claims about current schema constraints.
+erDiagram
+    ENVIRONMENT ||--o{ SYSTEM : "source-described grouping"
+    ENVIRONMENT ||--o{ USER : "via membership"
+    FLAKE ||--o{ DEPLOYMENT : "source-described"
+    FLAKE ||--o{ COMMIT : "git history"
+    BUILDER }o--o{ DERIVATION : "builds"
+    BUILDER }o--o{ ENVIRONMENT : "serves"
+    SYSTEM }o--o{ DEPLOYMENT : "has history of"
 ```
-Environment 1──∞ System
-    │
-    └──∞ Users (via membership)
 
-Flake 1──∞ Deployment
-    │
-    └──∞ Commit (git history)
-
-Builder ∞──∞ Derivation (builds)
-Builder ∞──∞ Environment (serves)
-
-System ∞──∞ Deployment (has history of)
-```
+> The diagram encodes the source document's conceptual relationship sketch.
+> Its cardinality notation is not derived from migrations and MUST NOT be read
+> as a statement of current database constraints.
 
 ## Related concepts
 

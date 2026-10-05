@@ -1,0 +1,18 @@
+# Narrow exclusions from the OKF knowledge corpus. These remain in the
+# source inventory, but they are not migrated into knowledge concepts.
+# Columns: repository-relative path glob<TAB>classification<TAB>reason.
+AGENTS.md	operational-control	Repository execution instructions are governed by the agent workflow, not knowledge concepts.
+CLAUDE.md	operational-control	Repository execution instructions are governed by the agent workflow, not knowledge concepts.
+CLA.md	license	Contributor license agreement is legal text, not Crystal Forge product knowledge.
+docs/agents/*.md	operational-control	Agent workflow, database safety, preview, and verification instructions are operational controls.
+backlog/tasks/*.md	backlog-record	Backlog task records remain in the task tracker and describe work items rather than durable knowledge concepts.
+backlog/completed/*.md	backlog-record	Completed Backlog task records remain historical work-tracking records.
+backlog/archive/**/*.md	backlog-record	Archived Backlog task records remain historical work-tracking records.
+backlog/milestones/*.md	backlog-record	Milestone records remain in Backlog.md and are scheduling metadata.
+backlog/decisions/*.md	backlog-record	Backlog task decisions remain attached to their task-tracker records.
+backlog/.backlog-templates/*.md	operational-template	Backlog capture and sprint-readiness templates are task-management controls.
+.gitlab/**/*.md	operational-template	Issue and merge-request templates are contribution workflow controls.
+docs/design/CrystalForge/uploads/CLA.md	duplicate-legal	Byte-identical uploaded copy of the root CLA.md, retained as a design-tool upload artifact.
+docs/design/CrystalForge/uploads/crystal-forge-xccdf-interchange-profile-v0.1.md	duplicate-source	Uploaded duplicate of docs/design/CrystalForge/docs/crystal-forge-xccdf-interchange-profile-v0.1.md; canonical source and destination are inventoried separately.
+docs/design/CrystalForge/uploads/system-cves-sc1-review.md	duplicate-source	Uploaded duplicate of docs/design/CrystalForge/fixtures/system-cves-sc1-review.md; canonical source and destination are inventoried separately.
+schemas/oscal-1.1.2/poam-provenance.txt	standards-provenance	Provenance metadata accompanies the pinned OSCAL schema package and is not a standalone Crystal Forge concept.

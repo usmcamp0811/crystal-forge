@@ -37,7 +37,6 @@ sequenceDiagram
 
     alt ServerBundledArchive mode
         Server->>GitCache: git clone --bare / git fetch<br/>(server uses stored SSH key or netrc)
-        GitCache-->>Server: 
         Note over Server: publish canonical tracked-tree tar and identity<br/>before the build job becomes claimable
     end
 
@@ -49,8 +48,7 @@ sequenceDiagram
     Note over Builder: enforce authorized size and SHA-256<br/>bounded extraction<br/>Nix store ingestion
 
     Builder->>Server: 4. POST /builders/:id/jobs/:jid/publish-derivation-closure<br/>Ed25519-signed
-    Server->>GitCache: nix copy --to &lt;cache&gt;<br/>(server pushes .drv closure to cache)
-    GitCache-->>Server: 
+    Server->>GitCache: nix copy to the configured cache (server pushes .drv closure)
     Server-->>Builder: 200 OK
 
     Note over Builder,GitCache: Builder: nix-store --realise<br/>(pulls .drv closure from cache or server<br/>via derivation-archive endpoint)

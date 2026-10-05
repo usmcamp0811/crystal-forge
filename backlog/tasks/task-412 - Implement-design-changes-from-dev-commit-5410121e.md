@@ -62,19 +62,20 @@ The task has four connected goals:
 
 The final result must support this workflow:
 
-```text
-Import a foreign STIG or CF-XCCDF benchmark
-    -> inspect benchmark metadata and requirements
-    -> select a profile and rules
-    -> map rules to existing policies, create unbound draft policies, or preserve unsupported rules
-    -> create a draft bundle
-    -> review and trust executable content
-    -> publish an immutable bundle version when ready
-    -> assign the bundle to an environment or system
-    -> enforce the bundle baseline by default
-    -> add or exclude policies through an assignment overlay
-    -> export the bundle as XCCDF
-    -> reimport it into another Crystal Forge instance without losing supported policy semantics
+```mermaid
+%% diagram-id: backlog-task-412-import-export-workflow
+flowchart TD
+    S1["Import a foreign STIG or CF-XCCDF benchmark"] --> S2["Inspect benchmark metadata and requirements"]
+    S2 --> S3["Select a profile and rules"]
+    S3 --> S4["Map rules to existing policies, create unbound draft policies, or preserve unsupported rules"]
+    S4 --> S5["Create a draft bundle"]
+    S5 --> S6["Review and trust executable content"]
+    S6 --> S7["Publish an immutable bundle version when ready"]
+    S7 --> S8["Assign the bundle to an environment or system"]
+    S8 --> S9["Enforce the bundle baseline by default"]
+    S9 --> S10["Add or exclude policies through an assignment overlay"]
+    S10 --> S11["Export the bundle as XCCDF"]
+    S11 --> S12["Reimport into another Crystal Forge instance without losing supported policy semantics"]
 ```
 
 ### Product semantics

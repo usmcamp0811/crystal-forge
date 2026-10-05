@@ -227,24 +227,28 @@ info!("📋 systemd-run not available, using direct execution");
 
 ### Before: Monolithic Evaluation
 
-```
-Crystal Forge Server Process
-├── All evaluations run in-process
-├── Memory consumption unlimited
-├── OOM kill affects entire server
-└── No resource isolation
+```mermaid
+%% diagram-id: core-evaluation-process-before
+flowchart TD
+    server["Crystal Forge Server Process"]
+    server --> eval["All evaluations run in-process"]
+    eval --> memory["Memory consumption unlimited"]
+    eval --> oom["OOM kill affects entire server"]
+    eval --> isolation["No resource isolation"]
 ```
 
 ### After: Isolated Evaluation
 
-```
-Crystal Forge Server Process
-├── Systemd User Session
-│   ├── Evaluation Scope 1 (4GB limit)
-│   ├── Evaluation Scope 2 (4GB limit)
-│   └── Evaluation Scope N (4GB limit)
-├── Fallback to direct execution
-└── Server process protected from evaluation OOM
+```mermaid
+%% diagram-id: core-evaluation-process-after
+flowchart TD
+    server["Crystal Forge Server Process"]
+    server --> session["Systemd User Session"]
+    session --> scope1["Evaluation Scope 1 (4GB limit)"]
+    session --> scope2["Evaluation Scope 2 (4GB limit)"]
+    session --> scopeN["Evaluation Scope N (4GB limit)"]
+    server --> fallback["Fallback to direct execution"]
+    server --> protected["Server process protected from evaluation OOM"]
 ```
 
 ## Future Improvements

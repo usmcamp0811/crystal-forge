@@ -40,22 +40,25 @@ browsing when no trustworthy root hierarchy can be established.
 
 The priority relationship is:
 
-```text
-authoritative primary/policy Nix work
-       >
-interactive Config exploration
-       >
-optional background full Config inventory
+```mermaid
+%% diagram-id: core-config-explorer-work-priority
+flowchart TD
+    Primary["Authoritative PRIMARY / policy Nix work"]
+    Interactive["Interactive Config exploration"]
+    Full["Optional background full Config inventory"]
+    Primary -->|higher priority than| Interactive
+    Interactive -->|higher priority than| Full
 ```
 
 Config exploration MUST NOT delay deployment authority unnecessarily. The
 historical failure mode was a job reported as `claimed` or `running` while it
 indefinitely waited for `pg_advisory_xact_lock`. The required state model is:
 
-```text
-queued/waiting_for_capacity
-          -> resource available
-          -> running
+```mermaid
+%% diagram-id: core-config-explorer-capacity-state
+stateDiagram-v2
+    [*] --> queued_or_waiting: queued / waiting_for_capacity
+    queued_or_waiting --> running: resource available
 ```
 
 The system MUST NOT hold a long-lived database transaction merely to wait for
@@ -74,13 +77,11 @@ persistence or terminalization so stale recovery cannot replace the owner.
 
 Conceptual request states are:
 
-```text
-queued
-waiting_for_capacity
-running / inspecting
-succeeded
-failed
-```
+- `queued`
+- `waiting_for_capacity`
+- `running` / `inspecting`
+- `succeeded`
+- `failed`
 
 Useful sub-phases include `inspecting_tree`, `inspecting_option`,
 `inspecting_provenance`, and `finalizing`. A request marked `running` MUST
@@ -168,34 +169,27 @@ The design targets are qualitative rather than brittle absolute limits:
 
 ### Interactive Explorer
 
-```text
-Browser
-   |
-   v
-API/cache check
-   |
-   +-- cached -> return
-   |
-   +-- missing -> enqueue scoped request
-                         |
-                         v
-                    worker/Nix
-                         |
-                         v
-                     cache result
-                         |
-                         v
-                       Browser
+```mermaid
+%% diagram-id: core-config-explorer-interactive-flow
+flowchart TD
+    Browser["Browser"] --> Check["API / cache check"]
+    Check -->|cached| Return["Return cached observation"]
+    Return --> Browser
+    Check -->|missing| Enqueue["Enqueue scoped request"]
+    Enqueue --> Worker["Worker / Nix"]
+    Worker --> Cache["Cache result"]
+    Cache --> Browser
 ```
 
 ### Authoritative separation
 
-```text
-configuration
-      |
-      +--> policy evaluator --> deployment gate
-      |
-      +--> Config Explorer --> human inspection
+```mermaid
+%% diagram-id: core-config-policy-authority-separation
+flowchart TD
+    Configuration --> Policy["Policy evaluator"]
+    Policy --> Gate["Deployment gate"]
+    Configuration --> Explorer["Config Explorer"]
+    Explorer --> Human["Human inspection"]
 ```
 
 There MUST be no arrow from the Config Explorer cache into the deployment gate.

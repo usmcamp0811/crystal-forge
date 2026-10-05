@@ -50,23 +50,25 @@ sources:
 
 ### Create Structure
 
-```
-Crystal Forge Redesign/
-├── 🎨 Design System
-│   ├── Colors (create color styles from JSON)
-│   ├── Typography (text styles)
-│   ├── Components (library)
-│   └── Layout Grids
-├── 📱 Pages - Mobile
-│   ├── Dashboard
-│   ├── Systems
-│   └── ... (other pages)
-├── 💻 Pages - Desktop
-│   ├── Dashboard
-│   ├── Systems
-│   └── ... (other pages)
-└── 🔄 Prototypes
-    └── User Flows
+```mermaid
+%% diagram-id: ui-figma-project-structure
+flowchart TB
+  project[Crystal Forge Redesign/]
+  project --> design[🎨 Design System]
+  design --> colors[Colors: create color styles from JSON]
+  design --> typography[Typography: text styles]
+  design --> components[Components: library]
+  design --> grids[Layout Grids]
+  project --> mobile[📱 Pages - Mobile]
+  mobile --> mobile_dashboard[Dashboard]
+  mobile --> mobile_systems[Systems]
+  mobile --> mobile_more[... other pages]
+  project --> desktop[💻 Pages - Desktop]
+  desktop --> desktop_dashboard[Dashboard]
+  desktop --> desktop_systems[Systems]
+  desktop --> desktop_more[... other pages]
+  project --> prototypes[🔄 Prototypes]
+  prototypes --> flows[User Flows]
 ```
 
 ### Import Colors to Figma

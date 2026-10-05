@@ -1,4 +1,4 @@
-* [views/](views/index.md) - Describes view_config_timeline, the Grafana config timeline view that labels each commit with the number of systems currently running it, derived from view_system_deployment_status and view_commit_deployment_timeline.
+* [views/](views/index.md) - Indexes the SQL view documents: the legacy build-reservation queue views, per-commit and per-flake status tables, the config timeline, and system deployment status.
 
 # Data Model
 

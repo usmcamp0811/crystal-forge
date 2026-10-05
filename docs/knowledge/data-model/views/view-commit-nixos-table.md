@@ -1,13 +1,12 @@
 ---
 type: Data Model
 title: "NixOS Commit Table View (`view_commit_nixos_table`)"
-description: "Describes view_commit_nixos_table, a compact commit-centric table of NixOS derivations with commit-level progress aggregates for Grafana half-width panels."
+description: "Describes view_commit_nixos_table, the SQL view that lists the NixOS derivations of a commit with commit-level progress aggregates; its only consumer is the database test suite."
 tags:
   - crystal-forge
   - view
   - commits
   - nixos
-  - grafana
 implementation_status: implemented
 sources:
   - id: origin
@@ -18,7 +17,9 @@ sources:
 
 ## Overview
 
-`view_commit_nixos_table` is a **compact, commit-centric table** for dashboards (half-width panels). It lists **NixOS** derivations for a given commit and includes small **commit-level aggregates** suitable for a progress/gauge visual.
+`view_commit_nixos_table` is a **compact, commit-centric table**. It lists **NixOS** derivations for a given commit and includes small **commit-level aggregates** (`total`, `successful`, `failed`, `in_progress`, `progress_pct`).
+
+**Consumers at revision `3b23d36f`:** only the database test (`packages/cf-test-suite/cf_test/tests/database/test_view_commit_nixos_table.py`). No application code, UI, API, or dashboard definition reads this view. It was defined once, by migration `0047_revamp_views.sql`.
 
 > Packages are **excluded**. Only `derivation_type = 'nixos'` rows are shown.
 
@@ -42,12 +43,12 @@ sources:
 
 ## Typical Use
 
-- **Filter by commit** (dropdown → hash), show per-derivation rows + a small **progress** (use `progress_pct`).
-- Sort table by `status_order`, then `derivation_name` for stable grouping.
+- Filter by commit hash and read the per-derivation rows together with `progress_pct`.
+- Sort by `status_order`, then `derivation_name`, for stable grouping.
 
 ## Example Queries
 
-### All NixOS rows for a commit (panel table)
+### All NixOS rows for a commit
 
 ```sql
 SELECT
@@ -58,11 +59,11 @@ SELECT
   derivation_status,
   progress_pct
 FROM public.view_commit_nixos_table
-WHERE git_commit_hash = $commit_hash  -- Grafana/variable
+WHERE git_commit_hash = $commit_hash
 ORDER BY status_order, derivation_name;
 ```
 
-### One row per commit (header/progress panel)
+### One row per commit
 
 ```sql
 SELECT DISTINCT
@@ -75,7 +76,7 @@ FROM public.view_commit_nixos_table
 WHERE git_commit_hash = $commit_hash;
 ```
 
-### Latest N commits for a flake (for a selector)
+### Latest N commits for a flake
 
 ```sql
 SELECT DISTINCT ON (git_commit_hash)
@@ -85,12 +86,6 @@ WHERE flake_name = $flake
 ORDER BY git_commit_hash, commit_timestamp DESC
 LIMIT 20;
 ```
-
-## Panel Tips (Grafana)
-
-- **Progress**: Use `progress_pct` as a **gauge** or **bar** (field override 0–100).
-- **Row coloring**: Map `derivation_status` to thresholds/colors.
-- **Compact**: Hide non-essential columns for half-width.
 
 ## Related
 

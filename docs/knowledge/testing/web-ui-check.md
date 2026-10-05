@@ -364,33 +364,25 @@ documented in the manifest's `exclusions`.
 
 ## CI integration
 
-`flake-check: [web-ui]` builds the check and exposes
+The separate `web-ui-check` CI job builds the check and exposes
 `web-ui-screenshots/` (screenshots, `results.json`, `visual-report.json`,
 `visual-summary.md`, `diffs/`, plus `design-drift-report.json`,
 `design-drift-summary.md`, `montages/`, `design-targets/`, `design-parity/`) as
 artifacts. The `web-ui-screenshots-mr-comment` job posts/updates an MR comment
 with the coverage + visual + design-parity summary, all themed step
 screenshots, up to 20 diff images, and up to 26 design-parity montages.
-The opt-in `web-ui-baseline-candidates` job publishes equivalent candidate
+The manual `web-ui-baseline-candidates` job publishes equivalent candidate
 artifacts after semantic and critical-workflow gates pass in baseline update
-mode. It does not replace or weaken `flake-check: [web-ui]`.
+mode. It does not replace the normal `web-ui-check` job.
 
-> **Status:** disagreement with the CI file. This section names a
-> `flake-check: [web-ui]` job. In `.gitlab-ci.yml` at the migration base
-> commit, the `flake-check` matrix lists `integration`, `oidc-auth`,
-> `run-ui-dev-db-check`, `server-regressions`, and `web-ui-test-runner`. The
-> `web-ui` check runs in a separate `web-ui-check` job that sets
-> `allow_failure: true`. This document keeps the original text. A later
-> verification pass must reconcile it with `.gitlab-ci.yml`.
+The `.gitlab-ci.yml` job sets `allow_failure: true`. A failed browser check
+therefore does not block the pipeline. The MR-comment job may still publish
+artifacts when the browser job fails before it creates screenshots.
 
 ## Known issues
 
-- `27-hardening-fleet` targets `/hardening`, which has no registered route
-  (orphaned view) — tracked as TASK-377.
-- A number of ci_fast steps fail routinely without blocking (only the
-  critical list gates) — triage tracked as TASK-378.
-
-> **Status:** the migration did not check the state of TASK-377 and TASK-378
-> in the backlog. `packages/web-ui/src/routes.rs` contains no `/hardening`
-> route at the migration base commit, so the first item still matches the
-> code.
+- The captured `27-hardening-fleet` workflow targets `/hardening`, but
+  `packages/web-ui/src/routes.rs` has no fleet-level `/hardening` page. System
+  hardening is available on System Detail (`/systems/:id?tab=hardening`). The
+  capture remains an orphaned design workflow until the route or manifest is
+  updated.

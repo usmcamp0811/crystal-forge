@@ -20,7 +20,7 @@ sources:
 
 # Authentication, Authorization, and System Registration
 
-> **Status:** Split from the system overview. OIDC and dev modes and the `AUTH_MODE` variable exist (`packages/default/crates/cf-server/src/config/server.rs`, `handlers/api/auth_oidc.rs`, `handlers/api/auth_dev.rs`). The role matrix and environment scoping have not been compared with `handlers/api/rbac.rs`. They are verification candidates.
+> **Status:** Partial. OIDC and development login routes and RBAC exist. This page records the current login entry points; see [API authentication and authorization](api-authentication-and-authorization.md) for the full API and RBAC contract.
 
 ## 1. Registering a System
 
@@ -36,18 +36,19 @@ sources:
 
 CF supports two auth modes:
 
-**OIDC (Production):**
-1. User clicks "Login with Google/Okta/etc"
-2. Redirects to Identity Provider
-3. User authenticates
-4. Callback with OIDC tokens
-5. CF creates session, maps groups to roles
+**OIDC:**
+1. The user opens `/login` and follows its link to `GET /api/auth/oidc/login`.
+2. The server redirects to the configured identity provider.
+3. The provider returns the authorization code to `GET /api/auth/oidc/callback`.
+4. The server exchanges the code, validates the identity, maps groups, and
+   creates the session.
 
 **Dev Mode (Development):**
-1. Set `AUTH_MODE=dev` in config
-2. Visit `/dev/login`
-3. Click "Login as Admin/Operator/Viewer"
-4. Dev user created in-memory
+1. Set `AUTH_MODE=dev` in configuration.
+2. Open the `/login` UI and use the development login form.
+3. Submit an existing development fixture user's email to
+   `POST /api/auth/dev/login`.
+4. The server authenticates the persisted fixture user and creates a session.
 
 ## 5. Authorization (RBAC)
 

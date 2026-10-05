@@ -1,14 +1,14 @@
 # Concept
 
 * [Crystal Forge problem brief](problem-statement.md) - States who is hurt by missing NixOS compliance tooling, the four gaps Crystal Forge addresses, why now, what is out of scope this phase, and the success signal; open it to understand the product purpose.
-* [Crystal Forge system context and current state](system-context-and-current-state.md) - Describes the system context, upstream dependencies, components, communication patterns, scaling model, and a point-in-time current state of Crystal Forge; open it for orientation and treat the Current State section as dated.
-* [Crystal Forge system overview](system-overview.md) - Explains what Crystal Forge is, the core fleet-management problem it solves, its high-level architecture, and its key components; open it first for orientation before the detailed concepts.
+* [Crystal Forge system context and current state](system-context-and-current-state.md) - Describes the system context, upstream dependencies, components, communication patterns, and scaling model of Crystal Forge; open it for orientation on what the platform depends on and how its parts connect.
+* [Crystal Forge system overview](system-overview.md) - Explains what Crystal Forge is, the fleet-management problems it solves, which component owns each responsibility, and where to read next; open it first for orientation before the detailed concepts.
 * [Project introduction and key features](project-introduction-and-key-features.md) - States what Crystal Forge is, its v0.3.0 status, the key features by area (monitoring, build coordination, deployment, authentication), and short data model and security model summaries; open it for the feature-level pitch before the detailed concepts.
 
 # Design Specification
 
 * [Crystal Forge constraints and policy](constraints-and-policy.md) - Lists non-negotiable security, privacy, platform, and regulatory constraints, flexible elements, and policy requirements for Crystal Forge; open it before a design choice that touches these boundaries.
-* [Crystal Forge roadmap](roadmap.md) - Lists planned Crystal Forge work (stabilization, deployment policy engine, CVE dashboard, STIG modules, reporting and attestation, Tvix) with a per-item implementation status note; open it to see intended direction.
+* [Crystal Forge roadmap](roadmap.md) - Lists the capabilities that exist at revision 3b23d36f and the planned work that remains (policy approvals and attestation, CVE trending and alerting, STIG verification, reporting and attestation packages, Tvix); open it to see intended direction.
 * [Release roadmap and active milestones](release-roadmap-and-milestones.md) - Lists the version-by-version release roadmap (v0.1.0 to v0.5.0 and future Tvix work), the progress figure, and the active Backlog milestones as recorded in the README at v0.3.0; open it to see the release plan at that time.
 
 # Historical Reference

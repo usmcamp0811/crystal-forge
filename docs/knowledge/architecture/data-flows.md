@@ -1,7 +1,7 @@
 ---
 type: Architecture
 title: "Data Flows"
-description: "Describes the four core data flows (state monitoring, CVE scanning, drift detection, evaluation and flake snapshots) between agent, server, builder, PostgreSQL, and Grafana; open it to trace how data moves through the system."
+description: "Describes the four core data flows - agent state reporting, commit evaluation and build, CVE scanning, and drift detection - between agent, server, builder, PostgreSQL, cache, and the UI, with who initiates each step; open it to trace how data moves through the system."
 tags:
   - crystal-forge
   - architecture
@@ -11,51 +11,117 @@ tags:
 implementation_status: implemented
 generated:
   by: opencode/claude-sonnet-5-5
-  at: 2026-10-03T22:57:15-05:00
+  at: 2026-10-04T16:05:00-05:00
 sources:
   - id: origin
     resource: "Crystal Forge repository file docs/architecture.md at commit 3b23d36f"
-    title: "ADR-000: Crystal Forge Architecture Overview"
+    title: "ADR-000: Crystal Forge Architecture Overview (original Data Flows section)"
   - id: code-1
     resource: "Crystal Forge repository file packages/default/crates/cf-server/src/handlers/agent_request.rs at commit 3b23d36f"
     title: Agent request signature verification
   - id: code-2
     resource: "Crystal Forge repository file packages/default/crates/cf-server/src/server/mod.rs at commit 3b23d36f"
-    title: Server background loops
+    title: Server background tasks
   - id: code-3
     resource: "Crystal Forge repository file packages/default/crates/cf-server/src/queries/evaluation_snapshots.rs at commit 3b23d36f"
-    title: Drift summary queries
+    title: Exact store-path drift and seven-day drift
+  - id: code-4
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/builder/cve_worker.rs at commit 3b23d36f"
+    title: Server CVE scan loop
 ---
 
 # Data Flows
 
-> **Status:** Split from [ADR-000](../decisions/adr-000-architecture-overview.md). Flows 1 to 3 were compared with the code at the level of component roles (see Migration verification notes). Flow 2 was corrected: evaluation runs in the server, not in the builder. Flow 4 was not compared in detail; its owning concepts are in `evaluation/`.
+Every flow below passes through the server. The UI reads results through the
+server API. Arrows labeled `request` start at the requester.
 
-## 1. State Monitoring Flow
+## 1. Agent state reporting
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Host as Managed NixOS host
+    participant Agent as cf-agent
+    participant API as Server API
+    participant DB as PostgreSQL
+    participant UI as Dioxus UI
+
+    Host->>Agent: configuration change or heartbeat timer
+    Agent->>API: request: signed heartbeat or state report
+    API->>API: verify signature against the system's public key
+    API->>DB: persist state or heartbeat
+    API-->>Agent: response (may carry desired_target)
+    UI->>API: request: read systems and status
+    API->>DB: read
+    API-->>UI: response
 ```
-NixOS System → Agent → Server → PostgreSQL → Grafana
+
+`POST /agent/state` and `POST /agent/heartbeat` verify the `X-Signature`
+header against the registered public key before the server persists anything.
+Which of the two the server stores is decided by the equivalence check in
+[Agent heartbeat versus state persistence](../deployment/agent-heartbeat-vs-state-persistence.md).
+
+## 2. Commit evaluation, build, and cache
+
+```mermaid
+flowchart LR
+    Source["Git remote<br/>(poll, webhook, API sync)"] -->|"commit inserted"| Server
+    subgraph Server["Server (authoritative)"]
+        Eval["Evaluate with nix-eval-jobs"]
+        Jobs["Queue build jobs<br/>for derivations that pass admission"]
+        DB[("PostgreSQL")]
+        Eval --> Jobs
+        Eval --> DB
+        Jobs --> DB
+    end
+    Builder["API-only builder"] -->|"request: poll and claim"| Server
+    Server -->|"response: job"| Builder
+    Builder -->|"data transfer: outputs"| Cache[("Binary cache")]
+    Builder -->|"request: complete with cache reference"| Server
+    Server -.->|"probe"| Cache
 ```
 
-Agent detects configuration change → Signs state report → Server validates signature → Stores compliance data → Grafana displays/alerts
+The server evaluates; the builder realizes. See
+[Wakeups and polling](event-driven-queues.md) for how each step discovers work.
 
-## 2. CVE Scanning Flow
+## 3. CVE scanning
 
+```mermaid
+flowchart LR
+    Built["Build completes and publishes"] --> Sched["Server scan scheduling<br/>(scan schedule policy)"]
+    Sched --> Where{"Who runs the scan?"}
+    Where -->|"server-local vulnix executor<br/>when enabled and vulnix is available"| Local["Server scan loop"]
+    Where -->|"builder claims a leased scan<br/>through the API"| Remote["Builder-side scan"]
+    Local --> Store["Scan results and exact evidence"]
+    Remote -->|"request: submit results"| Store
+    Store --> DB[("PostgreSQL")]
+    DB --> UI["Dioxus UI: CVE inventory, triage, POA&M"]
 ```
-Git Webhook → Server → Builder → vulnix → PostgreSQL → Grafana
+
+The server's scan loop always recovers expired remote scan leases and
+reconciles scan prerequisites. It runs vulnix itself only when the local
+executor is enabled and vulnix is available. See
+[Exact-CVE evidence authority](../cves/exact-cve-evidence-authority-and-inventory-reads.md).
+
+## 4. Drift detection
+
+```mermaid
+flowchart LR
+    Reported["Agent-reported running store path<br/>and heartbeat history"] --> Compare["Server comparison"]
+    Selected["Server-evaluated expected store path<br/>of the selected configuration"] --> Compare
+    Compare --> Exact["Exact store-path drift"]
+    Compare --> Seven["Seven-day drift status"]
+    Exact --> UI["Dioxus UI status"]
+    Seven --> UI
 ```
 
-Configuration update → Server evaluates the flake commit (`nix-eval-jobs`) and queues a build job → Builder builds the derivation → CVE scan runs (vulnix, on a builder or in the server's scan loop) → Stores vulnerability data → Compliance dashboard updates
+The server compares the store path the agent reports as running with the store
+path of the selected, server-evaluated configuration (`EvaluationDrift`). It
+derives a separate seven-day drift status from persisted system-state and
+heartbeat observations. The expected path comes from server evaluation, not
+from a builder.
 
-## 3. Drift Detection Flow
-
-```
-Agent State + Builder Evaluation → Server Comparison → Compliance Alert
-```
-
-Current system state compared against latest evaluated configuration to detect unauthorized changes.
-
-## 4. Evaluation and Flake Snapshot Flow
+## 5. Evaluation and flake snapshot flow
 
 PRIMARY evaluates system derivations and policies. It also emits one
 revision-scoped flake-output projection without per-host exploration. A separate
@@ -73,23 +139,7 @@ observation, failure containment, cache, and authority boundaries.
 
 ## Related concepts
 
-- [Core components](../components/core-components.md) - the components named in these flows
-- [Event-driven queue architecture](event-driven-queues.md) - queue wakeups behind the evaluation flow
+- [Ecosystem architecture summary](ecosystem-architecture-summary.md) - the one-page diagram
+- [Core components](../components/core-components.md) - what each component owns
+- [Wakeups and polling](event-driven-queues.md) - queue discovery and ordering
 - [Commit to deploy flow](../workflows/commit-eval-build-cache-deploy-flow.md) - the end-to-end flow chart
-
-## Migration verification notes
-
-Scope: component roles and direction of flows 1 to 3. Not checked: the full flow 4 text, Grafana dashboard behavior, and alerting.
-
-- Claim: Flow 1: the agent signs the state report and the server validates the signature before storing it.
-  Finding: `POST /agent/state` and `POST /system_state` verify the `X-Signature` header against the system's public key, then persist the state.
-  Evidence: `cf-server/src/handlers/agent_request.rs`; `cf-server/src/handlers/agent/state.rs`; `cf-server/src/bin/server.rs` routes.
-  Case: implemented. Grafana is an optional NixOS module integration (`modules/nixos/crystal-forge/default.nix`); alerting not checked.
-- Claim: Flow 2: the builder evaluates the flake and runs the CVE scan; the webhook triggers the server.
-  Finding: The server evaluates commits (`run_commit_evaluation_loop`). Builders build derivations. CVE scans run in the server loop (`run_cve_scan_loop`) or on builders (`cve-scans/claim`). The webhook inserts a commit only; polling or the fallback tick starts evaluation.
-  Evidence: `cf-server/src/server/mod.rs`; `cf-server/src/builder/cve_worker.rs`; `cf-server/src/handlers/webhook.rs`; `cf-builder/src/builder/cve_scanner.rs`.
-  Case: documentation stale (corrected in place).
-- Claim: Flow 3: current state is compared with the latest evaluated configuration to detect unauthorized changes.
-  Finding: The server computes selected-versus-running store-path drift (`EvaluationDrift`) and a seven-day drift status from stored system-state and heartbeat observations. A "compliance alert" action on drift was not checked.
-  Evidence: `cf-server/src/queries/evaluation_snapshots.rs`; `cf-server/src/handlers/api/systems.rs`.
-  Case: partially verified; alerting not checked.

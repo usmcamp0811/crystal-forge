@@ -142,9 +142,21 @@ This allows the agent to self-register using the API key workflow, which is the 
 ### Code Review Summary
 
 Change Flow Analysis:
-1. server-stack -> server-only -> server-module -> runServer -> generateConfig -> configTemplateClean ✅
-2. server-stack-mock -> server-stack-mock -> server-module + mock-execution-module (overrides) -> runServerMock -> generateConfigMock -> configTemplateMock ✅
-3. full-stack -> full-stack -> server-module -> runServer -> generateConfig -> configTemplateClean ✅
+```mermaid
+%% diagram-id: backlog-task-194-change-flow
+flowchart LR
+    subgraph F1["1. server-stack"]
+        a1["server-stack"] --> a2["server-only"] --> a3["server-module"] --> a4["runServer"] --> a5["generateConfig"] --> a6["configTemplateClean"]
+    end
+    subgraph F2["2. server-stack-mock"]
+        b1["server-stack-mock"] --> b2["server-stack-mock"] --> b3["server-module + mock-execution-module (overrides)"] --> b4["runServerMock"] --> b5["generateConfigMock"] --> b6["configTemplateMock"]
+    end
+    subgraph F3["3. full-stack"]
+        c1["full-stack"] --> c2["full-stack"] --> c3["server-module"] --> c4["runServer"] --> c5["generateConfig"] --> c6["configTemplateClean"]
+    end
+```
+
+All three flows were checked and satisfy the constraints below.
 
 All architectural constraints satisfied:
 - Backward compat maintained (configTemplate alias) ✅

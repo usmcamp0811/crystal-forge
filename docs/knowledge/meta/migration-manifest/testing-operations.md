@@ -207,7 +207,7 @@ optionally `## Related files`), which the catalog summarizes per check.
   | Source section | Destination |
   | --- | --- |
   | `## Help`, `## Quick start`, `## Examples` | [testing/flake-checks.md#scenario-runner-packagescf-test-suite](../../testing/flake-checks.md#scenario-runner-packagescf-test-suite) |
-- Unmapped content: none. The catalog records the command shape, scenario names, options, and connection variables, and a `Status:` note on the stale `cf-test-modules` attribute name.
+- Unmapped content: none. The catalog records the current `cf-test-suite` command, scenario names, options, and connection variables.
 
 ### `docs/design/CrystalForge/fixtures/README.md`
 

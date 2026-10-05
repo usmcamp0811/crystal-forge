@@ -190,24 +190,21 @@ Dropdown: 0 4px 6px rgba(0, 0, 0, 0.1)
 
 ### Application Shell Structure
 
-```
-┌──────────────────────────────────────────────────────────┐
-│ TopBar (fixed)                                           │
-│  [Logo] [Theme Toggle] [User Menu]                      │
-├─────────┬────────────────────────────────────────────────┤
-│         │                                                │
-│ Sidebar │  Main Content Area                            │
-│ (fixed) │  (scrollable)                                 │
-│         │                                                │
-│  Nav    │  [Page Title]                                 │
-│  Items  │  [Breadcrumbs/Tabs if applicable]            │
-│         │                                                │
-│         │  [Content: cards, tables, forms, etc.]        │
-│         │                                                │
-│         │                                                │
-│         │                                                │
-│         │                                                │
-└─────────┴────────────────────────────────────────────────┘
+```mermaid
+%% diagram-id: ui-figma-application-shell
+flowchart TB
+  shell[Application shell]
+  shell --> topbar[TopBar: fixed]
+  topbar --> logo[Logo]
+  topbar --> theme[Theme Toggle]
+  topbar --> user[User Menu]
+  shell --> workspace[Workspace row]
+  workspace --> sidebar[Sidebar: fixed]
+  sidebar --> nav[Nav Items]
+  workspace --> main[Main Content Area: scrollable]
+  main --> title[Page Title]
+  main --> crumbs[Breadcrumbs/Tabs if applicable]
+  main --> content[Content: cards, tables, forms, etc.]
 ```
 
 **Desktop**: 
@@ -250,28 +247,21 @@ Dropdown: 0 4px 6px rgba(0, 0, 0, 0.1)
 **Purpose**: Fleet-wide overview at a glance
 
 **Layout**:
-```
-┌─────────────────────────────────────────────┐
-│ Dashboard                                   │
-├─────────┬─────────┬─────────┬───────────────┤
-│ Stat    │ Stat    │ Stat    │ Stat          │
-│ Card    │ Card    │ Card    │ Card          │
-│ (Total) │ (Healthy)│(Behind) │(Critical CVEs)│
-├─────────┴─────────┴─────────┴───────────────┤
-│                                             │
-│ Fleet Health Breakdown (donut chart)       │
-│                                             │
-├──────────────────────┬──────────────────────┤
-│ Deployment Status    │ Build Queue          │
-│ Breakdown            │ Panel                │
-│ (donut chart)        │ (live updates)       │
-├──────────────────────┴──────────────────────┤
-│ Recent Deployments List                     │
-│ [table with 5 most recent]                  │
-├─────────────────────────────────────────────┤
-│ CVE Summary Panel                           │
-│ [severity breakdown]                        │
-└─────────────────────────────────────────────┘
+```mermaid
+%% diagram-id: ui-figma-dashboard-wireframe
+flowchart TB
+  page[Dashboard]
+  page --> stats[Stat Cards row]
+  stats --> total[Stat Card: Total]
+  stats --> healthy[Stat Card: Healthy]
+  stats --> behind[Stat Card: Behind]
+  stats --> critical[Stat Card: Critical CVEs]
+  page --> fleet[Fleet Health Breakdown: donut chart]
+  page --> pair[Two-panel row]
+  pair --> deploy[Deployment Status Breakdown: donut chart]
+  pair --> queue[Build Queue Panel: live updates]
+  page --> recent[Recent Deployments List: table with 5 most recent]
+  page --> cve[CVE Summary Panel: severity breakdown]
 ```
 
 **Widgets**:
@@ -294,29 +284,19 @@ Dropdown: 0 4px 6px rgba(0, 0, 0, 0.1)
 **Purpose**: Browse and manage all NixOS systems
 
 **Layout**:
-```
-┌─────────────────────────────────────────────┐
-│ Systems                                     │
-├─────────────────────────────────────────────┤
-│ [Search] [Filter: Health ▼] [Filter: Env ▼]│
-│ [View Toggle: Cards / Table]                │
-├─────────────────────────────────────────────┤
-│                                             │
-│ ┌─────────┐ ┌─────────┐ ┌─────────┐       │
-│ │ System  │ │ System  │ │ System  │       │
-│ │ Card    │ │ Card    │ │ Card    │       │
-│ │         │ │         │ │         │       │
-│ └─────────┘ └─────────┘ └─────────┘       │
-│                                             │
-│ (Card View - grid of system cards)          │
-│                                             │
-│ OR                                          │
-│                                             │
-│ ┌───────────────────────────────────────┐  │
-│ │ Table View                            │  │
-│ │ [Sortable columns]                    │  │
-│ └───────────────────────────────────────┘  │
-└─────────────────────────────────────────────┘
+```mermaid
+%% diagram-id: ui-figma-systems-list-wireframe
+flowchart TB
+  page[Systems]
+  page --> controls[Toolbar]
+  controls --> search[Search]
+  controls --> health[Filter: Health ▼]
+  controls --> env[Filter: Env ▼]
+  controls --> toggle[View Toggle: Cards / Table]
+  page --> choice{Selected view}
+  choice --> card_view[Card View: grid of system cards]
+  card_view --> cards[Three System Cards in a row]
+  page -->|OR| table_view[Table View: Sortable columns]
 ```
 
 **Components**:
@@ -340,28 +320,20 @@ Dropdown: 0 4px 6px rgba(0, 0, 0, 0.1)
 **Purpose**: Deep dive into a single system
 
 **Layout**:
-```
-┌─────────────────────────────────────────────┐
-│ [← Back] system-hostname                    │
-├─────────────────────────────────────────────┤
-│ Tabs: [Info] [Logs]                         │
-├─────────────────────────────────────────────┤
-│ Info Tab:                                   │
-│                                             │
-│ ┌─────────────────┐ ┌──────────────────┐   │
-│ │ System Info     │ │ Hardware Info    │   │
-│ │ Card            │ │ Card             │   │
-│ └─────────────────┘ └──────────────────┘   │
-│                                             │
-│ ┌─────────────────┐ ┌──────────────────┐   │
-│ │ Network Info    │ │ Security Info    │   │
-│ │ Card            │ │ Card             │   │
-│ └─────────────────┘ └──────────────────┘   │
-│                                             │
-│ ┌──────────────────────────────────────┐   │
-│ │ Agent Status Card                    │   │
-│ └──────────────────────────────────────┘   │
-└─────────────────────────────────────────────┘
+```mermaid
+%% diagram-id: ui-figma-system-detail-wireframe
+flowchart TB
+  page[System Detail]
+  page --> heading[← Back; system-hostname]
+  page --> tabs[Tabs: Info; Logs]
+  tabs --> info[Info Tab]
+  info --> row1[First card row]
+  row1 --> system[System Info Card]
+  row1 --> hardware[Hardware Info Card]
+  info --> row2[Second card row]
+  row2 --> network[Network Info Card]
+  row2 --> security[Security Info Card]
+  info --> agent[Agent Status Card]
 ```
 
 **Info Cards**:
@@ -388,24 +360,17 @@ Dropdown: 0 4px 6px rgba(0, 0, 0, 0.1)
 **Purpose**: Manage deployment environments (dev, staging, prod)
 
 **Layout**:
-```
-┌─────────────────────────────────────────────┐
-│ Environments                      [+ Add]   │
-├─────────────────────────────────────────────┤
-│                                             │
-│ ┌───────────────────────────────────────┐  │
-│ │ Environment Card: production          │  │
-│ │ [Edit] [Remove]                       │  │
-│ │                                       │  │
-│ │ Systems: 12                           │  │
-│ │ Policies: Auto-deploy on stable tag   │  │
-│ └───────────────────────────────────────┘  │
-│                                             │
-│ ┌───────────────────────────────────────┐  │
-│ │ Environment Card: staging             │  │
-│ │ ...                                   │  │
-│ └───────────────────────────────────────┘  │
-└─────────────────────────────────────────────┘
+```mermaid
+%% diagram-id: ui-figma-environments-wireframe
+flowchart TB
+  page[Environments]
+  page --> add[+ Add]
+  page --> production[Environment Card: production]
+  production --> prod_actions[Edit; Remove]
+  production --> systems[Systems: 12]
+  production --> policies[Policies: Auto-deploy on stable tag]
+  page --> staging[Environment Card: staging]
+  staging --> more[...]
 ```
 
 **Components**:
@@ -425,24 +390,19 @@ Dropdown: 0 4px 6px rgba(0, 0, 0, 0.1)
 **Purpose**: Visualize flake repository commit timeline
 
 **Layout**:
-```
-┌─────────────────────────────────────────────┐
-│ Flake Repository                            │
-├─────────────────────────────────────────────┤
-│                                             │
-│ Commit Timeline (vertical)                  │
-│                                             │
-│ ● abc1234 - 2 hours ago                     │
-│ │ feat: add new module                      │
-│ │ [View Evaluation]                         │
-│ │                                           │
-│ ● def5678 - 1 day ago                       │
-│ │ fix: update package                       │
-│ │ [View Evaluation]                         │
-│ │                                           │
-│ ● ghi9012 - 3 days ago                      │
-│   ...                                       │
-└─────────────────────────────────────────────┘
+```mermaid
+%% diagram-id: ui-figma-flakes-wireframe
+flowchart TB
+  page[Flake Repository]
+  page --> timeline[Commit Timeline: vertical]
+  timeline --> c1[● abc1234 - 2 hours ago]
+  c1 --> m1[feat: add new module]
+  c1 --> eval1[View Evaluation]
+  timeline --> c2[● def5678 - 1 day ago]
+  c2 --> m2[fix: update package]
+  c2 --> eval2[View Evaluation]
+  timeline --> c3[● ghi9012 - 3 days ago]
+  c3 --> more[...]
 ```
 
 **Components**:
@@ -462,26 +422,24 @@ Dropdown: 0 4px 6px rgba(0, 0, 0, 0.1)
 **Purpose**: Build control center - monitor and manage builds
 
 **Layout**:
-```
-┌─────────────────────────────────────────────┐
-│ Builds                                      │
-├──────────────────────┬──────────────────────┤
-│ Build Queue          │ Build Detail         │
-│                      │                      │
-│ [Queued]             │ [Selected build info]│
-│ build-123            │                      │
-│ build-124            │ System: server-01    │
-│                      │ Status: Building     │
-│ [Building]           │ Progress: 45%        │
-│ build-122 ◄──────────│ Started: 2 min ago   │
-│                      │                      │
-│ [Complete]           │ Logs:                │
-│ build-121            │ [build output...]    │
-│ build-120            │                      │
-│                      │                      │
-│ [Failed]             │ [Actions]            │
-│ build-119            │ [Retry] [Cancel]     │
-└──────────────────────┴──────────────────────┘
+```mermaid
+%% diagram-id: ui-figma-builds-wireframe
+flowchart LR
+  page[Builds]
+  page --> queue[Build Queue]
+  page --> detail[Build Detail]
+  queue --> queued[Queued: build-123; build-124]
+  queue --> building[Building: build-122]
+  queue --> complete[Complete: build-121; build-120]
+  queue --> failed[Failed: build-119]
+  detail -. selected .-> building
+  detail --> selected[Selected build info]
+  detail --> system[System: server-01]
+  detail --> status[Status: Building]
+  detail --> progress[Progress: 45%]
+  detail --> started[Started: 2 min ago]
+  detail --> logs[Logs: build output...]
+  detail --> actions[Actions: Retry; Cancel]
 ```
 
 **Components**:
@@ -503,40 +461,34 @@ Dropdown: 0 4px 6px rgba(0, 0, 0, 0.1)
 **Purpose**: View evaluation history and results
 
 **Layout**:
-```
-┌─────────────────────────────────────────────┐
-│ Evaluations                                 │
-├─────────────────────────────────────────────┤
-│ [Table of evaluations]                      │
-│                                             │
-│ Commit    | Time       | Status  | Systems  │
-│ abc1234   | 2h ago     | Success | 12/12    │
-│ def5678   | 1d ago     | Success | 12/12    │
-│ ghi9012   | 3d ago     | Failed  | 0/12     │
-│ ...                                         │
-└─────────────────────────────────────────────┘
+```mermaid
+%% diagram-id: ui-figma-evaluations-list-wireframe
+flowchart TB
+  page[Evaluations]
+  page --> table[Table of evaluations]
+  table --> columns[Columns: Commit; Time; Status; Systems]
+  table --> row1["abc1234 | 2h ago | Success | 12/12"]
+  table --> row2["def5678 | 1d ago | Success | 12/12"]
+  table --> row3["ghi9012 | 3d ago | Failed | 0/12"]
+  table --> more["..."]
 ```
 
 **Click row** → Navigate to `/evaluations/:commit_id`
 
 **Evaluation Detail Page**:
-```
-┌─────────────────────────────────────────────┐
-│ Evaluation: abc1234                         │
-├─────────────────────────────────────────────┤
-│ Status: Success                             │
-│ Evaluated: 2 hours ago                      │
-│ Systems: 12/12 successful                   │
-├─────────────────────────────────────────────┤
-│ [Per-system evaluation results table]      │
-│                                             │
-│ System       | Status  | Store Path        │
-│ server-01    | Success | /nix/store/...    │
-│ server-02    | Success | /nix/store/...    │
-│ ...                                         │
-├─────────────────────────────────────────────┤
-│ [View Logs] button                          │
-└─────────────────────────────────────────────┘
+```mermaid
+%% diagram-id: ui-figma-evaluation-detail-wireframe
+flowchart TB
+  page[Evaluation: abc1234]
+  page --> status[Status: Success]
+  page --> evaluated[Evaluated: 2 hours ago]
+  page --> systems[Systems: 12/12 successful]
+  page --> table[Per-system evaluation results table]
+  table --> columns[Columns: System; Status; Store Path]
+  table --> server1["server-01 | Success | /nix/store/..."]
+  table --> server2["server-02 | Success | /nix/store/..."]
+  table --> more["..."]
+  page --> logs[View Logs button]
 ```
 
 **Current UX Issues**:
@@ -551,27 +503,22 @@ Dropdown: 0 4px 6px rgba(0, 0, 0, 0.1)
 **Purpose**: Manage remote builders (build machines)
 
 **Layout**:
-```
-┌─────────────────────────────────────────────┐
-│ Builders                          [+ Add]   │
-├─────────────────────────────────────────────┤
-│                                             │
-│ ┌───────────────────────────────────────┐  │
-│ │ Builder Card: builder-01              │  │
-│ │ [Edit] [Remove]                       │  │
-│ │                                       │  │
-│ │ ● Online                              │  │
-│ │ SSH: builder@builder-01.local:22      │  │
-│ │ Systems: x86_64-linux                 │  │
-│ │ Features: kvm, nixos-test             │  │
-│ │ Speed: 100                            │  │
-│ │ Max Jobs: 8                           │  │
-│ │                                       │  │
-│ │ Metrics:                              │  │
-│ │ Total Builds: 456                     │  │
-│ │ Success Rate: 98.5%                   │  │
-│ └───────────────────────────────────────┘  │
-└─────────────────────────────────────────────┘
+```mermaid
+%% diagram-id: ui-figma-builders-wireframe
+flowchart TB
+  page[Builders]
+  page --> add[+ Add]
+  page --> card[Builder Card: builder-01]
+  card --> actions[Edit; Remove]
+  card --> online[● Online]
+  card --> ssh[SSH: builder@builder-01.local:22]
+  card --> systems[Systems: x86_64-linux]
+  card --> features[Features: kvm, nixos-test]
+  card --> speed[Speed: 100]
+  card --> jobs[Max Jobs: 8]
+  card --> metrics[Metrics]
+  metrics --> total[Total Builds: 456]
+  metrics --> rate[Success Rate: 98.5%]
 ```
 
 **Components**:
@@ -591,16 +538,15 @@ Dropdown: 0 4px 6px rgba(0, 0, 0, 0.1)
 **Purpose**: Manage binary caches
 
 **Layout**:
-```
-┌─────────────────────────────────────────────┐
-│ Caches                            [+ Add]   │
-├─────────────────────────────────────────────┤
-│ [List of cache configurations]             │
-│                                             │
-│ cache.nixos.org (public)                    │
-│ cache.internal.example.com (private)        │
-│ ...                                         │
-└─────────────────────────────────────────────┘
+```mermaid
+%% diagram-id: ui-figma-caches-wireframe
+flowchart TB
+  page[Caches]
+  page --> add[+ Add]
+  page --> list[List of cache configurations]
+  list --> public["cache.nixos.org (public)"]
+  list --> private["cache.internal.example.com (private)"]
+  list --> more["..."]
 ```
 
 **Note**: This page is less developed in current implementation.
@@ -612,19 +558,16 @@ Dropdown: 0 4px 6px rgba(0, 0, 0, 0.1)
 **Purpose**: Security vulnerability tracking (admin only)
 
 **Layout**:
-```
-┌─────────────────────────────────────────────┐
-│ CVE Vulnerabilities                         │
-├─────────────────────────────────────────────┤
-│ [Filters: Severity, Package, Status]        │
-├─────────────────────────────────────────────┤
-│ [Table of CVEs]                             │
-│                                             │
-│ CVE ID      | Severity | Package | Systems │
-│ CVE-2024-.. | Critical | openssl | 8/12    │
-│ CVE-2024-.. | High     | glibc   | 12/12   │
-│ ...                                         │
-└─────────────────────────────────────────────┘
+```mermaid
+%% diagram-id: ui-figma-cves-wireframe
+flowchart TB
+  page[CVE Vulnerabilities]
+  page --> filters[Filters: Severity, Package, Status]
+  page --> table[Table of CVEs]
+  table --> columns[Columns: CVE ID; Severity; Package; Systems]
+  table --> row1["CVE-2024-.. | Critical | openssl | 8/12"]
+  table --> row2["CVE-2024-.. | High | glibc | 12/12"]
+  table --> more["..."]
 ```
 
 **Current UX Issues**:
@@ -639,21 +582,17 @@ Dropdown: 0 4px 6px rgba(0, 0, 0, 0.1)
 **Purpose**: Define automated deployment rules
 
 **Layout**:
-```
-┌─────────────────────────────────────────────┐
-│ Deployment Policies                [+ Add]  │
-├─────────────────────────────────────────────┤
-│                                             │
-│ ┌───────────────────────────────────────┐  │
-│ │ Policy Card                           │  │
-│ │ [Edit] [Remove]                       │  │
-│ │                                       │  │
-│ │ Auto-deploy to production             │  │
-│ │ Trigger: Tag matching stable-*        │  │
-│ │ Target: Environment "production"      │  │
-│ │ Require: All tests pass               │  │
-│ └───────────────────────────────────────┘  │
-└─────────────────────────────────────────────┘
+```mermaid
+%% diagram-id: ui-figma-deployment-policies-wireframe
+flowchart TB
+  page[Deployment Policies]
+  page --> add[+ Add]
+  page --> card[Policy Card]
+  card --> actions[Edit; Remove]
+  card --> name[Auto-deploy to production]
+  card --> trigger[Trigger: Tag matching stable-*]
+  card --> target["Target: Environment production"]
+  card --> require[Require: All tests pass]
 ```
 
 **Components**:
@@ -673,12 +612,11 @@ Dropdown: 0 4px 6px rgba(0, 0, 0, 0.1)
 **Purpose**: Server management and configuration (admin only)
 
 **Layout**:
-```
-┌─────────────────────────────────────────────┐
-│ Server Administration                       │
-├─────────────────────────────────────────────┤
-│ [System information, config health, etc.]   │
-└─────────────────────────────────────────────┘
+```mermaid
+%% diagram-id: ui-figma-admin-wireframe
+flowchart TB
+  page[Server Administration]
+  page --> info[System information, config health, etc.]
 ```
 
 **Note**: Implementation details vary.
@@ -690,21 +628,16 @@ Dropdown: 0 4px 6px rgba(0, 0, 0, 0.1)
 **Purpose**: User authentication
 
 **Layout**:
-```
-┌─────────────────────────────────────────────┐
-│                                             │
-│          ┌───────────────────┐             │
-│          │  Crystal Forge    │             │
-│          │                   │             │
-│          │  [Username]       │             │
-│          │  [Password]       │             │
-│          │                   │             │
-│          │  [Login Button]   │             │
-│          │                   │             │
-│          │  [Register link]  │             │
-│          └───────────────────┘             │
-│                                             │
-└─────────────────────────────────────────────┘
+```mermaid
+%% diagram-id: ui-figma-login-wireframe
+flowchart TB
+  page[Login page]
+  page --> form[Centered login form]
+  form --> brand[Crystal Forge]
+  form --> username[Username]
+  form --> password[Password]
+  form --> login[Login Button]
+  form --> register[Register link]
 ```
 
 **Current UX Issues**:

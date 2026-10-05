@@ -1,6 +1,6 @@
 # Design Specification
 
-* [Exact-CVE evidence authority and CVE inventory reads](exact-cve-evidence-authority-and-inventory-reads.md) - Specifies how retained deployed-generation lineage authorizes exact-CVE POA&M verification, how fleet CVE reads choose exact versus legacy authority, and the contract of the /cves, /cve-inventory, and /cve-inventory-page routes.
+* [Exact-CVE evidence authority and CVE inventory reads](exact-cve-evidence-authority-and-inventory-reads.md) - Documents current exact-CVE authority and inventory reads: how the latest consistent reported state maps to one registered NixOS derivation and its newest completed schema-1 scan, with retained evaluation lineage as supplemental provenance, plus exact and legacy fleet reads.
 * [Exact-CVE writer locking and fleet triage transactions](exact-cve-writer-locking-and-fleet-triage.md) - Defines the READ COMMITTED lock hierarchy for exact-CVE POA&M and deployment-state writers, the SQLSTATE 40001 retry rule, append-only environment dispositions, and the all-or-nothing fleet triage transaction.
 
 # Operator Guide

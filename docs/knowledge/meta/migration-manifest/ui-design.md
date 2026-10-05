@@ -128,7 +128,7 @@ tags:
   | `## Resources` | [ui/figma-claude-redesign-workflow.md](../../ui/figma-claude-redesign-workflow.md#resources) |
   | `## Final Tips` | [ui/figma-claude-redesign-workflow.md](../../ui/figma-claude-redesign-workflow.md#final-tips) |
   | `## Next Steps` | [ui/figma-claude-redesign-workflow.md](../../ui/figma-claude-redesign-workflow.md#next-steps) |
-- Unmapped content: none. One line holding an absolute local path was rewritten to the repository-relative path `packages/web-ui/` and is listed in `coverage-exceptions.txt`.
+- Unmapped content: none. One absolute developer-machine path was normalized to `packages/web-ui/`; exact source-block hash and owner authorization are recorded as C-083 in the [cleanup record](../cleanup-record.md) and `checks/okf-knowledge/source-adjustments.tsv`.
 
 ### `docs/design/FIGMA_DESIGN_EXTRACTION.md`
 

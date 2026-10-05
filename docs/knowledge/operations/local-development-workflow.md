@@ -19,59 +19,58 @@ sources:
 
 # Local Development Workflow, Patterns, and Common Tasks
 
-> **Status:** partial. Paths in this guide follow the old single-crate layout. The backend now lives in `packages/default/crates/cf-server/src/` (see [Backend Cargo workspace](../architecture/backend-cargo-workspace.md)) and migrations live in `packages/default/crates/cf-server/migrations/`. The commands and file names are verification candidates.
-
 ## Development Workflow
 
 ### Running Locally
 
+Enter the repository's Nix development shell, then use the supported local
+stack commands:
+
 ```bash
-# Start database
-db-only up
-
-# Start API server (from packages/default)
-cargo run
-
-# Start web UI (from packages/web-ui)
-cargo run --serve
+nix develop
+run-ui-dev
 ```
+
+`run-ui-dev` starts the local PostgreSQL service, seeds its configured fixture
+data, starts the API server, and runs the Dioxus hot-reload frontend. To run
+only the frontend against an already-running development server, use
+`run-ui-frontend`. See [Fixture seeding](../testing/fixture-seeding.md) for the
+fixture and port details.
 
 ### Key Directories
 
 | Path | Purpose |
 |------|---------|
-| `packages/default/src/` | Backend code |
-| `packages/default/src/handlers/` | API endpoints |
-| `packages/default/src/queries/` | Database queries |
-| `packages/default/src/models/` | Data models |
-| `packages/default/src/builder/` | Builder worker logic |
-| `packages/default/src/deployment/` | Deployment logic |
+| `packages/default/crates/cf-server/src/` | Server code |
+| `packages/default/crates/cf-server/src/handlers/api/` | API handlers |
+| `packages/default/crates/cf-server/src/queries/` | Server database queries |
+| `packages/default/crates/cf-server/src/models/` | Server domain and persistence models |
+| `packages/default/crates/cf-builder/src/` | API-only builder process |
+| `packages/default/crates/cf-agent/src/` | Agent process |
 | `packages/web-ui/src/` | Frontend code |
 | `packages/web-ui/src/views/` | Page components |
 | `packages/web-ui/src/components/` | Reusable UI components |
-| `migrations/` | Database migrations |
+| `packages/default/crates/cf-server/migrations/` | Database migrations |
 
 ### Database
 
 - **PostgreSQL** is the single source of truth
 - All data flows through the API (no direct DB access from UI)
-- Migrations live in `packages/default/migrations/`
-- Run with: `sqlx migrate run`
+- Migrations live in `packages/default/crates/cf-server/migrations/`.
+- Database reset and migration commands must target the local development
+  database started by this repository. See [Database safety](../../agents/database-safety.md).
 
 ## Important Patterns
 
 ### Request Flow
 
-```
-HTTP Request
-    ↓
-Middleware (logging, auth)
-    ↓
-Handler (route logic)
-    ↓
-Query (database access)
-    ↓
-Response (JSON)
+```mermaid
+%% diagram-id: core-local-development-request-path
+flowchart TD
+    Request["HTTP Request"] --> Middleware["Middleware (logging, auth)"]
+    Middleware --> Handler["Handler (route logic)"]
+    Handler --> Query["Query (database access)"]
+    Query --> Response["Response (JSON)"]
 ```
 
 ### Error Handling
@@ -91,36 +90,34 @@ Response (JSON)
 
 ### Adding a New API Endpoint
 
-1. **Define DTO** in `api/models.rs`
-2. **Add query** in `queries/*.rs`
-3. **Add handler** in `handlers/api/*.rs`
-4. **Register route** in `server/mod.rs`
-5. **Add frontend** in `web-ui/src/`
+1. Follow [Adding a backend API endpoint](adding-a-backend-api-endpoint.md).
+2. Register the route in `packages/default/crates/cf-server/src/bin/server.rs`.
+3. Add or update the corresponding client code only when the endpoint has a UI consumer.
 
 ### Adding a New UI View
 
 1. **Create component** in `views/`
-2. **Add route** in `main.rs`
+2. **Add route** in `packages/web-ui/src/routes.rs`
 3. **Add navigation** in `AppShell`
 4. **Add API calls** in `api/client.rs`
 
 ### Database Migration
 
-1. Create SQL file in `migrations/`
-2. Run: `sqlx migrate add migration_name`
-3. Apply: `sqlx migrate run`
+1. Create a new migration in `packages/default/crates/cf-server/migrations/`.
+2. Follow the repository's SQLx metadata and database safety requirements.
+   See [Database safety](../../agents/database-safety.md).
 
 ## Key Files Reference
 
 | File | Purpose |
 |------|---------|
-| `src/server/mod.rs` | HTTP server setup, route registration |
-| `src/handlers/api/mod.rs` | All API route handlers |
-| `src/queries/mod.rs` | Database query modules |
-| `src/models/mod.rs` | Data structures |
-| `src/config/mod.rs` | Configuration loading |
-| `src/builder/mod.rs` | Builder worker orchestration |
-| `src/deployment/agent.rs` | Agent-side deployment logic |
+| `packages/default/crates/cf-server/src/bin/server.rs` | HTTP route registration |
+| `packages/default/crates/cf-server/src/handlers/api/` | Server API handlers |
+| `packages/default/crates/cf-server/src/queries/` | Database query modules |
+| `packages/default/crates/cf-server/src/models/` | Server models |
+| `packages/default/crates/cf-config/src/` | Shared configuration types |
+| `packages/default/crates/cf-builder/src/` | API-only builder implementation |
+| `packages/default/crates/cf-agent/src/deployment/agent.rs` | Agent-side deployment implementation |
 
 ## Related concepts
 

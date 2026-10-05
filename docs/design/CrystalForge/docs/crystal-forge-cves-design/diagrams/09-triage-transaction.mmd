@@ -14,7 +14,7 @@ sequenceDiagram
     Service->>DB: Re-resolve Current subjects and overrides
     alt Scope or authority changed
         Service->>DB: Roll back
-        Service-->>UI: Typed conflict; no triage mutation committed
+        Service-->>UI: Typed conflict with no triage mutation committed
     else Exact action set remains valid
         Service->>DB: Reuse or create one compatible POAM
         Service->>DB: Retire prior decisions and affected links

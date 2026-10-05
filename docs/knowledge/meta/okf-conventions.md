@@ -188,6 +188,45 @@ concept merges several sources.
   relative link, image, and diagram path.
 - Do not write absolute filesystem paths in any concept.
 
+## Documentation diagrams
+
+Every authored visual diagram in repository documentation MUST use Mermaid.
+This includes flow and sequence diagrams, state transitions, entity
+relationships, component/file containment trees, timelines, and UI wireframes.
+Do not keep an ASCII or Unicode duplicate beside a Mermaid diagram, hide one in
+a collapsible block, or move one to an appendix. A converted diagram MUST keep
+an adjacent field/behavior table when a structure diagram cannot carry all
+source detail legibly. A Mermaid flowchart communicates structure or flow; it
+does not establish pixel-level UI parity.
+
+Classify a fenced or unfenced text block as literal source material rather
+than a diagram only when the text itself is code, configuration, SQL, a
+regular expression, a Markdown table, a test fixture, or literal command
+output. Record each exception by exact path and block fingerprint in the
+diagram audit ledger. Do not suppress a whole file, directory, or glob. A
+directory tree that documents project structure is a diagram and MUST become
+a Mermaid flowchart with containment edges and original annotations retained.
+
+Each diagram replacement MUST have one row in
+`checks/okf-knowledge/diagram-audit/*.tsv`. Record its immutable source path
+and heading, purpose, entities/fields, relationships/branches/order, Mermaid
+destination and diagram ID, diagram type, semantic comparison, and render
+result. The blocking `okf-knowledge` Nix check validates Mermaid syntax with
+the pinned Mermaid parser without launching Chromium. Include source-block and
+Mermaid-block SHA-256 fingerprints. A parser or renderer pass verifies syntax
+only; it does not verify semantic equivalence.
+
+For a full SVG review, use the pinned Mermaid CLI outside the Nix build sandbox:
+
+```sh
+nix run .#okf-mermaid-renderer -- --out /tmp/cf-okf-mermaid --jobs 1
+```
+
+This manual render covers every Mermaid block in the repository. It is not a
+substitute for GitLab's renderer, so keep any unavailable GitLab-preview check
+marked pending. Do not send repository diagrams to an external rendering
+service.
+
 ## Index files
 
 - Each group directory has an `index.md` with sections that group concepts
@@ -201,21 +240,33 @@ concept merges several sources.
 
 ## Lossless migration rules
 
-These rules governed the migration and still govern later restructuring.
+These rules govern source migration and structural reorganization. The
+repository owner may separately authorize a semantic cleanup after migration;
+see [the cleanup record](cleanup-record.md). Do not treat a cleanup as
+lossless migration or hide it in a preservation exception.
 
 1. Every substantive section of a source document has a destination, recorded
    in [the migration manifest](migration-manifest/index.md).
 2. Split a document only when it mixes independent concepts. Move text
    verbatim. Allowed edits are frontmatter, heading levels, link targets, and
-   status notes. A rewrite needs a recorded reason.
+   status notes. A rewrite needs a recorded reason. A later semantic rewrite
+   requires owner authorization and a cleanup-record entry with the old claim,
+   the correction, the destination, and code or design evidence.
 3. Use `git mv` when one source maps to one destination so Git history
    follows the file.
 4. Reconcile disagreement between sources. Do not choose silently. State the
    disagreement and which source matches the code.
 5. Proposed and historical content stays and is labeled with
    `implementation_status`.
-6. A deletion is acceptable only after the manifest shows `Coverage: complete`
-   and a line-level coverage check found no lost content.
+6. A document deletion is acceptable only after the manifest shows
+   `Coverage: complete` and a line-level coverage check found no lost content.
+   This rule does not authorize deleting runtime code, NixOS options, SQL views,
+   or migrations during a documentation cleanup.
+
+7. A preservation failure caused by an authorized semantic cleanup is not
+   waived by a blanket exception. Record the changed source claim in the
+   cleanup record and update the source-block mapping to point to the corrected
+   concept. Keep unrelated source blocks subject to exact preservation.
 
 ## Content kept outside the bundle
 
@@ -243,6 +294,9 @@ catalog entry in the bundle with a description and implementation status.
 - Add an entry to [the update log](../log.md) for each structural change.
 - Run the `okf-knowledge` flake check before review. It enforces
   frontmatter, taxonomy, reserved names, the version declaration, links,
-  asset paths, manifest completeness, and the absence of absolute paths.
+  asset paths, manifest completeness, the diagram ledger, Mermaid rendering,
+  and the absence of absolute paths. The CI preservation job compares source
+  blocks against the immutable MR merge-base after fetching the required Git
+  object; the pure Nix build does not depend on Git history or the network.
 - Do not add a concept without adding it to a group index.
 - Do not copy the OKF specification into this repository.

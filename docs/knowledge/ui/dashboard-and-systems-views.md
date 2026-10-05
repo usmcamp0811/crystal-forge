@@ -50,21 +50,15 @@ sources:
 
 ### Data Flow
 
-```
-Frontend                     Backend
-   │                           │
-   ├─ GET /api/v1/dashboard ─►│
-   │                           │
-   │◄─── {                   ◄──│
-   │      systems: {           │
-   │        total: 8,          │
-   │        online: 7,         │
-   │        offline: 1         │
-   │      },                   │
-   │      environments: {...},  │
-   │      builds: {...},       │
-   │      flakes: {...}        │
-   │    }                     │
+```mermaid
+%% diagram-id: ui-dashboard-api-sequence
+sequenceDiagram
+  participant Frontend
+  participant Backend
+  Frontend->>Backend: GET /api/v1/dashboard/summary
+  Backend-->>Frontend: Dashboard summary
+  Frontend->>Backend: GET /api/v1/dashboard/activity?limit={limit}
+  Backend-->>Frontend: Recent dashboard activity
 ```
 
 ### How to Modify
@@ -109,12 +103,13 @@ Frontend                     Backend
 
 ### Data Flow
 
-```
-Frontend                                    Backend
-   │                                            │
-   ├─ GET /api/v1/systems?environment=prod ────►│
-   │                                            │
-   │◄─── { systems: [...] } ───────────────────│
+```mermaid
+%% diagram-id: ui-systems-list-api-sequence
+sequenceDiagram
+  participant Frontend
+  participant Backend
+  Frontend->>Backend: GET /api/v1/systems?environment=prod
+  Backend-->>Frontend: { systems: [...] }
 ```
 
 **Query Parameters:**
@@ -137,7 +132,7 @@ Frontend                                    Backend
 
 The view has **tabs** for different aspects:
 
-#### Tab 1: Overview (`/systems/:id`)
+#### Tab 1: Overview (`/systems/:id?tab=overview`)
 
 **Purpose:** See current system state at a glance.
 
@@ -149,7 +144,7 @@ The view has **tabs** for different aspects:
 - Currently deployed flake + commit
 - Currently activated generation number
 
-#### Tab 2: Deploy (`/systems/:id/deploy`)
+#### Tab 2: Deploy (`/systems/:id?tab=deploy`)
 
 **Purpose:** Deploy a new configuration to this system.
 
@@ -169,7 +164,7 @@ The view has **tabs** for different aspects:
 6. Modal shows progress
 7. Success/failure notification
 
-#### Tab 3: History (`/systems/:id/history`)
+#### Tab 3: History (`/systems/:id?tab=history`)
 
 **Purpose:** See past deployments to this system.
 
@@ -178,7 +173,7 @@ The view has **tabs** for different aspects:
 - Columns: Date, Commit, Status (success/failed), Triggered By
 - Click row to see deployment details
 
-#### Tab 4: Logs (`/systems/:id/logs`)
+#### Tab 4: Logs (`/systems/:id?tab=logs`)
 
 **Purpose:** See deployment output logs.
 
@@ -189,16 +184,16 @@ The view has **tabs** for different aspects:
 
 ### Data Flow
 
-```
-Frontend                         Backend
-   │                               │
-   ├─ GET /api/v1/systems/:id ──►│ Get system details
-   │                               │
-   ├─ GET /api/v1/systems/:id/deployments ──►│ Get history
-   │                               │
-   ├─ GET /api/v1/systems/:id/logs ──►│ Get logs
-   │                               │
-   ├─ POST /api/v1/systems/:id/deploy ──►│ Trigger deployment
+```mermaid
+%% diagram-id: ui-system-detail-api-sequence
+sequenceDiagram
+  participant Frontend
+  participant Backend
+  Frontend->>Backend: GET /api/v1/systems/:id (System details)
+  Frontend->>Backend: GET /api/v1/systems/:id/deployment-status
+  Frontend->>Backend: GET /api/v1/systems/:id/history
+  Frontend->>Backend: GET /api/v1/systems/:id/agent-events
+  Frontend->>Backend: POST /api/v1/systems/:id/deploy (On deploy action)
 ```
 
 ### How to Modify
@@ -206,7 +201,10 @@ Frontend                         Backend
 - **Backend:** `handlers/api/systems.rs`
 - **Frontend:** `views/system_detail.rs`, `components/system/`
 
-> **Status:** The System Detail tabs above use sub-paths (`/systems/:id/deploy`, `/history`, `/logs`). `packages/web-ui/src/routes.rs` registers one `/systems/:id` route with a `tab` query parameter (and further query parameters), not these sub-paths. The Dashboard data flow shows `GET /api/v1/dashboard`; the server registers `/api/v1/dashboard/summary` and `/api/v1/dashboard/activity`. Not reconciled in this migration.
+The System Detail page has one UI route, `/systems/:id`. Its tabs use the
+`tab` query parameter; the route also carries `poam`, `config_mode`, `revision`,
+`generation`, `deploy_generation`, `cve_target`, and `cve_mode`. API paths in
+the data flow are server routes, not UI routes.
 
 ## Related concepts
 

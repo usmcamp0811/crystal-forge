@@ -45,26 +45,20 @@ This document describes each UI view in Crystal Forge. It's written for develope
 
 The app uses a **sidebar navigation** pattern:
 
-```
-┌────────────────────────────────────────────────┐
-│  ┌──────┐                                     │
-│  │ Logo │  Crystal Forge                       │
-│  └──────┘                                     │
-├────────┬───────────────────────────────────────┤
-│        │                                       │
-│  Dash  │                                       │
-│        │                                       │
-│Systems │         Main Content Area              │
-│        │                                       │
-│ Flakes │         (Changes based on route)       │
-│        │                                       │
-│Environ │                                       │
-│        │                                       │
-│ Builds │                                       │
-│        │                                       │
-│ Admin  │                                       │
-│        │                                       │
-└────────┴───────────────────────────────────────┘
+```mermaid
+%% diagram-id: ui-navigation-shell
+flowchart TB
+  shell[Application shell]
+  shell --> header[Header: Logo; Crystal Forge]
+  shell --> columns[Main row]
+  columns --> sidebar[Sidebar navigation]
+  columns --> content[Main Content Area: changes based on route]
+  sidebar --> dash[Dash]
+  sidebar --> systems[Systems]
+  sidebar --> flakes[Flakes]
+  sidebar --> environ[Environ]
+  sidebar --> builds[Builds]
+  sidebar --> admin[Admin]
 ```
 
 **Route Mapping:**
@@ -133,31 +127,33 @@ Used for:
 
 ## File Organization
 
-```
-web-ui/src/
-├── main.rs                 # App entry, routing
-├── AppShell.rsx           # Layout with sidebar
-├── api/
-│   ├── client.rs          # API fetch functions
-│   └── models.rs         # TypeScript types
-├── views/
-│   ├── dashboard.rs
-│   ├── systems_list.rs
-│   ├── system_detail.rs
-│   ├── flakes_list.rs
-│   ├── environments_list.rs
-│   ├── builds.rs
-│   ├── admin.rs
-│   └── login.rs
-├── components/
-│   ├── systems/
-│   ├── flakes/
-│   ├── builds/
-│   └── admin/
-└── adapters/              # Data fetching + state
-    ├── systems_adapter.rs
-    ├── flakes_adapter.rs
-    └── ...
+```mermaid
+%% diagram-id: ui-frontend-file-organization
+flowchart TB
+  root[web-ui/src/]
+  root --> main[main.rs: App entry, routing]
+  root --> shell[AppShell.rsx: Layout with sidebar]
+  root --> api[api/]
+  api --> client[client.rs: API fetch functions]
+  api --> models[models.rs: TypeScript types]
+  root --> views[views/]
+  views --> dashboard[dashboard.rs]
+  views --> systems[systems_list.rs]
+  views --> detail[system_detail.rs]
+  views --> flakes[flakes_list.rs]
+  views --> environments[environments_list.rs]
+  views --> builds[builds.rs]
+  views --> admin[admin.rs]
+  views --> login[login.rs]
+  root --> components[components/]
+  components --> systems_component[systems/]
+  components --> flakes_component[flakes/]
+  components --> builds_component[builds/]
+  components --> admin_component[admin/]
+  root --> adapters[adapters/: Data fetching + state]
+  adapters --> systems_adapter[systems_adapter.rs]
+  adapters --> flakes_adapter[flakes_adapter.rs]
+  adapters --> more[...]
 ```
 
 > **Status:** Documentation stale; the file organization above is the source text and does not match `packages/web-ui/src/`. Current layout: routes in `src/routes.rs` (not `main.rs`), shell in `components/layout/app_shell.rs` (not `AppShell.rsx`), no `adapters/` directory (adapters are `src/dashboard/adapter.rs`, `src/environments/adapter.rs`, `src/systems/adapter.rs`), `api/models.rs` holds Rust types (not TypeScript), plus `hooks/`, `state/`, `bootstrap/`, `alerts/`, `showcase/`, and many more views (`compliance.rs`, `poams.rs`, `scanning.rs`, `caches.rs`, `setup.rs`, `builders.rs`, and others). The `Adding a New View` steps should read: view in `views/`, route in `routes.rs`, nav item in `components/layout/sidebar.rs` (and its mobile drawer), API functions in `api/client.rs`.

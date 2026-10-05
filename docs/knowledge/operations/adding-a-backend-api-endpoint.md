@@ -105,36 +105,38 @@ Router::new()
 
 ## File Organization
 
-```
-src/
-├── main.rs                 # Entry point
-├── server/
-│   └── mod.rs             # Route setup, middleware
-├── handlers/
-│   ├── mod.rs
-│   ├── api/
-│   │   ├── systems.rs
-│   │   ├── flakes.rs
-│   │   ├── builders.rs
-│   │   ├── admin.rs
-│   │   └── ...
-│   └── agent/
-│       ├── heartbeat.rs
-│       └── ...
-├── queries/
-│   ├── mod.rs
-│   ├── systems.rs
-│   ├── flakes.rs
-│   └── ...
-├── models/
-│   ├── mod.rs
-│   ├── system.rs
-│   └── ...
-├── api/
-│   └── models.rs          # DTOs (Data Transfer Objects)
-├── config/
-│   └── mod.rs             # Configuration
-└── error.rs               # Error types
+```mermaid
+%% diagram-id: core-backend-api-file-tree
+flowchart TD
+    root["src/"]
+    root --> main["main.rs — Entry point"]
+    root --> server["server/"]
+    server --> server_mod["mod.rs — Route setup, middleware"]
+    root --> handlers["handlers/"]
+    handlers --> handlers_mod["mod.rs"]
+    handlers --> api_handlers["api/"]
+    api_handlers --> systems["systems.rs"]
+    api_handlers --> flakes["flakes.rs"]
+    api_handlers --> builders["builders.rs"]
+    api_handlers --> admin["admin.rs"]
+    api_handlers --> api_ellipsis["..."]
+    handlers --> agent["agent/"]
+    agent --> heartbeat["heartbeat.rs"]
+    agent --> agent_ellipsis["..."]
+    root --> queries["queries/"]
+    queries --> queries_mod["mod.rs"]
+    queries --> qsystems["systems.rs"]
+    queries --> qflakes["flakes.rs"]
+    queries --> queries_ellipsis["..."]
+    root --> models["models/"]
+    models --> models_mod["mod.rs"]
+    models --> system_model["system.rs"]
+    models --> models_ellipsis["..."]
+    root --> api["api/"]
+    api --> api_models["models.rs — DTOs (Data Transfer Objects)"]
+    root --> config["config/"]
+    config --> config_mod["mod.rs — Configuration"]
+    root --> error["error.rs — Error types"]
 ```
 
 > **Status:** The examples and the file tree above use the original document's `src/...` paths and a `RequireOperator` middleware layer. The crate lives under `packages/default/crates/cf-server/src/` (with `handlers/api/`, `queries/`, `models/`, `api/`, `auth/`, and `bin/server.rs` where routes are registered), and the authorization extractors are in `auth/extractors.rs`. The example code was not compiled against the current code. Not reconciled in this migration.

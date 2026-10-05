@@ -41,22 +41,21 @@ Once a derivation reaches `dry-run-complete` status, the system is considered to
 
 ### Status Progression and Meaning
 
-```
-Git Commit → Derivation Evaluation Pipeline:
-
-pending → queued → dry-run-pending → dry-run-in-progress
-    ↓
-dry-run-complete ✅ ← SYSTEM HAS THIS COMMIT'S CONFIG
-    ↓
-build-pending ✅ ← Still has the config
-    ↓
-build-in-progress ✅ ← Still has the config
-    ↓
-build-complete ✅ ← Config + successful build
-    OR
-build-failed ✅ ← Config available, build artifacts failed
-    ↓
-complete ✅ ← Fully processed
+```mermaid
+%% diagram-id: core-legacy-derivation-status-progression
+stateDiagram-v2
+    [*] --> pending
+    pending --> queued
+    queued --> dry_run_pending: dry-run-pending
+    dry_run_pending --> dry_run_in_progress: dry-run-in-progress
+    dry_run_in_progress --> dry_run_complete: dry-run-complete
+    state "SYSTEM HAS THIS COMMIT'S CONFIG" as dry_run_complete
+    dry_run_complete --> build_pending: still has the config
+    build_pending --> build_in_progress: still has the config
+    build_in_progress --> build_complete: build succeeds
+    build_in_progress --> build_failed: build artifacts fail; config remains available
+    build_complete --> complete: fully processed
+    build_failed --> complete: fully processed
 ```
 
 ### Statuses That Count as "System Has This Commit"

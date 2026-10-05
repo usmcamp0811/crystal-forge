@@ -22,17 +22,19 @@ sources:
 
 ## Coach Panel Not Appearing
 
-**Symptom**: After logging in as admin, the coach panel doesn't show.
+**Symptom**: After signing in, the coach panel does not show.
 
 **Possible causes:**
-- You're not logged in as an admin (only admins see the coach)
-- The coach was previously dismissed and persisted that state
+- The coach was previously dismissed in this browser
+- You are not authenticated
 - Browser localStorage is disabled
 
 **Solutions:**
-1. Verify you're logged in as an admin (check user menu)
-2. Go to **Server Management** → **Relaunch Setup Coach**
-3. Clear browser localStorage: `localStorage.removeItem('cf.coach.dismissed')`
+1. Verify you are signed in.
+2. Use **Guide** in the top bar to reopen the coach. The Guide is available to
+   every authenticated role.
+3. To reset this browser's coach presentation state, clear
+   `localStorage.removeItem('cf.coach.ui.v2')` in the browser developer console.
 4. Refresh the page
 
 ## Steps Not Marking Complete
@@ -152,8 +154,6 @@ If you configured required policies in an environment, but a system's flake does
 
 - Environment required policies (Environments page)
 - System's flake configuration (does it enable those STIG modules?)
-
-> **Status:** This guide says that only administrators see the coach and that dismissal persists as `cf.coach.dismissed` in browser localStorage. The Guided Setup Coach section says every authenticated role can reopen the Coach from **Guide**, and `packages/web-ui/src/components/onboarding/state.rs` stores presentation state under the key `cf.coach.ui.v2`. Not reconciled in this migration.
 
 ## Related concepts
 

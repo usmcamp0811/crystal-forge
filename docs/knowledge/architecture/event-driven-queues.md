@@ -1,144 +1,216 @@
 ---
 type: Architecture
-title: "Event-Driven Queue Architecture"
-description: "Describes the QueueNotifier bounded MPSC wakeup channels, the eval queue and build queue flows, notification guarantees, and fallback polling; open it when changing queue wakeups or worker loops."
+title: "Evaluation and build queue wakeups and polling"
+description: "Explains which queue work is woken by the in-process QueueNotifier (evaluation), which is picked up by API-builder polling (builds), webhook latency, retry timing, builder-offline recovery, and queue ordering; open it when changing how queued work is discovered or ordered."
 tags:
   - crystal-forge
   - architecture
   - queue
   - eval
   - build
-implementation_status: partial
+implementation_status: implemented
 generated:
   by: opencode/claude-sonnet-5-5
-  at: 2026-10-03T22:57:15-05:00
+  at: 2026-10-04T15:30:00-05:00
 sources:
   - id: origin
     resource: "Crystal Forge repository file docs/architecture.md at commit 3b23d36f"
-    title: "ADR-000: Crystal Forge Architecture Overview"
+    title: "ADR-000: Crystal Forge Architecture Overview (original queue section)"
   - id: code-1
     resource: "Crystal Forge repository file packages/default/crates/cf-server/src/queue/mod.rs at commit 3b23d36f"
     title: QueueNotifier implementation
   - id: code-2
     resource: "Crystal Forge repository file packages/default/crates/cf-server/src/server/mod.rs at commit 3b23d36f"
-    title: Background loops and evaluation loop
+    title: Background task startup, evaluation loop, builder recovery loop
   - id: code-3
     resource: "Crystal Forge repository file packages/default/crates/cf-server/src/handlers/webhook.rs at commit 3b23d36f"
     title: Webhook handler
   - id: code-4
-    resource: "Crystal Forge repository file packages/default/crates/cf-config/src/config/flakes.rs at commit 3b23d36f"
-    title: Flake loop interval defaults
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/queries/builders.rs at commit 3b23d36f"
+    title: Job claim SQL and stale-builder recovery
   - id: code-5
-    resource: "Crystal Forge repository file packages/default/crates/cf-builder/src/bin/builder.rs at commit 3b23d36f"
-    title: Builder job polling loop
-verified:
-  by: opencode/claude-sonnet-5-5
-  at: 2026-10-04T08:50:00-05:00
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/queries/commits.rs at commit 3b23d36f"
+    title: Evaluation eligibility and ordering
+  - id: code-6
+    resource: "Crystal Forge repository file packages/default/crates/cf-config/src/config/builder.rs at commit 3b23d36f"
+    title: Builder poll and heartbeat defaults
+  - id: code-7
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/migrations/0189_automatic_retry_policy.sql at commit 3b23d36f"
+    title: Automatic retry policy
 ---
 
-# Event-Driven Queue Architecture
+# Evaluation and build queue wakeups and polling
 
-> **Status:** partial. `QueueNotifier` exists with capacity-1 channels (`packages/default/crates/cf-server/src/queue/mod.rs`). The eval wakeup is implemented: `run_commit_evaluation_loop` waits on `wait_for_eval_work()` together with a fallback ticker. `notify_build_queue()` is called after build jobs are queued and during recovery, but `wait_for_build_work()` has no caller outside `queue/mod.rs`. Builders are separate API-only processes, so the build wakeup remains "NOT YET IMPLEMENTED" as described below. The webhook handler does not notify the eval queue (see Migration verification notes).
+Two queues feed the pipeline. They are discovered in different ways. This page
+states which mechanism applies to each queue.
 
-Crystal Forge uses an event-driven architecture for both evaluation and build queues, replacing polling-based approaches with immediate notifications.
+| Queue | Who consumes it | How new work is discovered |
+| --- | --- | --- |
+| Evaluation queue (commits) | The `run_commit_evaluation_loop` task inside `cf-server` | In-process wakeup from `QueueNotifier`, plus a fallback tick and a durable retry-due wakeup |
+| Build queue (`build_jobs`) | API-only `cf-builder` processes | The builder polls the server API for the next job. The server-side build wakeup has no waiter. |
 
-## Queue Notification System
+## The in-process wakeup channel
 
-The `QueueNotifier` provides bounded event channels using Tokio MPSC:
+`QueueNotifier` (`cf-server/src/queue/mod.rs`) holds two bounded channels of
+capacity 1, one for evaluation and one for builds. A notification is a
+fire-and-forget `try_send`. It never blocks the sender. When a wakeup is
+already pending, the new notification is coalesced into it. A closed receiver
+is ignored. A wakeup is a hint to look at the database, not a unit of work.
+The database rows are the source of truth.
 
-```rust
-pub struct QueueNotifier {
-    eval_tx: mpsc::Sender<()>,   // channel(1), coalesced wakeups
-    eval_rx: Arc<Mutex<mpsc::Receiver<()>>>,
-    build_tx: mpsc::Sender<()>,  // channel(1), coalesced wakeups
-    build_rx: Arc<Mutex<mpsc::Receiver<()>>>,
-}
+The channel exists only inside the `cf-server` process. A separate builder
+process cannot wait on it.
+
+## Evaluation queue
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Source as Commit source<br/>(flake poll, API, webhook)
+    participant DB as PostgreSQL
+    participant N as QueueNotifier<br/>(in server process)
+    participant EvalLoop as Evaluation loop<br/>(in cf-server)
+
+    Source->>DB: insert commit (evaluation queued)
+    alt flake poll or API handler
+        Source-->>N: notify_eval_queue() (coalesced)
+        N-->>EvalLoop: wakeup
+    else webhook handler
+        Note over Source,N: No notification is sent. The handler has no<br/>access to the notifier and returns 202 Accepted.
+    end
+    EvalLoop->>DB: select eligible commits
+    Note over EvalLoop: Between cycles the loop waits for the first of:<br/>a notification, the fallback tick, or the next retry-due time.
+    EvalLoop->>DB: evaluate the highest-priority eligible commit
 ```
 
-**Key Benefits**:
-- **Zero-latency triggering**: Work starts immediately when commits/jobs arrive
-- **Bounded memory**: channel capacity is 1 and duplicate wakeups are coalesced
-- **Idle efficiency**: No CPU cycles wasted polling empty queues
-- **Fallback safety**: Periodic ticks catch any missed notifications
+Arrows mean: solid = data written or read, dashed = wakeup hint.
 
-## Eval Queue Flow
+Producers that call `notify_eval_queue()`: the flake polling loop after it
+inserts commits, and the API handlers for re-evaluation, flake sync, and the
+related manual actions (`handlers/api/commits.rs`, `flakes.rs`, `systems.rs`).
 
+The webhook handler (`handlers/webhook.rs`) accepts a push payload, returns
+`202 Accepted`, and inserts the commit in a spawned task. It does not notify
+the queue. A webhook-inserted commit is therefore evaluated at the next
+evaluation-loop wake-up, which is at most one fallback interval away
+(`flakes.commit_evaluation_interval`, default 60 seconds) unless another
+producer or a retry-due time wakes the loop earlier.
+
+Latency claims: an API-triggered or flake-poll-triggered commit starts
+evaluation without waiting for the fallback tick. A webhook-triggered commit
+waits for the next wake-up. No path is "zero latency".
+
+The loop also scans for flake changes every `flakes.flake_polling_interval`
+(default 600 seconds), independent of webhooks.
+
+### Eligibility and ordering
+
+A commit is eligible when `evaluation_status = 'pending'`, it has an
+`evaluation_attempts` row in status `queued` whose `available_at` has passed,
+and its source is not archived. Eligible commits are ordered by
+`COALESCE(eval_queue_position, 0) DESC`, then `commit_timestamp DESC`, then
+`id DESC`. Operators can reorder the queue with
+`POST /api/v1/commits/eval-queue/reorder`. The loop evaluates one commit at a
+time.
+
+At startup the evaluation loop first resets stuck in-progress evaluations and
+stuck builds, cleans up partial derivations, and re-queues build-eligible
+derivations that have no build job.
+
+## Build queue
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Eval as Server evaluation<br/>(authoritative)
+    participant DB as PostgreSQL
+    participant N as QueueNotifier
+    participant B as API-only builder<br/>(signed requests)
+
+    Eval->>DB: create build_jobs (queued)
+    Eval-->>N: notify_build_queue()
+    Note over N: No production task waits on the build channel.<br/>The notification is not a delivery path to builders.
+    loop every builder.poll_interval (default 5 s)
+        B->>DB: via server API: claim next job<br/>(session-checked, atomic)
+        DB-->>B: job, or none if at capacity or nothing eligible
+    end
 ```
-Commit Insert → notify_eval_queue() → Eval Loop Wakes → Process Pending
-                                    ↓
-                        (fallback: 60s ticker)
-```
 
-**Trigger Points**:
-1. Flake polling discovers new commits
-2. Webhook receives push notification
-3. Manual commit insertion via API
+`notify_build_queue()` is called after jobs are queued and during recovery,
+but `wait_for_build_work()` has no caller outside tests. Builders discover
+work only by polling the server API. The pickup delay is therefore bounded by
+the builder's `builder.poll_interval` (default 5 seconds) plus claim
+contention, not by the notifier.
 
-> **Status:** Trigger points 1 and 3 call `notify_eval_queue()` (`run_flake_polling_loop` in `server/mod.rs`; `handlers/api/commits.rs` and `handlers/api/flakes.rs`). Trigger point 2 is incomplete: `webhook_handler` in `handlers/webhook.rs` inserts the commit but does not notify the queue, so a webhook commit waits for the next fallback tick.
+### Claim eligibility and ordering
 
-**Processing Loop**:
-```rust
-loop {
-    process_pending_commits(&pool, &cf_state, &queue_notifier).await;
+A builder claim (`claim_next_job_atomic`, `queries/builders.rs`) runs in one
+transaction. It locks the builder row and checks the builder session. A
+session mismatch rejects the claim. It then checks the builder's
+`max_concurrent_jobs` against its `building` jobs. If the builder is at
+capacity, no job is claimed. Otherwise it claims the first job that satisfies
+all of these conditions, using `FOR UPDATE ... SKIP LOCKED`:
 
-    tokio::select! {
-        _ = ticker.tick() => { /* fallback: every 60s */ }
-        _ = queue_notifier.wait_for_eval_work() => { /* immediate */ }
-    }
-}
-```
+- `status = 'queued'` and `available_at <= NOW()`;
+- the job's environment matches the builder's environment assignments, or the
+  job has no environment, or the builder has no assignments (wildcard);
+- the derivation has `cf_agent_enabled` and `policy_requirements_met` true.
 
-## Build Queue Flow
+Order among eligible jobs is:
 
-```
-Eval Complete → create_build_jobs() → notify_build_queue() → Build Workers Wake
-                                                           ↓
-                                        (NOT YET IMPLEMENTED: workers still poll 5s)
-```
+1. `queue_position DESC NULLS LAST`,
+2. `priority_weight DESC`,
+3. the commit's `commit_timestamp DESC NULLS LAST`,
+4. `created_at ASC`.
 
-**Current State**:
-- Server-side build job creation triggers notification
-- Build workers (separate processes) still poll every 5s
-- Future: PostgreSQL LISTEN/NOTIFY or unified process model
+New jobs are appended with `queue_position` greater than every queued or
+building job (`MAX(queue_position) + n`). Because the claim takes the highest
+position first, the most recently queued batch is claimed first unless an
+operator reorders it with `POST /api/v1/build-queue/reorder`. Within a batch
+the later derivation id has the higher position. This is newest-first by
+position. It is not a FIFO.
 
-## Notification Guarantees
+### Retry delay
 
-**Fire-and-Forget Semantics**:
-- Notifications never block the sender
-- Dropped receivers (server shutdown) are silently ignored
-- Multiple notifications coalesce into one pending wakeup
+Automatic retries use the singleton `automatic_retry_policy` row: defaults are
+2 build retries, 1 evaluation retry, `backoff_seconds` 30 (allowed values 0,
+10, 30, 60, 120, 300), and `transient_only` true. A retried attempt becomes
+eligible when its `available_at` passes. The evaluation loop wakes at the
+earliest queued `available_at`.
 
-**Ordering Scope**:
-- MPSC channels preserve send order for server-internal wakeup delivery.
-- Global work claiming across separate worker processes remains database/poll driven and is not a strict cross-process FIFO guarantee.
+## Builder liveness and recovery
 
-**Fallback Polling**:
-- Eval loop: 60s ticker (catches DB corruption, missed signals). The interval is `flakes.commit_evaluation_interval` (default 60s). The loop also wakes at the next durable retry time of a delayed evaluation attempt.
-- Build workers: 5s ticker (until event-driven build implemented). The interval is `builder.poll_interval` (default 5s) in each API-only builder process.
+The server spawns `run_builder_recovery_loop` at startup. It runs once at
+startup and then every `max(builder.heartbeat_interval, 15 s)`. The tick uses
+the server's `[builder] heartbeat_interval` (default 30 seconds).
+
+Each cycle:
+
+1. Marks builders with status `active` whose `last_heartbeat_at` is older than
+   the stale timeout as `offline`. The timeout is
+   `max(3 × max(heartbeat_interval, 15 s), 60 s)`. At the default 30-second
+   interval it is 90 seconds.
+2. Re-queues `building` jobs whose builder row is missing, not `active`, or
+   disabled. The job returns to `queued`, loses its builder and session
+   assignment, and receives an audit line in its log.
+3. Re-queues build-eligible derivations that have no build job.
+4. Calls `notify_build_queue()` when it queued anything.
+
+A recovered job is picked up by the polling rule above.
+
+## Which workers run
+
+The server process starts these queue-related tasks in
+`spawn_background_tasks` (`cf-server/src/server/mod.rs`): flake polling, the
+evaluation loop, the builder recovery loop, commit artifact hydration, build
+log retention, deployment policy management, and the CVE scan loop. It does
+not start `run_build_loop` or `run_cache_push_workers`. Those functions exist
+in the `cf-server` library but have no caller in the server startup path.
+Build execution and cache publication happen in the API-only builder.
 
 ## Related concepts
 
-- [Core components](../components/core-components.md) - server and builder processes involved
-- [Evaluation and build queue pipeline](../workflows/evaluation-and-build-queue-pipeline.md) - database-side behavior of both queues
-- [Derivation processing loops](derivation-processing-loops.md) - the loops these notifications wake
-
-## Migration verification notes
-
-Scope: all behavioral claims of this concept were compared with the code. Verified: channel construction, capacity, coalescing, fire-and-forget semantics, eval loop select, fallback interval, build-queue wakeup gap, builder poll interval.
-
-- Claim: `QueueNotifier` has capacity-1 channels with coalesced, fire-and-forget wakeups.
-  Finding: `mpsc::channel(1)` for both queues; `try_send` handles `Full` and `Closed` without error.
-  Evidence: `packages/default/crates/cf-server/src/queue/mod.rs` (`QueueNotifier::new`, `notify_eval_queue`, `notify_build_queue`).
-  Case: implemented.
-- Claim: The eval loop selects on the notifier and a 60s fallback ticker.
-  Finding: `run_commit_evaluation_loop` also processes pending work before waiting, and adds a third branch that wakes at the next evaluation `available_at` time. Ticker period is `flakes.commit_evaluation_interval`, default 60s.
-  Evidence: `cf-server/src/server/mod.rs` (`run_commit_evaluation_loop`); `cf-config/src/config/flakes.rs`.
-  Case: documentation stale (third wake source added; text extended in place).
-- Claim: The webhook is a trigger point for `notify_eval_queue()`.
-  Finding: `webhook_handler` takes only the database pool, inserts the commit, and never calls the notifier. The rustdoc of `notify_eval_queue` also lists the webhook, which is stale relative to the handler.
-  Evidence: `cf-server/src/handlers/webhook.rs`; `cf-server/src/queue/mod.rs`.
-  Case: actual implementation defect (design intent: webhook wakes the eval loop). Listed for a backlog task.
-- Claim: Build workers do not yet wait on `notify_build_queue()` and poll every 5s.
-  Finding: Still true. `wait_for_build_work()` has no caller outside tests; builders poll `GET/POST /api/v1/builders/:id/next-job` at `builder.poll_interval` (default 5s).
-  Evidence: `cf-server/src/queue/mod.rs`; `cf-builder/src/bin/builder.rs` (`run_api_job_loop`); `cf-config/src/config/builder.rs`.
-  Case: implementation incomplete relative to the stated future design (LISTEN/NOTIFY or unified process model).
+- [Core components](../components/core-components.md) - what the server, builder, and agent own
+- [Evaluation and build queue pipeline](../workflows/evaluation-and-build-queue-pipeline.md) - database-side fields and the single-active-evaluation rule
+- [Derivation processing loops](derivation-processing-loops.md) - what each loop picks and runs
+- [Builder architecture and job scheduling](../builders/builder-architecture-and-job-scheduling.md) - builder assignment, heartbeat, and offline detection

@@ -61,20 +61,24 @@ At this point, we are already writing a complete project. However, an essential 
 
 According to community and official standards, test and benchmark files should be placed in tests and benches directories at the same level as src, as shown below:
 
-sdk/
-  ├── Cargo.toml
-  ├── src/
-  │   └── lib.rs
-  ├── tests/
-  │   ├── some-integration-tests.rs
-  │   └── multi-file-test/
-  │       ├── main.rs
-  │       └── test_module.rs
-  └── benches/
-      ├── large-input.rs
-      └── multi-file-bench/
-          ├── main.rs
-          └── bench_module.rs
+```mermaid
+%% diagram-id: core-task127-package-test-bench-tree
+flowchart TD
+    root["sdk/"]
+    root --> cargo["Cargo.toml"]
+    root --> src["src/"]
+    src --> lib["lib.rs"]
+    root --> tests["tests/"]
+    tests --> integration["some-integration-tests.rs"]
+    tests --> multi_test["multi-file-test/"]
+    multi_test --> test_main["main.rs"]
+    multi_test --> test_module["test_module.rs"]
+    root --> benches["benches/"]
+    benches --> bench_file["large-input.rs"]
+    benches --> multi_bench["multi-file-bench/"]
+    multi_bench --> bench_main["main.rs"]
+    multi_bench --> bench_module["bench_module.rs"]
+```
 When initially writing the project, unit tests can be placed directly below the relevant code files, so there is no need to create the multi-file-test directory and files. However, as development progresses and test code starts occupying significant space, it is recommended to move them to the tests folder to keep the main code clean.
 
 tests/ contains functional test code, primarily for verifying feature implementation.
