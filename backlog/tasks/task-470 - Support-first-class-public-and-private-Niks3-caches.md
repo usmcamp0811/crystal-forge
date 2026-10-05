@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-05 01:00'
+updated_date: '2026-10-05 01:07'
 labels: []
 dependencies: []
 references:
@@ -356,6 +356,12 @@ User instructed stop additional local checks and commit/push, let CI run. Commit
 Proxy upgradefix: Nixmodule activeenabledserver asserttrustflagrequiresnonemptyCIDRs; camelCase listmaps TOMLtrusted_proxy_cidrs withtrustflag verifiedby realconfiggenerator/startupwrapper and nativeVMloadedfile. Singleevidence snapshot preservesCIDRboundary/exact1Xfphttps and logs safe fields only. RealTCPsignedpath50Attic/S3/Niks3/publiccases testaddedexactblockingserver-regressions. VM8positive21negativeTLS/HTTPclaims verified identity/building/start202 plusallfiveexistingfullNiks3variantspassed; legacyAtticS3nativeuploadsnotclaimed. Optiondocs and3proxydocs fixedinclstatus404not426 and envprefixDOUBLEFORGE. No deployedinstance/testprodconfiguration modified; operatorstillmust setactualTraefikdirectpeerCIDR /32/128 andoverwriteonehttps. Loopbacksampleonlyforsamehostbackendloopback.
 
 LOCK STATUS: awaiting exact-head CI and maintainer re-review; no active implementation subagents. Existing taskpreviewretained; sourceupgrade diagnostics/backendnotrefreshed afterlatestcommit dueuserimmediatepushinstruction. Keep reviewDBoverride/persistentdata ownership unchanged.
+
+Retained-credential frontend preparatory work at 6d3e7374: modified api/models.rs with agreed default-false attic_token_configured/s3_credentials_configured/s3_session_token_configured and omitted absent Update secret fields; explicit Some("") S3 session clearing stays serialized. Added documented api/client.rs test_stored_cache_destination_credentials(id, &UpdateCacheDestination) with unwrapped POST /caches/{id}/test-credentials. Added checks/web-ui/tests/retained-cache-credential-workflow.js and only its 25-caches-modal-attic integration invocation; real ID probes remain unmocked. CF_CACHE_CREDENTIAL_FIXTURE file schema is {attic:{id},s3:{id},niks3:{id},nix:{id}}, positive integer IDs for seeded native working destinations. Workflow checks current selectors, real probe success, Niks3 write Untested, secret-free GET/requests, canceled nested/outer drafts, no mutation and stable public config/timestamps; captures only secret-free desktop/390px states. Shared existing test now expects absent rather than null omitted credential fields.
+
+Verification: nix develop -c cargo test --manifest-path packages/web-ui/Cargo.toml api::models::tests::cache_ -- --nocapture passed exit 0 (2 tests). nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown --message-format short passed exit 0 (existing warnings). Final owned API rustfmt --edition 2024 --config skip_children=true --check passed exit 0 after correcting two formatting-only test lines. Nix node --check passed for new retained workflow, shared workflow and integration-test.js. Owned tracked diff --check passed. No services/database/commits. Other owners are editing backend/fixtures concurrently; their changes preserved.
+
+BLOCKER: user explicitly requires owner backend refresh before frontend view edits. packages/web-ui/src/views/caches.rs is untouched. Preview HTTP 8081 responds 200, but unauthenticated POST with {} to http://127.0.0.1:3447/api/v1/caches/0/test-credentials still returns 404. Owner must refresh current backend against task-owned crystal_forge_review and confirm endpoint/auth routing before selector/modal/Test wiring proceeds. New retained browser workflow is prepared but unexecuted and cannot pass existing UI; replacement successful Test/Save coverage and updates to existing direct-field browser selectors remain pending UI implementation. Proposed selectors: cache-credential + cache-add-credential; Niks3 independent niks3-write-credential / niks3-read-credential; retained option __current__ labelled Current configured credential. Do not claim full UI completion or authoritative verification.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
