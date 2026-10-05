@@ -18,6 +18,8 @@ tags:
 | `TESTING.md` | [historical/multi-builder-api-testing-guide.md](../../historical/multi-builder-api-testing-guide.md) | moved | complete |
 | `docs/mock-execution-mode.md` | [operations/mock-execution-mode.md](../../operations/mock-execution-mode.md) | moved | complete |
 | `checks/integration/README.md` | retained in place; see [integration section](../../testing/flake-checks.md#integration) | retained | complete |
+| `checks/builder-evaluator-packaging/README.md` | retained in place; see [builder-evaluator-packaging section](../../testing/flake-checks.md#builder-evaluator-packaging) | retained | complete |
+| `checks/niks3-cache/README.md` | retained in place; see [niks3-cache section](../../testing/flake-checks.md#niks3-cache) | retained | complete |
 | `checks/nixos-options-metadata/README.md` | retained in place; see [nixos-options-metadata section](../../testing/flake-checks.md#nixos-options-metadata) | retained | complete |
 | `checks/oidc-auth/README.md` | retained in place; see [oidc-auth section](../../testing/flake-checks.md#oidc-auth) | retained | complete |
 | `checks/oscal-export/README.md` | retained in place; see [oscal-export section](../../testing/flake-checks.md#oscal-export) | retained | complete |
@@ -173,6 +175,16 @@ optionally `## Related files`), which the catalog summarizes per check.
 - `checks/web-ui-test-runner/README.md`: Title "Web UI Test Runner Check". Action: retained. Destination: [web-ui-test-runner](../../testing/flake-checks.md#web-ui-test-runner).
 - `checks/xccdf-schema/README.md`: Title "XCCDF Schema Check". Action: retained. Destination: [xccdf-schema](../../testing/flake-checks.md#xccdf-schema).
 - Unmapped content: none. The catalog adds `Status:` notes where a README differs from the check's `default.nix` or `.gitlab-ci.yml`.
+
+### TASK-470 additions after rebase
+
+These retained README mappings were added for TASK-470 after rebase onto the
+OKF knowledge bundle. Neither README existed at the original migration base
+`3b23d36f`; the historical source inventory remains unchanged.
+
+- `checks/builder-evaluator-packaging/README.md`: Title "Builder and server runtime packaging". Action: retained. Destination: [builder-evaluator-packaging](../../testing/flake-checks.md#builder-evaluator-packaging).
+- `checks/niks3-cache/README.md`: Title "Niks3 cache integration". Action: retained. Destination: [niks3-cache](../../testing/flake-checks.md#niks3-cache).
+- Unmapped content: none. Both READMEs remain authoritative in place; the catalog summarizes scope, commands, limits, and CI membership.
 
 ### `packages/cf-test-suite/README.md`
 

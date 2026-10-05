@@ -65,7 +65,9 @@ authoritative text and stay in place, because each check and package uses its
 README as its ecosystem entry point. This catalog records, for each README, what
 the check verifies, how to run it, and where the README lives. The summaries
 come from reading each README together with the matching `default.nix` at the
-migration base commit.
+migration base commit. The TASK-470 packaging and Niks3 sections and cache
+regression summary were added after rebase and describe the current checks,
+not files or behavior present at the original migration base `3b23d36f`.
 
 Every check below runs with
 `nix build .#checks.x86_64-linux.<name> --print-build-logs`, unless the section
@@ -84,6 +86,8 @@ says otherwise. For the web UI check in depth, see the
 | `web-ui-test-runner` | No | The `web-ui-test` wrapper script logic | [README](../../../checks/web-ui-test-runner/README.md) |
 | `ui-screenshots` | No | Fixture-driven screenshots of every view in two themes | [README](../../../checks/ui-screenshots/README.md) |
 | `server-regressions` | No | PostgreSQL-backed Rust regression tests and a migration upgrade rehearsal | [README](../../../checks/server-regressions/README.md) |
+| `builder-evaluator-packaging` | No | Evaluator-bound Nix/Niks3 wrappers, service PATH, proxy assertions, and generated configuration | [README](../../../checks/builder-evaluator-packaging/README.md) |
+| `niks3-cache` | Yes (cache, server, builder, agent) | Real cache publication, proxy claims, capability gates, agent pulls, and local CVE materialization | [README](../../../checks/niks3-cache/README.md) |
 | `okf-knowledge` | No | OKF structural validation, checker unit tests, exact diagram audit, and a pinned Mermaid syntax parse of every diagram (no browser render; `nix run .#okf-mermaid-renderer` renders SVG manually) | — |
 | `oscal-export` | No | OSCAL 1.1.2 schema validation of fixture output | [README](../../../checks/oscal-export/README.md) |
 | `xccdf-schema` | No | XCCDF 1.2 and `cf-xccdf-1` schema validation | [README](../../../checks/xccdf-schema/README.md) |
@@ -144,6 +148,13 @@ README: [checks/server-regressions/README.md](../../../checks/server-regressions
   Cargo integration test binaries and a curated list of `#[ignore]`d library
   tests (POA&M, policy, notification, composite AC3, STIG mapping, bundle
   baseline, and agent key rotation areas).
+  TASK-470 also runs 35 explicitly named ignored PostgreSQL tests and 8 named
+  non-ignored tests for cache scope, retained credentials, signed capabilities,
+  direct-peer dispatch, and publication-backed reads. Each invocation uses
+  `--exact --test-threads=1` and requires the named success line and exactly one
+  passed test with zero ignored tests. Only the 35 selected database tests use
+  `--ignored`; missing or renamed tests fail the check. The current README lists
+  every qualified name. This gate does not run native Attic/S3 upload suites.
 - **Why it exists.** `nix build .#server` runs only `--lib --bins` tests, and
   the `integration` check runs the Python suite, so these Rust integration
   targets would otherwise run nowhere. The list is curated on purpose and is
@@ -158,6 +169,43 @@ README: [checks/server-regressions/README.md](../../../checks/server-regressions
 > `cargo test` invocation in `checks/server-regressions/default.nix` also runs
 > the `compliance_assignment_zombie_repair` test binary, which the README list
 > does not name.
+
+### `builder-evaluator-packaging`
+
+README: [checks/builder-evaluator-packaging/README.md](../../../checks/builder-evaluator-packaging/README.md).
+
+- **What it verifies.** Sandbox probes check component/public wrappers and service
+  PATH for the exact evaluator Nix and evaluator-bound Niks3 1.6.0. The dependent
+  module proof checks enabled/disabled proxy assertions, typed generated TOML,
+  and the unchanged ExecStart wrapper's selected configuration path and overrides.
+- **Run it.** `nix build .#checks.x86_64-linux.builder-evaluator-packaging -L`.
+  The smaller proof is `.#checks.x86_64-linux.builder-evaluator-packaging.moduleValidation`.
+- **Scope limits.** No VM, host service, browser, or HTTP authorization runs.
+  Recording-binary probes establish the startup contract, not live credential
+  delivery. Runtime peer/header verification remains required.
+- **CI.** Blocking `flake-check: [builder-evaluator-packaging]` matrix job on
+  merge requests and `main`, using the `nix` runner tag in `.gitlab-ci.yml`.
+
+### `niks3-cache`
+
+README: [checks/niks3-cache/README.md](../../../checks/niks3-cache/README.md).
+
+- **What it verifies.** Four isolated VMs exercise five token/mTLS write and
+  public/private read variants with real remote builds, signed destination-bound
+  completion, server signature/read verification, agent pulls, environment
+  isolation, local CVE materialization, and secret/cleanup audits. Real HTTPS
+  proxy claims cover Attic/S3/Niks3 credential gates and public Http/Nix dispatch.
+- **Run it.** `nix build .#checks.x86_64-linux.niks3-cache -L`. The full gate has
+  `globalTimeout = 1800` seconds and requires KVM. Disposable VM databases do not
+  use the host development database. `.#checks.x86_64-linux.niks3-cache.fixture`
+  provides smaller CLI/infrastructure diagnosis; it does not replace the full gate.
+- **Scope limits.** Seeded evaluation identities do not test flake evaluation.
+  Agent pulls do not prove a full generation switch/reboot; CVE materialization
+  does not prove successful vulnerability analysis. Legacy claims do not prove
+  native Attic/S3 uploads. See the README for certificate and log-audit limits.
+- **CI.** Blocking `flake-check: [niks3-cache]` matrix job on merge requests and
+  `main`, using the `nix` runner tag in `.gitlab-ci.yml`; its runner must supply KVM.
+  Matrix membership establishes neither check's pass for a particular commit.
 
 ## Web UI checks
 
@@ -193,7 +241,8 @@ procedural guide is the [Web UI check runbook](web-ui-check.md).
 `playwrightResultTimeout ? 2700`. `.gitlab-ci.yml` runs the Web UI check as a
 separate `web-ui-check` job with `allow_failure: true`. The `flake-check`
 matrix includes `integration`, `oidc-auth`, `run-ui-dev-db-check`,
-`server-regressions`, `web-ui-test-runner`, and `okf-knowledge`.
+`server-regressions`, `niks3-cache`, `builder-evaluator-packaging`,
+`web-ui-test-runner`, and `okf-knowledge`.
 
 ### `web-ui/baselines`
 
@@ -386,10 +435,12 @@ The package is `packages/cf-test-suite/`. Its `scenarioRunner` member builds
 ## Checks without a README
 
 At the migration base commit, these directories under `checks/` have no
-README, and this catalog does not describe them: `builder-cve-contract`,
+README: `builder-cve-contract`,
 `builder-evaluator-packaging`, `config-inspector`, `config-observer`,
 `evaluator-snapshot-isolation`, `okf-knowledge`, `test-keys`, and
-`verified-source-evaluator-parity`. Read each `default.nix` for its scope.
+`verified-source-evaluator-parity`. TASK-470 subsequently added the
+`builder-evaluator-packaging` README and catalog section above. Read each
+remaining check's `default.nix` for its scope.
 
 ## Related concepts
 

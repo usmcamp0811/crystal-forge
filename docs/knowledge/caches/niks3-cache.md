@@ -14,7 +14,7 @@ implementation_status: implemented
 This guide describes TASK-470's implemented Niks3 support in
 [MR !331](https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/331).
 The UI reference is the
-[Caches view design](../design/CrystalForge/components/CachesView.jsx).
+[Caches view design](../../design/CrystalForge/components/CachesView.jsx).
 The upstream protocol reference is [Niks3 v1.6.0](https://github.com/Mic92/niks3/tree/v1.6.0).
 
 ## Supported configuration
@@ -487,8 +487,8 @@ access for the Nix builder. Packaging retains pinned **Niks3 1.6.0** and binds i
 child Nix, the server, and the builder to evaluator **Nix 2.34.8** through
 `pkgs.nix-eval-jobs.nix`; do not replace this with an unrelated Nix on `PATH`.
 
-The [packaging gate](../../checks/builder-evaluator-packaging/README.md) probes
-wrappers and service PATH. The [Niks3 VM gate](../../checks/niks3-cache/README.md)
+The [packaging gate](../../../checks/builder-evaluator-packaging/README.md) probes
+wrappers and service PATH. The [Niks3 VM gate](../../../checks/niks3-cache/README.md)
 exercises token/public, mTLS/public, token/private, mTLS/private, and token/public
 read-proxy variants with real remote builds, signed completion, server verification,
 agent pulls, environment denial, local CVE materialization, and secret/cleanup

@@ -1,6 +1,7 @@
 # Operator Guide
 
 * [Crystal Forge — S3 Cache (MinIO) Quickstart](s3-minio-cache-quickstart.md) - Shows how to push Nix store paths to a MinIO-backed S3 cache and use it as a substituter, including path-style addressing, AWS environment variables, the NixOS cache configuration snippet, and troubleshooting.
+* [Niks3 Cache Operator Guide](niks3-cache.md) - Describes separate read/write authentication, publication-backed deployment, retained credential tests, proxy configuration, and verification limits.
 
 # Workflow
 
