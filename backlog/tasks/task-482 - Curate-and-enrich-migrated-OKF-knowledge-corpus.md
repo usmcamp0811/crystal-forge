@@ -4,6 +4,7 @@ title: Curate and enrich migrated OKF knowledge corpus
 status: Backlog
 assignee: []
 created_date: '2026-10-05 16:14'
+updated_date: '2026-10-05 16:15'
 labels:
   - knowledge
   - curation
@@ -18,7 +19,7 @@ ordinal: 503000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-The OKF migration established a useful current knowledge corpus but did not carry every detail from every pre-migration Markdown source. The one-time audit against baseline 3b23d36f identified remaining source-block fidelity differences. These findings are curation leads, not an invariant that every historical source must be copied into OKF. Future curation should keep useful current guidance complete, retain genuinely useful design/history with clear status, map duplicate material to a complete canonical destination, and leave process or temporary material out of durable knowledge. Do not depend on the old baseline or require C-NNN exceptions for routine future documentation changes.
+The OKF migration produced a useful current corpus, but the one-time audit against baseline 3b23d36f reports 214 unresolved source-block fidelity findings. These mostly mean the new concepts contain less detail than their pre-OKF sources; they are not evidence that the current corpus is invalid. Representative affected areas include architecture, API, derivation lifecycle, builder API, onboarding, SQL views, STIG, and testing. Treat findings as curation leads, not a requirement to reproduce every historical document. Review based on usefulness and current correctness. Keep process, temporary, historical, duplicate, and obsolete material out of durable knowledge unless it has independent reference value. Never depend on baseline 3b23d36f or require C-NNN exceptions for routine future documentation changes.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
