@@ -15,17 +15,25 @@ import argparse
 import csv
 import fnmatch
 import hashlib
-import diagram_scan
 import re
 import subprocess
 import sys
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
+
+import diagram_scan
+from validate import slugify
 
 DOC_SUFFIXES = {".md", ".mdx", ".rst", ".adoc", ".asciidoc"}
 HEADING = re.compile(r"^##\s+(.+?)\s*#*\s*$")
 LINK = re.compile(r"\]\(([^)\s]+)\)")
 FENCE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
+H1 = re.compile(r"^#\s+\S")
+RULE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")
+
+# Name of the synthetic block that holds the content before the first H2.
+# INVARIANT: no real H2 may use this name; ``split_document`` rejects it.
+PREAMBLE_HEADING = "__preamble__"
 
 
 def git(*args: str, binary: bool = False):
@@ -38,13 +46,18 @@ def require_revision(revision: str) -> None:
 
 
 def baseline_paths(revision: str) -> list[str]:
-    raw = git("ls-tree", "-r", "--name-only", "-z", revision, binary=True)
+    raw = git("ls-tree", "-r", "--full-tree", "--name-only", "-z", revision, binary=True)
     return [p.decode("utf-8", "surrogateescape") for p in raw.split(b"\0") if p
             and Path(p.decode("utf-8", "surrogateescape")).suffix.lower() in DOC_SUFFIXES]
 
 
 def baseline_text(revision: str, path: str) -> str:
-    return git("show", f"{revision}:{path}")
+    """Returns the immutable blob text without newline translation.
+
+    Block hashes in the ledgers are computed over these exact characters, so
+    the blob is decoded from bytes instead of using text-mode output.
+    """
+    return git("show", f"{revision}:{path}", binary=True).decode("utf-8")
 
 
 def split_blocks(text: str) -> list[tuple[str, str]]:
@@ -57,6 +70,50 @@ def split_blocks(text: str) -> list[tuple[str, str]]:
         end = starts[n + 1] if n + 1 < len(starts) else len(lines)
         result.append((heading, "".join(lines[start:end])))
     return result
+
+
+def preamble_content(text: str) -> str:
+    """Returns the preservation-relevant text before the first H2, or ``""``.
+
+    Front matter, H1 title lines, thematic breaks, and blank lines are not
+    content: a destination concept has its own title and metadata. Everything
+    else is content, including H3 and deeper headings, fenced code (kept
+    byte-exact, including indentation), tables, lists, and prose. A document
+    without an H2 is entirely preamble.
+    """
+    lines = text.splitlines(keepends=True)
+    first_h2 = next((i for i, l in enumerate(lines) if HEADING.match(l.rstrip("\r\n"))), len(lines))
+    head = lines[:first_h2]
+    if head and head[0].strip() == "---":
+        closing = next((i for i in range(1, len(head)) if head[i].strip() == "---"), None)
+        if closing is not None:
+            head = head[closing + 1:]
+    kept: list[str] = []
+    fence: str | None = None
+    for line in head:
+        opened = FENCE.match(line.rstrip("\r\n"))
+        if fence is None and opened:
+            fence = opened.group(1)[0]
+        elif fence is not None and opened and opened.group(1)[0] == fence and not opened.group(2).strip():
+            fence = None
+        elif fence is None and (not line.strip() or H1.match(line) or RULE.match(line.rstrip("\r\n"))):
+            continue
+        kept.append(line)
+    return "".join(kept)
+
+
+def split_document(text: str) -> list[tuple[str, str]]:
+    """Returns the preamble block, when it has content, then every H2 block.
+
+    The preamble is the synthetic block ``PREAMBLE_HEADING``. A document with
+    no H2 yields one preamble block, so its whole body is preservation-checked.
+    The H2 blocks equal ``split_blocks`` output, so their hashes are unchanged.
+    """
+    blocks = split_blocks(text)
+    if any(heading == PREAMBLE_HEADING for heading, _ in blocks):
+        raise ValueError(f"an H2 heading must not be named {PREAMBLE_HEADING!r}")
+    preamble = preamble_content(text)
+    return ([(PREAMBLE_HEADING, preamble)] if preamble else []) + blocks
 
 
 def tokenize_prose(text: str) -> list[str]:
@@ -302,57 +359,144 @@ def remove_mermaid_block(text: str, diagram_id: str) -> str:
     return "".join(output)
 
 
-def load_semantic_replacements(root: Path) -> list[dict[str, str]]:
-    """Loads owner-authorized semantic replacement records with schema validation."""
-    rows = []
+SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+CLEANUP_ID = re.compile(r"^C-\d{3}$")
+SEMANTIC_COLUMNS = (
+    "source_path", "source_heading", "baseline_block_sha256",
+    "adjustment_id", "destination_path", "destination_heading",
+    "destination_block_sha256", "transformation", "reason",
+)
+
+
+def validate_destination_path(root: Path, value: str) -> str | None:
+    """Returns a diagnostic when ``value`` is not a normalized in-repo path.
+
+    A valid destination is a repository-relative POSIX path with no ``.`` or
+    ``..`` segments, no backslashes, and a final resolved location inside
+    ``root``. Symbolic links that leave ``root`` are rejected.
+    """
+    if value.startswith("/") or PureWindowsPath(value).is_absolute() or "\\" in value:
+        return f"destination_path must be repository-relative and use '/': {value!r}"
+    parts = PurePosixPath(value)
+    if ".." in parts.parts:
+        return f"destination_path must not contain '..': {value!r}"
+    if parts.as_posix() != value:
+        return f"destination_path is not normalized: {value!r}"
+    try:
+        (root / value).resolve().relative_to(root.resolve())
+    except ValueError:
+        return f"destination_path resolves outside the repository: {value!r}"
+    return None
+
+
+def load_semantic_replacements(root: Path) -> tuple[list[dict[str, str]], list[str]]:
+    """Loads owner-authorized semantic replacement rows.
+
+    Returns the schema-valid rows and one diagnostic per rejected row. This
+    function never raises for malformed ledger content, so the caller can fail
+    the audit with deterministic diagnostics instead of a traceback. A rejected
+    row is not returned and therefore cannot authorize any replacement.
+    """
     path = root / "checks/okf-knowledge/semantic-replacements.tsv"
-    if path.is_file():
-        with path.open(encoding="utf-8", newline="") as handle:
-            reader = csv.DictReader(handle, delimiter="\t")
-            required_fields = {
-                "source_path", "source_heading", "baseline_block_sha256",
-                "adjustment_id", "destination_path", "destination_heading",
-                "destination_block_sha256", "transformation", "reason",
-            }
-            if reader.fieldnames is None:
-                raise ValueError(f"semantic-replacements.tsv: empty or missing header")
-            if not {"source_path", "source_heading", "baseline_block_sha256",
-                    "adjustment_id", "destination_path", "destination_heading",
-                    "destination_block_sha256", "transformation", "reason"}.issubset(reader.fieldnames):
-                raise ValueError(f"semantic-replacements.tsv: missing required columns, got {reader.fieldnames}")
-            seen_keys = set()
-            rows = []
-            for row_num, row in enumerate(reader, start=2):  # 1-based line number (1 = header)
-                # Check all required fields present and non-empty
-                for field in required_fields:
-                    if not row.get(field, "").strip():
-                        raise ValueError(f"semantic-replacements.tsv:{row_num}: empty required field '{field}'")
-                # Validate SHA-256 format
-                for sha_field in ["baseline_block_sha256", "destination_block_sha256"]:
-                    val = row[sha_field].strip()
-                    if len(val) != 64 or not all(c in "0123456789abcdef" for c in val):
-                        raise ValueError(f"semantic-replacements.tsv:{row_num}: '{sha_field}' must be 64 lowercase hex chars, got '{val[:16]}...'")
-                # Validate transformation
-                if row["transformation"] != "semantic-replacement":
-                    raise ValueError(f"semantic-replacements.tsv:{row_num}: transformation must be 'semantic-replacement', got '{row['transformation']}'")
-                # Validate adjustment_id format (C-NNN)
-                adj_id = row["adjustment_id"].strip()
-                if not re.match(r"^C-\d{3}$", adj_id):
-                    raise ValueError(f"semantic-replacements.tsv:{row_num}: adjustment_id must match C-NNN format, got '{adj_id}'")
-                # Validate destination path is repository-relative and resolves inside repo
-                dest_path_str = row["destination_path"].strip()
-                dest_path = Path(dest_path_str)
-                if dest_path.is_absolute():
-                    raise ValueError(f"semantic-replacements.tsv:{row_num}: destination_path must be repository-relative, not absolute: {dest_path}")
-                if ".." in dest_path.parts:
-                    raise ValueError(f"semantic-replacements.tsv:{row_num}: destination_path must not contain '..': {dest_path}")
-                # Check for duplicate (source_path, source_heading)
-                key = (row["source_path"].strip(), row["source_heading"].strip())
-                if key in seen_keys:
-                    raise ValueError(f"semantic-replacements.tsv:{row_num}: duplicate semantic replacement key {key}")
-                seen_keys.add(key)
-                rows.append(row)
-    return rows
+    if not path.is_file():
+        return [], []
+    name = "semantic-replacements.tsv"
+    rows: list[dict[str, str]] = []
+    errors: list[str] = []
+    with path.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        if reader.fieldnames is None:
+            return [], [f"{name}: empty file; expected a header row"]
+        missing = [c for c in SEMANTIC_COLUMNS if c not in reader.fieldnames]
+        if missing:
+            return [], [f"{name}: header is missing required columns {missing}"]
+        seen: set[tuple[str, str]] = set()
+        for number, row in enumerate(reader, start=2):
+            where = f"{name}:{number}"
+            if None in row:
+                errors.append(f"{where}: row has more cells than the header")
+                continue
+            absent = [c for c in SEMANTIC_COLUMNS if row.get(c) is None]
+            if absent:
+                errors.append(f"{where}: row is missing required fields {absent}")
+                continue
+            empty = [c for c in SEMANTIC_COLUMNS if not row[c].strip()]
+            if empty:
+                errors.append(f"{where}: empty required fields {empty}")
+                continue
+            padded = [c for c in SEMANTIC_COLUMNS if row[c] != row[c].strip()]
+            if padded:
+                errors.append(f"{where}: fields have leading or trailing whitespace {padded}")
+                continue
+            problems = [
+                f"{field} must be 64 lowercase hexadecimal characters"
+                for field in ("baseline_block_sha256", "destination_block_sha256")
+                if not SHA256_HEX.match(row[field])
+            ]
+            if row["transformation"] != "semantic-replacement":
+                problems.append(
+                    f"unsupported transformation {row['transformation']!r}; "
+                    "expected 'semantic-replacement'"
+                )
+            if not CLEANUP_ID.match(row["adjustment_id"]):
+                problems.append(f"adjustment_id must match C-NNN, got {row['adjustment_id']!r}")
+            path_problem = validate_destination_path(root, row["destination_path"])
+            if path_problem:
+                problems.append(path_problem)
+            if problems:
+                errors.append(f"{where}: " + "; ".join(problems))
+                continue
+            key = (row["source_path"], row["source_heading"])
+            if key in seen:
+                errors.append(f"{where}: duplicate semantic replacement key {key}")
+                continue
+            seen.add(key)
+            rows.append(row)
+    return rows, errors
+
+
+def verify_semantic_replacement(
+    row: dict[str, str],
+    raw_block: str,
+    allowed: set[tuple[str, str]],
+    root: Path,
+    cleanup_text: str,
+    adjusted: bool,
+) -> str | None:
+    """Returns a diagnostic when ``row`` does not authorize ``raw_block``.
+
+    The caller MUST pass ``allowed`` after resolving the migration manifest
+    mapping for the exact source H2. ``allowed`` holds the repository-relative
+    destination path and GitLab anchor of each destination that the manifest
+    maps for that H2. The row can authorize only one of those destinations.
+    ``raw_block`` is the immutable baseline block before any source adjustment.
+    """
+    if adjusted:
+        return "semantic replacement overlaps a source adjustment; one block cannot use both"
+    if f"| {row['adjustment_id']} |" not in cleanup_text:
+        return f"cleanup-record.md has no entry {row['adjustment_id']}"
+    actual = hashlib.sha256(raw_block.encode("utf-8")).hexdigest()
+    if actual != row["baseline_block_sha256"]:
+        return (f"baseline_block_sha256 mismatch: ledger {row['baseline_block_sha256']}, "
+                f"baseline block {actual}")
+    destination = row["destination_path"]
+    anchor = slugify(row["destination_heading"])
+    if (destination, anchor) not in allowed:
+        return (f"destination {destination}#{anchor} is not a manifest-mapped destination "
+                f"for this source H2")
+    target = root / destination
+    if not target.is_file():
+        return f"destination {destination} does not exist"
+    matches = [b for h, b in split_blocks(target.read_text(encoding="utf-8"))
+               if h == row["destination_heading"]]
+    if len(matches) != 1:
+        return (f"destination {destination} must have exactly one H2 "
+                f"{row['destination_heading']!r}, found {len(matches)}")
+    actual = hashlib.sha256(matches[0].encode("utf-8")).hexdigest()
+    if actual != row["destination_block_sha256"]:
+        return (f"destination_block_sha256 mismatch: ledger {row['destination_block_sha256']}, "
+                f"destination block {actual}")
+    return None
 
 
 def load_diagram_rows(root: Path) -> list[dict[str, str]]:
@@ -412,25 +556,64 @@ def parse_manifest(bundle: Path) -> dict[str, tuple[Path, str, str, list[tuple[s
     return rows
 
 
+def mapped_destinations_for(
+    source: str,
+    heading: str,
+    manifest: Path,
+    map_cell: str,
+    root: Path,
+    errors: list[str],
+) -> tuple[list[tuple[Path, str]], set[tuple[str, str]]]:
+    """Resolves the manifest destinations of one source H2.
+
+    Returns the destination texts used for preservation comparison and the
+    ``(repository-relative path, anchor)`` pairs that the manifest maps for the
+    H2. Missing anchors and missing files are appended to ``errors``.
+    """
+    destinations: list[tuple[Path, str]] = []
+    allowed: set[tuple[str, str]] = set()
+    for link in LINK.findall(map_cell):
+        target, _, anchor = link.partition("#")
+        if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", target):
+            continue
+        if not anchor:
+            errors.append(f"{source}: H2 {heading!r} mapping lacks an exact destination anchor")
+        resolved = (manifest.parent / target).resolve()
+        if not resolved.is_file():
+            errors.append(f"{source}: H2 {heading!r} destination is missing: {target}")
+            continue
+        try:
+            relative = resolved.relative_to(root)
+        except ValueError:
+            errors.append(f"{source}: H2 {heading!r} destination is outside the repository: {target}")
+            continue
+        destinations.append((relative, resolved.read_text(encoding="utf-8")))
+        allowed.add((relative.as_posix(), anchor))
+    return destinations, allowed
+
+
 def audit(base: str, bundle: Path, scope_file: Path, root: Path) -> int:
+    """Checks every baseline document against the migration manifests.
+
+    Returns 0 when preservation is proven, 1 when any block is lost or any
+    ledger is invalid, and raises for unreadable inputs (see ``main``).
+    """
     require_revision(base)
+    errors: list[str] = []
     rows = parse_manifest(bundle)
     diagram_rows = load_diagram_rows(root)
     adjustment_file = root / "checks/okf-knowledge/source-adjustments.tsv"
     adjustments = load_source_adjustments(adjustment_file) if adjustment_file.is_file() else {}
-    semantic_file = root / "checks/okf-knowledge/semantic-replacements.tsv"
-    semantic_replacements = []
-    if semantic_file.is_file():
-        try:
-            semantic_replacements = load_semantic_replacements(root)
-        except ValueError as exc:
-            errors.append(f"semantic-replacements.tsv: {exc}")
+    semantic_by_key: dict[tuple[str, str], dict[str, str]] = {}
+    semantic_rows, semantic_errors = load_semantic_replacements(root)
+    errors.extend(semantic_errors)
+    for row in semantic_rows:
+        semantic_by_key[(row["source_path"], row["source_heading"])] = row
     cleanup_record = bundle / "meta/cleanup-record.md"
     cleanup_text = cleanup_record.read_text(encoding="utf-8") if cleanup_record.is_file() else ""
     used_adjustments: set[tuple[str, str]] = set()
     used_semantic: set[tuple[str, str]] = set()
     baseline = baseline_paths(base)
-    errors: list[str] = []
     scoped_patterns = []
     for line_no, line in enumerate(scope_file.read_text(encoding="utf-8").splitlines(), 1):
         if not line or line.startswith("#"):
@@ -463,135 +646,109 @@ def audit(base: str, bundle: Path, scope_file: Path, root: Path) -> int:
             if len(matches) != 1:
                 errors.append(f"{source}: excluded disposition is not supported by exactly one scope rule")
             continue
-        links = LINK.findall(dest_cell)
-        destinations = []
-        for link in links:
-            target, _, fragment = link.partition("#")
+        document_destinations: list[tuple[Path, str]] = []
+        for link in LINK.findall(dest_cell):
+            target = link.partition("#")[0]
             if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", target):
                 continue
-            path = (manifest.parent / target).resolve()
-            if not path.is_file():
+            resolved = (manifest.parent / target).resolve()
+            if not resolved.is_file():
                 errors.append(f"{source}: missing destination {target}")
                 continue
-            destinations.append(path.read_text(encoding="utf-8"))
+            document_destinations.append((resolved.relative_to(root), resolved.read_text(encoding="utf-8")))
 
-        blocks = split_blocks(baseline_text(base, source))
+        blocks = split_document(baseline_text(base, source))
+        h2_headings = [heading for heading, _block in blocks if heading != PREAMBLE_HEADING]
         mapped = [heading for heading, _dest in detail]
         retained_blocks: dict[str, str] = {}
-        if action == "retained" and current_path.is_file():
-            current_blocks = split_blocks(current_path.read_text(encoding="utf-8"))
+        retained_text = ""
+        if action == "retained":
+            retained_text = current_path.read_text(encoding="utf-8")
+            current_blocks = split_blocks(retained_text)
             retained_blocks = {heading: text for heading, text in current_blocks}
             if len(retained_blocks) != len(current_blocks):
                 errors.append(f"{source}: retained source has duplicate H2 headings; cannot map blocks by heading")
-        if action != "retained" and Counter(mapped) != Counter(heading for heading, _block in blocks):
+        if action != "retained" and Counter(mapped) != Counter(h2_headings):
             errors.append(f"{source}: detailed source map does not map each H2 block exactly once")
         for heading, block in blocks:
+            if heading == PREAMBLE_HEADING:
+                # The preamble has no per-block manifest row. It is compared
+                # with every destination of the document row, or with the
+                # current file for a retained document.
+                targets = [(Path(source), retained_text)] if action == "retained" else document_destinations
+                if not targets:
+                    errors.append(f"{source}: preamble has no resolvable destination")
+                    continue
+                try:
+                    preamble, remaining = remove_converted_diagrams(
+                        source, heading, block, targets, diagram_rows
+                    )
+                except ValueError as exc:
+                    errors.append(f"{source}: preamble: {exc}")
+                    continue
+                if not preserved(preamble, remaining):
+                    errors.append(f"{source}: content/order/punctuation lost in the preamble before the first H2")
+                continue
+            # Resolve the manifest destinations of this exact H2 before any
+            # semantic-replacement or content comparison.
             if action == "retained" and heading in retained_blocks:
                 mapped_destinations = [(Path(source), retained_blocks[heading])]
+                allowed = {(source, slugify(heading))}
             elif mapped.count(heading) != 1:
                 errors.append(f"{source}: unmapped H2 source block {heading!r}")
                 continue
             else:
-                mapped_destinations = []
-            adjustment_key = (source, heading)
-            baseline_block = block  # Save raw baseline block for semantic replacement verification
-            if adjustment_key in adjustments:
-                digest, adjustment_id, _transformation = adjustments[adjustment_key]
+                map_cell = next(cell for name, cell in detail if name == heading)
+                mapped_destinations, allowed = mapped_destinations_for(
+                    source, heading, manifest, map_cell, root, errors
+                )
+            key = (source, heading)
+            raw_block = block
+            if key in adjustments:
+                _digest, adjustment_id, _transformation = adjustments[key]
                 if f"| {adjustment_id} |" not in cleanup_text:
                     errors.append(f"{source}: adjustment {adjustment_id} is not recorded in cleanup-record.md")
                     continue
                 try:
-                    block = apply_source_adjustment(source, adjustments[adjustment_key], block)
+                    block = apply_source_adjustment(source, adjustments[key], raw_block)
                 except ValueError as exc:
                     errors.append(f"{source}: {heading!r}: {exc}")
                     continue
-                used_adjustments.add(adjustment_key)
+                used_adjustments.add(key)
 
-            # Semantic replacement: exact source block replaced by exact destination block
-            semantic_key = (source, heading)
-            for sr in semantic_replacements:
-                if sr["source_path"] == source and sr["source_heading"] == heading:
-                    # Verify source block hash (must match raw baseline, before any adjustments)
-                    expected_source_hash = sr["baseline_block_sha256"]
-                    actual_source_hash = hashlib.sha256(baseline_block.encode("utf-8")).hexdigest()
-                    if actual_source_hash != expected_source_hash:
-                        errors.append(f"{source}: {heading!r}: semantic replacement source hash mismatch (expected {expected_source_hash[:16]}..., got {actual_source_hash[:16]}...)")
-                        continue
-                    # Reject overlap with source-adjustments (they apply to different baseline blocks)
-                    if semantic_key in adjustments:
-                        errors.append(f"{source}: {heading!r}: semantic replacement overlaps with source-adjustment; cannot authorize both")
-                        continue
-                    # Verify cleanup record ID exists
-                    adj_id = sr["adjustment_id"]
-                    if f"| {adj_id} |" not in cleanup_text:
-                        errors.append(f"{source}: semantic replacement {adj_id} is not recorded in cleanup-record.md")
-                        continue
-                    # Verify destination block
-                    dest_path = Path(sr["destination_path"])
-                    if not dest_path.is_file():
-                        errors.append(f"{source}: semantic replacement destination {sr['destination_path']} does not exist")
-                        continue
-                    dest_content = dest_path.read_text(encoding="utf-8")
-                    dest_blocks = split_blocks(dest_content)
-                    dest_heading = sr["destination_heading"]
-                    matching_dest_blocks = [b for h, b in dest_blocks if h == dest_heading]
-                    if len(matching_dest_blocks) == 0:
-                        errors.append(f"{source}: semantic replacement destination heading {dest_heading!r} not found in {sr['destination_path']}")
-                        continue
-                    if len(matching_dest_blocks) > 1:
-                        errors.append(f"{source}: semantic replacement destination heading {dest_heading!r} is ambiguous ({len(matching_dest_blocks)} matches) in {sr['destination_path']}")
-                        continue
-                    dest_block = matching_dest_blocks[0]
-                    expected_dest_hash = sr["destination_block_sha256"]
-                    actual_dest_hash = hashlib.sha256(dest_block.encode("utf-8")).hexdigest()
-                    if actual_dest_hash != expected_dest_hash:
-                        errors.append(f"{source}: semantic replacement destination hash mismatch (expected {expected_dest_hash[:16]}..., got {actual_dest_hash[:16]}...)")
-                        continue
-                    # Bind to migration manifest: destination must be among mapped destinations for this source H2
-                    if mapped_destinations:
-                        allowed_paths = {str(p) for p, _ in mapped_destinations}
-                        if sr["destination_path"] not in allowed_paths:
-                            errors.append(f"{source}: {heading!r}: semantic replacement destination {sr['destination_path']} not permitted by migration manifest for this source H2")
-                            continue
-                    # All verified: mark as used and skip normal comparison
-                    used_semantic.add((source, heading))
-                    block = None  # Signal to skip normal comparison
-                    break
-            if not mapped_destinations:
-                map_cell = next(cell for name, cell in detail if name == heading)
-                for link in LINK.findall(map_cell):
-                    target, _, anchor = link.partition("#")
-                    if not anchor:
-                        errors.append(f"{source}: H2 {heading!r} mapping lacks an exact destination anchor")
-                    resolved = (manifest.parent / target).resolve()
-                    if resolved.is_file():
-                        mapped_destinations.append((resolved.relative_to(root), resolved.read_text(encoding="utf-8")))
-                    else:
-                        errors.append(f"{source}: H2 {heading!r} destination is missing: {target}")
-            # If block is None, it was a verified semantic replacement; skip normal comparison
-            if block is None:
+            replacement = semantic_by_key.get(key)
+            if replacement is not None:
+                problem = verify_semantic_replacement(
+                    replacement, raw_block, allowed, root, cleanup_text, key in adjustments
+                )
+                if problem:
+                    errors.append(f"{source}: {heading!r}: semantic replacement {replacement['adjustment_id']}: {problem}")
+                else:
+                    used_semantic.add(key)
                 continue
             if not mapped_destinations:
                 errors.append(f"{source}: H2 {heading!r} has no resolvable destination")
-            elif not identical_retained:
-                try:
-                    block, destinations_without_diagrams = remove_converted_diagrams(
-                        source, heading, block, mapped_destinations, diagram_rows
-                    )
-                except ValueError as exc:
-                    errors.append(f"{source}: H2 {heading!r}: {exc}")
-                    continue
-                if not preserved(block, destinations_without_diagrams):
-                    errors.append(f"{source}: content/order/punctuation lost in H2 {heading!r}")
+                continue
+            try:
+                block, destinations_without_diagrams = remove_converted_diagrams(
+                    source, heading, block, mapped_destinations, diagram_rows
+                )
+            except ValueError as exc:
+                errors.append(f"{source}: H2 {heading!r}: {exc}")
+                continue
+            if not preserved(block, destinations_without_diagrams):
+                errors.append(f"{source}: content/order/punctuation lost in H2 {heading!r}")
 
-    for key in adjustments.keys() - used_adjustments:
+    for key in sorted(adjustments.keys() - used_adjustments):
         errors.append(f"{key[0]}: stale source adjustment for H2 {key[1]!r}")
-
-    # Check for unused semantic replacements
-    for sr in semantic_replacements:
-        key = (sr["source_path"], sr["source_heading"])
-        if key not in used_semantic:
-            errors.append(f"{sr['source_path']}: stale semantic replacement for H2 {sr['source_heading']!r} (adjustment {sr['adjustment_id']})")
+    for key in sorted(semantic_by_key.keys() - used_semantic):
+        row = semantic_by_key[key]
+        # A row whose verification failed already has a specific diagnostic.
+        if not any(f"semantic replacement {row['adjustment_id']}:" in e for e in errors):
+            errors.append(
+                f"{key[0]}: stale semantic replacement {row['adjustment_id']} for H2 {key[1]!r}: "
+                "no baseline block uses it"
+            )
 
     if errors:
         print("\n".join(errors))
