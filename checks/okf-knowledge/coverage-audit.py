@@ -119,9 +119,25 @@ def split_document(text: str) -> list[tuple[str, str]]:
     return ([(PREAMBLE_HEADING, preamble)] if preamble else []) + blocks
 
 
+# Matches the destination of an inline link or image that is not an absolute
+# URL (no scheme). A migrated document moves, so such a target changes by
+# design. The link text, the link structure, and every absolute URL stay exact.
+RELATIVE_LINK_TARGET = re.compile(r"\]\((?![A-Za-z][A-Za-z0-9+.-]*:)[^)\s]*(?:\s+\"[^\"]*\")?\)")
+
+
+def normalize_relative_links(text: str) -> str:
+    """Replaces each relative link target by a fixed marker."""
+    return RELATIVE_LINK_TARGET.sub("](~)", text)
+
+
 def tokenize_prose(text: str) -> list[str]:
-    """Preserve punctuation and token order while permitting whitespace reflow."""
-    return re.findall(r"[^\W_]+(?:['’][^\W_]+)*|[^\s\w]", text, flags=re.UNICODE)
+    """Preserve punctuation and token order while permitting whitespace reflow.
+
+    Relative link targets are not significant; see ``RELATIVE_LINK_TARGET``.
+    """
+    return re.findall(
+        r"[^\W_]+(?:['’][^\W_]+)*|[^\s\w]", normalize_relative_links(text), flags=re.UNICODE
+    )
 
 
 def protected_blocks(text: str) -> list[str]:
@@ -145,7 +161,7 @@ def protected_blocks(text: str) -> list[str]:
             found.append(line + "\n")
             continue
         if line.lstrip().startswith("|"):
-            found.append("TABLE:" + line + "\n")
+            found.append("TABLE:" + normalize_relative_links(line) + "\n")
     return found
 
 

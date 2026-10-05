@@ -74,6 +74,18 @@ class MarkdownValidationTests(unittest.TestCase):
         self.assertFalse(coverage.preserved("first\nsecond", ["second first"]))
         self.assertFalse(coverage.preserved("same\nsame", ["same"]))
 
+    def test_relative_link_targets_may_change_but_text_and_urls_may_not(self):
+        source = "See [the guide](docs/guide.md) and [site](https://example.com/a).\n"
+        self.assertTrue(coverage.preserved(source, ["See [the guide](../ops/guide.md#x) and [site](https://example.com/a).\n"]))
+        self.assertFalse(coverage.preserved(source, ["See [the guide](../ops/guide.md) and [site](https://example.com/b).\n"]))
+        self.assertFalse(coverage.preserved(source, ["See [the manual](../ops/guide.md) and [site](https://example.com/a).\n"]))
+        self.assertFalse(coverage.preserved(source, ["See the guide and [site](https://example.com/a).\n"]))
+        table = "| Doc |\n|---|\n| [a](x/a.md) |\n"
+        self.assertTrue(coverage.preserved(table, ["| Doc |\n|---|\n| [a](../y/a.md) |\n"]))
+        self.assertFalse(coverage.preserved(table, ["| Doc |\n|---|\n| [b](../y/a.md) |\n"]))
+        code = "```sh\ncat [x](docs/a.md)\n```\n"
+        self.assertFalse(coverage.preserved(code, ["```sh\ncat [x](docs/b.md)\n```\n"]))
+
     def test_code_indentation_and_table_rows_are_exact(self):
         source = "```sh\n  command --flag\n```\n\n| A | B |\n|---|---|\n| x | y |\n"
         self.assertTrue(coverage.preserved(source, [source]))
