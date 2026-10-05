@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-05 19:38'
+updated_date: '2026-10-05 19:47'
 labels: []
 dependencies: []
 references:
@@ -126,6 +126,8 @@ User finalization authorization: no further production changes unless final veri
 CI16944877425 fixture timing correction scope: checks/web-ui/default.nix/native-cache-fixture.py/README and retained-cache-credential-workflow.js timing only. Native provider VMs/credential prep may warm early, but seven realAPI rows must wait for a mode0600 nonsecret seed-request marker emitted at entry to retained workflow25, after originalshared/Niks3create/security checks. Then waitseed_complete asbefore; allrawcheckpoint/replacementSave/nativeobserverproofs unchanged. No assertion/prod/baseline edits, commits/pushes orpersistentpreview/providerchanges. Verify21+25 selector forabsence ofearly native rows and25 end-to-end afterUIownerstable.
 
 User-approved P1 existing-row remediation at published d8ae6ace: configured flags are presentation metadata, never retained-secret authority for Edit Test. Fresh GET by ID must precede initializing existing Edit, with explicit loading/error/retry and no stale fallback; Save remains blocked until destination and scope ready. Client validates public fields and explicitly selected replacement drafts; existing ID with no replacement always reaches stored-ID Test using the same Save patch and omitted unchanged secrets. Audit Attic/S3/Niks3/Basic and earlier Save clearing paths; remove dead editor only if call-site audit proves unreachable and verification protects routes. Add direct-SQL legacy plaintext and independently historically encrypted Attic fixtures, stale/absent metadata and DB-missing defensive cases, safe flag/redaction/native auth and exact Test/Cancel immutability plus unrelated Save retention. Preserve four pending fixture-seed timing WIP files and existing native tests. Run focused server/legacy PostgreSQL, UI unit/native/WASM, authoritative step25, diff check and persistent legacy-row proof. Investigate deployed row only through user-provided safe SQL/API metadata; do not fabricate deployed authentication/root cause or recover deleted secrets. No merge.
+
+User-delegated test-only legacy Attic proof at d8ae6ace: own retained_probe_tests.rs and server-regressions exact membership/README only. Insert pre-TASK-compatible Attic rows directly with runtime synthetic plaintext and independently constructed historical enc:v1 AES-256-GCM envelopes (SHA-256 runtime fixture key; 12-byte nonce; standard Base64 nonce and ciphertext/tag). Prove GET/list redaction/configured flags, exact non-mutating stored-ID Test and Cancel-without-request, blank same-type Save rejection and omitted-secret unrelated Save retention with explicit allowed name/updated_at and assignment created_at changes. Prove NULL/empty stored-ID Test safe 400 before callback. Verify PID3415 task cluster/socket/datadir/admin before disposable SQLx databases; run nonignored/new/all retained ignored tests plus all-target compilation through Nix. No production, migrations, services, commits or pushes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
