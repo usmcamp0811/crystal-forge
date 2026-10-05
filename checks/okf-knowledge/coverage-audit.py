@@ -348,6 +348,8 @@ def remove_converted_diagrams(
         # Some reviewed source diagrams are text-only priority or hierarchy
         # blocks. The explicit ledger row classifies a text fence as a diagram
         # when scanner shape heuristics alone cannot do so.
+        # Track line ranges of already-found candidates to avoid duplicates.
+        candidate_ranges = [(c.start - 1, c.end) for c in candidates]
         lines = block.splitlines()
         fenced_text: list[diagram_scan.Candidate] = []
         i = 0
@@ -365,6 +367,11 @@ def remove_converted_diagrams(
             j = i + 1
             while j < len(lines) and not re.match(rf"^\s*{re.escape(marker[0])}{{{len(marker)},}}\s*$", lines[j]):
                 j += 1
+            # Skip if this fence range overlaps an existing candidate
+            fence_range = (i, min(j + 1, len(lines)))
+            if any(not (fence_range[1] <= cr[0] or fence_range[0] >= cr[1]) for cr in candidate_ranges):
+                i = min(j + 1, len(lines))
+                continue
             if language in {"", "text", "plaintext", "ascii"} and active_heading in source_sections:
                 fenced_text.append(diagram_scan.Candidate(
                     source, active_heading, i + 1, min(j + 1, len(lines)),

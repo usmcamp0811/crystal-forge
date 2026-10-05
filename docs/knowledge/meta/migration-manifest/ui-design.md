@@ -573,6 +573,22 @@ tags:
 - Sections:
   | Source section | Destination |
   | --- | --- |
-  | whole body (identical to `docs/ui-ux-design-system.md` at `3b23d36f`; only the Backlog frontmatter differed) | [ui/design-system-overview.md](../../ui/design-system-overview.md), [ui/design-system-theming-and-color.md](../../ui/design-system-theming-and-color.md), [ui/design-system-typography-and-layout.md](../../ui/design-system-typography-and-layout.md), [ui/design-system-components-and-interaction.md](../../ui/design-system-components-and-interaction.md), [ui/design-system-accessibility-responsive-motion.md](../../ui/design-system-accessibility-responsive-motion.md), [ui/design-system-conventions-and-anti-patterns.md](../../ui/design-system-conventions-and-anti-patterns.md) |
+  | `## Table of Contents` | [ui/design-system-overview.md#table-of-contents](../../ui/design-system-overview.md#table-of-contents) |
+  | `## Design Philosophy` | [ui/design-system-overview.md#design-philosophy](../../ui/design-system-overview.md#design-philosophy) |
+  | `## Technology Stack` | [ui/design-system-overview.md#technology-stack](../../ui/design-system-overview.md#technology-stack) |
+  | `## Theming System` | [ui/design-system-theming-and-color.md#theming-system](../../ui/design-system-theming-and-color.md#theming-system) |
+  | `## Color System` | [ui/design-system-theming-and-color.md#color-system](../../ui/design-system-theming-and-color.md#color-system) |
+  | `## Typography` | [ui/design-system-typography-and-layout.md#typography](../../ui/design-system-typography-and-layout.md#typography) |
+  | `## Spacing & Layout` | [ui/design-system-typography-and-layout.md#spacing--layout](../../ui/design-system-typography-and-layout.md#spacing--layout) |
+  | `## Component Patterns` | [ui/design-system-components-and-interaction.md#component-patterns](../../ui/design-system-components-and-interaction.md#component-patterns) |
+  | `## Interaction Patterns` | [ui/design-system-components-and-interaction.md#interaction-patterns](../../ui/design-system-components-and-interaction.md#interaction-patterns) |
+  | `## Accessibility Requirements` | [ui/design-system-accessibility-responsive-motion.md#accessibility-requirements](../../ui/design-system-accessibility-responsive-motion.md#accessibility-requirements) |
+  | `## Responsive Design` | [ui/design-system-accessibility-responsive-motion.md#responsive-design](../../ui/design-system-accessibility-responsive-motion.md#responsive-design) |
+  | `## Animation & Motion` | [ui/design-system-accessibility-responsive-motion.md#animation--motion](../../ui/design-system-accessibility-responsive-motion.md#animation--motion) |
+  | `## Naming Conventions` | [ui/design-system-conventions-and-anti-patterns.md#naming-conventions](../../ui/design-system-conventions-and-anti-patterns.md#naming-conventions) |
+  | `## Anti-Patterns` | [ui/design-system-conventions-and-anti-patterns.md#anti-patterns](../../ui/design-system-conventions-and-anti-patterns.md#anti-patterns) |
+  | `## Decision Framework` | [ui/design-system-conventions-and-anti-patterns.md#decision-framework](../../ui/design-system-conventions-and-anti-patterns.md#decision-framework) |
+  | `## Visual Reference` | [ui/design-system-overview.md#visual-reference](../../ui/design-system-overview.md#visual-reference) |
+  | `## Changelog` | [ui/design-system-overview.md#changelog](../../ui/design-system-overview.md#changelog) |
   | body now | short pointer to the overview concept; frontmatter kept |
 - Unmapped content: none. The diff against the original shows only the frontmatter block and the H1 line. No unique content needed merging.

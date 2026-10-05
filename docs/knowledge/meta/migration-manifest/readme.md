@@ -28,7 +28,7 @@ tags:
   | `## What is Crystal Forge?` | [overview/project-introduction-and-key-features.md#what-is-crystal-forge](../../overview/project-introduction-and-key-features.md#what-is-crystal-forge) |
   | `## Key Features` | [overview/project-introduction-and-key-features.md#key-features](../../overview/project-introduction-and-key-features.md#key-features) |
   | `## Architecture` | [architecture/ecosystem-architecture-summary.md#components](../../architecture/ecosystem-architecture-summary.md#components) |
-  | `## Quick Start` | [operations/nixos-module-configuration.md#quick-start](../../operations/nixos-module-configuration.md#quick-start), [README.md#quick-start](../../../../README.md#quick-start) |
+  | `## Quick Start` | [operations/nixos-module-configuration.md#nixos-module-configuration](../../operations/nixos-module-configuration.md#nixos-module-configuration), [README.md#quick-start](../../../../README.md#quick-start) |
   | `## Development` | [operations/development-environment-commands.md#development](../../operations/development-environment-commands.md#development) |
   | `## STIG Compliance Modules` | [operations/nixos-module-configuration.md#stig-compliance-modules](../../operations/nixos-module-configuration.md#stig-compliance-modules) |
   | `## Data Model` | [overview/project-introduction-and-key-features.md#data-model](../../overview/project-introduction-and-key-features.md#data-model) |

@@ -45,7 +45,7 @@ tags:
   | `## Cache API (Future - TASK-141)` | [../../api/agent-and-cache-api.md#cache-administration-api](../../api/agent-and-cache-api.md#cache-administration-api) |
   | `## Common Error Codes` | [../../api/api-overview-errors-and-streaming.md#common-error-codes](../../api/api-overview-errors-and-streaming.md#common-error-codes) |
   | `## Adding a New API Endpoint` | [../../operations/adding-a-backend-api-endpoint.md#where-things-live](../../operations/adding-a-backend-api-endpoint.md#where-things-live) |
-  | `## File Organization` | [../../architecture/backend-cargo-workspace.md#workspace-layout](../../architecture/backend-cargo-workspace.md#workspace-layout) |
+  | `## File Organization` | [../../ui/frontend-navigation-and-shared-patterns.md#file-organization](../../ui/frontend-navigation-and-shared-patterns.md#file-organization) |
   | `## WebSocket Streaming` | [../../api/api-overview-errors-and-streaming.md#websocket-streaming](../../api/api-overview-errors-and-streaming.md#websocket-streaming) |
   | `## Summary` | [../../api/api-overview-errors-and-streaming.md#summary](../../api/api-overview-errors-and-streaming.md#summary) |
 - Unmapped content: none. Horizontal rules between sections were not carried over. Sections were reordered only at concept level (Common Error Codes, WebSocket Streaming, and Summary follow API Overview).
@@ -60,19 +60,20 @@ tags:
   | --- | --- |
   | Title, introduction, related documentation | [ui/frontend-navigation-and-shared-patterns.md](../../ui/frontend-navigation-and-shared-patterns.md) |
   | `## Navigation Structure` | [../../ui/frontend-navigation-and-shared-patterns.md#navigation-structure](../../ui/frontend-navigation-and-shared-patterns.md#navigation-structure) |
-  | `## Dashboard (/)` | [../../ui/dashboard-and-systems-views.md#dashboard-](../../ui/dashboard-and-systems-views.md#dashboard-) |
-  | `## Systems List (/systems)` | [../../ui/dashboard-and-systems-views.md#systems-list-systems](../../ui/dashboard-and-systems-views.md#systems-list-systems) |
-  | `## System Detail (/systems/:id)` | [../../ui/dashboard-and-systems-views.md#system-detail-systemsid](../../ui/dashboard-and-systems-views.md#system-detail-systemsid) |
-  | `## Flakes List (/flakes)` | [../../ui/flakes-environments-builds-and-evaluations-views.md#flakes-list-flakes](../../ui/flakes-environments-builds-and-evaluations-views.md#flakes-list-flakes) |
-  | `## Environments List (/environments)` | [../../ui/flakes-environments-builds-and-evaluations-views.md#environments-list-environments](../../ui/flakes-environments-builds-and-evaluations-views.md#environments-list-environments) |
-  | `## Builds Queue (/builds)` | [../../ui/flakes-environments-builds-and-evaluations-views.md#builds-queue-builds](../../ui/flakes-environments-builds-and-evaluations-views.md#builds-queue-builds) |
-  | `## Admin Console (/admin)` | [../../ui/admin-console-and-login-views.md#admin-console-admin](../../ui/admin-console-and-login-views.md#admin-console-admin) |
+  | `## Dashboard (`/`)` | [../../ui/dashboard-and-systems-views.md#dashboard-](../../ui/dashboard-and-systems-views.md#dashboard-) |
+  | `## Systems List (`/systems`)` | [../../ui/dashboard-and-systems-views.md#systems-list-systems](../../ui/dashboard-and-systems-views.md#systems-list-systems) |
+  | `## System Detail (`/systems/:id`)` | [../../ui/dashboard-and-systems-views.md#system-detail-systemsid](../../ui/dashboard-and-systems-views.md#system-detail-systemsid) |
+  | `## Flakes List (`/flakes`)` | [../../ui/flakes-environments-builds-and-evaluations-views.md#flakes-list-flakes](../../ui/flakes-environments-builds-and-evaluations-views.md#flakes-list-flakes) |
+  | `## Environments List (`/environments`)` | [../../ui/flakes-environments-builds-and-evaluations-views.md#environments-list-environments](../../ui/flakes-environments-builds-and-evaluations-views.md#environments-list-environments) |
+  | `## Builds Queue (`/builds`)` | [../../ui/flakes-environments-builds-and-evaluations-views.md#builds-queue-builds](../../ui/flakes-environments-builds-and-evaluations-views.md#builds-queue-builds) |
+  | `## Admin Console (`/admin`)` | [../../ui/admin-console-and-login-views.md#admin-console-admin](../../ui/admin-console-and-login-views.md#admin-console-admin) |
   | `## Login Views` | [../../ui/admin-console-and-login-views.md#login-views](../../ui/admin-console-and-login-views.md#login-views) |
   | `## Common UI Components` | [../../ui/frontend-navigation-and-shared-patterns.md#common-ui-components](../../ui/frontend-navigation-and-shared-patterns.md#common-ui-components) |
   | `## Responsive Behavior` | [../../ui/frontend-navigation-and-shared-patterns.md#responsive-behavior](../../ui/frontend-navigation-and-shared-patterns.md#responsive-behavior) |
+  | `## File Organization` | [../../ui/frontend-navigation-and-shared-patterns.md#file-organization](../../ui/frontend-navigation-and-shared-patterns.md#file-organization) |
   
   | `## Adding a New View` | [../../ui/frontend-navigation-and-shared-patterns.md#adding-a-new-view](../../ui/frontend-navigation-and-shared-patterns.md#adding-a-new-view) |
-  | `## Evaluations (/evaluations)` | [../../ui/flakes-environments-builds-and-evaluations-views.md#evaluations-evaluations](../../ui/flakes-environments-builds-and-evaluations-views.md#evaluations-evaluations) |
+  | `## Evaluations (`/evaluations`)` | [../../ui/flakes-environments-builds-and-evaluations-views.md#evaluations-evaluations](../../ui/flakes-environments-builds-and-evaluations-views.md#evaluations-evaluations) |
   | `## Summary Table` | [../../ui/frontend-navigation-and-shared-patterns.md#summary-table](../../ui/frontend-navigation-and-shared-patterns.md#summary-table) |
 - Unmapped content: none.
 
