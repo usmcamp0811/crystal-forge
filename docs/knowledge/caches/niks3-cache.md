@@ -404,6 +404,60 @@ ambient proxies and redirects, and retain TLS hostname verification. Private
 targets require the explicit `server.allow_private_cache_test_targets` opt-in.
 Do not interpret a blocked probe as a write-authentication failure.
 
+### Testing retained credentials in Edit
+
+In **Caches**, Edit can use **Current configured credential** without retrieving
+the stored secret. Attic and S3 replacements are local credential-dialog drafts;
+Niks3 retains independent read and write credential choices. Test uses the draft,
+but only Save persists it. Cancel discards the draft.
+
+Admin `POST /api/v1/caches/:id/test-credentials` accepts the same unwrapped update
+JSON as Save. An empty object tests the stored configuration. The server loads
+and decrypts the destination by ID, then uses Save's shared merge and validation
+in memory. Same-type omitted credential fields retain stored values; changing
+type cannot borrow inactive credentials. Replacement fields, authentication-mode
+changes, and explicit clears follow Save's rules. The probe does not write
+configuration, credentials, assignments, timestamps, usage, or jobs. Its unlocked
+snapshot can become stale; a successful Test does not guarantee a later Save.
+
+Destination responses omit Attic tokens, S3 access IDs, secret access keys, and
+session tokens, as well as Niks3 tokens and private keys. These response-only
+flags describe configured material, not verified connectivity or authorization:
+
+| Flag | Meaning |
+| --- | --- |
+| `attic_token_configured` | A nonempty token for the active Attic type. |
+| `s3_credentials_configured` | A complete access ID and secret for the active S3 type. |
+| `s3_session_token_configured` | A nonempty session token for the active S3 type. |
+| `http_basic_auth_configured` | Stored URL userinfo for the active Http or Nix type. |
+| `legacy_query_credentials_configured` | Recognized credential query parameters in a legacy URL. |
+
+S3 Test signs a bounded, read-only `ListObjectsV2` request with the effective
+explicit keys and optional session token, requesting at most one key. It does not
+use ambient profiles or credentials. Success proves only the checked bucket-list
+read access, not object reads, uploads, or write authorization. Attic bearer
+authentication is sent only for Attic tests. All probes retain the target, TLS,
+DNS-pinning, proxy, and redirect protections described above.
+
+### Legacy URL credentials and migration
+
+Legacy Http/Nix Basic credentials remain server-only. API URL fields are
+sanitized; Http/Nix Test sends stored userinfo through a sensitive Basic
+Authorization header. On a same-type unrelated Save, omitting the URL or sending
+the same sanitized URL preserves the stored credential-bearing URI. An explicitly
+different URL cannot inherit its Basic or query credentials. Changing type strips
+URI credentials from inherited URLs. Basic credential replacement is unavailable
+in the Caches form.
+
+Recognized credential query parameters, including signed AWS query parameters,
+are hidden in responses but retained in storage on same-type unrelated saves.
+Test rejects these configurations with HTTP 400
+`legacy_query_credentials_unsupported` before DNS resolution or any network
+request. The operator must migrate to a credential-free URL and supported access
+configuration before testing. Crystal Forge does not automatically migrate or
+replay these query credentials; removing them from the displayed URL is not a
+storage migration.
+
 ## Local verification
 
 Run from the repository root. These commands use the pinned flake and disposable

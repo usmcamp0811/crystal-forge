@@ -64,9 +64,19 @@ environment-specific ignored tests that do not belong in this gate.
 
 ## TASK-470 selected library tests
 
-The following exact names run with `--ignored --exact --test-threads=1`:
+The following 35 ignored PostgreSQL tests run with
+`--ignored --exact --test-threads=1`. Each invocation must report exactly one
+passed test and zero ignored tests. The tests include completed CVE publication
+provenance and malformed signing-key rejection across all Niks3 auth modes.
 
 ```text
+handlers::api::caches::retained_probe_tests::stored_probe_preserves_ciphertext_scope_and_timestamps
+handlers::api::caches::retained_probe_tests::stored_probe_admin_json_missing_id_conversion_and_ssrf
+handlers::api::caches::retained_probe_tests::add_probe_validates_without_writes_and_niks3_requires_token
+handlers::api::caches::retained_probe_tests::legacy_basic_probe_preserves_raw_url_and_sanitized_roundtrip
+handlers::api::caches::retained_probe_tests::legacy_query_probe_refuses_without_mutation_or_replay
+handlers::api::caches::retained_probe_tests::legacy_s3_presigned_endpoint_redacts_and_refuses_replay
+handlers::api::caches::retained_probe_tests::legacy_uri_type_conversion_strips_inherited_auth
 queries::cache_destinations::atomic_scope_tests::create_scope_failure_leaves_no_cache_credentials_or_global_fallback
 queries::cache_destinations::atomic_scope_tests::update_scope_failure_preserves_entire_config_ciphertext_and_assignments
 queries::cache_destinations::tests::niks3_selection_assigned_first_disabled_fallback_and_stable_order
@@ -92,11 +102,19 @@ queries::cache_publication_reads::tests::niks3_publication_rotation_race_before_
 queries::cache_publication_reads::tests::niks3_publication_assignment_race_before_claim_locks
 queries::cache_publication_reads::tests::niks3_publication_deletion_race_before_claim_locks
 queries::cache_publication_reads::tests::niks3_publication_assigned_gates_never_downgrade_to_proven_global
+builder::cve_worker::tests::materialization_completed_provenance_identity_and_eligibility
+handlers::api::caches::tests::niks3_api_create_rejects_malformed_keys_in_all_auth_modes
+handlers::api::caches::tests::niks3_api_update_rejects_malformed_keys_in_all_auth_modes
 ```
 
-These non-ignored tests run with `--exact --test-threads=1`:
+These 8 non-ignored tests run with `--exact --test-threads=1`:
 
 ```text
+handlers::api::caches::retained_probe_tests::active_type_metadata_and_serialization_never_reveal_inactive_credentials
+handlers::api::caches::retained_probe_tests::effective_update_never_borrows_inactive_credentials_on_type_conversion
+handlers::api::caches::retained_probe_tests::bearer_auth_is_exclusive_to_active_attic
+handlers::api::caches::retained_probe_tests::every_url_field_redacts_decoded_aws_queries_and_invalid_urls_fail_closed
+handlers::api::caches::s3_probe::tests::sigv4_signs_exact_bucket_host_path_query_and_sensitive_session
 handlers::agent_request::tests::niks3_capability_requires_authenticated_body_and_ignores_unsigned_headers
 handlers::agent::heartbeat::tests::niks3_selected_cache_never_drops_private_or_unsupported_first_for_fallback
 handlers::api::builders::tests::niks3_preclaim_capability_gate_preserves_legacy_cache_dispatch

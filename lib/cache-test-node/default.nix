@@ -6,7 +6,7 @@
 }: rec {
   # These reproducible private keys are public test data, never production keys.
   # Certificates are issued at build time so isolated VMs use valid TLS dates.
-  makeNiks3TestCredentials = {pkgs}: pkgs.runCommand "niks3-test-credentials" {
+  makeNiks3TestCredentials = {pkgs, extraDnsNames ? [], strictTls ? false}: pkgs.runCommand "niks3-test-credentials" {
     nativeBuildInputs = [pkgs.openssl (pkgs.python3.withPackages (p: [p.pynacl]))];
   } ''
     mkdir -p "$out"
@@ -31,14 +31,20 @@
             name + ":" + base64.b64encode(bytes(key.verify_key)).decode() + "\n")
     PY
     openssl req -new -x509 -key "$out/ca.key" -out "$out/ca.crt" \
-      -subj /CN=niks3-test-ca -days 3650 -set_serial 1
+      -subj /CN=niks3-test-ca -days 3650 -set_serial 1 ${lib.optionalString strictTls "-addext 'keyUsage=critical,keyCertSign,cRLSign'"}
     for name in server write read wrong; do
       openssl req -new -key "$out/$name.key" -out "$name.csr" -subj "/CN=$name"
       if [ "$name" = server ]; then
-        printf '%s\n' 'subjectAltName=DNS:cache,DNS:server,DNS:localhost,IP:127.0.0.1' 'extendedKeyUsage=serverAuth' > extensions
+        printf '%s\n' 'subjectAltName=DNS:cache,DNS:server,DNS:localhost,IP:127.0.0.1${lib.concatMapStrings (name: ",DNS:${name}") extraDnsNames}' 'extendedKeyUsage=serverAuth' > extensions
       else
         printf '%s\n' 'extendedKeyUsage=clientAuth' > extensions
       fi
+      ${lib.optionalString strictTls ''
+        # Python's current native TLS verifier requires RFC 5280 key usage and
+        # issuer identity. Keep legacy certificate generation unchanged unless
+        # the caller requests this stricter fixture profile.
+        printf '%s\n' 'keyUsage=critical,digitalSignature' 'authorityKeyIdentifier=keyid,issuer' 'subjectKeyIdentifier=hash' >> extensions
+      ''}
       openssl x509 -req -in "$name.csr" -CA "$out/ca.crt" -CAkey "$out/ca.key" \
         -set_serial "$(case "$name" in server) echo 2;; write) echo 3;; read) echo 4;; wrong) echo 5;; esac)" \
         -days 3650 -extfile extensions -out "$out/$name.crt"
@@ -52,6 +58,9 @@
     pkgs,
     credentials ? makeNiks3TestCredentials {inherit pkgs;},
     port ? 5751,
+    # Discovery must advertise the exact configured read plane. Existing native
+    # upload fixtures retain their public read URL unless callers opt in.
+    cacheUrl ? "https://cache:${toString port}",
     tlsReadProxy ? true,
     enableFirewall ? false,
     ...
@@ -112,7 +121,7 @@
           "--sign-key-path /run/niks3/signing-0.key --sign-key-path /run/niks3/signing-1.key"
           "--tls-cert ${credentials}/server.crt --tls-key /run/niks3/server.key"
           "--tls-client-ca ${credentials}/ca.crt --mtls-bound-subject CN=write"
-          "--enable-read-proxy --cache-url https://cache:${toString port}"
+          "--enable-read-proxy --cache-url ${lib.escapeShellArg cacheUrl}"
         ];
       };
     };

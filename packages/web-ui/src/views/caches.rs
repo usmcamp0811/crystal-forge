@@ -61,7 +61,7 @@ const CACHE_FORM_CSS: &str = r#"
 "#;
 
 // INVARIANT: Edit state contains replacements only. Configured flags permit
-// retention on save, but never substitute redacted secrets in a connection probe.
+// retention on save and by-ID probes; the browser never substitutes secrets.
 #[derive(Clone, PartialEq)]
 struct Niks3FormState {
     name: String,
@@ -459,7 +459,9 @@ impl CacheTypeDrafts {
             return Err("Select a supported cache type.".into());
         }
         let mut req = self.request(kind, common);
-        let retaining = retained.is_some_and(|d| cache_form_kind(&d.cache_type) == kind);
+        let selected = self.get(kind, "credential");
+        let retaining = (selected.is_empty() || selected == "__current__")
+            && retained.is_some_and(|d| retained_credential_configured(kind, d));
         if retaining && let Some(d) = retained {
             req.push_to = req
                 .push_to
@@ -467,7 +469,6 @@ impl CacheTypeDrafts {
                 .or_else(|| d.push_to.clone());
             req.s3_region = req.s3_region.or_else(|| d.s3_region.clone());
             req.s3_endpoint_url = req.s3_endpoint_url.or_else(|| d.s3_endpoint_url.clone());
-            req.s3_access_key_id = req.s3_access_key_id.or_else(|| d.s3_access_key_id.clone());
             req.attic_cache_name = req.attic_cache_name.or_else(|| d.attic_cache_name.clone());
             req.attic_public_key = req.attic_public_key.or_else(|| d.attic_public_key.clone());
         }
@@ -476,8 +477,9 @@ impl CacheTypeDrafts {
                 return Err("Enter an Attic token in Credentials.".into());
             }
             if kind == "s3"
-                && !retaining
-                && (req.s3_access_key_id.is_none() || req.s3_secret_access_key.is_none())
+                && ((!retaining
+                    && (req.s3_access_key_id.is_none() || req.s3_secret_access_key.is_none()))
+                    || (req.s3_access_key_id.is_some() != req.s3_secret_access_key.is_some()))
             {
                 return Err("Enter AWS access credentials in Credentials. The current API requires access keys even with a profile.".into());
             }
@@ -520,9 +522,9 @@ impl CacheTypeDrafts {
         Ok(())
     }
 
-    // COMPATIBILITY: Omitted fields retain stored configuration and ciphertext.
-    // Legacy conversions keep that existing server contract; unrelated edits
-    // never enable a disabled cache or rewrite inactive credential fields.
+    // COMPATIBILITY: Same-type omitted fields retain stored configuration
+    // and ciphertext. Type conversions require target-type credentials and
+    // clear incompatible secrets. Unrelated edits never enable a disabled cache.
     fn update_request(
         &self,
         kind: &str,
@@ -531,6 +533,14 @@ impl CacheTypeDrafts {
         original: Option<&CacheDestination>,
     ) -> UpdateCacheDestination {
         let req = self.request(kind, common);
+        // SECURITY: A new S3 identity must not borrow the previous session token.
+        // An omitted token retains it only when the entire identity is retained.
+        let replacement_session =
+            if req.s3_access_key_id.is_some() && req.s3_secret_access_key.is_some() {
+                Some(req.s3_session_token.clone().unwrap_or_default())
+            } else {
+                req.s3_session_token.clone()
+            };
         let mut update = UpdateCacheDestination {
             name: Some(req.name),
             cache_type: convert.then_some(req.cache_type),
@@ -542,7 +552,7 @@ impl CacheTypeDrafts {
             s3_endpoint_url: req.s3_endpoint_url,
             s3_access_key_id: req.s3_access_key_id,
             s3_secret_access_key: req.s3_secret_access_key,
-            s3_session_token: req.s3_session_token,
+            s3_session_token: replacement_session,
             attic_cache_name: req.attic_cache_name,
             attic_public_key: req.attic_public_key,
             attic_token: req.attic_token,
@@ -570,6 +580,39 @@ impl CacheTypeDrafts {
         }
         update
     }
+}
+
+// Configured entries describe only the active server identity, never inventory.
+fn retained_credential_configured(kind: &str, destination: &CacheDestination) -> bool {
+    cache_form_kind(&destination.cache_type) == kind
+        && match kind {
+            "attic" => destination.attic_token_configured,
+            "s3" => destination.s3_credentials_configured,
+            "nix" => {
+                destination.http_basic_auth_configured
+                    && !destination.legacy_query_credentials_configured
+            }
+            _ => false,
+        }
+}
+
+// INVARIANT: Save and Test submit the same patch. Tests merge retained material
+// only on the server; public sanitized URLs remain omitted when unchanged.
+fn cache_update_patch(
+    kind: &str,
+    form: &Niks3FormState,
+    drafts: &CacheTypeDrafts,
+    convert: bool,
+    original: Option<&CacheDestination>,
+    ids: Vec<Uuid>,
+) -> UpdateCacheDestination {
+    let mut update = if kind == "niks3" {
+        form.update_request()
+    } else {
+        drafts.update_request(kind, form, convert, original)
+    };
+    update.environment_ids = Some(ids);
+    update
 }
 
 #[component]
@@ -615,12 +658,22 @@ fn CacheDestinationForm(
         .as_ref()
         .map(|d| cache_form_kind(&d.cache_type))
         .unwrap_or("s3");
-    let initial_drafts = CacheTypeDrafts::from_destination(destination.as_ref());
+    let mut initial_drafts = CacheTypeDrafts::from_destination(destination.as_ref());
+    if destination
+        .as_ref()
+        .is_some_and(|d| retained_credential_configured(initial_kind, d))
+    {
+        initial_drafts
+            .0
+            .insert(format!("{initial_kind}.credential"), "__current__".into());
+    }
     let mut kind = use_signal(move || initial_kind);
     let mut type_changed = use_signal(|| false);
     let mut drafts = use_signal(move || initial_drafts);
     let mut credentials = use_signal(Vec::<LocalCredential>::new);
     let mut show_credential = use_signal(|| false);
+    let mut credential_modal_new = use_signal(|| true);
+    let mut identity_dialog = use_signal(|| None::<String>);
     let mut busy = use_signal(|| None::<&'static str>);
     let mut error = use_signal(|| None::<String>);
     let mut discovery_note = use_signal(|| None::<String>);
@@ -651,7 +704,6 @@ fn CacheDestinationForm(
         }
     });
     let retained = destination.clone();
-    let testing_retained = destination.clone();
     let type_label = match kind() {
         "s3" => "S3",
         "attic" => "Attic",
@@ -682,6 +734,73 @@ fn CacheDestinationForm(
     } else {
         save_validation.as_ref().err().cloned()
     };
+    let test_original = destination.clone();
+    let test_connection = EventHandler::new(move |_: MouseEvent| {
+        error.set(None);
+        result.set(None);
+        let validation = if kind() == "niks3" {
+            form().validate(test_original.as_ref())
+        } else {
+            drafts()
+                .validate(kind(), &form(), false, test_original.as_ref())
+                .and_then(|_| drafts().validate(kind(), &form(), true, test_original.as_ref()))
+        };
+        if let Err(message) = validation {
+            error.set(Some(format!("Test not run: {message}")));
+            return;
+        }
+        let patch = cache_update_patch(
+            kind(),
+            &form(),
+            &drafts(),
+            type_changed(),
+            test_original.as_ref(),
+            environment_ids(),
+        );
+        let mut create = if kind() == "niks3" {
+            form().request()
+        } else {
+            drafts().request(kind(), &form())
+        };
+        let legacy_query = kind() == "nix"
+            && patch.push_to.is_none()
+            && test_original
+                .as_ref()
+                .is_some_and(|d| d.legacy_query_credentials_configured);
+        create.environment_ids = Some(environment_ids());
+        busy.set(Some("test"));
+        spawn(async move {
+            let tested = if let Some(id) = editing_id {
+                client::test_stored_cache_destination_credentials(id, &patch).await
+            } else {
+                client::test_cache_destination_credentials(&create).await
+            };
+            match tested {
+                Ok(value) => result.set(Some(value)),
+                Err(ApiClientError::Status { code: 400, .. }) => error.set(Some(if legacy_query {
+                    "Legacy credential queries require migration before testing. The endpoint was not contacted."
+                } else {
+                    "Connection test rejected. Check destination values and credentials."
+                }.into())),
+                Err(_) => error.set(Some("Connection test failed. Check endpoint policy and credentials.".into())),
+            }
+            busy.set(None);
+        });
+    });
+    let current_configured = destination
+        .as_ref()
+        .is_some_and(|d| retained_credential_configured(kind(), d));
+    let credential_draft = drafts().get(kind(), "credential");
+    let selected_credential = credentials().into_iter().find(|c| c.id == credential_draft);
+    let selected_local_credential = selected_credential.is_some();
+    let url_changed = destination
+        .as_ref()
+        .is_some_and(|d| kind() == "nix" && d.push_to.as_deref() != Some(form().read_url.trim()));
+    let migration_required = kind() == "nix"
+        && !url_changed
+        && destination
+            .as_ref()
+            .is_some_and(|d| d.legacy_query_credentials_configured);
     rsx! {
         div { class: "modal-backdrop", style: "padding:8px;", onclick: move |_| { if busy().is_none() { on_close.call(()); } },
             style { "{CACHE_FORM_CSS}" }
@@ -690,7 +809,7 @@ fn CacheDestinationForm(
                     event.stop_propagation();
                     if event.key() == Key::Escape {
                         event.prevent_default();
-                        if busy().is_none() && !show_credential() { on_close.call(()); }
+                        if busy().is_none() && !show_credential() && identity_dialog().is_none() { on_close.call(()); }
                     } else if event.key() == Key::Tab && busy().is_some() {
                         event.prevent_default();
                     }
@@ -707,7 +826,7 @@ fn CacheDestinationForm(
                             span { style: "color:var(--cf-brand-purple);display:flex;", Icon { name: if destination.is_some() { IconName::Gear } else { IconName::Plus }, size: 15 } }
                             h2 { class: "pe-head-title", if form().name.trim().is_empty() { if let Some(d) = destination.as_ref() { "{d.name}" } else { "Add cache destination" } } else { "{form().name}" } }
                             span { class: "chip chip-info", "{type_label}" }
-                            span { id: "cache-destination-busy", tabindex: "-1", class: "chip", if busy().is_some() { "Working" } else if error().is_some() { "Needs attention" } else { "Unsaved draft" } }
+                            span { id: "cache-destination-busy", tabindex: "-1", class: "chip", if busy().is_some() { "Working" } else if migration_required { "Migration required" } else if error().is_some() { "Needs attention" } else if save_validation.is_ok() { "Set" } else { "Unsaved draft" } }
                         }
                         p { id: "cache-destination-description", class: "pe-head-sub", if destination.is_some() { "Update binary cache destination." } else { "Register a new binary cache destination." } }
                     }
@@ -718,10 +837,10 @@ fn CacheDestinationForm(
                         button { aria_label: label, aria_current: if section() == id { "true" } else { "false" }, disabled: busy().is_some(), class: if section() == id { "pe-rail-item focus-ring active" } else { "pe-rail-item focus-ring" }, onclick: move |_| section.set(id),
                             Icon { name: icon, size: 13 }
                             span { class: "pe-rail-label", "{label}" }
-                            span { class: if (id == "dest" && destination_valid.is_err()) || (id == "auth" && credentials_valid.is_err()) { "pe-rail-badge warn" } else { "pe-rail-badge" }, title: "Draft validation and scope; not connection verification",
+                            span { class: if (id == "dest" && destination_valid.is_err()) || (id == "auth" && (credentials_valid.is_err() || migration_required)) { "pe-rail-badge warn" } else { "pe-rail-badge" }, title: "Draft validation and scope; not connection verification",
                                 if id == "envs" { if scope_ready { "{environment_ids().len()}" } else { "!" } }
                                 else if id == "dest" { if destination_valid.is_ok() { "Set" } else { "!" } }
-                                else { if credentials_valid.is_ok() { "Set" } else { "Review" } }
+                                else { if credentials_valid.is_ok() && !migration_required { "Set" } else { "Review" } }
                             }
                         }
                     }
@@ -754,7 +873,7 @@ fn CacheDestinationForm(
                                 }
                             }
                             if destination.as_ref().is_some_and(|d| cache_form_kind(&d.cache_type) == "niks3") { p { class: "help", "Editing retains the Niks3 destination type and stored credential boundary." } }
-                            else if destination.is_some() { p { class: "help", "Legacy type changes are explicit. Blank secrets retain configured material; inactive fields are not deleted." } }
+                             else if destination.is_some() { p { class: "help", "Type changes require a replacement identity for the selected type. An unrelated edit retains the current configured credential." } }
                         }
                         if kind() == "s3" {
                             CacheDraftField { kind: "s3", field: "url", label: "Destination URL", drafts, result, secret: false }
@@ -796,103 +915,88 @@ fn CacheDestinationForm(
                         }
                     }
                     if section() == "auth" && kind() != "niks3" {
-                        div { class: "pe-sec-head", h3 { "Credentials" } p { "Select a draft credential or enter the destination credentials below. Secrets are encrypted on save." } }
+                        div { class: "pe-sec-head", h3 { "Credentials" } p { "Use the current configured credential or select a dialog-local replacement. Secrets are encrypted on save." } }
                         div { class: "field", label { style: "display:flex;gap:9px;align-items:flex-start;margin:0;text-transform:none;letter-spacing:0;",
-                            input { r#type: "checkbox", checked: kind() != "nix", disabled: true, style: "accent-color:var(--cf-brand-purple);margin-top:1px;" }
-                            span { "Requires authentication" div { class: "help", if kind() == "nix" { "Managed by the executing Nix store configuration." } else { "Required by the current destination API; anonymous publication is not supported." } } }
+                            input { r#type: "checkbox", checked: kind() != "nix" || (current_configured && !url_changed), disabled: true, style: "accent-color:var(--cf-brand-purple);margin-top:1px;" }
+                            span { "Requires authentication" div { class: "help", if kind() == "nix" { if current_configured { "HTTP Basic credentials remain on the server." } else { "Public read access or the executing Nix store configuration." } } else { "Required by the current destination API; anonymous publication is not supported." } } }
                         } }
                         if kind() == "nix" {
                             p { class: "help", "Nix HTTPS uses the configured Nix store mechanism. A generic bearer-token provider is not supported by this destination type." }
+                            if destination.as_ref().is_some_and(|d| d.legacy_query_credentials_configured) {
+                                p { role: "status", "Legacy query credentials: migration required. Testing rejects credential queries before contacting the endpoint. An unrelated save preserves the existing server-only URL." }
+                            }
+                            div { class: "field", label { r#for: "cache-http-credential", "Read access" }
+                                div { style: "display:flex;gap:8px;align-items:center;",
+                                    select { id: "cache-http-credential", class: "input focus-ring", disabled: true, value: if migration_required { "__migration__" } else if current_configured && !url_changed { "__current__" } else { "__anonymous__" },
+                                        option { value: if migration_required { "__migration__" } else if current_configured && !url_changed { "__current__" } else { "__anonymous__" }, selected: true, if migration_required { "Migration required" } else if current_configured && !url_changed { "Current configured credential" } else { "Anonymous read access" } }
+                                    }
+                                    button { class: "btn btn-ghost focus-ring xs", onclick: test_connection, if busy() == Some("test") { "Testing…" } else { "Test connection" } }
+                                }
+                            }
+                            if current_configured { p { class: "help", "Stored HTTP Basic credentials can be retained and tested by ID. Replacing Basic credentials is not available in this form." } }
+                            if url_changed && destination.as_ref().is_some_and(|d| d.http_basic_auth_configured || d.legacy_query_credentials_configured) { p { role: "status", "URL changed: stored URL credentials will not be forwarded to the new destination. The new URL must provide its own supported access configuration." } }
                         } else {
-                            if destination.is_some() { p { class: "help", "Stored secrets are never returned. Leave secret fields blank to retain configured material. The server validates retained credentials on save." } }
+                            if current_configured { p { class: "help", if credential_draft == "__current__" { "Credentials stored. Test uses the configured identity without retrieving its secrets." } else { "Replacement selected. Save replaces the configured identity; Cancel discards this dialog's draft." } } }
                             div { class: "field", label { r#for: "cache-credential", "Credential" }
                                 div { style: "display:flex;gap:8px;align-items:center;",
                                 select { id: "cache-credential", class: "input focus-ring", value: drafts().get(kind(), "credential"), onchange: move |e| {
                                     result.set(None);
                                     let id = e.value();
-                                    if id == "__new__" { show_credential.set(true); } else {
+                                    if id == "__new__" { credential_modal_new.set(true); show_credential.set(true); } else {
                                         drafts.write().0.insert(format!("{}.credential", kind()), id.clone());
                                         if let Some(cred) = credentials().iter().find(|c| c.id == id) {
                                             let (profile, access, secret, token) = credential_fields_for_request(Some(cred));
-                                            for (field, value) in [("profile", profile), ("access", access), ("secret", secret), ("token", token)] {
+                                            for (field, value) in [("profile", profile), ("access", access), ("secret", secret), ("token", token), ("session", cred.session_token.clone())] {
                                                 drafts.write().0.insert(format!("{}.{field}", kind()), value.unwrap_or_default());
                                             }
+                                        } else {
+                                            for field in ["access", "secret", "token", "session"] { drafts.write().0.remove(&format!("{}.{field}", kind())); }
                                         }
                                     }
                                 },
-                                    option { value: "", selected: !show_credential() && drafts().get(kind(), "credential").is_empty(), "Enter credentials below…" }
+                                    option { value: "", selected: !show_credential() && drafts().get(kind(), "credential").is_empty(), "Select a credential…" }
+                                    if current_configured { option { value: "__current__", selected: credential_draft == "__current__", "Current configured credential" } }
                                     // Newly confirmed options can be inserted after the
                                     // select value is patched. Select the option itself
                                     // so the visible credential matches the draft ID.
                                     for cred in credentials().into_iter().filter(|c| credential_matches_cache_type(c, kind())) { option { value: "{cred.id}", selected: !show_credential() && drafts().get(kind(), "credential") == cred.id, "{credential_label(&cred)}" } }
-                                    option { value: "__new__", "+ Add new credential…" }
+                                    option { value: "__new__", if current_configured { "+ Replace credential…" } else { "+ Add new credential…" } }
                                 }
-                                button { id: "cache-add-credential", class: "btn btn-ghost focus-ring xs", r#type: "button", onclick: move |_| show_credential.set(true), "Add credential" }
+                                button { class: "btn btn-ghost focus-ring xs", onclick: test_connection, if busy() == Some("test") { "Testing…" } else { "Test connection" } }
                                 }
+                                button { id: "cache-add-credential", class: "btn btn-ghost focus-ring xs", r#type: "button", style: "margin-top:8px;width:fit-content;display:inline-flex;", onclick: move |_| { credential_modal_new.set(!selected_local_credential); show_credential.set(true); }, if selected_local_credential { "Edit credential" } else if current_configured { "Replace credential" } else { "Add credential" } }
                                 p { class: "help", "Credential drafts are available for this dialog only; they are not a server-side credential library." }
                             }
-                            if kind() == "attic" { CacheDraftField { kind: "attic", field: "token", label: "Attic token", drafts, result, secret: true } }
                             if kind() == "s3" {
                                 CacheDraftField { kind: "s3", field: "profile", label: "S3 profile (optional)", drafts, result, secret: false }
                                 p { class: "help", "Uses a profile already configured on the executing builder. The legacy IAM-role credential maps to this profile field; this form does not assume a role. The current API also requires access keys." }
-                                CacheDraftField { kind: "s3", field: "access", label: "AWS access key ID", drafts, result, secret: false }
-                                CacheDraftField { kind: "s3", field: "secret", label: "AWS secret access key", drafts, result, secret: true }
-                                CacheDraftField { kind: "s3", field: "session", label: "AWS session token (optional)", drafts, result, secret: true }
                             }
                         }
-                        button { class: "btn btn-ghost focus-ring", onclick: move |_| {
-                            error.set(None); result.set(None);
-                            if let Err(message) = drafts().validate(kind(), &form(), false, None).and_then(|_| drafts().validate(kind(), &form(), true, None)) { error.set(Some(format!("Test not run: {message} Supply replacement credentials; stored secrets cannot be retrieved for this probe."))); return; }
-                            let req = drafts().request(kind(), &form()); busy.set(Some("test"));
-                            spawn(async move { match client::test_cache_destination_credentials(&req).await {
-                                Ok(value) => result.set(Some(value)),
-                                Err(_) => error.set(Some("Connection test failed. Check endpoint policy and credentials.".into())),
-                            } busy.set(None); });
-                        }, if busy() == Some("test") { "Testing…" } else { "Test connection" } }
-                        if let Some(test) = result() { p { role: "status", if test.ok { "Connection verified." } else { "Connection failed. Check endpoint configuration." } } }
+                        if let Some(test) = result() { p { role: "status", if test.ok { if kind() == "s3" { "Bucket read access verified. Write authorization: Untested." } else { "Connection verified." } } else { "Connection failed. Check endpoint configuration." } } }
                     }
                     if section() == "auth" && kind() == "niks3" {
                         div { class: "pe-sec-head", h3 { "Credentials" } p { "Write credentials stay on builders. Read credentials go only to assigned agents." } }
-                        div { class: "field", label { r#for: "niks3-read-mode", "Read authentication" }
-                            select { id: "niks3-read-mode", class: "input focus-ring", value: form().read_mode, onchange: move |e| { result.set(None); let mut state = form.write(); state.read_mode = e.value(); state.read_cert.clear(); state.read_key.clear(); state.read_ca.clear(); state.clear_read_ca = false; },
-                                option { value: "none", "Public (none)" } option { value: "mtls", "mTLS" }
-                            }
-                        }
-                        div { class: "field", label { r#for: "niks3-write-mode", "Write authentication" }
-                            select { id: "niks3-write-mode", class: "input focus-ring", value: form().write_mode, onchange: move |e| { result.set(None); let mut state = form.write(); state.write_mode = e.value(); state.token.clear(); state.write_cert.clear(); state.write_key.clear(); state.write_ca.clear(); state.clear_write_ca = false; },
-                                option { value: "token", "Static token" } option { value: "mtls", "mTLS" }
-                            }
-                        }
-                        if form().write_mode == "token" {
-                            Niks3TextField { label: "Write token", field: "token", form, result, multiline: false, secret: true,
-                                hint: if destination.as_ref().is_some_and(|d| d.niks3_write_token_configured) { "Token configured. Leave blank to retain; enter a new token to rotate.".to_string() } else { "Required for token writes.".to_string() }
-                            }
-                        }
-                        for (plane, cert_field, key_field, ca_field, configured, has_ca) in [
-                            ("Read", "read_cert", "read_key", "read_ca", destination.as_ref().is_some_and(|d| d.niks3_read_mtls_configured), destination.as_ref().is_some_and(|d| d.niks3_read_ca_cert.is_some())),
-                            ("Write", "write_cert", "write_key", "write_ca", destination.as_ref().is_some_and(|d| d.niks3_write_mtls_configured), destination.as_ref().is_some_and(|d| d.niks3_write_ca_cert.is_some())),
-                        ] {
-                            if (plane == "Write" && form().write_mode == "mtls") || (plane == "Read" && form().read_mode == "mtls") {
-                                h4 { "{plane} mTLS identity" }
-                                p { class: "help", if configured { "Identity configured. Leave both identity fields blank to retain, or replace certificate and key together." } else { "Enter a client certificate and private key together." } }
-                                Niks3TextField { label: if plane == "Write" { "Write client certificate" } else { "Read client certificate" }, field: cert_field, form, result, multiline: true, secret: false, hint: "PEM certificate.".to_string() }
-                                Niks3TextField { label: if plane == "Write" { "Write private key" } else { "Read private key" }, field: key_field, form, result, multiline: true, secret: true, hint: "PEM private key. Stored keys are never returned.".to_string() }
-                                Niks3TextField { label: if plane == "Write" { "Write CA certificate (optional)" } else { "Read CA certificate (optional)" }, field: ca_field, form, result, multiline: true, secret: false, hint: if has_ca { "Custom CA configured. Blank retains it.".to_string() } else { "Blank uses system trust.".to_string() } }
-                                if has_ca { label { input { r#type: "checkbox", checked: if plane == "Write" { form().clear_write_ca } else { form().clear_read_ca }, onchange: move |e| { result.set(None); if plane == "Write" { form.write().clear_write_ca = e.checked(); } else { form.write().clear_read_ca = e.checked(); } } } " Remove {plane} custom CA on save" } }
+                        for plane in ["Read", "Write"] {
+                            section { aria_label: "{plane} identity", style: "margin-bottom:18px;",
+                                if plane == "Read" {
+                                    div { class: "field", label { r#for: "niks3-read-mode", "Read authentication" }
+                                        select { id: "niks3-read-mode", class: "input focus-ring", value: form().read_mode, onchange: move |e| { result.set(None); let mut state = form.write(); state.read_mode = e.value(); state.read_cert.clear(); state.read_key.clear(); state.read_ca.clear(); state.clear_read_ca = false; },
+                                            option { value: "none", "Public (none)" } option { value: "mtls", "mTLS" }
+                                        }
+                                    }
+                                } else {
+                                    div { class: "field", label { r#for: "niks3-write-mode", "Write authentication" }
+                                        select { id: "niks3-write-mode", class: "input focus-ring", value: form().write_mode, onchange: move |e| { result.set(None); let mut state = form.write(); state.write_mode = e.value(); state.token.clear(); state.write_cert.clear(); state.write_key.clear(); state.write_ca.clear(); state.clear_write_ca = false; },
+                                            option { value: "token", "Static token" } option { value: "mtls", "mTLS" }
+                                        }
+                                    }
+                                }
+                                if plane == "Write" || form().read_mode == "mtls" {
+                                    Niks3CredentialControl { plane: plane.to_string(), form, result, destination: destination.clone(), on_open: move |plane| identity_dialog.set(Some(plane)), on_test: test_connection, testing: busy() == Some("test") }
+                                } else { p { class: "help", "Public read access. No read credential is sent." } }
                             }
                         }
                         p { class: "help", "Changing authentication modes clears previous credentials on save. External credential providers are not offered." }
-                        button { class: "btn btn-ghost focus-ring", disabled: busy().is_some(), onclick: move |_| {
-                            error.set(None); result.set(None);
-                            if let Err(message) = form().validate(None) {
-                                error.set(Some(if testing_retained.is_some() { format!("Test not run: {message} Stored secrets cannot be retrieved; supply a replacement identity for a non-mutating probe.") } else { format!("Test not run: {message}") })); return;
-                            }
-                            let req = form().request(); busy.set(Some("test"));
-                            spawn(async move { match client::test_cache_destination_credentials(&req).await {
-                                Ok(value) => result.set(Some(value)),
-                                Err(_) => error.set(Some("Connection test failed. Check endpoint policy and TLS credentials.".into())),
-                            } busy.set(None); });
-                        }, if busy() == Some("test") { "Testing…" } else { "Test connection" } }
                         if let Some(test) = result() {
                             div { role: "status", "data-testid": "niks3-test-result",
                                 for (label, value) in [("API reachable", test.server_reachable), ("Discovery valid", test.discovery_valid), ("Write authorization", test.write_auth_valid), ("Read endpoint reachable", test.read_endpoint_reachable), ("Signing keys found", test.signing_keys_found)] {
@@ -924,7 +1028,7 @@ fn CacheDestinationForm(
                 footer { class: "pe-foot",
                     div { class: "pe-foot-state", style: CACHE_FORM_FOOT_STATE_STYLE,
                     span { if form().name.trim().is_empty() { "Unnamed cache" } else { "{form().name}" } span { class: "pe-foot-dot", "·" } "{type_label}" span { class: "pe-foot-dot", "·" }
-                        if kind() == "niks3" { "{form().write_mode} writes / {form().read_mode} reads" } else if kind() == "nix" { "Nix store auth" } else if credentials_valid.is_ok() { "Credential set" } else { "Credential required" }
+                        if kind() == "niks3" { "{form().write_mode} writes / {form().read_mode} reads" } else if migration_required { "Credential migration required" } else if kind() == "nix" { if current_configured && !url_changed { "Credentials stored" } else { "Public read access" } } else if credential_draft == "__current__" && current_configured { "Credentials stored" } else if credentials_valid.is_ok() { "Credential draft set" } else { "Credential required" }
                         span { class: "pe-foot-dot", "·" } if !scope_ready { "Scope not loaded" } else if environment_ids().is_empty() { "Global scope" } else { "{environment_ids().len()} selected" } }
                     if let Some(reason) = blocked_reason.as_ref() { p { id: "cache-save-blocked", "data-testid": "cache-save-blocked", role: "status", aria_live: "polite", style: "margin:4px 0 0;", "{reason}" } }
                     }
@@ -935,8 +1039,7 @@ fn CacheDestinationForm(
                         let validation = if kind() == "niks3" { form().validate(retained.as_ref()) } else { drafts().validate(kind(), &form(), false, retained.as_ref()).and_then(|_| drafts().validate(kind(), &form(), true, retained.as_ref())) };
                         if let Err(message) = validation { error.set(Some(format!("Save not run: {message}"))); return; }
                         let mut req = if kind() == "niks3" { form().request() } else { drafts().request(kind(), &form()) }; let state = form(); let ids = environment_ids(); req.environment_ids = Some(ids.clone());
-                        let mut update = if kind() == "niks3" { state.update_request() } else { drafts().update_request(kind(), &state, type_changed(), retained.as_ref()) };
-                        update.environment_ids = Some(ids);
+                         let update = cache_update_patch(kind(), &state, &drafts(), type_changed(), retained.as_ref(), ids);
                         busy.set(Some("save"));
                         spawn(async move {
                             let saved = if let Some(id) = editing_id {
@@ -954,17 +1057,164 @@ fn CacheDestinationForm(
                 DialogFocusSentinel { dialog_id: "cache-destination-dialog".to_string(), boundary: DialogFocusBoundary::First }
             }
         }
-        if show_credential() { CacheCredModal { cache_type: kind().to_string(), on_close: move |value: Option<LocalCredential>| {
+        if show_credential() { CacheCredModal { cache_type: kind().to_string(), initial: if credential_modal_new() { None } else { selected_credential }, on_close: move |value: Option<LocalCredential>| {
             show_credential.set(false);
             if let Some(cred) = value {
                 result.set(None);
                 let (profile, access, secret, token) = credential_fields_for_request(Some(&cred));
-                for (field, value) in [("profile", profile), ("access", access), ("secret", secret), ("token", token)] { drafts.write().0.insert(format!("{}.{field}", kind()), value.unwrap_or_default()); }
+                for (field, value) in [("profile", profile), ("access", access), ("secret", secret), ("token", token), ("session", cred.session_token.clone())] {
+                    // A key draft must not erase an independently configured
+                    // builder profile when that draft has no profile override.
+                    if field != "profile" || value.is_some() { drafts.write().0.insert(format!("{}.{field}", kind()), value.unwrap_or_default()); }
+                }
                 drafts.write().0.insert(format!("{}.credential", kind()), cred.id.clone());
+                if current_configured
+                    && drafts().request(kind(), &form()).attic_token.is_none()
+                    && drafts().request(kind(), &form()).s3_access_key_id.is_none()
+                    && drafts().request(kind(), &form()).s3_secret_access_key.is_none() {
+                    drafts.write().0.insert(format!("{}.credential", kind()), "__current__".into());
+                }
+                credentials.write().retain(|c| c.id != cred.id);
                 credentials.write().push(cred);
             }
         } } }
+        if let Some(plane) = identity_dialog() {
+            Niks3CredentialModal { plane: plane.clone(), initial: form(), destination: destination.clone(), on_close: move |replacement: Option<Niks3FormState>| {
+                identity_dialog.set(None);
+                if let Some(replacement) = replacement {
+                    result.set(None);
+                    let mut state = form.write();
+                    // Each modal owns only its plane. Confirming read auth must
+                    // never overwrite write auth or the destination/scope draft.
+                    if plane == "Write" {
+                        state.token = replacement.token; state.write_cert = replacement.write_cert;
+                        state.write_key = replacement.write_key; state.write_ca = replacement.write_ca;
+                        state.clear_write_ca = replacement.clear_write_ca;
+                    } else {
+                        state.read_cert = replacement.read_cert; state.read_key = replacement.read_key;
+                        state.read_ca = replacement.read_ca; state.clear_read_ca = replacement.clear_read_ca;
+                    }
+                }
+            } }
+        }
     }
+}
+
+fn niks3_identity_configured(
+    plane: &str,
+    form: &Niks3FormState,
+    destination: Option<&CacheDestination>,
+) -> bool {
+    destination.is_some_and(|d| {
+        cache_form_kind(&d.cache_type) == "niks3"
+            && if plane == "Write" {
+                d.niks3_write_auth_mode.as_deref() == Some(form.write_mode.as_str())
+                    && if form.write_mode == "token" {
+                        d.niks3_write_token_configured
+                    } else {
+                        d.niks3_write_mtls_configured
+                    }
+            } else {
+                d.niks3_read_auth_mode.as_deref() == Some("mtls")
+                    && form.read_mode == "mtls"
+                    && d.niks3_read_mtls_configured
+            }
+    })
+}
+
+fn niks3_identity_draft(plane: &str, form: &Niks3FormState) -> bool {
+    if plane == "Write" {
+        !form.token.trim().is_empty()
+            || !form.write_cert.trim().is_empty()
+            || !form.write_key.trim().is_empty()
+            || !form.write_ca.trim().is_empty()
+            || form.clear_write_ca
+    } else {
+        !form.read_cert.trim().is_empty()
+            || !form.read_key.trim().is_empty()
+            || !form.read_ca.trim().is_empty()
+            || form.clear_read_ca
+    }
+}
+
+/// Renders independent configured and replacement choices for one Niks3 plane.
+#[component]
+fn Niks3CredentialControl(
+    plane: String,
+    mut form: Signal<Niks3FormState>,
+    mut result: Signal<Option<crate::api::models::CacheCredentialTestResult>>,
+    destination: Option<CacheDestination>,
+    on_open: EventHandler<String>,
+    on_test: EventHandler<MouseEvent>,
+    testing: bool,
+) -> Element {
+    let configured = niks3_identity_configured(&plane, &form(), destination.as_ref());
+    let draft = niks3_identity_draft(&plane, &form());
+    let id = format!("niks3-{}-credential", plane.to_lowercase());
+    let selection_plane = plane.clone();
+    rsx! { div { class: "field",
+        label { r#for: "{id}", "{plane} credential" }
+        div { style: "display:flex;gap:8px;align-items:center;",
+            select { id, class: "input focus-ring", value: if draft { "__draft__" } else if configured { "__current__" } else { "" }, onchange: move |e| {
+                if e.value() == "__new__" { on_open.call(selection_plane.clone()); }
+                else if e.value() == "__current__" {
+                    result.set(None); let mut state = form.write();
+                    if selection_plane == "Write" { state.token.clear(); state.write_cert.clear(); state.write_key.clear(); state.write_ca.clear(); state.clear_write_ca = false; }
+                    else { state.read_cert.clear(); state.read_key.clear(); state.read_ca.clear(); state.clear_read_ca = false; }
+                }
+            },
+                option { value: "", selected: !draft && !configured, "Select a credential…" }
+                if configured { option { value: "__current__", selected: !draft, "Current configured credential" } }
+                if draft { option { value: "__draft__", selected: true, "Replacement credential draft" } }
+                option { value: "__new__", "+ Enter credential…" }
+            }
+            if plane == "Write" { button { class: "btn btn-ghost focus-ring xs", onclick: on_test, if testing { "Testing…" } else { "Test connection" } } }
+        }
+        button { class: "btn btn-ghost focus-ring xs", style: "margin-top:8px;width:fit-content;display:inline-flex;", onclick: { let plane = plane.clone(); move |_| on_open.call(plane.clone()) }, if configured { "Replace {plane} credential" } else if draft { "Edit {plane} credential" } else { "Add {plane} credential" } }
+        p { class: "help", if draft { "Replacement draft selected. Cancel the cache dialog to discard it." } else if configured { "Credentials stored. Secrets remain on the server." } else { "Enter this plane's identity in its credential dialog." } }
+    } }
+}
+
+/// Edits a snapshot of one Niks3 identity without persisting or mutating its parent.
+/// Cancel discards this snapshot. Confirmation returns replacements and CA clears.
+#[component]
+fn Niks3CredentialModal(
+    plane: String,
+    initial: Niks3FormState,
+    destination: Option<CacheDestination>,
+    on_close: EventHandler<Option<Niks3FormState>>,
+) -> Element {
+    let mut form = use_signal(move || initial);
+    let result = use_signal(|| None::<crate::api::models::CacheCredentialTestResult>);
+    let write = plane == "Write";
+    let configured = niks3_identity_configured(&plane, &form(), destination.as_ref());
+    let has_ca = destination.as_ref().is_some_and(|d| {
+        if write {
+            d.niks3_write_ca_cert.is_some()
+        } else {
+            d.niks3_read_ca_cert.is_some()
+        }
+    });
+    rsx! { div { class: "modal-backdrop modal-backdrop-above-drawer", style: CACHE_CREDENTIAL_BACKDROP_STYLE, onclick: move |e| { e.stop_propagation(); on_close.call(None); },
+        div { id: "niks3-credential-dialog", class: "modal", style: CACHE_CREDENTIAL_DIALOG_STYLE, role: "dialog", aria_modal: "true", aria_label: "{plane} credential", tabindex: "-1", onclick: move |e| e.stop_propagation(), onkeydown: move |e| { e.stop_propagation(); if e.key() == Key::Escape { e.prevent_default(); on_close.call(None); } },
+            DialogFocusRestore {} DialogInitialFocus { dialog_id: "niks3-credential-dialog".to_string() }
+            DialogFocusSentinel { dialog_id: "niks3-credential-dialog".to_string(), boundary: DialogFocusBoundary::Last }
+            div { class: "modal-head", h2 { "{plane} credential" } }
+            div { class: "modal-body",
+                p { class: "help", if configured { "Leave identity fields blank to retain stored credentials. Replace certificate and key together." } else { "Confirm a local credential draft. The cache Save action persists it." } }
+                if write && form().write_mode == "token" {
+                    Niks3TextField { label: "Write token", field: "token", form, result, multiline: false, secret: true, hint: "Stored tokens are never returned.".to_string() }
+                } else {
+                    Niks3TextField { label: "{plane} client certificate", field: if write { "write_cert" } else { "read_cert" }, form, result, multiline: true, secret: false, hint: "PEM client certificate.".to_string() }
+                    Niks3TextField { label: "{plane} private key", field: if write { "write_key" } else { "read_key" }, form, result, multiline: true, secret: true, hint: "PEM private key. Stored keys are never returned.".to_string() }
+                    Niks3TextField { label: "{plane} CA certificate (optional)", field: if write { "write_ca" } else { "read_ca" }, form, result, multiline: true, secret: false, hint: if has_ca { "Blank retains the configured CA.".to_string() } else { "Blank uses system trust.".to_string() } }
+                    if has_ca { label { input { r#type: "checkbox", checked: if write { form().clear_write_ca } else { form().clear_read_ca }, onchange: move |e| { if write { form.write().clear_write_ca = e.checked(); } else { form.write().clear_read_ca = e.checked(); } } } " Remove {plane} custom CA on save" } }
+                }
+            }
+            div { class: "modal-foot", button { class: "btn btn-ghost focus-ring", onclick: move |_| on_close.call(None), "Cancel" } button { class: "btn btn-primary focus-ring", onclick: move |_| on_close.call(Some(form())), "Use credential" } }
+            DialogFocusSentinel { dialog_id: "niks3-credential-dialog".to_string(), boundary: DialogFocusBoundary::First }
+        }
+    } }
 }
 
 fn is_http_url(value: &str) -> bool {
@@ -1219,6 +1469,7 @@ struct LocalCredential {
     secret_access_key: Option<String>,
     role_arn: Option<String>,
     token: Option<String>,
+    session_token: Option<String>,
 }
 
 fn credential_label(cred: &LocalCredential) -> String {
@@ -1630,9 +1881,18 @@ fn CacheDestinationsList(
 /// Closing restores focus to the opener. Escape cancels only this dialog;
 /// confirmation returns draft fields without persisting a credential inventory.
 #[component]
-fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<LocalCredential>>) -> Element {
+fn CacheCredModal(
+    cache_type: String,
+    initial: Option<LocalCredential>,
+    on_close: EventHandler<Option<LocalCredential>>,
+) -> Element {
     let mut cred_kind = use_signal(|| {
-        if cache_type == "s3" {
+        if initial
+            .as_ref()
+            .is_some_and(|c| c.kind == LocalCredentialKind::AwsRole)
+        {
+            "aws-role"
+        } else if cache_type == "s3" {
             "aws-key"
         } else if cache_type == "attic" {
             "attic-token"
@@ -1640,11 +1900,20 @@ fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<LocalCredent
             "nix-token"
         }
     });
-    let mut cred_name = use_signal(String::new);
-    let mut cred_access_key = use_signal(String::new);
-    let mut cred_secret_key = use_signal(String::new);
-    let mut cred_token = use_signal(String::new);
-    let mut cred_role_arn = use_signal(String::new);
+    let seed = initial.clone();
+    let mut cred_name = use_signal(move || seed.map(|c| c.name).unwrap_or_default());
+    let seed = initial.clone();
+    let mut cred_access_key =
+        use_signal(move || seed.and_then(|c| c.access_key_id).unwrap_or_default());
+    let seed = initial.clone();
+    let mut cred_secret_key =
+        use_signal(move || seed.and_then(|c| c.secret_access_key).unwrap_or_default());
+    let seed = initial.clone();
+    let mut cred_token = use_signal(move || seed.and_then(|c| c.token).unwrap_or_default());
+    let seed = initial.clone();
+    let mut cred_role_arn = use_signal(move || seed.and_then(|c| c.role_arn).unwrap_or_default());
+    let mut cred_session =
+        use_signal(move || initial.and_then(|c| c.session_token).unwrap_or_default());
 
     rsx! {
         div {
@@ -1767,6 +2036,10 @@ fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<LocalCredent
                                 placeholder: "AKIA…"
                             }
                         }
+                        div { class: "field", label { r#for: "cache-credential-session", "AWS session token (optional)" }
+                            input { id: "cache-credential-session", autocomplete: "off", r#type: "password", class: "input focus-ring mono", value: cred_session(), oninput: move |e| cred_session.set(e.value()) }
+                            p { class: "help", "Blank clears a previous session token when replacing access keys. Retaining the current configured credential preserves it." }
+                        }
                         div {
                             class: "field",
                             label { r#for: "cache-credential-secret", "Secret access key" }
@@ -1842,7 +2115,7 @@ fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<LocalCredent
                         disabled: cred_name().trim().is_empty(),
                         onclick: move |_| {
                             let name = cred_name();
-                            let cred_id = format!("cred-{}", name.to_lowercase().replace(|c: char| !c.is_ascii_alphanumeric(), "-"));
+                            let cred_id = format!("cred-{cache_type}-{}", name.to_lowercase().replace(|c: char| !c.is_ascii_alphanumeric(), "-"));
                             let credential = LocalCredential {
                                 id: cred_id,
                                 name,
@@ -1856,6 +2129,7 @@ fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<LocalCredent
                                 secret_access_key: if cred_kind() == "aws-key" { Some(cred_secret_key()) } else { None },
                                 role_arn: if cred_kind() == "aws-role" { Some(cred_role_arn()) } else { None },
                                 token: if cred_kind() == "attic-token" || cred_kind() == "nix-token" { Some(cred_token()) } else { None },
+                                session_token: if cred_kind() == "aws-key" { Some(cred_session()) } else { None },
                             };
                             on_close.call(Some(credential));
                         },
@@ -3122,7 +3396,8 @@ mod tests {
                 "s3_endpoint_url": "https://s3.example", "s3_secret_access_key": "must-not-prefill",
                 "s3_session_token": "must-not-prefill", "attic_token": "must-not-prefill",
                 "attic_cache_name": "fixture", "attic_public_key": "fixture:AAAA", "compression": "zstd",
-                "signing_key_path": "/fixture/key"
+                "signing_key_path": "/fixture/key", "attic_token_configured": cache_type == "Attic",
+                "s3_credentials_configured": cache_type == "S3"
             })).unwrap();
             let common = Niks3FormState::from_destination(Some(&destination));
             let drafts = CacheTypeDrafts::from_destination(Some(&destination));
@@ -3169,6 +3444,128 @@ mod tests {
         assert_eq!(update.attic_token.as_deref(), Some("replacement"));
         assert!(update.s3_secret_access_key.is_none());
         assert!(!update.clear_niks3_auth_token);
+    }
+
+    #[test]
+    fn s3_replacement_is_atomic_and_explicitly_clears_an_omitted_session() {
+        let destination = serde_json::from_value(serde_json::json!({
+            "id": 1, "name": "fixture", "cache_type": "S3", "enabled": false,
+            "created_at": "2026-10-02T00:00:00Z", "updated_at": "2026-10-02T00:00:00Z",
+            "push_to": "s3://fixture", "s3_credentials_configured": true,
+            "s3_session_token_configured": true
+        }))
+        .unwrap();
+        let common = Niks3FormState::from_destination(Some(&destination));
+        let mut drafts = CacheTypeDrafts::from_destination(Some(&destination));
+        assert!(
+            drafts
+                .validate("s3", &common, true, Some(&destination))
+                .is_ok()
+        );
+        let retained = drafts.update_request("s3", &common, false, Some(&destination));
+        assert!(retained.s3_session_token.is_none());
+        drafts
+            .0
+            .insert("s3.access".into(), "fixture-replacement-access".into());
+        assert!(
+            drafts
+                .validate("s3", &common, true, Some(&destination))
+                .is_err(),
+            "never borrow a retained secret for a new access ID"
+        );
+        drafts
+            .0
+            .insert("s3.secret".into(), "fixture-replacement-secret".into());
+        assert!(
+            drafts
+                .validate("s3", &common, true, Some(&destination))
+                .is_ok()
+        );
+        let replacement = drafts.update_request("s3", &common, false, Some(&destination));
+        assert_eq!(replacement.s3_session_token.as_deref(), Some(""));
+        drafts
+            .0
+            .insert("s3.session".into(), "fixture-new-session".into());
+        let replacement = drafts.update_request("s3", &common, false, Some(&destination));
+        assert_eq!(
+            replacement.s3_session_token.as_deref(),
+            Some("fixture-new-session")
+        );
+    }
+
+    #[test]
+    fn configured_flags_cannot_cross_types_or_complete_an_empty_replacement_draft() {
+        let destination = serde_json::from_value(serde_json::json!({
+            "id": 1, "name": "fixture", "cache_type": "Attic", "enabled": true,
+            "created_at": "2026-10-02T00:00:00Z", "updated_at": "2026-10-02T00:00:00Z",
+            "attic_token_configured": true, "s3_credentials_configured": true
+        }))
+        .unwrap();
+        let common = Niks3FormState::from_destination(Some(&destination));
+        let mut drafts = CacheTypeDrafts::from_destination(Some(&destination));
+        assert!(
+            drafts
+                .validate("attic", &common, true, Some(&destination))
+                .is_ok()
+        );
+        assert!(
+            drafts
+                .validate("s3", &common, true, Some(&destination))
+                .is_err()
+        );
+        drafts
+            .0
+            .insert("attic.credential".into(), "local-empty-replacement".into());
+        assert!(
+            drafts
+                .validate("attic", &common, true, Some(&destination))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn basic_and_query_unrelated_edits_omit_sanitized_uri_but_new_authority_is_explicit() {
+        for flag in [
+            "http_basic_auth_configured",
+            "legacy_query_credentials_configured",
+        ] {
+            let mut json = serde_json::json!({
+                "id": 1, "name": "fixture", "cache_type": "Http", "enabled": false,
+                "created_at": "2026-10-02T00:00:00Z", "updated_at": "2026-10-02T00:00:00Z",
+                "push_to": "https://fixture.example/nix-cache-info"
+            });
+            json[flag] = true.into();
+            let destination = serde_json::from_value(json).unwrap();
+            let mut common = Niks3FormState::from_destination(Some(&destination));
+            let drafts = CacheTypeDrafts::from_destination(Some(&destination));
+            common.name = "new fixture name".into();
+            let patch = super::cache_update_patch(
+                "nix",
+                &common,
+                &drafts,
+                false,
+                Some(&destination),
+                vec![],
+            );
+            assert!(patch.push_to.is_none());
+            assert!(patch.cache_type.is_none());
+            assert!(patch.enabled.is_none());
+            common.read_url = "https://new-authority.example/nix-cache-info".into();
+            let patch = super::cache_update_patch(
+                "nix",
+                &common,
+                &drafts,
+                false,
+                Some(&destination),
+                vec![],
+            );
+            assert_eq!(
+                patch.push_to.as_deref(),
+                Some("https://new-authority.example/nix-cache-info")
+            );
+            assert!(patch.attic_token.is_none());
+            assert!(patch.s3_secret_access_key.is_none());
+        }
     }
 
     #[test]

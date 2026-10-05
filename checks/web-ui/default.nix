@@ -13,7 +13,8 @@
 #
 # Optional legacy "mega" phases (Attic/S3 cache + builder pytest suites) are
 # opt-in via CF_WEB_UI_RUN_MEGA_PHASES=1 (interactive runs only — the env var
-# cannot cross the Nix build sandbox). Their VMs are only booted when enabled.
+# cannot cross the Nix build sandbox). The focused cache workflow independently
+# boots its native Attic/Garage/Niks3 fixtures through evaluated step selection.
 #
 # Note: OIDC tests remain in the separate integration check.
 #
@@ -33,6 +34,105 @@ let
   baselinesDir = ./baselines;
   designParityDir = ./design-parity;
   CF_TEST_SERVER_PORT = 3000;
+  # Selection is evaluated outside the sandbox. A focused cache run must boot
+  # native fixtures even though the legacy mega-phase environment cannot cross it.
+  nativeCacheStep = "25-caches-modal-attic";
+  runNativeCacheFixtures = testSteps == null || testSteps == ""
+    || builtins.elem nativeCacheStep (map lib.strings.trim (lib.splitString "," testSteps));
+  cacheCredentials = lib.crystal-forge.makeNiks3TestCredentials {
+    inherit pkgs;
+    extraDnsNames = ["atticCache" "s3Cache" "cache-alt"];
+    strictTls = true;
+  };
+  cacheFixturePython = pkgs.python3.withPackages (p: [p.requests]);
+  cacheFixtureDriver = ./native-cache-fixture.py;
+  # TLS terminates on the backend's own VM. Preserve the configured host and
+  # port: Garage verifies both as part of the native SigV4 signature.
+  fixtureTls = upstream: {
+    enable = true;
+    virtualHosts.native-cache-fixture = {
+      addSSL = true;
+      listen = [{addr = "0.0.0.0"; port = 9443; ssl = true;}];
+      sslCertificate = "${cacheCredentials}/server.crt";
+      sslCertificateKey = "${cacheCredentials}/server.key";
+      locations."/" = {
+        proxyPass = upstream;
+        extraConfig = "proxy_set_header Host $host:$server_port;";
+      };
+      extraConfig = "access_log off;";
+    };
+  };
+  atticFixtureNode = {
+    imports = [(lib.crystal-forge.makeAtticCacheNode {
+      inherit lib pkgs;
+      port = 8080;
+      jwtSecretB64 = "dGVzdCBzZWNyZXQgZm9yIGF0dGljZA==";
+    })];
+    security.pki.certificateFiles = ["${cacheCredentials}/ca.crt"];
+    environment.etc."cache-fixture-credentials".source = cacheCredentials;
+    environment.systemPackages = [cacheFixturePython pkgs.attic-server];
+    services.nginx = fixtureTls "http://127.0.0.1:8080";
+    # The legacy debug service mints a broad token; it is not required for
+    # the private authenticated fixture or browser verification.
+    systemd.services.attic-debug.enable = lib.mkForce false;
+  };
+  niks3FixtureNode = {
+    imports = [(lib.crystal-forge.makeNiks3CacheNode {
+      inherit pkgs;
+      credentials = cacheCredentials;
+      cacheUrl = "https://cache:5752";
+    })];
+    services.nginx = lib.recursiveUpdate (fixtureTls "http://127.0.0.1:3900") {
+      commonHttpConfig = ''
+        map $http_authorization $cf_cache_auth_present {
+          "" absent;
+          default present;
+        }
+        # Never log Authorization, userinfo, or query strings. Route counters and
+        # header presence are sufficient to prove non-forwarding/non-replay.
+        log_format cf_cache_probe '$uri status=$status auth=$cf_cache_auth_present';
+      '';
+      virtualHosts.http-credential-fixture = {
+        addSSL = true;
+        listen = [{addr = "0.0.0.0"; port = 9444; ssl = true;}];
+        sslCertificate = "${cacheCredentials}/server.crt";
+        sslCertificateKey = "${cacheCredentials}/server.key";
+        extraConfig = "access_log /var/log/nginx/cache-probe.log cf_cache_probe;";
+        locations."/basic/" = {
+          alias = "/run/cache-http-metadata/";
+          extraConfig = ''
+            auth_basic "Disposable cache fixture";
+            auth_basic_user_file /run/cache-http-fixture.htpasswd;
+          '';
+        };
+        # A real static Nix metadata response on a different DNS authority. The
+        # observer proves that editing the URL cannot forward stored Basic auth.
+        locations."/authority/".alias = "/run/cache-http-metadata/";
+        locations."/legacy-query/".alias = "/run/cache-http-metadata/";
+      };
+    };
+    environment.systemPackages = [cacheFixturePython pkgs.openssl];
+    systemd.services.cache-http-fixture = {
+      before = ["nginx.service"];
+      requiredBy = ["nginx.service"];
+      path = [pkgs.openssl];
+      serviceConfig = {Type = "oneshot"; RemainAfterExit = true;};
+      script = "${cacheFixturePython}/bin/python ${cacheFixtureDriver} http-setup";
+    };
+    # Both identities have native bucket permission. The second pair proves
+    # replacement Test followed by Cancel/Save without anonymous fallbacks.
+    systemd.services.garage-web-ui-key = {
+      wantedBy = ["multi-user.target"];
+      after = ["garage-setup.service"];
+      requires = ["garage-setup.service"];
+      path = [pkgs.garage];
+      serviceConfig = {Type = "oneshot"; RemainAfterExit = true;};
+      script = ''
+        garage key import --yes -n web-ui-replacement GKabcdef0123456789abcdef01 fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 >/dev/null
+        garage bucket allow --read --write nix-cache --key web-ui-replacement >/dev/null
+      '';
+    };
+  };
 
   # ── Design-evidence harness ─────────────────────────────────────────────────
   # Vendor the design example's CDN dependencies so the tracked design gold
@@ -185,11 +285,7 @@ in pkgs.testers.runNixOSTest {
     };
 
     # Attic binary cache
-    atticCache = lib.crystal-forge.makeAtticCacheNode {
-      inherit lib pkgs;
-      port = 8080;
-      jwtSecretB64 = "dGVzdCBzZWNyZXQgZm9yIGF0dGljZA==";
-    };
+    atticCache = atticFixtureNode;
 
     # S3-compatible cache (Garage)
     s3Cache = lib.crystal-forge.makeS3CacheNode {
@@ -197,6 +293,8 @@ in pkgs.testers.runNixOSTest {
       port = 3900;
       bucketName = "nix-cache";
     };
+
+    cache = niks3FixtureNode;
 
     # Main Crystal Forge server with all services enabled
     machine = {
@@ -246,7 +344,9 @@ in pkgs.testers.runNixOSTest {
       environment.etc = {
         "server.key".source = "${keyPath}/agent.key";
         "server.pub".source = "${pubPath}/agent.pub";
+        "cache-fixture-credentials".source = cacheCredentials;
       };
+      security.pki.certificateFiles = ["${cacheCredentials}/ca.crt"];
 
       networking.firewall.allowedTCPPorts = [ CF_TEST_SERVER_PORT 5432 ];
 
@@ -306,6 +406,7 @@ in pkgs.testers.runNixOSTest {
           package = cfServer;
           port = CF_TEST_SERVER_PORT;
           host = "0.0.0.0";
+          allow_private_cache_test_targets = runNativeCacheFixtures;
         };
 
         build = {
@@ -386,12 +487,16 @@ in pkgs.testers.runNixOSTest {
     # s3 cache VMs would boot and be health-waited without ever being used.
     # Only start the VMs that this run will actually exercise.
     run_mega_phases = os.environ.get("CF_WEB_UI_RUN_MEGA_PHASES", "0") == "1"
+    run_native_cache_fixtures = ${if runNativeCacheFixtures then "True" else "False"}
 
     machine.start()
     gitserver.start()
     if run_mega_phases:
-        atticCache.start()
         s3Cache.start()
+    if run_mega_phases or run_native_cache_fixtures:
+        atticCache.start()
+    if run_native_cache_fixtures:
+        cache.start()
 
     # === Infrastructure Warmup ===
     print("=== Infrastructure Warmup ===")
@@ -633,6 +738,36 @@ in pkgs.testers.runNixOSTest {
     # === Phase 4: Web UI Tests (Playwright) ===
     print("=== Phase 4: Web UI Tests (Playwright) ===")
 
+    if run_native_cache_fixtures:
+        atticCache.wait_for_unit("attic-setup.service")
+        atticCache.wait_for_unit("nginx.service")
+        atticCache.wait_for_open_port(9443)
+        cache.wait_for_unit("niks3.service")
+        cache.wait_for_unit("garage-web-ui-key.service")
+        cache.wait_for_unit("nginx.service")
+        cache.wait_for_open_port(5751)
+        cache.wait_for_open_port(5752)
+        cache.wait_for_open_port(9443)
+        cache.wait_for_open_port(9444)
+        # Only file paths enter driver logs. JWTs never enter driver commands,
+        # environment strings, screenshots or derivation outputs.
+        atticCache.succeed("${cacheFixturePython}/bin/python ${cacheFixtureDriver} attic")
+        import pathlib
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="cf-cache-private-") as private_dir:
+            os.chmod(private_dir, 0o700)
+            atticCache.copy_from_vm("/run/cf-attic-fixture.json", private_dir)
+            machine.copy_from_host(str(pathlib.Path(private_dir) / "cf-attic-fixture.json"), "/run/cf-attic-fixture.json")
+            cache.copy_from_vm("/run/cf-http-fixture.json", private_dir)
+            machine.copy_from_host(str(pathlib.Path(private_dir) / "cf-http-fixture.json"), "/run/cf-http-fixture.json")
+        machine.succeed("chmod 0600 /run/cf-attic-fixture.json")
+        machine.succeed("${cacheFixturePython}/bin/python ${cacheFixtureDriver} assemble")
+        # Registration remains owned by the existing browser workflow. Seed
+        # only after its real bootstrap-admin login becomes available; the
+        # consumer waits for seed_complete in the atomic runtime JSON file.
+        machine.succeed("nohup ${cacheFixturePython}/bin/python ${cacheFixtureDriver} seed > /run/cf-cache-seed.log 2>&1 </dev/null &")
+        machine.succeed("nohup ${cacheFixturePython}/bin/python ${cacheFixtureDriver} checkpoints > /run/cf-cache-checkpoints.log 2>&1 </dev/null &")
+
     # Create output directories
     machine.succeed("mkdir -p /tmp/screenshots")
     machine.succeed("mkdir -p /tmp/web-ui-tests")
@@ -674,6 +809,8 @@ in pkgs.testers.runNixOSTest {
         f" CF_TEST_REAL_CONFIGURATION_NAME={os.environ['CF_TEST_REAL_CONFIGURATION_NAME']}"
         " CF_TEST_CONFIG_INSPECTION_WAIT_SECONDS=1260"
     )
+    if run_native_cache_fixtures:
+        live_fixture_env += " CF_CACHE_CREDENTIAL_FIXTURE=/run/cf-cache-credential-fixture.json"
     result_timeout = ${toString playwrightResultTimeout}
 
     # Deployment-policy fixture state. Browser steps that read the policy
@@ -745,6 +882,19 @@ in pkgs.testers.runNixOSTest {
         )
 
     exit_code = machine.succeed("cat /tmp/web-ui-tests/integration.exit").strip()
+
+    if run_native_cache_fixtures and exit_code == "0":
+        # An independent real-API probe compares private PostgreSQL snapshots,
+        # including ciphertext and timestamps, without exporting row contents.
+        print(machine.succeed("cat /run/cf-cache-checkpoints.log"))
+        with tempfile.TemporaryDirectory(prefix="cf-cache-observer-") as observer_dir:
+            cache.copy_from_vm("/var/log/nginx/cache-probe.log", observer_dir)
+            machine.copy_from_host(str(pathlib.Path(observer_dir) / "cache-probe.log"), "/run/cf-cache-observer.log")
+        machine.succeed("${cacheFixturePython}/bin/python ${cacheFixtureDriver} observe")
+        print(machine.succeed("cat /tmp/screenshots/native-http-observer-proof.json"))
+        machine.copy_from_vm("/tmp/screenshots/native-http-observer-proof.json", "screenshots")
+        machine.succeed("${cacheFixturePython}/bin/python ${cacheFixtureDriver} verify")
+        machine.copy_from_vm("/tmp/screenshots/native-cache-proof.json", "screenshots")
 
     # Read results
     results_json = machine.succeed("cat /tmp/screenshots/results.json")
@@ -884,6 +1034,7 @@ in pkgs.testers.runNixOSTest {
       "15k-builds-latest-combined-filters-empty-clear",
       "16-cves",
       "16b-cves-severity-filter",
+      "25-caches-modal-attic",
       "26c-evaluations-latest-per-flake-populated",
       "26d-evaluations-latest-combined-filters-empty-clear",
       "29g-poam-failed-evidence-create",
@@ -1089,4 +1240,54 @@ in pkgs.testers.runNixOSTest {
     print("\n=== All Mega Integration Tests Passed ===")
     print("Completed: Cache (Attic+S3), Builder, Web UI, OSCAL Export, SARIF Export")
   '';
+} // {
+  # Infrastructure-only proof can run while sibling application changes are
+  # still building. It shares the exact authoritative nodes and runtime driver;
+  # it cannot substitute for the browser or stored-ID API verification.
+  nativeCacheFixture = pkgs.testers.runNixOSTest {
+    name = "web-ui-native-cache-fixture";
+    skipLint = true;
+    skipTypeCheck = true;
+    globalTimeout = 600;
+    nodes = {
+      atticCache = atticFixtureNode;
+      cache = niks3FixtureNode;
+      machine = {
+        networking.firewall.enable = false;
+        security.pki.certificateFiles = ["${cacheCredentials}/ca.crt"];
+        environment.etc."cache-fixture-credentials".source = cacheCredentials;
+        environment.systemPackages = [cacheFixturePython];
+      };
+    };
+    testScript = ''
+      import os
+      import pathlib
+      import tempfile
+      start_all()
+      atticCache.wait_for_unit("attic-setup.service")
+      atticCache.wait_for_unit("nginx.service")
+      atticCache.wait_for_open_port(9443)
+      cache.wait_for_unit("niks3.service")
+      cache.wait_for_unit("garage-web-ui-key.service")
+      cache.wait_for_unit("nginx.service")
+      cache.wait_for_open_port(5751)
+      cache.wait_for_open_port(5752)
+      cache.wait_for_open_port(9443)
+      cache.wait_for_open_port(9444)
+      atticCache.succeed("${cacheFixturePython}/bin/python ${cacheFixtureDriver} attic")
+      with tempfile.TemporaryDirectory(prefix="cf-cache-private-") as private_dir:
+          os.chmod(private_dir, 0o700)
+          atticCache.copy_from_vm("/run/cf-attic-fixture.json", private_dir)
+          machine.copy_from_host(str(pathlib.Path(private_dir) / "cf-attic-fixture.json"), "/run/cf-attic-fixture.json")
+          cache.copy_from_vm("/run/cf-http-fixture.json", private_dir)
+          machine.copy_from_host(str(pathlib.Path(private_dir) / "cf-http-fixture.json"), "/run/cf-http-fixture.json")
+      machine.succeed("chmod 0600 /run/cf-attic-fixture.json")
+      machine.succeed("${cacheFixturePython}/bin/python ${cacheFixtureDriver} assemble")
+      machine.succeed("test $(stat -c %a /run/cf-cache-credential-fixture.json) = 600")
+      with tempfile.TemporaryDirectory(prefix="cf-cache-observer-") as observer_dir:
+          cache.copy_from_vm("/var/log/nginx/cache-probe.log", observer_dir)
+          machine.copy_from_host(str(pathlib.Path(observer_dir) / "cache-probe.log"), "/run/cf-cache-observer.log")
+      machine.succeed("${cacheFixturePython}/bin/python ${cacheFixtureDriver} observe-native")
+    '';
+  };
 }

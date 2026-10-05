@@ -13,7 +13,9 @@ pub struct CacheDestinationEnvironment {
 /// Stores a cache destination with separate Niks3 read and write credentials.
 ///
 /// Query helpers decrypt tokens and private keys and compute configured flags.
-/// Serialization omits Niks3 tokens and private keys. Debug omits all credentials.
+/// Serialization omits all tokens, S3 access IDs/secrets, and private keys.
+/// Debug omits all credentials. Attic/S3 configured flags describe only the active
+/// cache type and must be refreshed from decrypted fields before redaction.
 /// Niks3 requires HTTPS URLs, nonempty signing keys, and complete selected auth.
 /// Client certificates and CA bundles contain only X.509 certificate PEM blocks.
 /// Custom CA bundles are supported only for mTLS modes, not token/public modes.
@@ -27,6 +29,9 @@ pub struct CacheDestination {
     pub cache_type: String,
 
     // Common fields
+    /// Stores the raw cache URL internally, including legacy URI authentication.
+    /// Cache-management responses redact userinfo and credential queries. Save
+    /// and Test retain same-type sanitized round trips without revealing auth.
     pub push_to: Option<String>,
     pub enabled: bool,
     pub signing_key_path: Option<String>,
@@ -35,13 +40,45 @@ pub struct CacheDestination {
     // S3-specific
     pub s3_region: Option<String>,
     pub s3_profile: Option<String>,
+    /// Stores the decrypted internal S3 access ID; omitted from serialization.
+    #[serde(skip_serializing)]
     pub s3_access_key_id: Option<String>,
+    /// Stores the decrypted internal S3 secret; omitted from serialization.
+    #[serde(skip_serializing)]
     pub s3_secret_access_key: Option<String>,
+    /// Stores the optional decrypted S3 session token; omitted from serialization.
+    #[serde(skip_serializing)]
     pub s3_session_token: Option<String>,
+    /// Stores the raw S3 endpoint; API responses redact legacy URI credentials.
+    /// Credential queries are never replayed by the read-only Test operation.
     pub s3_endpoint_url: Option<String>,
 
     // Attic-specific
+    /// Stores the decrypted internal Attic token; omitted from serialization.
+    #[serde(skip_serializing)]
     pub attic_token: Option<String>,
+    /// Indicates a nonempty decrypted token for the active Attic type.
+    #[serde(default)]
+    #[sqlx(skip)]
+    pub attic_token_configured: bool,
+    /// Indicates a complete decrypted access ID and secret for the active S3 type.
+    #[serde(default)]
+    #[sqlx(skip)]
+    pub s3_credentials_configured: bool,
+    /// Indicates a nonempty decrypted session token for the active S3 type.
+    #[serde(default)]
+    #[sqlx(skip)]
+    pub s3_session_token_configured: bool,
+    /// Indicates stored URL userinfo for the active Http or Nix type.
+    /// The username and password remain server-only.
+    #[serde(default)]
+    #[sqlx(skip)]
+    pub http_basic_auth_configured: bool,
+    /// Indicates recognized credential queries in either legacy URL field.
+    /// Such queries are retained in storage but must never be replayed by Test.
+    #[serde(default)]
+    #[sqlx(skip)]
+    pub legacy_query_credentials_configured: bool,
     pub attic_cache_name: Option<String>,
     pub attic_public_key: Option<String>,
     pub attic_ignore_upstream_cache_filter: Option<bool>,
@@ -73,15 +110,15 @@ pub struct CacheDestination {
     pub niks3_read_client_key: Option<String>,
     /// Optional PEM CA certificate for the read server.
     pub niks3_read_ca_cert: Option<String>,
-    /// Indicates a nonempty write token without exposing the token.
+    /// Indicates a nonempty write token on the active Niks3 type.
     #[sqlx(skip)]
     #[serde(default)]
     pub niks3_write_token_configured: bool,
-    /// Indicates a complete write client certificate and private key pair.
+    /// Indicates a complete write certificate/key pair on the active Niks3 type.
     #[sqlx(skip)]
     #[serde(default)]
     pub niks3_write_mtls_configured: bool,
-    /// Indicates a complete read client certificate and private key pair.
+    /// Indicates a complete read certificate/key pair on the active Niks3 type.
     #[sqlx(skip)]
     #[serde(default)]
     pub niks3_read_mtls_configured: bool,
@@ -164,6 +201,9 @@ pub struct CreateCacheDestination {
 /// the previous credential set before applying replacements. The merged state
 /// must validate before persistence. A clear cannot remove a required credential
 /// unless the same update selects a mode that no longer requires that credential.
+/// Same-type sanitized URL round trips retain server-only URI credentials.
+/// Other explicit URLs cannot borrow URI auth. Cache type changes strip URI
+/// auth from inherited URLs; explicit replacement URLs use their own auth.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct UpdateCacheDestination {
     pub name: Option<String>,
@@ -248,10 +288,9 @@ impl CreateCacheDestination {
         match self.cache_type.as_str() {
             "S3" | "Attic" | "Http" | "Nix" | "Niks3" => {}
             _ => {
-                return Err(format!(
-                    "Invalid cache_type: {}. Must be one of: S3, Attic, Http, Nix, Niks3",
-                    self.cache_type
-                ));
+                return Err(
+                    "Invalid cache_type. Must be one of: S3, Attic, Http, Nix, Niks3".into(),
+                );
             }
         }
 
@@ -469,6 +508,131 @@ pub(crate) fn niks3_query_parameter_is_sensitive(name: &str) -> bool {
     .is_err()
 }
 
+/// Identifies decoded credential-query names, including legacy AWS signatures.
+///
+/// Matching is case-insensitive. Callers must percent-decode query names once
+/// with [`url::Url::query_pairs`] or [`url::form_urlencoded::parse`]. The existing
+/// Niks3 managed-credential policy also remains in force.
+pub(crate) fn cache_url_query_parameter_is_sensitive(name: &str) -> bool {
+    let normalized: String = name
+        .chars()
+        .filter(|ch| !matches!(*ch, '-' | '_'))
+        .flat_map(char::to_lowercase)
+        .collect();
+    matches!(
+        normalized.as_str(),
+        "xamzcredential"
+            | "xamzsecuritytoken"
+            | "xamzsignature"
+            | "awsaccesskeyid"
+            | "signature"
+            | "securitytoken"
+            | "accesskeyid"
+            | "secretaccesskey"
+            | "sessiontoken"
+    ) || niks3_query_parameter_is_sensitive(name)
+}
+
+/// Detects credential queries without exposing their names or values.
+///
+/// Also examines query text on malformed legacy URLs. Redaction and refusal
+/// must not depend on a malformed credential-bearing URL being parseable.
+pub(crate) fn cache_url_has_query_credentials(raw: &str) -> bool {
+    if let Ok(url) = url::Url::parse(raw) {
+        return url
+            .query_pairs()
+            .any(|(name, _)| cache_url_query_parameter_is_sensitive(&name));
+    }
+    let query = raw
+        .split('#')
+        .next()
+        .unwrap_or("")
+        .split_once('?')
+        .map(|(_, query)| query);
+    query.is_some_and(|query| {
+        url::form_urlencoded::parse(query.as_bytes())
+            .any(|(name, _)| cache_url_query_parameter_is_sensitive(&name))
+    })
+}
+
+/// Removes URL userinfo, credential queries, and fragments for API responses.
+///
+/// Invalid or opaque URLs return `[REDACTED]`; unparsed input is never echoed.
+/// Safe query pairs remain in order. The returned URL is presentation metadata,
+/// not a replacement for the stored authenticated URL.
+pub(crate) fn sanitize_cache_url_credentials(raw: &str) -> String {
+    if raw.bytes().any(|byte| byte.is_ascii_control()) {
+        return "[REDACTED]".into();
+    }
+    let Ok(mut parsed) = url::Url::parse(raw) else {
+        return "[REDACTED]".into();
+    };
+    if parsed.cannot_be_a_base() {
+        return "[REDACTED]".into();
+    }
+    let sensitive_query = cache_url_has_query_credentials(raw);
+    if !sensitive_query
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.fragment().is_none()
+    {
+        return raw.into();
+    }
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    parsed.set_fragment(None);
+    if sensitive_query {
+        let safe_pairs: Vec<_> = parsed
+            .query_pairs()
+            .into_owned()
+            .filter(|(name, _)| !cache_url_query_parameter_is_sensitive(name))
+            .collect();
+        parsed.set_query(None);
+        if !safe_pairs.is_empty() {
+            parsed.query_pairs_mut().extend_pairs(safe_pairs);
+        }
+    }
+    parsed.to_string()
+}
+
+/// Merges a URL without forwarding implicit credentials to a new identity.
+///
+/// Same-type omissions preserve the raw URL. An explicit URL equal to the whole
+/// sanitized current URL also preserves raw credentials, so a GET/Save round
+/// trip cannot erase server-only auth. Other explicit URLs use only their own
+/// credentials. Type conversions strip credentials from inherited URLs.
+pub(crate) fn effective_cache_url(
+    current: Option<&str>,
+    replacement: Option<&str>,
+    same_type: bool,
+) -> Option<String> {
+    match (current, replacement) {
+        (Some(current), Some(replacement)) if same_type => {
+            let sanitized = sanitize_cache_url_credentials(current);
+            let has_credentials = cache_url_has_query_credentials(current)
+                || url::Url::parse(current)
+                    .ok()
+                    .is_some_and(|url| !url.username().is_empty() || url.password().is_some());
+            let round_trip = has_credentials
+                && sanitized != current
+                && (replacement == sanitized
+                    || (sanitized != "[REDACTED]"
+                        && url::Url::parse(replacement)
+                            .ok()
+                            .zip(url::Url::parse(&sanitized).ok())
+                            .is_some_and(|(replacement, sanitized)| replacement == sanitized)));
+            Some(if round_trip { current } else { replacement }.into())
+        }
+        (_, Some(replacement)) => Some(replacement.into()),
+        (Some(current), None) if same_type => Some(current.into()),
+        (Some(current), None) => Some(sanitize_cache_url_credentials(current)),
+        (None, None) => None,
+    }
+}
+
+/// Explains why legacy credential-query probes are refused without replay.
+pub(crate) const LEGACY_QUERY_CREDENTIALS_TEST_ERROR: &str = "Credential-query cache URLs cannot be tested. Migrate credentials to a supported authentication mechanism.";
+
 fn validate_certificate_fields(fields: &[(&str, Option<&str>)]) -> Result<(), String> {
     for (field, value) in fields {
         if let Some(value) = value {
@@ -538,10 +702,34 @@ impl CacheDestination {
     }
     /// Refreshes response flags from decrypted credentials, without DB columns.
     pub(crate) fn refresh_niks3_configured(&mut self) {
-        self.niks3_write_token_configured = nonempty(self.niks3_auth_token.as_deref());
-        self.niks3_write_mtls_configured = nonempty(self.niks3_write_client_cert.as_deref())
+        self.http_basic_auth_configured = matches!(self.cache_type.as_str(), "Http" | "Nix")
+            && self
+                .push_to
+                .as_deref()
+                .and_then(|raw| url::Url::parse(raw).ok())
+                .is_some_and(|url| {
+                    matches!(url.scheme(), "https" | "http")
+                        && (!url.username().is_empty() || url.password().is_some())
+                });
+        self.legacy_query_credentials_configured =
+            [self.push_to.as_deref(), self.s3_endpoint_url.as_deref()]
+                .into_iter()
+                .flatten()
+                .any(cache_url_has_query_credentials);
+        self.attic_token_configured =
+            self.cache_type == "Attic" && nonempty(self.attic_token.as_deref());
+        self.s3_credentials_configured = self.cache_type == "S3"
+            && nonempty(self.s3_access_key_id.as_deref())
+            && nonempty(self.s3_secret_access_key.as_deref());
+        self.s3_session_token_configured =
+            self.cache_type == "S3" && nonempty(self.s3_session_token.as_deref());
+        self.niks3_write_token_configured =
+            self.cache_type == "Niks3" && nonempty(self.niks3_auth_token.as_deref());
+        self.niks3_write_mtls_configured = self.cache_type == "Niks3"
+            && nonempty(self.niks3_write_client_cert.as_deref())
             && nonempty(self.niks3_write_client_key.as_deref());
-        self.niks3_read_mtls_configured = nonempty(self.niks3_read_client_cert.as_deref())
+        self.niks3_read_mtls_configured = self.cache_type == "Niks3"
+            && nonempty(self.niks3_read_client_cert.as_deref())
             && nonempty(self.niks3_read_client_key.as_deref());
     }
 
@@ -549,7 +737,8 @@ impl CacheDestination {
     ///
     /// Mode changes discard the previous mode's entire credential set. Fields
     /// omitted in an unchanged mode preserve existing credentials. Callers must
-    /// validate the resulting configuration while holding the DB row lock.
+    /// validate the resulting configuration. Persistence callers must hold the DB
+    /// row lock; read-only probes merge an unlocked point-in-time snapshot.
     ///
     /// # Errors
     /// Returns an error when a credential field is both replaced and cleared.

@@ -15,10 +15,196 @@ use crate::api::models::ApiError;
 use crate::config::ServerConfig;
 use crate::handlers::api::rbac::{authenticated_user_roles, require_admin as require_admin_user};
 use crate::models::cache_destination::{
-    CacheDestination, CreateCacheDestination, UpdateCacheDestination,
-    niks3_query_parameter_is_sensitive,
+    CacheDestination, CreateCacheDestination, LEGACY_QUERY_CREDENTIALS_TEST_ERROR,
+    UpdateCacheDestination, cache_url_has_query_credentials,
+    cache_url_query_parameter_is_sensitive, effective_cache_url, sanitize_cache_url_credentials,
 };
 use crate::queries::{cache_destinations, cache_push};
+
+mod s3_probe;
+
+#[cfg(test)]
+mod retained_probe_tests;
+
+fn probe_error(status: StatusCode, code: &str, message: &str) -> axum::response::Response {
+    (
+        status,
+        Json(ApiError {
+            error: code.into(),
+            message: message.into(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
+fn optional_probe_csrf(headers: &HeaderMap) -> Result<(), axum::response::Response> {
+    use crate::auth::session::{CSRF_COOKIE_NAME, CSRF_HEADER_NAME, extract_cookie};
+    // Read-only probes follow cache API session authorization. If the caller
+    // supplies double-submit CSRF state, require the existing matching pattern.
+    if headers.contains_key(&CSRF_HEADER_NAME)
+        || extract_cookie(headers, CSRF_COOKIE_NAME).is_some()
+    {
+        crate::handlers::api::auth_session::require_csrf(headers)?;
+    }
+    Ok(())
+}
+
+async fn probe_json<T: serde::de::DeserializeOwned>(
+    request: axum::extract::Request,
+) -> Result<T, axum::response::Response> {
+    let invalid = || {
+        probe_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_cache_test_config",
+            "Invalid cache test JSON",
+        )
+    };
+    if !request
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(';')
+                .next()
+                .is_some_and(|value| value.trim() == "application/json")
+        })
+    {
+        return Err(invalid());
+    }
+    let body = axum::body::to_bytes(request.into_body(), 1024 * 1024)
+        .await
+        .map_err(|_| invalid())?;
+    serde_json::from_slice(&body).map_err(|_| invalid())
+}
+
+/// Tests a stored destination with the same unwrapped update JSON used by Save.
+///
+/// `POST /api/v1/caches/:id/test-credentials` returns `403` before lookup or JSON
+/// parsing for non-admin callers, `404` for an absent ID, and `400` for invalid
+/// JSON, effective settings, or targets. Provided CSRF state must match. A `200`
+/// result describes only observed read access, never upload authorization.
+/// Stored secrets are decrypted and merged in memory. No destination, assignment,
+/// timestamp, usage, encryption, or job write occurs. The unlocked snapshot may
+/// become stale during the probe; the result is not a guarantee about later Save.
+/// Legacy Http/Nix URL Basic auth stays server-only and is sent through Reqwest's
+/// sensitive Authorization header. Same-type sanitized URL round trips retain
+/// that identity; different URLs cannot borrow it. Recognized credential queries
+/// return `400 legacy_query_credentials_unsupported` before DNS or network work.
+///
+/// # Examples
+/// ```text
+/// POST /api/v1/caches/42/test-credentials
+/// Content-Type: application/json
+///
+/// {}
+/// ```
+pub async fn test_stored_cache_destination_credentials(
+    State(pool): State<PgPool>,
+    State(server_config): State<ServerConfig>,
+    headers: HeaderMap,
+    Path(id): Path<i32>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    test_stored_with_probe(&pool, &headers, id, request, |effective| async move {
+        run_cache_destination_test(&effective, server_config.allow_private_cache_test_targets).await
+    })
+    .await
+}
+
+// Test injection is per-call and private, not global or part of server state.
+// Production always supplies the pinned HTTPS probe above.
+async fn test_stored_with_probe<F, Fut>(
+    pool: &PgPool,
+    headers: &HeaderMap,
+    id: i32,
+    request: axum::extract::Request,
+    probe: F,
+) -> axum::response::Response
+where
+    F: FnOnce(CreateCacheDestination) -> Fut,
+    Fut: std::future::Future<Output = Result<CacheCredentialTestResult, String>>,
+{
+    if require_admin_user(pool, headers).await.is_none() {
+        return probe_error(StatusCode::FORBIDDEN, "forbidden", "Admin role required");
+    }
+    if let Err(response) = optional_probe_csrf(headers) {
+        return response;
+    }
+    // CONCURRENCY: This single SELECT releases its connection before any network
+    // work. Do not reuse the publication snapshot helper, which retains locks.
+    let current = match cache_destinations::get_cache_destination(pool, id).await {
+        Ok(Some(current)) => current,
+        Ok(None) => {
+            return probe_error(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "Cache destination not found",
+            );
+        }
+        Err(_) => {
+            return probe_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Failed to load cache destination",
+            );
+        }
+    };
+    let update: UpdateCacheDestination = match probe_json(request).await {
+        Ok(update) => update,
+        Err(response) => return response,
+    };
+    let same_type = update
+        .cache_type
+        .as_deref()
+        .is_none_or(|ty| ty == current.cache_type);
+    let push_to = effective_cache_url(
+        current.push_to.as_deref(),
+        update.push_to.as_deref(),
+        same_type,
+    );
+    let s3_endpoint = effective_cache_url(
+        current.s3_endpoint_url.as_deref(),
+        update.s3_endpoint_url.as_deref(),
+        same_type,
+    );
+    let niks3_server = update
+        .niks3_server_url
+        .as_deref()
+        .or(current.niks3_server_url.as_deref());
+    if let Err(message) =
+        reject_probe_query_credentials([push_to.as_deref(), s3_endpoint.as_deref(), niks3_server])
+    {
+        return probe_error(
+            StatusCode::BAD_REQUEST,
+            "legacy_query_credentials_unsupported",
+            message,
+        );
+    }
+    let effective = match cache_destinations::effective_update(&current, &update) {
+        Ok(effective) => effective,
+        Err(_) => {
+            return probe_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_cache_test_config",
+                "Invalid effective cache configuration",
+            );
+        }
+    };
+    match probe(effective).await {
+        Ok(mut result) => {
+            // Stored-ID results describe stages, not the private snapshot.
+            result.tested_url = None;
+            (StatusCode::OK, Json(result)).into_response()
+        }
+        Err(message) => probe_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_cache_test_config",
+            &message,
+        ),
+    }
+}
 
 fn normalize_test_url(
     cache_type: &str,
@@ -171,6 +357,27 @@ async fn cache_test_client(
         .timeout(Duration::from_secs(8))
         .redirect(reqwest::redirect::Policy::none())
         .resolve_to_addrs(url.host_str().ok_or("Missing cache host")?, &addrs);
+    // Rustls's bundled public roots do not include an operator's system CA.
+    // Honor standard process CA configuration without a test-only TLS bypass.
+    // VM fixtures install their CA before starting the server process.
+    let configured_roots =
+        std::env::var_os("SSL_CERT_FILE").or_else(|| std::env::var_os("NIX_SSL_CERT_FILE"));
+    let root_path = configured_roots
+        .clone()
+        .unwrap_or_else(|| "/etc/ssl/certs/ca-certificates.crt".into());
+    match tokio::fs::read(root_path).await {
+        Ok(pem) => {
+            let certificates = reqwest::Certificate::from_pem_bundle(&pem)
+                .map_err(|_| "Invalid system CA certificate bundle")?;
+            for certificate in certificates {
+                builder = builder.add_root_certificate(certificate);
+            }
+        }
+        Err(_) if configured_roots.is_some() => {
+            return Err("Failed to read configured system CA bundle".into());
+        }
+        Err(_) => {}
+    }
     match (cert, key) {
         (Some(cert), Some(key)) => {
             let pem = format!("{cert}\n{key}");
@@ -394,12 +601,17 @@ async fn run_niks3_test(
 }
 
 fn validate_cache_test_url(url: &Url, allow_private_targets: bool) -> Result<(), String> {
+    if url.fragment().is_some()
+        || url
+            .query_pairs()
+            .any(|(name, _)| cache_url_query_parameter_is_sensitive(&name))
+    {
+        return Err("Cache test URLs must not contain credentials or fragments".into());
+    }
     match url.scheme() {
         "https" => {}
-        other => {
-            return Err(format!(
-                "Unsupported cache test URL scheme: {other}. Only https is allowed"
-            ));
+        _ => {
+            return Err("Unsupported cache test URL scheme. Only https is allowed".into());
         }
     }
 
@@ -489,18 +701,40 @@ fn reject_non_public_ip(ip: IpAddr) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
 fn sanitize_test_url_for_response(url: &Url) -> String {
-    let mut sanitized = url.clone();
-    let _ = sanitized.set_username("");
-    let _ = sanitized.set_password(None);
-    sanitized.to_string()
+    sanitize_cache_url_credentials(url.as_str())
+}
+
+// SECURITY: Refuse recognized credential queries before DNS, client creation,
+// callbacks, or network work, even when the URL belongs to an inactive field.
+fn reject_probe_query_credentials<'a>(
+    urls: impl IntoIterator<Item = Option<&'a str>>,
+) -> Result<(), &'static str> {
+    if urls
+        .into_iter()
+        .flatten()
+        .any(cache_url_has_query_credentials)
+    {
+        return Err(LEGACY_QUERY_CREDENTIALS_TEST_ERROR);
+    }
+    Ok(())
 }
 
 async fn run_cache_destination_test(
     create: &CreateCacheDestination,
     allow_private_targets: bool,
 ) -> Result<CacheCredentialTestResult, String> {
+    reject_probe_query_credentials([
+        create.push_to.as_deref(),
+        create.s3_endpoint_url.as_deref(),
+        create.niks3_server_url.as_deref(),
+    ])?;
+    create.validate()?;
     let cache_type = create.cache_type.trim();
+    if cache_type == "S3" {
+        return s3_probe::probe(create, allow_private_targets).await;
+    }
     if cache_type == "Niks3" {
         return run_niks3_test(create, allow_private_targets).await;
     }
@@ -521,27 +755,30 @@ async fn run_cache_destination_test(
         return Err("No testable endpoint URL derived from cache configuration".to_string());
     };
 
-    let parsed_url = Url::parse(&test_url).map_err(|e| format!("Invalid cache test URL: {e}"))?;
-    let tested_url = sanitize_test_url_for_response(&parsed_url);
+    let parsed_url = Url::parse(&test_url).map_err(|_| "Invalid cache test URL")?;
+    if !matches!(cache_type, "Http" | "Nix")
+        && (!parsed_url.username().is_empty() || parsed_url.password().is_some())
+    {
+        return Err(
+            "URL Basic authentication is supported only for Http and Nix cache tests".into(),
+        );
+    }
 
     let client = cache_test_client(&parsed_url, allow_private_targets, None, None, None).await?;
 
-    let mut request = client.get(parsed_url.clone());
-    if let Some(token) = create.attic_token.as_ref().filter(|t| !t.trim().is_empty()) {
-        request = request.bearer_auth(token.trim());
-    }
+    let request = legacy_probe_request(&client, parsed_url.clone(), create);
 
     let response = request
         .send()
         .await
-        .map_err(|e| format!("Connectivity test failed: {e}"))?;
+        .map_err(|_| "Cache connection failed")?;
 
     if response.status().is_success() {
         Ok(CacheCredentialTestResult {
             ok: true,
             status_code: Some(response.status().as_u16()),
             message: "Connection successful".to_string(),
-            tested_url: Some(tested_url),
+            tested_url: None,
             niks3: None,
         })
     } else {
@@ -549,10 +786,31 @@ async fn run_cache_destination_test(
             ok: false,
             status_code: Some(response.status().as_u16()),
             message: format!("Endpoint responded with status {}", response.status()),
-            tested_url: Some(tested_url),
+            tested_url: None,
             niks3: None,
         })
     }
+}
+
+// SECURITY: Reqwest extracts Http/Nix URL userinfo into a sensitive Basic
+// Authorization header and removes it from the sent URL. Inactive Attic fields
+// cannot authenticate any other cache type. All target checks precede send.
+fn legacy_probe_request(
+    client: &reqwest::Client,
+    url: Url,
+    create: &CreateCacheDestination,
+) -> reqwest::RequestBuilder {
+    let mut request = client.get(url);
+    if create.cache_type == "Attic" {
+        if let Some(token) = create
+            .attic_token
+            .as_deref()
+            .filter(|token| !token.trim().is_empty())
+        {
+            request = request.bearer_auth(token.trim());
+        }
+    }
+    request
 }
 
 fn redact_cache_secrets(mut destination: CacheDestination) -> CacheDestination {
@@ -564,66 +822,25 @@ fn redact_cache_secrets(mut destination: CacheDestination) -> CacheDestination {
     destination.niks3_auth_token = None;
     destination.niks3_write_client_key = None;
     destination.niks3_read_client_key = None;
-    destination.push_to = destination.push_to.as_deref().map(|url| {
-        if destination.cache_type == "Niks3" {
-            sanitize_niks3_url_credentials(url)
-        } else {
-            sanitize_push_to_url_credentials(url)
-        }
-    });
+    destination.push_to = destination
+        .push_to
+        .as_deref()
+        .map(sanitize_cache_url_credentials);
     destination.attic_token = None;
     destination.s3_access_key_id = None;
     destination.s3_secret_access_key = None;
     destination.s3_session_token = None;
+    destination.s3_endpoint_url = destination
+        .s3_endpoint_url
+        .as_deref()
+        .map(sanitize_niks3_url_credentials);
     destination
 }
 
-fn sanitize_push_to_url_credentials(push_to: &str) -> String {
-    let Ok(mut parsed) = Url::parse(push_to) else {
-        return push_to.to_string();
-    };
-
-    if parsed.password().is_none() && parsed.username().is_empty() {
-        return push_to.to_string();
-    }
-
-    let _ = parsed.set_username("");
-    let _ = parsed.set_password(None);
-    parsed.to_string()
-}
-
-// SECURITY: Old rows can predate credential-query validation. Remove prohibited
-// query pairs from both Niks3 planes before API serialization. Invalid URLs fail
-// closed rather than echoing unparsed input that can contain private material.
+// Keep the existing internal name for discovery/redaction tests. Every URL field
+// uses the same expanded policy, including generic and S3 legacy queries.
 fn sanitize_niks3_url_credentials(value: &str) -> String {
-    let Ok(mut parsed) = Url::parse(value) else {
-        return "[REDACTED]".into();
-    };
-    let sensitive_query = parsed
-        .query_pairs()
-        .any(|(name, _)| niks3_query_parameter_is_sensitive(&name));
-    if !sensitive_query
-        && parsed.username().is_empty()
-        && parsed.password().is_none()
-        && parsed.fragment().is_none()
-    {
-        return value.into();
-    }
-    let _ = parsed.set_username("");
-    let _ = parsed.set_password(None);
-    parsed.set_fragment(None);
-    if sensitive_query {
-        let safe_pairs: Vec<_> = parsed
-            .query_pairs()
-            .into_owned()
-            .filter(|(name, _)| !niks3_query_parameter_is_sensitive(name))
-            .collect();
-        parsed.set_query(None);
-        if !safe_pairs.is_empty() {
-            parsed.query_pairs_mut().extend_pairs(safe_pairs);
-        }
-    }
-    parsed.to_string()
+    sanitize_cache_url_credentials(value)
 }
 
 // ============================================================================
@@ -799,11 +1016,15 @@ pub async fn create_cache_destination(
 /// rejected configured targets, and `200` with stage results for probe failures.
 /// Redirects are errors. Read mTLS credentials go only to the configured read
 /// endpoint; the write token is never sent. An untested stage is false or null.
+/// JSON parsing follows admin authorization and rejects invalid bodies without
+/// echoing values. Validates the same create configuration as persistence.
+/// Supplied double-submit CSRF state must match. S3 checks path-style bucket
+/// ListObjectsV2 with explicit keys; success does not prove write permission.
 pub async fn test_cache_destination_credentials(
     State(pool): State<PgPool>,
     State(server_config): State<ServerConfig>,
     headers: HeaderMap,
-    Json(create): Json<CreateCacheDestination>,
+    request: axum::extract::Request,
 ) -> impl IntoResponse {
     if require_admin_user(&pool, &headers).await.is_none() {
         return (
@@ -817,6 +1038,31 @@ pub async fn test_cache_destination_credentials(
             .into_response();
     }
 
+    if let Err(response) = optional_probe_csrf(&headers) {
+        return response;
+    }
+    let create: CreateCacheDestination = match probe_json(request).await {
+        Ok(create) => create,
+        Err(response) => return response,
+    };
+    if let Err(message) = reject_probe_query_credentials([
+        create.push_to.as_deref(),
+        create.s3_endpoint_url.as_deref(),
+        create.niks3_server_url.as_deref(),
+    ]) {
+        return probe_error(
+            StatusCode::BAD_REQUEST,
+            "legacy_query_credentials_unsupported",
+            message,
+        );
+    }
+    if create.validate().is_err() {
+        return probe_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_cache_test_config",
+            "Invalid cache configuration",
+        );
+    }
     match run_cache_destination_test(&create, server_config.allow_private_cache_test_targets).await
     {
         Ok(result) => (StatusCode::OK, Json(result)).into_response(),
@@ -887,7 +1133,7 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
     use url::Url;
 
-    async fn admin_headers(pool: &PgPool) -> HeaderMap {
+    pub(super) async fn admin_headers(pool: &PgPool) -> HeaderMap {
         use crate::auth::session::{SESSION_COOKIE_NAME, hash_token};
         use crate::models::auth_identity::AuthRole;
         use crate::queries::auth_identity::{create_user_session, sync_user_role};
@@ -1205,10 +1451,13 @@ mod tests {
     #[tokio::test]
     async fn niks3_private_test_targets_fail_before_connecting() {
         let create = CreateCacheDestination {
+            name: "private-target-test".into(),
             cache_type: "Niks3".into(),
             niks3_server_url: Some("https://127.0.0.1".into()),
             push_to: Some("https://127.0.0.1".into()),
             niks3_write_auth_mode: Some("token".into()),
+            niks3_auth_token: Some("fixture-token-marker".into()),
+            niks3_public_keys: vec![nix_public_key_fixture("fixture")],
             niks3_read_auth_mode: Some("none".into()),
             ..Default::default()
         };
@@ -1247,6 +1496,7 @@ mod tests {
     #[test]
     fn niks3_response_redaction_preserves_configured_flags() {
         let destination = CacheDestination {
+            cache_type: "Niks3".into(),
             niks3_server_url: Some("https://user:secret@example.com".into()),
             niks3_auth_token: Some("token-secret".into()),
             niks3_write_client_cert: Some("write-cert".into()),
@@ -1366,7 +1616,7 @@ mod tests {
         });
         assert_eq!(
             generic.push_to.as_deref(),
-            Some("https://cache.example.com/?token=generic-token")
+            Some("https://cache.example.com/")
         );
     }
 
@@ -1531,9 +1781,10 @@ pub async fn update_cache_destination(
         )
             .into_response(),
         Err(e) => {
-            tracing::error!("Failed to update cache destination {}: {:#}", id, e);
+            tracing::error!("Failed to update cache destination {}", id);
             let message = e.to_string();
-            let status = if message.contains("required for")
+            let status = if message == "Invalid effective cache configuration"
+                || message.contains("required for")
                 || message.starts_with("Invalid Nix public signing key:")
                 || message == "niks3_public_keys requires nonempty signing keys"
                 || message.contains("Invalid cache_type")
@@ -1551,7 +1802,11 @@ pub async fn update_cache_destination(
                     } else {
                         "internal_error".to_string()
                     },
-                    message,
+                    message: if status == StatusCode::BAD_REQUEST {
+                        "Invalid effective cache configuration".into()
+                    } else {
+                        "Failed to update cache destination".into()
+                    },
                     details: None,
                 }),
             )

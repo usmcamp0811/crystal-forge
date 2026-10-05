@@ -27,6 +27,21 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
     await dialog.getByRole("button", { name, exact: true }).click();
     await expect(dialog.getByRole("button", { name, exact: true })).toHaveAttribute("aria-pressed", "true");
   };
+  const identity = async (plane, action) => {
+    await dialog.getByRole("button", { name: new RegExp(`^(Add|Edit|Replace) ${plane} credential$`) }).click();
+    const nested = page.getByRole("dialog", { name: `${plane} credential`, exact: true });
+    await expect(nested).toBeVisible();
+    await action(nested);
+    await nested.getByRole("button", { name: "Use credential", exact: true }).click();
+    await expect(nested).toBeHidden();
+  };
+  const localCredential = async action => {
+    await dialog.getByRole("button", { name: /^(Add|Edit|Replace) credential$/ }).click();
+    const nested = page.getByRole("dialog", { name: "Add credential", exact: true });
+    await action(nested);
+    await nested.getByRole("button", { name: "Save credential", exact: true }).click();
+    await expect(nested).toBeHidden();
+  };
   const extraCapture = async state => {
     if (captureState) await captureState(state);
     else if (screenshot) {
@@ -141,7 +156,7 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
       assert.deepEqual(body.environment_ids, expectedIds);
       assert.equal(body.cache_type, null, "unchanged type is omitted, preserving exact legacy wire type");
       assert.equal(body.enabled, null, "Edit does not activate a disabled cache");
-      for (const field of ["s3_access_key_id", "s3_secret_access_key", "s3_session_token", "attic_token", "niks3_auth_token", "niks3_write_client_key", "niks3_read_client_key"]) assert.equal(body[field], null, `blank edit retains ${field}`);
+      for (const field of ["s3_access_key_id", "s3_secret_access_key", "s3_session_token", "attic_token", "niks3_auth_token", "niks3_write_client_key", "niks3_read_client_key"]) assert.equal(body[field], undefined, `blank edit omits and retains ${field}`);
       await expect(dialog).toBeHidden();
       await expect(trigger).toBeFocused();
       assert.deepEqual(await api("GET", `${cachePath}/environments`), expectedIds);
@@ -174,8 +189,11 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
       await dialog.getByLabel("Attic cache name", { exact: true }).fill("fixture-converted");
       await dialog.getByLabel("Attic public key", { exact: true }).fill(key);
       await section("Credentials");
-      await expect(dialog.getByLabel("Attic token", { exact: true })).toHaveValue("");
-      await dialog.getByLabel("Attic token", { exact: true }).fill("fixture-explicit-conversion-token");
+      await expect(dialog.getByLabel("Attic token", { exact: true })).toHaveCount(0);
+      await localCredential(async nested => {
+        await nested.getByLabel("Name", { exact: true }).fill("explicit conversion");
+        await nested.getByLabel("Token", { exact: true }).fill("fixture-explicit-conversion-token");
+      });
       await convert("Attic");
       await open();
       await expect(dialog.getByRole("button", { name: "Save changes", exact: true })).toBeEnabled();
@@ -208,7 +226,7 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
   };
   const credentialDraft = async (kind, phase, retainCapture) => {
     const outerNode = await dialog.elementHandle();
-    const trigger = dialog.getByRole("button", { name: "Add credential", exact: true });
+    const trigger = dialog.getByRole("button", { name: /^(Add|Edit) credential$/ });
     const nested = page.getByRole("dialog", { name: "Add credential", exact: true });
     const saveDraft = nested.getByRole("button", { name: "Save credential", exact: true });
     const before = requests.filter(r => r.method() === "POST" && /\/caches$/.test(r.url())).length;
@@ -283,7 +301,7 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
     // canceled. The outer destination, scope and type-specific inputs survive.
     await trigger.press("Enter");
     await expect(nested.getByLabel("Name", { exact: true })).toBeFocused();
-    await expect(nested.getByLabel("Name", { exact: true })).toHaveValue("");
+    await expect(nested.getByLabel("Name", { exact: true })).toHaveValue(`incomplete-${prefix}-${phase}`);
     await nested.getByLabel("Name", { exact: true }).fill(`${prefix}-${phase}-credential`);
     if (kind === "s3") {
       await nested.getByLabel("Access key ID", { exact: true }).fill("fixture-access");
@@ -298,7 +316,7 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
     await expect(trigger).toBeFocused();
     assert(await dialog.evaluate((current, original) => current === original, outerNode), "draft confirmation preserves the exact outer dialog");
     await expect(dialog.getByLabel("Credential", { exact: true }).locator("option:checked")).toContainText(`${prefix}-${phase}-credential`);
-    await expect(dialog.getByLabel(kind === "s3" ? "AWS secret access key" : "Attic token", { exact: true })).toHaveValue(kind === "s3" ? "fixture-secret" : "fixture-attic-token");
+    await expect(dialog.getByLabel(kind === "s3" ? "AWS secret access key" : "Attic token", { exact: true })).toHaveCount(0);
     assert.equal(requests.filter(r => r.method() === "POST" && /\/caches$/.test(r.url())).length, before, "confirming a credential draft does not persist a cache or credential library");
     console.log(`TASK-470 nested ${phase} labels, focus containment, Escape return and edited draft passed`);
   };
@@ -380,14 +398,15 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
     await dialog.getByLabel("Write / API URL", { exact: true }).fill("https://write.example.com");
     await dialog.getByLabel("Signing public keys", { exact: true }).fill(key);
     await section("Credentials");
-    await dialog.getByLabel("Write token", { exact: true }).fill("fixture-niks3-token");
+    await identity("Write", nested => nested.getByLabel("Write token", { exact: true }).fill("fixture-niks3-token"));
     await type("S3-compatible");
     for (const [label, value] of [["Destination URL", "s3://fixture-bucket/prefix"], ["S3 region", "us-east-1"], ["S3 endpoint URL", "https://s3.example.com"]]) await dialog.getByLabel(label, { exact: true }).fill(value);
     await dialog.getByLabel("Signing key path (optional)", { exact: true }).fill("/fixture/signing-key");
     await dialog.getByLabel("Compression (optional)", { exact: true }).selectOption("zstd");
     await section("Credentials");
     await credentialDraft("s3", "s3", true);
-    for (const [label, value] of [["AWS session token (optional)", "fixture-session"], ["S3 profile (optional)", "fixture-profile"]]) await dialog.getByLabel(label, { exact: true }).fill(value);
+    await localCredential(nested => nested.getByLabel("AWS session token (optional)", { exact: true }).fill("fixture-session"));
+    await dialog.getByLabel("S3 profile (optional)", { exact: true }).fill("fixture-profile");
     for (const [name, badge] of [["Attic", "Attic"], ["Niks3", "Niks3"], ["Nix HTTPS", "Nix HTTPS"], ["S3-compatible", "S3"]]) {
       await type(name);
       assert(await dialog.evaluate((current, original) => current === original, node), `same actual dialog object after ${name}`);
@@ -401,7 +420,7 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
         await expect(dialog.getByLabel("Attic public key", { exact: true })).toHaveValue(key);
         await expect(dialog.getByLabel("Write / API URL", { exact: true })).toHaveCount(0);
         await section("Credentials");
-        await expect(dialog.getByLabel("Attic token", { exact: true })).toHaveValue("fixture-attic-token");
+        await localCredential(nested => expect(nested.getByLabel("Token", { exact: true })).toHaveValue("fixture-attic-token"));
         await expect(dialog.getByLabel("AWS access key ID", { exact: true })).toHaveCount(0);
       } else if (name === "Niks3") {
         await expect(dialog.getByLabel("Read / substituter URL", { exact: true })).toHaveValue("https://read.example.com");
@@ -409,7 +428,7 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
         await expect(dialog.getByLabel("Signing public keys", { exact: true })).toHaveValue(key);
         await expect(dialog.getByLabel("S3 region", { exact: true })).toHaveCount(0);
         await section("Credentials");
-        await expect(dialog.getByLabel("Write token", { exact: true })).toHaveValue("fixture-niks3-token");
+        await identity("Write", nested => expect(nested.getByLabel("Write token", { exact: true })).toHaveValue("fixture-niks3-token"));
       } else if (name === "S3-compatible") {
         await expect(dialog.getByLabel("Destination URL", { exact: true })).toHaveValue("s3://fixture-bucket/prefix");
         await expect(dialog.getByLabel("S3 region", { exact: true })).toHaveValue("us-east-1");
@@ -417,9 +436,11 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
         await expect(dialog.getByLabel("Signing key path (optional)", { exact: true })).toHaveValue("/fixture/signing-key");
         await expect(dialog.getByLabel("Compression (optional)", { exact: true })).toHaveValue("zstd");
         await section("Credentials");
-        await expect(dialog.getByLabel("AWS access key ID", { exact: true })).toHaveValue("fixture-access");
-        await expect(dialog.getByLabel("AWS secret access key", { exact: true })).toHaveValue("fixture-secret");
-        await expect(dialog.getByLabel("AWS session token (optional)", { exact: true })).toHaveValue("fixture-session");
+        await localCredential(async nested => {
+          await expect(nested.getByLabel("Access key ID", { exact: true })).toHaveValue("fixture-access");
+          await expect(nested.getByLabel("Secret access key", { exact: true })).toHaveValue("fixture-secret");
+          await expect(nested.getByLabel("AWS session token (optional)", { exact: true })).toHaveValue("fixture-session");
+        });
         await expect(dialog.getByLabel("S3 profile (optional)", { exact: true })).toHaveValue("fixture-profile");
       } else {
         await expect(dialog.getByLabel("URL", { exact: true })).toHaveValue("https://read.example.com");
@@ -432,22 +453,26 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
     await dialog.getByLabel("Write authentication").selectOption("mtls");
     await dialog.getByLabel("Read authentication").selectOption("mtls");
     for (const plane of ["Write", "Read"]) {
-      await dialog.getByLabel(`${plane} client certificate`, { exact: true }).fill(`draft-${plane}-certificate`);
-      await dialog.getByLabel(`${plane} private key`, { exact: true }).fill(`draft-${plane}-private-key`);
-      await dialog.getByLabel(`${plane} CA certificate (optional)`, { exact: true }).fill(`draft-${plane}-CA`);
+      await identity(plane, async nested => {
+        await nested.getByLabel(`${plane} client certificate`, { exact: true }).fill(`draft-${plane}-certificate`);
+        await nested.getByLabel(`${plane} private key`, { exact: true }).fill(`draft-${plane}-private-key`);
+        await nested.getByLabel(`${plane} CA certificate (optional)`, { exact: true }).fill(`draft-${plane}-CA`);
+      });
     }
     await type("Attic");
     await type("Niks3");
     assert(await dialog.evaluate((current, original) => current === original, node), "mTLS switching retains the actual dialog object");
     await section("Credentials");
     for (const plane of ["Write", "Read"]) {
-      await expect(dialog.getByLabel(`${plane} client certificate`, { exact: true })).toHaveValue(`draft-${plane}-certificate`);
-      await expect(dialog.getByLabel(`${plane} private key`, { exact: true })).toHaveValue(`draft-${plane}-private-key`);
-      await expect(dialog.getByLabel(`${plane} CA certificate (optional)`, { exact: true })).toHaveValue(`draft-${plane}-CA`);
+      await identity(plane, async nested => {
+        await expect(nested.getByLabel(`${plane} client certificate`, { exact: true })).toHaveValue(`draft-${plane}-certificate`);
+        await expect(nested.getByLabel(`${plane} private key`, { exact: true })).toHaveValue(`draft-${plane}-private-key`);
+        await expect(nested.getByLabel(`${plane} CA certificate (optional)`, { exact: true })).toHaveValue(`draft-${plane}-CA`);
+      });
     }
     await dialog.getByLabel("Write authentication").selectOption("token");
     await dialog.getByLabel("Read authentication").selectOption("none");
-    await dialog.getByLabel("Write token").fill("fixture-niks3-token");
+    await identity("Write", nested => nested.getByLabel("Write token").fill("fixture-niks3-token"));
     await type("S3-compatible");
     await section("Destination");
     await dialog.getByLabel("Name", { exact: true }).fill("");
@@ -474,7 +499,7 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
           await dialog.getByLabel("Write / API URL", { exact: true }).fill("https://write.example.com");
           await dialog.getByLabel("Signing public keys", { exact: true }).fill(key);
           await section("Credentials");
-          await dialog.getByLabel("Write token", { exact: true }).fill("fixture-niks3-token");
+          await identity("Write", nested => nested.getByLabel("Write token", { exact: true }).fill("fixture-niks3-token"));
         }
         await section("Environments");
         await dialog.getByRole("button", { name: env.name, exact: true }).click();

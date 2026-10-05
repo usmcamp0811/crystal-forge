@@ -2753,6 +2753,24 @@ pub async fn test_cache_destination_credentials(
     send_json_with_csrf("POST", &url, Some(data)).await
 }
 
+/// Tests a stored destination with the same replacement patch used by Save.
+///
+/// The server resolves omitted credentials by ID. This request does not save
+/// configuration, credentials, environment assignments or usage timestamps.
+/// The request body is an unwrapped [`UpdateCacheDestination`].
+///
+/// # Errors
+/// Returns an error for authorization, missing destinations, invalid overrides,
+/// target-policy rejection or network failures. Callers must display a static
+/// failure message rather than echo response bodies or submitted credentials.
+pub async fn test_stored_cache_destination_credentials(
+    id: i32,
+    data: &UpdateCacheDestination,
+) -> Result<CacheCredentialTestResult, ApiClientError> {
+    let url = format!("{}/caches/{id}/test-credentials", base_url());
+    send_json_with_csrf("POST", &url, Some(data)).await
+}
+
 /// Discovers public Niks3 endpoints and signing keys without saving changes.
 ///
 /// # Errors

@@ -6397,6 +6397,21 @@ pub struct CacheDestination {
     pub attic_public_key: Option<String>,
     pub attic_ignore_upstream_cache_filter: Option<bool>,
     pub attic_jobs: Option<i32>,
+    /// Indicates an active Attic token without exposing stored material.
+    #[serde(default)]
+    pub attic_token_configured: bool,
+    /// Indicates a complete active S3 access-key identity.
+    #[serde(default)]
+    pub s3_credentials_configured: bool,
+    /// Indicates an active S3 session token without exposing its value.
+    #[serde(default)]
+    pub s3_session_token_configured: bool,
+    /// Indicates retained HTTP Basic credentials in the server-only URL.
+    #[serde(default)]
+    pub http_basic_auth_configured: bool,
+    /// Indicates a legacy credential query that requires explicit migration.
+    #[serde(default)]
+    pub legacy_query_credentials_configured: bool,
     /// HTTPS write API URL; `push_to` remains the independent read URL.
     pub niks3_server_url: Option<String>,
     /// Trusted Nix signing keys for reads, including rotation overlap.
@@ -6503,10 +6518,18 @@ pub struct UpdateCacheDestination {
     pub compression: Option<String>,
     pub s3_region: Option<String>,
     pub s3_profile: Option<String>,
+    /// Replaces the S3 access key ID; omission retains the configured identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub s3_access_key_id: Option<String>,
+    /// Replaces the S3 secret access key; omission retains stored material.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub s3_secret_access_key: Option<String>,
+    /// Retains the session token when omitted; an empty replacement clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub s3_session_token: Option<String>,
     pub s3_endpoint_url: Option<String>,
+    /// Replaces the Attic token; omission retains the configured token.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub attic_token: Option<String>,
     pub attic_cache_name: Option<String>,
     pub attic_public_key: Option<String>,
@@ -6527,10 +6550,12 @@ pub struct UpdateCacheDestination {
     /// Selects write mode; mode changes clear the previous identity atomically.
     pub niks3_write_auth_mode: Option<String>,
     /// Replaces the token; omission preserves the configured token.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_auth_token: Option<String>,
     /// Replaces the write client certificate.
     pub niks3_write_client_cert: Option<String>,
     /// Replaces the write private key; omission preserves it.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_write_client_key: Option<String>,
     /// Replaces the write trust anchor; omission preserves it.
     pub niks3_write_ca_cert: Option<String>,
@@ -6539,6 +6564,7 @@ pub struct UpdateCacheDestination {
     /// Replaces the read client certificate.
     pub niks3_read_client_cert: Option<String>,
     /// Replaces the read private key; omission preserves it.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_read_client_key: Option<String>,
     /// Replaces the read trust anchor; omission preserves it.
     pub niks3_read_ca_cert: Option<String>,
@@ -6985,6 +7011,65 @@ pub struct UpdatePolicyMappingRequest {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cache_update_omits_retained_secrets_but_preserves_explicit_session_clear() {
+        let retained = serde_json::to_value(super::UpdateCacheDestination::default())
+            .expect("serialize retained credential patch");
+        for field in [
+            "attic_token",
+            "s3_access_key_id",
+            "s3_secret_access_key",
+            "s3_session_token",
+            "niks3_auth_token",
+            "niks3_write_client_key",
+            "niks3_read_client_key",
+        ] {
+            assert!(retained.get(field).is_none(), "omit {field}");
+        }
+        let replacement = serde_json::to_value(super::UpdateCacheDestination {
+            s3_access_key_id: Some("fixture-access".into()),
+            s3_secret_access_key: Some("fixture-secret".into()),
+            s3_session_token: Some(String::new()),
+            ..Default::default()
+        })
+        .expect("serialize explicit credential replacement");
+        assert_eq!(replacement["s3_session_token"], "");
+        assert!(replacement.get("attic_token").is_none());
+        assert!(replacement.get("niks3_auth_token").is_none());
+    }
+
+    #[test]
+    fn cache_configured_flags_default_false_for_older_servers() {
+        let legacy = serde_json::json!({
+            "id": 7, "name": "fixture", "cache_type": "Attic",
+            "enabled": true, "created_at": "2026-10-04T00:00:00Z",
+            "updated_at": "2026-10-04T00:00:00Z"
+        });
+        let cache: super::CacheDestination =
+            serde_json::from_value(legacy.clone()).expect("deserialize legacy destination");
+        assert!(!cache.attic_token_configured);
+        assert!(!cache.s3_credentials_configured);
+        assert!(!cache.s3_session_token_configured);
+        assert!(!cache.http_basic_auth_configured);
+        assert!(!cache.legacy_query_credentials_configured);
+        let mut configured = legacy;
+        configured["attic_token_configured"] = true.into();
+        configured["s3_credentials_configured"] = true.into();
+        configured["s3_session_token_configured"] = true.into();
+        configured["http_basic_auth_configured"] = true.into();
+        configured["legacy_query_credentials_configured"] = true.into();
+        let cache: super::CacheDestination =
+            serde_json::from_value(configured).expect("deserialize configured flags");
+        assert!(cache.attic_token_configured);
+        assert!(cache.s3_credentials_configured);
+        assert!(cache.s3_session_token_configured);
+        assert!(cache.http_basic_auth_configured);
+        assert!(cache.legacy_query_credentials_configured);
+        assert!(cache.attic_token.is_none());
+        assert!(cache.s3_secret_access_key.is_none());
+        assert!(cache.s3_session_token.is_none());
+    }
+
     use super::{
         ComplianceControlEvidence, ConfigObservationLifecycle, ConfigObservationPayload,
         ConfigObservationRequestResponse, ConfigObservationResponse, CreatePolicyDraftRequest,

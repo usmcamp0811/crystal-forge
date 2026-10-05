@@ -20969,6 +20969,10 @@ security.audit.enable = true;</fixtext>
         page, baseUrl, apiBaseUrl, undefined,
         state => captureWorkflowState(page, "25-caches-modal-attic", state),
       );
+      await require("./retained-cache-credential-workflow.js").retainedCacheCredentialWorkflow(
+        page, baseUrl, apiBaseUrl,
+        state => captureWorkflowState(page, "25-caches-modal-attic", state),
+      );
       const { expect } = require("@playwright/test");
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
       await page.getByRole("button", { name: "Add cache", exact: true }).click();

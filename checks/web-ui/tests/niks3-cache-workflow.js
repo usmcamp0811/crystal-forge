@@ -126,6 +126,15 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     await dialog.getByRole("button", { name: "Save changes", exact: true }).click();
     await expect(dialog).toBeHidden();
   };
+  const identity = async (dialog, plane, action) => {
+    await dialog.getByRole("button", { name: new RegExp(`^(Add|Edit|Replace) ${plane} credential$`) }).click();
+    const nested = page.getByRole("dialog", { name: `${plane} credential`, exact: true });
+    await expect(nested).toBeVisible();
+    await action(nested);
+    await nested.getByRole("button", { name: "Use credential", exact: true }).click();
+    await expect(nested).toBeHidden();
+  };
+  const tokenDraft = (dialog, value) => identity(dialog, "Write", nested => nested.getByLabel("Write token").fill(value));
   try {
     // Keep the overlay out of this form workflow without changing server-side
     // onboarding state. The harness owns this browser presentation record.
@@ -178,13 +187,13 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     await dialog.getByRole("button", { name: "Credentials", exact: true }).click();
     const credentialOrder = await dialog.locator("label").allTextContents();
     assert(credentialOrder.indexOf("Read authentication") < credentialOrder.indexOf("Write authentication"), "Read precedes Write in Credentials");
-    await dialog.getByLabel("Write token").fill(token);
+    await tokenDraft(dialog, token);
     await dialog.getByRole("button", { name: "Test connection" }).click();
     await expect(dialog.getByRole("alert")).toContainText("Connection test failed");
     await expect(dialog.getByRole("alert")).not.toContainText(token);
     await dialog.getByRole("button", { name: "Test connection" }).click();
     await expect(dialog.getByRole("button", { name: "Testing…", exact: true })).toBeDisabled();
-    await expect(dialog.getByLabel("Write token")).toBeDisabled();
+    await expect(dialog.getByRole("button", { name: "Edit Write credential", exact: true })).toBeDisabled();
     releaseTest();
     await expect(dialog.getByTestId("niks3-test-result")).toContainText("Write authorization: Untested");
     await expect(dialog.getByTestId("niks3-test-result")).not.toContainText("Write authorization: Verified");
@@ -217,9 +226,9 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     assert.deepEqual(cache.niks3_public_keys, keys);
     dialog = await openEdit();
     await dialog.getByRole("button", { name: "Credentials", exact: true }).click();
-    await expect(dialog.getByLabel("Write token")).toHaveValue("");
-    await expect(dialog.getByText("Token configured.", { exact: false })).toBeVisible();
-    await dialog.getByLabel("Write token").fill(rotatedToken);
+    await expect(dialog.getByLabel("Write token")).toHaveCount(0);
+    await expect(dialog.getByLabel("Write credential")).toHaveValue("__current__");
+    await tokenDraft(dialog, rotatedToken);
     const beforeFailedUpdate = await getRedacted();
     await dialog.getByRole("button", { name: "Destination", exact: true }).click();
     await dialog.getByLabel("Read / substituter URL", { exact: true }).fill("https://changed-read.example.com");
@@ -243,7 +252,7 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     assert(cache.niks3_write_token_configured);
     dialog = await openEdit();
     await dialog.getByRole("button", { name: "Credentials", exact: true }).click();
-    await expect(dialog.getByLabel("Write token")).toHaveValue("");
+    await expect(dialog.getByLabel("Write token")).toHaveCount(0);
     await save(dialog);
     cache = await getRedacted();
     assert(cache.niks3_write_token_configured, "blank edit retains token");
@@ -257,9 +266,11 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     await expect(dialog.getByTestId("cache-save-blocked")).toContainText("Write mTLS requires");
     assert.equal(requests.filter(r => r.method() === "PUT").length, updatesBeforeInvalidIdentity, "invalid mTLS edit makes no update request");
     for (const plane of ["Write", "Read"]) {
-      await dialog.getByLabel(`${plane} client certificate`, { exact: true }).fill(cert);
-      await dialog.getByLabel(`${plane} private key`, { exact: true }).fill(privateKey);
-      await dialog.getByLabel(`${plane} CA certificate (optional)`, { exact: true }).fill(cert);
+      await identity(dialog, plane, async nested => {
+        await nested.getByLabel(`${plane} client certificate`, { exact: true }).fill(cert);
+        await nested.getByLabel(`${plane} private key`, { exact: true }).fill(privateKey);
+        await nested.getByLabel(`${plane} CA certificate (optional)`, { exact: true }).fill(cert);
+      });
     }
     await save(dialog);
     cache = await getRedacted();
@@ -268,8 +279,8 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     assert.equal(cache.niks3_read_mtls_configured, true);
     dialog = await openEdit();
     await dialog.getByRole("button", { name: "Credentials", exact: true }).click();
-    await expect(dialog.getByLabel("Write private key")).toHaveValue("");
-    await expect(dialog.getByLabel("Read private key")).toHaveValue("");
+    await expect(dialog.getByLabel("Write private key")).toHaveCount(0);
+    await expect(dialog.getByLabel("Read private key")).toHaveCount(0);
     if (screenshot) await page.screenshot({ path: screenshot.replace(/\.png$/, "-mtls.png"), fullPage: true, animations: "disabled" });
     if (captureState) await captureState("niks3-mtls");
     await dialog.getByRole("button", { name: "Environments", exact: true }).click();
@@ -279,8 +290,7 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     assert(cache.niks3_write_mtls_configured && cache.niks3_read_mtls_configured);
     dialog = await openEdit();
     await dialog.getByRole("button", { name: "Credentials", exact: true }).click();
-    await dialog.getByRole("checkbox", { name: "Remove Write custom CA on save" }).check();
-    await dialog.getByRole("checkbox", { name: "Remove Read custom CA on save" }).check();
+    for (const plane of ["Write", "Read"]) await identity(dialog, plane, nested => nested.getByRole("checkbox", { name: `Remove ${plane} custom CA on save` }).check());
     await save(dialog);
     cache = await getRedacted();
     assert.equal(cache.niks3_write_ca_cert, null);
@@ -288,7 +298,7 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     dialog = await openEdit();
     await dialog.getByRole("button", { name: "Credentials", exact: true }).click();
     await dialog.getByLabel("Write authentication").selectOption("token");
-    await dialog.getByLabel("Write token").fill(token);
+    await tokenDraft(dialog, token);
     await dialog.getByLabel("Read authentication").selectOption("none");
     await save(dialog);
     cache = await getRedacted();

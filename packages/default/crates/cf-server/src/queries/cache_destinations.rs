@@ -1,5 +1,5 @@
 use crate::models::cache_destination::{
-    CacheDestination, CreateCacheDestination, UpdateCacheDestination,
+    CacheDestination, CreateCacheDestination, UpdateCacheDestination, effective_cache_url,
 };
 use crate::security::cache_secrets;
 use anyhow::Result;
@@ -251,6 +251,8 @@ pub async fn create_cache_destination(
 ///
 /// Authentication mode transitions clear the old mode's credentials before
 /// validation. Concurrent updates serialize on the destination row lock.
+/// URL writes use [`effective_update`], preserving same-type sanitized round
+/// trips and removing inherited URI authentication on type conversions.
 ///
 /// # Errors
 /// Returns an error for invalid resulting settings, encryption, or DB failure.
@@ -272,10 +274,11 @@ pub async fn update_cache_destination(
         return Ok(None);
     };
 
-    validate_update_shape(&current, update)?;
-    let niks3 = current
-        .merge_niks3_update(update)
-        .map_err(anyhow::Error::msg)?;
+    let niks3 = effective_update(&current, update)
+        .map_err(|_| anyhow::anyhow!("Invalid effective cache configuration"))?;
+    let type_changed = niks3.cache_type != current.cache_type;
+    let update_push_to = update.push_to.is_some() || type_changed;
+    let update_s3_endpoint = update.s3_endpoint_url.is_some() || type_changed;
     // Preserve stored ciphertext on unrelated updates. Write all Niks3 columns
     // together only when that configuration or its cache type changes.
     let update_niks3 = (current.cache_type == "Niks3"
@@ -303,6 +306,28 @@ pub async fn update_cache_destination(
     let mut updates = Vec::new();
     let mut bind_count = 1;
 
+    if update
+        .cache_type
+        .as_deref()
+        .is_some_and(|ty| ty != current.cache_type)
+    {
+        // SECURITY: Save must not activate stale inactive credentials that the
+        // shared effective merge intentionally excluded from validation/Test.
+        for (column, replaced) in [
+            ("attic_token", update.attic_token.is_some()),
+            ("s3_access_key_id", update.s3_access_key_id.is_some()),
+            (
+                "s3_secret_access_key",
+                update.s3_secret_access_key.is_some(),
+            ),
+            ("s3_session_token", update.s3_session_token.is_some()),
+        ] {
+            if !replaced {
+                updates.push(format!("{column} = NULL"));
+            }
+        }
+    }
+
     if let Some(ref name) = update.name {
         if name.trim().is_empty() {
             return Err(anyhow::anyhow!("Cache destination name cannot be empty"));
@@ -320,7 +345,7 @@ pub async fn update_cache_destination(
         updates.push(format!("cache_type = ${}", bind_count));
         bind_count += 1;
     }
-    if update.push_to.is_some() {
+    if update_push_to {
         updates.push(format!("push_to = ${}", bind_count));
         bind_count += 1;
     }
@@ -356,7 +381,7 @@ pub async fn update_cache_destination(
         updates.push(format!("s3_session_token = ${}", bind_count));
         bind_count += 1;
     }
-    if update.s3_endpoint_url.is_some() {
+    if update_s3_endpoint {
         updates.push(format!("s3_endpoint_url = ${}", bind_count));
         bind_count += 1;
     }
@@ -445,8 +470,8 @@ pub async fn update_cache_destination(
         if let Some(ref cache_type) = update.cache_type {
             q = q.bind(cache_type);
         }
-        if let Some(ref push_to) = update.push_to {
-            q = q.bind(push_to);
+        if update_push_to {
+            q = q.bind(&niks3.push_to);
         }
         if let Some(enabled) = update.enabled {
             q = q.bind(enabled);
@@ -475,8 +500,8 @@ pub async fn update_cache_destination(
             let encrypted = cache_secrets::encrypt_secret(s3_session_token)?;
             q = q.bind(encrypted);
         }
-        if let Some(ref s3_endpoint_url) = update.s3_endpoint_url {
-            q = q.bind(s3_endpoint_url);
+        if update_s3_endpoint {
+            q = q.bind(&niks3.s3_endpoint_url);
         }
         if let Some(ref attic_token) = update.attic_token {
             let encrypted = cache_secrets::encrypt_secret(attic_token)?;
@@ -563,20 +588,83 @@ pub async fn update_cache_destination(
     Ok(destination)
 }
 
+#[cfg(test)]
 fn validate_update_shape(
     current: &CacheDestination,
     update: &UpdateCacheDestination,
 ) -> Result<()> {
-    let niks3 = current
-        .merge_niks3_update(update)
-        .map_err(anyhow::Error::msg)?;
+    effective_update(current, update)
+        .map(|_| ())
+        .map_err(anyhow::Error::msg)
+}
+
+/// Returns the validated plaintext configuration shared by Save and Test.
+///
+/// Same-type omissions retain stored values. Type conversions cannot borrow
+/// inactive credentials, including Niks3 modes and client identities. Mode
+/// transitions and explicit clears use the same merge as persistence. This
+/// function performs no encryption, database, filesystem, or network operations.
+/// The caller must not serialize or log the returned plaintext credentials.
+/// Same-type sanitized URL round trips retain the stored raw URL; other explicit
+/// URLs cannot borrow its userinfo or queries. Inherited URLs on type conversions
+/// have URI credentials removed. Save must bind these effective URL values.
+///
+/// # Errors
+/// Returns a credential-free validation error for an invalid effective update.
+///
+/// # Examples
+/// ```
+/// use crystal_forge::models::cache_destination::{CacheDestination, UpdateCacheDestination};
+/// use crystal_forge::queries::cache_destinations::effective_update;
+/// let current = CacheDestination {
+///     name: "public".into(), cache_type: "Nix".into(),
+///     push_to: Some("https://cache.example".into()), ..Default::default()
+/// };
+/// assert_eq!(effective_update(&current, &UpdateCacheDestination::default())?.name, "public");
+/// # Ok::<(), String>(())
+/// ```
+pub fn effective_update(
+    current: &CacheDestination,
+    update: &UpdateCacheDestination,
+) -> std::result::Result<CreateCacheDestination, String> {
+    let same_type = update
+        .cache_type
+        .as_deref()
+        .is_none_or(|ty| ty == current.cache_type);
+    let mut source = current.clone();
+    if update
+        .cache_type
+        .as_deref()
+        .is_some_and(|ty| ty != current.cache_type)
+    {
+        // SECURITY: Historical inactive fields are not a credential library.
+        source.attic_token = None;
+        source.s3_access_key_id = None;
+        source.s3_secret_access_key = None;
+        source.s3_session_token = None;
+        source.niks3_auth_token = None;
+        source.niks3_write_auth_mode = None;
+        source.niks3_read_auth_mode = None;
+        source.niks3_write_client_cert = None;
+        source.niks3_write_client_key = None;
+        source.niks3_write_ca_cert = None;
+        source.niks3_read_client_cert = None;
+        source.niks3_read_client_key = None;
+        source.niks3_read_ca_cert = None;
+    }
+    let current = &source;
+    let niks3 = current.merge_niks3_update(update)?;
     let merged = CreateCacheDestination {
         name: update.name.clone().unwrap_or_else(|| current.name.clone()),
         cache_type: update
             .cache_type
             .clone()
             .unwrap_or_else(|| current.cache_type.clone()),
-        push_to: update.push_to.clone().or_else(|| current.push_to.clone()),
+        push_to: effective_cache_url(
+            current.push_to.as_deref(),
+            update.push_to.as_deref(),
+            same_type,
+        ),
         enabled: Some(update.enabled.unwrap_or(current.enabled)),
         signing_key_path: update
             .signing_key_path
@@ -606,10 +694,11 @@ fn validate_update_shape(
             .s3_session_token
             .clone()
             .or_else(|| current.s3_session_token.clone()),
-        s3_endpoint_url: update
-            .s3_endpoint_url
-            .clone()
-            .or_else(|| current.s3_endpoint_url.clone()),
+        s3_endpoint_url: effective_cache_url(
+            current.s3_endpoint_url.as_deref(),
+            update.s3_endpoint_url.as_deref(),
+            same_type,
+        ),
         attic_token: update
             .attic_token
             .clone()
@@ -646,7 +735,8 @@ fn validate_update_shape(
         niks3_read_ca_cert: niks3.niks3_read_ca_cert,
     };
 
-    merged.validate().map_err(|e| anyhow::anyhow!(e))
+    merged.validate()?;
+    Ok(merged)
 }
 
 /// Delete a cache destination
