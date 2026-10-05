@@ -55,11 +55,11 @@ tags:
 - Sections:
   | Source section | Destination |
   | --- | --- |
-  | `## Who Is Hurt` | [overview/problem-statement.md#who-is-hurt](../../overview/problem-statement.md#who-is-hurt) |
-  | `## The Problem` | [overview/problem-statement.md#the-problem](../../overview/problem-statement.md#the-problem) |
-  | `## Why Now` | [overview/problem-statement.md#why-now](../../overview/problem-statement.md#why-now) |
-  | `## Out of Scope (This Phase)` | [overview/problem-statement.md](../../overview/problem-statement.md) |
-  | `## One Success Signal` | [overview/problem-statement.md#one-success-signal](../../overview/problem-statement.md#one-success-signal) |
+  | `## Who Is Hurt` | [../../overview/problem-statement.md#who-is-hurt](../../overview/problem-statement.md#who-is-hurt) |
+  | `## The Problem` | [../../overview/problem-statement.md#the-problem](../../overview/problem-statement.md#the-problem) |
+  | `## Why Now` | [../../overview/problem-statement.md#why-now](../../overview/problem-statement.md#why-now) |
+  | `## Out of Scope (This Phase)` | [../../overview/problem-statement.md#out-of-scope-this-phase](../../overview/problem-statement.md#out-of-scope-this-phase) |
+  | `## One Success Signal` | [../../overview/problem-statement.md#one-success-signal](../../overview/problem-statement.md#one-success-signal) |
 - Unmapped content: none
 
 ### `docs/requirments.md`
@@ -70,9 +70,9 @@ tags:
 - Sections:
   | Source section | Destination |
   | --- | --- |
-  | `## Non-Negotiable Constraints` (Security & Memory Safety, Data Handling & Privacy, Platform Requirements, Regulatory Compliance) | [overview/constraints-and-policy.md#non-negotiable-constraints](../../overview/constraints-and-policy.md#non-negotiable-constraints) |
-  | `## Flexible Elements` | [overview/constraints-and-policy.md#flexible-elements](../../overview/constraints-and-policy.md#flexible-elements) |
-  | `## Policy Requirements` | [overview/constraints-and-policy.md#policy-requirements](../../overview/constraints-and-policy.md#policy-requirements) |
+  | `## Non-Negotiable Constraints` (Security & Memory Safety, Data Handling & Privacy, Platform Requirements, Regulatory Compliance) | [../../overview/constraints-and-policy.md#non-negotiable-constraints](../../overview/constraints-and-policy.md#non-negotiable-constraints) |
+  | `## Flexible Elements` | [../../overview/constraints-and-policy.md#flexible-elements](../../overview/constraints-and-policy.md#flexible-elements) |
+  | `## Policy Requirements` | [../../overview/constraints-and-policy.md#policy-requirements](../../overview/constraints-and-policy.md#policy-requirements) |
 - Unmapped content: none
 
 ### `docs/context.md`
@@ -83,7 +83,7 @@ tags:
 - Sections:
   | Source section | Destination |
   | --- | --- |
-  | `## System Context` (Upstream Dependencies, System Components) | [overview/system-context-and-current-state.md](../../overview/system-context-and-current-state.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
+  | `## System Context` (Upstream Dependencies, System Components) | [../../overview/system-context-and-current-state.md](../../overview/system-context-and-current-state.md), [../cleanup-record.md](../cleanup-record.md) |
   | `### Current State` | [overview/system-context-and-current-state.md](../../overview/system-context-and-current-state.md) (flagged as stale-risk) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
   | `### Communication Patterns` | [overview/system-context-and-current-state.md#communication-patterns](../../overview/system-context-and-current-state.md#communication-patterns) |
   | `### Scaling Model` | [overview/system-context-and-current-state.md#scaling-model](../../overview/system-context-and-current-state.md#scaling-model) |
@@ -97,9 +97,9 @@ tags:
 - Sections:
   | Source section | Destination |
   | --- | --- |
-  | `## Where We Are` | [overview/roadmap.md](../../overview/roadmap.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
-  | `## Where We're Going` (items 1 to 6) | [overview/roadmap.md](../../overview/roadmap.md) |
-  | `## Future Possibilities` | [overview/roadmap.md#future-possibilities](../../overview/roadmap.md#future-possibilities) |
+  | `## Where We Are` | [../../overview/roadmap.md](../../overview/roadmap.md), [../cleanup-record.md](../cleanup-record.md) |
+  | `## Where We're Going` (items 1 to 6) | [../../overview/roadmap.md](../../overview/roadmap.md) |
+  | `## Future Possibilities` | [../../overview/roadmap.md#future-possibilities](../../overview/roadmap.md#future-possibilities) |
 - Unmapped content: none
 
 ### `docs/architecture.md`
@@ -110,15 +110,15 @@ tags:
 - Sections:
   | Source section | Destination |
   | --- | --- |
-  | `## Status`, `## Context`, `## Decision` | [decisions/adr-000-architecture-overview.md](../../decisions/adr-000-architecture-overview.md) |
+  | `## Status`, `## Context`, `## Decision` | [../../decisions/adr-000-architecture-overview.md#status](../../decisions/adr-000-architecture-overview.md#status) |
   | `### Core Components` (diagram, Agent, Server, Builder) | [components/core-components.md](../../components/core-components.md) |
   | `### Data Flows` | [architecture/data-flows.md](../../architecture/data-flows.md) |
   | `### Event-Driven Queue Architecture` | [architecture/event-driven-queues.md](../../architecture/event-driven-queues.md) |
   | `### Key Architectural Decisions` | [decisions/adr-000-architecture-overview.md](../../decisions/adr-000-architecture-overview.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
   | `### Observability Points` | [operations/observability-and-troubleshooting.md#observability-points](../../operations/observability-and-troubleshooting.md#observability-points) |
-  | `## Consequences` | [decisions/adr-000-architecture-overview.md#consequences](../../decisions/adr-000-architecture-overview.md#consequences) |
-  | `## Frontend Development` | [ui/frontend-development-overview.md](../../ui/frontend-development-overview.md) |
-  | `## Future Evolution` | [decisions/adr-000-architecture-overview.md](../../decisions/adr-000-architecture-overview.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
+  | `## Consequences` | [../../decisions/adr-000-architecture-overview.md#consequences](../../decisions/adr-000-architecture-overview.md#consequences) |
+  | `## Frontend Development` | [../../ui/frontend-development-overview.md](../../ui/frontend-development-overview.md) |
+  | `## Future Evolution` | [../../decisions/adr-000-architecture-overview.md](../../decisions/adr-000-architecture-overview.md), [../cleanup-record.md](../cleanup-record.md) |
 - Unmapped content: none
 
 ### `docs/specs/00-system-overview.md`
@@ -129,20 +129,20 @@ tags:
 - Sections:
   | Source section | Destination |
   | --- | --- |
-  | `## What is Crystal Forge?` | [overview/system-overview.md#what-is-crystal-forge](../../overview/system-overview.md#what-is-crystal-forge) |
-  | `## High-Level Architecture` (including `### Key Components`) | [overview/system-overview.md](../../overview/system-overview.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
-  | `## Data Model` | [data-model/core-entities-and-relationships.md](../../data-model/core-entities-and-relationships.md) |
-  | `## How It Works` (heading) | [overview/system-overview.md#how-it-works](../../overview/system-overview.md#how-it-works) |
+  | `## What is Crystal Forge?` | [../../overview/system-overview.md#what-is-crystal-forge](../../overview/system-overview.md#what-is-crystal-forge) |
+  | `## High-Level Architecture` (including `### Key Components`) | [../../overview/system-overview.md](../../overview/system-overview.md), [../cleanup-record.md](../cleanup-record.md) |
+  | `## Data Model` | [../../data-model/core-entities-and-relationships.md](../../data-model/core-entities-and-relationships.md) |
+  | `## How It Works` (heading) | [../../overview/system-overview.md#how-it-works](../../overview/system-overview.md#how-it-works) |
   | `### 1. Registering a System` | [security/authentication-and-authorization-overview.md#1-registering-a-system](../../security/authentication-and-authorization-overview.md#1-registering-a-system) |
   | `### 2. Evaluation and Build Queue Pipeline` | [workflows/evaluation-and-build-queue-pipeline.md](../../workflows/evaluation-and-build-queue-pipeline.md) |
   | `### 3. Deploying to a System` | [deployment/deployment-flow.md#automatic-deployment](../../deployment/deployment-flow.md#automatic-deployment) |
   | `### 4. Authentication`, `### 5. Authorization (RBAC)` | [security/authentication-and-authorization-overview.md](../../security/authentication-and-authorization-overview.md) |
-  | `## Development Workflow` | [operations/local-development-workflow.md#development-workflow](../../operations/local-development-workflow.md#development-workflow) |
-  | `## Configuration` | [operations/server-configuration-reference.md](../../operations/server-configuration-reference.md) |
-  | `## Important Patterns` | [operations/local-development-workflow.md#important-patterns](../../operations/local-development-workflow.md#important-patterns) |
-  | `## Common Tasks` | [operations/local-development-workflow.md#common-tasks](../../operations/local-development-workflow.md#common-tasks) |
-  | `## Key Files Reference` | [operations/local-development-workflow.md#key-files-reference](../../operations/local-development-workflow.md#key-files-reference) |
-  | `## Next Steps` | [overview/system-overview.md](../../overview/system-overview.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
+  | `## Development Workflow` | [../../operations/local-development-workflow.md#development-workflow](../../operations/local-development-workflow.md#development-workflow) |
+  | `## Configuration` | [../../operations/server-configuration-reference.md#configuration](../../operations/server-configuration-reference.md#configuration) |
+  | `## Important Patterns` | [../../operations/local-development-workflow.md#important-patterns](../../operations/local-development-workflow.md#important-patterns) |
+  | `## Common Tasks` | [../../operations/local-development-workflow.md#common-tasks](../../operations/local-development-workflow.md#common-tasks) |
+  | `## Key Files Reference` | [../../operations/local-development-workflow.md#key-files-reference](../../operations/local-development-workflow.md#key-files-reference) |
+  | `## Next Steps` | [../../overview/system-overview.md](../../overview/system-overview.md), [../cleanup-record.md](../cleanup-record.md) |
 - Unmapped content: none
 
 ### `docs/eval-build-deploy-flow.md`
@@ -153,8 +153,8 @@ tags:
 - Sections:
   | Source section | Destination |
   | --- | --- |
-  | `## Mermaid Flowchart` | [workflows/commit-eval-build-cache-deploy-flow.md](../../workflows/commit-eval-build-cache-deploy-flow.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
-  | `## Quick Explanation` | [workflows/commit-eval-build-cache-deploy-flow.md](../../workflows/commit-eval-build-cache-deploy-flow.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
+  | `## Mermaid Flowchart` | [../../workflows/commit-eval-build-cache-deploy-flow.md](../../workflows/commit-eval-build-cache-deploy-flow.md), [../cleanup-record.md](../cleanup-record.md) |
+  | `## Quick Explanation` | [../../workflows/commit-eval-build-cache-deploy-flow.md](../../workflows/commit-eval-build-cache-deploy-flow.md), [../cleanup-record.md](../cleanup-record.md) |
 - Unmapped content: none
 
 ### `docs/eval-build-deploy-sequence.md`
@@ -165,8 +165,8 @@ tags:
 - Sections:
   | Source section | Destination |
   | --- | --- |
-  | `## Mermaid Sequence Diagram` | [workflows/commit-eval-build-cache-deploy-sequence.md](../../workflows/commit-eval-build-cache-deploy-sequence.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
-  | `## Reading Guide` (Key Architectural Decisions) | [workflows/commit-eval-build-cache-deploy-sequence.md#reading-guide](../../workflows/commit-eval-build-cache-deploy-sequence.md#reading-guide) |
+  | `## Mermaid Sequence Diagram` | [../../workflows/commit-eval-build-cache-deploy-sequence.md](../../workflows/commit-eval-build-cache-deploy-sequence.md), [../cleanup-record.md](../cleanup-record.md) |
+  | `## Reading Guide` (Key Architectural Decisions) | [../../workflows/commit-eval-build-cache-deploy-sequence.md#reading-guide](../../workflows/commit-eval-build-cache-deploy-sequence.md#reading-guide) |
 - Unmapped content: none
 
 ### `docs/store-path-flow.md`
@@ -177,8 +177,8 @@ tags:
 - Sections:
   | Source section | Destination |
   | --- | --- |
-  | `## The Complete Flow` | [workflows/store-path-flow.md#the-complete-flow](../../workflows/store-path-flow.md#the-complete-flow) |
-  | `## Key Points for Dumb Interns` (Parallel Operations, LIFO Build Queue, System States, The Loop, Why This Design?) | [workflows/store-path-flow.md](../../workflows/store-path-flow.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
+  | `## The Complete Flow` | [../../workflows/store-path-flow.md#the-complete-flow](../../workflows/store-path-flow.md#the-complete-flow) |
+  | `## Key Points for Dumb Interns` (Parallel Operations, LIFO Build Queue, System States, The Loop, Why This Design?) | [../../workflows/store-path-flow.md#key-points](../../workflows/store-path-flow.md#key-points), [../cleanup-record.md](../cleanup-record.md) |
 - Unmapped content: none
 
 ### `docs/derivation-status.md`
@@ -190,16 +190,16 @@ tags:
   | Source section | Destination |
   | --- | --- |
   | Title and introduction | [concepts/derivation-status-lifecycle.md](../../concepts/derivation-status-lifecycle.md) |
-  | `## Combined Lifecycle (Sequence)` | [concepts/derivation-status-lifecycle.md#current-lifecycle](../../concepts/derivation-status-lifecycle.md#current-lifecycle) |
-  | `## Status Table` | [concepts/derivation-status-lifecycle.md#derivation-statuses](../../concepts/derivation-status-lifecycle.md#derivation-statuses) |
-  | `## Processing Loops` | [architecture/derivation-processing-loops.md](../../architecture/derivation-processing-loops.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
-  | `## Deployment Flow` | [deployment/deployment-flow.md](../../deployment/deployment-flow.md) |
-  | `## Cache Push Process` | [caches/cache-push-process.md](../../caches/cache-push-process.md) |
-  | `## Retry Logic` | [concepts/derivation-status-lifecycle.md#retry-rules](../../concepts/derivation-status-lifecycle.md#retry-rules) |
-  | `## Terminal States` | [concepts/derivation-status-lifecycle.md#terminal-states](../../concepts/derivation-status-lifecycle.md#terminal-states) |
-  | `## Integration Points` | [architecture/derivation-processing-loops.md](../../architecture/derivation-processing-loops.md) (section rewritten during cleanup; see [cleanup record](../cleanup-record.md)) |
-  | `## Common Issues` | [operations/observability-and-troubleshooting.md#common-issues](../../operations/observability-and-troubleshooting.md#common-issues) |
-  | `## Monitoring Recommendations` | [operations/observability-and-troubleshooting.md#monitoring-recommendations](../../operations/observability-and-troubleshooting.md#monitoring-recommendations) |
+  | `## Combined Lifecycle (Sequence)` | [../../concepts/derivation-status-lifecycle.md#current-lifecycle](../../concepts/derivation-status-lifecycle.md#current-lifecycle) |
+  | `## Status Table` | [../../concepts/derivation-status-lifecycle.md#derivation-statuses](../../concepts/derivation-status-lifecycle.md#derivation-statuses) |
+  | `## Processing Loops` | [../../architecture/derivation-processing-loops.md](../../architecture/derivation-processing-loops.md), [../cleanup-record.md](../cleanup-record.md) |
+  | `## Deployment Flow` | [../../deployment/deployment-flow.md](../../deployment/deployment-flow.md) |
+  | `## Cache Push Process` | [../../caches/cache-push-process.md](../../caches/cache-push-process.md) |
+  | `## Retry Logic` | [../../concepts/derivation-status-lifecycle.md#retry-rules](../../concepts/derivation-status-lifecycle.md#retry-rules) |
+  | `## Terminal States` | [../../concepts/derivation-status-lifecycle.md#terminal-states](../../concepts/derivation-status-lifecycle.md#terminal-states) |
+  | `## Integration Points` | [../../architecture/derivation-processing-loops.md](../../architecture/derivation-processing-loops.md), [../cleanup-record.md](../cleanup-record.md) |
+  | `## Common Issues` | [../../operations/observability-and-troubleshooting.md#common-issues](../../operations/observability-and-troubleshooting.md#common-issues) |
+  | `## Monitoring Recommendations` | [../../operations/observability-and-troubleshooting.md#monitoring-recommendations](../../operations/observability-and-troubleshooting.md#monitoring-recommendations) |
 - Unmapped content: none
 
 ### `packages/default/WORKSPACE.md`
@@ -210,12 +210,12 @@ tags:
 - Sections:
   | Source section | Destination |
   | --- | --- |
-  | `## Workspace layout`, `## Crate boundaries` | [architecture/backend-cargo-workspace.md#workspace-layout](../../architecture/backend-cargo-workspace.md#workspace-layout) |
-  | `## Targeted Cargo checks`, `## Targeted Nix builds` | [architecture/backend-cargo-workspace.md#targeted-cargo-checks](../../architecture/backend-cargo-workspace.md#targeted-cargo-checks) |
-  | `## Forbidden dependency boundaries` | [architecture/backend-cargo-workspace.md#forbidden-dependency-boundaries](../../architecture/backend-cargo-workspace.md#forbidden-dependency-boundaries) |
-  | `## Timing evidence` | [architecture/backend-cargo-workspace.md#timing-evidence](../../architecture/backend-cargo-workspace.md#timing-evidence) |
-  | `## Known follow-ups (outside this MR)` | [architecture/backend-cargo-workspace.md#known-follow-ups](../../architecture/backend-cargo-workspace.md#known-follow-ups) |
-  | `## SQLx offline metadata` | [architecture/backend-cargo-workspace.md#sqlx-offline-metadata](../../architecture/backend-cargo-workspace.md#sqlx-offline-metadata) |
+  | `## Workspace layout`, `## Crate boundaries` | [../../architecture/backend-cargo-workspace.md#workspace-layout](../../architecture/backend-cargo-workspace.md#workspace-layout) |
+  | `## Targeted Cargo checks`, `## Targeted Nix builds` | [../../architecture/backend-cargo-workspace.md#targeted-cargo-checks](../../architecture/backend-cargo-workspace.md#targeted-cargo-checks) |
+  | `## Forbidden dependency boundaries` | [../../architecture/backend-cargo-workspace.md#forbidden-dependency-boundaries](../../architecture/backend-cargo-workspace.md#forbidden-dependency-boundaries) |
+  | `## Timing evidence` | [../../architecture/backend-cargo-workspace.md#timing-evidence](../../architecture/backend-cargo-workspace.md#timing-evidence) |
+  | `## Known follow-ups (outside this MR)` | [../../architecture/backend-cargo-workspace.md#known-follow-ups](../../architecture/backend-cargo-workspace.md#known-follow-ups) |
+  | `## SQLx offline metadata` | [../../architecture/backend-cargo-workspace.md#sqlx-offline-metadata](../../architecture/backend-cargo-workspace.md#sqlx-offline-metadata) |
 - Unmapped content: none
 
 ### `backlog/docs/doc-2 - Commit-Eval-Build-Cache-Deploy-Flow.md`
