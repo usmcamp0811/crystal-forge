@@ -302,6 +302,16 @@ def remove_mermaid_block(text: str, diagram_id: str) -> str:
     return "".join(output)
 
 
+def load_semantic_replacements(root: Path) -> list[dict[str, str]]:
+    """Loads owner-authorized semantic replacement records."""
+    rows = []
+    path = root / "checks/okf-knowledge/semantic-replacements.tsv"
+    if path.is_file():
+        with path.open(encoding="utf-8", newline="") as handle:
+            rows.extend(csv.DictReader(handle, delimiter="\t"))
+    return rows
+
+
 def load_diagram_rows(root: Path) -> list[dict[str, str]]:
     """Loads semantic conversion records for baseline source diagrams."""
     rows = []
@@ -365,9 +375,12 @@ def audit(base: str, bundle: Path, scope_file: Path, root: Path) -> int:
     diagram_rows = load_diagram_rows(root)
     adjustment_file = root / "checks/okf-knowledge/source-adjustments.tsv"
     adjustments = load_source_adjustments(adjustment_file) if adjustment_file.is_file() else {}
+    semantic_file = root / "checks/okf-knowledge/semantic-replacements.tsv"
+    semantic_replacements = load_semantic_replacements(root) if semantic_file.is_file() else []
     cleanup_record = bundle / "meta/cleanup-record.md"
     cleanup_text = cleanup_record.read_text(encoding="utf-8") if cleanup_record.is_file() else ""
     used_adjustments: set[tuple[str, str]] = set()
+    used_semantic: set[tuple[str, str]] = set()
     baseline = baseline_paths(base)
     errors: list[str] = []
     scoped_patterns = []
@@ -444,6 +457,47 @@ def audit(base: str, bundle: Path, scope_file: Path, root: Path) -> int:
                     errors.append(f"{source}: {heading!r}: {exc}")
                     continue
                 used_adjustments.add(adjustment_key)
+
+            # Semantic replacement: exact source block replaced by exact destination block
+            semantic_key = (source, heading)
+            for sr in semantic_replacements:
+                if sr["source_path"] == source and sr["source_heading"] == heading:
+                    # Verify source block hash
+                    expected_source_hash = sr["baseline_block_sha256"]
+                    actual_source_hash = hashlib.sha256(block.encode("utf-8")).hexdigest()
+                    if actual_source_hash != expected_source_hash:
+                        errors.append(f"{source}: {heading!r}: semantic replacement source hash mismatch (expected {expected_source_hash[:16]}..., got {actual_source_hash[:16]}...)")
+                        continue
+                    # Verify cleanup record ID exists
+                    adj_id = sr["adjustment_id"]
+                    if f"| {adj_id} |" not in cleanup_text:
+                        errors.append(f"{source}: semantic replacement {adj_id} is not recorded in cleanup-record.md")
+                        continue
+                    # Verify destination block
+                    dest_path = Path(sr["destination_path"])
+                    if not dest_path.is_file():
+                        errors.append(f"{source}: semantic replacement destination {sr['destination_path']} does not exist")
+                        continue
+                    dest_content = dest_path.read_text(encoding="utf-8")
+                    dest_blocks = split_blocks(dest_content)
+                    dest_heading = sr["destination_heading"]
+                    dest_block = None
+                    for h, b in dest_blocks:
+                        if h == dest_heading:
+                            dest_block = b
+                            break
+                    if dest_block is None:
+                        errors.append(f"{source}: semantic replacement destination heading {dest_heading!r} not found in {sr['destination_path']}")
+                        continue
+                    expected_dest_hash = sr["destination_block_sha256"]
+                    actual_dest_hash = hashlib.sha256(dest_block.encode("utf-8")).hexdigest()
+                    if actual_dest_hash != expected_dest_hash:
+                        errors.append(f"{source}: semantic replacement destination hash mismatch (expected {expected_dest_hash[:16]}..., got {actual_dest_hash[:16]}...)")
+                        continue
+                    # All verified: mark as used and skip normal comparison
+                    used_semantic.add((source, heading))
+                    block = None  # Signal to skip normal comparison
+                    break
             if not mapped_destinations:
                 map_cell = next(cell for name, cell in detail if name == heading)
                 for link in LINK.findall(map_cell):
@@ -455,6 +509,9 @@ def audit(base: str, bundle: Path, scope_file: Path, root: Path) -> int:
                         mapped_destinations.append((resolved.relative_to(root), resolved.read_text(encoding="utf-8")))
                     else:
                         errors.append(f"{source}: H2 {heading!r} destination is missing: {target}")
+            # If block is None, it was a verified semantic replacement; skip normal comparison
+            if block is None:
+                continue
             if not mapped_destinations:
                 errors.append(f"{source}: H2 {heading!r} has no resolvable destination")
             elif not identical_retained:
@@ -470,6 +527,12 @@ def audit(base: str, bundle: Path, scope_file: Path, root: Path) -> int:
 
     for key in adjustments.keys() - used_adjustments:
         errors.append(f"{key[0]}: stale source adjustment for H2 {key[1]!r}")
+
+    # Check for unused semantic replacements
+    for sr in semantic_replacements:
+        key = (sr["source_path"], sr["source_heading"])
+        if key not in used_semantic:
+            errors.append(f"{sr['source_path']}: stale semantic replacement for H2 {sr['source_heading']!r} (adjustment {sr['adjustment_id']})")
 
     if errors:
         print("\n".join(errors))
