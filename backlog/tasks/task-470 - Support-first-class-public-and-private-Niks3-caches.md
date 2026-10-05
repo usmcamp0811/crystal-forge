@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-05 16:37'
+updated_date: '2026-10-05 17:36'
 labels: []
 dependencies: []
 references:
@@ -122,6 +122,8 @@ User-approved fixture-only checkpoint sequencing correction: own retained-cache-
 User-approved final fixture expectation: preserve existing environment-assignment Save persistence. Repository audit found no production business/audit/order/reconciliation dependency on cache_destination_environments.created_at; schema and historical troubleshooting SQL describe current row creation, not durable assignment history. Intentional successful Save may renew assignment created_at while preserving exact membership, retained ciphertext and credential-bearing raw URLs and all other protected fields. Test, Cancel, failed Save and retained Test after Save keep exact raw database immutability. Change only fixture comparisons and affected test documentation; rerun focused authoritative step 25.
 
 User finalization authorization: no further production changes unless final verification finds a real regression. Refresh task-owned current-source persistent preview with isolated review DB and trusted native-provider fixture CA; exercise seven retained Edit states with real native providers and strict private raw-state checks. Inspect final screenshots against CachesView.jsx and disclose remaining structural/interaction differences. Review full HEAD diff and documentation, commit focused remediation and normal-push only after remote/head verification. Confirm exact pushed MR head and all required CI gates including TASK-470 PostgreSQL regressions; investigate failures without weakening assertions/baselines. Update MR description and task evidence for current head; do not merge !331.
+
+CI16944877425 fixture timing correction scope: checks/web-ui/default.nix/native-cache-fixture.py/README and retained-cache-credential-workflow.js timing only. Native provider VMs/credential prep may warm early, but seven realAPI rows must wait for a mode0600 nonsecret seed-request marker emitted at entry to retained workflow25, after originalshared/Niks3create/security checks. Then waitseed_complete asbefore; allrawcheckpoint/replacementSave/nativeobserverproofs unchanged. No assertion/prod/baseline edits, commits/pushes orpersistentpreview/providerchanges. Verify21+25 selector forabsence ofearly native rows and25 end-to-end afterUIownerstable.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -468,5 +470,10 @@ Persistent native providers now READY with corrected fully task-private XDG_RUNT
 created: 2026-10-05 15:34
 ---
 Prepared external-only guarded realAPIseed/rawDBproof /tmp/opencode/task470-native-preview-proof.py and nonmockconfigured-only browser /tmp/opencode/task470-native-preview-browser.js (syntaxverified). Owner provide mode0600 owner-ready.json with owner_ready:true, newbackend_pid, verifieddatabase_admin_user, verifiedtaskdatabase_data_directory, mode0600 localfixturelogin_file path. Guards requiretaskcwd/config ownership, exactreviewDB, SSLbundle, privateoptin, readonlyPG admin/data_directory and actual APIAdminrole BEFOREseed. Onlynewdisabledscopedtask470-live-native-* rows through realAPI; originals unchanged. Browser targets8081+3447explicitly, no routes/mocks/replace/Save/secretreentry; screenshots currentconfiguredAttic/S3/Niks3/Basic/query; completeRawDBhashcheck+nativequerycounter after. Providers leavealive24h runtimeJWTlimit. Needownerready marker/newPID toexecute; no APIseed norreviewDBread/write performed yet.
+---
+
+created: 2026-10-05 17:36
+---
+ReadactualCI trace /tmp/opencode/task470-ci16944877425-trace.log: step21failure@line8549 ExpectedHealthy shows exactly7disabledtask470-retained-native rows (nativepollutionconfirmed). Currentnative.seed waitsapi_client(wait=True) afterlogin andcreatesrows longbefore25. Timinghandshake fix ownedhere. Independent21assertion contract mismatch also confirmed: integration-test.js20841/20842 asksHealthy/Issues and20844PushJobs, but productioncaches.rs1606–1624 rendersTotalCaches/Enabled/Disabled/PathsCached. UIowner handling22/23 should coordinate21current-view assertions too; fixtureowner WILL NOT changeintegration-test.js orassertions. Step25 order20964shared,20968Niks3,20972retained; markerwillbeemittedinsideRetainedentry only.
 ---
 <!-- COMMENTS:END -->
