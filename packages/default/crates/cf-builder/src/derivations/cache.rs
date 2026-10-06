@@ -703,14 +703,20 @@ fn resolve_attic_login_endpoint(
 /// Remote-only memoization and already-configured acceptance preserve existing
 /// behavior; neither proves that persisted credentials match this request.
 async fn ensure_attic_login(remote: &str, endpoint: &str, token: &str) -> anyhow::Result<()> {
-    ensure_attic_login_with_program(remote, endpoint, token, std::ffi::OsStr::new("attic")).await
+    ensure_attic_login_with_command(
+        remote,
+        endpoint,
+        token,
+        tokio::process::Command::new("attic"),
+    )
+    .await
 }
 
-async fn ensure_attic_login_with_program(
+async fn ensure_attic_login_with_command(
     remote: &str,
     endpoint: &str,
     token: &str,
-    program: &std::ffi::OsStr,
+    mut cmd: tokio::process::Command,
 ) -> anyhow::Result<()> {
     if is_attic_logged(remote) {
         tracing::debug!(
@@ -721,7 +727,6 @@ async fn ensure_attic_login_with_program(
     }
 
     tracing::info!("Attic login for remote '{remote}'");
-    let mut cmd = tokio::process::Command::new(program);
     cmd.args(["login", remote, endpoint, token]);
     // Ensure credentials are persisted under the crystal-forge account:
     cmd.env("HOME", "/var/lib/crystal-forge");
@@ -814,11 +819,16 @@ mod attic_url_tests {
             )).unwrap();
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
             clear_attic_logged(&remote);
-            ensure_attic_login_with_program(
+            // Execute an immutable interpreter, not the freshly written file.
+            // Concurrent fork/exec can briefly retain a writable descriptor to
+            // a fixture script and make direct execution fail with ETXTBSY.
+            let mut command = tokio::process::Command::new("/bin/sh");
+            command.arg(&script);
+            ensure_attic_login_with_command(
                 &remote,
                 &endpoint,
                 "synthetic-attic-cli-token",
-                script.as_os_str(),
+                command,
             )
             .await
             .unwrap();
