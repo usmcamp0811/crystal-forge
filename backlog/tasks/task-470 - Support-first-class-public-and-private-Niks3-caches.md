@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-06 15:47'
+updated_date: '2026-10-06 15:50'
 labels: []
 dependencies: []
 references:
@@ -142,6 +142,8 @@ Scoped Attic consumer delegation at 974daedf: own only cf-builder/src/derivation
 User-delegated Attic API/model correction at clean974daedf: own caches.rs optional attic_probe.rs, Attic read_config branch only in cache_destination.rs, retained_probe_tests.rs, exact server-regressions membership/README. Consume sibling cf_config::attic_urls resolver (do not implement duplicate). Probe canonical named-cache GET /_api/v1/cache-config/{cache}, retained/replacement active Attic Bearer only; enforce existing HTTPS/private/pinnedDNS/noProxy/noRedirect/8s/64KiB policy and required typed metadata with valid Nix key/store dir. Return flat credential-safe stage/access/token/write evidence, public success does not prove token validity, typed NoSuchCache404 only supports cache_not_found; generic404 endpoint_unavailable response. Canonical Attic read_config uses cache_url, preserving other types. Add pure status/body/path and migration-backed exact immutability/credential/policy proofs, blocking membership with accurate counts. Verify task PID3415 cluster before disposable DBs; targeted/all retained tests, all-targets and docs via Nix. No services/migrations/commit/push; parent refreshes stale preview after backend stable.
 
 User-approved exact-head CI remediation at0ce076b/pipeline2916142662: preserve operator-verified Attic and trusted-proxy behavior. Diagnose Niks3 final server cleanup failure with safe machine/directory/PID/executable-only owner and state diagnostics, no secrets/argv/body output; reproduce before deciding leak versus premature audit. If leak proven, repair owner cancellation/reap/store cleanup with Rust regression; if async race, use authoritative terminal-operation/child completion barrier, no sleeps/delete/exclusions/assertion removal. Independently scope known-good bounded substituter policy to affected authoritative CI gates and optional fullWebUI without globally disablingorganizationcache, builders, signatures, TLS, or raisingtimeout. Add meaningful named start/end/timing execution boundaries to server-regressions and reproduce last critical-integration phase plus newAttic/retained/publication PostgreSQL bodies; no fakeheartbeat to maskhang. Runfocusedchecks and fullNiks3 fivevariants, packaging, serverregressions beforecommit; cacheUIworkflow ifrelevantfixturechanges. Commit/pushnormallyafterremoteverification; monitor newexacthead allblockingjobs and fullWebUIoutcome, investigatefailureswithoutbaseline/assertrelaxation; no merge.
+
+Runner-progress delegation at 0ce076b: own checks/server-regressions/default.nix and README only. Split the same eleven critical integration targets into named compile (--no-run) and execution invocations. Add timestamped START/END, elapsed time and true exit status for command/phase boundaries and exact TASK-470 tests without nocapture, synthetic heartbeats or assertion relaxation. Preserve 38 ignored and 12 nonignored exact members. Exercise helper failure/zero/malformed-pass handling, then run full official sandbox server-regressions with command-local public-cache policy, max-jobs=1/cores=2 and retained external supervisor logs. Diagnose only observed process states; propose any Rust change to parent after a verified cause. No host database/services, CI edits, commits or pushes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
