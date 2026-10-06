@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-06 02:07'
+updated_date: '2026-10-06 02:09'
 labels: []
 dependencies: []
 references:
@@ -138,6 +138,8 @@ Delegated shared Attic helper at clean HEAD 974daedf: own only cf-config/src/att
 Native Attic endpoint fixture ownership at 974daedf: change only checks/web-ui/native-cache-fixture.py/default.nix/README.md and retained-cache-credential-workflow.js plus optional lib/cache-test-node Attic TLS observer support. Model push_to as server_url with separate cache_name for primary/legacy/replacement rows. Prove authenticated root404 versus canonical private cache-config200; prepare an isolated real Attic CLI publication before Test using protected write credentials. Capture old PID3514 stored-ID failure on a new guarded disabled task-owned direct-SQL base-shaped row without altering prior rows. Add read-only native endpoint/auth/not-found/no-upload and complete raw persistence guards; preserve existing seven/legacy/S3/Basic/Niks3 checks and late seeding. Wait for parent backend/UI readiness before persistent post-fix/browser and final official focused25. No Rust/UI edits, services, migrations, resets, commits or pushes.
 
 Scoped Attic consumer delegation at 974daedf: own only cf-builder/src/derivations/{utils,cache}.rs, cf-server/src/derivations/{utils,cache}.rs and cf-server/src/builder/cve_worker.rs URL derivation. Replace duplicated wrappers with cf_config::attic_urls::resolve_attic_urls; canonicalize the existing ambient-first chosen login endpoint with configured cache name; use resolver cache_url for CVE with invalid inputs returning None. Preserve push target/remote fields, publication provenance, cancellation, payload compatibility and existing token argv behavior. Verify required URL shapes and fake CLI login args, exact CVE read roots, targeted tests and builder/server all-target checks through Nix when sibling helper arrives. Parent owns shared helper/model/API/requisite handler, lock and lifecycle. No services/database writes/commits/pushes. Record remote-only login memoization/concurrency as an independent residual risk.
+
+User-delegated Attic API/model correction at clean974daedf: own caches.rs optional attic_probe.rs, Attic read_config branch only in cache_destination.rs, retained_probe_tests.rs, exact server-regressions membership/README. Consume sibling cf_config::attic_urls resolver (do not implement duplicate). Probe canonical named-cache GET /_api/v1/cache-config/{cache}, retained/replacement active Attic Bearer only; enforce existing HTTPS/private/pinnedDNS/noProxy/noRedirect/8s/64KiB policy and required typed metadata with valid Nix key/store dir. Return flat credential-safe stage/access/token/write evidence, public success does not prove token validity, typed NoSuchCache404 only supports cache_not_found; generic404 endpoint_unavailable response. Canonical Attic read_config uses cache_url, preserving other types. Add pure status/body/path and migration-backed exact immutability/credential/policy proofs, blocking membership with accurate counts. Verify task PID3415 cluster before disposable DBs; targeted/all retained tests, all-targets and docs via Nix. No services/migrations/commit/push; parent refreshes stale preview after backend stable.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
