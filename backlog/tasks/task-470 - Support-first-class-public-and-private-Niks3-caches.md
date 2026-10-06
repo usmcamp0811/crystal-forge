@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-06 16:23'
+updated_date: '2026-10-06 18:07'
 labels: []
 dependencies: []
 references:
@@ -146,6 +146,8 @@ User-approved exact-head CI remediation at0ce076b/pipeline2916142662: preserve o
 Runner-progress delegation at 0ce076b: own checks/server-regressions/default.nix and README only. Split the same eleven critical integration targets into named compile (--no-run) and execution invocations. Add timestamped START/END, elapsed time and true exit status for command/phase boundaries and exact TASK-470 tests without nocapture, synthetic heartbeats or assertion relaxation. Preserve 38 ignored and 12 nonignored exact members. Exercise helper failure/zero/malformed-pass handling, then run full official sandbox server-regressions with command-local public-cache policy, max-jobs=1/cores=2 and retained external supervisor logs. Diagnose only observed process states; propose any Rust change to parent after a verified cause. No host database/services, CI edits, commits or pushes.
 
 Scoped CI infrastructure delegation at 0ce076b: own only .gitlab-ci.yml and minimal packages/ci helper/test. Apply CLI-only public-cache policy to server-regressions, niks3-cache, builder-evaluator-packaging and separate web-ui jobs (manual candidates retain --impure). Report inherited Attic presence as a boolean and validate effective public-cache/timeouts/signatures with the same argument array used for builds; preserve builder controls and all other jobs. Audit root flake and runner traces, run configuration/scope/argv checks and GitLab API lint only. Parent owns local packaging gate and commit/push; no global Nix, root flake, services or application edits.
+
+Follow-up runner verification ownership: add exactly handlers::api::builders::niks3_input_owner_tests::niks3_input_owner_acknowledges_reap_and_cleanup_after_detach to nonignored membership/README (38 ignored + 13 nonignored). Preserve eleven compile/run targets and all guards. Run no-DB owner exact test, cf-config cache_credentials lifetime suite and focused Attic/model tests through Nix. Validate sibling public-cache wrapper compatibility first, then run fresh full server-regressions via wrapper with one job/two cores under a unique persistent supervisor retaining source hashes, drv, logs, exit and timestamps. Only sandbox PostgreSQL; no services, commits, CI triggers or production edits.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
