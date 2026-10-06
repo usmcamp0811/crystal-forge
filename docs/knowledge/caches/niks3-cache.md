@@ -460,6 +460,83 @@ read access, not object reads, uploads, or write authorization. Attic bearer
 authentication is sent only for Attic tests. All probes retain the target, TLS,
 DNS-pinning, proxy, and redirect protections described above.
 
+### Attic URL interpretation and named-cache Test
+
+Attic stores `push_to` as its server URL and `attic_cache_name` separately. The
+pure `cf_config::resolve_attic_urls` helper derives four endpoints in memory:
+
+| Field | Purpose and path |
+| --- | --- |
+| `server_url` | Login server directory, ending in `/`, including an HTTP(S) proxy prefix. |
+| `cache_url` | Nix read root: `<server prefix>/<cache>`. |
+| `metadata_url` | Nix metadata: `<server prefix>/<cache>/nix-cache-info`. |
+| `cache_config_url` | Read-only Attic API: `<server prefix>/_api/v1/cache-config/<cache>`. |
+
+HTTP(S) server bases, matching cache roots with an optional trailing slash, and
+matching full metadata URLs resolve to the same endpoints. Only the matching
+final cache segment or cache/metadata suffix is removed; unrelated paths remain
+proxy prefixes. Percent-encoded matching segments are compared as decoded ASCII.
+HTTP remains HTTP for CLI and read consumers; Test still requires HTTPS under
+its target policy. Legacy `attic://` selects HTTPS at the configured authority
+and discards the entire path, including any apparent proxy prefix.
+
+The configured name is authoritative. A legacy `remote:cache` reference needs
+one colon and a nonempty remote; endpoints use only the actual cache component.
+Native cache names contain 1–50 ASCII characters, start with an alphanumeric
+character, and otherwise allow alphanumerics, `_`, `+`, and `-`. The helper
+preserves queries, including empty queries, on all four URLs. It rejects URI
+userinfo and fragments, including empty forms. Test's sensitive-query refusal
+still runs before DNS; normalization does not grant permission to contact a
+target or send credentials. Test never rewrites the persisted URL or name.
+
+The same resolver supplies the server model's `read_config` for agent delivery,
+the CVE read root, builder/server login endpoints, publication read helpers, and
+the requisite-publication `ATTIC_SERVER_URL` export. Native CLI remote profiles
+still require initialization outside that export. Existing ambient endpoint
+precedence, remote-only login memoization, and already-configured acceptance
+remain separate compatibility behavior; URL normalization does not establish
+that a cached CLI profile holds the current request's credentials.
+
+Attic Test sends one Bearer-authenticated GET to the named cache's
+`cache_config_url`, not the generic server root. Bearer authentication is used
+only for Attic. Success requires HTTP 200 with typed JSON containing a valid Nix
+`public_key`, boolean `is_public`, `store_dir = "/nix/store"`, and i32 `priority`.
+HTTP 204, HTML, arbitrary JSON, missing fields, invalid keys, and another store
+directory cannot establish access. Metadata is bounded to 64 KiB. The existing
+eight-second transport timeout, pinned DNS, verified TLS, no-proxy, and
+no-redirect policy remain enforced; advertised URLs are not followed.
+
+Results expose `probe_kind: "attic_cache_config"`, `stage`,
+`cache_access_valid`, `token_auth_valid`, and `write_auth_valid`. Stages are
+`target_policy`, `dns`, `transport`, `authentication`, `cache_not_found`,
+`response`, and `complete`. Cache access is null before HTTP observation, false
+after an unsuccessful response, and true only for validated metadata. A private
+cache's successful response sets `token_auth_valid = true`; public-cache success
+leaves token authentication untested (null). Write authorization is always
+untested (null). HTTP 401/403 does not establish cache existence. Only HTTP 404
+with typed `code: 404` and `error: "NoSuchCache"` reports cache absence; generic
+404 reports `endpoint_unavailable` at the response stage. Policy refusal returns
+safe HTTP 400 fields with null `details`; other probe outcomes use HTTP 200
+result objects. Upstream bodies, URLs, tokens, and error text are never echoed.
+
+A healthy Attic server can return 404 at `/` while authenticated named-cache
+metadata returns 200. Conversely, root HTTP 200 does not prove cache access.
+The old generic-root Test could therefore fail while a real CLI push worked:
+publication and cache-specific read authorization use different endpoints.
+The corrected Test proves read access only and performs no upload or persistent
+mutation. Configured flags remain presentation metadata for Existing Edit Test;
+retained credential decryption and merge remain server-authoritative.
+
+Compatibility evidence is limited to the inspected pinned Attic `12cbeca…`
+revision shared by the 25.11 and 26.05 native packages. Inspection of older
+`ff8…` source is source evidence only, not a runtime pass or a guarantee for all
+nightly versions. The current native fixture persists server-base URLs for
+primary and direct-SQL legacy rows, separates real CLI setup publication from
+Test, and requires root-404/API-200 discrimination with zero Test uploads and
+unchanged raw rows. Final corrected runtime proof remains pending owner
+verification; this contract does not establish a deployed cause or current
+browser, backend, or CI pass.
+
 ### Legacy Attic verification scope
 
 The selected PostgreSQL regressions insert legacy Attic columns directly,
@@ -474,8 +551,8 @@ authentication.
 
 The separate native browser fixture inserts plaintext, independently encrypted
 historical `enc:v1`, and SQL NULL rows without the create API. Both valid rows
-must authenticate against real private Attic metadata. The NULL row must return
-a safe HTTP 400 with zero provider requests. Stale collection flags must trigger
+must authenticate against the real private Attic cache-config API. The NULL row
+must return a safe HTTP 400 with zero provider requests. Stale collection flags must trigger
 fresh ID loading; false or absent ID flags must permit stored-ID Test without
 including `attic_token`. Private database checkpoints require exact Test/Cancel
 non-mutation and credential retention across unrelated Save. See the

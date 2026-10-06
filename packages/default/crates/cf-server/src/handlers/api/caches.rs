@@ -21,6 +21,7 @@ use crate::models::cache_destination::{
 };
 use crate::queries::{cache_destinations, cache_push};
 
+mod attic_probe;
 mod s3_probe;
 
 #[cfg(test)]
@@ -176,6 +177,9 @@ where
     if let Err(message) =
         reject_probe_query_credentials([push_to.as_deref(), s3_endpoint.as_deref(), niks3_server])
     {
+        if update.cache_type.as_deref().unwrap_or(&current.cache_type) == "Attic" {
+            return attic_probe::policy_error_response(message);
+        }
         return probe_error(
             StatusCode::BAD_REQUEST,
             "legacy_query_credentials_unsupported",
@@ -192,12 +196,14 @@ where
             );
         }
     };
+    let is_attic = effective.cache_type == "Attic";
     match probe(effective).await {
         Ok(mut result) => {
             // Stored-ID results describe stages, not the private snapshot.
             result.tested_url = None;
             (StatusCode::OK, Json(result)).into_response()
         }
+        Err(message) if is_attic => attic_probe::policy_error_response(&message),
         Err(message) => probe_error(
             StatusCode::BAD_REQUEST,
             "invalid_cache_test_config",
@@ -217,23 +223,8 @@ fn normalize_test_url(
         "s3" => s3_endpoint_url
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()),
-        "attic" => push_to.and_then(|raw| {
-            let raw = raw.trim();
-            if raw.is_empty() {
-                return None;
-            }
-            if raw.starts_with("http://") || raw.starts_with("https://") {
-                return Some(raw.to_string());
-            }
-            if let Some(rest) = raw.strip_prefix("attic://") {
-                let host = rest.split('/').next().unwrap_or_default().trim();
-                if host.is_empty() {
-                    return None;
-                }
-                return Some(format!("https://{host}"));
-            }
-            None
-        }),
+        // Attic must use its named-cache API, never a generic root GET.
+        "attic" => None,
         _ => push_to
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()),
@@ -247,7 +238,16 @@ struct CacheCredentialTestResult {
     message: String,
     tested_url: Option<String>,
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
-    niks3: Option<Niks3ConnectionTestResult>,
+    niks3: Option<CacheProbeDetails>,
+}
+
+// Untagged flattening preserves the existing S3 and Niks3 wire shapes. Only
+// Attic adds the cache-access evidence; inactive types cannot report it.
+#[derive(Debug, serde::Serialize)]
+#[serde(untagged)]
+enum CacheProbeDetails {
+    Niks3(Niks3ConnectionTestResult),
+    Attic(attic_probe::AtticTestResult),
 }
 
 // Each stage describes only observed read-only behavior. In particular, the
@@ -349,6 +349,16 @@ async fn cache_test_client(
     ca: Option<&str>,
 ) -> Result<reqwest::Client, String> {
     let addrs = cache_test_addresses(url, allow_private_targets).await?;
+    cache_test_client_pinned(url, &addrs, cert, key, ca).await
+}
+
+async fn cache_test_client_pinned(
+    url: &Url,
+    addrs: &[SocketAddr],
+    cert: Option<&str>,
+    key: Option<&str>,
+    ca: Option<&str>,
+) -> Result<reqwest::Client, String> {
     // SECURITY: Connect only to the addresses checked above, retaining the URL
     // host for TLS verification. Proxies and redirects would bypass this pin.
     let mut builder = reqwest::Client::builder()
@@ -356,7 +366,7 @@ async fn cache_test_client(
         .no_proxy()
         .timeout(Duration::from_secs(8))
         .redirect(reqwest::redirect::Policy::none())
-        .resolve_to_addrs(url.host_str().ok_or("Missing cache host")?, &addrs);
+        .resolve_to_addrs(url.host_str().ok_or("Missing cache host")?, addrs);
     // Rustls's bundled public roots do not include an operator's system CA.
     // Honor standard process CA configuration without a test-only TLS bypass.
     // VM fixtures install their CA before starting the server process.
@@ -596,7 +606,7 @@ async fn run_niks3_test(
             "Discovery and read endpoint successful; write authorization untested".into()
         }),
         tested_url: Some(read.to_string()),
-        niks3: Some(stages),
+        niks3: Some(CacheProbeDetails::Niks3(stages)),
     })
 }
 
@@ -732,6 +742,9 @@ async fn run_cache_destination_test(
     ])?;
     create.validate()?;
     let cache_type = create.cache_type.trim();
+    if cache_type == "Attic" {
+        return attic_probe::probe(create, allow_private_targets).await;
+    }
     if cache_type == "S3" {
         return s3_probe::probe(create, allow_private_targets).await;
     }
@@ -1020,6 +1033,12 @@ pub async fn create_cache_destination(
 /// echoing values. Validates the same create configuration as persistence.
 /// Supplied double-submit CSRF state must match. S3 checks path-style bucket
 /// ListObjectsV2 with explicit keys; success does not prove write permission.
+/// Attic probes the canonical named-cache config API, not the server root.
+/// Its flat `probe_kind`, `stage`, `cache_access_valid`, `token_auth_valid`, and
+/// `write_auth_valid` fields expose only observed access. Private cache success
+/// verifies the supplied token for that read; public success leaves token validity
+/// null. Write authorization is always null and remains Untested. No upstream
+/// URLs or response-body values are returned or followed.
 pub async fn test_cache_destination_credentials(
     State(pool): State<PgPool>,
     State(server_config): State<ServerConfig>,
@@ -1050,6 +1069,9 @@ pub async fn test_cache_destination_credentials(
         create.s3_endpoint_url.as_deref(),
         create.niks3_server_url.as_deref(),
     ]) {
+        if create.cache_type == "Attic" {
+            return attic_probe::policy_error_response(message);
+        }
         return probe_error(
             StatusCode::BAD_REQUEST,
             "legacy_query_credentials_unsupported",
@@ -1066,6 +1088,9 @@ pub async fn test_cache_destination_credentials(
     match run_cache_destination_test(&create, server_config.allow_private_cache_test_targets).await
     {
         Ok(result) => (StatusCode::OK, Json(result)).into_response(),
+        Err(message) if create.cache_type == "Attic" => {
+            attic_probe::policy_error_response(&message)
+        }
         Err(message) => (
             StatusCode::BAD_REQUEST,
             Json(ApiError {
@@ -1425,10 +1450,10 @@ mod tests {
             status_code: Some(302),
             message: "Cache endpoint redirects are not allowed".into(),
             tested_url: None,
-            niks3: Some(Niks3ConnectionTestResult {
+            niks3: Some(CacheProbeDetails::Niks3(Niks3ConnectionTestResult {
                 server_reachable: true,
                 ..Default::default()
-            }),
+            })),
         };
         let json = serde_json::to_value(result).unwrap();
         assert_eq!(json["server_reachable"], true);
@@ -1641,7 +1666,7 @@ mod tests {
     #[test]
     fn normalize_test_url_handles_attic_scheme() {
         let normalized = normalize_test_url("Attic", Some("attic://cache.example.com/team"), None);
-        assert_eq!(normalized.as_deref(), Some("https://cache.example.com"));
+        assert!(normalized.is_none());
     }
 
     #[test]

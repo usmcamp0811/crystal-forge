@@ -13,7 +13,8 @@ use uuid::Uuid;
 
 use crate::api::client::{self, ApiClientError};
 use crate::api::models::{
-    CacheDestination, CachePushJob, CreateCacheDestination, EnvironmentSummary, SortOrder,
+    CacheCredentialTestResult, CacheDestination, CacheProbeKind, CacheProbePolicyError,
+    CacheProbeStage, CachePushJob, CreateCacheDestination, EnvironmentSummary, SortOrder,
     SystemSummary, SystemsListParams, UpdateCacheDestination,
 };
 use crate::components::dialog_focus::{
@@ -33,6 +34,67 @@ const CACHE_CREDENTIAL_ICON_STYLE: &str =
 // INVARIANT: The mobile stylesheet owns the footer's flex-basis. An inline
 // flex shorthand would override the full-width validation reason.
 const CACHE_FORM_FOOT_STATE_STYLE: &str = "flex-grow:1;min-width:0;";
+
+const ATTIC_ACCESS_VERIFIED: &str = "Cache access verified. Write authorization: Untested.";
+const ATTIC_ACCESS_UNVERIFIED: &str = "Attic cache access was not verified. Check the server URL and cache name. Write authorization: Untested.";
+const ATTIC_TOKEN_UNTESTED: &str = "Token authentication: Untested.";
+const ATTIC_TOKEN_READ_VERIFIED: &str = "Token authentication for private cache read: Verified.";
+
+// SECURITY: Display only allowlisted stage constants, never server prose, URLs
+// or exceptions. Complete evidence proves a named-cache read, never an upload.
+fn attic_probe_text(result: &CacheCredentialTestResult) -> (&'static str, &'static str) {
+    if result.probe_kind != Some(CacheProbeKind::AtticCacheConfig) {
+        return (ATTIC_ACCESS_UNVERIFIED, ATTIC_TOKEN_UNTESTED);
+    }
+    let verified = result.ok
+        && result.stage == Some(CacheProbeStage::Complete)
+        && result.status_code == Some(200)
+        && result.cache_access_valid == Some(true)
+        && result.write_auth_valid.is_none()
+        && result.error.is_none();
+    if verified {
+        return (
+            ATTIC_ACCESS_VERIFIED,
+            if result.token_auth_valid == Some(true) {
+                ATTIC_TOKEN_READ_VERIFIED
+            } else {
+                ATTIC_TOKEN_UNTESTED
+            },
+        );
+    }
+    let message = if result.ok {
+        ATTIC_ACCESS_UNVERIFIED
+    } else {
+        match result.stage {
+            Some(CacheProbeStage::TargetPolicy)
+                if result.error
+                    == Some(CacheProbePolicyError::LegacyQueryCredentialsUnsupported) =>
+            {
+                "Legacy credential queries require migration before testing. The endpoint was not contacted. Write authorization: Untested."
+            }
+            Some(CacheProbeStage::TargetPolicy) => {
+                "Target blocked. Check the HTTPS server URL and cache name; ask an administrator to review target policy. Write authorization: Untested."
+            }
+            Some(CacheProbeStage::Dns) => {
+                "Cannot resolve the Attic server. Check DNS and the server URL. Write authorization: Untested."
+            }
+            Some(CacheProbeStage::Transport) => {
+                "Cannot connect to the Attic server with verified TLS. Check connectivity and certificate trust. Write authorization: Untested."
+            }
+            Some(CacheProbeStage::Authentication) => {
+                "Cache access denied. Check the token and its cache read permissions; cache existence is unresolved. Write authorization: Untested."
+            }
+            Some(CacheProbeStage::CacheNotFound) => {
+                "Cache not found. Check the configured cache name. Write authorization: Untested."
+            }
+            Some(CacheProbeStage::Response) => {
+                "Unexpected Attic cache-config response. Check the server URL and proxy path. Write authorization: Untested."
+            }
+            _ => ATTIC_ACCESS_UNVERIFIED,
+        }
+    };
+    (message, ATTIC_TOKEN_UNTESTED)
+}
 
 // The policy-editor shell is not part of the production stylesheet. Keep this
 // design-parity styling local to the cache form, including its narrow layout.
@@ -1145,7 +1207,14 @@ fn CacheDestinationForm(
                                 p { class: "help", "Uses a profile already configured on the executing builder. The legacy IAM-role credential maps to this profile field; this form does not assume a role. The current API also requires access keys." }
                             }
                         }
-                        if let Some(test) = result() { p { role: "status", if test.ok { if kind() == "s3" { "Bucket read access verified. Write authorization: Untested." } else { "Connection verified." } } else { "Connection failed. Check endpoint configuration." } } }
+                        if let Some(test) = result() {
+                            if kind() == "attic" {
+                                div { role: "status", "data-testid": "attic-test-result",
+                                    p { "{attic_probe_text(&test).0}" }
+                                    p { class: "help", "{attic_probe_text(&test).1}" }
+                                }
+                            } else { p { role: "status", if test.ok { if kind() == "s3" { "Bucket read access verified. Write authorization: Untested." } else { "Connection verified." } } else { "Connection failed. Check endpoint configuration." } } }
+                        }
                     }
                     if section() == "auth" && kind() == "niks3" {
                         div { class: "pe-sec-head", h3 { "Credentials" } p { "Write credentials stay on builders. Read credentials go only to assigned agents." } }
@@ -2835,6 +2904,91 @@ mod tests {
         CacheFormValidationInput, CacheTypeDrafts, Niks3FormState, cache_form_kind,
         validate_cache_destination_form,
     };
+
+    fn attic_evidence(
+        stage: &str,
+        ok: bool,
+        private: bool,
+    ) -> crate::api::models::CacheCredentialTestResult {
+        serde_json::from_value(serde_json::json!({
+            "ok": ok, "status_code": if ok { Some(200) } else { None },
+            "message": "fixture-forbidden-upstream-body", "tested_url": "https://fixture-forbidden-url",
+            "probe_kind": "attic_cache_config", "stage": stage,
+            "cache_access_valid": ok, "token_auth_valid": if private { Some(true) } else { None },
+            "write_auth_valid": null
+        })).unwrap()
+    }
+
+    #[test]
+    fn attic_read_success_never_proves_public_token_or_write_permission() {
+        let private = attic_evidence("complete", true, true);
+        assert_eq!(
+            super::attic_probe_text(&private),
+            (
+                super::ATTIC_ACCESS_VERIFIED,
+                super::ATTIC_TOKEN_READ_VERIFIED
+            )
+        );
+        let public = attic_evidence("complete", true, false);
+        assert_eq!(
+            super::attic_probe_text(&public),
+            (super::ATTIC_ACCESS_VERIFIED, super::ATTIC_TOKEN_UNTESTED)
+        );
+    }
+
+    #[test]
+    fn attic_stage_formatting_is_allowlisted_and_never_echoes_prose_or_urls() {
+        for (stage, action) in [
+            ("target_policy", "Target blocked"),
+            ("dns", "Check DNS"),
+            ("transport", "connectivity and certificate trust"),
+            ("authentication", "cache existence is unresolved"),
+            ("cache_not_found", "configured cache name"),
+            ("response", "proxy path"),
+        ] {
+            let result = attic_evidence(stage, false, false);
+            let (message, token) = super::attic_probe_text(&result);
+            assert!(message.contains(action));
+            assert!(message.contains("Write authorization: Untested."));
+            assert_eq!(token, super::ATTIC_TOKEN_UNTESTED);
+            assert!(!message.contains(&result.message));
+            assert!(!message.contains(result.tested_url.as_ref().unwrap()));
+        }
+    }
+
+    #[test]
+    fn attic_unknown_legacy_and_inconsistent_evidence_cannot_manufacture_success() {
+        let legacy: crate::api::models::CacheCredentialTestResult = serde_json::from_value(
+            serde_json::json!({"success":true,"message":"fixture-forbidden"}),
+        )
+        .unwrap();
+        assert_eq!(
+            super::attic_probe_text(&legacy),
+            (super::ATTIC_ACCESS_UNVERIFIED, super::ATTIC_TOKEN_UNTESTED)
+        );
+        for field in [
+            "probe_kind",
+            "stage",
+            "status_code",
+            "cache_access_valid",
+            "write_auth_valid",
+            "error",
+        ] {
+            let mut value = serde_json::to_value(attic_evidence("complete", true, true)).unwrap();
+            value[field] = match field {
+                "status_code" => serde_json::json!(403),
+                "cache_access_valid" => serde_json::json!(false),
+                "write_auth_valid" => serde_json::json!(true),
+                _ => serde_json::json!("unsupported"),
+            };
+            let result = serde_json::from_value(value).unwrap();
+            assert_eq!(
+                super::attic_probe_text(&result),
+                (super::ATTIC_ACCESS_UNVERIFIED, super::ATTIC_TOKEN_UNTESTED),
+                "reject inconsistent {field}"
+            );
+        }
+    }
 
     fn test_destination(cache_type: &str, flags: bool) -> crate::api::models::CacheDestination {
         let mut value = serde_json::json!({

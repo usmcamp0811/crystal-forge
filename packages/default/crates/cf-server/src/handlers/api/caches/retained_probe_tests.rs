@@ -504,6 +504,304 @@ fn successful_probe() -> CacheCredentialTestResult {
     }
 }
 
+fn native_attic_config(is_public: bool) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "public_key": nix_public_key_fixture("native"),
+        "is_public": is_public,
+        "store_dir": "/nix/store",
+        "priority": 41
+    }))
+    .unwrap()
+}
+
+#[test]
+fn attic_canonical_api_and_model_read_roots_share_named_cache() {
+    for raw in [
+        "https://cache.example.com",
+        "https://cache.example.com/",
+        "https://cache.example.com/team",
+        "https://cache.example.com/team/nix-cache-info",
+    ] {
+        let urls = cf_config::attic_urls::resolve_attic_urls(raw, "team").unwrap();
+        assert_eq!(
+            urls.cache_config_url.as_str(),
+            "https://cache.example.com/_api/v1/cache-config/team"
+        );
+        let destination = CacheDestination {
+            cache_type: "Attic".into(),
+            push_to: Some(raw.into()),
+            attic_cache_name: Some("team".into()),
+            attic_public_key: Some(nix_public_key_fixture("native")),
+            ..Default::default()
+        };
+        let (read, _, auth) = destination.read_config().unwrap();
+        assert_eq!(read, "https://cache.example.com/team");
+        assert_eq!(auth, cf_protocol::cache::CacheReadAuth::None);
+    }
+    for (raw, name, expected_read, expected_api) in [
+        (
+            "attic://cache.example.com/ignored/prefix",
+            "local:team",
+            "https://cache.example.com/team",
+            "https://cache.example.com/_api/v1/cache-config/team",
+        ),
+        (
+            "https://cache.example.com/proxy/",
+            "local:team",
+            "https://cache.example.com/proxy/team",
+            "https://cache.example.com/proxy/_api/v1/cache-config/team",
+        ),
+        (
+            "https://cache.example.com/proxy/%74eam/nix-cache-info?priority=30",
+            "team",
+            "https://cache.example.com/proxy/team?priority=30",
+            "https://cache.example.com/proxy/_api/v1/cache-config/team?priority=30",
+        ),
+    ] {
+        let urls = cf_config::attic_urls::resolve_attic_urls(raw, name).unwrap();
+        assert_eq!(urls.cache_config_url.as_str(), expected_api);
+        let destination = CacheDestination {
+            cache_type: "Attic".into(),
+            push_to: Some(raw.into()),
+            attic_cache_name: Some(name.into()),
+            ..Default::default()
+        };
+        assert_eq!(destination.read_config().unwrap().0, expected_read);
+    }
+    for name in [None, Some(""), Some("../other")] {
+        let destination = CacheDestination {
+            cache_type: "Attic".into(),
+            push_to: Some("https://cache.example.com".into()),
+            attic_cache_name: name.map(str::to_string),
+            ..Default::default()
+        };
+        assert!(destination.read_config().is_err());
+    }
+}
+
+#[test]
+fn attic_native_metadata_and_status_matrix_never_claims_root_or_write_success() {
+    for is_public in [false, true] {
+        let json = serde_json::to_value(attic_probe::classify_response(
+            200,
+            &native_attic_config(is_public),
+        ))
+        .unwrap();
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["probe_kind"], "attic_cache_config");
+        assert_eq!(json["stage"], "complete");
+        assert_eq!(json["cache_access_valid"], true);
+        assert_eq!(
+            json["token_auth_valid"],
+            if is_public {
+                serde_json::Value::Null
+            } else {
+                true.into()
+            }
+        );
+        assert!(json["write_auth_valid"].is_null());
+        assert_eq!(
+            json["message"],
+            "Cache access verified. Write authorization: Untested."
+        );
+        assert!(json["tested_url"].is_null());
+        assert!(json.get("public_key").is_none());
+    }
+    for body in [
+        b"<html>root is healthy</html>".as_slice(),
+        b"{}",
+        b"[]",
+        b"null",
+    ] {
+        let json = serde_json::to_value(attic_probe::classify_response(200, body)).unwrap();
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["stage"], "response");
+    }
+    for (field, value) in [
+        ("public_key", serde_json::json!("invalid-key")),
+        ("is_public", serde_json::json!("true")),
+        ("store_dir", serde_json::json!("/other/store")),
+        ("priority", serde_json::json!(2147483648_i64)),
+    ] {
+        for missing in [false, true] {
+            let mut config: serde_json::Value =
+                serde_json::from_slice(&native_attic_config(false)).unwrap();
+            if missing {
+                config.as_object_mut().unwrap().remove(field);
+            } else {
+                config[field] = value.clone();
+            }
+            let result = attic_probe::classify_response(200, &serde_json::to_vec(&config).unwrap());
+            assert!(!result.ok);
+        }
+    }
+    for (status, body, stage) in [
+        (
+            401,
+            b"sensitive upstream detail".as_slice(),
+            "authentication",
+        ),
+        (403, b"{}", "authentication"),
+        (
+            404,
+            br#"{"code":404,"error":"NoSuchCache","message":"sensitive upstream detail"}"#,
+            "cache_not_found",
+        ),
+        (404, br#"{"error":"NoSuchCache"}"#, "response"),
+        (404, br#"{"code":404,"error":"NotFound"}"#, "response"),
+        (404, b"<html>not found</html>", "response"),
+        (302, b"{}", "response"),
+        (500, b"sensitive upstream detail", "response"),
+    ] {
+        let json = serde_json::to_value(attic_probe::classify_response(status, body)).unwrap();
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["stage"], stage);
+        assert!(json["token_auth_valid"].is_null());
+        assert!(json["write_auth_valid"].is_null());
+        assert!(!json.to_string().contains("sensitive upstream detail"));
+    }
+}
+
+#[tokio::test]
+async fn attic_target_policy_and_credential_queries_fail_before_network() {
+    for raw in [
+        "http://cache.example.com",
+        "https://127.0.0.1",
+        "https://[::1]",
+        "https://localhost",
+        "https://user:synthetic@cache.example.com",
+        "https://cache.example.com?token=synthetic",
+    ] {
+        let mut create = fixture("Attic");
+        create.push_to = Some(raw.into());
+        let error = run_cache_destination_test(&create, false)
+            .await
+            .unwrap_err();
+        assert!(!error.contains(raw));
+        let response = attic_probe::policy_error_response(&error);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = json_response(response).await;
+        assert_eq!(json["stage"], "target_policy");
+        assert!(json["write_auth_valid"].is_null());
+        assert!(json["cache_access_valid"].is_null());
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires verified task PostgreSQL and ephemeral database creation"]
+async fn attic_named_cache_retained_replacement_results_and_policy_preserve_raw_state(
+    pool: PgPool,
+) {
+    let admin = super::tests::admin_headers(&pool).await;
+    let destination = scoped_fixture(
+        &pool,
+        "Attic",
+        "native-api-scope",
+        "https://cache.example.com",
+    )
+    .await;
+    let before = snapshot(&pool, destination.id).await;
+    for replacement in [false, true] {
+        let patch = if replacement {
+            r#"{"attic_token":"replacement-attic-marker"}"#
+        } else {
+            "{}"
+        };
+        let probe_pool = &pool;
+        let id = destination.id;
+        let response = test_stored_with_probe(
+            &pool,
+            &admin,
+            destination.id,
+            request(patch),
+            |effective| async move {
+                let urls = cf_config::attic_urls::resolve_attic_urls(
+                    effective.push_to.as_deref().unwrap(),
+                    effective.attic_cache_name.as_deref().unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    urls.cache_config_url.as_str(),
+                    "https://cache.example.com/_api/v1/cache-config/fixture-cache"
+                );
+                let request = legacy_probe_request(
+                    &reqwest::Client::new(),
+                    urls.cache_config_url,
+                    &effective,
+                )
+                .build()
+                .unwrap();
+                let expected = if replacement {
+                    "replacement-attic-marker"
+                } else {
+                    "fixture-attic-marker"
+                };
+                let header = &request.headers()[reqwest::header::AUTHORIZATION];
+                assert!(header.is_sensitive());
+                assert!(header.to_str().unwrap() == format!("Bearer {expected}"));
+                // The probe holds no long database lock and performs no writes.
+                let mut tx = probe_pool.begin().await.unwrap();
+                sqlx::query("SELECT id FROM cache_destinations WHERE id=$1 FOR UPDATE NOWAIT")
+                    .bind(id)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+                tx.rollback().await.unwrap();
+                Ok(attic_probe::classify_response(
+                    200,
+                    &native_attic_config(false),
+                ))
+            },
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = json_response(response).await;
+        assert_eq!(json["stage"], "complete");
+        assert_eq!(json["token_auth_valid"], true);
+        assert!(!json.to_string().contains("marker"));
+        assert!(snapshot(&pool, destination.id).await == before);
+    }
+    for (status, body) in [
+        (401, b"private upstream detail".as_slice()),
+        (404, br#"{"code":404,"error":"NoSuchCache"}"#),
+        (200, b"{}"),
+        (302, b"private upstream detail"),
+    ] {
+        let response =
+            test_stored_with_probe(&pool, &admin, destination.id, request("{}"), |effective| {
+                assert!(effective.attic_token.as_deref() == Some("fixture-attic-marker"));
+                std::future::ready(Ok(attic_probe::classify_response(status, body)))
+            })
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = json_response(response).await;
+        assert_eq!(json["ok"], false);
+        assert!(json["write_auth_valid"].is_null());
+        assert!(!json.to_string().contains("private upstream detail"));
+        assert!(snapshot(&pool, destination.id).await == before);
+    }
+    for raw in [
+        "https://127.0.0.1",
+        "https://cache.example.com?token=synthetic",
+    ] {
+        let patch = serde_json::json!({"push_to":raw});
+        let response = test_stored_cache_destination_credentials(
+            State(pool.clone()),
+            State(ServerConfig::default()),
+            admin.clone(),
+            Path(destination.id),
+            request(&patch.to_string()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = json_response(response).await;
+        assert_eq!(json["stage"], "target_policy");
+        assert!(json["write_auth_valid"].is_null());
+        assert!(!json.to_string().contains("synthetic"));
+        assert!(snapshot(&pool, destination.id).await == before);
+    }
+}
+
 fn historical_attic_envelope(token: &str) -> String {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use rand::RngCore;

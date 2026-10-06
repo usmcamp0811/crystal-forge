@@ -11,8 +11,10 @@
 //! - Only `cf-protocol` is permitted as a Crystal Forge workspace dependency.
 //! - Foundational crate; may not depend on `cf-server`, `cf-builder`, or `cf-agent`.
 
+pub mod attic_urls;
 pub mod cache_credentials;
 pub mod config;
 
 // Re-export everything from config module at the crate root for convenience.
+pub use attic_urls::{AtticUrlError, AtticUrls, resolve_attic_urls};
 pub use config::*;

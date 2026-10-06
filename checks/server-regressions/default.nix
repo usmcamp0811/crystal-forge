@@ -678,6 +678,7 @@ SQL
     }
 
     for testName in \
+      handlers::api::caches::retained_probe_tests::attic_named_cache_retained_replacement_results_and_policy_preserve_raw_state \
       handlers::api::caches::retained_probe_tests::legacy_attic_plaintext_and_historical_ciphertext_retain_on_test_and_save \
       handlers::api::caches::retained_probe_tests::legacy_attic_null_and_empty_token_refuse_before_probe_without_mutation \
       handlers::api::caches::retained_probe_tests::stored_probe_preserves_ciphertext_scope_and_timestamps \
@@ -719,6 +720,10 @@ SQL
       runExactCacheRegression "$testName" --ignored
     done
     for testName in \
+      handlers::api::builders::tests::attic_requisite_env_uses_shared_server_base \
+      handlers::api::caches::retained_probe_tests::attic_canonical_api_and_model_read_roots_share_named_cache \
+      handlers::api::caches::retained_probe_tests::attic_native_metadata_and_status_matrix_never_claims_root_or_write_success \
+      handlers::api::caches::retained_probe_tests::attic_target_policy_and_credential_queries_fail_before_network \
       handlers::api::caches::retained_probe_tests::active_type_metadata_and_serialization_never_reveal_inactive_credentials \
       handlers::api::caches::retained_probe_tests::effective_update_never_borrows_inactive_credentials_on_type_conversion \
       handlers::api::caches::retained_probe_tests::bearer_auth_is_exclusive_to_active_attic \

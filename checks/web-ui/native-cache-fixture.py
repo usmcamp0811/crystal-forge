@@ -33,6 +33,8 @@ SEED_REQUEST = Path("/run/cf-cache-seed-request.json")
 PHASE_REQUEST = Path("/run/cf-cache-phase-request.json")
 PHASE_ACK = Path("/run/cf-cache-phase-ack.json")
 PHASE_PROOF = Path("/run/cf-cache-phase-proof.json")
+ATTIC_OBSERVER = Path("/run/cf-attic-observer/requests.log")
+ATTIC_SETUP_PROOF = Path("/run/cf-attic-setup-proof.json")
 SOURCE_KINDS = ("attic", "s3", "nix", "niks3", "nix_basic", "http_basic", "legacy_query")
 LEGACY_KINDS = ("legacy_plain", "legacy_encrypted", "legacy_missing")
 CA = "/etc/ssl/certs/ca-certificates.crt"
@@ -64,13 +66,15 @@ def request(client, method, url, **kwargs):
     return client.request(method, url, timeout=8, allow_redirects=False, **kwargs)
 
 
-def mint(subject, create=False):
+def mint(subject, create=False, push=False, cache_name="web-ui-private"):
     command = [
         "atticadm", "--config", "/etc/atticd.toml", "make-token",
-        "--sub", subject, "--validity", "1d", "--pull", "web-ui-private",
+        "--sub", subject, "--validity", "1d", "--pull", cache_name,
     ]
     if create:
-        command += ["--create-cache", "web-ui-private"]
+        command += ["--create-cache", cache_name]
+    if push:
+        command += ["--push", cache_name]
     result = subprocess.run(command, stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL, timeout=15, check=False)
     assert result.returncode == 0, "Attic token mint failed"
@@ -122,6 +126,41 @@ def bootstrap_attic():
     )
     assert config.status_code == 200, "Native Attic config read failed"
     assert config.json()["is_public"] is False, "Attic fixture must remain private"
+    assert config.json()["store_dir"] == "/nix/store"
+    assert config.json()["api_endpoint"] == "https://atticCache:9443/", \
+        "Native CLI must receive the reachable TLS API endpoint"
+    # A separate fixture-only writer publishes before any browser/API Test.
+    # Login retains token-file configuration; no JWT enters argv or diagnostics.
+    writer = mint("web-ui-publication-setup", push=True)
+    directory = Path("/run/cf-attic-setup-client")
+    directory.mkdir(mode=0o700)
+    config_dir = directory / "config" / "attic"
+    config_dir.mkdir(parents=True, mode=0o700)
+    token_file = directory / "token"
+    for path, text in ((token_file, writer + "\n"),
+                       (config_dir / "config.toml", '[servers.native]\nendpoint = "https://atticCache:9443/"\ntoken-file = ' + json.dumps(str(token_file)) + '\n')):
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w") as output:
+            output.write(text)
+    env = {"PATH": os.environ["PATH"], "HOME": str(directory),
+           "XDG_CONFIG_HOME": str(directory / "config"), "SSL_CERT_FILE": CA,
+           "NIX_SSL_CERT_FILE": CA}
+    published = Path("/etc/cache-fixture-publication-path").read_text().strip()
+    for command in (["attic", "login", "native", "https://atticCache:9443/"],
+                    ["attic", "cache", "info", "native:web-ui-private"],
+                    ["attic", "push", "native:web-ui-private", published]):
+        result = subprocess.run(command, env=env, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=120, check=False)
+        assert result.returncode == 0, "Native Attic setup CLI login/cache-info/push failed"
+    narinfo = request(client, "GET", "https://atticCache:9443/web-ui-private/" + Path(published).name[:32] + ".narinfo",
+                      headers={"Authorization": "Bearer " + token})
+    assert narinfo.status_code == 200 and "StorePath: " + published in narinfo.text, \
+        "Native CLI publication must be readable before Test"
+    token_file.unlink()
+    (config_dir / "config.toml").unlink()
+    setup = {"real_cli_login_cache_info_push": "passed", "published_narinfo_status": 200,
+             "publication_phase": "fixture_setup_before_test"}
+    protected_json(ATTIC_SETUP_PROOF, setup)
     protected_json(ATTIC_FIXTURE, {
         "server_url": "https://atticCache:9443",
         "cache_name": "web-ui-private",
@@ -129,6 +168,10 @@ def bootstrap_attic():
         "public_key": config.json()["public_key"],
         "token": token, "replacement_token": replacement,
         "legacy_token": mint("web-ui-legacy-read"),
+        "denied_token": mint("web-ui-denied", cache_name="web-ui-other-cache"),
+        "missing_cache_name": "web-ui-nonexistent",
+        "missing_cache_token": mint("web-ui-missing", cache_name="web-ui-nonexistent"),
+        "setup_proof": setup,
     })
 
 
@@ -188,6 +231,7 @@ def assemble():
     hosts_link.symlink_to(hosts_file)
     client = session()
     STAGE = "native Attic authenticated read"
+    cache_config_url = attic["server_url"] + "/_api/v1/cache-config/" + attic["cache_name"]
     assert request(client, "GET", attic["read_url"]).status_code in (401, 403, 404), \
         "Private Attic must reject anonymous reads"
     for field in ("token", "replacement_token"):
@@ -195,6 +239,29 @@ def assemble():
                            headers={"Authorization": "Bearer " + attic[field]})
         assert response.status_code == 200, "Native Attic read failed"
         assert "StoreDir: /nix/store" in response.text, "Attic metadata mismatch"
+        assert request(client, "GET", attic["server_url"] + "/",
+                       headers={"Authorization": "Bearer " + attic[field]}).status_code == 404, \
+            "Authenticated root404 must discriminate the old generic probe"
+        config = request(client, "GET", cache_config_url,
+                         headers={"Authorization": "Bearer " + attic[field]})
+        assert config.status_code == 200 and config.json()["is_public"] is False
+        assert config.json()["store_dir"] == "/nix/store" and config.json()["public_key"] == attic["public_key"]
+    denial_statuses = []
+    for token in (attic["denied_token"], "invalid-fixture-token"):
+        denied = request(client, "GET", cache_config_url, headers={"Authorization": "Bearer " + token})
+        assert denied.status_code in (401, 403), "Native private cache must reject wrong token/permission"
+        denial_statuses.append(denied.status_code)
+    missing = request(client, "GET", attic["server_url"] + "/_api/v1/cache-config/" + attic["missing_cache_name"],
+                      headers={"Authorization": "Bearer " + attic["missing_cache_token"]})
+    assert missing.status_code == 404 and "NoSuchCache" in missing.text, \
+        "A discovery-authorized nonexistent cache must return native NoSuchCache, not 401"
+    protected_json(Path("/run/cf-attic-public-proof.json"), {
+        **attic["setup_proof"], "authenticated_root_status": 404,
+        "private_cache_config_status": 200, "native_typed_cache_config": "passed",
+        "denied_identity_and_invalid_token_statuses": denial_statuses, "visible_missing_cache_status": 404,
+        "stored_id_test": "requires_authoritative_browser_gate",
+    })
+    print("Native Attic setup: CLI publication passed; root404/config200; wrong credentials401/403; visible missing cache404")
     s3 = {
         "endpoint": "https://cache:9443", "region": "garage", "bucket": "nix-cache",
         "access_key_id": "GK0123456789abcdef01234567",
@@ -423,7 +490,7 @@ def native_configs(fixture):
     """Returns real create payloads and independent replacement patches."""
     attic, s3, niks3 = (fixture[name] for name in ("attic", "s3", "niks3"))
     configs = [
-        ("Attic", {"push_to": attic["read_url"], "attic_cache_name": attic["cache_name"],
+        ("Attic", {"push_to": attic["server_url"], "attic_cache_name": attic["cache_name"],
                    "attic_public_key": attic["public_key"], "attic_token": attic["token"]},
          {"attic_token": attic["replacement_token"]}),
         ("S3", {"push_to": "s3://" + s3["bucket"], "s3_endpoint_url": s3["endpoint"],
@@ -503,7 +570,9 @@ def insert_legacy_attic(pg, attic, token, raw_key, scope, prefix="task470-retain
     with pg.cursor() as cursor:
         for kind in LEGACY_KINDS:
             name = prefix + kind
-            url = attic["read_url"] + "?fixture_case=" + kind
+            # Production persists a server/base URL and a separate cache name.
+            # Private phase checkpoints correlate requests, never URL markers.
+            url = attic["server_url"]
             cursor.execute("""INSERT INTO cache_destinations
                 (name,cache_type,push_to,enabled,attic_token,attic_cache_name,attic_public_key)
                 VALUES (%s,'Attic',%s,false,%s,%s,%s) RETURNING id""",
@@ -515,6 +584,39 @@ def insert_legacy_attic(pg, attic, token, raw_key, scope, prefix="task470-retain
             result[kind] = {"id": destination_id, "name": name, "storage": kind,
                             "token_expected": kind != "legacy_missing"}
     return result
+
+
+def attic_requests():
+    """Reads only the shared method/path/status/auth-presence access records."""
+    return ATTIC_OBSERVER.read_text().splitlines()
+
+
+def check_attic_read_delta(before, cache_name=None, status=None, no_network=False):
+    """Requires an exact read-only request delta after a synchronous Test.
+
+    Setup publication runs before these checkpoints. A Test must not upload,
+    fetch the root, or use a metadata URL. NULL credentials must stop locally.
+    The shared log never records queries, credentials or upstream bodies.
+    """
+    deadline = time.monotonic() + 2
+    while True:
+        after = attic_requests()
+        assert after[:len(before)] == before, "Native access log was reset during Test"
+        delta = after[len(before):]
+        if delta or no_network or time.monotonic() >= deadline:
+            break
+        time.sleep(0.02)
+    if no_network:
+        assert not delta, "Missing credential Test contacted native Attic"
+    else:
+        assert len(delta) == 1, "Attic Test must make exactly one native read-only request"
+        expected_path = "GET /_api/v1/cache-config/" + quote(cache_name, safe="") + " "
+        assert delta[0].startswith(expected_path), "Attic Test used the wrong native endpoint or uploaded"
+        if status is not None:
+            statuses = status if isinstance(status, tuple) else (status,)
+            assert any("status=" + str(value) + " " in delta[0] for value in statuses), "Native Attic Test status mismatch"
+        assert delta[0].endswith("auth=present"), "Private Attic Test omitted Authorization"
+    return len(delta)
 
 
 def seed():
@@ -596,6 +698,10 @@ def seed():
         hashes[str(destination_id)] = expected
     LEGACY_TOKEN.unlink()
     protected_json(Path("/run/cf-cache-seed-snapshots.json"), hashes)
+    # This boundary excludes the genuine setup push. Every later browser native
+    # request must be explained by an ID-scoped Test checkpoint, including
+    # negative replacements. Cancel and Save must not contact the provider.
+    fixture["attic"]["browser_observer_baseline"] = len(attic_requests())
     fixture["seed_complete"] = True
     temporary = FIXTURE.with_suffix(".ready")
     protected_json(temporary, fixture)
@@ -617,6 +723,8 @@ def checkpoints():
     legacy_checked = False
     legacy_states = {}
     clones = {}
+    attic_pending = None
+    attic_probes = []
     while time.monotonic() < deadline:
         if not PHASE_REQUEST.exists():
             time.sleep(0.1)
@@ -635,7 +743,22 @@ def checkpoints():
         fixture = json.loads(FIXTURE.read_text())
         source_ids = sorted(fixture[kind]["id"] for kind in SOURCE_KINDS)
         legacy_ids = sorted(value["id"] for value in fixture["legacy_attic"].values())
-        if not source_checked:
+        if phase == "attic-probe-before":
+            assert attic_pending is None and len(ids) == 1
+            assert ids[0] == fixture["attic"]["id"] or ids[0] in legacy_ids or clones.get(ids[0], {}).get("type") == "Attic"
+            attic_pending = {"id": ids[0], "raw": snapshot(ids[0]), "requests": attic_requests()}
+        elif phase in ("attic-probe-after", "attic-probe-no-network", "attic-probe-authentication"):
+            assert attic_pending is not None and ids == [attic_pending["id"]]
+            assert snapshot(ids[0]) == attic_pending["raw"], "Attic Test changed complete raw state"
+            calls = check_attic_read_delta(attic_pending["requests"], fixture["attic"]["cache_name"],
+                                          status=(401, 403) if phase == "attic-probe-authentication" else 200,
+                                          no_network=phase == "attic-probe-no-network")
+            # IDs correlate each private checkpoint with an existing fixture
+            # identity. Do not modify the persisted URL to label HTTP requests.
+            attic_probes.append({"destination_id": ids[0], "native_get_count": calls,
+                                 "complete_raw_immutability": "passed", "upload_count": 0})
+            attic_pending = None
+        elif not source_checked:
             assert phase == "source-pre-save" and sorted(ids) == source_ids, \
                 "First checkpoint must cover all seven original destinations"
             hashes = json.loads(Path("/run/cf-cache-seed-snapshots.json").read_text())
@@ -713,12 +836,20 @@ def checkpoints():
                     and legacy_checked and len(legacy_states) == 2
                     and all(state["stage"] == "retained" for state in legacy_states.values()))
         if complete:
+            observed = attic_requests()[fixture["attic"]["browser_observer_baseline"]:]
+            assert len(observed) == sum(probe["native_get_count"] for probe in attic_probes), \
+                "Uncheckpointed browser/Cancel/Save contacted native Attic"
+            assert all(row.startswith("GET /_api/v1/cache-config/") for row in observed), \
+                "Browser Test/Cancel/Save uploaded or contacted the generic root"
             protected_json(PHASE_PROOF, {
                 "source_pre_save": "passed", "complete_source_rows": 7,
                 "source_assignments_and_timestamps": "unchanged",
                 "legacy_direct_sql_pre_save": "passed",
                 "legacy_complete_raw_rows": 3,
                 "legacy_unrelated_save_credentials_preserved": "passed",
+                "attic_server_base_probes": attic_probes,
+                "attic_test_upload_count": 0,
+                "attic_browser_uncheckpointed_requests": 0,
                 "replacement_clones": [{"cache_type": clone["type"],
                                         "pre_save_raw_immutability": "passed",
                                         "post_save_retained_raw_immutability": "passed"}
@@ -793,6 +924,7 @@ def verify_api():
             for patch in ({}, {"name": create["name"] + "-draft"}, replacement):
                 if patch is None:
                     continue
+                native_before = attic_requests() if cache_type == "Attic" else None
                 response = request(client, "POST", url + "/test-credentials", json=patch)
                 assert response.status_code == 200, "Stored-ID native probe HTTP failure"
                 result = response.json()
@@ -802,6 +934,9 @@ def verify_api():
                     assert result["write_auth_valid"] is None, \
                         "Public Niks3 metadata does not prove write authorization"
                     assert result["read_endpoint_reachable"] is True
+                if cache_type == "Attic":
+                    assert_attic_result(result, "complete", True)
+                    check_attic_read_delta(native_before, fixture["attic"]["cache_name"], status=200)
                 assert snapshot(destination_id) == before, \
                     "Probe changed exact ciphertext/configuration/timestamps/assignments"
             if replacement:
@@ -812,14 +947,20 @@ def verify_api():
                 assert response.status_code == 200, "Native replacement save failed"
                 saved = snapshot(destination_id)
                 assert saved != before, "Replacement save must change stored credentials"
+                native_before = attic_requests() if cache_type == "Attic" else None
                 response = request(client, "POST", url + "/test-credentials", json={})
                 assert response.status_code == 200 and response.json()["ok"] is True
                 assert snapshot(destination_id) == saved, "Retained replacement probe mutated state"
+                if cache_type == "Attic":
+                    assert_attic_result(response.json(), "complete", True)
+                    check_attic_read_delta(native_before, fixture["attic"]["cache_name"], status=200)
             redacted = request(client, "GET", url)
             assert redacted.status_code == 200
             for field in ("attic_token", "s3_access_key_id", "s3_secret_access_key",
                           "niks3_auth_token", "niks3_write_client_key", "niks3_read_client_key"):
                 assert not redacted.json().get(field), "GET exposed a stored credential"
+            if cache_type == "Attic":
+                proof.append(verify_attic_api(client, url, fixture["attic"]))
             proof.append({"cache_type": cache_type, "write_mode": config.get("niks3_write_auth_mode"),
                           "stored_read_probe": "passed", "exact_database_immutability": "passed",
                           "replacement_cancel_save": "passed" if replacement else "not_applicable"})
@@ -836,6 +977,55 @@ def verify_api():
         assert response.status_code in (200, 204), "Direct legacy fixture cleanup failed"
     HTTP_FIXTURE.unlink()
     print("Native stored-ID API proof passed: Attic, S3, public Nix, Niks3 token/private and mTLS/private, Nix/Http Basic, legacy query retention")
+
+
+def assert_attic_result(result, stage, accessible):
+    """Requires explicit native cache-read evidence without write claims."""
+    assert result["probe_kind"] == "attic_cache_config"
+    assert result["stage"] == stage
+    assert result["cache_access_valid"] is accessible
+    assert result["write_auth_valid"] is None, "A read-only Test cannot prove write authorization"
+    if accessible:
+        assert result["token_auth_valid"] is True, "Private native success must authenticate"
+    else:
+        assert result["token_auth_valid"] is not True
+
+
+def verify_attic_api(client, url, attic):
+    """Checks wrong replacements and visible missing caches without persistence.
+
+    The nonexistent-cache token has pull permission for that exact name. This
+    makes native NoSuchCache404 discriminating; a hidden-cache401 is not proof
+    that a cache does not exist. Provider deltas exclude setup publication.
+    """
+    destination_id = int(url.rsplit("/", 1)[1])
+    before = snapshot(destination_id)
+    cases = [({"attic_token": attic["denied_token"]}, "authentication", (401, 403), attic["cache_name"]),
+             ({"attic_token": "invalid-fixture-token"}, "authentication", (401, 403), attic["cache_name"]),
+             ({"attic_cache_name": attic["missing_cache_name"], "attic_token": attic["missing_cache_token"]},
+              "cache_not_found", (404,), attic["missing_cache_name"])]
+    for patch, stage, statuses, name in cases:
+        native_before = attic_requests()
+        response = request(client, "POST", url + "/test-credentials", json=patch)
+        assert response.status_code == 200, "Native operational failures use a structured Test result"
+        result = response.json()
+        assert result["ok"] is False and result["status_code"] in statuses
+        assert_attic_result(result, stage, False)
+        assert snapshot(destination_id) == before, "Failed replacement/cache-name Test mutated stored row"
+        assert not any(token in json.dumps(result) for token in (attic["token"], attic["replacement_token"], attic["denied_token"], attic["missing_cache_token"])), \
+            "Attic result exposed a credential"
+        check_attic_read_delta(native_before, name, status=result["status_code"])
+    native_before = attic_requests()
+    retained = request(client, "POST", url + "/test-credentials", json={})
+    assert retained.status_code == 200 and retained.json()["ok"] is True
+    assert_attic_result(retained.json(), "complete", True)
+    check_attic_read_delta(native_before, attic["cache_name"], status=200)
+    assert snapshot(destination_id) == before
+    return {"cache_type": "Attic", "persisted_endpoint_shape": "server_base",
+            "setup_publication": attic["setup_proof"], "root404_config200": "passed",
+            "wrong_token_and_replacement": "authentication", "visible_missing_cache": "cache_not_found",
+            "failed_test_raw_immutability": "passed", "retained_test_after_failure": "passed",
+            "test_upload_count": 0, "write_authorization": "untested"}
 
 
 def verify_http_api(client, origin, fixture):
@@ -950,13 +1140,23 @@ def observe(native_only=False):
     result = {"legacy_query_native_request_count": 0,
               "changed_authority_requests": len(changed), "authorization_forwarded": False}
     if not native_only:
-        attic_rows = Path("/run/cf-attic-observer.log").read_text().splitlines()
-        assert not any(row.endswith("case=missing") for row in attic_rows), "Missing Attic credential probe contacted provider"
-        for kind in ("plain", "encrypted"):
-            assert any("status=200 auth=present" in row and row.endswith("case=" + kind) for row in attic_rows), \
-                "Direct legacy Attic read must authenticate against native private provider"
+        phase = json.loads(PHASE_PROOF.read_text())
+        fixture = json.loads(FIXTURE.read_text())
+        probes = phase["attic_server_base_probes"]
+        browser_rows = Path("/run/cf-attic-observer.log").read_text().splitlines()[fixture["attic"]["browser_observer_baseline"]:]
+        assert len(browser_rows) == sum(probe["native_get_count"] for probe in probes), \
+            "Final browser observer found an uncheckpointed Attic request"
+        assert all(row.startswith("GET /_api/v1/cache-config/") for row in browser_rows), \
+            "Final browser observer found an Attic upload or generic-root request"
+        for kind, value in fixture["legacy_attic"].items():
+            correlated = [probe for probe in probes if probe["destination_id"] == value["id"]]
+            assert correlated, "Every legacy row requires a private native request checkpoint"
+            assert all(probe["native_get_count"] == (1 if value["token_expected"] else 0) for probe in correlated)
+        assert phase["attic_test_upload_count"] == 0
         result.update(legacy_attic_plain_native_auth="passed", legacy_attic_encrypted_native_auth="passed",
-                      legacy_attic_missing_native_requests=0)
+                      legacy_attic_missing_native_requests=0, attic_test_upload_count=0,
+                      attic_browser_uncheckpointed_requests=0,
+                      attic_probe_endpoint="_api/v1/cache-config/<cache>")
         Path("/tmp/screenshots/native-http-observer-proof.json").write_text(json.dumps(result, indent=2))
     print("Native HTTP observer passed: no legacy query replay; no Basic Authorization at changed authority")
 

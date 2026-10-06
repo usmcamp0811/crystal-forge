@@ -2745,12 +2745,17 @@ pub async fn create_cache_destination(
     send_json_with_csrf("POST", &url, Some(data)).await
 }
 
-/// Test cache destination credentials/configuration
+/// Tests unsaved cache configuration through the existing CSRF transport.
+/// Structured Attic policy rejections remain failed probe results, not success.
+///
+/// # Errors
+/// Returns errors for API authorization, malformed responses, unsupported
+/// rejections or transport failures. Callers must not display response bodies.
 pub async fn test_cache_destination_credentials(
     data: &CreateCacheDestination,
 ) -> Result<CacheCredentialTestResult, ApiClientError> {
     let url = format!("{}/caches/test-credentials", base_url());
-    send_json_with_csrf("POST", &url, Some(data)).await
+    send_cache_probe(&url, data).await
 }
 
 /// Tests a stored destination with the same replacement patch used by Save.
@@ -2761,14 +2766,79 @@ pub async fn test_cache_destination_credentials(
 ///
 /// # Errors
 /// Returns an error for authorization, missing destinations, invalid overrides,
-/// target-policy rejection or network failures. Callers must display a static
+/// unsupported target-policy rejection or network failures. Allowlisted Attic
+/// HTTP 400 policy envelopes return failed results. Callers must display a static
 /// failure message rather than echo response bodies or submitted credentials.
 pub async fn test_stored_cache_destination_credentials(
     id: i32,
     data: &UpdateCacheDestination,
 ) -> Result<CacheCredentialTestResult, ApiClientError> {
     let url = format!("{}/caches/{id}/test-credentials", base_url());
-    send_json_with_csrf("POST", &url, Some(data)).await
+    send_cache_probe(&url, data).await
+}
+
+// SECURITY: Only cache-probe responses get this decoder. HTTP API authorization
+// and CSRF errors remain errors even if their bodies imitate Attic evidence.
+async fn send_cache_probe<B: serde::Serialize>(
+    url: &str,
+    data: &B,
+) -> Result<CacheCredentialTestResult, ApiClientError> {
+    let payload =
+        serde_json::to_string(data).map_err(|e| ApiClientError::Deserialize(e.to_string()))?;
+    let (status, text) = send_request_with_csrf("POST", url, Some(&payload)).await?;
+    decode_cache_probe(status, &text)
+}
+
+fn decode_cache_probe(
+    status: u16,
+    text: &str,
+) -> Result<CacheCredentialTestResult, ApiClientError> {
+    if status == 400 {
+        let envelope = serde_json::from_str::<serde_json::Value>(text).ok();
+        let parsed = serde_json::from_str::<CacheCredentialTestResult>(text).ok();
+        if let (Some(envelope), Some(mut result)) = (envelope, parsed) {
+            let null_fields = [
+                "status_code",
+                "cache_access_valid",
+                "token_auth_valid",
+                "write_auth_valid",
+                "details",
+            ];
+            if result.probe_kind == Some(CacheProbeKind::AtticCacheConfig)
+                && result.stage == Some(CacheProbeStage::TargetPolicy)
+                && !result.ok
+                && envelope.get("ok") == Some(&serde_json::Value::Bool(false))
+                && matches!(
+                    result.error,
+                    Some(
+                        CacheProbePolicyError::InvalidCacheTestConfig
+                            | CacheProbePolicyError::LegacyQueryCredentialsUnsupported
+                    )
+                )
+                && null_fields
+                    .iter()
+                    .all(|field| envelope.get(*field) == Some(&serde_json::Value::Null))
+            {
+                result.message.clear();
+                result.tested_url = None;
+                return Ok(result);
+            }
+        }
+    } else if (200..300).contains(&status) {
+        let mut result: CacheCredentialTestResult = serde_json::from_str(text)
+            .map_err(|_| ApiClientError::Deserialize("Invalid cache probe response".into()))?;
+        if result.probe_kind == Some(CacheProbeKind::AtticCacheConfig) {
+            result.message.clear();
+            result.tested_url = None;
+        }
+        return Ok(result);
+    }
+    Err(ApiClientError::Status {
+        code: status,
+        // Cache errors stay opaque. Preserve status for auth/CSRF handling,
+        // but do not retain arbitrary server or upstream prose in this API.
+        body: "Cache probe request rejected".into(),
+    })
 }
 
 /// Discovers public Niks3 endpoints and signing keys without saving changes.
@@ -3668,6 +3738,104 @@ pub async fn delete_policy_mapping(
         mapping_id
     );
     send_empty_with_csrf("DELETE", &url, None::<&()>).await
+}
+
+#[cfg(test)]
+mod cache_probe_tests {
+    use super::*;
+
+    fn policy() -> serde_json::Value {
+        serde_json::json!({
+            "ok": false, "status_code": null, "message": "fixture-untrusted-message",
+            "tested_url": "https://fixture-untrusted-url", "error": "invalid_cache_test_config",
+            "details": null, "probe_kind": "attic_cache_config", "stage": "target_policy",
+            "cache_access_valid": null, "token_auth_valid": null, "write_auth_valid": null
+        })
+    }
+
+    #[test]
+    fn attic_policy_400_is_a_failed_typed_result_without_prose_or_url() {
+        for code in [
+            "invalid_cache_test_config",
+            "legacy_query_credentials_unsupported",
+        ] {
+            let mut value = policy();
+            value["error"] = code.into();
+            let result = decode_cache_probe(400, &value.to_string()).unwrap();
+            assert!(!result.ok);
+            assert_eq!(result.stage, Some(CacheProbeStage::TargetPolicy));
+            assert!(result.message.is_empty());
+            assert!(result.tested_url.is_none());
+            assert!(result.cache_access_valid.is_none());
+            assert!(result.token_auth_valid.is_none());
+            assert!(result.write_auth_valid.is_none());
+        }
+    }
+
+    #[test]
+    fn api_authentication_and_csrf_statuses_never_become_probe_outcomes() {
+        for status in [400, 401, 403, 404, 500] {
+            let value = if status == 400 {
+                serde_json::json!({"error":"forbidden","message":"Admin role required"})
+            } else {
+                policy()
+            };
+            match decode_cache_probe(status, &value.to_string()) {
+                Err(ApiClientError::Status { code, body }) => {
+                    assert_eq!(code, status);
+                    assert_eq!(body, "Cache probe request rejected");
+                }
+                _ => panic!("API authorization or unsupported errors must remain errors"),
+            }
+        }
+    }
+
+    #[test]
+    fn policy_decoder_requires_exact_allowlisted_failed_evidence() {
+        for (field, invalid) in [
+            ("probe_kind", serde_json::json!("unsupported")),
+            ("stage", serde_json::json!("authentication")),
+            ("stage", serde_json::json!("unsupported")),
+            ("error", serde_json::json!("unsupported")),
+            ("ok", serde_json::json!(true)),
+            ("status_code", serde_json::json!(200)),
+            ("cache_access_valid", serde_json::json!(true)),
+            ("token_auth_valid", serde_json::json!(true)),
+            ("write_auth_valid", serde_json::json!(true)),
+            ("details", serde_json::json!({"upstream":"untrusted"})),
+        ] {
+            let mut value = policy();
+            value[field] = invalid;
+            assert!(
+                matches!(
+                    decode_cache_probe(400, &value.to_string()),
+                    Err(ApiClientError::Status { code: 400, .. })
+                ),
+                "reject {field}"
+            );
+        }
+        let mut value = policy();
+        value.as_object_mut().unwrap().remove("details");
+        assert!(decode_cache_probe(400, &value.to_string()).is_err());
+        assert!(decode_cache_probe(400, "not JSON").is_err());
+    }
+
+    #[test]
+    fn successful_attic_response_drops_untrusted_prose_without_affecting_legacy_results() {
+        let mut value = policy();
+        value["ok"] = true.into();
+        value["stage"] = "complete".into();
+        value["status_code"] = 200.into();
+        value["cache_access_valid"] = true.into();
+        value.as_object_mut().unwrap().remove("error");
+        let result = decode_cache_probe(200, &value.to_string()).unwrap();
+        assert!(result.message.is_empty());
+        assert!(result.tested_url.is_none());
+        let legacy = decode_cache_probe(200, r#"{"success":true,"message":"legacy"}"#).unwrap();
+        assert!(legacy.ok);
+        assert_eq!(legacy.message, "legacy");
+        assert!(legacy.probe_kind.is_none());
+    }
 }
 
 #[cfg(test)]

@@ -681,6 +681,7 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
       assert.deepEqual(await api("GET", `/caches/${created.id}/environments`), [env.id]);
       console.log(`TASK-470 shared dialog real ${apiType} create passed (HTTP 201, atomic scope)`);
       await editSmoke(created, env);
+      if (apiType === "Attic") await atticProbeDiagnosticWorkflow(page, baseUrl, apiBaseUrl, created.id, captureState);
     }
     assert(!requests.some(r => r.method() === "PUT" && /\/environments$/.test(r.url())), "no second environment PUT for any type");
     const environmentsRoute = `${apiBaseUrl}/api/v1/environments`;
@@ -714,4 +715,117 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
   }
 }
 
-module.exports = { sharedCacheModalWorkflow };
+/** First performs a real non-mutating stored-ID Test, then exercises explicitly
+ * mocked renderer/client-decoder outcomes. No cache configuration is saved.
+ * Native provider authentication remains covered by the sibling real workflow.
+ */
+async function atticProbeDiagnosticWorkflow(page, baseUrl, apiBaseUrl, id, captureState) {
+  const url = `${apiBaseUrl}/api/v1/caches/${id}`;
+  const probeUrl = `${url}/test-credentials`;
+  const read = async () => {
+    const result = await page.evaluate(async url => {
+      const response = await fetch(url, { credentials: "include" });
+      return { status: response.status, value: await response.json() };
+    }, url);
+    assert.equal(result.status, 200, "read-only Attic diagnostic baseline GET");
+    assert.equal(result.value.cache_type, "Attic", "diagnostic requires an existing Attic destination");
+    return result.value;
+  };
+  const before = await read();
+  const mutations = [];
+  const observe = request => {
+    if (request.url().startsWith(`${apiBaseUrl}/api/v1/caches`) &&
+      ["POST", "PUT", "PATCH", "DELETE"].includes(request.method()) &&
+      request.url() !== probeUrl) mutations.push(request);
+  };
+  page.on("request", observe);
+  const dialog = page.getByRole("dialog", { name: "Cache destination", exact: true });
+  let parent;
+  const forbidden = "fixture-forbidden-upstream-prose";
+  const forbiddenUrl = "https://fixture-forbidden.invalid/?token=fixture-forbidden-token";
+  const evidence = (stage, ok = false, privateToken = null) => ({
+    ok, status_code: ok ? 200 : stage === "authentication" ? 401 : stage === "cache_not_found" ? 404 : null,
+    message: forbidden, tested_url: forbiddenUrl, probe_kind: "attic_cache_config", stage,
+    cache_access_valid: ok ? true : ["target_policy", "dns", "transport"].includes(stage) ? null : false,
+    token_auth_valid: privateToken, write_auth_valid: null,
+  });
+  const constants = {
+    target_policy: "Target blocked. Check the HTTPS server URL and cache name; ask an administrator to review target policy. Write authorization: Untested.",
+    dns: "Cannot resolve the Attic server. Check DNS and the server URL. Write authorization: Untested.",
+    transport: "Cannot connect to the Attic server with verified TLS. Check connectivity and certificate trust. Write authorization: Untested.",
+    authentication: "Cache access denied. Check the token and its cache read permissions; cache existence is unresolved. Write authorization: Untested.",
+    cache_not_found: "Cache not found. Check the configured cache name. Write authorization: Untested.",
+    response: "Unexpected Attic cache-config response. Check the server URL and proxy path. Write authorization: Untested.",
+    complete: "Cache access verified. Write authorization: Untested.",
+    unverified: "Attic cache access was not verified. Check the server URL and cache name. Write authorization: Untested.",
+  };
+  const click = async () => {
+    const response = page.waitForResponse(r => r.url() === probeUrl && r.request().method() === "POST");
+    await dialog.getByRole("button", { name: "Test connection", exact: true }).click();
+    return response;
+  };
+  const result = dialog.getByTestId("attic-test-result");
+  try {
+    await page.goto(`${baseUrl}/caches`);
+    await page.getByText(before.name, { exact: true }).click();
+    parent = page.getByRole("dialog").filter({ has: page.getByRole("button", { name: "Edit cache", exact: true }) });
+    const fresh = page.waitForResponse(r => r.url() === url && r.request().method() === "GET");
+    await parent.getByRole("button", { name: "Edit cache", exact: true }).click();
+    assert.equal((await fresh).status(), 200, "diagnostic Edit uses fresh GET");
+    await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue(before.name);
+    await dialog.getByRole("button", { name: "Credentials", exact: true }).click();
+    await expect(dialog.getByRole("button", { name: "Test connection", exact: true })).toBeEnabled();
+    // No probe interception is installed for this request.
+    const real = await click();
+    const actual = await real.json();
+    assert([200, 400].includes(real.status()), "real Attic stored-ID Test status");
+    assert.equal(actual.probe_kind, "attic_cache_config", "real server uses canonical named-cache probe");
+    assert(Object.hasOwn(constants, actual.stage), "real server returns an allowlisted stage");
+    assert.equal(actual.write_auth_valid, null, "real read probe never establishes upload permission");
+    await expect(result).toContainText(constants[actual.stage]);
+    const patch = real.request().postDataJSON();
+    assert(!Object.hasOwn(patch, "attic_token"), "real retained Test omits stored token");
+    assert(patch.push_to == null, "real retained Test omits unchanged public URL");
+    if (captureState) await captureState("attic-diagnostic-real");
+    console.log(`TASK-470 real Attic diagnostic row ${id}: HTTP ${real.status()}, stage ${actual.stage}; no Save`);
+
+    const cases = [
+      ...["dns", "transport", "authentication", "cache_not_found", "response"].map(stage => ({ name: stage, status: 200, value: evidence(stage), text: constants[stage] })),
+      { name: "private-read", status: 200, value: evidence("complete", true, true), text: constants.complete, token: "Token authentication for private cache read: Verified." },
+      { name: "public-read", status: 200, value: evidence("complete", true), text: constants.complete },
+      { name: "policy-400", status: 400, value: { ...evidence("target_policy"), error: "invalid_cache_test_config", details: null }, text: constants.target_policy },
+      { name: "unknown-stage", status: 200, value: evidence("unsupported-stage", true, true), text: constants.unverified },
+      { name: "unknown-kind", status: 200, value: { ...evidence("complete", true, true), probe_kind: "unsupported-kind" }, text: constants.unverified },
+      { name: "legacy-root-success", status: 200, value: { success: true, message: forbidden, tested_url: forbiddenUrl }, text: constants.unverified },
+      ...[401, 403].map(status => ({ name: `api-auth-${status}`, status, value: { ...evidence("target_policy"), error: "invalid_cache_test_config", details: null }, error: "Connection test failed. Check endpoint policy and credentials." })),
+      { name: "non-policy-400", status: 400, value: { ...evidence("target_policy"), error: "forbidden", details: null }, error: "Connection test rejected. Check destination values and credentials." },
+    ];
+    for (const fixture of cases) {
+      // Renderer-only interception. This is not native authentication evidence.
+      const render = route => route.fulfill({ status: fixture.status, json: fixture.value });
+      await page.route(probeUrl, render);
+      try {
+        const response = await click();
+        assert.equal(response.status(), fixture.status, "renderer-only fixture HTTP status");
+        if (fixture.error) {
+          await expect(dialog.getByRole("alert")).toHaveText(fixture.error);
+          await expect(result).toHaveCount(0);
+        } else {
+          await expect(result).toContainText(fixture.text);
+          await expect(result).toContainText(fixture.token || "Token authentication: Untested.");
+        }
+        await expect(dialog).not.toContainText(forbidden);
+        await expect(dialog).not.toContainText(forbiddenUrl);
+        await expect(dialog).not.toContainText("fixture-forbidden-token");
+        if (captureState) await captureState(`attic-diagnostic-renderer-${fixture.name}`);
+      } finally { await page.unroute(probeUrl, render); }
+    }
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await parent.getByRole("button", { name: "Close", exact: true }).click();
+    assert(JSON.stringify(await read()) === JSON.stringify(before), "diagnostic Tests leave GET configuration/timestamps unchanged");
+    assert.equal(mutations.length, 0, "diagnostic renderer and real Test never create/update/delete cache configuration");
+    console.log("TASK-470 Attic renderer-only stage/400/auth/no-echo cases passed");
+  } finally { page.off("request", observe); }
+}
+
+module.exports = { sharedCacheModalWorkflow, atticProbeDiagnosticWorkflow };

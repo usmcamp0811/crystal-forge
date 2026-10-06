@@ -870,9 +870,13 @@ impl CacheDestination {
     ///
     /// Supports Niks3 and existing public cache types. Niks3's write token is
     /// never included. Callers must enforce confidential credential transport.
+    /// Attic derives its named-cache read root from a nonempty valid server URL
+    /// and cache name. Historical cache-root and metadata URLs are normalized in
+    /// memory; persisted URLs are not rewritten and Attic write tokens stay out.
     ///
     /// # Errors
-    /// Returns an error for missing URLs, unknown types, or invalid Niks3 reads.
+    /// Returns an error for missing URLs, unknown types, invalid Attic URL/name
+    /// combinations, or invalid Niks3 reads.
     ///
     /// # Examples
     /// ```
@@ -889,11 +893,32 @@ impl CacheDestination {
     /// assert_eq!(url, "https://cache.example.com");
     /// assert_eq!(keys.len(), 1);
     /// assert_eq!(auth, CacheReadAuth::None);
+    /// let attic = CacheDestination {
+    ///     cache_type: "Attic".into(),
+    ///     push_to: Some("https://cache.example.com/proxy/".into()),
+    ///     attic_cache_name: Some("local:team".into()),
+    ///     ..Default::default()
+    /// };
+    /// assert_eq!(attic.read_config()?.0, "https://cache.example.com/proxy/team");
     /// # Ok::<(), String>(())
     /// ```
     pub fn read_config(
         &self,
     ) -> Result<(String, Vec<String>, cf_protocol::cache::CacheReadAuth), String> {
+        if self.cache_type == "Attic" {
+            let urls = cf_config::attic_urls::resolve_attic_urls(
+                self.push_to.as_deref().ok_or("Missing Attic server URL")?,
+                self.attic_cache_name
+                    .as_deref()
+                    .ok_or("Missing Attic cache name")?,
+            )
+            .map_err(|_| "Invalid Attic server URL or cache name")?;
+            return Ok((
+                urls.cache_url.to_string(),
+                self.attic_public_key.iter().cloned().collect(),
+                cf_protocol::cache::CacheReadAuth::None,
+            ));
+        }
         let url = self
             .push_to
             .clone()

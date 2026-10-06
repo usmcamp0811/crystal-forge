@@ -148,11 +148,11 @@ README: [checks/server-regressions/README.md](../../../checks/server-regressions
   Cargo integration test binaries and a curated list of `#[ignore]`d library
   tests (POA&M, policy, notification, composite AC3, STIG mapping, bundle
   baseline, and agent key rotation areas).
-  TASK-470 also runs 37 explicitly named ignored PostgreSQL tests and 8 named
+  TASK-470 also runs 38 explicitly named ignored PostgreSQL tests and 12 named
   non-ignored tests for cache scope, retained credentials, signed capabilities,
   direct-peer dispatch, and publication-backed reads. Each invocation uses
   `--exact --test-threads=1` and requires the named success line and exactly one
-  passed test with zero ignored tests. Only the 37 selected database tests use
+  passed test with zero ignored tests. Only the 38 selected database tests use
   `--ignored`; missing or renamed tests fail the check. The current README lists
   every qualified name. This gate does not run native Attic/S3 upload suites.
   The two added legacy Attic regressions are
@@ -166,6 +166,23 @@ README: [checks/server-regressions/README.md](../../../checks/server-regressions
   requires real private Attic metadata reads for plaintext/historical rows and
   zero provider requests for the NULL row. Neither catalog membership nor this
   scope description establishes a pass for the current revision.
+  The added ignored
+  `handlers::api::caches::retained_probe_tests::attic_named_cache_retained_replacement_results_and_policy_preserve_raw_state`
+  covers retained/replacement probe results, safe policy refusal, lock release,
+  and exact raw-state preservation. Three added non-ignored tests in that module
+  are `attic_canonical_api_and_model_read_roots_share_named_cache`,
+  `attic_native_metadata_and_status_matrix_never_claims_root_or_write_success`,
+  and `attic_target_policy_and_credential_queries_fail_before_network`.
+  The fourth is
+  `handlers::api::builders::tests::attic_requisite_env_uses_shared_server_base`.
+  They cover canonical endpoint/read-root agreement, typed native metadata and
+  status classification, pre-network policy, and the requisite server-base export.
+  The native fixture separately requires server-root 404 and cache-config 200,
+  real CLI setup publication before Test, one named-cache GET per successful
+  Test, and zero Test uploads. Corrected runtime proof remains pending owner
+  verification. See the
+  [Attic endpoint contract](../caches/niks3-cache.md#attic-url-interpretation-and-named-cache-test)
+  for normalization, authentication, and compatibility limits.
 - **Why it exists.** `nix build .#server` runs only `--lib --bins` tests, and
   the `integration` check runs the Python suite, so these Rust integration
   targets would otherwise run nowhere. The list is curated on purpose and is

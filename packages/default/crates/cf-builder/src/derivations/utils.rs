@@ -145,6 +145,10 @@ pub fn apply_cache_env_to_command(cmd: &mut Command) {
     }
 }
 
+/// Applies configured cache credentials and a canonical Attic server endpoint.
+///
+/// Call this after ambient environment setup to let configured child values win.
+/// Invalid or incomplete Attic URLs do not add an endpoint override.
 pub fn apply_cache_config_env_to_command(cmd: &mut Command, cache: &CacheConfig) {
     if let Some(ref v) = cache.s3_access_key_id {
         cmd.env("AWS_ACCESS_KEY_ID", v);
@@ -174,36 +178,17 @@ pub fn apply_cache_config_env_to_command(cmd: &mut Command, cache: &CacheConfig)
     }
 }
 
+/// Returns the canonical Attic login base for a configured cache.
+///
+/// Returns `None` for missing fields or invalid resolver inputs. Resolution is
+/// pure and does not log the raw URI or change the configured push target.
 pub fn attic_server_url_from_cache_config(cache: &CacheConfig) -> Option<String> {
-    let raw = cache.push_to.as_deref()?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-
-    if let Some(rest) = raw.strip_prefix("attic://") {
-        let host = rest.split('/').next()?.trim();
-        if host.is_empty() {
-            return None;
-        }
-        return Some(format!("https://{host}"));
-    }
-
-    if !(raw.starts_with("http://") || raw.starts_with("https://")) {
-        return None;
-    }
-
-    let Some(cache_name) = cache
-        .attic_cache_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return Some(raw.trim_end_matches('/').to_string());
-    };
-
-    let trimmed = raw.trim_end_matches('/');
-    let suffix = format!("/{cache_name}");
-    Some(trimmed.strip_suffix(&suffix).unwrap_or(trimmed).to_string())
+    cf_config::attic_urls::resolve_attic_urls(
+        cache.push_to.as_deref()?.trim(),
+        cache.attic_cache_name.as_deref()?.trim(),
+    )
+    .ok()
+    .map(|urls| urls.server_url.to_string())
 }
 
 pub fn apply_cache_config_env_for_scope(scoped: &mut Command, cache: &CacheConfig) {
@@ -684,6 +669,64 @@ pub async fn count_closure_packages(drv_path: &str) -> Result<(i32, i32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attic_url_wrapper_and_child_environment_use_shared_base() {
+        for input in [
+            "https://cache.example/prefix/",
+            "https://cache.example/prefix/team",
+            "https://cache.example/prefix/team/nix-cache-info",
+        ] {
+            let cache = CacheConfig {
+                push_to: Some(input.into()),
+                attic_cache_name: Some("remote:team".into()),
+                ..Default::default()
+            };
+            assert_eq!(
+                attic_server_url_from_cache_config(&cache).as_deref(),
+                Some("https://cache.example/prefix/")
+            );
+            let mut command = Command::new("unused");
+            command.env("ATTIC_SERVER_URL", "https://ambient.example/");
+            apply_cache_config_env_to_command(&mut command, &cache);
+            assert!(
+                command
+                    .as_std()
+                    .get_envs()
+                    .any(|(key, value)| key == "ATTIC_SERVER_URL"
+                        && value == Some(std::ffi::OsStr::new("https://cache.example/prefix/")))
+            );
+        }
+    }
+
+    #[test]
+    fn attic_url_wrapper_rejects_invalid_and_non_attic_configuration() {
+        for cache in [
+            CacheConfig {
+                push_to: Some("https://cache.example/".into()),
+                ..Default::default()
+            },
+            CacheConfig {
+                push_to: Some("s3://bucket".into()),
+                ..Default::default()
+            },
+            CacheConfig {
+                push_to: Some("https://user:password@cache.example/".into()),
+                attic_cache_name: Some("team".into()),
+                ..Default::default()
+            },
+        ] {
+            assert!(attic_server_url_from_cache_config(&cache).is_none());
+            let mut command = Command::new("unused");
+            apply_cache_config_env_to_command(&mut command, &cache);
+            assert!(
+                !command
+                    .as_std()
+                    .get_envs()
+                    .any(|(key, _)| key == "ATTIC_SERVER_URL")
+            );
+        }
+    }
 
     #[test]
     fn test_normalize_scp_ssh_url_no_dot_git() {

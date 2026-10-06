@@ -686,6 +686,17 @@ fn apply_cache_destination_env(
     if let Some(value) = destination.attic_token.as_deref() {
         command.env("ATTIC_TOKEN", value);
     }
+    if destination.cache_type == "Attic"
+        && let (Some(endpoint), Some(cache)) = (
+            destination.push_to.as_deref(),
+            destination.attic_cache_name.as_deref(),
+        )
+        && let Ok(urls) = cf_config::resolve_attic_urls(endpoint, cache)
+    {
+        // Match the login and read consumers without changing persisted URLs.
+        // The CLI still requires its remote profile to be initialized.
+        command.env("ATTIC_SERVER_URL", urls.server_url.as_str());
+    }
 }
 
 async fn sign_derivation_requisites_for_cache(
@@ -5939,6 +5950,52 @@ mod tests {
             &make_headers_with("x-forwarded-proto", "https"),
             peer
         ));
+    }
+
+    #[test]
+    fn attic_requisite_env_uses_shared_server_base() {
+        use crate::models::cache_destination::CacheDestination;
+        use std::ffi::OsStr;
+
+        for input in [
+            "https://cache.example/proxy/",
+            "https://cache.example/proxy/campground",
+            "https://cache.example/proxy/campground/nix-cache-info",
+        ] {
+            let destination = CacheDestination {
+                cache_type: "Attic".into(),
+                push_to: Some(input.into()),
+                attic_cache_name: Some("local:campground".into()),
+                ..Default::default()
+            };
+            let mut command = tokio::process::Command::new("attic");
+            super::apply_cache_destination_env(&mut command, &destination);
+            let endpoint = command
+                .as_std()
+                .get_envs()
+                .find(|(key, _)| *key == OsStr::new("ATTIC_SERVER_URL"))
+                .and_then(|(_, value)| value);
+            assert_eq!(endpoint, Some(OsStr::new("https://cache.example/proxy/")));
+        }
+        for (kind, input) in [
+            ("Nix", "https://cache.example"),
+            ("Attic", "https://cache.example/#fragment"),
+        ] {
+            let destination = CacheDestination {
+                cache_type: kind.into(),
+                push_to: Some(input.into()),
+                attic_cache_name: Some("campground".into()),
+                ..Default::default()
+            };
+            let mut command = tokio::process::Command::new("attic");
+            super::apply_cache_destination_env(&mut command, &destination);
+            assert!(
+                !command
+                    .as_std()
+                    .get_envs()
+                    .any(|(key, _)| key == OsStr::new("ATTIC_SERVER_URL"))
+            );
+        }
     }
 
     #[test]

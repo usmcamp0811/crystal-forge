@@ -110,7 +110,13 @@ terminator preserves the signed Host header. It does not simulate S3 replies.
 `native-cache-fixture.py` first proves native authentication:
 
 - A private Attic cache rejects anonymous metadata reads. Two distinct
-  runtime-minted pull JWTs successfully read that same cache.
+  runtime-minted pull JWTs successfully read its native API v1 cache config.
+  Authenticated server-root requests return 404 while the private cache-config
+  API returns 200. This discriminator rejects the old generic-root Test.
+  A separate runtime pull/push identity runs real CLI login, cache-info and push
+  during fixture setup. The published tiny Nix output has readable narinfo
+  before Test. The fixture advertises the HTTPS API endpoint so CLI delegation
+  does not attempt HTTP on the TLS-only port. No setup JWT enters argv or logs.
 - Two imported Garage key pairs successfully perform native SigV4
   `ListObjectsV2`. Anonymous requests and incorrect signatures fail. Bucket
   listing proves read permission, not write authorization or native uploads.
@@ -150,6 +156,8 @@ checkpoint:
   request_path, ack_path
 attic:
   id, server_url, cache_name, read_url, public_key, token, replacement_token
+  denied_token, missing_cache_name, missing_cache_token, setup_proof,
+  browser_observer_baseline
 s3:
   id, endpoint, region, bucket, access_key_id, secret_access_key,
   replacement_access_key_id, replacement_secret_access_key
@@ -172,9 +180,34 @@ legacy_attic:
 Native endpoints are `https://atticCache:9443` (private cache
 `web-ui-private`), `https://cache:9443` (Garage), `https://cache:5751`
 (Niks3 write API), `https://cache:5752` (private Niks3 read), and
-`https://cache:5753/nix-cache-info` (public Nix metadata). Attic consumers
-must probe `read_url`, not the anonymous server root. Niks3 uses the token
+`https://cache:5753/nix-cache-info` (public Nix metadata). Attic destinations
+persist `push_to: server_url` and a separate `attic_cache_name: cache_name`.
+This applies to primary rows, direct-SQL legacy rows and replacement clones.
+Test must request `/_api/v1/cache-config/<cache_name>` on that server. The
+`read_url` field is infrastructure metadata, not a persisted Test target.
+Niks3 uses the token
 or write certificate independently from its read certificate.
+
+Every browser Attic Test has a private before/after checkpoint. The native VM
+shares an unbuffered access log with the verifier. The log records only method,
+path, HTTP status and Authorization presence. Destination IDs correlate the
+checkpoint with row identity; URLs carry no fixture query marker. Successful
+Tests make exactly one authenticated cache-config GET. NULL credentials make
+zero requests. Every Test delta must contain zero uploads, independently of
+the earlier CLI setup publication. Complete raw database snapshots also remain
+unchanged at these checkpoints. The total browser-phase request count must equal
+the sum of its Test checkpoints. Cancel and Save cannot hide provider requests
+between checkpoints.
+
+A correctly signed JWT without private-cache permission and an invalid token
+must yield structured `authentication` failures. A token with pull permission
+for an explicitly nonexistent name must yield native `NoSuchCache` HTTP 404
+and the structured `cache_not_found` stage. A hidden-cache 401 is not a
+not-found assertion. Negative replacement and cache-name overrides must not
+persist; a subsequent retained Test must still succeed. Success reports
+`probe_kind: attic_cache_config`, `stage: complete`, `cache_access_valid: true`
+and private `token_auth_valid: true`. `write_auth_valid` remains null and the
+UI reports `Write authorization: Untested`.
 
 After a successful browser run, an independent real Crystal Forge API
 verification first requires a VM-private checkpoint taken before any Save.
@@ -245,7 +278,8 @@ after Test/Cancel. Unrelated name Save for the two valid legacy rows must retain
 the exact plaintext or historical ciphertext, raw URI and scope; only the
 approved metadata timestamp changes are allowed. A new complete raw baseline
 then proves retained Test non-mutation. Native Attic observer logs record only
-path/status/Authorization presence and a fixed case label. Both valid legacy
+method/path/status/Authorization presence. Private ID-scoped checkpoints, not
+query strings or header values, identify each legacy row. Both valid legacy
 rows require authenticated HTTP 200; the missing-token case requires zero
 provider requests. These proofs supplement the existing seven current-API rows
 and replacement-clone guards without replacing them.

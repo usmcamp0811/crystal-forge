@@ -64,12 +64,13 @@ environment-specific ignored tests that do not belong in this gate.
 
 ## TASK-470 selected library tests
 
-The following 37 ignored PostgreSQL tests run with
+The following 38 ignored PostgreSQL tests run with
 `--ignored --exact --test-threads=1`. Each invocation must report exactly one
 passed test and zero ignored tests. The tests include completed CVE publication
 provenance and malformed signing-key rejection across all Niks3 auth modes.
 
 ```text
+handlers::api::caches::retained_probe_tests::attic_named_cache_retained_replacement_results_and_policy_preserve_raw_state
 handlers::api::caches::retained_probe_tests::legacy_attic_plaintext_and_historical_ciphertext_retain_on_test_and_save
 handlers::api::caches::retained_probe_tests::legacy_attic_null_and_empty_token_refuse_before_probe_without_mutation
 handlers::api::caches::retained_probe_tests::stored_probe_preserves_ciphertext_scope_and_timestamps
@@ -122,9 +123,39 @@ changes with exact membership. NULL and empty tokens fail before the probe
 callback. Synthetic JWT-shaped Rust values prove retained snapshots; actual
 native Bearer authentication remains the separate owner-managed VM proof.
 
-These 8 non-ignored tests run with `--exact --test-threads=1`:
+Attic Test uses the canonical named-cache `/_api/v1/cache-config/<cache>` API.
+Server-root HTTP 200, HTML, arbitrary JSON, invalid keys, missing required fields,
+and invalid store directories cannot establish cache access. Required native
+fields are `public_key` (valid Nix key), `is_public` (boolean), `store_dir`
+(`/nix/store`), and `priority` (i32). The probe bounds metadata to 64 KiB and
+retains HTTPS, pinned DNS, verified TLS, no-proxy, no-redirect, and eight-second
+timeouts. Attic read configuration uses the same resolver's named-cache root.
+
+Results add flat `probe_kind: "attic_cache_config"`, `stage`,
+`cache_access_valid`, `token_auth_valid`, and `write_auth_valid` fields. Stages
+are `target_policy`, `dns`, `transport`, `authentication`, `cache_not_found`,
+`response`, and `complete`. Access is null before HTTP observation, false after
+an unsuccessful response, and true only for validated native metadata. Token
+validity is true only for private-cache success and null otherwise. Write
+validity is always null (Untested). HTTP 401/403 leaves existence unresolved;
+only HTTP 404 with typed `code: 404, error: "NoSuchCache"` reports cache absence.
+Generic 404 reports `endpoint_unavailable` at the response stage. Target-policy
+rejection remains HTTP 400 with safe `error`, `message`, and null `details` plus
+the flat probe fields. Other probe outcomes remain HTTP 200 result objects.
+No upstream metadata, URLs, tokens, or error text are returned or followed.
+The PostgreSQL regression checks retained/replacement snapshots, credential-safe
+results, lock release, and exact raw-state preservation on policy refusal.
+
+The requisite-publication regression verifies that `ATTIC_SERVER_URL` uses the
+shared resolver's canonical server base for Attic.
+
+These 12 non-ignored tests run with `--exact --test-threads=1`:
 
 ```text
+handlers::api::builders::tests::attic_requisite_env_uses_shared_server_base
+handlers::api::caches::retained_probe_tests::attic_canonical_api_and_model_read_roots_share_named_cache
+handlers::api::caches::retained_probe_tests::attic_native_metadata_and_status_matrix_never_claims_root_or_write_success
+handlers::api::caches::retained_probe_tests::attic_target_policy_and_credential_queries_fail_before_network
 handlers::api::caches::retained_probe_tests::active_type_metadata_and_serialization_never_reveal_inactive_credentials
 handlers::api::caches::retained_probe_tests::effective_update_never_borrows_inactive_credentials_on_type_conversion
 handlers::api::caches::retained_probe_tests::bearer_auth_is_exclusive_to_active_attic

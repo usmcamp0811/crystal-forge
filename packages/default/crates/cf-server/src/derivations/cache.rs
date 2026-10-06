@@ -104,10 +104,14 @@ impl Derivation {
     /// contain presigned URLs. Attic retries authorization once after login.
     /// Disabled or filtered pushes return success without running a command.
     ///
+    /// Attic login preserves ambient endpoint and token precedence. The chosen
+    /// endpoint is resolved to the canonical server base before login.
+    ///
     /// # Errors
     ///
-    /// Returns an error for resolution, invalid Niks3 configuration, process
-    /// execution, timeout, or unsuccessful publication.
+    /// Returns an error for resolution, invalid Niks3 or Attic configuration,
+    /// missing Attic credentials, process execution, timeout, or failed
+    /// publication.
     pub async fn push_to_cache(
         &self,
         path: &str,
@@ -151,10 +155,10 @@ impl Derivation {
         {
             ensure_attic_client_available().await?;
 
-            let endpoint = std::env::var("ATTIC_SERVER_URL")
-                .ok()
-                .or_else(|| attic_server_url_from_cache_config(cache_config))
-                .context("ATTIC_SERVER_URL not set (e.g. http://atticCache:8080)")?;
+            let endpoint = resolve_attic_login_endpoint(
+                cache_config,
+                std::env::var("ATTIC_SERVER_URL").ok().as_deref(),
+            )?;
             let token = std::env::var("ATTIC_TOKEN")
                 .ok()
                 .or_else(|| cache_config.attic_token.clone())
@@ -454,9 +458,36 @@ async fn run_cache_command_streaming(
     Ok(status.success())
 }
 
-/// Log into Attic so the remote is available to the client.
-/// Always runs *directly* and writes config under /var/lib/crystal-forge.
+// COMPATIBILITY: Ambient ATTIC_SERVER_URL still wins over configured push_to.
+// Canonicalize that chosen endpoint before login; do not change push references.
+fn resolve_attic_login_endpoint(
+    cache: &CacheConfig,
+    endpoint_override: Option<&str>,
+) -> Result<String> {
+    let endpoint = endpoint_override
+        .or(cache.push_to.as_deref().map(str::trim))
+        .context("Attic server endpoint is missing")?;
+    let urls = cf_config::attic_urls::resolve_attic_urls(
+        endpoint,
+        cache.attic_cache_name.as_deref().unwrap_or_default().trim(),
+    )?;
+    Ok(urls.server_url.to_string())
+}
+
+/// Logs into Attic with a canonical server base under the service account.
+///
+/// Remote-only memoization and already-configured acceptance preserve existing
+/// behavior; neither proves that persisted credentials match this request.
 async fn ensure_attic_login(remote: &str, endpoint: &str, token: &str) -> anyhow::Result<()> {
+    ensure_attic_login_with_program(remote, endpoint, token, std::ffi::OsStr::new("attic")).await
+}
+
+async fn ensure_attic_login_with_program(
+    remote: &str,
+    endpoint: &str,
+    token: &str,
+    program: &std::ffi::OsStr,
+) -> anyhow::Result<()> {
     if is_attic_logged(remote) {
         tracing::debug!(
             "attic: remote '{}' already initialized in this process",
@@ -465,8 +496,8 @@ async fn ensure_attic_login(remote: &str, endpoint: &str, token: &str) -> anyhow
         return Ok(());
     }
 
-    tracing::info!("Attic login for remote '{remote}' at {endpoint}");
-    let mut cmd = tokio::process::Command::new("attic");
+    tracing::info!("Attic login for remote '{remote}'");
+    let mut cmd = tokio::process::Command::new(program);
     cmd.args(["login", remote, endpoint, token]);
     // Ensure credentials are persisted under the crystal-forge account:
     cmd.env("HOME", "/var/lib/crystal-forge");
@@ -511,5 +542,84 @@ async fn ensure_attic_client_available() -> anyhow::Result<()> {
              module builds add it to crystal-forge-builder.service PATH)"
         ),
         Err(e) => Err(e).context("failed to probe attic client availability"),
+    }
+}
+
+#[cfg(test)]
+mod attic_url_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn attic_login_cli_receives_canonical_base_and_existing_token_argument() {
+        for (index, (input, expected)) in [
+            ("http://cache.example:8080", "http://cache.example:8080/"),
+            ("https://cache.example/", "https://cache.example/"),
+            ("https://cache.example/team", "https://cache.example/"),
+            ("attic://cache.example/team", "https://cache.example/"),
+            (
+                "https://cache.example/team/nix-cache-info",
+                "https://cache.example/",
+            ),
+            (
+                "https://cache.example/prefix/team/?view=one",
+                "https://cache.example/prefix/?view=one",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let config = CacheConfig {
+                cache_type: CacheType::Attic,
+                push_to: Some(input.into()),
+                attic_cache_name: Some("configured-remote:team".into()),
+                ..Default::default()
+            };
+            let endpoint = resolve_attic_login_endpoint(&config, None).unwrap();
+            assert_eq!(endpoint, expected);
+            assert_eq!(config.push_to.as_deref(), Some(input));
+            assert_eq!(
+                config.attic_cache_name.as_deref(),
+                Some("configured-remote:team")
+            );
+            let remote = format!("server-url-test-{index}");
+            let directory = tempfile::tempdir().unwrap();
+            let script = directory.path().join("attic");
+            std::fs::write(&script, format!(
+                "#!/bin/sh\nset -eu\ntest \"$#\" = 4\ntest \"$1\" = login\ntest \"$2\" = '{remote}'\ntest \"$3\" = '{expected}'\ntest \"$4\" = synthetic-attic-cli-token\ntest \"$HOME\" = /var/lib/crystal-forge\ntest \"$XDG_CONFIG_HOME\" = /var/lib/crystal-forge/.config\n"
+            )).unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+            clear_attic_logged(&remote);
+            ensure_attic_login_with_program(
+                &remote,
+                &endpoint,
+                "synthetic-attic-cli-token",
+                script.as_os_str(),
+            )
+            .await
+            .unwrap();
+            assert!(is_attic_logged(&remote));
+            clear_attic_logged(&remote);
+        }
+    }
+
+    #[test]
+    fn attic_login_preserves_ambient_endpoint_precedence_and_fails_closed() {
+        let config = CacheConfig {
+            cache_type: CacheType::Attic,
+            push_to: Some("https://configured.example/team".into()),
+            attic_cache_name: Some("team".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_attic_login_endpoint(
+                &config,
+                Some("http://override.example/prefix/team/nix-cache-info?view=one")
+            )
+            .unwrap(),
+            "http://override.example/prefix/?view=one"
+        );
+        assert!(resolve_attic_login_endpoint(&config, Some("invalid")).is_err());
+        assert!(resolve_attic_login_endpoint(&config, Some("")).is_err());
     }
 }

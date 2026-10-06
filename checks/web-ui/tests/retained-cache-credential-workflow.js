@@ -46,6 +46,7 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
   const secrets = ["s3_access_key_id", "attic_token", "s3_secret_access_key", "s3_session_token",
     "niks3_auth_token", "niks3_write_client_key", "niks3_read_client_key"];
   const created = [];
+  const atticIds = new Set([fixture.attic.id, ...Object.values(fixture.legacy_attic).map(value => value.id)]);
   const mutationRequests = [];
   const observe = request => {
     if (/\/api\/v1\/caches(?:\/|$)/.test(request.url()) &&
@@ -97,6 +98,8 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
     await panel.getByRole("button", { name: "Close", exact: true }).click();
   };
   const probe = async (id, ok = true, status = 200, errorMessage = "Legacy credential queries require migration") => {
+    const attic = atticIds.has(id);
+    if (attic) await checkpoint("attic-probe-before", [id]);
     const url = `${apiBaseUrl}/api/v1/caches/${id}/test-credentials`;
     const responsePromise = page.waitForResponse(r => r.url() === url && r.request().method() === "POST");
     await outer.getByRole("button", { name: "Test connection", exact: true }).click();
@@ -107,11 +110,21 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
     if (status === 200) {
       const result = await response.json();
       assert.equal(result.ok, ok, "native stored-ID credential result");
+      if (attic) {
+        assert.equal(result.probe_kind, "attic_cache_config", "native Attic cache-specific probe");
+        assert.equal(result.stage, ok ? "complete" : "authentication", "safe native Attic probe stage");
+        assert.equal(result.cache_access_valid, ok, "private cache read access");
+        assert.equal(result.write_auth_valid, null, "cache-config GET cannot establish push permission");
+        if (ok) assert.equal(result.token_auth_valid, true, "private native success authenticated the token");
+        else assert.notEqual(result.token_auth_valid, true, "denied replacement cannot claim token authorization");
+        await expect(outer).toContainText("Write authorization: Untested");
+      }
       if (result.server_reachable != null) {
         assert.equal(result.write_auth_valid, null, "read/discovery cannot prove write authorization");
         await expect(outer.getByTestId("niks3-test-result")).toContainText("Write authorization: Untested");
       }
     } else await expect(outer.getByRole("alert")).toContainText(errorMessage);
+    if (attic) await checkpoint(status === 400 ? "attic-probe-no-network" : ok ? "attic-probe-after" : "attic-probe-authentication", [id]);
     return body;
   };
   const screenshots = async kind => {
@@ -160,6 +173,10 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
       const id = fixture[kind]?.id;
       assert(Number.isInteger(id) && id > 0, `native ${kind} fixture ID`);
       const before = await read(id);
+      if (kind === "attic") {
+        assert.equal(before.push_to, fixture.attic.server_url, "primary Attic stores the production server/base shape");
+        assert.equal(before.attic_cache_name, fixture.attic.cache_name);
+      }
       const count = mutationRequests.length;
       await open(before);
       if (kind === "attic" || kind === "s3") {
@@ -200,6 +217,20 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
         await expect(nested).toBeHidden();
         await expect(replace).toBeFocused();
         await expect(outer.getByLabel("Credential", { exact: true })).toHaveValue("__current__");
+        if (kind === "attic") {
+          // A correctly signed JWT for another cache is a genuine permission
+          // failure. Test the draft, then Cancel; never save a denied identity.
+          await replace.click();
+          const denied = page.getByRole("dialog", { name: "Add credential", exact: true });
+          await denied.getByLabel("Name", { exact: true }).fill("Denied native replacement");
+          await denied.getByLabel("Token", { exact: true }).fill(fixture.attic.denied_token);
+          await denied.getByRole("button", { name: "Save credential", exact: true }).click();
+          await probe(id, false);
+          await close();
+          unchanged(before, await read(id), "denied Attic replacement Cancel");
+          await open(before);
+          await expect(outer.getByLabel("Credential", { exact: true })).toHaveValue("__current__");
+        }
         await fillReplacement(kind);
         const replacement = await probe(id);
         assert(Boolean(replacement[kind === "attic" ? "attic_token" : "s3_secret_access_key"]), "confirmed replacement is included in probe");
@@ -248,6 +279,8 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
     // Metadata-only projections model stale clients; every Test POST is real.
     for (const [kind, value] of Object.entries(fixture.legacy_attic)) {
       const before = await read(value.id);
+      assert.equal(before.push_to, fixture.attic.server_url, "direct legacy Attic stores the server/base shape without query markers");
+      assert.equal(before.attic_cache_name, fixture.attic.cache_name);
       assert.equal(before.attic_token_configured, value.token_expected, "real legacy GET configured flag matches stored data");
       const count = mutationRequests.length;
       const collection = /\/api\/v1\/caches(?:\?.*)?$/;
@@ -362,10 +395,11 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
       const source = fixture[kind];
       const value = await api("POST", "/caches", {
         name: `task470-native-replacement-${kind}-${Date.now()}`, cache_type: kind === "attic" ? "Attic" : "S3", enabled: false, environment_ids: ids,
-        ...(kind === "attic" ? { push_to: source.read_url, attic_cache_name: source.cache_name, attic_public_key: source.public_key, attic_token: source.token }
+        ...(kind === "attic" ? { push_to: source.server_url, attic_cache_name: source.cache_name, attic_public_key: source.public_key, attic_token: source.token }
           : { push_to: `s3://${source.bucket}`, s3_region: source.region, s3_endpoint_url: source.endpoint, s3_access_key_id: source.access_key_id, s3_secret_access_key: source.secret_access_key }),
       });
       created.push(value.id);
+      if (kind === "attic") atticIds.add(value.id);
       await checkpoint("replacement-baseline", [value.id]);
       await open(value);
       await fillReplacement(kind);

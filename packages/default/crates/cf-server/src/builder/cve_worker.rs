@@ -31,9 +31,7 @@
 //! phase applies its own conservative query-layer batch limit.
 
 use crate::config::{CacheConfig, CacheType, CrystalForgeConfig};
-use crate::derivations::utils::{
-    apply_cache_config_env_to_command, attic_server_url_from_cache_config,
-};
+use crate::derivations::utils::apply_cache_config_env_to_command;
 use crate::log::{WorkerState, WorkerStatus, get_cve_status};
 use crate::models::cache_destination::CacheDestination;
 use crate::queries::cache_push::eligible_cache_destinations_for_derivation;
@@ -203,16 +201,13 @@ fn cache_destination_to_config(dest: &CacheDestination) -> Result<CacheConfig> {
 fn materialization_from_url(cache: &CacheConfig) -> Option<String> {
     match cache.cache_type {
         CacheType::Attic => {
-            let server_url = attic_server_url_from_cache_config(cache)?;
-            let cache_name = cache.attic_cache_name.as_deref()?.trim();
-            if cache_name.is_empty() {
-                return None;
-            }
-            Some(format!(
-                "{}/{}",
-                server_url.trim_end_matches('/'),
-                cache_name
-            ))
+            // Invalid historical inputs cannot become raw push-target reads.
+            cf_config::attic_urls::resolve_attic_urls(
+                cache.push_to.as_deref()?.trim(),
+                cache.attic_cache_name.as_deref()?.trim(),
+            )
+            .ok()
+            .map(|urls| urls.cache_url.to_string())
         }
         CacheType::Niks3 | CacheType::S3 | CacheType::Http | CacheType::Nix => {
             cache.push_to.clone()
@@ -1687,6 +1682,63 @@ async fn set_cve_status_idle() {
 mod tests {
     use super::*;
     use crate::models::cache_destination::nix_public_key_fixture;
+
+    #[test]
+    fn attic_materialization_uses_exact_canonical_cache_root() {
+        for (input, expected) in [
+            (
+                "http://cache.example:8080",
+                "http://cache.example:8080/team",
+            ),
+            ("https://cache.example/", "https://cache.example/team"),
+            ("https://cache.example/team/", "https://cache.example/team"),
+            ("attic://cache.example/team", "https://cache.example/team"),
+            (
+                "https://cache.example/team/nix-cache-info",
+                "https://cache.example/team",
+            ),
+            (
+                "https://cache.example/prefix/team/nix-cache-info?view=one",
+                "https://cache.example/prefix/team?view=one",
+            ),
+        ] {
+            let config = CacheConfig {
+                cache_type: CacheType::Attic,
+                push_to: Some(input.into()),
+                attic_cache_name: Some("configured-remote:team".into()),
+                ..Default::default()
+            };
+            assert_eq!(materialization_from_url(&config).as_deref(), Some(expected));
+            assert_eq!(config.push_to.as_deref(), Some(input));
+            let source =
+                materialization_source_from_config("selected-publication", config).unwrap();
+            assert_eq!(source.from_url, expected);
+            assert!(
+                source
+                    .nix_config_lines
+                    .contains(&format!("extra-substituters = {expected}"))
+            );
+        }
+    }
+
+    #[test]
+    fn attic_materialization_invalid_inputs_never_fall_back_to_push_target() {
+        for (input, name) in [
+            ("invalid", Some("team")),
+            ("https://cache.example/", None),
+            ("https://cache.example/", Some("")),
+            ("https://user:password@cache.example/team", Some("team")),
+        ] {
+            let config = CacheConfig {
+                cache_type: CacheType::Attic,
+                push_to: Some(input.into()),
+                attic_cache_name: name.map(str::to_owned),
+                ..Default::default()
+            };
+            assert!(materialization_from_url(&config).is_none());
+            assert!(materialization_source_from_config(input, config).is_none());
+        }
+    }
 
     fn completed_reference(source: &str, id: Option<i32>, name: &str) -> CompletedCacheReference {
         CompletedCacheReference {

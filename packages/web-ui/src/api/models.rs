@@ -6585,18 +6585,82 @@ pub struct UpdateCacheDestination {
     pub clear_niks3_read_ca_cert: bool,
 }
 
+/// Identifies an allowlisted cache probe without preserving unknown wire text.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheProbeKind {
+    /// Reads the canonical named Attic cache-config API.
+    AtticCacheConfig,
+    /// Represents an unsupported probe kind; its evidence cannot prove access.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Identifies the observed stage of a named-cache read probe.
+/// A completed read does not establish upload authorization.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheProbeStage {
+    /// Rejects the configured target before network access.
+    TargetPolicy,
+    /// Fails to resolve the configured server.
+    Dns,
+    /// Fails verified TLS setup or connectivity; no finer cause is asserted.
+    Transport,
+    /// Receives an upstream access denial; cache existence remains unresolved.
+    Authentication,
+    /// Receives a recognized named-cache-not-found response.
+    CacheNotFound,
+    /// Receives unexpected status or invalid cache-config metadata.
+    Response,
+    /// Validates successful named-cache configuration metadata.
+    Complete,
+    /// Represents unsupported stage text without exposing that text.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Classifies the safe policy errors accepted by the Attic probe parser.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheProbePolicyError {
+    /// Rejects local configuration or configured-target policy.
+    InvalidCacheTestConfig,
+    /// Rejects a legacy credential query before network access.
+    LegacyQueryCredentialsUnsupported,
+    /// Represents an unsupported error code; it must remain an API error.
+    #[serde(other)]
+    Unknown,
+}
+
 /// Reports non-mutating connectivity checks; absent authorization is untested.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CacheCredentialTestResult {
-    /// Legacy aggregate result; does not establish Niks3 write permission.
+    /// Legacy aggregate result; does not establish cache write permission.
     #[serde(alias = "success")]
     pub ok: bool,
     /// Optional HTTP response code from the probe.
     pub status_code: Option<u16>,
-    /// Human-readable probe outcome.
+    /// Untrusted legacy prose; Attic presentation must use stage constants.
     pub message: String,
-    /// Public endpoint used by the probe.
+    /// Legacy endpoint metadata; Attic presentation must not display this URL.
     pub tested_url: Option<String>,
+    /// Identifies the typed probe; omission preserves older server compatibility.
+    #[serde(default)]
+    pub probe_kind: Option<CacheProbeKind>,
+    /// Identifies the observed stage, never an inferred upstream error cause.
+    #[serde(default)]
+    pub stage: Option<CacheProbeStage>,
+    /// Reports validated named-cache read access; omission means untested.
+    #[serde(default)]
+    pub cache_access_valid: Option<bool>,
+    /// Confirms token acceptance for a private cache read only.
+    /// Public success and missing evidence do not establish token validity.
+    #[serde(default)]
+    pub token_auth_valid: Option<bool>,
+    /// Contains an allowlisted classification for a structured HTTP 400 result.
+    #[serde(default)]
+    pub error: Option<CacheProbePolicyError>,
     /// Whether the Niks3 API responded.
     pub server_reachable: Option<bool>,
     /// Whether the public cache configuration passed validation.
@@ -7011,6 +7075,41 @@ pub struct UpdatePolicyMappingRequest {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cache_probe_evidence_defaults_untested_for_legacy_results() {
+        let result: super::CacheCredentialTestResult =
+            serde_json::from_value(serde_json::json!({"success":true,"message":"legacy"})).unwrap();
+        assert!(result.ok);
+        assert!(result.probe_kind.is_none());
+        assert!(result.stage.is_none());
+        assert!(result.cache_access_valid.is_none());
+        assert!(result.token_auth_valid.is_none());
+        assert!(result.write_auth_valid.is_none());
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn cache_probe_wire_enums_discard_unknown_values_and_preserve_known_case() {
+        let result: super::CacheCredentialTestResult = serde_json::from_value(
+            serde_json::json!({"ok":true,"message":"untrusted","probe_kind":"unexpected-kind","stage":"unexpected-stage","error":"unexpected-code"})
+        ).unwrap();
+        assert_eq!(result.probe_kind, Some(super::CacheProbeKind::Unknown));
+        assert_eq!(result.stage, Some(super::CacheProbeStage::Unknown));
+        assert_eq!(result.error, Some(super::CacheProbePolicyError::Unknown));
+        assert_eq!(
+            serde_json::to_value(super::CacheProbeKind::AtticCacheConfig).unwrap(),
+            "attic_cache_config"
+        );
+        assert_eq!(
+            serde_json::to_value(super::CacheProbeStage::CacheNotFound).unwrap(),
+            "cache_not_found"
+        );
+        assert_eq!(
+            serde_json::to_value(super::CacheProbeStage::TargetPolicy).unwrap(),
+            "target_policy"
+        );
+    }
+
     #[test]
     fn cache_update_omits_retained_secrets_but_preserves_explicit_session_clear() {
         let retained = serde_json::to_value(super::UpdateCacheDestination::default())

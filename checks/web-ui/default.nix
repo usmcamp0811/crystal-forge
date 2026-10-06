@@ -46,6 +46,16 @@ let
   };
   cacheFixturePython = pkgs.python3.withPackages (p: [p.requests p.psycopg2 p.cryptography]);
   cacheFixtureDriver = ./native-cache-fixture.py;
+  # Publication belongs to fixture setup, never to Test. This tiny store output
+  # lets the real CLI prove the private cache already supports uploads.
+  atticPublicationOutput = pkgs.runCommand "web-ui-attic-publication-fixture" {} ''
+    mkdir -p "$out"
+    printf '%s\n' 'Disposable native Attic publication fixture.' > "$out/proof"
+  '';
+  atticObserverShare = {
+    source = "/tmp/cf-web-ui-attic-observer";
+    target = "/run/cf-attic-observer";
+  };
   # TLS terminates on the backend's own VM. Preserve the configured host and
   # port: Garage verifies both as part of the native SigV4 signature.
   fixtureTls = upstream: {
@@ -70,19 +80,28 @@ let
     })];
     security.pki.certificateFiles = ["${cacheCredentials}/ca.crt"];
     environment.etc."cache-fixture-credentials".source = cacheCredentials;
+    environment.etc."cache-fixture-publication-path".text = "${atticPublicationOutput}";
+    # Native cache-config must advertise the TLS API that the CLI can use.
+    # Without this, an HTTP upstream advertises HTTP on the TLS-only port.
+    environment.etc."atticd.toml".text = lib.mkBefore ''
+      api-endpoint = "https://atticCache:9443/"
+      substituter-endpoint = "https://atticCache:9443/"
+    '';
+    virtualisation.sharedDirectories.atticObserver = atticObserverShare;
+    systemd.services.nginx.serviceConfig.ReadWritePaths = ["/run/cf-attic-observer"];
     environment.systemPackages = [cacheFixturePython pkgs.attic-server];
     services.nginx = lib.recursiveUpdate (fixtureTls "http://127.0.0.1:8080") {
       commonHttpConfig = ''
         map $http_authorization $cf_attic_auth_present { "" absent; default present; }
-        map $arg_fixture_case $cf_attic_legacy_case {
-          default other;
-          legacy_plain plain;
-          legacy_encrypted encrypted;
-          legacy_missing missing;
-        }
-        log_format cf_attic_probe '$uri status=$status auth=$cf_attic_auth_present case=$cf_attic_legacy_case';
+        # Only method, path, status and header presence enter this shared log.
+        # Private checkpoint boundaries correlate requests with row identity.
+        log_format cf_attic_probe '$request_method $uri status=$status auth=$cf_attic_auth_present';
       '';
-      virtualHosts.native-cache-fixture.extraConfig = "access_log /var/log/nginx/attic-cache-probe.log cf_attic_probe;";
+      virtualHosts.native-cache-fixture = {
+        # A healthy private cache must not make a generic server-root probe pass.
+        locations."= /".return = "404";
+        extraConfig = "access_log /run/cf-attic-observer/requests.log cf_attic_probe;";
+      };
     };
     # The legacy debug service mints a broad token; it is not required for
     # the private authenticated fixture or browser verification.
@@ -311,6 +330,7 @@ in pkgs.testers.runNixOSTest {
     # Main Crystal Forge server with all services enabled
     machine = {
       imports = [ inputs.self.nixosModules.crystal-forge ];
+      virtualisation.sharedDirectories.atticObserver = lib.mkIf runNativeCacheFixtures atticObserverShare;
 
       virtualisation.memorySize = 20480; # 20GB for everything
       virtualisation.cores = 4;
@@ -500,6 +520,14 @@ in pkgs.testers.runNixOSTest {
     # Only start the VMs that this run will actually exercise.
     run_mega_phases = os.environ.get("CF_WEB_UI_RUN_MEGA_PHASES", "0") == "1"
     run_native_cache_fixtures = ${if runNativeCacheFixtures then "True" else "False"}
+
+    if run_mega_phases or run_native_cache_fixtures:
+        os.makedirs("/tmp/cf-web-ui-attic-observer", exist_ok=True)
+        # nginx runs as its VM-local service user. Share only this nonsecret
+        # method/path/status/presence log, not any credential-bearing file.
+        with open("/tmp/cf-web-ui-attic-observer/requests.log", "w"):
+            pass
+        os.chmod("/tmp/cf-web-ui-attic-observer/requests.log", 0o666)
 
     machine.start()
     gitserver.start()
@@ -908,8 +936,8 @@ in pkgs.testers.runNixOSTest {
         with tempfile.TemporaryDirectory(prefix="cf-cache-observer-") as observer_dir:
             cache.copy_from_vm("/var/log/nginx/cache-probe.log", observer_dir)
             machine.copy_from_host(str(pathlib.Path(observer_dir) / "cache-probe.log"), "/run/cf-cache-observer.log")
-            atticCache.copy_from_vm("/var/log/nginx/attic-cache-probe.log", observer_dir)
-            machine.copy_from_host(str(pathlib.Path(observer_dir) / "attic-cache-probe.log"), "/run/cf-attic-observer.log")
+            atticCache.copy_from_vm("/run/cf-attic-observer/requests.log", observer_dir)
+            machine.copy_from_host(str(pathlib.Path(observer_dir) / "requests.log"), "/run/cf-attic-observer.log")
         machine.succeed("${cacheFixturePython}/bin/python ${cacheFixtureDriver} observe")
         print(machine.succeed("cat /tmp/screenshots/native-http-observer-proof.json"))
         machine.copy_from_vm("/tmp/screenshots/native-http-observer-proof.json", "screenshots")
@@ -1273,6 +1301,7 @@ in pkgs.testers.runNixOSTest {
       atticCache = atticFixtureNode;
       cache = niks3FixtureNode;
       machine = {
+        virtualisation.sharedDirectories.atticObserver = atticObserverShare;
         networking.firewall.enable = false;
         security.pki.certificateFiles = ["${cacheCredentials}/ca.crt"];
         environment.etc."cache-fixture-credentials".source = cacheCredentials;
@@ -1283,6 +1312,10 @@ in pkgs.testers.runNixOSTest {
       import os
       import pathlib
       import tempfile
+      os.makedirs("/tmp/cf-web-ui-attic-observer", exist_ok=True)
+      with open("/tmp/cf-web-ui-attic-observer/requests.log", "w"):
+          pass
+      os.chmod("/tmp/cf-web-ui-attic-observer/requests.log", 0o666)
       start_all()
       atticCache.wait_for_unit("attic-setup.service")
       atticCache.wait_for_unit("nginx.service")
@@ -1308,6 +1341,7 @@ in pkgs.testers.runNixOSTest {
           cache.copy_from_vm("/var/log/nginx/cache-probe.log", observer_dir)
           machine.copy_from_host(str(pathlib.Path(observer_dir) / "cache-probe.log"), "/run/cf-cache-observer.log")
       machine.succeed("${cacheFixturePython}/bin/python ${cacheFixtureDriver} observe-native")
+      machine.copy_from_vm("/run/cf-attic-public-proof.json", "native-attic-setup-proof.json")
     '';
   };
 }
