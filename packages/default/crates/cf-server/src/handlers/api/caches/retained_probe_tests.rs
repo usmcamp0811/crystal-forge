@@ -504,6 +504,250 @@ fn successful_probe() -> CacheCredentialTestResult {
     }
 }
 
+fn historical_attic_envelope(token: &str) -> String {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use rand::RngCore;
+    use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
+    use sha2::{Digest, Sha256};
+
+    // COMPATIBILITY: Construct the historical wire format independently of
+    // encrypt_secret and the new create path. Use only the runtime fixture key;
+    // never print the key, plaintext, or envelope, even on assertion failure.
+    let raw_key = std::env::var("CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY").unwrap();
+    let key_bytes = Sha256::digest(raw_key.as_bytes());
+    let key = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &key_bytes).unwrap());
+    let mut nonce = [0u8; 12];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let mut ciphertext = token.as_bytes().to_vec();
+    key.seal_in_place_append_tag(
+        Nonce::assume_unique_for_key(nonce),
+        Aad::empty(),
+        &mut ciphertext,
+    )
+    .unwrap();
+    assert_eq!(ciphertext.len(), token.len() + 16);
+    format!(
+        "enc:v1:{}.{}",
+        STANDARD.encode(nonce),
+        STANDARD.encode(ciphertext)
+    )
+}
+
+async fn insert_legacy_attic(pool: &PgPool, name: &str, token: Option<&str>) -> i32 {
+    // Insert only historical columns. New create validation/encryption and
+    // response-only configured flags cannot manufacture this fixture's state.
+    let id = sqlx::query_scalar("INSERT INTO cache_destinations (name, cache_type, push_to, attic_token, attic_cache_name, attic_public_key) VALUES ($1, 'Attic', 'https://legacy.example.invalid/cache', $2, 'legacy-cache', $3) RETURNING id")
+        .bind(name).bind(token).bind(nix_public_key_fixture("legacy"))
+        .fetch_one(pool).await.unwrap();
+    let scope: uuid::Uuid =
+        sqlx::query_scalar("INSERT INTO environments (name) VALUES ($1) RETURNING id")
+            .bind(name)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    sqlx::query("INSERT INTO cache_destination_environments (cache_destination_id, environment_id) VALUES ($1, $2)")
+        .bind(id).bind(scope).execute(pool).await.unwrap();
+    id
+}
+
+async fn assert_legacy_attic_metadata(pool: &PgPool, admin: &HeaderMap, id: i32, configured: bool) {
+    let response = get_cache_destination(State(pool.clone()), admin.clone(), Path(id))
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    let single = json_response(response).await;
+    let response = list_cache_destinations(
+        State(pool.clone()),
+        admin.clone(),
+        Query(ListCacheDestinationsQuery {
+            enabled_only: false,
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    let list = json_response(response).await;
+    let listed = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == id)
+        .unwrap();
+    assert!(single == *listed, "single/list metadata differ");
+    assert_eq!(single["attic_token_configured"], configured);
+    assert!(
+        single
+            .get("attic_token")
+            .is_none_or(serde_json::Value::is_null)
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires verified task PostgreSQL and ephemeral database creation"]
+async fn legacy_attic_plaintext_and_historical_ciphertext_retain_on_test_and_save(pool: PgPool) {
+    let admin = super::tests::admin_headers(&pool).await;
+    for encrypted in [false, true] {
+        // JWT-shaped synthetic values exercise retention, not provider auth.
+        // Native Bearer acceptance is proved by the owner's VM runtime JWTs.
+        let token = format!("e30.e30.synthetic-{}", uuid::Uuid::new_v4());
+        let stored = if encrypted {
+            historical_attic_envelope(&token)
+        } else {
+            token.clone()
+        };
+        let id =
+            insert_legacy_attic(&pool, &format!("legacy-attic-{encrypted}"), Some(&stored)).await;
+        let before = snapshot(&pool, id).await;
+        assert_legacy_attic_metadata(&pool, &admin, id, true).await;
+        assert!(
+            snapshot(&pool, id).await == before,
+            "GET/list mutated raw state"
+        );
+        let response = test_stored_with_probe(&pool, &admin, id, request("{}"), |effective| {
+            assert_eq!(effective.cache_type, "Attic");
+            assert!(
+                effective.attic_token.as_deref() == Some(token.as_str()),
+                "retained token differs"
+            );
+            assert_eq!(
+                effective.push_to.as_deref(),
+                Some("https://legacy.example.invalid/cache")
+            );
+            std::future::ready(Ok(successful_probe()))
+        })
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let result = json_response(response).await;
+        assert_eq!(result["ok"], true);
+        assert!(!result.to_string().contains(&token));
+        assert!(!result.to_string().contains(&stored));
+        assert!(
+            snapshot(&pool, id).await == before,
+            "Test mutated raw state"
+        );
+        // Cancel has no server route: discard an in-memory draft without PUT.
+        let draft = UpdateCacheDestination {
+            name: Some("discarded draft".into()),
+            ..Default::default()
+        };
+        drop(draft);
+        assert!(
+            snapshot(&pool, id).await == before,
+            "Cancel mutated raw state"
+        );
+
+        let response = update_cache_destination(
+            State(pool.clone()),
+            admin.clone(),
+            Path(id),
+            Json(UpdateCacheDestination {
+                cache_type: Some("Attic".into()),
+                attic_token: Some(String::new()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error = json_response(response).await;
+        assert_eq!(error["error"], "validation_error");
+        assert_eq!(error["message"], "Invalid effective cache configuration");
+        assert!(error["details"].is_null());
+        assert!(!error.to_string().contains(&token));
+        assert!(!error.to_string().contains(&stored));
+        assert!(
+            snapshot(&pool, id).await == before,
+            "blank Save mutated raw state"
+        );
+
+        let scope = before["scope"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| serde_json::from_value(row["environment_id"].clone()).unwrap())
+            .collect();
+        let name = format!("legacy-attic-{encrypted}-renamed");
+        let response = update_cache_destination(
+            State(pool.clone()),
+            admin.clone(),
+            Path(id),
+            Json(UpdateCacheDestination {
+                name: Some(name.clone()),
+                cache_type: Some("Attic".into()),
+                environment_ids: Some(scope),
+                ..Default::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let saved = json_response(response).await;
+        assert_eq!(saved["attic_token_configured"], true);
+        assert!(
+            saved
+                .get("attic_token")
+                .is_none_or(serde_json::Value::is_null)
+        );
+        let after = snapshot(&pool, id).await;
+        assert_eq!(after["destination"]["name"], name);
+        let mut normalized = after.clone();
+        for field in ["name", "updated_at"] {
+            normalized["destination"][field] = before["destination"][field].clone();
+        }
+        // Successful assignment replacement may renew only created_at. Compare
+        // all other members, including exact destination/environment identity.
+        let old_scope = before["scope"].as_array().unwrap();
+        let new_scope = normalized["scope"].as_array_mut().unwrap();
+        assert_eq!(new_scope.len(), old_scope.len());
+        for (new, old) in new_scope.iter_mut().zip(old_scope) {
+            new["created_at"] = old["created_at"].clone();
+        }
+        assert!(
+            normalized == before,
+            "unrelated Save changed protected raw state"
+        );
+        let response = test_stored_with_probe(&pool, &admin, id, request("{}"), |effective| {
+            assert!(effective.attic_token.as_deref() == Some(token.as_str()));
+            std::future::ready(Ok(successful_probe()))
+        })
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            snapshot(&pool, id).await == after,
+            "post-Save Test mutated raw state"
+        );
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires verified task PostgreSQL and ephemeral database creation"]
+async fn legacy_attic_null_and_empty_token_refuse_before_probe_without_mutation(pool: PgPool) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let admin = super::tests::admin_headers(&pool).await;
+    for (name, token) in [("legacy-null", None), ("legacy-empty", Some(""))] {
+        let id = insert_legacy_attic(&pool, name, token).await;
+        let before = snapshot(&pool, id).await;
+        assert_legacy_attic_metadata(&pool, &admin, id, false).await;
+        let called = AtomicBool::new(false);
+        let response = test_stored_with_probe(&pool, &admin, id, request("{}"), |_| {
+            called.store(true, Ordering::SeqCst);
+            std::future::ready(Ok(successful_probe()))
+        })
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!called.load(Ordering::SeqCst));
+        let error = json_response(response).await;
+        assert_eq!(error["error"], "invalid_cache_test_config");
+        assert_eq!(error["message"], "Invalid effective cache configuration");
+        assert!(error["details"].is_null());
+        assert!(error.get("attic_token").is_none());
+        assert!(
+            snapshot(&pool, id).await == before,
+            "missing-token route mutated raw state"
+        );
+    }
+}
+
 async fn scoped_fixture(pool: &PgPool, ty: &str, name: &str, raw: &str) -> CacheDestination {
     let scope: uuid::Uuid =
         sqlx::query_scalar("INSERT INTO environments (name) VALUES ($1) RETURNING id")

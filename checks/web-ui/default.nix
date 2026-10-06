@@ -44,7 +44,7 @@ let
     extraDnsNames = ["atticCache" "s3Cache" "cache-alt"];
     strictTls = true;
   };
-  cacheFixturePython = pkgs.python3.withPackages (p: [p.requests]);
+  cacheFixturePython = pkgs.python3.withPackages (p: [p.requests p.psycopg2 p.cryptography]);
   cacheFixtureDriver = ./native-cache-fixture.py;
   # TLS terminates on the backend's own VM. Preserve the configured host and
   # port: Garage verifies both as part of the native SigV4 signature.
@@ -71,7 +71,19 @@ let
     security.pki.certificateFiles = ["${cacheCredentials}/ca.crt"];
     environment.etc."cache-fixture-credentials".source = cacheCredentials;
     environment.systemPackages = [cacheFixturePython pkgs.attic-server];
-    services.nginx = fixtureTls "http://127.0.0.1:8080";
+    services.nginx = lib.recursiveUpdate (fixtureTls "http://127.0.0.1:8080") {
+      commonHttpConfig = ''
+        map $http_authorization $cf_attic_auth_present { "" absent; default present; }
+        map $arg_fixture_case $cf_attic_legacy_case {
+          default other;
+          legacy_plain plain;
+          legacy_encrypted encrypted;
+          legacy_missing missing;
+        }
+        log_format cf_attic_probe '$uri status=$status auth=$cf_attic_auth_present case=$cf_attic_legacy_case';
+      '';
+      virtualHosts.native-cache-fixture.extraConfig = "access_log /var/log/nginx/attic-cache-probe.log cf_attic_probe;";
+    };
     # The legacy debug service mints a broad token; it is not required for
     # the private authenticated fixture or browser verification.
     systemd.services.attic-debug.enable = lib.mkForce false;
@@ -762,9 +774,10 @@ in pkgs.testers.runNixOSTest {
             machine.copy_from_host(str(pathlib.Path(private_dir) / "cf-http-fixture.json"), "/run/cf-http-fixture.json")
         machine.succeed("chmod 0600 /run/cf-attic-fixture.json")
         machine.succeed("${cacheFixturePython}/bin/python ${cacheFixtureDriver} assemble")
-        # Registration remains owned by the existing browser workflow. Seed
-        # only after its real bootstrap-admin login becomes available; the
-        # consumer waits for seed_complete in the atomic runtime JSON file.
+        # Provider warmup is independent of row creation. The seed worker waits
+        # for step25's retained-workflow marker, not merely login readiness, so
+        # earlier cache workflows retain their original data. The consumer then
+        # waits for seed_complete in the atomic runtime JSON file.
         machine.succeed("nohup ${cacheFixturePython}/bin/python ${cacheFixtureDriver} seed > /run/cf-cache-seed.log 2>&1 </dev/null &")
         machine.succeed("nohup ${cacheFixturePython}/bin/python ${cacheFixtureDriver} checkpoints > /run/cf-cache-checkpoints.log 2>&1 </dev/null &")
 
@@ -883,6 +896,11 @@ in pkgs.testers.runNixOSTest {
 
     exit_code = machine.succeed("cat /tmp/web-ui-tests/integration.exit").strip()
 
+    if run_native_cache_fixtures:
+        # This task-owned log contains only fixed stage/count messages. Retain
+        # seed timing evidence even if an unrelated earlier browser step fails.
+        print(machine.succeed("cat /run/cf-cache-seed.log"))
+
     if run_native_cache_fixtures and exit_code == "0":
         # An independent real-API probe compares private PostgreSQL snapshots,
         # including ciphertext and timestamps, without exporting row contents.
@@ -890,6 +908,8 @@ in pkgs.testers.runNixOSTest {
         with tempfile.TemporaryDirectory(prefix="cf-cache-observer-") as observer_dir:
             cache.copy_from_vm("/var/log/nginx/cache-probe.log", observer_dir)
             machine.copy_from_host(str(pathlib.Path(observer_dir) / "cache-probe.log"), "/run/cf-cache-observer.log")
+            atticCache.copy_from_vm("/var/log/nginx/attic-cache-probe.log", observer_dir)
+            machine.copy_from_host(str(pathlib.Path(observer_dir) / "attic-cache-probe.log"), "/run/cf-attic-observer.log")
         machine.succeed("${cacheFixturePython}/bin/python ${cacheFixtureDriver} observe")
         print(machine.succeed("cat /tmp/screenshots/native-http-observer-proof.json"))
         machine.copy_from_vm("/tmp/screenshots/native-http-observer-proof.json", "screenshots")

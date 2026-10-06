@@ -87,8 +87,11 @@ drafts; they do not create a reusable server-side credential inventory. Unsuppor
 authentication modes are not advertised as working capabilities.
 
 Discovery populates URLs and signing keys for review before saving. Editing
-loads existing environment assignments before enabling Save. If assignments
-cannot be loaded, close and reopen the form. Discovery, testing, and saving
+fetches the destination by ID before mounting the form, then loads its existing
+environment assignments. Save waits for both destination and scope readiness.
+If the destination fetch fails, use **Retry loading destination**; there is no
+list-data fallback. If assignments cannot be loaded, close and reopen the form.
+Discovery, testing, and saving
 freeze the submitted draft while the request runs. A failed save retains the
 draft. Save sends configuration and scope together.
 
@@ -411,6 +414,23 @@ the stored secret. Attic and S3 replacements are local credential-dialog drafts;
 Niks3 retains independent read and write credential choices. Test uses the draft,
 but only Save persists it. Cancel discards the draft.
 
+Existing Edit fetches fresh `GET /api/v1/caches/:id` metadata before mounting the
+form. Loading exposes no editing or testing actions. Failure exposes **Retry
+loading destination** and Cancel; Edit never falls back to the collection row.
+Test and Save also wait for environment-scope readiness and any active operation
+to finish. Fresh metadata is still a snapshot, not a lock on the destination.
+
+For Existing Edit Test, configured flags control presentation only. A true flag
+for the active type or Niks3 plane offers **Current configured credential**; the
+local `__current__` selection marker is not a secret or an API credential.
+False or absent metadata shows an unconfirmed stored-credential state but does
+not block a stored-ID Test. The server resolves retained credentials by ID.
+Save keeps its separate credential and destination validation; permitting Test
+does not permit Save or establish that stored credentials are usable. Explicit
+replacement drafts must be complete. The client rejects a selected blank token,
+an incomplete S3 identity, or a partial mTLS certificate/key pair rather than
+silently treating the replacement as retained material.
+
 Admin `POST /api/v1/caches/:id/test-credentials` accepts the same unwrapped update
 JSON as Save. An empty object tests the stored configuration. The server loads
 and decrypts the destination by ID, then uses Save's shared merge and validation
@@ -422,7 +442,8 @@ snapshot can become stale; a successful Test does not guarantee a later Save.
 
 Destination responses omit Attic tokens, S3 access IDs, secret access keys, and
 session tokens, as well as Niks3 tokens and private keys. These response-only
-flags describe configured material, not verified connectivity or authorization:
+flags describe configured material, not verified connectivity or authorization.
+They do not grant permission to probe or replace server validation:
 
 | Flag | Meaning |
 | --- | --- |
@@ -438,6 +459,32 @@ use ambient profiles or credentials. Success proves only the checked bucket-list
 read access, not object reads, uploads, or write authorization. Attic bearer
 authentication is sent only for Attic tests. All probes retain the target, TLS,
 DNS-pinning, proxy, and redirect protections described above.
+
+### Legacy Attic verification scope
+
+The selected PostgreSQL regressions insert legacy Attic columns directly,
+bypassing the current create API. Plaintext and independently constructed
+historical `enc:v1` rows must retain their exact raw credentials and URLs through
+stored-ID Test and an unrelated same-type Save. Test/Cancel preserves complete
+row and assignment snapshots; Save permits only the requested name and specified
+metadata timestamp changes with unchanged assignment membership. Explicit blank
+same-type Save fails without mutation. SQL NULL and empty tokens fail before
+the probe callback. Synthetic Rust tokens verify retention, not native Attic
+authentication.
+
+The separate native browser fixture inserts plaintext, independently encrypted
+historical `enc:v1`, and SQL NULL rows without the create API. Both valid rows
+must authenticate against real private Attic metadata. The NULL row must return
+a safe HTTP 400 with zero provider requests. Stale collection flags must trigger
+fresh ID loading; false or absent ID flags must permit stored-ID Test without
+including `attic_token`. Private database checkpoints require exact Test/Cancel
+non-mutation and credential retention across unrelated Save. See the
+[native legacy-row workflow](../../../checks/web-ui/README.md#existing-legacy-attic-rows)
+for fixture isolation and evidence limits. These fixture contracts do not
+establish a cause or recovery for any deployed destination. Use safe destination
+GET metadata and credential-free diagnostics to investigate an actual failure;
+do not log stored tokens or ciphertext. This description does not establish a
+browser or backend test pass for the current revision.
 
 ### Legacy URL credentials and migration
 

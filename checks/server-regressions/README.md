@@ -64,12 +64,14 @@ environment-specific ignored tests that do not belong in this gate.
 
 ## TASK-470 selected library tests
 
-The following 35 ignored PostgreSQL tests run with
+The following 37 ignored PostgreSQL tests run with
 `--ignored --exact --test-threads=1`. Each invocation must report exactly one
 passed test and zero ignored tests. The tests include completed CVE publication
 provenance and malformed signing-key rejection across all Niks3 auth modes.
 
 ```text
+handlers::api::caches::retained_probe_tests::legacy_attic_plaintext_and_historical_ciphertext_retain_on_test_and_save
+handlers::api::caches::retained_probe_tests::legacy_attic_null_and_empty_token_refuse_before_probe_without_mutation
 handlers::api::caches::retained_probe_tests::stored_probe_preserves_ciphertext_scope_and_timestamps
 handlers::api::caches::retained_probe_tests::stored_probe_admin_json_missing_id_conversion_and_ssrf
 handlers::api::caches::retained_probe_tests::add_probe_validates_without_writes_and_niks3_requires_token
@@ -106,6 +108,19 @@ builder::cve_worker::tests::materialization_completed_provenance_identity_and_el
 handlers::api::caches::tests::niks3_api_create_rejects_malformed_keys_in_all_auth_modes
 handlers::api::caches::tests::niks3_api_update_rejects_malformed_keys_in_all_auth_modes
 ```
+
+The two legacy Attic tests insert historical columns directly, bypassing the new
+create path. Plaintext and independently constructed historical `enc:v1` rows
+must produce matching single/list configured flags with no returned token.
+The envelope uses AES-256-GCM, a SHA-256-derived runtime fixture key, a 12-byte
+nonce, empty additional authenticated data, and standard Base64 nonce and
+ciphertext with a 16-byte appended tag. Stored-ID Test and Cancel without a PUT
+preserve exact raw rows and assignments. Explicit blank same-type Save fails
+without mutation; omitted-token unrelated Save preserves raw credentials and
+URLs, allowing only the requested name, `updated_at`, and assignment `created_at`
+changes with exact membership. NULL and empty tokens fail before the probe
+callback. Synthetic JWT-shaped Rust values prove retained snapshots; actual
+native Bearer authentication remains the separate owner-managed VM proof.
 
 These 8 non-ignored tests run with `--exact --test-threads=1`:
 

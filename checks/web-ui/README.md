@@ -128,8 +128,14 @@ outputs. Runtime JWTs are transferred through a private temporary driver
 directory that is removed before the browser starts. Consumers MUST NOT
 log the JSON or use credential values in assertion messages or screenshots.
 
-The seed process waits for the existing browser-owned bootstrap registration.
-It creates disabled environment-scoped destinations through the real API.
+Provider authentication warmup may occur before the browser starts. The seed
+process does not create cache rows when registration or login completes.
+At entry to the retained workflow in `25-caches-modal-attic`, after that step's
+original shared Add and Niks3 security workflows, Playwright writes a mode-0600
+nonsecret seed-request marker. Only then does the worker authenticate the
+existing browser-owned admin and create seven disabled environment-scoped
+destinations through the real API. Earlier workflows such as `21-caches` see
+their original cache data; no cleanup or assertion exception hides native rows.
 It atomically publishes their IDs with `seed_complete: true`. The browser
 consumer must wait for that flag before it reads IDs. Registration remains
 covered by the existing registration workflows.
@@ -139,6 +145,7 @@ Version 1 JSON contract (all values below are field descriptions):
 ```text
 version: 1
 seed_complete: true
+seed_request_path
 checkpoint:
   request_path, ack_path
 attic:
@@ -157,6 +164,9 @@ http_basic:
   id, url, authority_change_url
 legacy_query:
   id, sanitized_url, query_parameter, query_value_local_only
+legacy_attic:
+  legacy_plain, legacy_encrypted, legacy_missing:
+    id, name, storage, token_expected
 ```
 
 Native endpoints are `https://atticCache:9443` (private cache
@@ -208,6 +218,37 @@ the saved credentials and leaves storage unchanged. GET responses must
 redact credentials. Only nonsecret result labels are retained in
 `screenshots/native-cache-proof.json`; proof records are deleted through
 the real API.
+
+### Existing legacy Attic rows
+
+Three separate disabled scoped rows are inserted directly through parameterized
+SQL after the retained-workflow seed request. The current create API is not used
+to manufacture these compatibility cases. Canonical Attic cache metadata comes
+from the native private cache. Tokens are respectively legacy plaintext, an
+independently constructed historical `enc:v1` envelope, and SQL NULL.
+
+Historical encryption uses Python cryptography AES-256-GCM, SHA-256 of the
+runtime server encryption key, a random 12-byte nonce, empty AAD, and standard
+base64 `nonce.ciphertext-plus-tag`. The key is read privately from the fixture
+server process. A distinct legacy pull JWT remains in a mode-0600 server-only
+file and is never included in the browser fixture JSON or GET responses.
+
+The browser projects only safe collection GET flags to false/absent to model
+stale list snapshots. Edit must refresh the real ID metadata and show the
+current configured credential. Defensive cases project one ID metadata GET
+flag to false/absent: the UI must show unconfirmed state, permit the real stored-ID
+Test, and omit `attic_token`. Neither case intercepts or fulfills a Test POST.
+The SQL NULL case must return a safe real HTTP 400 without contacting Attic.
+
+All three raw rows and assignments must match their pre-Save checkpoint exactly
+after Test/Cancel. Unrelated name Save for the two valid legacy rows must retain
+the exact plaintext or historical ciphertext, raw URI and scope; only the
+approved metadata timestamp changes are allowed. A new complete raw baseline
+then proves retained Test non-mutation. Native Attic observer logs record only
+path/status/Authorization presence and a fixed case label. Both valid legacy
+rows require authenticated HTTP 200; the missing-token case requires zero
+provider requests. These proofs supplement the existing seven current-API rows
+and replacement-clone guards without replacing them.
 
 ### Legacy URL decision: retained Basic and query refusal
 

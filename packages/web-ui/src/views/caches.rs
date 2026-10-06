@@ -403,6 +403,29 @@ impl CacheTypeDrafts {
             .unwrap_or_default()
     }
 
+    // INVARIANT: Confirming a local draft preserves its explicit selection,
+    // including incomplete drafts. Validation rejects missing material; only
+    // the operator's Current selection requests retention of stored credentials.
+    fn confirm_credential(&mut self, kind: &str, credential: &LocalCredential) {
+        let (profile, access, secret, token) = credential_fields_for_request(Some(credential));
+        for (field, value) in [
+            ("profile", profile),
+            ("access", access),
+            ("secret", secret),
+            ("token", token),
+            ("session", credential.session_token.clone()),
+        ] {
+            // Key drafts without a profile override preserve the independent
+            // builder-profile draft. Profile-only drafts never supply keys.
+            if field != "profile" || value.is_some() {
+                self.0
+                    .insert(format!("{kind}.{field}"), value.unwrap_or_default());
+            }
+        }
+        self.0
+            .insert(format!("{kind}.credential"), credential.id.clone());
+    }
+
     fn request(&self, kind: &str, common: &Niks3FormState) -> CreateCacheDestination {
         let value = |field| {
             let text = self.get(kind, field);
@@ -615,6 +638,153 @@ fn cache_update_patch(
     update
 }
 
+// SECURITY: Configured flags describe redacted metadata, not permission to
+// probe a stored identity. The server alone merges and validates retained
+// credentials by ID. Only explicit replacement material is validated here.
+fn validate_cache_test(
+    kind: &str,
+    form: &Niks3FormState,
+    drafts: &CacheTypeDrafts,
+    existing: bool,
+) -> Result<(), String> {
+    if kind == "niks3" {
+        form.validate_destination()?;
+        validate_niks3_test_replacement(form, existing)
+    } else {
+        drafts.validate(kind, form, false, None)?;
+        validate_test_replacement(kind, form, drafts, existing)
+    }
+}
+
+fn validate_niks3_test_replacement(form: &Niks3FormState, existing: bool) -> Result<(), String> {
+    if !existing {
+        return form.validate_credentials(None);
+    }
+    if !matches!(form.write_mode.as_str(), "token" | "mtls")
+        || !matches!(form.read_mode.as_str(), "none" | "mtls")
+    {
+        return Err("Select supported read and write authentication modes.".into());
+    }
+    for (plane, mode, cert, key, ca) in [
+        (
+            "Write",
+            form.write_mode.as_str(),
+            &form.write_cert,
+            &form.write_key,
+            &form.write_ca,
+        ),
+        (
+            "Read",
+            form.read_mode.as_str(),
+            &form.read_cert,
+            &form.read_key,
+            &form.read_ca,
+        ),
+    ] {
+        if mode == "mtls" {
+            let cert_set = !cert.trim().is_empty();
+            let key_set = !key.trim().is_empty();
+            if cert_set != key_set {
+                return Err(format!(
+                    "{plane} mTLS requires a client certificate and private key together."
+                ));
+            }
+            if cert_set
+                && (!cert.contains("-----BEGIN CERTIFICATE-----")
+                    || !key.contains("PRIVATE KEY-----"))
+            {
+                return Err(format!(
+                    "{plane} mTLS identity must use PEM certificates and private keys."
+                ));
+            }
+            if !ca.trim().is_empty() && !ca.contains("-----BEGIN CERTIFICATE-----") {
+                return Err(format!("{plane} CA certificate must use PEM."));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_test_replacement(
+    kind: &str,
+    form: &Niks3FormState,
+    drafts: &CacheTypeDrafts,
+    existing: bool,
+) -> Result<(), String> {
+    let selected = drafts.get(kind, "credential");
+    let explicit = (!selected.is_empty() && selected != "__current__")
+        || ["token", "access", "secret", "session"]
+            .iter()
+            .any(|field| !drafts.get(kind, field).trim().is_empty());
+    if !existing || explicit {
+        drafts.validate(kind, form, true, None)
+    } else {
+        Ok(())
+    }
+}
+
+// INVARIANT: Disabled controls are presentation, not the mutation boundary.
+// Both handlers recheck initialization, scope and busy state before requests.
+fn cache_action_ready(
+    destination_ready: bool,
+    scope_ready: bool,
+    busy: bool,
+) -> Result<(), String> {
+    if !destination_ready {
+        Err("Destination is not loaded. Retry loading before continuing.".into())
+    } else if busy {
+        Err("Wait for the current operation to finish.".into())
+    } else if !scope_ready {
+        Err("Environment scope is not loaded. Wait for loading; if loading failed, close and reopen.".into())
+    } else {
+        Ok(())
+    }
+}
+
+/// Loads an existing destination by ID before mounting its editable snapshot.
+/// Loading and errors expose no draft actions. Retry fetches a new snapshot;
+/// successful loading mounts the form once, so signals never retain list data.
+/// The caller keys this component by ID to isolate different Edit sessions.
+#[component]
+fn CacheDestinationEditor(
+    id: i32,
+    on_close: EventHandler<()>,
+    on_saved: EventHandler<CacheDestination>,
+) -> Element {
+    let mut fresh = use_resource(move || async move { client::fetch_cache_destination(id).await });
+    rsx! {
+        DialogFocusRestore {}
+        match fresh.read().as_ref() {
+            Some(Ok(destination)) if destination.id == id => rsx! {
+                CacheDestinationForm {
+                    destination: Some(destination.clone()), destination_ready: true, restore_focus: false,
+                    add_draft: Niks3FormState::from_destination(None), add_environment_ids: Vec::new(),
+                    on_close, on_saved,
+                }
+            },
+            value => rsx! {
+                div { class: "modal-backdrop", style: "padding:8px;", onclick: move |_| on_close.call(()),
+                    style { "{CACHE_FORM_CSS}" }
+                    div { id: "cache-edit-loading-dialog", class: "pe-shell cache-form-shell", role: "dialog", aria_modal: "true", aria_label: "Cache destination", tabindex: "-1", onclick: move |e| e.stop_propagation(), onkeydown: move |e| { e.stop_propagation(); if e.key() == Key::Escape { e.prevent_default(); on_close.call(()); } },
+                        DialogInitialFocus { dialog_id: "cache-edit-loading-dialog".to_string() }
+                        DialogFocusSentinel { dialog_id: "cache-edit-loading-dialog".to_string(), boundary: DialogFocusBoundary::Last }
+                        header { class: "pe-head", h2 { class: "pe-head-title", "Edit cache destination" } button { class: "btn-icon focus-ring", aria_label: "Close", onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } } }
+                        div { class: "pe-body",
+                            if value.is_none() { p { role: "status", "Loading destination…" } }
+                            else {
+                                p { role: "alert", "Destination could not be loaded. Retry before editing or testing." }
+                                button { class: "btn btn-ghost focus-ring", onclick: move |_| fresh.restart(), "Retry loading destination" }
+                            }
+                        }
+                        footer { class: "pe-foot", p { "Destination not loaded" } button { class: "btn btn-ghost focus-ring", onclick: move |_| on_close.call(()), "Cancel" } }
+                        DialogFocusSentinel { dialog_id: "cache-edit-loading-dialog".to_string(), boundary: DialogFocusBoundary::First }
+                    }
+                }
+            },
+        }
+    }
+}
+
 #[component]
 fn CacheDraftField(
     kind: String,
@@ -638,9 +808,14 @@ fn CacheDraftField(
 /// Type changes retain drafts without unmounting the dialog. Scope and cache
 /// configuration commit together; stored secrets are never loaded into inputs.
 /// Legacy Edit conversions remain explicit; Niks3 Edit keeps its type fixed.
+/// Existing snapshots come from [`CacheDestinationEditor`], never list rows.
+/// Stored-ID Test delegates retention to the server. Save retains its separate
+/// credential policy and both actions require loaded destination and scope.
 #[component]
 fn CacheDestinationForm(
     destination: Option<CacheDestination>,
+    destination_ready: bool,
+    restore_focus: bool,
     add_draft: Niks3FormState,
     add_environment_ids: Vec<Uuid>,
     on_close: EventHandler<()>,
@@ -727,24 +902,17 @@ fn CacheDestinationForm(
     } else {
         destination_valid.clone().and(credentials_valid.clone())
     };
-    let blocked_reason = if busy().is_some() {
-        Some("Wait for the current operation to finish.".to_string())
-    } else if !scope_ready {
-        Some("Environment scope is not loaded. Wait for loading; if loading failed, close and reopen.".to_string())
-    } else {
-        save_validation.as_ref().err().cloned()
-    };
+    let blocked_reason = cache_action_ready(destination_ready, scope_ready, busy().is_some())
+        .err()
+        .or_else(|| save_validation.as_ref().err().cloned());
     let test_original = destination.clone();
     let test_connection = EventHandler::new(move |_: MouseEvent| {
         error.set(None);
         result.set(None);
-        let validation = if kind() == "niks3" {
-            form().validate(test_original.as_ref())
-        } else {
-            drafts()
-                .validate(kind(), &form(), false, test_original.as_ref())
-                .and_then(|_| drafts().validate(kind(), &form(), true, test_original.as_ref()))
-        };
+        let scope_ready =
+            environment_ready() && matches!(environments.read().as_ref(), Some(Ok(_)));
+        let validation = cache_action_ready(destination_ready, scope_ready, busy().is_some())
+            .and_then(|_| validate_cache_test(kind(), &form(), &drafts(), editing_id.is_some()));
         if let Err(message) = validation {
             error.set(Some(format!("Test not run: {message}")));
             return;
@@ -801,6 +969,8 @@ fn CacheDestinationForm(
         && destination
             .as_ref()
             .is_some_and(|d| d.legacy_query_credentials_configured);
+    let stored_access_unknown =
+        editing_id.is_some() && !current_configured && !migration_required && !url_changed;
     rsx! {
         div { class: "modal-backdrop", style: "padding:8px;", onclick: move |_| { if busy().is_none() { on_close.call(()); } },
             style { "{CACHE_FORM_CSS}" }
@@ -814,7 +984,7 @@ fn CacheDestinationForm(
                         event.prevent_default();
                     }
                 },
-                DialogFocusRestore {}
+                if restore_focus { DialogFocusRestore {} }
                 DialogInitialFocus { dialog_id: "cache-destination-dialog".to_string() }
                 DialogFocusSentinel { dialog_id: "cache-destination-dialog".to_string(), boundary: DialogFocusBoundary::Last }
                 // Disabled controls cannot receive focus during an operation.
@@ -848,7 +1018,7 @@ fn CacheDestinationForm(
                 div { class: "pe-body", style: "min-height:0;overflow-y:auto;",
                     // Freeze the submitted snapshot until discovery, probe or
                     // save completes, so responses cannot overwrite newer input.
-                    fieldset { disabled: busy().is_some(), style: "border:0;padding:0;margin:0;min-width:0;",
+                    fieldset { disabled: busy().is_some() || !destination_ready || !scope_ready, style: "border:0;padding:0;margin:0;min-width:0;",
                     if section() == "dest" {
                         div { class: "pe-sec-head", h3 { "Destination" } p { "What this cache is called, what kind of store it is, and where it lives." } }
                         Niks3TextField { label: "Name", field: "name", form, result, multiline: false, secret: false, hint: String::new() }
@@ -875,13 +1045,16 @@ fn CacheDestinationForm(
                             if destination.as_ref().is_some_and(|d| cache_form_kind(&d.cache_type) == "niks3") { p { class: "help", "Editing retains the Niks3 destination type and stored credential boundary." } }
                              else if destination.is_some() { p { class: "help", "Type changes require a replacement identity for the selected type. An unrelated edit retains the current configured credential." } }
                         }
-                        if kind() == "s3" {
+                         if kind() == "s3" {
                             CacheDraftField { kind: "s3", field: "url", label: "Destination URL", drafts, result, secret: false }
                             CacheDraftField { kind: "s3", field: "region", label: "S3 region", drafts, result, secret: false }
                             CacheDraftField { kind: "s3", field: "endpoint", label: "S3 endpoint URL", drafts, result, secret: false }
                         } else {
                             Niks3TextField { label: if kind() == "niks3" { "Read / substituter URL" } else if kind() == "attic" { "Attic server URL" } else { "URL" }, field: "read", form, result, multiline: false, secret: false, hint: if kind() == "niks3" { "HTTPS endpoint used by Nix reads; independent of the write API.".to_string() } else { String::new() } }
-                        }
+                         }
+                         if editing_id.is_some() && !current_configured && !selected_local_credential && kind() != "nix" {
+                             p { class: "help", "Stored credential status unavailable. Test resolves retained credentials on the server without retrieving them." }
+                         }
                         if kind() == "attic" {
                             CacheDraftField { kind: "attic", field: "cache", label: "Attic cache name", drafts, result, secret: false }
                             CacheDraftField { kind: "attic", field: "key", label: "Attic public key", drafts, result, secret: false }
@@ -918,7 +1091,7 @@ fn CacheDestinationForm(
                         div { class: "pe-sec-head", h3 { "Credentials" } p { "Use the current configured credential or select a dialog-local replacement. Secrets are encrypted on save." } }
                         div { class: "field", label { style: "display:flex;gap:9px;align-items:flex-start;margin:0;text-transform:none;letter-spacing:0;",
                             input { r#type: "checkbox", checked: kind() != "nix" || (current_configured && !url_changed), disabled: true, style: "accent-color:var(--cf-brand-purple);margin-top:1px;" }
-                            span { "Requires authentication" div { class: "help", if kind() == "nix" { if current_configured { "HTTP Basic credentials remain on the server." } else { "Public read access or the executing Nix store configuration." } } else { "Required by the current destination API; anonymous publication is not supported." } } }
+                            span { "Requires authentication" div { class: "help", if kind() == "nix" { if current_configured { "HTTP Basic credentials remain on the server." } else if stored_access_unknown { "Stored authentication metadata is unavailable. Test resolves the server configuration by ID." } else { "Public read access or the executing Nix store configuration." } } else { "Required by the current destination API; anonymous publication is not supported." } } }
                         } }
                         if kind() == "nix" {
                             p { class: "help", "Nix HTTPS uses the configured Nix store mechanism. A generic bearer-token provider is not supported by this destination type." }
@@ -927,8 +1100,8 @@ fn CacheDestinationForm(
                             }
                             div { class: "field", label { r#for: "cache-http-credential", "Read access" }
                                 div { style: "display:flex;gap:8px;align-items:center;",
-                                    select { id: "cache-http-credential", class: "input focus-ring", disabled: true, value: if migration_required { "__migration__" } else if current_configured && !url_changed { "__current__" } else { "__anonymous__" },
-                                        option { value: if migration_required { "__migration__" } else if current_configured && !url_changed { "__current__" } else { "__anonymous__" }, selected: true, if migration_required { "Migration required" } else if current_configured && !url_changed { "Current configured credential" } else { "Anonymous read access" } }
+                                    select { id: "cache-http-credential", class: "input focus-ring", disabled: true, value: if migration_required { "__migration__" } else if current_configured && !url_changed { "__current__" } else if stored_access_unknown { "__unknown__" } else { "__anonymous__" },
+                                        option { value: if migration_required { "__migration__" } else if current_configured && !url_changed { "__current__" } else if stored_access_unknown { "__unknown__" } else { "__anonymous__" }, selected: true, if migration_required { "Migration required" } else if current_configured && !url_changed { "Current configured credential" } else if stored_access_unknown { "Stored credential status unavailable" } else { "Anonymous read access" } }
                                     }
                                     button { class: "btn btn-ghost focus-ring xs", onclick: test_connection, if busy() == Some("test") { "Testing…" } else { "Test connection" } }
                                 }
@@ -1028,7 +1201,7 @@ fn CacheDestinationForm(
                 footer { class: "pe-foot",
                     div { class: "pe-foot-state", style: CACHE_FORM_FOOT_STATE_STYLE,
                     span { if form().name.trim().is_empty() { "Unnamed cache" } else { "{form().name}" } span { class: "pe-foot-dot", "·" } "{type_label}" span { class: "pe-foot-dot", "·" }
-                        if kind() == "niks3" { "{form().write_mode} writes / {form().read_mode} reads" } else if migration_required { "Credential migration required" } else if kind() == "nix" { if current_configured && !url_changed { "Credentials stored" } else { "Public read access" } } else if credential_draft == "__current__" && current_configured { "Credentials stored" } else if credentials_valid.is_ok() { "Credential draft set" } else { "Credential required" }
+                        if kind() == "niks3" { "{form().write_mode} writes / {form().read_mode} reads" } else if migration_required { "Credential migration required" } else if kind() == "nix" { if current_configured && !url_changed { "Credentials stored" } else if stored_access_unknown { "Stored credential status unavailable" } else { "Public read access" } } else if credential_draft == "__current__" && current_configured { "Credentials stored" } else if credentials_valid.is_ok() { "Credential draft set" } else if stored_access_unknown && !selected_local_credential { "Stored credential status unavailable" } else { "Credential required" }
                         span { class: "pe-foot-dot", "·" } if !scope_ready { "Scope not loaded" } else if environment_ids().is_empty() { "Global scope" } else { "{environment_ids().len()} selected" } }
                     if let Some(reason) = blocked_reason.as_ref() { p { id: "cache-save-blocked", "data-testid": "cache-save-blocked", role: "status", aria_live: "polite", style: "margin:4px 0 0;", "{reason}" } }
                     }
@@ -1036,7 +1209,8 @@ fn CacheDestinationForm(
                     button { class: "btn btn-ghost focus-ring", disabled: busy().is_some(), onclick: move |_| on_close.call(()), "Cancel" }
                     button { class: "btn btn-primary focus-ring", disabled: blocked_reason.is_some(), aria_describedby: if blocked_reason.is_some() { "cache-save-blocked" } else { "" }, title: blocked_reason.clone().unwrap_or_default(), onclick: move |_| {
                         error.set(None);
-                        let validation = if kind() == "niks3" { form().validate(retained.as_ref()) } else { drafts().validate(kind(), &form(), false, retained.as_ref()).and_then(|_| drafts().validate(kind(), &form(), true, retained.as_ref())) };
+                         let scope_ready = environment_ready() && matches!(environments.read().as_ref(), Some(Ok(_)));
+                         let validation = cache_action_ready(destination_ready, scope_ready, busy().is_some()).and_then(|_| if kind() == "niks3" { form().validate(retained.as_ref()) } else { drafts().validate(kind(), &form(), false, retained.as_ref()).and_then(|_| drafts().validate(kind(), &form(), true, retained.as_ref())) });
                         if let Err(message) = validation { error.set(Some(format!("Save not run: {message}"))); return; }
                         let mut req = if kind() == "niks3" { form().request() } else { drafts().request(kind(), &form()) }; let state = form(); let ids = environment_ids(); req.environment_ids = Some(ids.clone());
                          let update = cache_update_patch(kind(), &state, &drafts(), type_changed(), retained.as_ref(), ids);
@@ -1061,19 +1235,7 @@ fn CacheDestinationForm(
             show_credential.set(false);
             if let Some(cred) = value {
                 result.set(None);
-                let (profile, access, secret, token) = credential_fields_for_request(Some(&cred));
-                for (field, value) in [("profile", profile), ("access", access), ("secret", secret), ("token", token), ("session", cred.session_token.clone())] {
-                    // A key draft must not erase an independently configured
-                    // builder profile when that draft has no profile override.
-                    if field != "profile" || value.is_some() { drafts.write().0.insert(format!("{}.{field}", kind()), value.unwrap_or_default()); }
-                }
-                drafts.write().0.insert(format!("{}.credential", kind()), cred.id.clone());
-                if current_configured
-                    && drafts().request(kind(), &form()).attic_token.is_none()
-                    && drafts().request(kind(), &form()).s3_access_key_id.is_none()
-                    && drafts().request(kind(), &form()).s3_secret_access_key.is_none() {
-                    drafts.write().0.insert(format!("{}.credential", kind()), "__current__".into());
-                }
+                drafts.write().confirm_credential(kind(), &cred);
                 credentials.write().retain(|c| c.id != cred.id);
                 credentials.write().push(cred);
             }
@@ -1171,7 +1333,7 @@ fn Niks3CredentialControl(
             if plane == "Write" { button { class: "btn btn-ghost focus-ring xs", onclick: on_test, if testing { "Testing…" } else { "Test connection" } } }
         }
         button { class: "btn btn-ghost focus-ring xs", style: "margin-top:8px;width:fit-content;display:inline-flex;", onclick: { let plane = plane.clone(); move |_| on_open.call(plane.clone()) }, if configured { "Replace {plane} credential" } else if draft { "Edit {plane} credential" } else { "Add {plane} credential" } }
-        p { class: "help", if draft { "Replacement draft selected. Cancel the cache dialog to discard it." } else if configured { "Credentials stored. Secrets remain on the server." } else { "Enter this plane's identity in its credential dialog." } }
+        p { class: "help", if draft { "Replacement draft selected. Cancel the cache dialog to discard it." } else if configured { "Credentials stored. Secrets remain on the server." } else if destination.is_some() { "Stored credential status unavailable for this mode. Test resolves retained credentials on the server." } else { "Enter this plane's identity in its credential dialog." } }
     } }
 }
 
@@ -1246,6 +1408,10 @@ fn is_attic_public_key(value: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '/' | '=' | '-' | '_'))
 }
 
+// Compatibility tests retain this validator after the legacy card was retired.
+// Its render call was removed by the May 20 layout change (84bc3c8e).
+// Production forms use CacheTypeDrafts and Niks3FormState instead.
+#[cfg(test)]
 #[derive(Clone)]
 struct CacheFormValidationInput {
     name: String,
@@ -1262,6 +1428,7 @@ struct CacheFormValidationInput {
     require_s3_secret_access_key: bool,
 }
 
+#[cfg(test)]
 fn validate_cache_destination_form(input: &CacheFormValidationInput) -> HashMap<String, String> {
     let mut errors = HashMap::new();
 
@@ -1859,14 +2026,27 @@ fn CacheDestinationsList(
             }
 
             // The Add dialog stays mounted while its selected type changes.
-            if show_add_modal() || edit_destination().is_some() {
+            if show_add_modal() {
                 CacheDestinationForm {
-                    destination: edit_destination(),
+                    destination: None,
+                    destination_ready: true,
+                    restore_focus: true,
                     add_draft: Niks3FormState::from_destination(None),
                     add_environment_ids: Vec::new(),
                     on_close: move |_| { show_add_modal.set(false); edit_destination.set(None); },
                     on_saved: move |saved: CacheDestination| {
                         show_add_modal.set(false); edit_destination.set(None);
+                        if view_destination().is_some_and(|d| d.id == saved.id) { view_destination.set(Some(saved)); }
+                        refresh_nonce.set(refresh_nonce() + 1);
+                    },
+                }
+            } else if let Some(destination) = edit_destination() {
+                CacheDestinationEditor {
+                    key: "cache-edit-{destination.id}",
+                    id: destination.id,
+                    on_close: move |_| edit_destination.set(None),
+                    on_saved: move |saved: CacheDestination| {
+                        edit_destination.set(None);
                         if view_destination().is_some_and(|d| d.id == saved.id) { view_destination.set(Some(saved)); }
                         refresh_nonce.set(refresh_nonce() + 1);
                     },
@@ -2640,735 +2820,6 @@ fn CacheDestinationPanel(props: CacheDestinationPanelProps) -> Element {
     }
 }
 
-fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<()>) -> Element {
-    let enabled_badge_class = if destination.enabled {
-        format!(
-            "{} bg-emerald-500/10 text-emerald-400 border-emerald-500/30",
-            theme::presets::BADGE
-        )
-    } else {
-        format!(
-            "{} bg-gray-500/10 text-gray-400 border-gray-500/30",
-            theme::presets::BADGE
-        )
-    };
-
-    let type_badge_class = format!(
-        "{} bg-blue-500/10 text-blue-400 border-blue-500/30",
-        theme::presets::BADGE
-    );
-
-    let last_used_str = destination
-        .last_used_at
-        .map(|d| d.format("%Y-%m-%d %H:%M").to_string());
-    let created_str = destination.created_at.format("%Y-%m-%d").to_string();
-
-    let mut show_delete_confirm = use_signal(|| false);
-    let mut show_edit_modal = use_signal(|| false);
-    let mut edit_name = use_signal(|| destination.name.clone());
-    let mut edit_type = use_signal(|| destination.cache_type.clone());
-    let mut edit_push_to = use_signal(|| destination.push_to.clone().unwrap_or_default());
-    let mut edit_attic_cache_name =
-        use_signal(|| destination.attic_cache_name.clone().unwrap_or_default());
-    let mut edit_attic_public_key =
-        use_signal(|| destination.attic_public_key.clone().unwrap_or_default());
-    let mut edit_attic_token = use_signal(String::new);
-    let mut edit_signing_key_path =
-        use_signal(|| destination.signing_key_path.clone().unwrap_or_default());
-    let mut edit_compression = use_signal(|| destination.compression.clone().unwrap_or_default());
-    let mut edit_s3_region = use_signal(|| destination.s3_region.clone().unwrap_or_default());
-    let mut edit_s3_profile = use_signal(|| destination.s3_profile.clone().unwrap_or_default());
-    let mut edit_s3_access_key_id =
-        use_signal(|| destination.s3_access_key_id.clone().unwrap_or_default());
-    let mut edit_s3_secret_access_key = use_signal(String::new);
-    let mut edit_s3_session_token =
-        use_signal(|| destination.s3_session_token.clone().unwrap_or_default());
-    let mut edit_s3_endpoint_url =
-        use_signal(|| destination.s3_endpoint_url.clone().unwrap_or_default());
-    let mut edit_error = use_signal(|| None::<String>);
-    let mut edit_field_errors = use_signal(|| std::collections::HashMap::<String, String>::new());
-    let mut edit_submitting = use_signal(|| false);
-    let edit_modal_title_id = format!("edit-cache-destination-modal-title-{}", destination.id);
-    let delete_modal_title_id = format!("delete-cache-destination-modal-title-{}", destination.id);
-
-    // Fetch current environment assignments and available environments
-    let cache_id = destination.id;
-    let edit_environment_ids = use_resource(move || async move {
-        client::get_cache_environments(cache_id)
-            .await
-            .unwrap_or_default()
-    });
-    let mut edit_selected_environments = use_signal(Vec::<Uuid>::new);
-    let edit_environments = use_resource(|| async move { client::fetch_environments().await });
-
-    // Initialize selected environments when loaded
-    use_effect(move || {
-        if let Some(loaded_env_ids) = edit_environment_ids.read().as_ref() {
-            if edit_selected_environments().is_empty() && !loaded_env_ids.is_empty() {
-                edit_selected_environments.set(loaded_env_ids.clone());
-            }
-        }
-    });
-
-    rsx! {
-        div {
-            class: "{theme::presets::CARD}",
-
-            div {
-                class: "flex justify-between items-start",
-
-                div {
-                    class: "flex-1",
-                    div {
-                        class: "flex items-center gap-3 mb-2",
-                        h3 {
-                            class: "{theme::typography::SECTION_TITLE} {theme::text::PRIMARY}",
-                            "{destination.name}"
-                        }
-                        span {
-                            class: "{enabled_badge_class} border",
-                            if destination.enabled { "Enabled" } else { "Disabled" }
-                        }
-                        span {
-                            class: "{type_badge_class} border",
-                            "{destination.cache_type}"
-                        }
-                    }
-
-                    if let Some(ref url) = destination.push_to {
-                        p {
-                            class: "text-sm {theme::text::SECONDARY} mb-3",
-                            "→ {url}"
-                        }
-                    }
-
-                    div {
-                        class: "flex gap-4 text-xs {theme::text::MUTED}",
-                        if let Some(ref last_used) = last_used_str {
-                            span { "Last used: {last_used}" }
-                        } else {
-                            span { "Never used" }
-                        }
-                        span { "Created: {created_str}" }
-                    }
-                }
-
-                div {
-                    class: "flex gap-2",
-                    button {
-                        class: "px-3 py-1 text-sm rounded-lg {theme::interactive::GHOST_BTN} {theme::text::SECONDARY}",
-                        onclick: move |_| {
-                            show_edit_modal.set(true);
-                        },
-                        "Edit"
-                    }
-                    button {
-                        class: "px-3 py-1 text-sm rounded-lg {theme::interactive::DANGER_BTN}",
-                        onclick: move |_| {
-                            show_delete_confirm.set(true);
-                        },
-                        "Delete"
-                    }
-                }
-            }
-
-            if show_edit_modal() {
-                div {
-                    class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
-                    tabindex: "0",
-                    onclick: move |_| show_edit_modal.set(false),
-                    onkeydown: move |evt| {
-                        if evt.key() == Key::Escape {
-                            show_edit_modal.set(false);
-                        }
-                    },
-                    div {
-                        class: "relative {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl p-6 w-full cf-modal-panel-44 flex flex-col",
-                        style: "max-height: calc(100dvh - 2rem);",
-                        role: "dialog",
-                        aria_modal: "true",
-                        aria_labelledby: "{edit_modal_title_id}",
-                        onclick: move |e| e.stop_propagation(),
-
-                        // Header
-                        div {
-                            class: "flex justify-between items-center mb-6 shrink-0",
-                            h3 {
-                                id: "{edit_modal_title_id}",
-                                class: "{theme::typography::SECTION_TITLE} {theme::text::PRIMARY}",
-                                "Edit Cache Destination"
-                            }
-                            button {
-                                r#type: "button",
-                                class: "{theme::text::SECONDARY} hover:{theme::text::PRIMARY} text-lg",
-                                title: "Close edit cache destination modal",
-                                aria_label: "Close edit cache destination modal",
-                                onclick: move |_| show_edit_modal.set(false),
-                                "✕"
-                            }
-                        }
-
-                        // Scrollable body
-                        div {
-                            class: "flex-1 min-h-0 overflow-y-auto space-y-4 pr-1",
-                            div {
-                                label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Name *" }
-                                input {
-                                    class: if edit_field_errors().contains_key("name") {
-                                        "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
-                                    } else {
-                                        "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
-                                    },
-                                    value: edit_name(),
-                                    oninput: move |evt| {
-                                        edit_name.set(evt.value());
-                                        let mut errors = edit_field_errors();
-                                        errors.remove("name");
-                                        edit_field_errors.set(errors);
-                                    },
-                                }
-                                if let Some(err) = edit_field_errors().get("name") {
-                                    p { class: "text-[11px] text-red-300 mt-1", "{err}" }
-                                }
-                            }
-
-                            div {
-                                label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Type" }
-                                select {
-                                    class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
-                                    value: edit_type(),
-                                    onchange: move |evt| edit_type.set(evt.value()),
-                                    option { class: "text-slate-900 bg-white", value: "Nix", "Nix" }
-                                    option { class: "text-slate-900 bg-white", value: "Http", "Http" }
-                                    option { class: "text-slate-900 bg-white", value: "S3", "S3" }
-                                    option { class: "text-slate-900 bg-white", value: "Attic", "Attic" }
-                                }
-                            }
-
-                            // Type-specific required fields
-                            if edit_type() == "Attic" {
-                                div {
-                                    div {
-                                        class: "flex items-baseline justify-between gap-2",
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Cache Name (on Attic server) *" }
-                                        if !edit_field_errors().contains_key("attic_cache_name") {
-                                            span { class: "text-[11px] {theme::text::MUTED}", "Name of cache configured in your Attic server" }
-                                        }
-                                    }
-                                    input {
-                                        class: if edit_field_errors().contains_key("attic_cache_name") {
-                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
-                                        } else {
-                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
-                                        },
-                                        placeholder: "my-binary-cache",
-                                        value: edit_attic_cache_name(),
-                                        oninput: move |evt| {
-                                            edit_attic_cache_name.set(evt.value());
-                                            let mut errors = edit_field_errors();
-                                            errors.remove("attic_cache_name");
-                                            edit_field_errors.set(errors);
-                                        },
-                                    }
-                                    if let Some(err) = edit_field_errors().get("attic_cache_name") {
-                                        p { class: "text-[11px] text-red-300 mt-1", "{err}" }
-                                    }
-                                }
-                                div {
-                                    div {
-                                        class: "flex items-baseline justify-between gap-2",
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Server URL *" }
-                                        if !edit_field_errors().contains_key("push_to") {
-                                            span { class: "text-[11px] {theme::text::MUTED}", "Base URL for your Attic instance" }
-                                        }
-                                    }
-                                    input {
-                                        class: if edit_field_errors().contains_key("push_to") {
-                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
-                                        } else {
-                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
-                                        },
-                                        placeholder: "https://attic.example.com",
-                                        value: edit_push_to(),
-                                        oninput: move |evt| {
-                                            edit_push_to.set(evt.value());
-                                            let mut errors = edit_field_errors();
-                                            errors.remove("push_to");
-                                            edit_field_errors.set(errors);
-                                        },
-                                    }
-                                    if let Some(err) = edit_field_errors().get("push_to") {
-                                        p { class: "text-[11px] text-red-300 mt-1", "{err}" }
-                                    }
-                                }
-                                div {
-                                    div {
-                                        class: "flex items-baseline justify-between gap-2",
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Public Key *" }
-                                        if !edit_field_errors().contains_key("attic_public_key") {
-                                            span { class: "text-[11px] {theme::text::MUTED}", "Used by agents as trusted-public-key" }
-                                        }
-                                    }
-                                    input {
-                                        class: if edit_field_errors().contains_key("attic_public_key") {
-                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
-                                        } else {
-                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
-                                        },
-                                        placeholder: "cache.example.org-1:AbCdEf...",
-                                        value: edit_attic_public_key(),
-                                        oninput: move |evt| {
-                                            edit_attic_public_key.set(evt.value());
-                                            let mut errors = edit_field_errors();
-                                            errors.remove("attic_public_key");
-                                            edit_field_errors.set(errors);
-                                        },
-                                    }
-                                    if let Some(err) = edit_field_errors().get("attic_public_key") {
-                                        p { class: "text-[11px] text-red-300 mt-1", "{err}" }
-                                    }
-                                }
-                                div {
-                                    div {
-                                        class: "flex items-baseline justify-between gap-2",
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Token *" }
-                                        span { class: "text-[11px] {theme::text::MUTED}", "Leave blank to keep the existing token" }
-                                    }
-                                    input {
-                                        r#type: "password",
-                                        class: if edit_field_errors().contains_key("attic_token") {
-                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
-                                        } else {
-                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
-                                        },
-                                        placeholder: "••••••••",
-                                        value: edit_attic_token(),
-                                        oninput: move |evt| {
-                                            edit_attic_token.set(evt.value());
-                                            let mut errors = edit_field_errors();
-                                            errors.remove("attic_token");
-                                            edit_field_errors.set(errors);
-                                        },
-                                    }
-                                    if let Some(err) = edit_field_errors().get("attic_token") {
-                                        p { class: "text-[11px] text-red-300 mt-1", "{err}" }
-                                    }
-                                }
-                            } else {
-                                div {
-                                    div {
-                                        class: "flex items-baseline justify-between gap-2",
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Destination URL *" }
-                                        if !edit_field_errors().contains_key("push_to") {
-                                            span { class: "text-[11px] {theme::text::MUTED}", "Full URL to the cache destination" }
-                                        }
-                                    }
-                                    input {
-                                        class: if edit_field_errors().contains_key("push_to") {
-                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
-                                        } else {
-                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
-                                        },
-                                        placeholder: "https://cache.example.com or s3://bucket",
-                                        value: edit_push_to(),
-                                        oninput: move |evt| {
-                                            edit_push_to.set(evt.value());
-                                            let mut errors = edit_field_errors();
-                                            errors.remove("push_to");
-                                            edit_field_errors.set(errors);
-                                        },
-                                    }
-                                    if let Some(err) = edit_field_errors().get("push_to") {
-                                        p { class: "text-[11px] text-red-300 mt-1", "{err}" }
-                                    }
-                                }
-                            }
-
-                            // S3-specific fields
-                            if edit_type() == "S3" {
-                                div {
-                                    class: "grid grid-cols-2 gap-4",
-                                    div {
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Region *" }
-                                        input {
-                                            class: if edit_field_errors().contains_key("s3_region") {
-                                                "w-full px-3 py-2 rounded-lg text-sm {theme::text::PRIMARY} cf-policy-modal-field-error"
-                                            } else {
-                                                "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
-                                            },
-                                            placeholder: "us-east-1",
-                                            value: edit_s3_region(),
-                                            oninput: move |evt| {
-                                                edit_s3_region.set(evt.value());
-                                                let mut errors = edit_field_errors();
-                                                errors.remove("s3_region");
-                                                edit_field_errors.set(errors);
-                                            },
-                                        }
-                                        if let Some(err) = edit_field_errors().get("s3_region") {
-                                            p { class: "text-[11px] text-red-300 mt-1", "{err}" }
-                                        }
-                                    }
-                                    div {
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Profile (optional)" }
-                                        input {
-                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
-                                            placeholder: "default",
-                                            value: edit_s3_profile(),
-                                            oninput: move |evt| edit_s3_profile.set(evt.value()),
-                                        }
-                                    }
-                                }
-                                div {
-                                    class: "grid grid-cols-2 gap-4",
-                                    div {
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Access Key ID *" }
-                                        input {
-                                            class: if edit_field_errors().contains_key("s3_access_key_id") {
-                                                "w-full px-3 py-2 rounded-lg text-sm {theme::text::PRIMARY} cf-policy-modal-field-error"
-                                            } else {
-                                                "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
-                                            },
-                                            placeholder: "AKIA...",
-                                            value: edit_s3_access_key_id(),
-                                            oninput: move |evt| {
-                                                edit_s3_access_key_id.set(evt.value());
-                                                let mut errors = edit_field_errors();
-                                                errors.remove("s3_access_key_id");
-                                                edit_field_errors.set(errors);
-                                            },
-                                        }
-                                        if let Some(err) = edit_field_errors().get("s3_access_key_id") {
-                                            p { class: "text-[11px] text-red-300 mt-1", "{err}" }
-                                        }
-                                    }
-                                    div {
-                                        div {
-                                            class: "flex items-baseline justify-between gap-2",
-                                            label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Secret Access Key *" }
-                                            span { class: "text-[11px] {theme::text::MUTED}", "Leave blank to keep the existing secret" }
-                                        }
-                                        input {
-                                            r#type: "password",
-                                            class: if edit_field_errors().contains_key("s3_secret_access_key") {
-                                                "w-full px-3 py-2 rounded-lg text-sm {theme::text::PRIMARY} cf-policy-modal-field-error"
-                                            } else {
-                                                "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
-                                            },
-                                            placeholder: "••••••••",
-                                            value: edit_s3_secret_access_key(),
-                                            oninput: move |evt| {
-                                                edit_s3_secret_access_key.set(evt.value());
-                                                let mut errors = edit_field_errors();
-                                                errors.remove("s3_secret_access_key");
-                                                edit_field_errors.set(errors);
-                                            },
-                                        }
-                                        if let Some(err) = edit_field_errors().get("s3_secret_access_key") {
-                                            p { class: "text-[11px] text-red-300 mt-1", "{err}" }
-                                        }
-                                    }
-                                }
-                                div {
-                                    class: "grid grid-cols-2 gap-4",
-                                    div {
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Session Token (optional)" }
-                                        input {
-                                            r#type: "password",
-                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
-                                            placeholder: "session token",
-                                            value: edit_s3_session_token(),
-                                            oninput: move |evt| edit_s3_session_token.set(evt.value()),
-                                        }
-                                    }
-                                    div {
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Endpoint URL *" }
-                                        input {
-                                            class: if edit_field_errors().contains_key("s3_endpoint_url") {
-                                                "w-full px-3 py-2 rounded-lg text-sm {theme::text::PRIMARY} cf-policy-modal-field-error"
-                                            } else {
-                                                "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
-                                            },
-                                            placeholder: "https://s3.us-east-1.amazonaws.com",
-                                            value: edit_s3_endpoint_url(),
-                                            oninput: move |evt| {
-                                                edit_s3_endpoint_url.set(evt.value());
-                                                let mut errors = edit_field_errors();
-                                                errors.remove("s3_endpoint_url");
-                                                edit_field_errors.set(errors);
-                                            },
-                                        }
-                                        if let Some(err) = edit_field_errors().get("s3_endpoint_url") {
-                                            p { class: "text-[11px] text-red-300 mt-1", "{err}" }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Signing key (only for Nix binary cache types, not Attic)
-                            if edit_type() != "Attic" {
-                                div {
-                                    div {
-                                        class: "flex items-baseline justify-between gap-2",
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Signing Key Path (optional)" }
-                                        span { class: "text-[11px] {theme::text::MUTED}", "Path to Nix cache signing key for signature verification" }
-                                    }
-                                    input {
-                                        class: "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none",
-                                        placeholder: "/path/to/cache-priv-key.pem",
-                                        value: edit_signing_key_path(),
-                                        oninput: move |evt| edit_signing_key_path.set(evt.value()),
-                                    }
-                                }
-                            }
-
-                            div {
-                                label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Compression (optional)" }
-                                select {
-                                    class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
-                                    value: edit_compression(),
-                                    onchange: move |evt| edit_compression.set(evt.value()),
-                                    option { class: "text-slate-900 bg-white", value: "", selected: edit_compression().is_empty(), "(default)" }
-                                    option { class: "text-slate-900 bg-white", value: "none", selected: edit_compression() == "none", "None" }
-                                    option { class: "text-slate-900 bg-white", value: "xz", selected: edit_compression() == "xz", "XZ" }
-                                    option { class: "text-slate-900 bg-white", value: "zstd", selected: edit_compression() == "zstd", "Zstandard" }
-                                }
-                            }
-
-                            // Environment assignment
-                            div {
-                                div {
-                                    class: "flex items-baseline justify-between gap-2",
-                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Environments (optional)" }
-                                    span { class: "text-[11px] {theme::text::MUTED}", "Leave empty for global cache (all environments)" }
-                                }
-                                if let Some(Ok(envs)) = edit_environments.read().as_ref() {
-                                    div {
-                                        class: "flex flex-wrap gap-2 p-2 rounded-lg border {theme::interactive::INPUT}",
-                                        if envs.is_empty() {
-                                            p { class: "text-xs {theme::text::MUTED}", "No environments available" }
-                                        } else {
-                                            for env in envs {
-                                                {
-                                                    let env_id = env.id;
-                                                    let env_name = env.name.clone();
-                                                    let color = normalize_env_color(&env.color_hex);
-                                                    let is_selected = edit_selected_environments().contains(&env_id);
-                                                    rsx! {
-                                                        button {
-                                                            r#type: "button",
-                                                            style: if is_selected {
-                                                                format!("padding: 3px 7px; border-radius: 999px; font-size: 10px; border: 1px solid {}; background: color-mix(in oklab, {} 14%, var(--cf-card-bg)); color: {}; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit; font-weight: 400;", color, color, color)
-                                                            } else {
-                                                                "padding: 3px 7px; border-radius: 999px; font-size: 10px; border: 1px solid var(--cf-card-border); background: transparent; color: var(--cf-text-secondary); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit; font-weight: 400;".to_string()
-                                                            },
-                                                            onclick: move |_| {
-                                                                let mut selected = edit_selected_environments();
-                                                                if is_selected {
-                                                                    selected.retain(|&id| id != env_id);
-                                                                } else {
-                                                                    selected.push(env_id);
-                                                                }
-                                                                edit_selected_environments.set(selected);
-                                                            },
-                                                            span { style: "width:6px; height:6px; border-radius:50%; background:{color};" }
-                                                            "{env_name}"
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    p { class: "text-xs {theme::text::MUTED}", "Loading environments..." }
-                                }
-                            }
-
-                            if let Some(err) = edit_error() {
-                                p { class: "text-sm text-red-400", "{err}" }
-                            }
-                        }
-
-                        // Footer
-                        div {
-                            class: "mt-6 flex justify-end gap-3 shrink-0 pt-4 border-t {theme::surface::DIVIDER}",
-                            button {
-                                class: "px-4 py-2 rounded-lg text-sm font-medium {theme::interactive::GHOST_BTN} {theme::text::SECONDARY}",
-                                onclick: move |_| {
-                                    show_edit_modal.set(false);
-                                    edit_error.set(None);
-                                    edit_field_errors.set(std::collections::HashMap::new());
-                                },
-                                "Cancel"
-                            }
-                            button {
-                                class: "px-4 py-2 rounded-lg text-sm font-medium {theme::interactive::PRIMARY_BTN}",
-                                disabled: edit_submitting(),
-                                onclick: move |_| {
-                                    let name = edit_name().trim().to_string();
-                                    let cache_type = edit_type();
-                                    let push_to = edit_push_to().trim().to_string();
-                                    let attic_cache_name = edit_attic_cache_name().trim().to_string();
-                                    let attic_public_key = edit_attic_public_key().trim().to_string();
-
-                                    let errors = validate_cache_destination_form(&CacheFormValidationInput {
-                                        name: name.clone(),
-                                        cache_type: cache_type.clone(),
-                                        push_to: push_to.clone(),
-                                        attic_cache_name: attic_cache_name.clone(),
-                                        attic_public_key: attic_public_key.clone(),
-                                        attic_token: edit_attic_token(),
-                                        s3_region: edit_s3_region(),
-                                        s3_access_key_id: edit_s3_access_key_id(),
-                                        s3_secret_access_key: edit_s3_secret_access_key(),
-                                        s3_endpoint_url: edit_s3_endpoint_url(),
-                                        require_attic_token: cache_type == "Attic"
-                                            && destination.attic_token.is_none(),
-                                        require_s3_secret_access_key: cache_type == "S3"
-                                            && destination.s3_secret_access_key.is_none(),
-                                    });
-
-                                    // If there are validation errors, display them and stop
-                                    if !errors.is_empty() {
-                                        edit_field_errors.set(errors);
-                                        edit_error.set(Some("Please fix the errors above".to_string()));
-                                        return;
-                                    }
-
-                                    // Clear any previous errors
-                                    edit_field_errors.set(std::collections::HashMap::new());
-                                    edit_submitting.set(true);
-                                    edit_error.set(None);
-                                    let on_change = on_change.clone();
-
-                                    let attic_token_val = edit_attic_token();
-                                    let signing_key_path_val = edit_signing_key_path();
-                                    let compression_val = edit_compression();
-                                    let s3_region_val = edit_s3_region();
-                                    let s3_profile_val = edit_s3_profile();
-                                    let s3_access_key_id_val = edit_s3_access_key_id();
-                                    let s3_secret_access_key_val = edit_s3_secret_access_key();
-                                    let s3_session_token_val = edit_s3_session_token();
-                                    let s3_endpoint_url_val = edit_s3_endpoint_url();
-
-                                    spawn(async move {
-                                        let req = UpdateCacheDestination {
-                                            name: Some(name),
-                                            cache_type: Some(cache_type.clone()),
-                                            push_to: if push_to.trim().is_empty() {
-                                                None
-                                            } else {
-                                                Some(push_to)
-                                            },
-                                            enabled: None,
-                                            signing_key_path: if signing_key_path_val.trim().is_empty() { None } else { Some(signing_key_path_val.trim().to_string()) },
-                                            compression: if compression_val.trim().is_empty() { None } else { Some(compression_val.trim().to_string()) },
-                                            s3_region: if s3_region_val.trim().is_empty() { None } else { Some(s3_region_val.trim().to_string()) },
-                                            s3_profile: if s3_profile_val.trim().is_empty() { None } else { Some(s3_profile_val.trim().to_string()) },
-                                            s3_access_key_id: if s3_access_key_id_val.trim().is_empty() { None } else { Some(s3_access_key_id_val.trim().to_string()) },
-                                            s3_secret_access_key: if s3_secret_access_key_val.trim().is_empty() { None } else { Some(s3_secret_access_key_val.trim().to_string()) },
-                                            s3_session_token: if s3_session_token_val.trim().is_empty() { None } else { Some(s3_session_token_val.trim().to_string()) },
-                                            s3_endpoint_url: if s3_endpoint_url_val.trim().is_empty() { None } else { Some(s3_endpoint_url_val.trim().to_string()) },
-                                            attic_token: if attic_token_val.trim().is_empty() { None } else { Some(attic_token_val.trim().to_string()) },
-                                            attic_cache_name: if cache_type == "Attic" {
-                                                Some(attic_cache_name)
-                                            } else {
-                                                None
-                                            },
-                                            attic_public_key: if cache_type == "Attic" {
-                                                if attic_public_key.trim().is_empty() { None } else { Some(attic_public_key.trim().to_string()) }
-                                            } else {
-                                                None
-                                            },
-                                            attic_ignore_upstream_cache_filter: None,
-                                            attic_jobs: None,
-                                            parallel_uploads: None,
-                                            max_retries: None,
-                                            retry_delay_seconds: None,
-                                            push_timeout_seconds: None,
-                                            force_repush: None,
-                                            require_sigs: None,
-                                            environment_ids: if edit_selected_environments().is_empty() {
-                                                None
-                                            } else {
-                                                Some(edit_selected_environments())
-                                            },
-                                            ..Default::default()
-                                        };
-
-                                        match client::update_cache_destination(destination.id, &req).await {
-                                            Ok(_) => {
-                                                show_edit_modal.set(false);
-                                                on_change.call(());
-                                            }
-                                            Err(e) => {
-                                                edit_error.set(Some(format!("Failed to update destination: {e}")));
-                                            }
-                                        }
-                                        edit_submitting.set(false);
-                                    });
-                                },
-                                if edit_submitting() { "Saving..." } else { "Save Changes" }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Delete confirmation modal
-            if show_delete_confirm() {
-                div {
-                    class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
-                    tabindex: "0",
-                    onclick: move |_| show_delete_confirm.set(false),
-                    onkeydown: move |evt| {
-                        if evt.key() == Key::Escape {
-                            show_delete_confirm.set(false);
-                        }
-                    },
-                    div {
-                        class: "relative {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl p-6 cf-modal-panel-30",
-                        role: "dialog",
-                        aria_modal: "true",
-                        aria_labelledby: "{delete_modal_title_id}",
-                        onclick: move |e| e.stop_propagation(),
-
-                        h3 {
-                            id: "{delete_modal_title_id}",
-                            class: "{theme::typography::SECTION_TITLE} {theme::text::PRIMARY} mb-4",
-                            "Delete Cache Destination?"
-                        }
-                        p { class: "{theme::text::SECONDARY} mb-6", "Are you sure you want to delete \"{destination.name}\"? This action cannot be undone." }
-
-                        div {
-                            class: "flex gap-3 justify-end",
-                            button {
-                                class: "px-4 py-2 rounded-lg text-sm font-medium {theme::interactive::GHOST_BTN} {theme::text::SECONDARY}",
-                                onclick: move |_| show_delete_confirm.set(false),
-                                "Cancel"
-                            }
-                            button {
-                                class: "px-4 py-2 rounded-lg text-sm font-medium {theme::interactive::DANGER_BTN}",
-                                onclick: move |_| {
-                                    let dest_id = destination.id;
-                                    let on_change = on_change.clone();
-                                    spawn(async move {
-                                        if client::delete_cache_destination(dest_id).await.is_ok() {
-                                            on_change.call(());
-                                        }
-                                    });
-                                    show_delete_confirm.set(false);
-                                },
-                                "Delete"
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 fn normalize_env_color(color_hex: &str) -> &str {
     let trimmed = color_hex.trim();
     if trimmed.is_empty() {
@@ -3384,6 +2835,206 @@ mod tests {
         CacheFormValidationInput, CacheTypeDrafts, Niks3FormState, cache_form_kind,
         validate_cache_destination_form,
     };
+
+    fn test_destination(cache_type: &str, flags: bool) -> crate::api::models::CacheDestination {
+        let mut value = serde_json::json!({
+            "id": 1, "name": "fixture", "cache_type": cache_type, "enabled": false,
+            "created_at": "2026-10-02T00:00:00Z", "updated_at": "2026-10-02T00:00:00Z",
+            "push_to": if cache_type == "S3" { "s3://fixture" } else { "https://fixture.example" },
+            "s3_region": "fixture", "s3_endpoint_url": "https://fixture.example",
+            "attic_cache_name": "fixture", "attic_public_key": "fixture:AAAA",
+            "niks3_write_auth_mode": "token", "niks3_read_auth_mode": "mtls"
+        });
+        if flags {
+            for flag in [
+                "attic_token_configured",
+                "s3_credentials_configured",
+                "niks3_write_token_configured",
+                "niks3_read_mtls_configured",
+                "http_basic_auth_configured",
+            ] {
+                value[flag] = false.into();
+            }
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn edit_test_retention_does_not_require_false_or_absent_metadata() {
+        for flags in [false, true] {
+            for kind in ["attic", "s3", "nix"] {
+                let destination = test_destination(&super::api_cache_type(kind), flags);
+                let form = Niks3FormState::from_destination(Some(&destination));
+                let drafts = CacheTypeDrafts::from_destination(Some(&destination));
+                assert!(super::validate_cache_test(kind, &form, &drafts, true).is_ok());
+                let patch = super::cache_update_patch(
+                    kind,
+                    &form,
+                    &drafts,
+                    false,
+                    Some(&destination),
+                    vec![],
+                );
+                assert!(patch.attic_token.is_none());
+                assert!(patch.s3_secret_access_key.is_none());
+                assert!(patch.push_to.is_none());
+            }
+            let destination = test_destination("Niks3", flags);
+            let mut form = Niks3FormState::from_destination(Some(&destination));
+            assert!(super::validate_niks3_test_replacement(&form, true).is_ok());
+            // A mode transition with no explicit identity also belongs to the
+            // server's effective-update validation, not configured metadata.
+            form.write_mode = "mtls".into();
+            assert!(super::validate_niks3_test_replacement(&form, true).is_ok());
+            assert!(form.update_request().niks3_write_client_key.is_none());
+        }
+    }
+
+    #[test]
+    fn explicit_edit_test_replacements_are_complete_without_borrowing_flags() {
+        for kind in ["attic", "s3"] {
+            let destination = test_destination(&super::api_cache_type(kind), true);
+            let form = Niks3FormState::from_destination(Some(&destination));
+            let mut drafts = CacheTypeDrafts::from_destination(Some(&destination));
+            drafts
+                .0
+                .insert(format!("{kind}.credential"), "explicit-empty-draft".into());
+            assert!(super::validate_cache_test(kind, &form, &drafts, true).is_err());
+            if kind == "s3" {
+                drafts.0.insert("s3.access".into(), "fixture-access".into());
+                assert!(super::validate_cache_test(kind, &form, &drafts, true).is_err());
+                drafts.0.insert("s3.secret".into(), "fixture-secret".into());
+            } else {
+                drafts
+                    .0
+                    .insert("attic.token".into(), "fixture-token".into());
+            }
+            assert!(super::validate_cache_test(kind, &form, &drafts, true).is_ok());
+        }
+        let mut form = Niks3FormState::from_destination(Some(&test_destination("Niks3", true)));
+        form.read_cert = "-----BEGIN CERTIFICATE-----".into();
+        assert!(super::validate_niks3_test_replacement(&form, true).is_err());
+        form.read_key = "-----BEGIN PRIVATE KEY-----".into();
+        assert!(super::validate_niks3_test_replacement(&form, true).is_ok());
+    }
+
+    #[test]
+    fn confirmed_empty_replacements_remain_selected_with_configured_flags_true() {
+        for (kind, credential_kind, role) in [
+            ("attic", super::LocalCredentialKind::AtticToken, None),
+            ("s3", super::LocalCredentialKind::AwsKey, None),
+            (
+                "s3",
+                super::LocalCredentialKind::AwsRole,
+                Some("fixture-role-profile"),
+            ),
+        ] {
+            let mut destination = test_destination(&super::api_cache_type(kind), true);
+            destination.attic_token_configured = kind == "attic";
+            destination.s3_credentials_configured = kind == "s3";
+            destination.s3_profile = Some("original-builder-profile".into());
+            let form = Niks3FormState::from_destination(Some(&destination));
+            let mut drafts = CacheTypeDrafts::from_destination(Some(&destination));
+            drafts
+                .0
+                .insert(format!("{kind}.credential"), "__current__".into());
+            let credential = super::LocalCredential {
+                id: "explicit-empty-replacement".into(),
+                name: "Empty replacement".into(),
+                kind: credential_kind,
+                access_key_id: None,
+                secret_access_key: None,
+                role_arn: role.map(str::to_string),
+                token: None,
+                session_token: None,
+            };
+            // Exercise the same transition as modal confirmation, not only the
+            // validators. Configured metadata must not rewrite this selection.
+            drafts.confirm_credential(kind, &credential);
+            assert_eq!(drafts.get(kind, "credential"), credential.id);
+            assert!(super::validate_cache_test(kind, &form, &drafts, true).is_err());
+            assert!(
+                drafts
+                    .validate(kind, &form, true, Some(&destination))
+                    .is_err()
+            );
+            let request = drafts.request(kind, &form);
+            assert!(request.attic_token.is_none());
+            assert!(request.s3_access_key_id.is_none());
+            assert!(request.s3_secret_access_key.is_none());
+            if kind == "s3" {
+                assert_eq!(
+                    drafts.get(kind, "profile"),
+                    role.unwrap_or("original-builder-profile")
+                );
+            }
+            // This is an explicit operator selection, matching the selector's
+            // existing retention branch. Confirmation never performs it.
+            drafts
+                .0
+                .insert(format!("{kind}.credential"), "__current__".into());
+            assert!(super::validate_cache_test(kind, &form, &drafts, true).is_ok());
+            assert!(
+                drafts
+                    .validate(kind, &form, true, Some(&destination))
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn niks3_configured_identity_retention_and_ca_only_edits_do_not_allow_partial_pairs() {
+        let mut destination = test_destination("Niks3", true);
+        destination.niks3_write_token_configured = true;
+        destination.niks3_read_mtls_configured = true;
+        let mut form = Niks3FormState::from_destination(Some(&destination));
+        // Niks3 has a data-derived plane choice, not a named local draft ID.
+        // Blank identity fields mean retention; CA-only changes retain the pair.
+        assert!(!super::niks3_identity_draft("Read", &form));
+        assert!(super::validate_niks3_test_replacement(&form, true).is_ok());
+        assert!(form.validate_credentials(Some(&destination)).is_ok());
+        form.clear_read_ca = true;
+        assert!(super::niks3_identity_draft("Read", &form));
+        assert!(super::validate_niks3_test_replacement(&form, true).is_ok());
+        assert!(form.validate_credentials(Some(&destination)).is_ok());
+        assert!(form.update_request().clear_niks3_read_ca_cert);
+        assert!(form.update_request().niks3_read_client_key.is_none());
+        form.read_cert = "-----BEGIN CERTIFICATE-----".into();
+        assert!(super::validate_niks3_test_replacement(&form, true).is_err());
+        assert!(form.validate_credentials(Some(&destination)).is_err());
+    }
+
+    #[test]
+    fn add_test_still_requires_credentials_and_save_policy_is_unchanged() {
+        for kind in ["attic", "s3"] {
+            let destination = test_destination(&super::api_cache_type(kind), false);
+            let form = Niks3FormState::from_destination(Some(&destination));
+            let drafts = CacheTypeDrafts::from_destination(Some(&destination));
+            assert!(super::validate_cache_test(kind, &form, &drafts, false).is_err());
+            assert!(
+                drafts
+                    .validate(kind, &form, true, Some(&destination))
+                    .is_err()
+            );
+        }
+        let form = Niks3FormState::from_destination(Some(&test_destination("Niks3", false)));
+        assert!(super::validate_niks3_test_replacement(&form, false).is_err());
+        assert!(form.validate_credentials(None).is_err());
+    }
+
+    #[test]
+    fn action_guards_reject_every_unready_or_busy_combination() {
+        for destination_ready in [false, true] {
+            for scope_ready in [false, true] {
+                for busy in [false, true] {
+                    assert_eq!(
+                        super::cache_action_ready(destination_ready, scope_ready, busy).is_ok(),
+                        destination_ready && scope_ready && !busy
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn legacy_editor_retains_secrets_disabled_status_and_exact_wire_type() {

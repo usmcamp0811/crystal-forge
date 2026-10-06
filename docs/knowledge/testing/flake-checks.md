@@ -148,13 +148,24 @@ README: [checks/server-regressions/README.md](../../../checks/server-regressions
   Cargo integration test binaries and a curated list of `#[ignore]`d library
   tests (POA&M, policy, notification, composite AC3, STIG mapping, bundle
   baseline, and agent key rotation areas).
-  TASK-470 also runs 35 explicitly named ignored PostgreSQL tests and 8 named
+  TASK-470 also runs 37 explicitly named ignored PostgreSQL tests and 8 named
   non-ignored tests for cache scope, retained credentials, signed capabilities,
   direct-peer dispatch, and publication-backed reads. Each invocation uses
   `--exact --test-threads=1` and requires the named success line and exactly one
-  passed test with zero ignored tests. Only the 35 selected database tests use
+  passed test with zero ignored tests. Only the 37 selected database tests use
   `--ignored`; missing or renamed tests fail the check. The current README lists
   every qualified name. This gate does not run native Attic/S3 upload suites.
+  The two added legacy Attic regressions are
+  `legacy_attic_plaintext_and_historical_ciphertext_retain_on_test_and_save` and
+  `legacy_attic_null_and_empty_token_refuse_before_probe_without_mutation` in
+  `handlers::api::caches::retained_probe_tests`. They insert historical columns
+  directly, check independent `enc:v1` compatibility, exact Test/Cancel snapshots,
+  raw credential retention on unrelated Save, and pre-probe NULL/empty refusal.
+  Synthetic Rust tokens do not prove native Bearer authentication. The separate
+  [native browser fixture](../../../checks/web-ui/README.md#existing-legacy-attic-rows)
+  requires real private Attic metadata reads for plaintext/historical rows and
+  zero provider requests for the NULL row. Neither catalog membership nor this
+  scope description establishes a pass for the current revision.
 - **Why it exists.** `nix build .#server` runs only `--lib --bins` tests, and
   the `integration` check runs the Python suite, so these Rust integration
   targets would otherwise run nowhere. The list is curated on purpose and is

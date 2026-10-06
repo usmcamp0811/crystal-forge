@@ -1,6 +1,6 @@
 /** TASK-470 native stored-ID tests. All cache API requests remain unmocked.
  * CF_CACHE_CREDENTIAL_FIXTURE is the owner-managed mode-0600 runtime JSON.
- * Wait for version 1 / seed_complete before using its seven destination IDs.
+ * Request native rows at entry to this workflow, then wait for seed_complete.
  * Runtime credentials are used only in password-masked replacement dialogs and
  * request bodies. Do not print fixture data, response bodies or credential values.
  */
@@ -11,6 +11,16 @@ const { expect } = require("@playwright/test");
 async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captureState) {
   const filename = process.env.CF_CACHE_CREDENTIAL_FIXTURE;
   assert(filename, "CF_CACHE_CREDENTIAL_FIXTURE must identify the native cache fixture JSON file");
+  const prepared = JSON.parse(fs.readFileSync(filename, "utf8"));
+  assert.equal(prepared.version, 1, "native credential fixture version");
+  if (prepared.seed_complete !== true) {
+    // The driver may warm providers early, but earlier workflows must not see
+    // these seven cache rows. Signal only after step25's original Add/security
+    // workflows finish; this marker carries no credential or database values.
+    const temporary = `${prepared.seed_request_path}.pending`;
+    fs.writeFileSync(temporary, JSON.stringify({ version: 1, step: "25-caches-modal-attic", workflow: "retained-cache-credentials" }), { mode: 0o600, flag: "wx" });
+    fs.renameSync(temporary, prepared.seed_request_path);
+  }
   await expect.poll(() => {
     try { return JSON.parse(fs.readFileSync(filename, "utf8")).seed_complete === true; }
     catch { return false; }
@@ -67,14 +77,17 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
   const unchanged = (before, after, kind) => assert(JSON.stringify(before) === JSON.stringify(after), `${kind} probe/cancel must preserve configuration and timestamps`);
   const outer = page.getByRole("dialog", { name: "Cache destination", exact: true });
   let panel, edit;
-  const open = async value => {
+  const open = async (value, beforeEdit, saveReady = true) => {
     await page.goto(`${baseUrl}/caches`);
     await page.getByText(value.name, { exact: true }).click();
     panel = page.getByRole("dialog").filter({ has: page.getByRole("button", { name: "Edit cache", exact: true }) });
     edit = panel.getByRole("button", { name: "Edit cache", exact: true });
+    await expect(edit).toBeVisible();
+    if (beforeEdit) await beforeEdit();
     await edit.click();
     await expect(outer).toBeVisible();
-    await expect(outer.getByRole("button", { name: "Save changes", exact: true })).toBeEnabled();
+    if (saveReady) await expect(outer.getByRole("button", { name: "Save changes", exact: true })).toBeEnabled();
+    else await expect(outer.getByRole("button", { name: "Save changes", exact: true })).toBeDisabled();
     await outer.getByRole("button", { name: "Credentials", exact: true }).click();
   };
   const close = async () => {
@@ -83,7 +96,7 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
     await expect(edit).toBeFocused();
     await panel.getByRole("button", { name: "Close", exact: true }).click();
   };
-  const probe = async (id, ok = true, status = 200) => {
+  const probe = async (id, ok = true, status = 200, errorMessage = "Legacy credential queries require migration") => {
     const url = `${apiBaseUrl}/api/v1/caches/${id}/test-credentials`;
     const responsePromise = page.waitForResponse(r => r.url() === url && r.request().method() === "POST");
     await outer.getByRole("button", { name: "Test connection", exact: true }).click();
@@ -98,7 +111,7 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
         assert.equal(result.write_auth_valid, null, "read/discovery cannot prove write authorization");
         await expect(outer.getByTestId("niks3-test-result")).toContainText("Write authorization: Untested");
       }
-    } else await expect(outer.getByRole("alert")).toContainText("Legacy credential queries require migration");
+    } else await expect(outer.getByRole("alert")).toContainText(errorMessage);
     return body;
   };
   const screenshots = async kind => {
@@ -231,11 +244,97 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
       assert.equal(mutationRequests.length, count, "retained/replacement probes and canceled forms do not save");
       console.log(`TASK-470 real ${kind} stored-ID probe: HTTP ${kind === "legacy_query" ? 400 : 200}; no mutation`);
     }
+    // Direct SQL legacy rows are separate from the seven current-API rows.
+    // Metadata-only projections model stale clients; every Test POST is real.
+    for (const [kind, value] of Object.entries(fixture.legacy_attic)) {
+      const before = await read(value.id);
+      assert.equal(before.attic_token_configured, value.token_expected, "real legacy GET configured flag matches stored data");
+      const count = mutationRequests.length;
+      const collection = /\/api\/v1\/caches(?:\?.*)?$/;
+      const listProjection = async route => {
+        if (route.request().method() !== "GET") return route.continue();
+        const response = await route.fetch();
+        const body = await response.json();
+        const safe = body.map(row => {
+          if (row.id !== value.id) return row;
+          for (const field of secrets) assert(row[field] == null, "metadata projection must remain secret-free");
+          const projected = { ...row };
+          if (kind === "legacy_encrypted") delete projected.attic_token_configured;
+          else projected.attic_token_configured = false;
+          return projected;
+        });
+        return route.fulfill({ response, json: safe });
+      };
+      await page.route(collection, listProjection);
+      try {
+        await open(before, undefined, value.token_expected);
+        if (value.token_expected) {
+          await expect(outer.getByLabel("Credential", { exact: true })).toHaveValue("__current__");
+          const body = await probe(value.id);
+          assert(!Object.hasOwn(body, "attic_token"), "direct legacy stored-ID Test omits token");
+        } else {
+          await expect(outer.getByText("Current configured credential", { exact: true })).toHaveCount(0);
+          await expect(outer.getByRole("button", { name: "Test connection", exact: true })).toBeEnabled();
+          const body = await probe(value.id, false, 400, /token|credential|configuration/i);
+          assert(!Object.hasOwn(body, "attic_token"), "missing legacy stored-ID Test omits token");
+        }
+        await screenshots(kind + "-stale-list");
+        await close();
+      } finally { await page.unroute(collection, listProjection); }
+      unchanged(before, await read(value.id), kind);
+      if (value.token_expected) {
+        for (const mode of ["false", "absent"]) {
+          const metadata = new RegExp(`/api/v1/caches/${value.id}$`);
+          let projected = 0;
+          const freshProjection = async route => {
+            if (route.request().method() !== "GET" || projected > 0) return route.continue();
+            const response = await route.fetch();
+            const body = await response.json();
+            for (const field of secrets) assert(body[field] == null, "fresh metadata projection must remain secret-free");
+            const safe = { ...body };
+            if (mode === "false") safe.attic_token_configured = false;
+            else delete safe.attic_token_configured;
+            projected += 1;
+            return route.fulfill({ response, json: safe });
+          };
+          try {
+            await open(before, () => page.route(metadata, freshProjection), false);
+            assert.equal(projected, 1, "only one fresh metadata GET is projected");
+            await expect(outer.getByText("Current configured credential", { exact: true })).toHaveCount(0);
+            await expect(outer.getByRole("button", { name: "Test connection", exact: true })).toBeEnabled();
+            const body = await probe(value.id);
+            assert(!Object.hasOwn(body, "attic_token"), "unknown metadata still uses real stored-ID probe without token");
+            if (captureState) await captureState(`${kind}-fresh-${mode}-real-test`);
+            await close();
+          } finally { await page.unroute(metadata, freshProjection); }
+          unchanged(before, await read(value.id), kind);
+        }
+      }
+      assert.equal(mutationRequests.length, count, "all direct legacy Test/Cancel cases precede Save without mutation");
+      console.log(`TASK-470 direct SQL ${kind}: real stored-ID Test ${value.token_expected ? 200 : 400}; no token body/no mutation`);
+    }
     // Every original source finishes Test/Cancel before any intentional Save.
     // A redacted GET comparison alone cannot prove ciphertext retention, so
     // block the Save phase until the VM-private whole-row verifier acknowledges.
     assert.equal(mutationRequests.length, 0, "all source Test/Cancel phases precede every Save");
     await checkpoint("source-pre-save", kinds.map(kind => fixture[kind].id));
+    await checkpoint("legacy-pre-save", Object.values(fixture.legacy_attic).map(value => value.id));
+    for (const kind of ["legacy_plain", "legacy_encrypted"]) {
+      const value = fixture.legacy_attic[kind];
+      const before = await read(value.id);
+      await open(before);
+      await outer.getByRole("button", { name: "Destination", exact: true }).click();
+      await outer.getByLabel("Name", { exact: true }).fill(before.name + "-roundtrip");
+      const patch = await save(value.id);
+      assert(!Object.hasOwn(patch, "attic_token"), "unrelated legacy Save omits credential replacement");
+      await checkpoint("legacy-saved", [value.id]);
+      const saved = await read(value.id);
+      await open(saved);
+      await probe(value.id);
+      await close();
+      unchanged(saved, await read(value.id), kind);
+      await checkpoint("legacy-retained", [value.id]);
+    }
     for (const kind of ["nix_basic", "http_basic"]) {
         const id = fixture[kind].id;
         const before = await read(id);

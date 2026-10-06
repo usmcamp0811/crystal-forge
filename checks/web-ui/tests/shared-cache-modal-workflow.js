@@ -81,11 +81,118 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
       retry_delay_seconds: 9, push_timeout_seconds: 120, parallel_uploads: 3, require_sigs: true,
     });
     const before = await api("GET", cachePath);
+    // Defensive metadata tests alter only redacted GET presentation. Stored-ID
+    // probes below continue to the real server; no Test response is mocked.
+    const flags = ["attic_token_configured", "s3_credentials_configured", "s3_session_token_configured",
+      "niks3_write_token_configured", "niks3_write_mtls_configured", "niks3_read_mtls_configured",
+      "http_basic_auth_configured", "legacy_query_credentials_configured"];
+    const listRoute = `${apiBaseUrl}/api/v1/caches`;
+    const staleList = async route => {
+      if (route.request().method() !== "GET") return route.continue();
+      const response = await route.fetch();
+      const values = await response.json();
+      await route.fulfill({ response, json: values.map(value => value.id === created.id
+        ? { ...value, ...Object.fromEntries(flags.map(flag => [flag, false])), push_to: value.cache_type === "S3" ? "s3://stale-list-bucket" : "https://stale-list.example" }
+        : value) });
+    };
+    let releaseLoad;
+    const loadGate = new Promise(resolve => { releaseLoad = resolve; });
+    let firstLoad = true;
+    const freshRoute = `${apiBaseUrl}/api/v1${cachePath}`;
+    const delayThenFail = async route => {
+      if (route.request().method() === "GET" && firstLoad) {
+        firstLoad = false;
+        await loadGate;
+        return route.fulfill({ status: 503, json: { error: "fixture destination unavailable" } });
+      }
+      await route.continue();
+    };
+    await page.route(listRoute, staleList);
+    await page.route(freshRoute, delayThenFail);
+    const editRequestsBeforeLoad = requests.filter(r => r.method() !== "GET" && r.url().includes(cachePath)).length;
+    try {
+      await page.goto(`${baseUrl}/caches`);
+      await page.getByText(created.name, { exact: true }).click();
+      const parent = page.getByRole("dialog").filter({ has: page.getByRole("button", { name: "Edit cache", exact: true }) });
+      const opener = parent.getByRole("button", { name: "Edit cache", exact: true });
+      await opener.click();
+      await expect(dialog.getByRole("status")).toHaveText("Loading destination…");
+      await expect(dialog.getByLabel("Name", { exact: true })).toHaveCount(0);
+      await expect(dialog.getByRole("button", { name: "Save changes", exact: true })).toHaveCount(0);
+      await expect(dialog.getByRole("button", { name: "Test connection", exact: true })).toHaveCount(0);
+      releaseLoad();
+      await expect(dialog.getByRole("alert")).toContainText("Destination could not be loaded");
+      await expect(dialog.getByLabel("Name", { exact: true })).toHaveCount(0);
+      const freshResponse = page.waitForResponse(r => r.url() === freshRoute && r.request().method() === "GET" && r.status() === 200);
+      await dialog.getByRole("button", { name: "Retry loading destination", exact: true }).click();
+      await freshResponse;
+      await expect(dialog.getByRole("button", { name: "Save changes", exact: true })).toBeEnabled();
+      await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue(before.name);
+      await expect(dialog.getByLabel(created.cache_type === "S3" ? "Destination URL" : created.cache_type === "Attic" ? "Attic server URL" : created.cache_type === "Niks3" ? "Read / substituter URL" : "URL", { exact: true })).toHaveValue(before.push_to);
+      await section("Credentials");
+      if (created.cache_type === "Attic" || created.cache_type === "S3") await expect(dialog.getByLabel("Credential", { exact: true })).toHaveValue("__current__");
+      if (created.cache_type === "Niks3") await expect(dialog.getByLabel("Write credential", { exact: true })).toHaveValue("__current__");
+      assert.equal(requests.filter(r => r.method() !== "GET" && r.url().includes(cachePath)).length, editRequestsBeforeLoad, "loading/error/retry never probe or save stale list data");
+      await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+      await expect(opener).toBeFocused();
+      await parent.getByRole("button", { name: "Close", exact: true }).click();
+    } finally { releaseLoad(); await page.unroute(freshRoute, delayThenFail); await page.unroute(listRoute, staleList); }
+    const missingFlags = async route => {
+      if (route.request().method() !== "GET") return route.continue();
+      const response = await route.fetch();
+      const value = await response.json();
+      for (const flag of flags) delete value[flag];
+      await route.fulfill({ response, json: value });
+    };
+    await page.route(freshRoute, missingFlags);
+    try {
+      await page.goto(`${baseUrl}/caches`);
+      await page.getByText(created.name, { exact: true }).click();
+      const parent = page.getByRole("dialog").filter({ has: page.getByRole("button", { name: "Edit cache", exact: true }) });
+      const freshResponse = page.waitForResponse(r => r.url() === freshRoute && r.request().method() === "GET");
+      await parent.getByRole("button", { name: "Edit cache", exact: true }).click();
+      assert.equal((await freshResponse).status(), 200, "Edit fetches its baseline by ID");
+      await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue(before.name);
+      await section("Credentials");
+      await expect(dialog.getByRole("button", { name: "Test connection", exact: true })).toBeEnabled();
+      await expect(dialog).toContainText("Stored credential status unavailable");
+      const testUrl = `${freshRoute}/test-credentials`;
+      const probe = page.waitForResponse(r => r.url() === testUrl && r.request().method() === "POST");
+      await dialog.getByRole("button", { name: "Test connection", exact: true }).click();
+      const response = await probe;
+      // These discovery/draft fixtures use example.com endpoints, not the
+      // native provider fixture. Prove server authority and secret omission;
+      // the sibling native workflow requires real successful authentication.
+      assert([200, 400].includes(response.status()), "missing metadata reaches the authoritative stored-ID API");
+      if (response.status() === 400) assert.equal((await response.json()).error, "invalid_cache_test_config", "example endpoint rejection is an explicit server result");
+      const patch = response.request().postDataJSON();
+      for (const field of ["attic_token", "s3_access_key_id", "s3_secret_access_key", "s3_session_token", "niks3_auth_token", "niks3_write_client_key", "niks3_read_client_key"]) assert(!Object.hasOwn(patch, field), `retained Test omits ${field}`);
+      if (created.cache_type !== "Niks3") assert(patch.push_to == null, "unchanged fresh public URL remains omitted");
+      if (created.cache_type === "Attic" || created.cache_type === "S3") {
+        await dialog.getByRole("button", { name: "Add credential", exact: true }).click();
+        const nested = page.getByRole("dialog", { name: "Add credential", exact: true });
+        await nested.getByLabel("Name", { exact: true }).fill("incomplete replacement");
+        await nested.getByRole("button", { name: "Save credential", exact: true }).click();
+        const count = requests.filter(r => r.url() === testUrl).length;
+        await dialog.getByRole("button", { name: "Test connection", exact: true }).click();
+        await expect(dialog.getByRole("alert")).toContainText("Test not run");
+        assert.equal(requests.filter(r => r.url() === testUrl).length, count, "explicit incomplete replacement never borrows retained identity");
+        await expect(dialog.getByRole("button", { name: "Save changes", exact: true })).toBeDisabled();
+      }
+      await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+      await parent.getByRole("button", { name: "Close", exact: true }).click();
+      console.log(`TASK-470 ${created.cache_type}: fresh GET loading/error/retry; missing flags real ID Test HTTP ${response.status()}; secret omission passed`);
+    } finally { await page.unroute(freshRoute, missingFlags); }
     await page.goto(`${baseUrl}/caches`);
     await page.getByText(created.name, { exact: true }).click();
     const panel = page.getByRole("dialog").filter({ has: page.getByRole("button", { name: "Edit cache", exact: true }) });
     const trigger = panel.getByRole("button", { name: "Edit cache", exact: true });
-    const open = async () => { await trigger.click(); await expect(dialog).toBeVisible(); };
+    const open = async () => {
+      const freshResponse = page.waitForResponse(r => r.url() === `${apiBaseUrl}/api/v1${cachePath}` && r.request().method() === "GET");
+      await trigger.click();
+      assert.equal((await freshResponse).status(), 200, "Edit bootstrap GET succeeds");
+      await expect(dialog.getByLabel("Name", { exact: true })).toBeVisible();
+    };
     const envRoute = `${apiBaseUrl}/api/v1/caches/${created.id}/environments`;
     await page.route(envRoute, async route => {
       if (route.request().method() === "GET" && await dialog.count() > 0) return route.fulfill({ status: 503, json: { error: "fixture scope read failure" } });
@@ -117,6 +224,55 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
     for (const label of ["AWS secret access key", "AWS session token (optional)", "Attic token", "Write token"]) {
       const input = dialog.getByLabel(label, { exact: true });
       if (await input.count()) await expect(input).toHaveValue("");
+    }
+    if (created.cache_type === "Attic" || created.cache_type === "S3") {
+      const configuredFlag = created.cache_type === "Attic" ? "attic_token_configured" : "s3_credentials_configured";
+      assert.equal(before[configuredFlag], true, "normal configured-true path must exercise empty replacement confirmation");
+      const selector = dialog.getByLabel("Credential", { exact: true });
+      await expect(selector).toHaveValue("__current__");
+      const testUrl = `${apiBaseUrl}/api/v1${cachePath}/test-credentials`;
+      const puts = () => requests.filter(r => r.url() === `${apiBaseUrl}/api/v1${cachePath}` && r.method() === "PUT").length;
+      const probes = () => requests.filter(r => r.url() === testUrl && r.method() === "POST").length;
+      for (const variant of created.cache_type === "S3" ? ["empty-key", "profile-only-role"] : ["empty-token"]) {
+        const name = `incomplete-${variant}`;
+        const putsBefore = puts();
+        const probesBefore = probes();
+        await dialog.getByRole("button", { name: "Replace credential", exact: true }).click();
+        const nested = page.getByRole("dialog", { name: "Add credential", exact: true });
+        await nested.getByLabel("Name", { exact: true }).fill(name);
+        if (variant === "profile-only-role") {
+          await nested.getByRole("group", { name: "Type", exact: true }).getByRole("button", { name: "IAM role (IRSA)", exact: true }).click();
+          await nested.getByLabel("Role ARN", { exact: true }).fill("fixture-role-profile");
+        } else await expect(nested.getByLabel(created.cache_type === "Attic" ? "Token" : "Secret access key", { exact: true })).toHaveValue("");
+        await nested.getByRole("button", { name: "Save credential", exact: true }).click();
+        await expect(nested).toBeHidden();
+        await expect(selector.locator("option:checked")).toContainText(name);
+        assert(!["", "__current__", "__new__"].includes(await selector.inputValue()), "confirmation preserves the explicit local draft ID");
+        await expect(dialog.getByRole("button", { name: "Edit credential", exact: true })).toBeVisible();
+        await expect(dialog.getByRole("button", { name: "Save changes", exact: true })).toBeDisabled();
+        await dialog.getByRole("button", { name: "Test connection", exact: true }).click();
+        await expect(dialog.getByRole("alert")).toContainText(created.cache_type === "Attic" ? "Test not run: Enter an Attic token" : "Test not run: Enter AWS access credentials");
+        assert.equal(probes(), probesBefore, "configured credentials cannot complete an explicit empty replacement Test");
+        assert.equal(puts(), putsBefore, "confirming an incomplete replacement never saves or silently retains it");
+        // Only an operator selection restores retention. Restore the separate
+        // public profile draft too, so the remaining unrelated-edit assertions
+        // continue to check the original configuration rather than a role edit.
+        await selector.selectOption("__current__");
+        if (variant === "profile-only-role") await dialog.getByLabel("S3 profile (optional)", { exact: true }).fill(before.s3_profile || "");
+        await expect(selector).toHaveValue("__current__");
+        await expect(dialog.getByRole("button", { name: "Save changes", exact: true })).toBeEnabled();
+        const responsePromise = page.waitForResponse(r => r.url() === testUrl && r.request().method() === "POST");
+        await dialog.getByRole("button", { name: "Test connection", exact: true }).click();
+        const response = await responsePromise;
+        assert([200, 400].includes(response.status()), "explicit retention reaches the real stored-ID API");
+        if (response.status() === 400) assert.equal((await response.json()).error, "invalid_cache_test_config", "example endpoint rejection remains server-authoritative");
+        const patch = response.request().postDataJSON();
+        for (const field of ["attic_token", "s3_access_key_id", "s3_secret_access_key", "s3_session_token"]) assert(!Object.hasOwn(patch, field), `explicit retention omits ${field}`);
+        assert.equal(probes(), probesBefore + 1, "retention occurs only after selecting Current");
+        assert.equal(puts(), putsBefore, "retained Test is not Save");
+        await expect(dialog.getByRole("button", { name: "Save changes", exact: true })).toBeEnabled();
+      }
+      console.log(`TASK-470 ${created.cache_type}: configured-true empty replacements stay selected; Test/Save blocked; explicit Current permits secret-free ID POST`);
     }
     if (created.cache_type === "Nix") {
       await expect(dialog.getByRole("button", { name: "Add credential", exact: true })).toHaveCount(0);

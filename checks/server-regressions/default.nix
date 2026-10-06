@@ -678,6 +678,8 @@ SQL
     }
 
     for testName in \
+      handlers::api::caches::retained_probe_tests::legacy_attic_plaintext_and_historical_ciphertext_retain_on_test_and_save \
+      handlers::api::caches::retained_probe_tests::legacy_attic_null_and_empty_token_refuse_before_probe_without_mutation \
       handlers::api::caches::retained_probe_tests::stored_probe_preserves_ciphertext_scope_and_timestamps \
       handlers::api::caches::retained_probe_tests::stored_probe_admin_json_missing_id_conversion_and_ssrf \
       handlers::api::caches::retained_probe_tests::add_probe_validates_without_writes_and_niks3_requires_token \

@@ -117,9 +117,11 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
   const openEdit = async () => {
     await page.goto(`${baseUrl}/caches`);
     await page.getByText(name, { exact: true }).click();
+    const freshResponse = page.waitForResponse(r => r.url() === `${apiBaseUrl}/api/v1/caches/${createdId}` && r.request().method() === "GET");
     await page.getByRole("button", { name: "Edit cache", exact: true }).click();
+    assert.equal((await freshResponse).status(), 200, "Niks3 Edit loads a fresh destination by ID");
     const dialog = page.getByRole("dialog", { name: "Cache destination" });
-    await expect(dialog).toBeVisible();
+    await expect(dialog.getByLabel("Name", { exact: true })).toBeVisible();
     return dialog;
   };
   const save = async dialog => {
@@ -314,6 +316,8 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     await expect(dialog.getByRole("button", { name: "Save changes", exact: true })).toBeDisabled();
     await expect(dialog.locator("footer")).toContainText("Scope not loaded");
     await expect(dialog.locator("footer")).not.toContainText("Global scope");
+    await dialog.getByRole("button", { name: "Credentials", exact: true }).click();
+    await expect(dialog.getByRole("button", { name: "Test connection", exact: true })).toBeDisabled();
     if (captureState) await captureState("niks3-scope-load-error");
     await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
     dialog = await openEdit();

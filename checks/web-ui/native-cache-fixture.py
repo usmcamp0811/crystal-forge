@@ -6,6 +6,7 @@ The deterministic Garage/Niks3 keys are public, test-only protocol fixtures.
 """
 
 import datetime
+import base64
 import hashlib
 import hmac
 import json
@@ -27,10 +28,13 @@ CREDENTIALS = Path("/etc/cache-fixture-credentials")
 FIXTURE = Path("/run/cf-cache-credential-fixture.json")
 ATTIC_FIXTURE = Path("/run/cf-attic-fixture.json")
 HTTP_FIXTURE = Path("/run/cf-http-fixture.json")
+LEGACY_TOKEN = Path("/run/cf-legacy-attic-token.json")
+SEED_REQUEST = Path("/run/cf-cache-seed-request.json")
 PHASE_REQUEST = Path("/run/cf-cache-phase-request.json")
 PHASE_ACK = Path("/run/cf-cache-phase-ack.json")
 PHASE_PROOF = Path("/run/cf-cache-phase-proof.json")
 SOURCE_KINDS = ("attic", "s3", "nix", "niks3", "nix_basic", "http_basic", "legacy_query")
+LEGACY_KINDS = ("legacy_plain", "legacy_encrypted", "legacy_missing")
 CA = "/etc/ssl/certs/ca-certificates.crt"
 STAGE = "startup"
 
@@ -124,6 +128,7 @@ def bootstrap_attic():
         "read_url": "https://atticCache:9443/web-ui-private/nix-cache-info",
         "public_key": config.json()["public_key"],
         "token": token, "replacement_token": replacement,
+        "legacy_token": mint("web-ui-legacy-read"),
     })
 
 
@@ -167,6 +172,7 @@ def assemble():
     """Proves authentication against native services before exposing the file."""
     global STAGE
     attic = json.loads(ATTIC_FIXTURE.read_text())
+    protected_json(LEGACY_TOKEN, {"token": attic.pop("legacy_token")})
     basic = json.loads(HTTP_FIXTURE.read_text())
     # This alias belongs only to the disposable VM. Its certificate SAN and
     # native route are verified below; the server later resolves/pins this DNS
@@ -252,6 +258,7 @@ def assemble():
                              "nix": nix, "niks3": niks3,
                              "nix_basic": dict(basic_public), "http_basic": dict(basic_public),
                              "checkpoint": {"request_path": str(PHASE_REQUEST), "ack_path": str(PHASE_ACK)},
+                             "seed_request_path": str(SEED_REQUEST),
                              "legacy_query": {
                                  "sanitized_url": "https://cache:9444/legacy-query/nix-cache-info?fixture=legacy",
                                  "query_parameter": "token", "query_value_local_only": True,
@@ -463,9 +470,78 @@ def environment_scope(client, origin):
     return [values[0]["id"]]
 
 
+def historical_envelope(token, raw_key):
+    """Builds a historical enc:v1 envelope independently from production Rust.
+
+    The wire format is AES-256-GCM with SHA-256(raw process key), a random
+    96-bit nonce, empty AAD, and standard base64 nonce.ciphertext-plus-tag.
+    Neither the key, token nor resulting ciphertext may enter driver output.
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    nonce = os.urandom(12)
+    encrypted = AESGCM(hashlib.sha256(raw_key.encode()).digest()).encrypt(nonce, token.encode(), b"")
+    return "enc:v1:" + base64.b64encode(nonce).decode() + "." + base64.b64encode(encrypted).decode()
+
+
+def process_encryption_key(pid):
+    """Reads only the effective process encryption key into private memory."""
+    env = dict(value.split("=", 1) for value in Path(f"/proc/{pid}/environ").read_bytes().decode().split("\0") if "=" in value)
+    key = env.get("CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY", env.get("CRYSTAL_FORGE_SECRET_KEY"))
+    assert key, "Fixture server encryption key must be configured"
+    return key
+
+
+def insert_legacy_attic(pg, attic, token, raw_key, scope, prefix="task470-retained-native-"):
+    """Inserts separate disabled legacy rows without the current create API.
+
+    Parameterized SQL supplies canonical native metadata and exact membership.
+    The three rows contain plaintext, independently encrypted historical data,
+    and NULL respectively. Only IDs/storage-kind labels are returned to UI.
+    """
+    stored = {"legacy_plain": token, "legacy_encrypted": historical_envelope(token, raw_key), "legacy_missing": None}
+    result = {}
+    with pg.cursor() as cursor:
+        for kind in LEGACY_KINDS:
+            name = prefix + kind
+            url = attic["read_url"] + "?fixture_case=" + kind
+            cursor.execute("""INSERT INTO cache_destinations
+                (name,cache_type,push_to,enabled,attic_token,attic_cache_name,attic_public_key)
+                VALUES (%s,'Attic',%s,false,%s,%s,%s) RETURNING id""",
+                (name, url, stored[kind], attic["cache_name"], attic["public_key"]))
+            destination_id = cursor.fetchone()[0]
+            for environment_id in scope:
+                cursor.execute("INSERT INTO cache_destination_environments (cache_destination_id,environment_id) VALUES (%s,%s)",
+                               (destination_id, environment_id))
+            result[kind] = {"id": destination_id, "name": name, "storage": kind,
+                            "token_expected": kind != "legacy_missing"}
+    return result
+
+
 def seed():
-    """Seeds disabled scoped destinations after browser registration completes."""
+    """Seeds seven destinations only when the retained browser workflow requests.
+
+    Provider startup and login readiness do not authorize row creation. Earlier
+    browser workflows must see their original cache data. Step25 sends only a
+    private nonsecret marker after its shared Add and Niks3 security workflows.
+    """
     global STAGE
+    STAGE = "waiting for retained workflow25 seed request"
+    deadline = time.monotonic() + 2700
+    while not SEED_REQUEST.exists():
+        assert time.monotonic() < deadline, "Retained workflow did not request native fixture seed"
+        time.sleep(0.1)
+    assert SEED_REQUEST.stat().st_mode & 0o777 == 0o600, "Seed request must be private"
+    assert json.loads(SEED_REQUEST.read_text()) == {
+        "version": 1, "step": "25-caches-modal-attic", "workflow": "retained-cache-credentials",
+    }, "Seed request must identify the retained workflow"
+    print("Retained workflow25 requested native seed; starting real API creation", flush=True)
+    before = subprocess.run(
+        ["sudo", "-u", "postgres", "psql", "-d", "crystal_forge", "-At", "-v", "ON_ERROR_STOP=1",
+         "-c", "SELECT count(*) FROM cache_destinations WHERE name LIKE 'task470-retained-native-%'"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=8, check=False,
+    )
+    assert before.returncode == 0 and before.stdout.strip() == b"0", "Native fixture rows must not exist before retained workflow seed"
+    print("Native row count before retained workflow seed: 0", flush=True)
     STAGE = "waiting for browser-owned VM admin"
     client, origin = api_client(wait=True)
     fixture = json.loads(FIXTURE.read_text())
@@ -499,6 +575,26 @@ def seed():
             "saved_name": "task470-retained-native-" + kind + "-roundtrip",
             "fields": field_hashes(destination_id),
         }
+    # Legacy compatibility must not be manufactured by the current API writer.
+    import psycopg2
+    server = subprocess.run(["systemctl", "show", "crystal-forge-server.service", "-p", "MainPID", "--value"],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=8, check=False)
+    assert server.returncode == 0
+    legacy_token = json.loads(LEGACY_TOKEN.read_text())["token"]
+    pg = psycopg2.connect(dbname="crystal_forge", user="postgres", host="/run/postgresql")
+    with pg:
+        fixture["legacy_attic"] = insert_legacy_attic(pg, fixture["attic"], legacy_token,
+                                                    process_encryption_key(int(server.stdout)), scope)
+    pg.close()
+    for kind, value in fixture["legacy_attic"].items():
+        destination_id = value["id"]
+        expected = {"row": snapshot(destination_id).hex()}
+        if kind != "legacy_missing":
+            expected.update(post_save_row=snapshot(destination_id, intentional_save=True).hex(),
+                            uri=snapshot(destination_id, uri_only=True).hex(),
+                            saved_name=value["name"] + "-roundtrip", fields=field_hashes(destination_id))
+        hashes[str(destination_id)] = expected
+    LEGACY_TOKEN.unlink()
     protected_json(Path("/run/cf-cache-seed-snapshots.json"), hashes)
     fixture["seed_complete"] = True
     temporary = FIXTURE.with_suffix(".ready")
@@ -518,6 +614,8 @@ def checkpoints():
     deadline = time.monotonic() + 2700
     sequence = 1
     source_checked = False
+    legacy_checked = False
+    legacy_states = {}
     clones = {}
     while time.monotonic() < deadline:
         if not PHASE_REQUEST.exists():
@@ -536,6 +634,7 @@ def checkpoints():
         assert len(set(ids)) == len(ids), "Checkpoint IDs must be distinct"
         fixture = json.loads(FIXTURE.read_text())
         source_ids = sorted(fixture[kind]["id"] for kind in SOURCE_KINDS)
+        legacy_ids = sorted(value["id"] for value in fixture["legacy_attic"].values())
         if not source_checked:
             assert phase == "source-pre-save" and sorted(ids) == source_ids, \
                 "First checkpoint must cover all seven original destinations"
@@ -545,6 +644,29 @@ def checkpoints():
                     "Pre-Save Test/Cancel changed complete raw destination or assignments"
             source_checked = True
             print("Private pre-Save checkpoint passed: all seven complete raw rows and assignments unchanged")
+        elif phase == "legacy-pre-save":
+            assert not legacy_checked and sorted(ids) == legacy_ids
+            hashes = json.loads(Path("/run/cf-cache-seed-snapshots.json").read_text())
+            for destination_id in legacy_ids:
+                assert snapshot(destination_id).hex() == hashes[str(destination_id)]["row"], \
+                    "Legacy Test/Cancel changed plaintext/historical/NULL raw row or assignments"
+            legacy_checked = True
+            print("Private legacy pre-Save checkpoint passed: plaintext/historical/NULL complete raw rows unchanged")
+        elif phase in ("legacy-saved", "legacy-retained"):
+            assert legacy_checked and len(ids) == 1 and ids[0] in legacy_ids
+            destination_id = ids[0]
+            kind = next(kind for kind, value in fixture["legacy_attic"].items() if value["id"] == destination_id)
+            assert kind != "legacy_missing"
+            if phase == "legacy-saved":
+                expected = json.loads(Path("/run/cf-cache-seed-snapshots.json").read_text())[str(destination_id)]
+                assert snapshot(destination_id, intentional_save=True).hex() == expected["post_save_row"], \
+                    "Unrelated legacy Save rewrote plaintext/ciphertext/configuration/scope"
+                legacy_states[destination_id] = {"kind": kind, "stage": "saved", "hash": snapshot(destination_id)}
+            else:
+                state = legacy_states[destination_id]
+                assert state["stage"] == "saved" and snapshot(destination_id) == state["hash"]
+                state["stage"] = "retained"
+                print("Private unrelated-Save/retained-Test legacy checkpoint passed: " + kind)
         else:
             assert len(ids) == 1 and ids[0] not in source_ids, "Clone checkpoint requires one new ID"
             destination_id = ids[0]
@@ -587,11 +709,16 @@ def checkpoints():
                 print("Private replacement retained-Test checkpoint passed: " + clone["type"])
             else:
                 raise AssertionError("Unexpected browser checkpoint phase")
-        complete = len(clones) == 2 and all(clone["stage"] == "retained" for clone in clones.values())
+        complete = (len(clones) == 2 and all(clone["stage"] == "retained" for clone in clones.values())
+                    and legacy_checked and len(legacy_states) == 2
+                    and all(state["stage"] == "retained" for state in legacy_states.values()))
         if complete:
             protected_json(PHASE_PROOF, {
                 "source_pre_save": "passed", "complete_source_rows": 7,
                 "source_assignments_and_timestamps": "unchanged",
+                "legacy_direct_sql_pre_save": "passed",
+                "legacy_complete_raw_rows": 3,
+                "legacy_unrelated_save_credentials_preserved": "passed",
                 "replacement_clones": [{"cache_type": clone["type"],
                                         "pre_save_raw_immutability": "passed",
                                         "post_save_retained_raw_immutability": "passed"}
@@ -704,6 +831,9 @@ def verify_api():
     for kind in ("attic", "s3", "nix", "niks3", "nix_basic", "http_basic", "legacy_query"):
         response = request(client, "DELETE", origin + f"/api/v1/caches/{fixture[kind]['id']}")
         assert response.status_code in (200, 204), "Native browser fixture cleanup failed"
+    for value in fixture["legacy_attic"].values():
+        response = request(client, "DELETE", origin + f"/api/v1/caches/{value['id']}")
+        assert response.status_code in (200, 204), "Direct legacy fixture cleanup failed"
     HTTP_FIXTURE.unlink()
     print("Native stored-ID API proof passed: Attic, S3, public Nix, Niks3 token/private and mTLS/private, Nix/Http Basic, legacy query retention")
 
@@ -820,6 +950,13 @@ def observe(native_only=False):
     result = {"legacy_query_native_request_count": 0,
               "changed_authority_requests": len(changed), "authorization_forwarded": False}
     if not native_only:
+        attic_rows = Path("/run/cf-attic-observer.log").read_text().splitlines()
+        assert not any(row.endswith("case=missing") for row in attic_rows), "Missing Attic credential probe contacted provider"
+        for kind in ("plain", "encrypted"):
+            assert any("status=200 auth=present" in row and row.endswith("case=" + kind) for row in attic_rows), \
+                "Direct legacy Attic read must authenticate against native private provider"
+        result.update(legacy_attic_plain_native_auth="passed", legacy_attic_encrypted_native_auth="passed",
+                      legacy_attic_missing_native_requests=0)
         Path("/tmp/screenshots/native-http-observer-proof.json").write_text(json.dumps(result, indent=2))
     print("Native HTTP observer passed: no legacy query replay; no Basic Authorization at changed authority")
 
