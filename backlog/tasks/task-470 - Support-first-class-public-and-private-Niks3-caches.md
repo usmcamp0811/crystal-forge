@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-06 18:36'
+updated_date: '2026-10-06 19:14'
 labels: []
 dependencies: []
 references:
@@ -148,6 +148,8 @@ Runner-progress delegation at 0ce076b: own checks/server-regressions/default.nix
 Scoped CI infrastructure delegation at 0ce076b: own only .gitlab-ci.yml and minimal packages/ci helper/test. Apply CLI-only public-cache policy to server-regressions, niks3-cache, builder-evaluator-packaging and separate web-ui jobs (manual candidates retain --impure). Report inherited Attic presence as a boolean and validate effective public-cache/timeouts/signatures with the same argument array used for builds; preserve builder controls and all other jobs. Audit root flake and runner traces, run configuration/scope/argv checks and GitLab API lint only. Parent owns local packaging gate and commit/push; no global Nix, root flake, services or application edits.
 
 Follow-up runner verification ownership: add exactly handlers::api::builders::niks3_input_owner_tests::niks3_input_owner_acknowledges_reap_and_cleanup_after_detach to nonignored membership/README (38 ignored + 13 nonignored). Preserve eleven compile/run targets and all guards. Run no-DB owner exact test, cf-config cache_credentials lifetime suite and focused Attic/model tests through Nix. Validate sibling public-cache wrapper compatibility first, then run fresh full server-regressions via wrapper with one job/two cores under a unique persistent supervisor retaining source hashes, drv, logs, exit and timestamps. Only sandbox PostgreSQL; no services, commits, CI triggers or production edits.
+
+Final FIFO verification follow-up: verified builders.rs SHA256 050c0cc398fcb5a8d69f3d96651ceb2a91e67977053a0cb5d6b38cbd4b8d2731. Add actual test handlers::api::builders::niks3_input_owner_tests::fifo_deadlines_cover_missing_readiness_and_absent_release_reader beside acknowledgement test in nonignored list and local README (38+14). Preserve existing guards/targets. Run focused exact FIFO/owner tests and fresh official full sandbox gate via stable public-cache wrapper with one job/two cores, retaining unique logs and before/after Rust/Python source hashes. No canonical sibling docs, production code, services, commits or pushes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
