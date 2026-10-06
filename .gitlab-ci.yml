@@ -200,7 +200,7 @@ flake-check:
     - |
       case "$CHECK_NAME" in
         server-regressions|niks3-cache|builder-evaluator-packaging)
-          bash packages/ci/public-cache-build.sh ".#checks.x86_64-linux.${CHECK_NAME}" -L --show-trace
+          sh packages/ci/public-cache-build.sh ".#checks.x86_64-linux.${CHECK_NAME}" -L --show-trace
           ;;
         *)
           nix build ".#checks.x86_64-linux.${CHECK_NAME}" -L --show-trace
@@ -241,7 +241,7 @@ web-ui-check:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - bash packages/ci/public-cache-build.sh ".#checks.x86_64-linux.web-ui" -L --show-trace
+    - sh packages/ci/public-cache-build.sh ".#checks.x86_64-linux.web-ui" -L --show-trace
     - mkdir -p web-ui-screenshots
     - |
       STORE_PATH=$(readlink -f result)
@@ -276,7 +276,7 @@ web-ui-baseline-candidates:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - CF_UI_UPDATE_BASELINES=1 bash packages/ci/public-cache-build.sh --impure ".#checks.x86_64-linux.web-ui" -L --show-trace
+    - CF_UI_UPDATE_BASELINES=1 sh packages/ci/public-cache-build.sh --impure ".#checks.x86_64-linux.web-ui" -L --show-trace
     - mkdir -p web-ui-baseline-candidates
     - STORE_PATH=$(readlink -f result)
     - test -d "$STORE_PATH/screenshots"

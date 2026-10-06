@@ -114,7 +114,7 @@ max-jobs = 3
         assert before == after, name
 
     def run(arguments, **extra):
-        result = subprocess.run(["bash", str(HELPER), *arguments],
+        result = subprocess.run(["sh", str(HELPER), *arguments],
                                 env=dict(env, **extra), capture_output=True, text=True)
         assert "private-marker" not in result.stdout + result.stderr
         assert "127.0.0.1" not in result.stdout + result.stderr
@@ -122,7 +122,7 @@ max-jobs = 3
 
     route = new["flake-check"]["script"][0]
     for name in old["flake-check"]["parallel"]["matrix"][0]["CHECK_NAME"]:
-        result = subprocess.run(["bash", "-euc", route], cwd=ROOT,
+        result = subprocess.run(["sh", "-euc", route], cwd=ROOT,
                                 env=dict(env, CHECK_NAME=name), capture_output=True, text=True)
         assert result.returncode == 0, name
         recorded = json.loads((directory / "argv").read_text())
@@ -131,7 +131,7 @@ max-jobs = 3
         assert recorded == ["build", *(POLICY if scoped else []), *arguments], name
         assert result.stdout.count("InheritedInternalCache=") == int(scoped), name
     for job in ("web-ui-check", "web-ui-baseline-candidates"):
-        result = subprocess.run(["bash", "-euc", new[job]["script"][0]], cwd=ROOT,
+        result = subprocess.run(["sh", "-euc", new[job]["script"][0]], cwd=ROOT,
                                 env=env, capture_output=True, text=True)
         assert result.returncode == 0, job
         impure = ["--impure"] if job.endswith("candidates") else []
