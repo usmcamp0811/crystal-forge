@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-06 02:02'
+updated_date: '2026-10-06 02:04'
 labels: []
 dependencies: []
 references:
@@ -132,6 +132,8 @@ User-delegated test-only legacy Attic proof at d8ae6ace: own retained_probe_test
 User legacy native/P1 expansion preserves four late-seed WIP files: add three separately direct-SQL legacyAttic rows (plaintext, independentAES256GCM historicalenc:v1, NULL) after retained25 seed request. NewlegacyJWT remainsserver-only; UIJSON onlyIDs/names/storage-kind. ReadruntimeCFkey privately; independentnonce12/AADempty/SHA256/rawkey/standardb64nonce.cipher+tag. Browser GETcollection-safe stale flags false/absent, realIDGETfreshtrue, realPOSTstoredID noattic_token; defensive singleIDGETflagfalse/absent stillrealPOSTsuccess withunknownpresentation. Missingtokenreal400/no providercontact. Separatelegacystrict preSave/private postsave/rawcredentialretention checkpoints withoutweakening existingseven+clones. Scoped guarded directSQL previewinsert authorizedreviewDB+current3514key, actualprivateproviders, nootherrows/services touched; browserlogicwaits siblingfrontendready before25gate.
 
 User-approved P1 Attic endpoint remediation at 974daedf: production push_to is an Attic server/base URL with separate attic_cache_name; current generic GET ignores cache name and native fixtures falsely model push_to as metadata URL. Add one pure cf-config URL derivation contract consumed by builder/server login utilities, Attic read_config/CVE materialization and cache-specific Test. Preserve legitimate base/trailing-slash/cache-root/attic-alias representations and explicitly handle old metadata URLs in memory without rewriting rows. Probe canonical read-only GET _api/v1/cache-config/<cache>, validate bounded native JSON, preserve pinned-DNS/TLS/private-target/redirect/proxy/security boundaries and retained-ID merge/non-mutation. Return safe stage/error outcomes, cache access only, write authorization Untested; public-cache success does not prove token validity. Correct primary and direct-SQL legacy fixtures to server-base shape, native root404 versus successfulAPI discriminator, wrong token/replacement and nonexistent cache cases plus configured/redacted/Edit/tokenomitted/rawimmutability proofs. Reuse task-owned persistent preview/providers and refresh backend before UI result changes; verify real existing base-shaped working-cache path. No upload as part of Test, schema changes, blanket credential replacement, assertion/baseline weakening, or MR merge. Unrelated Attic login memoization/environment concerns are audited but not automatically expanded into this fix.
+
+Delegated shared Attic helper at clean HEAD 974daedf: own only cf-config/src/attic_urls.rs and lib.rs export. Implement pure canonical server/cache/metadata/cache-config derivation using existing url dependency, native cache-name/remote-reference validation, encoded segment comparison, static errors and historical attic-alias authority semantics. Preserve HTTP prefixes and queries, reject userinfo/fragments; no persistence or network policy changes. Add unit matrices and rustdoc example; verify focused cf-config tests/doctests, owned rustfmt and diff check via Nix. Stage only new module for Git flake inclusion; no commits, pushes or services. Parent lock/worktree remain owner-managed.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
