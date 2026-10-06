@@ -148,7 +148,7 @@ README: [checks/server-regressions/README.md](../../../checks/server-regressions
   Cargo integration test binaries and a curated list of `#[ignore]`d library
   tests (POA&M, policy, notification, composite AC3, STIG mapping, bundle
   baseline, and agent key rotation areas).
-  TASK-470 also runs 38 explicitly named ignored PostgreSQL tests and 12 named
+  TASK-470 also runs 38 explicitly named ignored PostgreSQL tests and 14 named
   non-ignored tests for cache scope, retained credentials, signed capabilities,
   direct-peer dispatch, and publication-backed reads. Each invocation uses
   `--exact --test-threads=1` and requires the named success line and exactly one
@@ -183,6 +183,15 @@ README: [checks/server-regressions/README.md](../../../checks/server-regressions
   verification. See the
   [Attic endpoint contract](../caches/niks3-cache.md#attic-url-interpretation-and-named-cache-test)
   for normalization, authentication, and compatibility limits.
+  The input-owner lifetime regression runs through the same exact-test guard:
+  `handlers::api::builders::niks3_input_owner_tests::niks3_input_owner_acknowledges_reap_and_cleanup_after_detach`.
+  FIFO handshakes check success, exit failure, timeout, caller detachment, spawn
+  failure, and invalid preparation, with completion after reap and credential
+  drop. The companion
+  `handlers::api::builders::niks3_input_owner_tests::fifo_deadlines_cover_missing_readiness_and_absent_release_reader`
+  checks bounded, nonblocking coordination when readiness or a release reader
+  is absent. Both tests are selected by the current runner; the coordination
+  regression must fail at its deadline rather than hang Cargo.
 - **Why it exists.** `nix build .#server` runs only `--lib --bins` tests, and
   the `integration` check runs the Python suite, so these Rust integration
   targets would otherwise run nowhere. The list is curated on purpose and is
@@ -197,6 +206,32 @@ README: [checks/server-regressions/README.md](../../../checks/server-regressions
 > `cargo test` invocation in `checks/server-regressions/default.nix` also runs
 > the `compliance_assignment_zombie_repair` test binary, which the README list
 > does not name.
+
+The runner emits timestamped `START`/`END` phase boundaries, actual exit status,
+and elapsed seconds. Eleven critical integration targets each have separate
+named compile and run boundaries; the library has a compile boundary, and each
+selected TASK-470 test reports its qualified name and mode through the unchanged
+exact-test guard. Progress adds no heartbeat, command-argument dump, environment
+dump, or `--nocapture`. Earlier aggregate compilation output did not identify a
+hung target or the cause of a remote failure; these boundaries aid future diagnosis.
+
+For the three matrix entries `server-regressions`, `niks3-cache`, and
+`builder-evaluator-packaging`, current CI invokes
+`bash packages/ci/public-cache-build.sh` before the normal build attribute.
+The full `web-ui-check` and optional manual `web-ui-baseline-candidates` jobs use
+the same wrapper; the full browser job remains `allow_failure: true`, and the
+candidate job remains manual and optional. Other matrix entries keep their
+existing commands. This is command-local policy, not removal of organization
+caches from global configuration or a change to the application's Attic access.
+The wrapper validates public-only substituters, empty extra substituters, and
+rejection of flake-supplied cache settings. It bounds connection attempts to
+10 seconds, stalled downloads to 30 seconds, and download attempts to two, with
+fallback source builds and signature checks retained. Builder settings remain
+inherited; these limits do not bound total compilation or test duration. It
+prints the actual Nix version, a boolean inherited-cache indicator, and known
+effective settings without exposing unknown runner values. Local configuration
+evidence does not establish the remote runner's settings or a CI pass. No manual
+baseline action is implied by this catalog entry.
 
 ### `builder-evaluator-packaging`
 

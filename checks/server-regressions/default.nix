@@ -50,6 +50,52 @@ pkgs.rustPlatform.buildRustPackage {
   checkPhase = ''
     runHook preCheck
 
+    # Keep the timing EXIT trap local so PostgreSQL hook cleanup retains its
+    # ownership. Boundaries report real work, never periodic synthetic output.
+    (
+    checkStarted=$SECONDS
+    phaseName=""
+    phaseStarted=$SECONDS
+    finishPhase() {
+      local status="$1"
+      if [[ -n "$phaseName" ]]; then
+        printf 'END phase=%s exit=%s elapsed=%ss at=%s\n' \
+          "$phaseName" "$status" "$((SECONDS - phaseStarted))" "$(date -u +%FT%TZ)"
+      fi
+    }
+    beginPhase() {
+      finishPhase 0
+      phaseName="$1"
+      phaseStarted=$SECONDS
+      printf 'START phase=%s at=%s\n' "$phaseName" "$(date -u +%FT%TZ)"
+    }
+    finishCheck() {
+      local status="$?"
+      finishPhase "$status"
+      printf 'END check=server-regressions exit=%s elapsed=%ss at=%s\n' \
+        "$status" "$((SECONDS - checkStarted))" "$(date -u +%FT%TZ)"
+      exit "$status"
+    }
+    trap finishCheck EXIT
+    printf 'START check=server-regressions at=%s\n' "$(date -u +%FT%TZ)"
+
+    # Only caller-supplied target/mode labels are printed, never argv or env.
+    # A failed command retains its actual status even under Bash errexit.
+    runRegressionCommand() {
+      local testName="$1" mode="$2" started=$SECONDS status
+      shift 2
+      printf 'START %s mode=%s at=%s\n' "$testName" "$mode" "$(date -u +%FT%TZ)"
+      if "$@"; then
+        status=0
+      else
+        status=$?
+      fi
+      printf 'END %s mode=%s exit=%s elapsed=%ss at=%s\n' \
+        "$testName" "$mode" "$status" "$((SECONDS - started))" "$(date -u +%FT%TZ)"
+      return "$status"
+    }
+
+    beginPhase migrations-and-upgrade-rehearsals
     export DATABASE_URL="postgresql://$PGUSER@127.0.0.1/$PGDATABASE"
     export CRYSTAL_FORGE_TEST_DATABASE_URL="$DATABASE_URL"
     # Public sandbox-only fixture key. Never inherit deployment credentials.
@@ -432,20 +478,32 @@ SQL
 SQL
 
     echo "=== Critical cf-server integration targets ==="
-    cargo test --offline --package cf-server \
-      --test assignment_semantics \
-      --test compliance_assignment_zombie_repair \
-      --test composite_policy \
-      --test evidence_for_ato \
-      --test framework_version_id_lifecycle \
-      --test policy_counts_defect \
-      --test policy_editor_phase2 \
-      --test poam_workflows \
-      --test task433_assignment_visibility \
-      --test task433_csrf \
-      --test time_window_policy_test \
-      -- --test-threads=1
+    beginPhase critical-integration-targets
+    # Preserve all eleven targets and Cargo's failure propagation. Separate
+    # compilation/linking from execution to identify a silent boundary.
+    for testTarget in \
+      assignment_semantics \
+      compliance_assignment_zombie_repair \
+      composite_policy \
+      evidence_for_ato \
+      framework_version_id_lifecycle \
+      policy_counts_defect \
+      policy_editor_phase2 \
+      poam_workflows \
+      task433_assignment_visibility \
+      task433_csrf \
+      time_window_policy_test
+    do
+      runRegressionCommand "$testTarget" compile \
+        cargo test --offline --package cf-server --test "$testTarget" --no-run
+      runRegressionCommand "$testTarget" run \
+        cargo test --offline --package cf-server --test "$testTarget" \
+          -- --test-threads=1
+    done
 
+    beginPhase selected-library-and-additional-integration-regressions
+    runRegressionCommand cf-server-lib compile \
+      cargo test --offline --package cf-server --lib --no-run
     echo "=== Selected POA&M authorization, setup, notification, and overdue regressions ==="
     cargo test --offline --package cf-server --lib \
       handlers::api::poam::tests::http_requires_session_csrf_and_mutator_role \
@@ -659,22 +717,32 @@ SQL
       -- --ignored --test-threads=1
 
     echo "=== TASK-470 cache scope, signed capability, selection, and dispatch contracts ==="
+    beginPhase task470-exact-cache-regressions
     # --exact alone succeeds when a test is renamed or removed. Require both
     # the named success line and exactly one executed test. pipefail preserves
     # Cargo failures through tee; ignored tests are enabled only by name.
     runExactCacheRegression() {
-      local testName="$1"
+      local testName="$1" mode=nonignored started=$SECONDS status
       shift
+      if [[ "''${1:-}" == --ignored ]]; then
+        mode=ignored
+      fi
       local testLog="$TMPDIR/task470-exact-test.log"
-      if ! (set -o pipefail; cargo test --offline --package cf-server --lib "$testName" \
+      printf 'START %s mode=%s at=%s\n' "$testName" "$mode" "$(date -u +%FT%TZ)"
+      if (set -o pipefail; cargo test --offline --package cf-server --lib "$testName" \
         -- --exact --test-threads=1 --color=never "$@" 2>&1 | tee "$testLog"); then
-        return 1
+        status=0
+      else
+        status=$?
       fi
-      if ! grep -Fxq "test $testName ... ok" "$testLog" || \
-        ! grep -Fq "test result: ok. 1 passed; 0 failed; 0 ignored;" "$testLog"; then
+      if (( status == 0 )) && { ! grep -Fxq "test $testName ... ok" "$testLog" || \
+        ! grep -Fq "test result: ok. 1 passed; 0 failed; 0 ignored;" "$testLog"; }; then
         echo "Expected exactly one successful test: $testName" >&2
-        return 1
+        status=1
       fi
+      printf 'END %s mode=%s exit=%s elapsed=%ss at=%s\n' \
+        "$testName" "$mode" "$status" "$((SECONDS - started))" "$(date -u +%FT%TZ)"
+      return "$status"
     }
 
     for testName in \
@@ -731,11 +799,14 @@ SQL
       handlers::api::caches::s3_probe::tests::sigv4_signs_exact_bucket_host_path_query_and_sensitive_session \
       handlers::agent_request::tests::niks3_capability_requires_authenticated_body_and_ignores_unsigned_headers \
       handlers::agent::heartbeat::tests::niks3_selected_cache_never_drops_private_or_unsupported_first_for_fallback \
-      handlers::api::builders::tests::niks3_preclaim_capability_gate_preserves_legacy_cache_dispatch
+      handlers::api::builders::tests::niks3_preclaim_capability_gate_preserves_legacy_cache_dispatch \
+      handlers::api::builders::niks3_input_owner_tests::niks3_input_owner_acknowledges_reap_and_cleanup_after_detach \
+      handlers::api::builders::niks3_input_owner_tests::fifo_deadlines_cover_missing_readiness_and_absent_release_reader
     do
       runExactCacheRegression "$testName"
     done
 
+    )
     runHook postCheck
   '';
 

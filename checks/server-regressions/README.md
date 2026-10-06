@@ -16,8 +16,9 @@ is meant to be consumed as a package.
   columns and indexes present. This is an upgrade rehearsal, not just a
   from-empty migration run.
 - A focused list of `cf-server` Cargo integration test binaries: assignment
-  semantics, composite policy, evidence-for-ATO, framework version ID
-  lifecycle, policy counts, policy editor phase 2, POA&M workflows, TASK-433
+  semantics, compliance assignment zombie repair, composite policy,
+  evidence-for-ATO, framework version ID lifecycle, policy counts, policy editor
+  phase 2, POA&M workflows, TASK-433
   assignment visibility and CSRF, and time-window policy behavior.
 - A curated list of `#[ignore]`d library tests covering POA&M
   authorization/CSRF, setup-wizard progress counting, policy-requirement
@@ -149,7 +150,7 @@ results, lock release, and exact raw-state preservation on policy refusal.
 The requisite-publication regression verifies that `ATTIC_SERVER_URL` uses the
 shared resolver's canonical server base for Attic.
 
-These 12 non-ignored tests run with `--exact --test-threads=1`:
+These 14 non-ignored tests run with `--exact --test-threads=1`:
 
 ```text
 handlers::api::builders::tests::attic_requisite_env_uses_shared_server_base
@@ -164,13 +165,73 @@ handlers::api::caches::s3_probe::tests::sigv4_signs_exact_bucket_host_path_query
 handlers::agent_request::tests::niks3_capability_requires_authenticated_body_and_ignores_unsigned_headers
 handlers::agent::heartbeat::tests::niks3_selected_cache_never_drops_private_or_unsupported_first_for_fallback
 handlers::api::builders::tests::niks3_preclaim_capability_gate_preserves_legacy_cache_dispatch
+handlers::api::builders::niks3_input_owner_tests::niks3_input_owner_acknowledges_reap_and_cleanup_after_detach
+handlers::api::builders::niks3_input_owner_tests::fifo_deadlines_cover_missing_readiness_and_absent_release_reader
 ```
+
+The input-publication owner regression uses FIFO handshakes to cover success,
+child failure, timeout, caller detach, spawn failure, and configuration failure.
+Credentials remain available while the child runs. The completion callback
+observes child reaping and credential-directory cleanup before it acknowledges
+completion. Caller detach does not cancel the process owner.
+The FIFO deadline regression proves that missing readiness and a full release
+FIFO fail with `TimedOut` rather than leave a blocking fixture operation.
+
+## Execution progress and failure evidence
+
+The check emits timestamped `START` and `END` boundaries for the overall check
+and its migration, critical integration, selected regression, and TASK-470
+phases. `END` records the actual exit status and elapsed whole seconds. The
+timing trap runs in a subshell so the PostgreSQL hook retains cleanup ownership.
+Failure stops the check and closes the active phase with the failed status.
+
+Each of the same eleven critical integration targets now has a named `compile`
+invocation (`cargo test --no-run`) followed by a named `run` invocation. Both use
+`--offline --package cf-server --test <target>`; execution retains
+`--test-threads=1`. Cargo reuses shared build artifacts. A last `START` without
+its matching `END` identifies the active target and whether Cargo was compiling
+or executing. The library also has an explicit compilation boundary before its
+selected tests execute. Cargo's normal output reports executed test names.
+
+Each of the 38 ignored and 14 non-ignored TASK-470 tests emits its qualified name,
+mode, start time, exit status, and elapsed time. Cargo stdout and stderr still
+pass through `tee` to the exact-test guard. `pipefail` preserves failures from
+Cargo or `tee`; success still requires the named `... ok` line and the existing
+one-passed/zero-failed/zero-ignored summary. Zero executed tests fail the gate.
+
+Progress labels contain only phase names, target names, and modes. The runner
+does not print command arguments or environment values, enable `--nocapture`,
+or emit periodic heartbeat output. Successful test payload output remains
+captured by Rust's default test harness. Failed tests retain existing Cargo
+failure output.
+
+CI job `16957035199` last reported compilation warnings at `04:14:07` after
+entering the aggregate critical integration command. That trace has no observed
+test start and does not identify a hung target, an active PID, or lost output.
+The later TASK-470 Attic tests had not been logged. The new boundaries narrow a
+future reproduction; they do not establish the cause of that remote failure.
 
 ## Run it
 
 ```sh
 nix build .#checks.x86_64-linux.server-regressions --print-build-logs
 ```
+
+For a constrained local reproduction with the public binary cache:
+
+```sh
+bash packages/ci/public-cache-build.sh --no-link -L --max-jobs 1 --cores 2 \
+  --keep-failed --print-out-paths .#checks.x86_64-linux.server-regressions
+```
+
+The wrapper validates the public-cache policy with the same CLI options passed
+to the build. It preserves inherited builder settings and requires signatures.
+The policy applies to this command only. Connection and stalled-download
+timeouts bound substitution attempts; they do not change the test or CI job
+budget. Retain raw build logs, the command's exit status, and start/finish times
+under an external supervisor when the calling terminal has a shorter timeout.
+A previously realized derivation is not proof that a changed runner executed;
+confirm the new derivation was built and emitted its check boundaries.
 
 No VM is booted. `postgresqlTestHook` starts a local disposable PostgreSQL
 instance for the build sandbox; the test role has `LOGIN SUPERUSER CREATEDB`

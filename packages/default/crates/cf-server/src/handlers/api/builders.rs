@@ -768,51 +768,21 @@ async fn push_derivation_requisites_to_cache_destination(
         let deadline = std::time::Duration::from_secs(
             destination.push_timeout_seconds.unwrap_or(3600).max(1) as u64,
         );
-        // CONCURRENCY: Cancellation detaches this owner, which retains write
-        // credentials until the single closure push exits or is killed/reaped.
-        return tokio::spawn(async move {
-            let credential_directory = prepared
-                .args
-                .windows(2)
-                .find(|pair| matches!(pair[0].as_str(), "--auth-token-path" | "--client-key"))
-                .and_then(|pair| std::path::Path::new(&pair[1]).parent())
-                .ok_or(StatusCode::CONFLICT)?;
-            let mut command = Command::new(&prepared.command);
-            crate::derivations::utils::apply_niks3_env_to_command(
-                &mut command,
-                credential_directory,
+        return run_niks3_input_owner(prepared, deadline, |event| {
+            // SECURITY: Fixed fields identify an operation, never its arguments,
+            // credential filenames, store paths, URLs or upstream diagnostics.
+            tracing::info!(
+                target: "crystal_forge::niks3_input_owner",
+                operation = %event.operation,
+                phase = event.phase,
+                child_pid = event.child_pid.unwrap_or(0),
+                child_reaped = event.child_reaped,
+                cleanup_attempted = event.cleanup_attempted,
+                outcome = event.outcome,
+                "Niks3 input owner lifecycle"
             );
-            let mut child = command
-                .args(&prepared.args)
-                .kill_on_drop(true)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            let result = match tokio::time::timeout(deadline, child.wait()).await {
-                Ok(Ok(status)) => {
-                    if status.success() {
-                        Ok(true)
-                    } else {
-                        Err(StatusCode::INTERNAL_SERVER_ERROR)
-                    }
-                }
-                Ok(Err(_)) => {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                    Err(StatusCode::INTERNAL_SERVER_ERROR)
-                }
-                Err(_) => {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                    Err(StatusCode::CONFLICT)
-                }
-            };
-            drop(prepared);
-            result
         })
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .await;
     }
     let remote = std::env::var("ATTIC_REMOTE_NAME").unwrap_or_else(|_| "local".to_string());
 
@@ -904,6 +874,408 @@ async fn push_derivation_requisites_to_cache_destination(
     }
 
     Ok(true)
+}
+
+// Completion acknowledges resource destruction, not successful directory
+// removal: TempDir::drop can ignore filesystem errors. The final cleanup audit
+// must still check the original roots after this acknowledgment.
+struct Niks3InputOwnerEvent {
+    operation: Uuid,
+    phase: &'static str,
+    child_pid: Option<u32>,
+    child_reaped: bool,
+    cleanup_attempted: bool,
+    outcome: &'static str,
+}
+
+// CONCURRENCY: The handoff transfers child and prepared credentials together.
+// Dropping the caller afterward detaches the owned task without changing upload
+// cancellation policy.
+// Child startup and the start acknowledgment precede the first await and task
+// handoff, so a queued owner cannot hold resources without a visible start.
+// It emits exactly one start and one completion on controlled return paths.
+// Completion follows child wait/reap and explicit credential-owner drop. A
+// failed reap is recorded as such and cannot establish a quiescent boundary.
+async fn run_niks3_input_owner(
+    prepared: cf_config::cache_credentials::PreparedNiks3Push,
+    deadline: std::time::Duration,
+    mut observe: impl FnMut(Niks3InputOwnerEvent) + Send + 'static,
+) -> Result<bool, StatusCode> {
+    let operation = Uuid::new_v4();
+    let credential_directory = prepared
+        .args
+        .windows(2)
+        .find(|pair| matches!(pair[0].as_str(), "--auth-token-path" | "--client-key"))
+        .and_then(|pair| std::path::Path::new(&pair[1]).parent());
+    let spawned = credential_directory.map(|directory| {
+        let mut command = Command::new(&prepared.command);
+        crate::derivations::utils::apply_niks3_env_to_command(&mut command, directory);
+        command
+            .args(&prepared.args)
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    });
+    let child_pid = spawned
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .and_then(tokio::process::Child::id);
+    // Preserve the deadline relative to child startup even if the owned task
+    // must wait for a scheduler slot after this synchronous resource handoff.
+    let expires = tokio::time::Instant::now() + deadline;
+    observe(Niks3InputOwnerEvent {
+        operation,
+        phase: "started",
+        child_pid,
+        child_reaped: false,
+        cleanup_attempted: false,
+        outcome: "running",
+    });
+    tokio::spawn(async move {
+        let (result, child_reaped, outcome) = match spawned {
+            Some(Ok(mut child)) => {
+                let completion = match tokio::time::timeout_at(expires, child.wait()).await {
+                    Ok(Ok(status)) if status.success() => (Ok(true), true, "success"),
+                    Ok(Ok(_)) => (Err(StatusCode::INTERNAL_SERVER_ERROR), true, "exit_failure"),
+                    Ok(Err(_)) => {
+                        let _ = child.kill().await;
+                        let reaped = child.wait().await.is_ok();
+                        (
+                            Err(StatusCode::INTERNAL_SERVER_ERROR),
+                            reaped,
+                            "wait_failure",
+                        )
+                    }
+                    Err(_) => {
+                        let _ = child.kill().await;
+                        let reaped = child.wait().await.is_ok();
+                        (Err(StatusCode::CONFLICT), reaped, "timeout")
+                    }
+                };
+                drop(child);
+                completion
+            }
+            Some(Err(_)) => (
+                Err(StatusCode::INTERNAL_SERVER_ERROR),
+                false,
+                "spawn_failure",
+            ),
+            None => (Err(StatusCode::CONFLICT), false, "configuration_failure"),
+        };
+        drop(prepared);
+        observe(Niks3InputOwnerEvent {
+            operation,
+            phase: "completed",
+            child_pid,
+            child_reaped,
+            cleanup_attempted: true,
+            outcome,
+        });
+        result
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+}
+
+#[cfg(test)]
+mod niks3_input_owner_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::time::{Duration, Instant};
+
+    // Keep both FIFO ends open before spawning a child. O_NONBLOCK bounds every
+    // read/write syscall; the parent endpoints prevent blocking opens or EOF
+    // from making a missing child look like a completed handshake.
+    fn handshake_fifo(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+        nix::unistd::mkfifo(
+            path,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )?;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(path)
+    }
+
+    fn poll_fifo(
+        fifo: &std::fs::File,
+        events: libc::c_short,
+        until: Instant,
+        phase: &'static str,
+    ) -> std::io::Result<()> {
+        loop {
+            let remaining = until
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::TimedOut, phase))?;
+            let milliseconds = remaining
+                .as_millis()
+                .saturating_add(1)
+                .min(i32::MAX as u128);
+            let mut descriptor = libc::pollfd {
+                fd: fifo.as_raw_fd(),
+                events,
+                revents: 0,
+            };
+            // SAFETY: The borrowed File keeps its descriptor open. The initialized
+            // stack pollfd is exclusively borrowed for one synchronous poll call.
+            let result = unsafe { libc::poll(&mut descriptor, 1, milliseconds as i32) };
+            if result < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    // EINTR must not restart the original relative timeout.
+                    continue;
+                }
+                return Err(error);
+            }
+            if result == 0 {
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, phase));
+            }
+            if descriptor.revents & (libc::POLLERR | libc::POLLNVAL | libc::POLLHUP) != 0 {
+                return Err(std::io::Error::other(phase));
+            }
+            if descriptor.revents & events != 0 {
+                return Ok(());
+            }
+        }
+    }
+
+    fn ready_pid(fifo: &mut std::fs::File, until: Instant) -> std::io::Result<u32> {
+        // A u32 PID needs at most ten decimal digits plus newline. Reject an
+        // oversized or malformed marker without printing any received bytes.
+        let mut digits = Vec::with_capacity(10);
+        loop {
+            poll_fifo(fifo, libc::POLLIN, until, "child readiness deadline")?;
+            let mut byte = [0];
+            match fifo.read(&mut byte) {
+                Ok(1) if byte[0] == b'\n' => {
+                    return std::str::from_utf8(&digits)
+                        .ok()
+                        .and_then(|line| line.parse::<u32>().ok())
+                        .filter(|pid| *pid != 0)
+                        .ok_or_else(|| std::io::Error::other("invalid child readiness marker"));
+                }
+                Ok(1) if byte[0].is_ascii_digit() && digits.len() < 10 => digits.push(byte[0]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
+                _ => return Err(std::io::Error::other("invalid child readiness marker")),
+            }
+        }
+    }
+
+    fn release_child(
+        fifo: &mut std::fs::File,
+        code: &[u8; 2],
+        until: Instant,
+    ) -> std::io::Result<()> {
+        let mut written = 0;
+        while written < code.len() {
+            poll_fifo(fifo, libc::POLLOUT, until, "child release deadline")?;
+            match fifo.write(&code[written..]) {
+                Ok(0) => return Err(std::io::Error::other("child release made no progress")),
+                Ok(count) => written += count,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn fifo_deadlines_cover_missing_readiness_and_absent_release_reader() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut ready = handshake_fifo(&fixture.path().join("ready")).unwrap();
+        let mut release = handshake_fifo(&fixture.path().join("release")).unwrap();
+        let bound = Duration::from_millis(30);
+        assert_eq!(
+            ready_pid(&mut ready, Instant::now() + bound)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        // No child has opened a reader. The tiny release is still nonblocking
+        // because the parent holds RDWR; readiness/owner checks identify absence.
+        release_child(&mut release, b"0\n", Instant::now() + bound).unwrap();
+        // With no external reader, exhaust the FIFO capacity and prove that a
+        // blocked release fails at its own poll deadline rather than hanging.
+        let fill_until = Instant::now() + Duration::from_secs(1);
+        loop {
+            assert!(Instant::now() < fill_until, "FIFO capacity-fill deadline");
+            match release.write(&[0; 4096]) {
+                Ok(count) => assert!(count > 0),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                _ => panic!("FIFO capacity-fill failed"),
+            }
+        }
+        assert_eq!(
+            release_child(&mut release, b"0\n", Instant::now() + bound)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::TimedOut
+        );
+    }
+
+    // FIFO handshakes prove that the child has inspected its live credentials.
+    // The completion callback, not filesystem polling, is the cleanup boundary.
+    #[tokio::test]
+    async fn niks3_input_owner_acknowledges_reap_and_cleanup_after_detach() {
+        for scenario in [
+            "success",
+            "exit_failure",
+            "timeout",
+            "detach",
+            "spawn_failure",
+            "configuration_failure",
+        ] {
+            let fixture = tempfile::tempdir().unwrap();
+            let ready_path = fixture.path().join("ready");
+            let release_path = fixture.path().join("release");
+            let mut ready = handshake_fifo(&ready_path).unwrap();
+            let mut release = handshake_fifo(&release_path).unwrap();
+            let program = fixture.path().join("niks3");
+            std::fs::write(&program, format!(
+                "#!/bin/sh\nset -eu\ntest -f \"$HOME/token\"\nprintf '%s\\n' \"$$\" > '{}'\nIFS= read -r code < '{}'\ntest -f \"$HOME/token\"\nexit \"$code\"\n",
+                ready_path.display(), release_path.display(),
+            )).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let mut prepared = cf_config::cache_credentials::PreparedNiks3Push::new(
+                "https://input.example",
+                &cf_protocol::cache::Niks3WriteAuth::Token {
+                    token: "synthetic-input-fixture".into(),
+                },
+                1,
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-input.drv",
+            )
+            .unwrap();
+            let credentials = std::path::PathBuf::from(
+                &prepared.args[prepared
+                    .args
+                    .iter()
+                    .position(|arg| arg == "--auth-token-path")
+                    .unwrap()
+                    + 1],
+            );
+            prepared.command = if scenario == "spawn_failure" {
+                fixture.path().join("absent").display().to_string()
+            } else {
+                program.display().to_string()
+            };
+            if scenario == "configuration_failure" {
+                prepared.args.clear();
+            }
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let observed_credentials = credentials.clone();
+            let deadline = if scenario == "timeout" {
+                Duration::from_secs(5)
+            } else {
+                Duration::from_secs(10)
+            };
+            let caller = tokio::spawn(run_niks3_input_owner(prepared, deadline, move |event| {
+                if event.phase == "started" {
+                    assert!(observed_credentials.exists());
+                } else {
+                    assert!(!observed_credentials.exists());
+                    assert!(!observed_credentials.parent().unwrap().exists());
+                    if let Some(pid) = event.child_pid {
+                        assert!(event.child_reaped);
+                        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+                    }
+                }
+                sender.send((event, Instant::now())).unwrap();
+            }));
+            let (started, started_at) =
+                tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(started.phase, "started");
+            let pid = if matches!(scenario, "spawn_failure" | "configuration_failure") {
+                None
+            } else {
+                let pid = ready_pid(&mut ready, started_at + Duration::from_secs(2))
+                    .unwrap_or_else(|error| panic!("{scenario}: readiness phase failed: {error}"));
+                assert_eq!(Some(pid), started.child_pid);
+                let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                    .unwrap_or_else(|_| panic!("{scenario}: ready child no longer exists"));
+                let state = stat
+                    .rsplit_once(')')
+                    .unwrap()
+                    .1
+                    .split_whitespace()
+                    .next()
+                    .unwrap();
+                assert!(
+                    !matches!(state, "Z" | "X"),
+                    "{scenario}: ready child is not alive"
+                );
+                assert!(credentials.exists());
+                if scenario == "detach" {
+                    caller.abort();
+                }
+                if scenario != "timeout" {
+                    let code = if scenario == "exit_failure" {
+                        b"7\n"
+                    } else {
+                        b"0\n"
+                    };
+                    release_child(&mut release, code, Instant::now() + Duration::from_secs(1))
+                        .unwrap_or_else(|error| {
+                            panic!("{scenario}: release phase failed: {error}")
+                        });
+                }
+                Some(pid)
+            };
+            // Include the remaining configured operation deadline and two seconds
+            // for reap/drop/ack scheduling. This is a bound, not a readiness sleep.
+            let remaining = (started_at + deadline + Duration::from_secs(2))
+                .saturating_duration_since(Instant::now());
+            let (completed, _) = tokio::time::timeout(remaining, receiver.recv())
+                .await
+                .unwrap_or_else(|_| panic!("{scenario}: owner completion deadline"))
+                .unwrap_or_else(|| panic!("{scenario}: owner ended without acknowledgment"));
+            assert_eq!(completed.operation, started.operation);
+            assert_eq!(completed.phase, "completed");
+            assert!(completed.cleanup_attempted);
+            assert!(!credentials.exists());
+            if let Some(pid) = pid {
+                assert!(completed.child_reaped);
+                assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+            }
+            assert_eq!(
+                completed.outcome,
+                if scenario == "detach" {
+                    "success"
+                } else {
+                    scenario
+                }
+            );
+            if scenario != "detach" {
+                let result = tokio::time::timeout(Duration::from_secs(2), caller)
+                    .await
+                    .expect("caller result deadline")
+                    .unwrap();
+                assert_eq!(result.is_ok(), scenario == "success");
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+                    .await
+                    .expect("owner event-channel closure deadline")
+                    .is_none(),
+                "owner emitted more than two events"
+            );
+        }
+    }
 }
 
 async fn push_derivation_requisites_to_assigned_cache(

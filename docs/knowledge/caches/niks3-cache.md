@@ -330,6 +330,19 @@ Upstream Niks3 1.6.0 WARN logs can expose a prefix/suffix of a rejected token;
 backend access logs can expose presigned URLs. Crystal Forge's output suppression
 does not redact those independently operated services.
 
+Server-owned Niks3 derivation-input uploads emit fixed-field `started` and
+`completed` lifecycle events with an opaque operation UUID, child PID, reap
+status, cleanup-attempt status, and a static outcome. Events contain no request
+headers, protected filenames, credential-directory paths, or secret arguments.
+Start precedes the first await and resource handoff. Dropping the HTTP request
+caller detaches the owner; the upload continues under its existing deadline,
+measured from child startup. Controlled completion follows child wait/reap and
+prepared-credential drop. Failed reap cannot establish a terminal boundary.
+`cleanup_attempted = true` records resource destruction, not guaranteed file
+deletion: temporary-directory cleanup can fail, so the final filesystem audit
+remains required. These observations do not change generic CVE cancellation or
+guarantee that all detached tasks globally kill their children on cancellation.
+
 ## Publication, failure, and recovery
 
 Remote completion is signed and bound to the current builder/session, the
@@ -626,3 +639,16 @@ remote-scanner credential delivery. Expired/untrusted-CA client certificate case
 an exhaustive captured-heartbeat secret audit, and corrupted-signature rejection
 at the Crystal Forge completion endpoint are not part of this VM matrix. The
 fixture separately tests untrusted signing-key rejection with fresh local stores.
+
+The full Niks3 gate waits for all recorded fixture builds and scans to become
+terminal, relevant cache-push jobs to finish without pending retries, and every
+input-owner start to receive a post-reap, post-drop completion. Each agent copy
+must reach its awaited read-owner completion and its activation unit's terminal
+boundary. Independent inspection must then find no live Nix/Niks3 consuming
+client; daemon identity, unknown inspection, and directory disappearance cannot
+substitute for owner completion. Producers stop only after these boundaries.
+The final assertion still checks directories named `cf-cache-*` under exactly
+`/tmp`, `/var/lib/crystal-forge`, and `/var/lib/crystal-forge-agent`, at depth 3,
+without exclusions. The controlled detached-upload race explains a possible
+concurrent audit failure; it does not identify the leftover owner in an earlier
+CI run without that run's evidence.

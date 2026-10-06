@@ -42,7 +42,11 @@ in pkgs.testers.runNixOSTest {
   skipTypeCheck = true;
   globalTimeout = 1800;
   nodes = {
-    cache = lib.crystal-forge.makeNiks3CacheNode {inherit pkgs credentials;};
+    cache = {
+      imports = [(lib.crystal-forge.makeNiks3CacheNode {inherit pkgs credentials;})];
+      # Cleanup diagnostics run inside each guest without exporting raw /proc.
+      environment.systemPackages = [pkgs.python3];
+    };
     server = {lib, ...}: {
       imports = [common];
       virtualisation.additionalPaths = [pkgs.busybox] ++ map (target: target.drvPath) (builtins.attrValues targets);

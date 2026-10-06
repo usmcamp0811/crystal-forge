@@ -136,6 +136,95 @@ the scratch SQL identities before the original five builds begin.
 
 ## Fixture diagnosis
 
+The full gate records cleanup snapshots initially, after queueing, publication,
+scan requests and scan termination, after each delivery audit, and immediately
+before the original final cleanup assertion. The assertion retains exactly
+`/tmp /var/lib/crystal-forge /var/lib/crystal-forge-agent`, depth 3, directories
+only, and `cf-cache-*`. Snapshots do not remove paths or wait for disappearance.
+Each guest diagnostic has an 8-second command bound and a 6-second process-scan
+budget. A failed or truncated diagnostic reports unknown correlation.
+
+JSON contains machine names, directory paths/basenames/types, allowlisted
+process executable basenames, PID, comm, state, and matching directory paths.
+Directory types distinguish `verification_store` from `credential`; both have
+`filesystem_type: directory`.
+The helper reads command lines, FD links and mappings privately to detect exact
+directory or descendant references. It never emits those bytes, environments,
+directory contents, credentials or service journals. PID/start-time rechecks
+discard raced process identities. A path reference is correlation, not proof
+of ownership. A Rust `TempDir` owner without an open FD can remain unknown.
+For systemd `PrivateTmp`, the helper matches a process-visible `/tmp` alias only
+when `/proc/<pid>/root` resolves it to the same device and inode as the audited
+directory. The emitted path remains the original assertion-visible path.
+VM database snapshots select only the current fixture build/scan IDs and states,
+selected cache IDs, and active cache-push IDs, derivation IDs and states.
+They do not select error, output, metadata or URL fields.
+
+Helper regressions cover exact path boundaries, safe JSON serialization,
+PID reuse and permission-denied unknown results. Diagnostic evidence must
+identify the remaining operation before any cleanup-wait or production fix.
+
+After the five variants, an isolated signed builder claim starts a real
+server-owned derivation input upload through a TLS forwarding gate. The gate
+acknowledges receipt and waits for an explicit FIFO release. The fixture drops
+the HTTP request client, captures the surviving upload child and directory,
+and requires the exact cleanup assertion to fail at that concurrent boundary.
+It then releases forwarding to native Niks3 and matches the exact operation's
+completion acknowledgment. The owner emits two fixed-field INFO events under
+`crystal_forge::niks3_input_owner`: `started` and `completed`, with one opaque
+operation UUID and the child PID. Start is acknowledged before the first await
+and detached-task handoff, so a
+queued owner is already visible. The deadline remains tied to child startup.
+Completion follows child wait/reap and prepared-credential drop, including
+controlled error paths. A failed
+reap cannot establish a terminal child boundary. `cleanup_attempted` means
+resource destruction finished; it does not claim that `TempDir::drop` removed
+every file successfully. The same cleanup assertion must still pass afterward.
+The fixture parses structured journals privately and emits only validated
+lifecycle projections, never raw messages. A pidfd exit alone is insufficient:
+the parent may still need to reap the child and drop its credential owner.
+
+Before both the early handshake precheck and the final audit, the fixture waits
+for every recorded build and scan to reach a terminal state and every relevant
+cache-push job to finish without a pending retry. Every input-owner start must
+have a matching post-reap, post-drop completion. Independent process inspection
+requires zero live Nix/Niks3 credential-consuming clients; the identified Nix
+daemon is not a client. Unknown or truncated inspection cannot pass. The builder
+stops only after these boundaries. No new fixture work is produced during the
+barrier. Credential-directory disappearance is not a barrier condition.
+
+For each agent pull, a fresh `Deployment completed successfully` marker proves
+that the authenticated-copy owner was awaited and its read credentials dropped.
+The activation unit must also report successful deactivation, and no Nix/Niks3
+client may remain before the agent stops. Output presence alone does not permit
+stopping the agent.
+
+Only the isolated input-only scratch job is removed, after its exact operation
+finishes. It records no output publication or successful build. Original jobs,
+scan identities and publication records remain available to the final barrier.
+The original final cleanup assertion still runs for every machine. This
+controlled race proves an outstanding-operation boundary; it does not identify
+the final owner in an earlier CI failure without that run's evidence.
+
+The focused Rust regression is
+`handlers::api::builders::niks3_input_owner_tests::niks3_input_owner_acknowledges_reap_and_cleanup_after_detach`.
+FIFO handshakes cover success, exit failure, timeout, detached callers, spawn
+failure and invalid preparation. The completion callback checks that credentials
+are already gone and any spawned child is reaped. No folder polling or sleep
+establishes the test's handoff boundary. Blocking CI membership is owner-managed.
+The parent opens both FIFO ends with `RDWR | O_NONBLOCK` before child startup.
+Readiness uses an absolute 2-second poll deadline and a bounded decimal PID
+marker. Release writes use a 1-second deadline. `poll` recomputes the remaining
+time after `EINTR`; no blocking FIFO open or unbounded blocking-thread work is
+used. Normal operations have a 10-second deadline; the timeout scenario has a
+5-second deadline. Completion waits include the remaining operation deadline
+and 2 seconds for reap/drop acknowledgment. The parent verifies the marker PID
+against the start event and a live process before checking credential lifetime.
+`handlers::api::builders::niks3_input_owner_tests::fifo_deadlines_cover_missing_readiness_and_absent_release_reader`
+checks a missing readiness marker and an absent external release reader. A tiny
+release remains nonblocking with the parent endpoints held open. A full FIFO
+with no external reader fails at its own 30-millisecond poll deadline.
+
 This smaller command can run while shared Rust integration is incomplete:
 
 ```sh
