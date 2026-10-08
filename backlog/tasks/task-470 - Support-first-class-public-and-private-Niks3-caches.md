@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-08 15:15'
+updated_date: '2026-10-08 15:57'
 labels: []
 dependencies: []
 references:
@@ -162,6 +162,8 @@ OWNER UPDATE c82efcb25e16b47385e76964dffb32a09ac58703 preservedasnewpublishedHEA
 Delegated Basic read protocol/helper scope at c82efcb2: own cf-protocol/src/{cache,agent}.rs and cf-config/src/cache_credentials.rs only, with config/cache.rs only if needed. Add strict Basic wire auth with both fields Debug-redacted and default-false signed supports_niks3_basic_read. Add CF_NETRC_AUTHORITY_SETTING, nonsecret runtime-settings feature evidence, guarded Basic preparation before secret file creation, exact normalized HTTPS origin and host-only protected quoted netrc, explicit command settings preserving signatures/extra keys and TempDir ownership until reap. Keep legacy public/mTLS APIs and write preparation unchanged. Verify bounded protocol/config unit and rustdoc checks through Nix; no services, database, commits or pushes. Parent retains task/worktree lifecycle and sibling consumer/native-Nix ownership.
 
 Basic-read backend at HEADc82efcb2, preserving13stagedownerWIP and committed mTLS discovery. Own model/query/encryption, additive nextfree0302Basic columns, affected offlineSQLxmetadata only from verified disposable taskDB, publication-read/heartbeat/composite typed-fullcapability fencing, API probe_scope write/read/all through existing Test routes, scoped tests. Basic pair password encrypted with existing envelope, both username/password omitted from API/Debug, response-only configuredflag. Same-mode omitted pair retained; partial replacements refused; mode/type transitions clear inactive pair; changed HTTPS authority cannot inherit retainedBasic, same authority path changes allowed. Save/all validatewhole; merge factored without validation and scoped explicit Niks3 validators allow independent write/read bootstrap while reusing authority merge. Write metadata noBearer/noReadcredentials andwriteauthUntested; read uses sensitiveBasicheader only configured pinned HTTPS, systemtrust only, validates nix-cache-info without claimingartifact signatures. Agent signed supports_niks3_basic_read required forBasic plus existing confidential transport and supports_niks3; preserve selection/provenance. New migration only against SQLxdisposableDB after PID/cgroup/socket/datadir/port/admin verification; no previewwrites/services/commits/pushes/UI/protocol/helper/agent edits. Parent advised builders publication-fingerprint serializer must include newBasic fields outside this ownership. Notify before commands expected>2min.
+
+User-approved Basic consumer delegation at c82efcb: reuse parent worktree/lock and preserve staged WIP. Own cf-agent bin/deployment agent, builders.rs probe_cache_read and narrow runtime feature wrapper/tests, cve_worker Niks3 read prep/child settings, and NixOS agent PATH/evaluator binding only. Probe actual executable privately with Tokio config show JSON, bounded to 10s and 2MiB before Basic credential preparation; apply all prepared settings to every read child. Advertise Basic only from actual runtime support inside signed payload. Verify focused capability/argument tests and Nix-environment compilation; native Basic behavior awaits parent-owned VM. No commits/push/services or write-plane edits.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
