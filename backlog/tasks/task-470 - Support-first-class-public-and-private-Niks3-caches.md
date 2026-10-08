@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-08 19:45'
+updated_date: '2026-10-08 19:51'
 labels: []
 dependencies: []
 references:
@@ -166,6 +166,8 @@ Basic-read backend at HEADc82efcb2, preserving13stagedownerWIP and committed mTL
 User-approved Basic consumer delegation at c82efcb: reuse parent worktree/lock and preserve staged WIP. Own cf-agent bin/deployment agent, builders.rs probe_cache_read and narrow runtime feature wrapper/tests, cve_worker Niks3 read prep/child settings, and NixOS agent PATH/evaluator binding only. Probe actual executable privately with Tokio config show JSON, bounded to 10s and 2MiB before Basic credential preparation; apply all prepared settings to every read child. Advertise Basic only from actual runtime support inside signed payload. Verify focused capability/argument tests and Nix-environment compilation; native Basic behavior awaits parent-owned VM. No commits/push/services or write-plane edits.
 
 User-approved bounded storage-metrics backend delegation at c82efcb2: own new handlers/api/caches/storage_metrics.rs and minimal caches.rs/bin/server.rs route wiring only. GET /api/v1/caches/:id/metrics returns response-only availability and optional reported logical bytes/live tracked objects; path_count always null. Authenticate before metadata lookup; non-admin Niks3 returns unavailable_requires_admin without decrypt/network. Disabled and Attic/S3/Http/Nix return truthful null states without provider requests. Admin Niks3 uses current stored write TLS projection only and public GET api/cache-stats with no Bearer/read/Basic identity, existing HTTPS/private-target/pinned-DNS/no-proxy/no-redirect policy, 8s request/64KiB body and overall Tokio deadline. No persistence/migrations/inventory enumeration/background cache subsystem/UI or fixture-owner edits. Add focused parsing/status/auth-order/no-network/deadline tests through Nix. Newer native Niks3 1.8 fixture remains parent/native-owner coordination; packaged CLI stays pinned 1.6.
+
+Owner-approved Basic-read native VM scope at c82efcb2: preserve prior owner-ledger six-variant PASS and original five cases. Opt sixth split-PKI case into HTTPS Basic read proxy only; retain mTLS-only API, A+B write trust, direct B S3 and shared PKI aliases. Exercise actual packaged Nix with protected netrc, complete signature-required closure copies, eight native redirect/foreign-NAR negatives with boolean-only target observations and ordinary unguarded redirect control. Verify signed old-agent Basic capability fencing, real server publication/CVE and packaged agent pull, unchanged quiescence and cleanup audits. After source completion run the existing niks3-cache gate once in foreground with visible action/purpose/duration; no supervisors, hash layering, commits or pushes. Parent owns task lock/worktree and sibling changes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
