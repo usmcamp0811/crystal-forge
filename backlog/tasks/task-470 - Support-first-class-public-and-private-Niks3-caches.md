@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-08 20:04'
+updated_date: '2026-10-08 21:26'
 labels: []
 dependencies: []
 references:
@@ -168,6 +168,8 @@ User-approved Basic consumer delegation at c82efcb: reuse parent worktree/lock a
 User-approved bounded storage-metrics backend delegation at c82efcb2: own new handlers/api/caches/storage_metrics.rs and minimal caches.rs/bin/server.rs route wiring only. GET /api/v1/caches/:id/metrics returns response-only availability and optional reported logical bytes/live tracked objects; path_count always null. Authenticate before metadata lookup; non-admin Niks3 returns unavailable_requires_admin without decrypt/network. Disabled and Attic/S3/Http/Nix return truthful null states without provider requests. Admin Niks3 uses current stored write TLS projection only and public GET api/cache-stats with no Bearer/read/Basic identity, existing HTTPS/private-target/pinned-DNS/no-proxy/no-redirect policy, 8s request/64KiB body and overall Tokio deadline. No persistence/migrations/inventory enumeration/background cache subsystem/UI or fixture-owner edits. Add focused parsing/status/auth-order/no-network/deadline tests through Nix. Newer native Niks3 1.8 fixture remains parent/native-owner coordination; packaged CLI stays pinned 1.6.
 
 Owner-approved Basic-read native VM scope at c82efcb2: preserve prior owner-ledger six-variant PASS and original five cases. Opt sixth split-PKI case into HTTPS Basic read proxy only; retain mTLS-only API, A+B write trust, direct B S3 and shared PKI aliases. Exercise actual packaged Nix with protected netrc, complete signature-required closure copies, eight native redirect/foreign-NAR negatives with boolean-only target observations and ordinary unguarded redirect control. Verify signed old-agent Basic capability fencing, real server publication/CVE and packaged agent pull, unchanged quiescence and cleanup audits. After source completion run the existing niks3-cache gate once in foreground with visible action/purpose/duration; no supervisors, hash layering, commits or pushes. Parent owns task lock/worktree and sibling changes.
+
+User-approved response-only metrics UI scope: consume the ready GET /api/v1/caches/:id/metrics contract after inspecting storage_metrics.rs. Add documented DTO/client and a small private cache metric display/loading module. Load observations once per successful page-list load or explicit Refresh with at most three concurrent requests; share the resulting map across cards/table/details. Hide prior observations immediately when refreshing or disabling a destination. Render only supported available bases: reported logical bytes in GiB and live tracked objects as objects, never physical usage/capacity or fabricated path totals. Use static allowlisted unavailable/error explanations and local observation timestamps. Keep root Paths cached unavailable and preserve existing forms/design/credential semantics. Source-first work under the explicit preview waiver; only owned web-ui API/view/module and owned shared/Niks3 workflows. Run focused unit/WASM/format checks; no backend/protocol/package/native-fixture edits or native-provider mocking.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
