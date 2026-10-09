@@ -71,6 +71,16 @@ use the same `path:/nix/store/<source>?narHash=<percent-encoded-SRI>` reference.
 The startup capability probe reads `builtins.nixVersion` and
 `builtins.currentSystem`; it does not evaluate a build target.
 
+Command 14's `--workers` and `--max-memory-size` values come from the
+server's [bulk evaluator resource plan](../evaluation/bulk-evaluator-resource-planning.md).
+The resource contract resolves `eval_workers = 0` in Crystal Forge and
+passes an explicit positive count. An absent `eval_max_memory_mb` selects
+automatic sizing; an explicit integer remains a per-worker MiB threshold.
+The idle and overall deadlines are outer process controls, not additional
+`nix-eval-jobs` flags. Packaging selects exactly `nix-eval-jobs` 2.34.3 linked
+against Nix 2.34.8; its post-job peak-RSS restart check is not a hard aggregate
+memory limit. See the resource guide for sizing rules and version caveats.
+
 ### `derivations/eval.rs`
 
 | # | Purpose | Command | Source |

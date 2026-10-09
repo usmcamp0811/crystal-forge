@@ -2,6 +2,10 @@
 
 * [Config Explorer current implementation map](config-explorer-implementation-status.md) - Maps the Config Explorer design to its implementing server, worker, Nix expression, query, migration, API, and Web UI paths, and describes how scoped observations, V2 snapshot reuse, and paged root and prefix observations currently work.
 
+# Operator Guide
+
+* [Bulk evaluator memory planning and timeouts](bulk-evaluator-resource-planning.md) - Open when sizing bulk commit evaluation or upgrading its memory and timeout defaults; explains automatic limits, explicit per-worker overrides, worker resolution, and pinned upstream threshold semantics.
+
 # Concept
 
 * [SystemD-Run Evaluation Isolation in Crystal Forge](systemd-run-evaluation-isolation.md) - Explains the systemd-run scope isolation (memory, CPU, timeout limits) and the direct-execution fallback that keep Nix evaluations from OOM-killing the server, with trade-offs, failure modes, and proposed improvements.

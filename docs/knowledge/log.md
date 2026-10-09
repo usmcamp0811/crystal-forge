@@ -1,5 +1,8 @@
 # Bundle Update Log
 
+## 2026-10-09
+* **Bulk evaluator resource contract**: Added a focused operator guide for the adaptive memory plan and independent deadlines. Wired the evaluation index, NixOS and TOML operator references, verified-source contract, CLI reference, queue workflow, and packaging runbook. The guide distinguishes current resource planning from the pinned v2.34.3 upstream behavior and version-dependent deployment reports. Implementation status describes source behavior, not a passing validation result.
+
 ## 2026-10-04
 * **Creation**: Initial OKF knowledge bundle migration from Crystal Forge documentation.
 * **Owner-authorized semantic cleanup**: Corrected queue, builder, cache, deployment, and view contracts against code at `3b23d36f`; converted reviewed source diagrams to Mermaid and repaired incorrect Mermaid; added the cleanup record and exact diagram audit. Updated the lossless-migration rules to separate authorized semantic cleanup from source-preserving migration. No runtime code, NixOS option, SQL view, or migration was removed.

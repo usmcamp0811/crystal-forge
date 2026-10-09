@@ -89,6 +89,24 @@ limit, outer process timeout, and cache-status reporting are resource or
 diagnostic controls. They can stop an evaluation or add metadata, but they
 cannot change a successful `.drvPath`.
 
+The server's [bulk evaluator resource plan](../evaluation/bulk-evaluator-resource-planning.md)
+resolves one explicit nonzero worker count and per-worker MiB threshold after
+the heavy-Nix locks and before spawn. Automatic memory sizing and independent
+output-idle/overall deadlines are server-only controls. They do not change
+builder re-evaluation, the linked Nix fingerprint, purity, IFD, or source
+identity. An explicit `12288` MiB override with two workers retains the
+24576 MiB configured product. The resource guide distinguishes the packaged
+v2.34.3 restart threshold from version-dependent
+aggregate kill/retry behavior reported in a deployment.
+
+Both deadlines are enforced by an outer monitor across all evaluator
+collection awaits, including output-handler database work, log flushing, and
+the final child wait. Cooperative cancellation uses a two-second polling
+cadence at loop boundaries; a pending handler await can delay the actual
+query. The cadence is not a two-second response guarantee. Timeout and error
+cleanup kills the process group and reaps outside the deadline race before
+optional timeout-log persistence, so evaluation timers cannot interrupt reap.
+
 A post-claim fingerprint mismatch remains a defense-in-depth check. The server
 releases that job to the queue without consuming retry budget or failing the
 shared derivation. A pre-upgrade queued job with no usable contract-v1

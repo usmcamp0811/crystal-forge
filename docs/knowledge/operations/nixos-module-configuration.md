@@ -94,6 +94,21 @@ sources:
 }
 ```
 
+## Bulk evaluator resources
+
+Before tuning build resources, configure bulk evaluation separately. The
+adaptive evaluator contract defaults `server.eval_max_memory_mb`
+to `null`; the generator omits that key from TOML. A positive integer
+remains a fixed per-worker MiB threshold. With two workers, `12288` preserves
+a 24576 MiB configured product. `build.systemd_memory_max` in the quick-start
+example controls build execution, not the bulk evaluator's sizing policy.
+
+See [Bulk evaluator memory planning and timeouts](../evaluation/bulk-evaluator-resource-planning.md)
+for runtime host/cgroup detection, the 4096 MiB reserve,
+85-percent policy, and independent 900-second idle / 3600-second overall
+deadlines. An absent memory override enables automatic sizing on upgrade;
+set an explicit `4096` if the previous fixed threshold is required.
+
 ## STIG Compliance Modules
 
 Crystal Forge exports 25 NixOS-native STIG control modules and four presets (`high`, `medium`, `low`, `off`):

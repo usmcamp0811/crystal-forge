@@ -1,3 +1,4 @@
+use crate::evaluator_resources::validate_resolved_args;
 use cf_protocol::builder::{RemoteBuildExecutionStrategy, SourceInputDeliveryMode};
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -36,16 +37,31 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
 
-    /// Number of worker threads for nix-eval-jobs parallel evaluation.
-    /// Default: 2 (conservative to avoid hosing the system)
+    /// Number of evaluator workers. Defaults to 2; zero resolves the available
+    /// CPU count at runtime. The CLI always receives an explicit positive count.
     #[serde(default = "default_eval_workers")]
     pub eval_workers: usize,
 
-    /// Maximum memory size per worker in MB for nix-eval-jobs.
-    /// Total eval memory = eval_workers × eval_max_memory_mb
-    /// Default: 4096 MB (4 GB) per worker
-    #[serde(default = "default_eval_max_memory_mb")]
-    pub eval_max_memory_mb: usize,
+    /// Optional fixed per-worker MiB. Omission enables capacity-based sizing;
+    /// an explicit positive value is preserved exactly, including legacy 12288.
+    #[serde(default)]
+    pub eval_max_memory_mb: Option<usize>,
+
+    /// MiB reserved outside evaluation during automatic sizing. Defaults to 4096.
+    #[serde(default = "default_eval_memory_reserve_mb")]
+    pub eval_memory_reserve_mb: usize,
+
+    /// Maximum capacity percentage for automatic sizing, in 1..=100. Default: 85.
+    #[serde(default = "default_eval_memory_max_percent")]
+    pub eval_memory_max_percent: usize,
+
+    /// Positive seconds without evaluator output before cancellation. Default: 900.
+    #[serde(default = "default_eval_output_idle_timeout_secs")]
+    pub eval_output_idle_timeout_secs: u64,
+
+    /// Positive overall evaluator timeout in seconds. Default: 3600.
+    #[serde(default = "default_eval_overall_timeout_secs")]
+    pub eval_overall_timeout_secs: u64,
 
     /// Whether to check cache status during evaluation.
     /// Adds --check-cache-status flag to nix-eval-jobs.
@@ -305,8 +321,17 @@ fn default_eval_workers() -> usize {
     2 // Conservative: don't hose the system by default
 }
 
-fn default_eval_max_memory_mb() -> usize {
-    4096 // 4 GB per worker
+fn default_eval_memory_reserve_mb() -> usize {
+    4096
+}
+fn default_eval_memory_max_percent() -> usize {
+    85
+}
+fn default_eval_output_idle_timeout_secs() -> u64 {
+    900
+}
+fn default_eval_overall_timeout_secs() -> u64 {
+    3600
 }
 
 fn default_eval_check_cache() -> bool {
@@ -343,7 +368,11 @@ impl Default for ServerConfig {
             host: "127.0.0.1".to_string(),
             port: 3000,
             eval_workers: default_eval_workers(),
-            eval_max_memory_mb: default_eval_max_memory_mb(),
+            eval_max_memory_mb: None,
+            eval_memory_reserve_mb: default_eval_memory_reserve_mb(),
+            eval_memory_max_percent: default_eval_memory_max_percent(),
+            eval_output_idle_timeout_secs: default_eval_output_idle_timeout_secs(),
+            eval_overall_timeout_secs: default_eval_overall_timeout_secs(),
             eval_check_cache: default_eval_check_cache(),
             auto_hardening_scans: false,
             auth_mode: default_auth_mode(),
@@ -387,46 +416,56 @@ impl ServerConfig {
         format!("{}:{}", self.host, self.port)
     }
 
-    /// Get arguments for nix-eval-jobs based on config.
-    pub fn nix_eval_jobs_args(&self) -> Vec<String> {
+    /// Returns explicit nix-eval-jobs arguments from a resolved resource plan.
+    ///
+    /// nix-eval-jobs 2.34.3 does not interpret zero workers as CPU auto-detection.
+    /// Callers must resolve a fresh plan for each evaluation before spawning.
+    ///
+    /// # Errors
+    /// Returns an error for invalid policy, zero resolved values, overflow, or
+    /// a plan whose requested workers or fixed override do not match this config.
+    pub fn nix_eval_jobs_args(
+        &self,
+        plan: &crate::EvaluatorResourcePlan,
+    ) -> Result<Vec<String>, String> {
+        self.validate_evaluator_policy()?;
+        validate_resolved_args(self.eval_workers, self.eval_max_memory_mb, plan)?;
         let mut args = vec![
             "--workers".to_string(),
-            self.eval_workers.to_string(),
+            plan.effective_workers.to_string(),
             "--max-memory-size".to_string(),
-            self.eval_max_memory_mb.to_string(),
+            plan.per_worker_mb.to_string(),
         ];
 
         if self.eval_check_cache {
             args.push("--check-cache-status".to_string());
         }
 
-        args
+        Ok(args)
     }
 
-    /// Validate configuration and warn about potential issues.
-    pub fn validate(&self) -> Result<(), String> {
-        // Check for excessive memory allocation
-        let total_eval_memory_mb = self.eval_workers * self.eval_max_memory_mb;
-        if total_eval_memory_mb > 32768 {
-            // 32 GB
-            return Err(format!(
-                "Evaluation memory too high: {} workers × {} MB = {} MB total ({}GB). \
-                 This may exhaust system memory.",
-                self.eval_workers,
-                self.eval_max_memory_mb,
-                total_eval_memory_mb,
-                total_eval_memory_mb / 1024
-            ));
-        }
+    /// Validates evaluator ranges and fixed-budget arithmetic without runtime IO.
+    ///
+    /// # Errors
+    /// Returns an error for invalid memory/reserve/percentage/timeouts or overflow.
+    pub fn validate_evaluator_policy(&self) -> Result<(), String> {
+        crate::evaluator_resources::validate_evaluator_policy(
+            self.eval_workers,
+            self.eval_max_memory_mb,
+            self.eval_memory_reserve_mb,
+            self.eval_memory_max_percent,
+            self.eval_output_idle_timeout_secs,
+            self.eval_overall_timeout_secs,
+        )
+    }
 
-        // Warn if eval workers seems excessive
-        if self.eval_workers > 16 {
-            eprintln!(
-                "⚠️  Warning: {} evaluation workers is very high. \
-                 Consider reducing to 4-8 for most systems.",
-                self.eval_workers
-            );
-        }
+    /// Validates static server policy without detecting runtime resources.
+    ///
+    /// # Errors
+    /// Returns an error when evaluator, logging, notification, session, execution,
+    /// or heartbeat settings violate their configured ranges or requirements.
+    pub fn validate(&self) -> Result<(), String> {
+        self.validate_evaluator_policy()?;
 
         if self.max_build_log_chunk_mb == 0 {
             return Err("max_build_log_chunk_mb must be greater than 0".to_string());

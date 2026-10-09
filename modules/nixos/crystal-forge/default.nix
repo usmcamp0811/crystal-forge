@@ -42,6 +42,10 @@
           port = cfg.server.port;
           eval_workers = cfg.server.eval_workers;
           eval_max_memory_mb = cfg.server.eval_max_memory_mb;
+          eval_memory_reserve_mb = cfg.server.eval_memory_reserve_mb;
+          eval_memory_max_percent = cfg.server.eval_memory_max_percent;
+          eval_output_idle_timeout_secs = cfg.server.eval_output_idle_timeout_secs;
+          eval_overall_timeout_secs = cfg.server.eval_overall_timeout_secs;
           eval_check_cache = cfg.server.eval_check_cache;
           auto_hardening_scans = cfg.server.auto_hardening_scans;
           allow_private_cache_test_targets =
@@ -1752,11 +1756,12 @@ in {
         };
       };
       eval_workers = lib.mkOption {
-        type = lib.types.int;
+        type = lib.types.ints.unsigned;
         default = 2;
         description = lib.mdDoc ''
           Number of worker threads for nix-eval-jobs parallel evaluation.
-          Set to 0 to automatically use the number of CPU cores available.
+          Set to 0 for Crystal Forge to resolve Rust available_parallelism
+          explicitly before starting nix-eval-jobs.
 
           This controls how many systems can be evaluated concurrently
           when processing flake commits.
@@ -1764,18 +1769,65 @@ in {
       };
 
       eval_max_memory_mb = lib.mkOption {
-        type = lib.types.int;
+        type = lib.types.nullOr lib.types.ints.positive;
+        default = null;
+        description = lib.mdDoc ''
+          Per-worker memory threshold in MiB (despite the historical _mb name).
+          An explicit value is passed unchanged, including 12288. Null omits
+          the TOML field and selects Crystal Forge's automatic budget.
+
+          Automatic sizing uses the minimum of physical memory and finite
+          effective cgroup limits, not fluctuating MemAvailable. It divides
+          min(floor(effective MiB * eval_memory_max_percent / 100),
+          effective MiB - eval_memory_reserve_mb) by the resolved worker count.
+          Insufficient headroom is an error rather than a silent fallback.
+
+          The pinned nix-eval-jobs 2.34.3 checks each worker's RSS after a job
+          and restarts an oversized worker. A job can exceed this threshold;
+          it is not a hard memory limit. Later nix-eval-jobs versions use a
+          distinct aggregate workers * max-memory-size scheduler budget.
+          Service-cgroup limits provide hard containment independently.
+        '';
+      };
+
+      eval_memory_reserve_mb = lib.mkOption {
+        type = lib.types.ints.positive;
         default = 4096;
         description = lib.mdDoc ''
-          Worker restart threshold in MB for nix-eval-jobs.
+          Headroom reserved in MiB from stable effective memory for automatic
+          evaluator sizing. The reserve must be positive and leave room for
+          the resolved workers. An explicit eval_max_memory_mb bypasses sizing.
+        '';
+      };
 
-          nix-eval-jobs checks this threshold after evaluating an attribute and
-          then restarts an oversized worker. It is not a hard memory limit and
-          a worker can temporarily exceed it while evaluating an attribute.
-          Default is 4096 MB (4 GB) per worker. Use the server systemd memory
-          options for hard service-cgroup containment.
+      eval_memory_max_percent = lib.mkOption {
+        type = lib.types.ints.between 1 100;
+        default = 85;
+        description = lib.mdDoc ''
+          Maximum percentage of stable effective memory for automatic evaluator
+          sizing, from 1 through 100 inclusive. Crystal Forge uses the smaller
+          of the floored percentage budget and the reserve-subtracted budget,
+          then divides by the resolved worker count.
+        '';
+      };
 
-          Adjust based on available system memory and the number of workers.
+      eval_output_idle_timeout_secs = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 900;
+        description = lib.mdDoc ''
+          Maximum seconds without evaluator output before cancellation.
+          Output resets this idle clock. The independent absolute deadline
+          remains active even when the evaluator continues producing output.
+        '';
+      };
+
+      eval_overall_timeout_secs = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 3600;
+        description = lib.mdDoc ''
+          Absolute evaluator deadline in seconds from process start.
+          Output does not reset this clock. The output-idle deadline can
+          cancel evaluation earlier and is configured independently.
         '';
       };
 

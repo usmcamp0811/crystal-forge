@@ -17,6 +17,34 @@ component wrappers and the public builder wrapper. Runtime probes require
 same evaluator Nix. Finally, the packaged Nix version must match the version
 reported by `nix-eval-jobs` itself.
 
+## Bulk evaluator resource contract
+
+The pinned package is exactly `nix-eval-jobs` **2.34.3**, linked against
+Nix **2.34.8**. In upstream v2.34.3 `src/worker.cc`, `shouldRestart` compares
+each worker's own peak RSS after the job response, then requests a worker
+restart. This package does not implement aggregate-worker killing or
+retry-alone semantics. A more recent deployed binary may have different
+semantics; verify its version and source before attributing that behavior to
+this package. The Nix library version is not the `nix-eval-jobs` version.
+
+See [Bulk evaluator memory planning and timeouts](../../docs/knowledge/evaluation/bulk-evaluator-resource-planning.md)
+for the adaptive resource contract. The
+aggregate target derives a per-worker threshold; it is not hard containment.
+The service cgroup remains the hard memory boundary. Automatic sizing, worker
+resolution, and outer deadlines do not change evaluator Nix selection, the
+root flake pin, or the guarded netrc patch below.
+
+The module proof defines seven valid evaluator cases: `defaults`,
+`explicitNull`, `explicit12288`, `custom`, `workersZero`, `lowerBounds`, and
+`upperPercent`. It parses generated TOML to assert null omission, automatic
+reserve/percentage and timeout defaults, explicit integer preservation, custom
+values, and valid boundaries. It also defines 25 invalid option type/range
+cases across the six evaluator options. These cases extend the existing proxy
+and config-path checks. This description records assertions in the check
+source, not a passing result for the current worktree. A packaging pass alone
+does not prove runtime memory detection, automatic worker resolution, timeout
+cleanup, or newer upstream memory semantics.
+
 ## Guarded Basic read runtime
 
 The CF overlay applies `packages/default/patches/nix-cf-netrc-authority.patch`

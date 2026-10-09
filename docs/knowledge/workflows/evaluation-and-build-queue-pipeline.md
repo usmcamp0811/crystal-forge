@@ -52,7 +52,15 @@ When a commit arrives:
    [Wakeups and polling](../architecture/event-driven-queues.md).
 3. **One commit evaluates at a time.** A database index enforces this.
 4. The server marks the commit `in_progress`.
-5. `nix-eval-jobs` evaluates all systems in parallel.
+5. After the heavy-Nix locks, the server resolves one immutable
+   [bulk evaluator resource plan](../evaluation/bulk-evaluator-resource-planning.md)
+   before spawning `nix-eval-jobs`. Systems evaluate in parallel using its
+   explicit worker count and per-worker memory threshold. Independent idle and
+   overall monitors bound every collection await, including output-handler
+   database work and the final child wait. Cancellation polls are eligible
+   every two seconds at loop boundaries; handler awaits can delay the actual
+   query. Timeout and error cleanup terminates the process group and reaps
+   outside the deadline race before optional timeout-log persistence.
 6. For each system that completes:
    - The policy check runs (is Crystal Forge enabled for this system?).
    - If it **passes**, the derivation becomes `dry-run-complete` and gets a

@@ -11,12 +11,16 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::{Duration, Instant};
 
+#[path = "evaluation_watchdog.rs"]
+mod evaluation_watchdog;
+use evaluation_watchdog::{
+    EvaluationWatchdog, Expiry, OutputStream, cancellation_ticker, within_deadlines,
+};
+
 const MOCK_EVAL_TOTAL_DURATION_MS: u64 = 30_000;
 const MOCK_EVAL_MIN_PER_SYSTEM_MS: u64 = 5_000;
 const MOCK_EVAL_STAGE_COUNT: u64 = 5;
-const EVAL_OUTPUT_IDLE_TIMEOUT_SECS: u64 = 300;
-/// Hard ceiling for one bulk evaluator process, including continuously noisy jobs.
-const EVAL_OVERALL_TIMEOUT_SECS: u64 = 1800;
+/// Diagnostic cadence in seconds; independent of evaluator timeout deadlines.
 const EVAL_PROGRESS_HEARTBEAT_SECS: u64 = 30;
 /// Maximum number of missing systems to attempt individual fallback evaluation
 /// for. Beyond this threshold, treat as a likely process-wide evaluator failure
@@ -168,7 +172,11 @@ pub(crate) async fn run_nix_command_bounded(
     let child = command
         .spawn()
         .with_context(|| format!("failed to spawn {process_name}"))?;
+    let spawned_at = Instant::now();
     let mut guard = NixEvalProcessGuard::from_spawned_child(child, process_name)?;
+    let expires_at = spawned_at
+        .checked_add(deadline)
+        .context("bounded process deadline is out of range")?;
     let stdout = guard
         .child_mut()
         .stdout
@@ -181,7 +189,6 @@ pub(crate) async fn run_nix_command_bounded(
         .context("bounded child stderr was not piped")?;
     let mut stdout_task = tokio::spawn(read_capped(stdout, stdout_limit));
     let mut stderr_task = tokio::spawn(read_capped(stderr, stderr_limit));
-    let expires_at = Instant::now() + deadline;
 
     let status = match tokio::time::timeout_at(expires_at, guard.wait()).await {
         Ok(result) => result.with_context(|| format!("failed to wait for {process_name}"))?,
@@ -3150,9 +3157,25 @@ enum SystemFinalizeAction {
     Superseded,
 }
 
-/// FIXED: Now properly:
-/// 1. Stores derivation_path from nix-eval-jobs
-/// 2. Updates status to DryRunComplete after successful evaluation
+/// Evaluates the verified commit source and finalizes its assigned policies.
+///
+/// Resolves an immutable runtime worker/memory plan after heavy-Nix locking.
+/// Nonblank stdout and stderr reset the configured idle timeout, in seconds.
+/// The independent overall timeout starts at spawn and includes streaming,
+/// output-handler awaits, log flushing, and child wait. Both deadlines run in
+/// an independent outer monitor; late buffered lines cannot revive expiry.
+/// Collection returns before cleanup starts. Timeout, cancellation, or a
+/// collection error kills the process group and reaps the direct child outside
+/// the evaluation timers before releasing its slot. Cleanup is not interrupted
+/// by a second evaluator deadline. Cancellation polls remain cooperative at
+/// two-second loop boundaries; a pending handler can delay the next poll.
+/// Resource options do not change the authoritative derivation expression.
+///
+/// # Errors
+///
+/// Returns a classified failure for invalid resource policy, source discovery,
+/// process or database failures, cancellation, or timeout. Missing-system
+/// fallback retains its separate verification and bounded phase semantics.
 pub async fn evaluate_with_nix_eval_jobs(
     pool: &PgPool,
     commit: &Commit,
@@ -3285,7 +3308,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
     // Broadcast detailed start information
     if let Some(state) = cf_state {
         let start_msg = format!(
-            "🚀 Starting evaluation for flake: {}\n   Commit: {}\n   Target: {}\n   Workers: {}",
+            "🚀 Starting evaluation for flake: {}\n   Commit: {}\n   Target: {}\n   Requested workers: {}",
             flake.name,
             &commit_hash[..8.min(commit_hash.len())],
             target_system,
@@ -3425,6 +3448,31 @@ async fn evaluate_with_nix_eval_jobs_inner(
         .acquire_owned()
         .await
         .context("heavy Nix evaluation limiter was closed")?;
+    // Resolve current runtime resources only after waiting for both locks.
+    // The plan is immutable for this child; output cannot alter its budget.
+    let resource_plan =
+        cf_config::evaluator_resources::EvaluatorResourcePlan::resolve(server_config)
+            .map_err(anyhow::Error::msg)?;
+    let resource_mode = match resource_plan.mode {
+        cf_config::evaluator_resources::EvaluatorResourceMode::Auto => "auto",
+        cf_config::evaluator_resources::EvaluatorResourceMode::Fixed => "fixed",
+        cf_config::evaluator_resources::EvaluatorResourceMode::Fallback => "fallback",
+    };
+    // SECURITY: Log only parsed numeric capacities and the finite mode label.
+    // Never render the configuration, environment, or raw detection files.
+    info!(
+        mode = resource_mode,
+        requested_workers = resource_plan.requested_workers,
+        effective_workers = resource_plan.effective_workers,
+        physical_memory_mb = resource_plan.physical_memory_mb,
+        cgroup_memory_mb = resource_plan.cgroup_memory_mb,
+        effective_limit_mb = resource_plan.effective_limit_mb,
+        reserve_mb = resource_plan.reserve_mb,
+        max_memory_percent = resource_plan.max_memory_percent,
+        total_budget_mb = resource_plan.total_budget_mb,
+        per_worker_mb = resource_plan.per_worker_mb,
+        "evaluator_resource_plan"
+    );
     let mut cmd = Command::new("nix-eval-jobs");
     // Kill the child process if this future is dropped (e.g. cancellation,
     // discovery failure would no longer trigger this, but it is still a
@@ -3443,8 +3491,8 @@ async fn evaluate_with_nix_eval_jobs_inner(
     // resource failure or diagnostics, but cannot change a successful drvPath.
     cmd.args(authoritative_evaluator_args(
         &nix_expr,
-        server_config.eval_workers,
-        server_config.eval_max_memory_mb,
+        resource_plan.effective_workers,
+        resource_plan.per_worker_mb,
         server_config.eval_check_cache,
     ));
     isolate_authoritative_evaluator_credentials(&mut cmd);
@@ -3454,13 +3502,28 @@ async fn evaluate_with_nix_eval_jobs_inner(
     let child = cmd
         .spawn()
         .with_context(|| "Failed to spawn nix-eval-jobs")?;
+    let spawned_at = Instant::now();
+    // Arm cleanup before any fallible timer or pipe setup.
+    let mut guard = NixEvalProcessGuard::from_spawned_child(child, "nix-eval-jobs")?;
+    let watchdog = EvaluationWatchdog::new(
+        spawned_at,
+        Duration::from_secs(server_config.eval_output_idle_timeout_secs),
+        Duration::from_secs(server_config.eval_overall_timeout_secs),
+    )?;
     // Wrap the child in an RAII guard that will kill the entire process
     // group when dropped unless disarmed after child exit and pipe drain.
     // This ensures cleanup on any abnormal return path (bail!, ?, panic).
-    let mut guard = NixEvalProcessGuard::from_spawned_child(child, "nix-eval-jobs")?;
     // Access the child through the guard for the remainder of this function.
-    let stdout = guard.child_mut().stdout.take().unwrap();
-    let stderr = guard.child_mut().stderr.take().unwrap();
+    let stdout = guard
+        .child_mut()
+        .stdout
+        .take()
+        .context("evaluator stdout was not piped")?;
+    let stderr = guard
+        .child_mut()
+        .stderr
+        .take()
+        .context("evaluator stderr was not piped")?;
 
     let mut stdout_reader = BufReader::new(stdout).lines();
     let mut stderr_reader = BufReader::new(stderr).lines();
@@ -3483,841 +3546,486 @@ async fn evaluate_with_nix_eval_jobs_inner(
     // fallback outcome checks).
     let mut successful_results: Vec<SuccessfulSystemResult> = Vec::new();
 
-    // Cancellation poll interval: check the DB every 2 seconds while eval runs.
-    let mut cancel_ticker = tokio::time::interval(Duration::from_secs(2));
-    cancel_ticker.tick().await; // consume the immediate first tick
+    // Cancellation polls are eligible every two seconds at loop boundaries.
+    // A pending output-handler await can delay the next cooperative poll.
+    let mut cancel_ticker = cancellation_ticker().await;
     let mut progress_ticker =
         tokio::time::interval(Duration::from_secs(EVAL_PROGRESS_HEARTBEAT_SECS));
     progress_ticker.tick().await; // consume immediate first tick
-    let mut last_output_at = Instant::now();
-    let evaluation_deadline = tokio::time::sleep(Duration::from_secs(EVAL_OVERALL_TIMEOUT_SECS));
-    tokio::pin!(evaluation_deadline);
 
-    loop {
-        tokio::select! {
-            _ = &mut evaluation_deadline => {
-                guard.terminate().await;
-                bail!(
-                    "evaluation exceeded the overall {}s deadline",
-                    EVAL_OVERALL_TIMEOUT_SECS
-                );
-            }
-            // Third arm: cooperative cancellation poll
-            _ = cancel_ticker.tick() => {
-                match crate::queries::commits::check_cancellation_requested(pool, commit.id).await {
-                    Ok(true) => {
-                        warn!("🚫 Cancellation requested for commit {} — killing nix-eval-jobs process group", commit.id);
-                        guard.terminate().await;
-                        // Do NOT call force_cancel_commit_evaluation here — the
-                        // outer handler (process_pending_commits) is the single
-                        // authority that atomically transitions the state and
-                        // broadcasts the cancelled event.  We just return a
-                        // typed error.
-                        return Err(EvaluationCancelled.into());
-                    }
-                    Ok(false) => {} // not cancelled, continue
-                    Err(e) => {
-                        warn!("Failed to check cancellation flag for commit {}: {e}", commit.id);
+    // INVARIANT: The independent outer monitor bounds every collection await
+    // with idle and overall deadlines. Collection never terminates the guard:
+    // cleanup runs outside the monitor so expiry cannot interrupt explicit reap.
+    let collection = async {
+        loop {
+            tokio::select! {
+                // Third arm: cooperative cancellation poll
+                _ = cancel_ticker.tick() => {
+                    match crate::queries::commits::check_cancellation_requested(pool, commit.id).await {
+                        Ok(true) => {
+                            warn!("🚫 Cancellation requested for commit {} — killing nix-eval-jobs process group", commit.id);
+                            // Do NOT call force_cancel_commit_evaluation here — the
+                            // outer handler (process_pending_commits) is the single
+                            // authority that atomically transitions the state and
+                            // broadcasts the cancelled event.  We just return a
+                            // typed error.
+                            return Err(EvaluationCancelled.into());
+                        }
+                        Ok(false) => {} // not cancelled, continue
+                        Err(e) => {
+                            warn!("Failed to check cancellation flag for commit {}: {e}", commit.id);
+                        }
                     }
                 }
-            }
-            _ = progress_ticker.tick() => {
-                let idle_for = Instant::now().duration_since(last_output_at);
-                if idle_for >= Duration::from_secs(EVAL_OUTPUT_IDLE_TIMEOUT_SECS) {
-                    let timeout_msg = format!(
-                        "❌ Evaluation produced no output for {}s; terminating nix-eval-jobs",
-                        EVAL_OUTPUT_IDLE_TIMEOUT_SECS
-                    );
-                    error!("{} (commit_id={})", timeout_msg, commit.id);
-
-                    if let Some(state) = cf_state {
-                        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, timeout_msg)
-                            .await;
-                    }
-
-                    guard.terminate().await;
-                    bail!(
-                        "evaluation timed out after {}s without nix-eval-jobs output",
-                        EVAL_OUTPUT_IDLE_TIMEOUT_SECS
+                _ = progress_ticker.tick() => {
+                    debug!(
+                        "nix-eval-jobs still running for commit {} (idle {}s)",
+                        commit.id,
+                        watchdog.idle_elapsed(Instant::now()).as_secs()
                     );
                 }
-
-                debug!(
-                    "nix-eval-jobs still running for commit {} (idle {}s)",
-                    commit.id,
-                    idle_for.as_secs()
-                );
-            }
-            line_result = stdout_reader.next_line(), if !stdout_done => {
-                match line_result? {
-                    Some(line) if !line.trim().is_empty() => {
-                        last_output_at = Instant::now();
-                        match serde_json::from_str::<NixEvalJobResult>(&line) {
-                            Ok(mut result) => {
-                                result.error = result.error.take().map(|error| {
-                                    crate::security::snapshot_redaction::redact_evaluation_error(
-                                        &error,
-                                    )
-                                });
-                                normalize_policy_metadata(&mut result);
-                                let system_name = result
-                                    .attr_path
-                                    .last()
-                                    .cloned()
-                                    .unwrap_or_else(|| result.attr.clone());
-                                if system_name == "__crystalForgeFlakeOutput" {
-                                    flake_output_snapshot = result
-                                        .meta
-                                        .as_ref()
-                                        .and_then(|meta| meta.get("flakeOutputSnapshot"))
-                                        .map(crate::security::snapshot_redaction::redact_json);
-                                    continue;
-                                }
-                                let build_eligible = match &allowed_systems {
-                                    Some(systems) => systems.iter().any(|c| c == &system_name),
-                                    None => true,
-                                };
-                                if !build_eligible {
-                                    debug!(
-                                        "System {} is not eligible for build jobs under flake build_scope={}",
-                                        system_name,
-                                        flake.build_scope,
-                                    );
-                                }
-                                let has_error = result.error.is_some();
-                                let drv_path = result.drv_path.clone();
-                                let config_root = captured_config_root(&result);
-                                // Resolve the expected store path from nix-eval-jobs
-                                // JSON outputs (fast, no subprocess).  This avoids
-                                // blocking the stdout reader on a nix-store query
-                                // before the build job can be created.
-                                let expected_store_path = if !has_error {
-                                    result
-                                        .outputs
-                                        .as_ref()
-                                        .and_then(parse_expected_store_path_from_outputs)
-                                } else {
-                                    None
-                                };
-
-                                info!(
-                                    commit_id = commit.id,
-                                    expected_attempt,
-                                    system = %system_name,
-                                    has_error,
-                                    has_drv = drv_path.is_some(),
-                                    "system_result_received"
-                                );
-
-                                // Broadcast system evaluation result to logs
-                                if let Some(state) = cf_state {
-                                    if has_error {
-                                        let error_msg = result.error.as_ref()
-                                            .map(|e| {
-                                                // Truncate long errors for readability
-                                                if e.len() > 200 {
-                                                    format!("{}...", &e[..200])
-                                                } else {
-                                                    e.clone()
-                                                }
-                                            })
-                                            .unwrap_or_else(|| "Unknown error".to_string());
-                                        let log_msg = format!("❌ {}: {}", system_name, error_msg);
-                                        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
-                                    } else {
-                                        let log_msg = format!(
-                                            "🔍 {}: Nix evaluation succeeded; checking assigned policies",
-                                            system_name
+                line_result = stdout_reader.next_line(), if !stdout_done => {
+                    match line_result? {
+                        Some(line) if !line.trim().is_empty() => {
+                            watchdog.record_output(OutputStream::Stdout, &line, Instant::now());
+                            match serde_json::from_str::<NixEvalJobResult>(&line) {
+                                Ok(mut result) => {
+                                    result.error = result.error.take().map(|error| {
+                                        crate::security::snapshot_redaction::redact_evaluation_error(
+                                            &error,
+                                        )
+                                    });
+                                    normalize_policy_metadata(&mut result);
+                                    let system_name = result
+                                        .attr_path
+                                        .last()
+                                        .cloned()
+                                        .unwrap_or_else(|| result.attr.clone());
+                                    if system_name == "__crystalForgeFlakeOutput" {
+                                        flake_output_snapshot = result
+                                            .meta
+                                            .as_ref()
+                                            .and_then(|meta| meta.get("flakeOutputSnapshot"))
+                                            .map(crate::security::snapshot_redaction::redact_json);
+                                        continue;
+                                    }
+                                    let build_eligible = match &allowed_systems {
+                                        Some(systems) => systems.iter().any(|c| c == &system_name),
+                                        None => true,
+                                    };
+                                    if !build_eligible {
+                                        debug!(
+                                            "System {} is not eligible for build jobs under flake build_scope={}",
+                                            system_name,
+                                            flake.build_scope,
                                         );
-                                        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
+                                    }
+                                    let has_error = result.error.is_some();
+                                    let drv_path = result.drv_path.clone();
+                                    let config_root = captured_config_root(&result);
+                                    // Resolve the expected store path from nix-eval-jobs
+                                    // JSON outputs (fast, no subprocess).  This avoids
+                                    // blocking the stdout reader on a nix-store query
+                                    // before the build job can be created.
+                                    let expected_store_path = if !has_error {
+                                        result
+                                            .outputs
+                                            .as_ref()
+                                            .and_then(parse_expected_store_path_from_outputs)
+                                    } else {
+                                        None
+                                    };
+
+                                    info!(
+                                        commit_id = commit.id,
+                                        expected_attempt,
+                                        system = %system_name,
+                                        has_error,
+                                        has_drv = drv_path.is_some(),
+                                        "system_result_received"
+                                    );
+
+                                    // Broadcast system evaluation result to logs
+                                    if let Some(state) = cf_state {
+                                        if has_error {
+                                            let error_msg = result.error.as_ref()
+                                                .map(|e| {
+                                                    // Truncate long errors for readability
+                                                    if e.len() > 200 {
+                                                        format!("{}...", &e[..200])
+                                                    } else {
+                                                        e.clone()
+                                                    }
+                                                })
+                                                .unwrap_or_else(|| "Unknown error".to_string());
+                                            let log_msg = format!("❌ {}: {}", system_name, error_msg);
+                                            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
+                                        } else {
+                                            let log_msg = format!(
+                                                "🔍 {}: Nix evaluation succeeded; checking assigned policies",
+                                                system_name
+                                            );
+                                            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
+                                        }
+
+                                        // Broadcast in-progress status to WebSocket clients.
+                                        crate::handlers::api::commits::broadcast_system_status(
+                                            state,
+                                            commit.id,
+                                            system_name.clone(),
+                                            crate::handlers::api::commits::SystemEvalStatus::Evaluating,
+                                            None,
+                                        )
+                                        .await;
                                     }
 
-                                    // Broadcast in-progress status to WebSocket clients.
-                                    crate::handlers::api::commits::broadcast_system_status(
-                                        state,
-                                        commit.id,
-                                        system_name.clone(),
-                                        crate::handlers::api::commits::SystemEvalStatus::Evaluating,
-                                        None,
-                                    )
-                                    .await;
-                                }
+                                    // Resolve this configuration's assigned policies from the map.
+                                    let assigned_policies: &[AssignedPolicy] =
+                                        policies_for_config(policies_by_configuration, &system_name);
 
-                                // Resolve this configuration's assigned policies from the map.
-                                let assigned_policies: &[AssignedPolicy] =
-                                    policies_for_config(policies_by_configuration, &system_name);
-
-                                // Extract policy check results from meta.policies
-                                let mut cf_agent_enabled = None;
-                                let mut policy_check_for_system: Option<PolicyCheckResult> = None;
-                                let mut policy_metadata_error: Option<String> = None;
-                                if has_error {
-                                    // Error lines are converted to confirmed target failures below.
-                                    // They have no successful policy metadata contract to parse.
-                                } else if let Some(meta) = &result.meta {
-                                    // The evaluator reports snapshot capture
-                                    // separately from the derivation result. A
-                                    // configuration whose Nix evaluation
-                                    // succeeded must stay successful even when
-                                    // no snapshot artifact could be produced,
-                                    // so every branch here records observability
-                                    // state only and never a system failure.
-                                    //
-                                    // The primary evaluator intentionally does
-                                    // not capture snapshots. Missing snapshot
-                                    // metadata therefore means unavailable,
-                                    // not an empty available snapshot and not a
-                                    // failed system evaluation.
-                                    let captured = meta
-                                        .get("evaluationSnapshotCaptured")
-                                        .and_then(serde_json::Value::as_bool)
-                                        .unwrap_or(false);
-                                    if !captured {
-                                        snapshot_capture_failures.insert(
-                                            system_name.clone(),
-                                            "Configuration snapshot was not captured separately"
-                                                .to_string(),
-                                        );
-                                    } else if let Some(snapshot) =
-                                        meta.get("evaluationSnapshot")
-                                    {
-                                        match serde_json::from_value::<Vec<EvaluatedOption>>(
-                                            snapshot.clone(),
-                                        ) {
-                                            Ok(parsed) => {
-                                                let options = parsed
-                                                    .into_iter()
-                                                    .map(EvaluatedOption::redacted)
-                                                    .collect();
-                                                evaluation_snapshots
-                                                    .insert(system_name.clone(), options);
-                                            }
-                                            // A snapshot the server cannot parse
-                                            // is not a trustworthy artifact, but
-                                            // it is also not a Nix evaluation
-                                            // failure. Record the gap instead of
-                                            // aborting the whole commit.
-                                            Err(parse_error) => {
-                                                warn!(
-                                                    commit_id = commit.id,
-                                                    system = %system_name,
-                                                    error = %parse_error,
-                                                    "evaluation_snapshot_metadata_unparsable"
-                                                );
-                                                snapshot_capture_failures.insert(
-                                                    system_name.clone(),
-                                                    "Configuration snapshot metadata could not be \
-                                                     interpreted"
-                                                        .to_string(),
-                                                );
+                                    // Extract policy check results from meta.policies
+                                    let mut cf_agent_enabled = None;
+                                    let mut policy_check_for_system: Option<PolicyCheckResult> = None;
+                                    let mut policy_metadata_error: Option<String> = None;
+                                    if has_error {
+                                        // Error lines are converted to confirmed target failures below.
+                                        // They have no successful policy metadata contract to parse.
+                                    } else if let Some(meta) = &result.meta {
+                                        // The evaluator reports snapshot capture
+                                        // separately from the derivation result. A
+                                        // configuration whose Nix evaluation
+                                        // succeeded must stay successful even when
+                                        // no snapshot artifact could be produced,
+                                        // so every branch here records observability
+                                        // state only and never a system failure.
+                                        //
+                                        // The primary evaluator intentionally does
+                                        // not capture snapshots. Missing snapshot
+                                        // metadata therefore means unavailable,
+                                        // not an empty available snapshot and not a
+                                        // failed system evaluation.
+                                        let captured = meta
+                                            .get("evaluationSnapshotCaptured")
+                                            .and_then(serde_json::Value::as_bool)
+                                            .unwrap_or(false);
+                                        if !captured {
+                                            snapshot_capture_failures.insert(
+                                                system_name.clone(),
+                                                "Configuration snapshot was not captured separately"
+                                                    .to_string(),
+                                            );
+                                        } else if let Some(snapshot) =
+                                            meta.get("evaluationSnapshot")
+                                        {
+                                            match serde_json::from_value::<Vec<EvaluatedOption>>(
+                                                snapshot.clone(),
+                                            ) {
+                                                Ok(parsed) => {
+                                                    let options = parsed
+                                                        .into_iter()
+                                                        .map(EvaluatedOption::redacted)
+                                                        .collect();
+                                                    evaluation_snapshots
+                                                        .insert(system_name.clone(), options);
+                                                }
+                                                // A snapshot the server cannot parse
+                                                // is not a trustworthy artifact, but
+                                                // it is also not a Nix evaluation
+                                                // failure. Record the gap instead of
+                                                // aborting the whole commit.
+                                                Err(parse_error) => {
+                                                    warn!(
+                                                        commit_id = commit.id,
+                                                        system = %system_name,
+                                                        error = %parse_error,
+                                                        "evaluation_snapshot_metadata_unparsable"
+                                                    );
+                                                    snapshot_capture_failures.insert(
+                                                        system_name.clone(),
+                                                        "Configuration snapshot metadata could not be \
+                                                         interpreted"
+                                                            .to_string(),
+                                                    );
+                                                }
                                             }
                                         }
-                                    }
-                                    // Override provenance is reconstructed from
-                                    // the raw module graph. A degraded graph
-                                    // still yields a usable snapshot, so report
-                                    // it without changing the lifecycle.
-                                    if meta
-                                        .get("evaluationSnapshotModulesCaptured")
-                                        .and_then(serde_json::Value::as_bool)
-                                        == Some(false)
-                                    {
-                                        warn!(
-                                            commit_id = commit.id,
-                                            system = %system_name,
-                                            "evaluation_snapshot_module_graph_degraded"
-                                        );
-                                    }
-                                    if let Some(policies_json) = meta.get("policies") {
-                                        // Parse policy results using this configuration's assigned
-                                        // policies only (stable-key path).
-                                        let check_result = PolicyCheckResult::from_assigned(
-                                            system_name.clone(),
-                                            policies_json,
-                                            assigned_policies,
-                                        );
+                                        // Override provenance is reconstructed from
+                                        // the raw module graph. A degraded graph
+                                        // still yields a usable snapshot, so report
+                                        // it without changing the lifecycle.
+                                        if meta
+                                            .get("evaluationSnapshotModulesCaptured")
+                                            .and_then(serde_json::Value::as_bool)
+                                            == Some(false)
+                                        {
+                                            warn!(
+                                                commit_id = commit.id,
+                                                system = %system_name,
+                                                "evaluation_snapshot_module_graph_degraded"
+                                            );
+                                        }
+                                        if let Some(policies_json) = meta.get("policies") {
+                                            // Parse policy results using this configuration's assigned
+                                            // policies only (stable-key path).
+                                            let check_result = PolicyCheckResult::from_assigned(
+                                                system_name.clone(),
+                                                policies_json,
+                                                assigned_policies,
+                                            );
 
-                                        match check_result {
-                                            Ok(check) => {
-                                                cf_agent_enabled = check.cf_agent_enabled;
+                                            match check_result {
+                                                Ok(check) => {
+                                                    cf_agent_enabled = check.cf_agent_enabled;
 
-                                                // Log policy results
-                                                if !check.meets_requirements {
-                                                    let has_strict = check.failed_policies.iter().any(|(_, s)| *s);
-                                                    for warning in &check.warnings {
-                                                        if has_strict {
-                                                            error!("❌ {}", warning);
-                                                        } else {
-                                                            warn!("⚠️  {}", warning);
+                                                    // Log policy results
+                                                    if !check.meets_requirements {
+                                                        let has_strict = check.failed_policies.iter().any(|(_, s)| *s);
+                                                        for warning in &check.warnings {
+                                                            if has_strict {
+                                                                error!("❌ {}", warning);
+                                                            } else {
+                                                                warn!("⚠️  {}", warning);
+                                                            }
+                                                            if let Some(state) = cf_state {
+                                                                let log_msg = format!("⚠️  {}: {}", system_name, warning);
+                                                                broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
+                                                            }
                                                         }
+                                                    } else if assigned_policies.is_empty() {
+                                                        debug!("✅ {}: no assigned policies — passes evaluation", system_name);
+                                                    } else {
+                                                        info!("✅ {}: all assigned policies passed", system_name);
                                                         if let Some(state) = cf_state {
-                                                            let log_msg = format!("⚠️  {}: {}", system_name, warning);
+                                                            let log_msg = format!("✅ {}: all assigned policies passed", system_name);
                                                             broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
                                                         }
                                                     }
-                                                } else if assigned_policies.is_empty() {
-                                                    debug!("✅ {}: no assigned policies — passes evaluation", system_name);
-                                                } else {
-                                                    info!("✅ {}: all assigned policies passed", system_name);
+
+                                                    policy_check_for_system = Some(check.clone());
+                                                    policy_checks.push(check);
+                                                }
+                                                Err(mismatch) => {
+                                                    // Expression-generation/parser mismatch — treat as
+                                                    // infrastructure error for this configuration.
+                                                    error!(
+                                                        system = %system_name,
+                                                        "Policy metadata key mismatch: {}", mismatch
+                                                    );
                                                     if let Some(state) = cf_state {
-                                                        let log_msg = format!("✅ {}: all assigned policies passed", system_name);
+                                                        let log_msg = format!("❌ {}: policy metadata mismatch: {}", system_name, mismatch);
                                                         broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
                                                     }
+                                                    policy_metadata_error = Some(format!(
+                                                        "Policy metadata mismatch: {}",
+                                                        mismatch
+                                                    ));
                                                 }
-
-                                                policy_check_for_system = Some(check.clone());
-                                                policy_checks.push(check);
                                             }
-                                            Err(mismatch) => {
-                                                // Expression-generation/parser mismatch — treat as
-                                                // infrastructure error for this configuration.
-                                                error!(
-                                                    system = %system_name,
-                                                    "Policy metadata key mismatch: {}", mismatch
-                                                );
-                                                if let Some(state) = cf_state {
-                                                    let log_msg = format!("❌ {}: policy metadata mismatch: {}", system_name, mismatch);
-                                                    broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
-                                                }
-                                                policy_metadata_error = Some(format!(
-                                                    "Policy metadata mismatch: {}",
-                                                    mismatch
-                                                ));
-                                            }
+                                        } else {
+                                            let msg = format!(
+                                                "{}: evaluator did not emit policy metadata",
+                                                system_name
+                                            );
+                                            debug!("⚠️  {msg}");
+                                            policy_metadata_error = Some(msg);
                                         }
                                     } else {
                                         let msg = format!(
-                                            "{}: evaluator did not emit policy metadata",
+                                            "{}: evaluator did not emit derivation metadata",
                                             system_name
                                         );
                                         debug!("⚠️  {msg}");
                                         policy_metadata_error = Some(msg);
                                     }
-                                } else {
-                                    let msg = format!(
-                                        "{}: evaluator did not emit derivation metadata",
-                                        system_name
-                                    );
-                                    debug!("⚠️  {msg}");
-                                    policy_metadata_error = Some(msg);
-                                }
 
-                                // Configurations with no assigned policies still receive
-                                // unconditional cfAgentEnabled metadata from the evaluator.
-                                // Synthesize a passing check only when that metadata is present;
-                                // otherwise leave policy_check_for_system as None so the system
-                                // is not incorrectly persisted with a null cf_agent_enabled.
-                                if policy_check_for_system.is_none()
-                                    && policy_metadata_error.is_none()
-                                    && !has_error
-                                    && assigned_policies.is_empty()
-                                {
-                                    let cf_agent_enabled = result
-                                        .meta
-                                        .as_ref()
-                                        .and_then(|m| m.get("policies"))
-                                        .and_then(|p| p.get("cfAgentEnabled"))
-                                        .and_then(|v| v.as_bool());
-                                    if cf_agent_enabled.is_none() {
-                                        policy_metadata_error = Some(format!(
-                                            "{}: evaluator did not emit cfAgentEnabled metadata",
-                                            system_name
-                                        ));
-                                    } else {
-                                        let check = PolicyCheckResult {
-                                            system_name: system_name.clone(),
-                                            cf_agent_enabled,
-                                            assigned_results: BTreeMap::new(),
-                                            has_required_packages: None,
-                                            custom_checks: HashMap::new(),
-                                            meets_requirements: cf_agent_enabled == Some(true),
-                                            warnings: Vec::new(),
-                                            failed_policies: Vec::new(),
-                                            cve_checks: Vec::new(),
-                                        };
-                                        policy_check_for_system = Some(check.clone());
-                                        policy_checks.push(check);
-                                    }
-                                }
-
-                                // Broadcast post-policy status to WebSocket clients.
-                                if let Some(state) = cf_state {
-                                    if has_error {
-                                        let error_msg = result
-                                            .error
-                                            .clone()
-                                            .unwrap_or_else(|| "Unknown error".to_string());
-                                        crate::handlers::api::commits::broadcast_system_status(
-                                            state,
-                                            commit.id,
-                                            system_name.clone(),
-                                            crate::handlers::api::commits::SystemEvalStatus::Failed,
-                                            Some(error_msg.clone()),
-                                        )
-                                        .await;
-                                        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
-                                            format!("❌ {}: {}", system_name, error_msg),
-                                        )
-                                        .await;
-                                    } else if let Some(metadata_error) = policy_metadata_error.as_ref() {
-                                        crate::handlers::api::commits::broadcast_system_status(
-                                            state,
-                                            commit.id,
-                                            system_name.clone(),
-                                            crate::handlers::api::commits::SystemEvalStatus::Failed,
-                                            Some(metadata_error.clone()),
-                                        )
-                                        .await;
-                                    } else {
-                                        // Use the actual policy check result to determine status.
-                                        let passes = policy_check_for_system
+                                    // Configurations with no assigned policies still receive
+                                    // unconditional cfAgentEnabled metadata from the evaluator.
+                                    // Synthesize a passing check only when that metadata is present;
+                                    // otherwise leave policy_check_for_system as None so the system
+                                    // is not incorrectly persisted with a null cf_agent_enabled.
+                                    if policy_check_for_system.is_none()
+                                        && policy_metadata_error.is_none()
+                                        && !has_error
+                                        && assigned_policies.is_empty()
+                                    {
+                                        let cf_agent_enabled = result
+                                            .meta
                                             .as_ref()
-                                            .map(|c| c.meets_requirements)
-                                            .unwrap_or(false);
-                                        if passes {
-                                            // QueuedForBuild broadcast deferred to post-finalization.
-                                            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
-                                                format!("✅ {}: evaluation and policies passed", system_name),
-                                            )
-                                            .await;
+                                            .and_then(|m| m.get("policies"))
+                                            .and_then(|p| p.get("cfAgentEnabled"))
+                                            .and_then(|v| v.as_bool());
+                                        if cf_agent_enabled.is_none() {
+                                            policy_metadata_error = Some(format!(
+                                                "{}: evaluator did not emit cfAgentEnabled metadata",
+                                                system_name
+                                            ));
                                         } else {
-                                            let reason = policy_check_for_system
-                                                .as_ref()
-                                                .and_then(|c| c.warnings.first())
-                                                .map(|d| d.as_str())
-                                                .or_else(|| {
-                                                    policy_check_for_system
-                                                        .as_ref()
-                                                        .and_then(|c| c.failed_policies.first())
-                                                        .map(|(d, _)| d.as_str())
-                                                })
-                                                .unwrap_or("policy failed");
-                                            let has_strict = policy_check_for_system
-                                                .as_ref()
-                                                .map(|c| {
-                                                    c.failed_policies.iter().any(|(_, strict)| *strict)
-                                                })
-                                                .unwrap_or(true);
-                                            let terminal_log = if has_strict {
-                                                format!(
-                                                    "❌ {}: strict policy failed — {}",
-                                                    system_name, reason
-                                                )
-                                            } else {
-                                                format!(
-                                                    "⚠️  {}: non-strict policy warning — {}",
-                                                    system_name, reason
-                                                )
+                                            let check = PolicyCheckResult {
+                                                system_name: system_name.clone(),
+                                                cf_agent_enabled,
+                                                assigned_results: BTreeMap::new(),
+                                                has_required_packages: None,
+                                                custom_checks: HashMap::new(),
+                                                meets_requirements: cf_agent_enabled == Some(true),
+                                                warnings: Vec::new(),
+                                                failed_policies: Vec::new(),
+                                                cve_checks: Vec::new(),
                                             };
-                                            broadcast_and_persist_eval_log(
-                                                pool,
-                                                Some(state),
-                                                commit.id,
-                                                &mut log_sequence,
-                                                terminal_log,
-                                            )
-                                            .await;
-                                            let reason = policy_check_for_system
-                                                .as_ref()
-                                                .and_then(|c| c.failed_policies.first())
-                                                .map(|(d, _)| d.as_str())
-                                                .unwrap_or("policy failed");
+                                            policy_check_for_system = Some(check.clone());
+                                            policy_checks.push(check);
+                                        }
+                                    }
+
+                                    // Broadcast post-policy status to WebSocket clients.
+                                    if let Some(state) = cf_state {
+                                        if has_error {
+                                            let error_msg = result
+                                                .error
+                                                .clone()
+                                                .unwrap_or_else(|| "Unknown error".to_string());
                                             crate::handlers::api::commits::broadcast_system_status(
                                                 state,
                                                 commit.id,
                                                 system_name.clone(),
-                                                crate::handlers::api::commits::SystemEvalStatus::PolicyFailed,
-                                                Some(reason.to_string()),
+                                                crate::handlers::api::commits::SystemEvalStatus::Failed,
+                                                Some(error_msg.clone()),
                                             )
                                             .await;
+                                            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
+                                                format!("❌ {}: {}", system_name, error_msg),
+                                            )
+                                            .await;
+                                        } else if let Some(metadata_error) = policy_metadata_error.as_ref() {
+                                            crate::handlers::api::commits::broadcast_system_status(
+                                                state,
+                                                commit.id,
+                                                system_name.clone(),
+                                                crate::handlers::api::commits::SystemEvalStatus::Failed,
+                                                Some(metadata_error.clone()),
+                                            )
+                                            .await;
+                                        } else {
+                                            // Use the actual policy check result to determine status.
+                                            let passes = policy_check_for_system
+                                                .as_ref()
+                                                .map(|c| c.meets_requirements)
+                                                .unwrap_or(false);
+                                            if passes {
+                                                // QueuedForBuild broadcast deferred to post-finalization.
+                                                broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
+                                                    format!("✅ {}: evaluation and policies passed", system_name),
+                                                )
+                                                .await;
+                                            } else {
+                                                let reason = policy_check_for_system
+                                                    .as_ref()
+                                                    .and_then(|c| c.warnings.first())
+                                                    .map(|d| d.as_str())
+                                                    .or_else(|| {
+                                                        policy_check_for_system
+                                                            .as_ref()
+                                                            .and_then(|c| c.failed_policies.first())
+                                                            .map(|(d, _)| d.as_str())
+                                                    })
+                                                    .unwrap_or("policy failed");
+                                                let has_strict = policy_check_for_system
+                                                    .as_ref()
+                                                    .map(|c| {
+                                                        c.failed_policies.iter().any(|(_, strict)| *strict)
+                                                    })
+                                                    .unwrap_or(true);
+                                                let terminal_log = if has_strict {
+                                                    format!(
+                                                        "❌ {}: strict policy failed — {}",
+                                                        system_name, reason
+                                                    )
+                                                } else {
+                                                    format!(
+                                                        "⚠️  {}: non-strict policy warning — {}",
+                                                        system_name, reason
+                                                    )
+                                                };
+                                                broadcast_and_persist_eval_log(
+                                                    pool,
+                                                    Some(state),
+                                                    commit.id,
+                                                    &mut log_sequence,
+                                                    terminal_log,
+                                                )
+                                                .await;
+                                                let reason = policy_check_for_system
+                                                    .as_ref()
+                                                    .and_then(|c| c.failed_policies.first())
+                                                    .map(|(d, _)| d.as_str())
+                                                    .unwrap_or("policy failed");
+                                                crate::handlers::api::commits::broadcast_system_status(
+                                                    state,
+                                                    commit.id,
+                                                    system_name.clone(),
+                                                    crate::handlers::api::commits::SystemEvalStatus::PolicyFailed,
+                                                    Some(reason.to_string()),
+                                                )
+                                                .await;
+                                            }
                                         }
                                     }
-                                }
 
-                                // ── Incrementally persist successful systems ──────────
-                                // A healthy system must be queued as soon as its own eval,
-                                // policy check, derivation write, and build-job insertion commit.
-                                if let Some(system_name) = result.attr_path.last() {
-                                    if !has_error && drv_path.is_some() && policy_metadata_error.is_none() {
-                                        let drv = drv_path.clone().unwrap();
-                                        let derivation_target = build_agent_target(
-                                            &flake.repo_url,
-                                            &commit.git_commit_hash,
-                                            system_name,
-                                        );
-                                        let successful = SuccessfulSystemResult {
-                                            system_name: system_name.clone(),
-                                            derivation_target,
-                                            drv_path: drv,
-                                            expected_store_path: expected_store_path.clone(),
-                                            cf_agent_enabled,
-                                            build_eligible,
-                                        };
-
-                                        let default_check;
-                                        let policy_check = match policy_check_for_system.as_ref() {
-                                            Some(check) => check,
-                                            None => {
-                                                default_check = PolicyCheckResult {
-                                                    system_name: system_name.clone(),
-                                                    cf_agent_enabled,
-                                                    assigned_results: BTreeMap::new(),
-                                                    has_required_packages: None,
-                                                    custom_checks: HashMap::new(),
-                                                    meets_requirements: cf_agent_enabled != Some(false),
-                                                    warnings: Vec::new(),
-                                                    failed_policies: Vec::new(),
-                                                    cve_checks: Vec::new(),
-                                                };
-                                                &default_check
-                                            }
-                                        };
-
-                                        // ── Phase 1: persist derivation (no build job) ──
-                                        let persisted = persist_evaluated_system(
-                                            pool,
-                                            commit.id,
-                                            expected_attempt,
-                                            &successful,
-                                            policy_check,
-                                            assigned_policies,
-                                        )
-                                        .await?;
-
-                                        let observation_derivation_id = match &persisted {
-                                            SystemPersistenceOutcome::NeedsBuildPreparation { derivation_id, .. }
-                                            | SystemPersistenceOutcome::ExistingBuildJob { derivation_id, .. }
-                                            | SystemPersistenceOutcome::RecordedWithoutBuild { derivation_id, .. } => Some(*derivation_id),
-                                            SystemPersistenceOutcome::Cancelled
-                                            | SystemPersistenceOutcome::Superseded => None,
-                                        };
-                                        if let Some(derivation_id) = observation_derivation_id
-                                            && let Err(error) = root_publication_tx.try_send(
-                                                PrimaryConfigRootPublication {
-                                                    commit_id: commit.id,
-                                                    derivation_id,
-                                                    configuration_name: system_name.clone(),
-                                                    carrier_drv_path: successful.drv_path.clone(),
-                                                    payload: config_root.clone(),
-                                                },
-                                            )
-                                        {
-                                            // FAILURE ISOLATION: Optional Config data cannot
-                                            // roll back a valid derivation or delay build
-                                            // preparation for this configuration. A full
-                                            // bounded channel is reported instead of creating
-                                            // unbounded publication tasks.
-                                            warn!(
-                                                commit_id = commit.id,
-                                                expected_attempt,
-                                                derivation_id,
-                                                system = %system_name,
-                                                %error,
-                                                "primary_config_root_publication_queue_full"
+                                    // ── Incrementally persist successful systems ──────────
+                                    // A healthy system must be queued as soon as its own eval,
+                                    // policy check, derivation write, and build-job insertion commit.
+                                    if let Some(system_name) = result.attr_path.last() {
+                                        if !has_error && drv_path.is_some() && policy_metadata_error.is_none() {
+                                            let drv = drv_path.clone().unwrap();
+                                            let derivation_target = build_agent_target(
+                                                &flake.repo_url,
+                                                &commit.git_commit_hash,
+                                                system_name,
                                             );
-                                        }
-
-                                        match persisted {
-                                            SystemPersistenceOutcome::NeedsBuildPreparation {
-                                                derivation_id,
-                                                drv_path,
-                                            } => {
-                                                build_prep_count += 1;
-                                                // Spawn bounded preparation: GC root → activate → notify.
-                                                // This keeps the stdout pipe unblocked while the
-                                                // nix-store subprocess and second transaction run.
-                                                let build_preparation_limit =
-                                                    build_preparation_limit.clone();
-                                                let pool = pool.clone();
-                                                let commit_id = commit.id;
-                                                let attempt = expected_attempt;
-                                                let system_name = system_name.clone();
-                                                let finalized = FinalizedDerivation {
-                                                    derivation_id,
-                                                    drv_path: drv_path.clone(),
-                                                    system_name: system_name.clone(),
-                                                    cf_agent_enabled: successful.cf_agent_enabled,
-                                                };
-                                                let successful = successful.clone();
-                                                let cf_state_owned = cf_state.cloned();
-                                                let queue_notifier_owned = queue_notifier.cloned();
-
-                                                info!(
-                                                    commit_id,
-                                                    expected_attempt,
-                                                    derivation_id,
-                                                    system = %system_name,
-                                                    "build_preparation_spawned"
-                                                );
-
-                                                build_preparations.spawn(async move {
-                                                    let _permit = build_preparation_limit
-                                                        .acquire_owned()
-                                                        .await
-                                                        .context(
-                                                            "Build preparation semaphore closed",
-                                                        )?;
-
-                                                    info!(
-                                                        commit_id,
-                                                        expected_attempt = attempt,
-                                                        derivation_id,
-                                                        system = %system_name,
-                                                        "build_preparation_started"
-                                                    );
-
-                                                    // Phase 2: GC root (required — bail on failure)
-                                                    let gc_root_result = crate::builder::create_drv_gc_root(
-                                                        &drv_path,
-                                                        derivation_id,
-                                                    )
-                                                    .await
-                                                    .with_context(|| {
-                                                        format!(
-                                                            "Failed to create GC root for derivation {}",
-                                                            derivation_id,
-                                                        )
-                                                    });
-                                                    let rooted = match gc_root_result {
-                                                        Ok(r) => r,
-                                                        Err(err) => {
-                                                            let msg = format!(
-                                                                "build_prep_gc_root_error derivation_id={}: {err:#}",
-                                                                derivation_id,
-                                                            );
-                                                            record_preparation_failure(
-                                                                &pool, derivation_id, commit_id, attempt, &drv_path, &msg,
-                                                            )
-                                                            .await;
-                                                            return Err(err);
-                                                        }
-                                                    };
-                                                    if !rooted {
-                                                        #[cfg(not(test))]
-                                                        {
-                                                            let msg = format!(
-                                                                "build_prep_not_valid derivation_id={} drv_path={}",
-                                                                derivation_id, drv_path,
-                                                            );
-                                                            record_preparation_failure(
-                                                                &pool, derivation_id, commit_id, attempt, &drv_path, &msg,
-                                                            )
-                                                            .await;
-                                                            bail!(
-                                                                "Derivation {} (drv={}) is not valid \
-                                                                 in the server store; build activation aborted",
-                                                                derivation_id,
-                                                                drv_path,
-                                                            );
-                                                        }
-                                                        #[cfg(test)]
-                                                        warn!(
-                                                            "⚠️  Skipping GC-root requirement for \
-                                                             derivation {} (drv={}) in test mode",
-                                                            derivation_id, drv_path,
-                                                        );
-                                                    }
-
-                                                    info!(
-                                                        commit_id,
-                                                        expected_attempt = attempt,
-                                                        derivation_id,
-                                                        system = %system_name,
-                                                        "build_gc_root_created"
-                                                    );
-
-                                                    // Phase 3: activate build job (second transaction)
-                                                    let activation = match
-                                                        activate_evaluated_system_build(
-                                                            &pool,
-                                                            commit_id,
-                                                            attempt,
-                                                            derivation_id,
-                                                        )
-                                                        .await
-                                                    {
-                                                        Ok(a) => a,
-                                                        Err(err) => {
-                                                            let msg = format!(
-                                                                "build_prep_activation_error derivation_id={derivation_id}: {err:#}",
-                                                            );
-                                                            record_preparation_failure(
-                                                                &pool, derivation_id, commit_id, attempt, &drv_path, &msg,
-                                                            )
-                                                            .await;
-                                                            return Err(err);
-                                                        }
-                                                    };
-
-                                                    match &activation {
-                                                        SystemBuildActivationOutcome::Queued { .. }
-                                                        | SystemBuildActivationOutcome::AlreadyExists { .. } => {
-                                                            handle_system_build_activation(
-                                                                &pool,
-                                                                cf_state_owned.as_ref(),
-                                                                queue_notifier_owned.as_ref(),
-                                                                commit_id,
-                                                                &system_name,
-                                                                &activation,
-                                                                None, // skip eval-log persistence from tasks
-                                                            )
-                                                            .await?;
-
-                                                            spawn_closure_counting(pool, finalized);
-                                                        }
-                                                        SystemBuildActivationOutcome::Cancelled => {
-                                                            // Task completed after cancellation —
-                                                            // nothing further to do.
-                                                        }
-                                                        SystemBuildActivationOutcome::Superseded => {
-                                                            // Build activation was superseded
-                                                            // (attempt changed or commit no longer
-                                                            // in_progress).
-                                                        }
-                                                    }
-
-                                                    info!(
-                                                        commit_id,
-                                                        expected_attempt = attempt,
-                                                        derivation_id,
-                                                        system = %system_name,
-                                                        "build_preparation_completed"
-                                                    );
-
-                                                    Ok(())
-                                                });
-
-                                                // Track in main results immediately so the
-                                                // plan is correct even if preparation is pending.
-                                                successful_results.push(successful);
-                                            }
-
-                                            SystemPersistenceOutcome::ExistingBuildJob {
-                                                derivation_id,
-                                                build_job_id,
-                                                build_job_status,
-                                                drv_path,
-                                            } => {
-                                                // Best-effort GC root for existing build; the
-                                                // build job is already claimable.
-                                                match crate::builder::create_drv_gc_root(
-                                                    &drv_path,
-                                                    derivation_id,
-                                                )
-                                                .await
-                                                {
-                                                    Ok(true) => debug!(
-                                                        "📌 Rooted existing drv (id={}, drv={})",
-                                                        derivation_id, drv_path
-                                                    ),
-                                                    Ok(false) => warn!(
-                                                        "⚠️  Existing drv (id={}, drv={}) not valid \
-                                                         in the server store",
-                                                        derivation_id, drv_path
-                                                    ),
-                                                    Err(err) => warn!(
-                                                        "⚠️  Failed to create GC root for existing \
-                                                         drv {} (id={}): {}",
-                                                        drv_path, derivation_id, err
-                                                    ),
-                                                }
-
-                                                // Re-notify queue if the existing job is still queued.
-                                                if build_job_status == "queued" {
-                                                    if let Some(notifier) = queue_notifier {
-                                                        notifier.notify_build_queue();
-                                                    }
-                                                    if let Some(state) = cf_state {
-                                                        crate::handlers::api::commits::broadcast_system_status(
-                                                            state,
-                                                            commit.id,
-                                                            system_name.to_string(),
-                                                            crate::handlers::api::commits::SystemEvalStatus::QueuedForBuild,
-                                                            None,
-                                                        )
-                                                        .await;
-                                                        broadcast_and_persist_eval_log(
-                                                            pool,
-                                                            Some(state),
-                                                            commit.id,
-                                                            &mut log_sequence,
-                                                            format!(
-                                                                "🚀 {}: build job already queued ({})",
-                                                                system_name, build_job_id
-                                                            ),
-                                                        )
-                                                        .await;
-                                                    }
-                                                } else {
-                                                    if let Some(state) = cf_state {
-                                                        broadcast_and_persist_eval_log(
-                                                            pool,
-                                                            Some(state),
-                                                            commit.id,
-                                                            &mut log_sequence,
-                                                            format!(
-                                                                "ℹ️  {}: build job exists (status={})",
-                                                                system_name, build_job_status
-                                                            ),
-                                                        )
-                                                        .await;
-                                                    }
-                                                }
-
-                                                successful_results.push(successful.clone());
-                                            }
-
-                                            SystemPersistenceOutcome::RecordedWithoutBuild {
-                                                ..
-                                            } => {
-                                                successful_results.push(successful);
-                                            }
-
-                                            SystemPersistenceOutcome::Cancelled => {
-                                                return Err(EvaluationCancelled.into());
-                                            }
-
-                                            SystemPersistenceOutcome::Superseded => {
-                                                bail!(
-                                                    "evaluation attempt was superseded while finalizing {}",
-                                                    system_name
-                                                );
-                                            }
-                                        }
-                                    } else if let Some(metadata_error) = policy_metadata_error.as_ref() {
-                                        let derivation_target = build_agent_target(
-                                            &flake.repo_url,
-                                            &commit.git_commit_hash,
-                                            system_name,
-                                        );
-                                        let error_check = PolicyCheckResult::for_evaluation_terminal(
-                                            system_name.clone(),
-                                            assigned_policies,
-                                            EvaluationTerminalOutcome::Error,
-                                            metadata_error,
-                                        );
-                                        if let Some(drv_path) = drv_path.clone() {
-                                            let failed = SuccessfulSystemResult {
+                                            let successful = SuccessfulSystemResult {
                                                 system_name: system_name.clone(),
                                                 derivation_target,
-                                                drv_path,
+                                                drv_path: drv,
                                                 expected_store_path: expected_store_path.clone(),
-                                                cf_agent_enabled: None,
-                                                build_eligible: false,
+                                                cf_agent_enabled,
+                                                build_eligible,
                                             };
+
+                                            let default_check;
+                                            let policy_check = match policy_check_for_system.as_ref() {
+                                                Some(check) => check,
+                                                None => {
+                                                    default_check = PolicyCheckResult {
+                                                        system_name: system_name.clone(),
+                                                        cf_agent_enabled,
+                                                        assigned_results: BTreeMap::new(),
+                                                        has_required_packages: None,
+                                                        custom_checks: HashMap::new(),
+                                                        meets_requirements: cf_agent_enabled != Some(false),
+                                                        warnings: Vec::new(),
+                                                        failed_policies: Vec::new(),
+                                                        cve_checks: Vec::new(),
+                                                    };
+                                                    &default_check
+                                                }
+                                            };
+
+                                            // ── Phase 1: persist derivation (no build job) ──
                                             let persisted = persist_evaluated_system(
                                                 pool,
                                                 commit.id,
                                                 expected_attempt,
-                                                &failed,
-                                                &error_check,
+                                                &successful,
+                                                policy_check,
                                                 assigned_policies,
                                             )
                                             .await?;
+
                                             let observation_derivation_id = match &persisted {
-                                                SystemPersistenceOutcome::RecordedWithoutBuild { derivation_id, .. }
-                                                | SystemPersistenceOutcome::ExistingBuildJob { derivation_id, .. } => Some(*derivation_id),
-                                                _ => None,
+                                                SystemPersistenceOutcome::NeedsBuildPreparation { derivation_id, .. }
+                                                | SystemPersistenceOutcome::ExistingBuildJob { derivation_id, .. }
+                                                | SystemPersistenceOutcome::RecordedWithoutBuild { derivation_id, .. } => Some(*derivation_id),
+                                                SystemPersistenceOutcome::Cancelled
+                                                | SystemPersistenceOutcome::Superseded => None,
                                             };
                                             if let Some(derivation_id) = observation_derivation_id
                                                 && let Err(error) = root_publication_tx.try_send(
@@ -4325,191 +4033,566 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                                         commit_id: commit.id,
                                                         derivation_id,
                                                         configuration_name: system_name.clone(),
-                                                        carrier_drv_path: failed.drv_path.clone(),
+                                                        carrier_drv_path: successful.drv_path.clone(),
                                                         payload: config_root.clone(),
                                                     },
                                                 )
                                             {
+                                                // FAILURE ISOLATION: Optional Config data cannot
+                                                // roll back a valid derivation or delay build
+                                                // preparation for this configuration. A full
+                                                // bounded channel is reported instead of creating
+                                                // unbounded publication tasks.
                                                 warn!(
                                                     commit_id = commit.id,
                                                     expected_attempt,
                                                     derivation_id,
                                                     system = %system_name,
                                                     %error,
-                                                    "policy_failed_config_root_publication_queue_full"
+                                                    "primary_config_root_publication_queue_full"
                                                 );
                                             }
+
                                             match persisted {
-                                                SystemPersistenceOutcome::RecordedWithoutBuild { .. }
-                                                | SystemPersistenceOutcome::ExistingBuildJob { .. } => {}
+                                                SystemPersistenceOutcome::NeedsBuildPreparation {
+                                                    derivation_id,
+                                                    drv_path,
+                                                } => {
+                                                    build_prep_count += 1;
+                                                    // Spawn bounded preparation: GC root → activate → notify.
+                                                    // This keeps the stdout pipe unblocked while the
+                                                    // nix-store subprocess and second transaction run.
+                                                    let build_preparation_limit =
+                                                        build_preparation_limit.clone();
+                                                    let pool = pool.clone();
+                                                    let commit_id = commit.id;
+                                                    let attempt = expected_attempt;
+                                                    let system_name = system_name.clone();
+                                                    let finalized = FinalizedDerivation {
+                                                        derivation_id,
+                                                        drv_path: drv_path.clone(),
+                                                        system_name: system_name.clone(),
+                                                        cf_agent_enabled: successful.cf_agent_enabled,
+                                                    };
+                                                    let successful = successful.clone();
+                                                    let cf_state_owned = cf_state.cloned();
+                                                    let queue_notifier_owned = queue_notifier.cloned();
+
+                                                    info!(
+                                                        commit_id,
+                                                        expected_attempt,
+                                                        derivation_id,
+                                                        system = %system_name,
+                                                        "build_preparation_spawned"
+                                                    );
+
+                                                    build_preparations.spawn(async move {
+                                                        let _permit = build_preparation_limit
+                                                            .acquire_owned()
+                                                            .await
+                                                            .context(
+                                                                "Build preparation semaphore closed",
+                                                            )?;
+
+                                                        info!(
+                                                            commit_id,
+                                                            expected_attempt = attempt,
+                                                            derivation_id,
+                                                            system = %system_name,
+                                                            "build_preparation_started"
+                                                        );
+
+                                                        // Phase 2: GC root (required — bail on failure)
+                                                        let gc_root_result = crate::builder::create_drv_gc_root(
+                                                            &drv_path,
+                                                            derivation_id,
+                                                        )
+                                                        .await
+                                                        .with_context(|| {
+                                                            format!(
+                                                                "Failed to create GC root for derivation {}",
+                                                                derivation_id,
+                                                            )
+                                                        });
+                                                        let rooted = match gc_root_result {
+                                                            Ok(r) => r,
+                                                            Err(err) => {
+                                                                let msg = format!(
+                                                                    "build_prep_gc_root_error derivation_id={}: {err:#}",
+                                                                    derivation_id,
+                                                                );
+                                                                record_preparation_failure(
+                                                                    &pool, derivation_id, commit_id, attempt, &drv_path, &msg,
+                                                                )
+                                                                .await;
+                                                                return Err(err);
+                                                            }
+                                                        };
+                                                        if !rooted {
+                                                            #[cfg(not(test))]
+                                                            {
+                                                                let msg = format!(
+                                                                    "build_prep_not_valid derivation_id={} drv_path={}",
+                                                                    derivation_id, drv_path,
+                                                                );
+                                                                record_preparation_failure(
+                                                                    &pool, derivation_id, commit_id, attempt, &drv_path, &msg,
+                                                                )
+                                                                .await;
+                                                                bail!(
+                                                                    "Derivation {} (drv={}) is not valid \
+                                                                     in the server store; build activation aborted",
+                                                                    derivation_id,
+                                                                    drv_path,
+                                                                );
+                                                            }
+                                                            #[cfg(test)]
+                                                            warn!(
+                                                                "⚠️  Skipping GC-root requirement for \
+                                                                 derivation {} (drv={}) in test mode",
+                                                                derivation_id, drv_path,
+                                                            );
+                                                        }
+
+                                                        info!(
+                                                            commit_id,
+                                                            expected_attempt = attempt,
+                                                            derivation_id,
+                                                            system = %system_name,
+                                                            "build_gc_root_created"
+                                                        );
+
+                                                        // Phase 3: activate build job (second transaction)
+                                                        let activation = match
+                                                            activate_evaluated_system_build(
+                                                                &pool,
+                                                                commit_id,
+                                                                attempt,
+                                                                derivation_id,
+                                                            )
+                                                            .await
+                                                        {
+                                                            Ok(a) => a,
+                                                            Err(err) => {
+                                                                let msg = format!(
+                                                                    "build_prep_activation_error derivation_id={derivation_id}: {err:#}",
+                                                                );
+                                                                record_preparation_failure(
+                                                                    &pool, derivation_id, commit_id, attempt, &drv_path, &msg,
+                                                                )
+                                                                .await;
+                                                                return Err(err);
+                                                            }
+                                                        };
+
+                                                        match &activation {
+                                                            SystemBuildActivationOutcome::Queued { .. }
+                                                            | SystemBuildActivationOutcome::AlreadyExists { .. } => {
+                                                                handle_system_build_activation(
+                                                                    &pool,
+                                                                    cf_state_owned.as_ref(),
+                                                                    queue_notifier_owned.as_ref(),
+                                                                    commit_id,
+                                                                    &system_name,
+                                                                    &activation,
+                                                                    None, // skip eval-log persistence from tasks
+                                                                )
+                                                                .await?;
+
+                                                                spawn_closure_counting(pool, finalized);
+                                                            }
+                                                            SystemBuildActivationOutcome::Cancelled => {
+                                                                // Task completed after cancellation —
+                                                                // nothing further to do.
+                                                            }
+                                                            SystemBuildActivationOutcome::Superseded => {
+                                                                // Build activation was superseded
+                                                                // (attempt changed or commit no longer
+                                                                // in_progress).
+                                                            }
+                                                        }
+
+                                                        info!(
+                                                            commit_id,
+                                                            expected_attempt = attempt,
+                                                            derivation_id,
+                                                            system = %system_name,
+                                                            "build_preparation_completed"
+                                                        );
+
+                                                        Ok(())
+                                                    });
+
+                                                    // Track in main results immediately so the
+                                                    // plan is correct even if preparation is pending.
+                                                    successful_results.push(successful);
+                                                }
+
+                                                SystemPersistenceOutcome::ExistingBuildJob {
+                                                    derivation_id,
+                                                    build_job_id,
+                                                    build_job_status,
+                                                    drv_path,
+                                                } => {
+                                                    // Best-effort GC root for existing build; the
+                                                    // build job is already claimable.
+                                                    match crate::builder::create_drv_gc_root(
+                                                        &drv_path,
+                                                        derivation_id,
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(true) => debug!(
+                                                            "📌 Rooted existing drv (id={}, drv={})",
+                                                            derivation_id, drv_path
+                                                        ),
+                                                        Ok(false) => warn!(
+                                                            "⚠️  Existing drv (id={}, drv={}) not valid \
+                                                             in the server store",
+                                                            derivation_id, drv_path
+                                                        ),
+                                                        Err(err) => warn!(
+                                                            "⚠️  Failed to create GC root for existing \
+                                                             drv {} (id={}): {}",
+                                                            drv_path, derivation_id, err
+                                                        ),
+                                                    }
+
+                                                    // Re-notify queue if the existing job is still queued.
+                                                    if build_job_status == "queued" {
+                                                        if let Some(notifier) = queue_notifier {
+                                                            notifier.notify_build_queue();
+                                                        }
+                                                        if let Some(state) = cf_state {
+                                                            crate::handlers::api::commits::broadcast_system_status(
+                                                                state,
+                                                                commit.id,
+                                                                system_name.to_string(),
+                                                                crate::handlers::api::commits::SystemEvalStatus::QueuedForBuild,
+                                                                None,
+                                                            )
+                                                            .await;
+                                                            broadcast_and_persist_eval_log(
+                                                                pool,
+                                                                Some(state),
+                                                                commit.id,
+                                                                &mut log_sequence,
+                                                                format!(
+                                                                    "🚀 {}: build job already queued ({})",
+                                                                    system_name, build_job_id
+                                                                ),
+                                                            )
+                                                            .await;
+                                                        }
+                                                    } else {
+                                                        if let Some(state) = cf_state {
+                                                            broadcast_and_persist_eval_log(
+                                                                pool,
+                                                                Some(state),
+                                                                commit.id,
+                                                                &mut log_sequence,
+                                                                format!(
+                                                                    "ℹ️  {}: build job exists (status={})",
+                                                                    system_name, build_job_status
+                                                                ),
+                                                            )
+                                                            .await;
+                                                        }
+                                                    }
+
+                                                    successful_results.push(successful.clone());
+                                                }
+
+                                                SystemPersistenceOutcome::RecordedWithoutBuild {
+                                                    ..
+                                                } => {
+                                                    successful_results.push(successful);
+                                                }
+
                                                 SystemPersistenceOutcome::Cancelled => {
                                                     return Err(EvaluationCancelled.into());
                                                 }
+
                                                 SystemPersistenceOutcome::Superseded => {
-                                                    bail!("evaluation attempt was superseded while recording policy parser failure for {system_name}");
-                                                }
-                                                SystemPersistenceOutcome::NeedsBuildPreparation { .. } => {
-                                                    bail!("policy parser failure unexpectedly authorized build preparation for {system_name}");
+                                                    bail!(
+                                                        "evaluation attempt was superseded while finalizing {}",
+                                                        system_name
+                                                    );
                                                 }
                                             }
-                                        } else {
-                                            crate::queries::derivations::record_synthetic_eval_failure(
-                                                pool,
-                                                Some(commit.id),
+                                        } else if let Some(metadata_error) = policy_metadata_error.as_ref() {
+                                            let derivation_target = build_agent_target(
+                                                &flake.repo_url,
+                                                &commit.git_commit_hash,
                                                 system_name,
-                                                "nixos",
-                                                Some(&derivation_target),
+                                            );
+                                            let error_check = PolicyCheckResult::for_evaluation_terminal(
+                                                system_name.clone(),
+                                                assigned_policies,
+                                                EvaluationTerminalOutcome::Error,
                                                 metadata_error,
-                                            )
-                                            .await
-                                            .with_context(|| {
-                                                format!(
-                                                    "Failed to record policy metadata failure for {}",
-                                                    system_name
+                                            );
+                                            if let Some(drv_path) = drv_path.clone() {
+                                                let failed = SuccessfulSystemResult {
+                                                    system_name: system_name.clone(),
+                                                    derivation_target,
+                                                    drv_path,
+                                                    expected_store_path: expected_store_path.clone(),
+                                                    cf_agent_enabled: None,
+                                                    build_eligible: false,
+                                                };
+                                                let persisted = persist_evaluated_system(
+                                                    pool,
+                                                    commit.id,
+                                                    expected_attempt,
+                                                    &failed,
+                                                    &error_check,
+                                                    assigned_policies,
                                                 )
-                                            })?;
-                                        }
-                                        policy_checks.push(error_check);
-                                    } else {
-                                        if has_error {
-                                            debug!("⚠️  {} has evaluation error, will not be persisted as success", system_name);
-                                        }
-                                        if drv_path.is_none() && !has_error {
-                                            warn!("⚠️  {} missing drv_path, not marking complete", system_name);
+                                                .await?;
+                                                let observation_derivation_id = match &persisted {
+                                                    SystemPersistenceOutcome::RecordedWithoutBuild { derivation_id, .. }
+                                                    | SystemPersistenceOutcome::ExistingBuildJob { derivation_id, .. } => Some(*derivation_id),
+                                                    _ => None,
+                                                };
+                                                if let Some(derivation_id) = observation_derivation_id
+                                                    && let Err(error) = root_publication_tx.try_send(
+                                                        PrimaryConfigRootPublication {
+                                                            commit_id: commit.id,
+                                                            derivation_id,
+                                                            configuration_name: system_name.clone(),
+                                                            carrier_drv_path: failed.drv_path.clone(),
+                                                            payload: config_root.clone(),
+                                                        },
+                                                    )
+                                                {
+                                                    warn!(
+                                                        commit_id = commit.id,
+                                                        expected_attempt,
+                                                        derivation_id,
+                                                        system = %system_name,
+                                                        %error,
+                                                        "policy_failed_config_root_publication_queue_full"
+                                                    );
+                                                }
+                                                match persisted {
+                                                    SystemPersistenceOutcome::RecordedWithoutBuild { .. }
+                                                    | SystemPersistenceOutcome::ExistingBuildJob { .. } => {}
+                                                    SystemPersistenceOutcome::Cancelled => {
+                                                        return Err(EvaluationCancelled.into());
+                                                    }
+                                                    SystemPersistenceOutcome::Superseded => {
+                                                        bail!("evaluation attempt was superseded while recording policy parser failure for {system_name}");
+                                                    }
+                                                    SystemPersistenceOutcome::NeedsBuildPreparation { .. } => {
+                                                        bail!("policy parser failure unexpectedly authorized build preparation for {system_name}");
+                                                    }
+                                                }
+                                            } else {
+                                                crate::queries::derivations::record_synthetic_eval_failure(
+                                                    pool,
+                                                    Some(commit.id),
+                                                    system_name,
+                                                    "nixos",
+                                                    Some(&derivation_target),
+                                                    metadata_error,
+                                                )
+                                                .await
+                                                .with_context(|| {
+                                                    format!(
+                                                        "Failed to record policy metadata failure for {}",
+                                                        system_name
+                                                    )
+                                                })?;
+                                            }
+                                            policy_checks.push(error_check);
+                                        } else {
+                                            if has_error {
+                                                debug!("⚠️  {} has evaluation error, will not be persisted as success", system_name);
+                                            }
+                                            if drv_path.is_none() && !has_error {
+                                                warn!("⚠️  {} missing drv_path, not marking complete", system_name);
+                                            }
                                         }
                                     }
-                                }
 
-                                if result.attr_path.last() == Some(&target_system.to_string()) || target_system == "all" {
-                                    found_target = true;
-                                    if target_system != "all" {
-                                        info!("✅ Found target system: {}", target_system);
+                                    if result.attr_path.last() == Some(&target_system.to_string()) || target_system == "all" {
+                                        found_target = true;
+                                        if target_system != "all" {
+                                            info!("✅ Found target system: {}", target_system);
+                                        }
                                     }
-                                }
 
-                                if let Some(error) = &result.error {
-                                    warn!("⚠️  Evaluation error for {}: {}", result.attr, error);
+                                    if let Some(error) = &result.error {
+                                        warn!("⚠️  Evaluation error for {}: {}", result.attr, error);
 
-                                    // When we have an authoritative expected-system set, record
-                                    // the error-line system as a confirmed failure immediately.
-                                    // nix-eval-jobs already provided the error message — no
-                                    // need for an expensive standalone re-evaluation.
-                                    // These systems are NOT added to seen_systems so that
-                                    // they appear correctly in accounting (not "seen" = not
-                                    // successfully evaluated), but they ARE tracked in
-                                    // error_line_failures so they are excluded from
-                                    // missing_systems (no redundant standalone fallback).
-                                    if has_known_systems {
-                                        let derivation_target = build_agent_target(
-                                            &flake.repo_url,
-                                            &commit.git_commit_hash,
-                                            &system_name,
-                                        );
-                                        error_line_failures.push(ConfirmedSystemFailure {
-                                            system_name: system_name.clone(),
-                                            derivation_target,
-                                            error: error.chars().take(500).collect(),
-                                        });
-                                        // Do NOT push to results here; confirmed failures
-                                        // are added to results after the fallback phase.
+                                        // When we have an authoritative expected-system set, record
+                                        // the error-line system as a confirmed failure immediately.
+                                        // nix-eval-jobs already provided the error message — no
+                                        // need for an expensive standalone re-evaluation.
+                                        // These systems are NOT added to seen_systems so that
+                                        // they appear correctly in accounting (not "seen" = not
+                                        // successfully evaluated), but they ARE tracked in
+                                        // error_line_failures so they are excluded from
+                                        // missing_systems (no redundant standalone fallback).
+                                        if has_known_systems {
+                                            let derivation_target = build_agent_target(
+                                                &flake.repo_url,
+                                                &commit.git_commit_hash,
+                                                &system_name,
+                                            );
+                                            error_line_failures.push(ConfirmedSystemFailure {
+                                                system_name: system_name.clone(),
+                                                derivation_target,
+                                                error: error.chars().take(500).collect(),
+                                            });
+                                            // Do NOT push to results here; confirmed failures
+                                            // are added to results after the fallback phase.
+                                        } else {
+                                            results.push(result);
+                                        }
                                     } else {
+                                        // Successful evaluation.
+                                        if has_known_systems {
+                                            seen_systems.insert(system_name.clone());
+                                        }
                                         results.push(result);
                                     }
-                                } else {
-                                    // Successful evaluation.
-                                    if has_known_systems {
-                                        seen_systems.insert(system_name.clone());
-                                    }
-                                    results.push(result);
+                                }
+                                Err(e) => {
+                                    let line = crate::security::snapshot_redaction::redact_text(&line);
+                                    warn!("Failed to parse nix-eval-jobs output: {}\nLine: {}", e, line);
                                 }
                             }
-                            Err(e) => {
-                                let line = crate::security::snapshot_redaction::redact_text(&line);
-                                warn!("Failed to parse nix-eval-jobs output: {}\nLine: {}", e, line);
-                            }
                         }
+                        Some(_) => {},
+                        None => stdout_done = true,
                     }
-                    Some(_) => {},
-                    None => stdout_done = true,
                 }
-            }
-            line_result = stderr_reader.next_line(), if !stderr_done => {
-                match line_result? {
-                    Some(line) => {
-                        let line = crate::security::snapshot_redaction::redact_text(&line);
-                        last_output_at = Instant::now();
-                        if line.contains("error:") {
-                            error!("nix-eval-jobs stderr: {}", line);
-                        } else {
-                            debug!("nix-eval-jobs stderr: {}", line);
-                        }
-
-                        // Broadcast stderr to WebSocket clients
-                        if let Some(state) = cf_state {
-                            // Keep live streaming immediate.
-                            crate::handlers::api::commits::broadcast_eval_log(state, commit.id, line.clone()).await;
-
-                            // Persist stderr logs in batches to avoid per-line DB latency on hot path.
-                            let level = if line.to_ascii_lowercase().contains("error") {
-                                Some("error".to_string())
-                            } else if line.to_ascii_lowercase().contains("warn") {
-                                Some("warn".to_string())
+                line_result = stderr_reader.next_line(), if !stderr_done => {
+                    match line_result? {
+                        Some(line) => {
+                            watchdog.record_output(OutputStream::Stderr, &line, Instant::now());
+                            let line = crate::security::snapshot_redaction::redact_text(&line);
+                            if line.contains("error:") {
+                                error!("nix-eval-jobs stderr: {}", line);
                             } else {
-                                Some("debug".to_string())
-                            };
-                            stderr_log_batch.push((log_sequence, level, line.clone()));
-                            log_sequence += 1;
-
-                            if stderr_log_batch.len() >= STDERR_LOG_BATCH_SIZE {
-                                if let Err(e) = crate::queries::eval_logs::insert_eval_logs_batch(
-                                    pool,
-                                    commit.id,
-                                    &stderr_log_batch,
-                                )
-                                .await
-                                {
-                                    warn!(
-                                        "Failed to batch-persist stderr logs for commit {}: {}",
-                                        commit.id, e
-                                    );
-                                }
-                                stderr_log_batch.clear();
+                                debug!("nix-eval-jobs stderr: {}", line);
                             }
-                        }
 
-                        stderr_diagnostic.push(line.as_bytes(), EVALUATOR_STDERR_DIAGNOSTIC_MAX_BYTES);
-                        stderr_diagnostic.push(b"\n", EVALUATOR_STDERR_DIAGNOSTIC_MAX_BYTES);
+                            // Broadcast stderr to WebSocket clients
+                            if let Some(state) = cf_state {
+                                // Keep live streaming immediate.
+                                crate::handlers::api::commits::broadcast_eval_log(state, commit.id, line.clone()).await;
+
+                                // Persist stderr logs in batches to avoid per-line DB latency on hot path.
+                                let level = if line.to_ascii_lowercase().contains("error") {
+                                    Some("error".to_string())
+                                } else if line.to_ascii_lowercase().contains("warn") {
+                                    Some("warn".to_string())
+                                } else {
+                                    Some("debug".to_string())
+                                };
+                                stderr_log_batch.push((log_sequence, level, line.clone()));
+                                log_sequence += 1;
+
+                                if stderr_log_batch.len() >= STDERR_LOG_BATCH_SIZE {
+                                    if let Err(e) = crate::queries::eval_logs::insert_eval_logs_batch(
+                                        pool,
+                                        commit.id,
+                                        &stderr_log_batch,
+                                    )
+                                    .await
+                                    {
+                                        warn!(
+                                            "Failed to batch-persist stderr logs for commit {}: {}",
+                                            commit.id, e
+                                        );
+                                    }
+                                    stderr_log_batch.clear();
+                                }
+                            }
+
+                            stderr_diagnostic.push(line.as_bytes(), EVALUATOR_STDERR_DIAGNOSTIC_MAX_BYTES);
+                            stderr_diagnostic.push(b"\n", EVALUATOR_STDERR_DIAGNOSTIC_MAX_BYTES);
+                        }
+                        None => stderr_done = true,
                     }
-                    None => stderr_done = true,
                 }
+            }
+
+            if stdout_done && stderr_done {
+                break;
             }
         }
 
-        if stdout_done && stderr_done {
-            break;
+        // Flush any remaining buffered stderr logs.
+        if !stderr_log_batch.is_empty() {
+            if let Err(e) = crate::queries::eval_logs::insert_eval_logs_batch(
+                pool,
+                commit.id,
+                &stderr_log_batch,
+            )
+            .await
+            {
+                warn!(
+                    "Failed to flush batched stderr logs for commit {}: {}",
+                    commit.id, e
+                );
+            }
         }
-    }
 
-    // Flush any remaining buffered stderr logs.
-    if !stderr_log_batch.is_empty() {
-        if let Err(e) =
-            crate::queries::eval_logs::insert_eval_logs_batch(pool, commit.id, &stderr_log_batch)
-                .await
-        {
-            warn!(
-                "Failed to flush batched stderr logs for commit {}: {}",
-                commit.id, e
-            );
+        // ── Capture child exit status after consuming both streams ─────────
+        // Important: do NOT bail before synthesis — we must account for every
+        // expected system even when nix-eval-jobs crashed partway through.
+        // Both streams reached EOF before this wait, so it is now safe to disarm
+        // after reaping the direct child. EOF is not process exit: the outer
+        // monitor keeps both deadlines active through flush and final wait.
+        guard
+            .wait()
+            .await
+            .context("failed to wait for nix-eval-jobs")
+    };
+    let child_status = match within_deadlines(&watchdog, collection).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => {
+            guard.terminate().await;
+            return Err(error);
         }
-    }
-
-    // ── Capture child exit status after consuming both streams ─────────
-    // Important: do NOT bail before synthesis — we must account for every
-    // expected system even when nix-eval-jobs crashed partway through.
-    // Both streams reached EOF before this wait, so it is now safe to disarm
-    // after reaping the direct child. If wait errors, Drop still performs
-    // process-group cleanup for this `?` early-return path.
-    let child_status = guard.wait().await?;
+        Err(expiry) => {
+            // The collection future has been dropped, releasing its guard
+            // borrow. Kill and reap outside all evaluation timers and before
+            // optional logging, so expiry cannot cancel an in-progress reap.
+            guard.terminate().await;
+            match expiry {
+                Expiry::Overall => bail!(
+                    "evaluation exceeded the overall {}s deadline",
+                    server_config.eval_overall_timeout_secs
+                ),
+                Expiry::Idle => {
+                    let timeout_msg = format!(
+                        "❌ Evaluation produced no output for {}s; terminated nix-eval-jobs",
+                        server_config.eval_output_idle_timeout_secs
+                    );
+                    error!("{} (commit_id={})", timeout_msg, commit.id);
+                    if let Some(state) = cf_state {
+                        broadcast_and_persist_eval_log(
+                            pool,
+                            Some(state),
+                            commit.id,
+                            &mut log_sequence,
+                            timeout_msg,
+                        )
+                        .await;
+                    }
+                    bail!(
+                        "evaluation timed out after {}s without nix-eval-jobs output",
+                        server_config.eval_output_idle_timeout_secs
+                    );
+                }
+            }
+        }
+    };
     guard.disarm_after_output_drained();
     drop(heavy_nix_permit);
 
@@ -5772,6 +5855,69 @@ mod tests {
     use crate::models::retry_policy::RetryFailureClass;
 
     #[test]
+    fn evaluator_server_config_serde_defaults_drive_watchdog() {
+        use super::evaluation_watchdog::{EvaluationWatchdog, Expiry};
+
+        let config: crate::config::ServerConfig = serde_json::from_value(serde_json::json!({
+            "host": "127.0.0.1", "port": 3445
+        }))
+        .unwrap();
+        assert_eq!(config.eval_max_memory_mb, None);
+        assert_eq!(config.eval_memory_reserve_mb, 4096);
+        assert_eq!(config.eval_memory_max_percent, 85);
+        assert_eq!(config.eval_output_idle_timeout_secs, 900);
+        assert_eq!(config.eval_overall_timeout_secs, 3600);
+        config.validate_evaluator_policy().unwrap();
+        let spawn = tokio::time::Instant::now();
+        let watchdog = EvaluationWatchdog::new(
+            spawn,
+            std::time::Duration::from_secs(config.eval_output_idle_timeout_secs),
+            std::time::Duration::from_secs(config.eval_overall_timeout_secs),
+        )
+        .unwrap();
+        assert_eq!(
+            watchdog.expired(spawn + std::time::Duration::from_secs(301)),
+            None
+        );
+        assert_eq!(
+            watchdog.expired(spawn + std::time::Duration::from_secs(900)),
+            Some(Expiry::Idle)
+        );
+    }
+
+    #[test]
+    fn evaluator_server_config_serde_honors_timeout_names_and_policy_ranges() {
+        let input = serde_json::json!({
+            "host": "127.0.0.1", "port": 3445,
+            "eval_workers": 3, "eval_max_memory_mb": 12288,
+            "eval_memory_reserve_mb": 1024, "eval_memory_max_percent": 100,
+            "eval_output_idle_timeout_secs": 7, "eval_overall_timeout_secs": 11
+        });
+        let config: crate::config::ServerConfig = serde_json::from_value(input.clone()).unwrap();
+        assert_eq!(config.eval_output_idle_timeout_secs, 7);
+        assert_eq!(config.eval_overall_timeout_secs, 11);
+        assert_eq!(config.eval_max_memory_mb, Some(12288));
+        assert_eq!(config.eval_workers, 3);
+        config.validate_evaluator_policy().unwrap();
+        for (field, value) in [
+            ("eval_max_memory_mb", 0),
+            ("eval_memory_reserve_mb", 0),
+            ("eval_memory_max_percent", 0),
+            ("eval_memory_max_percent", 101),
+            ("eval_output_idle_timeout_secs", 0),
+            ("eval_overall_timeout_secs", 0),
+        ] {
+            let mut invalid = input.clone();
+            invalid[field] = serde_json::json!(value);
+            let config: crate::config::ServerConfig = serde_json::from_value(invalid).unwrap();
+            assert!(
+                config.validate_evaluator_policy().is_err(),
+                "must reject {field}={value}"
+            );
+        }
+    }
+
+    #[test]
     fn scoped_expected_systems_match_the_primary_expression_boundary() {
         let known = vec![
             "managed-b".to_string(),
@@ -6336,6 +6482,171 @@ mod tests {
 
         assert!(error.to_string().contains("timed out"));
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn watchdog_timeout_kills_and_reaps_process_group() {
+        use super::evaluation_watchdog::{EvaluationWatchdog, Expiry};
+
+        let (child, pgid, descendant_pid) = spawn_process_group_with_descendant().await;
+        let mut guard = NixEvalProcessGuard::new(child, pgid).unwrap();
+        let watchdog = EvaluationWatchdog::new(
+            tokio::time::Instant::now(),
+            std::time::Duration::from_millis(20),
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        let started = std::time::Instant::now();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::select! {
+                expiry = watchdog.wait() => assert_eq!(expiry, Expiry::Idle),
+                status = guard.wait() => panic!("child exited before watchdog: {status:?}"),
+            }
+            guard.terminate().await;
+            assert!(!process_is_alive(pgid), "direct child must be reaped");
+            while process_is_alive(descendant_pid) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("watchdog must kill and reap the group promptly");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn watchdog_overall_bounds_closed_pipes_and_slow_output_handler() {
+        use super::evaluation_watchdog::{EvaluationWatchdog, Expiry, within_deadlines};
+
+        let mut command = Command::new("sh");
+        command.args(["-c", "exec 1>&- 2>&-; sleep 60"]);
+        command.kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
+        let child = command.spawn().unwrap();
+        let spawned_at = tokio::time::Instant::now();
+        let mut guard = NixEvalProcessGuard::from_spawned_child(child, "closed-pipe test").unwrap();
+        let watchdog = EvaluationWatchdog::new(
+            spawned_at,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_millis(30),
+        )
+        .unwrap();
+        // The same outer deadline used by the runtime includes awaits inside
+        // output handlers and the final wait after both streams reach EOF.
+        let result = within_deadlines(&watchdog, async {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            guard.wait().await
+        })
+        .await;
+        assert!(matches!(result, Err(Expiry::Overall)));
+        guard.terminate().await;
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn watchdog_idle_applies_after_both_pipes_close() {
+        use super::evaluation_watchdog::{EvaluationWatchdog, Expiry, within_deadlines};
+
+        let mut command = Command::new("sh");
+        command.args(["-c", "exec 1>&- 2>&-; sleep 60"]);
+        command
+            .kill_on_drop(true)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command.process_group(0);
+        let child = command.spawn().unwrap();
+        let spawned_at = tokio::time::Instant::now();
+        let mut guard =
+            NixEvalProcessGuard::from_spawned_child(child, "idle-after-EOF test").unwrap();
+        let pgid = guard.pgid();
+        let stdout = guard.child_mut().stdout.take().unwrap();
+        let stderr = guard.child_mut().stderr.take().unwrap();
+        let watchdog = EvaluationWatchdog::new(
+            spawned_at,
+            std::time::Duration::from_millis(30),
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        let result = within_deadlines(&watchdog, async {
+            let (stdout, stderr) = tokio::join!(read_capped(stdout, 64), read_capped(stderr, 64));
+            assert_eq!(stdout.unwrap().total_bytes, 0);
+            assert_eq!(stderr.unwrap().total_bytes, 0);
+            guard.wait().await
+        })
+        .await;
+        assert!(matches!(result, Err(Expiry::Idle)));
+        guard.terminate().await;
+        assert!(
+            !process_is_alive(pgid),
+            "idle timeout must reap the direct child"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn watchdog_drops_collection_before_cleanup_and_cannot_interrupt_reap() {
+        use super::evaluation_watchdog::{EvaluationWatchdog, Expiry, within_deadlines};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct CollectionDrop<'a>(&'a AtomicBool);
+        impl Drop for CollectionDrop<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        for returns_error in [false, true] {
+            let (child, pgid, descendant_pid) = spawn_process_group_with_descendant().await;
+            let mut guard = NixEvalProcessGuard::new(child, pgid).unwrap();
+            let watchdog = EvaluationWatchdog::new(
+                tokio::time::Instant::now(),
+                std::time::Duration::from_millis(20),
+                std::time::Duration::from_millis(40),
+            )
+            .unwrap();
+            let dropped = AtomicBool::new(false);
+            let result = within_deadlines(&watchdog, async {
+                let _collection_drop = CollectionDrop(&dropped);
+                if returns_error {
+                    return Err(anyhow::anyhow!("collection failed"));
+                }
+                guard.wait().await.map_err(anyhow::Error::from)
+            })
+            .await;
+            if returns_error {
+                assert!(matches!(result, Ok(Err(_))));
+            } else {
+                assert!(matches!(result, Err(Expiry::Idle)));
+            }
+            assert!(
+                dropped.load(Ordering::SeqCst),
+                "collection must drop before cleanup owns the guard"
+            );
+            assert!(
+                guard.armed && guard.child.is_some(),
+                "collection must not start termination or take the child"
+            );
+            // Cross the other evaluation deadline after collection ends. No
+            // monitor remains to interrupt scheduling or reaping in cleanup.
+            tokio::time::sleep_until(
+                watchdog.overall_deadline() + std::time::Duration::from_millis(10),
+            )
+            .await;
+            guard.terminate().await;
+            assert!(!guard.armed && guard.child.is_none());
+            assert!(
+                !process_is_alive(pgid),
+                "cleanup must reap the direct child"
+            );
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while process_is_alive(descendant_pid) {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("cleanup must kill the descendant without a second evaluation timer");
+        }
     }
 
     fn test_database_url() -> String {

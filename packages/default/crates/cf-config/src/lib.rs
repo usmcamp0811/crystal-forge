@@ -14,7 +14,22 @@
 pub mod attic_urls;
 pub mod cache_credentials;
 pub mod config;
+pub mod evaluator_resources;
 
 // Re-export everything from config module at the crate root for convenience.
 pub use attic_urls::{AtticUrlError, AtticUrls, resolve_attic_urls};
 pub use config::*;
+pub use evaluator_resources::{EvaluatorResourceMode, EvaluatorResourcePlan};
+
+// Compile the obsolete server copy in tests so evaluator contracts cannot drift.
+#[cfg(test)]
+extern crate self as cf_config;
+#[cfg(test)]
+mod models {
+    pub mod builders {
+        pub use cf_protocol::builder::{RemoteBuildExecutionStrategy, SourceInputDeliveryMode};
+    }
+}
+#[cfg(test)]
+#[path = "../../cf-server/src/config/server.rs"]
+mod obsolete_server_config;

@@ -98,17 +98,73 @@
     falseEmpty = proxySystems.falseEmpty.config;
     trueAllowed = proxySystems.trueAllowed.config;
   };
+  evaluatorSystems = {
+    defaults = mkProxySystem {};
+    explicitNull = mkProxySystem {server.eval_max_memory_mb = null;};
+    explicit12288 = mkProxySystem {server.eval_max_memory_mb = 12288;};
+    custom = mkProxySystem {
+      server = {
+        eval_workers = 3;
+        eval_max_memory_mb = 2048;
+        eval_memory_reserve_mb = 1024;
+        eval_memory_max_percent = 70;
+        eval_output_idle_timeout_secs = 123;
+        eval_overall_timeout_secs = 456;
+      };
+    };
+    workersZero = mkProxySystem {server.eval_workers = 0;};
+    lowerBounds = mkProxySystem {
+      server = {
+        eval_max_memory_mb = 1;
+        eval_memory_reserve_mb = 1;
+        eval_memory_max_percent = 1;
+        eval_output_idle_timeout_secs = 1;
+        eval_overall_timeout_secs = 1;
+      };
+    };
+    upperPercent = mkProxySystem {server.eval_memory_max_percent = 100;};
+  };
+  invalidEvaluatorValues = {
+    eval_workers = [(-1) "2" null 1.5];
+    eval_max_memory_mb = [0 (-1) "12288" 1.5];
+    eval_memory_reserve_mb = [0 (-1) "4096" null];
+    eval_memory_max_percent = [0 101 (-1) "85" null];
+    eval_output_idle_timeout_secs = [0 (-1) "900" null];
+    eval_overall_timeout_secs = [0 (-1) "3600" null];
+  };
+  # Force real module option values so rejected inputs exercise NixOS type
+  # checking. No source-text inspection stands in for configuration behavior.
+  evaluatorCases = {
+    valid =
+      lib.mapAttrs (_: host:
+        (builtins.tryEval host.config.system.build.toplevel.drvPath).success)
+      evaluatorSystems;
+    invalid =
+      lib.mapAttrs (option: values:
+        map (value: let
+          host = mkProxySystem {server.${option} = value;};
+        in
+          (builtins.tryEval (builtins.deepSeq
+            host.config.services.crystal-forge.server.${option} true)).success)
+        values)
+      invalidEvaluatorValues;
+  };
+  generatedConfigCases = validProxyConfigs
+    // lib.mapAttrs (_: host: host.config) evaluatorSystems;
   moduleValidation = assert proxyCases.falseEmpty.failures == [] && proxyCases.falseEmpty.evaluates;
   assert proxyCases.trueEmpty.failures == [proxyAssertionMessage] && !proxyCases.trueEmpty.evaluates;
   assert proxyCases.trueAllowed.failures == [] && proxyCases.trueAllowed.evaluates;
   assert proxyCases.globalDisabled.failures == [] && proxyCases.globalDisabled.evaluates;
   assert proxyCases.serverDisabled.failures == [] && proxyCases.serverDisabled.evaluates;
+  assert lib.all (valid: valid) (builtins.attrValues evaluatorCases.valid);
+  assert lib.all (results: lib.all (valid: !valid) results) (builtins.attrValues evaluatorCases.invalid);
     pkgs.runCommand "crystal-forge-proxy-module-validation" {
       nativeBuildInputs = [pkgs.bash pkgs.coreutils pkgs.jq pkgs.remarshal];
-      passthru.evaluationResults = proxyCases;
+      passthru.evaluationResults = proxyCases // {evaluator = evaluatorCases;};
     } ''
       mkdir -p "$out"
       cp ${pkgs.writeText "proxy-assertion-results.json" (builtins.toJSON proxyCases)} "$out/assertions.json"
+      cp ${pkgs.writeText "evaluator-option-results.json" (builtins.toJSON evaluatorCases)} "$out/evaluator-options.json"
       # Intercept only config-copy filesystem operations. Run the generated
       # module script unchanged; never write to the host's /var/lib paths.
       mkdir() { test "$*" = '-p /var/lib/crystal-forge'; }
@@ -151,12 +207,34 @@
           jq -e '.config == "/var/lib/crystal-forge/config.toml" and .trustOverride == "false"' \
             "$out/${name}-override.json"
         '')
-        validProxyConfigs)}
+        generatedConfigCases)}
       jq -e '.server.trust_forwarded_builder_https == false and .server.trusted_proxy_cidrs == []
         and (.server | has("trustedProxyCidrs") | not)' "$out/falseEmpty.json"
       jq -e '.server.trust_forwarded_builder_https == true
         and .server.trusted_proxy_cidrs == ["127.0.0.1/32", "::1/128"]
         and (.server | has("trustedProxyCidrs") | not)' "$out/trueAllowed.json"
+      for name in defaults explicitNull workersZero upperPercent; do
+        jq -e '.server | has("eval_max_memory_mb") | not' "$out/$name.json"
+      done
+      for name in defaults explicitNull explicit12288 workersZero upperPercent; do
+        jq -e '.server.eval_memory_reserve_mb == 4096
+          and .server.eval_output_idle_timeout_secs == 900
+          and .server.eval_overall_timeout_secs == 3600' "$out/$name.json"
+      done
+      for name in defaults explicitNull explicit12288; do
+        jq -e '.server.eval_workers == 2 and .server.eval_memory_max_percent == 85' "$out/$name.json"
+      done
+      jq -e '.server.eval_max_memory_mb == 12288' "$out/explicit12288.json"
+      jq -e '.server.eval_workers == 0 and .server.eval_memory_max_percent == 85' "$out/workersZero.json"
+      jq -e '.server.eval_workers == 2 and .server.eval_memory_max_percent == 100' "$out/upperPercent.json"
+      jq -e '.server.eval_workers == 3 and .server.eval_max_memory_mb == 2048
+        and .server.eval_memory_reserve_mb == 1024 and .server.eval_memory_max_percent == 70
+        and .server.eval_output_idle_timeout_secs == 123
+        and .server.eval_overall_timeout_secs == 456' "$out/custom.json"
+      jq -e '.server.eval_workers == 2 and .server.eval_max_memory_mb == 1
+        and .server.eval_memory_reserve_mb == 1 and .server.eval_memory_max_percent == 1
+        and .server.eval_output_idle_timeout_secs == 1
+        and .server.eval_overall_timeout_secs == 1' "$out/lowerBounds.json"
     '';
 in
   # INVARIANT: Both colocated services and the default builder package use the
