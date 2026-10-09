@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-09 20:00'
+updated_date: '2026-10-09 20:09'
 labels: []
 dependencies: []
 references:
@@ -180,6 +180,8 @@ Delegated adaptive evaluator/watchdog scope at bab049a4: own only packages/defau
 Owner confirmed adaptive recovery recommendations 2026-10-09: retain verified completed-system outcomes and evidence when remaining configurations have resource failures; never report unresolved required work as complete success. Replacement evaluator requires confirmed owned group cleanup; deadline/pending cleanup stops recovery and retains fail-closed heavy-Nix ownership until cleanup completes. Implement inside existing bulk invocation/attempt, same NAR-qualified source/revision/policies/parser/persistence, distinct from existing small standalone fallback. Add memory.high to effective working boundary, fixedoverride warnings, bounded30s numeric process/cgroup/events/PSI diagnostics and multisignal hysteresis. One shared absolute deadline including cleanup/fallback; atmostone return to parallel thenstickyserial, atmostone isolatedCF recovery perconfiguration, no redundantretry of upstreamterminalsoloexhaustion. FocusedRust/SQLx relevantauthoritativechecks only; no unrelatedNiks3VM, schema, generalflakeupdate or merge.
 
 Owner-confirmed pressure-module delegation at f36c6085: implement only new private cf-server models/evaluation_pressure.rs in existing task worktree. Bounded procfs numeric sampler with injected config-owned cgroup directories, PID/start-time baselines, conservative completeness and pure sustained-pressure hysteresis. Inline unit coverage and foreground Nix formatting; compile/tests only through parent module integration. No runtime/recovery/watch/config/dependency changes or services/commits.
+
+Confirmed partial resource-failure lifecycle delegation at f36c6085: own server/mod.rs, queries/commits.rs, services/composite_enforcement.rs, retry_policy.rs and focused tests/server-regressions membership. Add ResourceFailure mapped to existing database transient class with explicit resource_pressure diagnostic/evidence; suppress whole-flake automatic retry after exhausted same-attempt recovery. Partial finalizer validates retained EvaluationPlan against exact derivation identity, metadata, policy outcomes and runtime-owned policy_results.evaluation_attempt integer before publishing snapshots and preserving completed evidence under existing CAS locks. Fail only unresolved configurations; preserve cancellation/supersession and job identity. Runtime owner supplies typed partial failure and retained plan. Verify focused non-DB Rust checks through Nix; ignored migration-backed tests run only in authoritative parent-owned server-regressions sandbox. No services, host DB, commits or pushes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
