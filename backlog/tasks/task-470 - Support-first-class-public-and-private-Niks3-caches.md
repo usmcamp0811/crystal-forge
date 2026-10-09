@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-09 19:58'
+updated_date: '2026-10-09 20:00'
 labels: []
 dependencies: []
 references:
@@ -178,6 +178,8 @@ Focused evaluator configuration delegation at bab049a4: own cf-config/src/config
 Delegated adaptive evaluator/watchdog scope at bab049a4: own only packages/default/crates/cf-server/src/models/evaluate_with_policies.rs and an adjacent private watchdog module. Consume owner cf_config::evaluator_resources::EvaluatorResourcePlan::resolve after heavy-Nix locks, preserve authoritative usize args and drvPath semantics, log numeric resource summary only. Replace bulk idle/overall constants with config and spawn-anchored absolute watchdog deadlines; preserve 2s cancellation and process-group guard across streaming/wait. Verify deterministic elapsed/reset/precedence/cancellation tests, tiny bounded child deadline tests and existing guard regressions through foreground nix develop. Stage new module only; parent owns lock/lifecycle/config/API and compile initializer repairs. No services/database/Niks3 changes or commits.
 
 Owner confirmed adaptive recovery recommendations 2026-10-09: retain verified completed-system outcomes and evidence when remaining configurations have resource failures; never report unresolved required work as complete success. Replacement evaluator requires confirmed owned group cleanup; deadline/pending cleanup stops recovery and retains fail-closed heavy-Nix ownership until cleanup completes. Implement inside existing bulk invocation/attempt, same NAR-qualified source/revision/policies/parser/persistence, distinct from existing small standalone fallback. Add memory.high to effective working boundary, fixedoverride warnings, bounded30s numeric process/cgroup/events/PSI diagnostics and multisignal hysteresis. One shared absolute deadline including cleanup/fallback; atmostone return to parallel thenstickyserial, atmostone isolatedCF recovery perconfiguration, no redundantretry of upstreamterminalsoloexhaustion. FocusedRust/SQLx relevantauthoritativechecks only; no unrelatedNiks3VM, schema, generalflakeupdate or merge.
+
+Owner-confirmed pressure-module delegation at f36c6085: implement only new private cf-server models/evaluation_pressure.rs in existing task worktree. Bounded procfs numeric sampler with injected config-owned cgroup directories, PID/start-time baselines, conservative completeness and pure sustained-pressure hysteresis. Inline unit coverage and foreground Nix formatting; compile/tests only through parent module integration. No runtime/recovery/watch/config/dependency changes or services/commits.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
