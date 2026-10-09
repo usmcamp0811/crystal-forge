@@ -746,6 +746,14 @@ SQL
     }
 
     for testName in \
+      queries::commits::partial_resource_failure_tests::partial_resource_failure_retains_rejected_completion_with_preserved_build_history \
+      queries::commits::partial_resource_failure_tests::partial_resource_failure_reconciles_committed_but_unacknowledged_completion \
+      queries::commits::partial_resource_failure_tests::partial_resource_failure_ignores_never_committed_completion_candidate \
+      queries::commits::partial_resource_failure_tests::partial_resource_failure_mixed_confirmed_and_resource_cohorts_terminalize \
+      queries::build_jobs::tests::resource_terminal_pending_preparation_is_exact_guarded_and_activates_once \
+      queries::commits::partial_resource_failure_tests::partial_resource_failure_retains_completed_evidence_snapshots_and_jobs \
+      queries::commits::partial_resource_failure_tests::partial_resource_failure_rejects_unverified_retention_atomically \
+      queries::commits::partial_resource_failure_tests::partial_resource_failure_respects_supersession_and_cancellation \
       handlers::api::caches::basic_read_tests::niks3_basic_get_save_test_cancel_modes_and_authority_preserve_secrets \
       queries::cache_publication_reads::tests::niks3_basic_publication_withholds_old_capabilities_and_insecure_delivery \
       handlers::api::caches::discovery_tests::niks3_stored_discovery_retains_replaces_clears_modes_without_persistence \
@@ -792,6 +800,10 @@ SQL
       runExactCacheRegression "$testName" --ignored
     done
     for testName in \
+      queries::commits::partial_resource_failure_tests::partial_failure_diagnostic_uses_proven_counts_not_checkpoint_guesses \
+      queries::commits::partial_resource_failure_tests::evaluation_failure_resource_marker_is_server_owned \
+      queries::commits::partial_resource_failure_tests::partial_failure_cohort_keeps_confirmed_and_resource_systems_disjoint \
+      models::retry_policy::tests::resource_failure_never_retries_whole_flake_despite_available_budget \
       models::cache_destination::tests::niks3_basic_pair_validation_redaction_modes_and_authority \
       models::cache_destination::tests::niks3_probe_planes_bootstrap_without_unselected_settings \
       handlers::api::caches::basic_read_tests::niks3_basic_http_projection_and_plane_scope_do_not_cross_credentials \

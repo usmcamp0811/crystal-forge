@@ -2,6 +2,10 @@ use crate::api::models::{
     CancelEvalOutcome, EvalHistoryItem, EvalHistoryPage, EvalHistoryParams, EvalQueueParams,
 };
 use crate::models::commits::Commit;
+use crate::models::deployment_policies::PolicyCheckResult;
+use crate::models::evaluate_with_policies::{
+    EvaluationPlan, SuccessfulSystemResult, UnacknowledgedCompletion,
+};
 use crate::models::flakes::Flake;
 use crate::models::retry_policy::{
     AutomaticRetryPolicy, RetryFailureClass, automatic_retry_budget_remaining,
@@ -12,6 +16,9 @@ use anyhow::{Context, Result, bail};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::collections::{BTreeSet, HashSet};
 use tracing::{debug, error, info, warn};
+
+#[cfg(test)]
+mod partial_resource_failure_tests;
 
 const EVAL_QUEUE_ADVISORY_LOCK_KEY: i64 = 1_600_001;
 
@@ -680,7 +687,7 @@ pub enum EvalFailureOutcome {
     SupersededOrCancelled,
 }
 
-/// Mark commit evaluation as failed (with retry logic)
+/// Marks the active commit evaluation failed using the persisted retry policy.
 ///
 /// Atomically transitions `in_progress` → `pending`/`failed` only when
 /// cancellation has not been requested and the attempt count matches.
@@ -688,15 +695,18 @@ pub enum EvalFailureOutcome {
 /// cancellation was requested, preventing the generic failure handler
 /// from overwriting a concurrent cancellation.
 ///
-/// Retries up to 3 times with exponential backoff:
-/// - Attempt 1: immediate
-/// - Attempt 2: after 1 minute
-/// - Attempt 3: after 5 minutes (from attempt 2)
-///
-/// After 3 failed attempts, marks as permanently 'failed'.
+/// Uses the persisted automatic retry policy and finite lineage budget.
+/// Exhausted resource recovery never schedules a whole-flake retry.
 /// Manual re-evaluation can be triggered through the API. It preserves attempt
 /// lineage and assigns a strictly newer attempt number.
 /// Terminally fail the active evaluation attempt and schedule at most one child.
+/// Resource failures must use `finalize_partial_evaluation_resource_failure`
+/// with the retained plan instead of this whole-attempt failure function.
+///
+/// # Errors
+///
+/// Returns an error for a resource failure without a retained plan, or when
+/// PostgreSQL cannot persist evidence, snapshots, or the lifecycle transition.
 pub async fn mark_commit_evaluation_failed(
     pool: &PgPool,
     commit_id: i32,
@@ -704,9 +714,84 @@ pub async fn mark_commit_evaluation_failed(
     expected_attempt: i32,
     failure_class: RetryFailureClass,
 ) -> Result<EvalFailureOutcome> {
+    mark_commit_evaluation_failed_with_retained_plan(
+        pool,
+        commit_id,
+        error,
+        expected_attempt,
+        failure_class,
+        None,
+        None,
+        &[],
+    )
+    .await
+    .map(|(outcome, _, _, _)| outcome)
+}
+
+/// Terminalizes exhausted resource recovery while retaining completed systems.
+///
+/// Retained outcomes MUST already exist in durable derivation evidence for this
+/// exact attempt. The plan supplies snapshots, not authority to create or alter
+/// derivations, jobs, or completed policy outcomes. Invalid retention rolls back
+/// the complete transaction. Cancellation and supersession return without writes.
+/// The commit and attempt become failed, never complete, and no automatic child
+/// attempt is queued, even when the normal retry policy permits one.
+/// `remaining_systems` contains only configurations selected by the runtime's
+/// verified source inventory and evaluation scope that remain unresolved due
+/// to resource failure. Confirmed Nix failures are a separate disjoint cohort
+/// in `retained_plan.confirmed_failures`. Unselected configurations
+/// retain their prior lifecycle. Confirmed Nix failures keep their own diagnostic
+/// and terminal policy outcome instead of becoming resource failures.
+///
+/// # Errors
+///
+/// Returns an error when retained identity, metadata, or policy evidence does
+/// not match, snapshot persistence fails, or PostgreSQL rejects the transition.
+///
+/// Returns the lifecycle outcome, proven completed count, unresolved resource
+/// count, and exact redacted persisted diagnostic. Counts and diagnostic are
+/// meaningful only for an accepted failure; supersession returns zero counts
+/// and an empty diagnostic. Unacknowledged candidates have no authority until
+/// the same validator used by runtime reconciliation proves their commit.
+pub(crate) async fn finalize_partial_evaluation_resource_failure(
+    pool: &PgPool,
+    commit_id: i32,
+    expected_attempt: i32,
+    retained_plan: &EvaluationPlan,
+    remaining_systems: &[String],
+    unacknowledged_completions: &[UnacknowledgedCompletion],
+    diagnostic: &str,
+) -> Result<(EvalFailureOutcome, usize, usize, String)> {
+    mark_commit_evaluation_failed_with_retained_plan(
+        pool,
+        commit_id,
+        diagnostic,
+        expected_attempt,
+        RetryFailureClass::ResourceFailure,
+        Some(retained_plan),
+        Some(remaining_systems),
+        unacknowledged_completions,
+    )
+    .await
+}
+
+async fn mark_commit_evaluation_failed_with_retained_plan(
+    pool: &PgPool,
+    commit_id: i32,
+    error: &str,
+    expected_attempt: i32,
+    failure_class: RetryFailureClass,
+    retained_plan: Option<&EvaluationPlan>,
+    remaining_systems: Option<&[String]>,
+    unacknowledged_completions: &[UnacknowledgedCompletion],
+) -> Result<(EvalFailureOutcome, usize, usize, String)> {
+    anyhow::ensure!(
+        failure_class != RetryFailureClass::ResourceFailure || retained_plan.is_some(),
+        "resource failure requires a retained evaluation plan"
+    );
     // SECURITY: Commit and attempt errors are API-visible and persisted. Raw
     // evaluator diagnostics must not cross this boundary.
-    let error = crate::security::snapshot_redaction::redact_evaluation_error(error);
+    let mut error = evaluation_failure_diagnostic(error, failure_class);
     let mut tx = pool.begin().await?;
     // CONCURRENCY: Terminal failure publishes failed artifacts and can take
     // queue, attempt, POA&M, commit, derivation, system, and deployment locks
@@ -741,11 +826,16 @@ pub async fn mark_commit_evaluation_failed(
     .await?;
     if current.is_none() {
         tx.rollback().await?;
-        return Ok(EvalFailureOutcome::SupersededOrCancelled);
+        return Ok((
+            EvalFailureOutcome::SupersededOrCancelled,
+            0,
+            0,
+            String::new(),
+        ));
     }
 
     let class_name = match failure_class {
-        RetryFailureClass::Transient => "transient",
+        RetryFailureClass::Transient | RetryFailureClass::ResourceFailure => "transient",
         RetryFailureClass::Deterministic | RetryFailureClass::DerivationMismatch => "deterministic",
         RetryFailureClass::Cancelled => "cancelled",
         RetryFailureClass::Authorization => "authorization",
@@ -753,29 +843,176 @@ pub async fn mark_commit_evaluation_failed(
     };
     let failed = sqlx::query_as::<_, FailedAttempt>(
         r#"
-        UPDATE evaluation_attempts
-        SET status = 'failed', completed_at = NOW(), error_message = $2,
-            failure_class = $3, updated_at = NOW()
-        WHERE commit_id = $1 AND status = 'in_progress'
-          AND attempt_number = $4
-        RETURNING id, root_attempt_id, attempt_number, automatic_retry_count
+        SELECT id, root_attempt_id, attempt_number, automatic_retry_count
+        FROM evaluation_attempts
+        WHERE commit_id = $1 AND status = 'in_progress' AND attempt_number = $2
+        FOR UPDATE
         "#,
     )
     .bind(commit_id)
-    .bind(&error)
-    .bind(class_name)
     .bind(expected_attempt)
     .fetch_optional(&mut *tx)
     .await?;
     let Some(failed) = failed else {
         tx.rollback().await?;
-        return Ok(EvalFailureOutcome::SupersededOrCancelled);
+        return Ok((
+            EvalFailureOutcome::SupersededOrCancelled,
+            0,
+            0,
+            String::new(),
+        ));
     };
 
-    crate::services::composite_enforcement::fail_eval_passed_attempt_in_tx(
-        &mut tx, failed.id, &error, class_name,
+    // CONCURRENCY: COMMIT acknowledgement can be lost after the server made
+    // evaluation evidence durable. Read it only after the current commit and
+    // active attempt locks, then merge proven candidates before failure scope.
+    let reconciled_plan = if let Some(plan) = retained_plan {
+        Some(
+            merge_unacknowledged_completions_tx(
+                &mut tx,
+                commit_id,
+                expected_attempt,
+                plan,
+                remaining_systems.unwrap_or_default(),
+                unacknowledged_completions,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let retained_plan = reconciled_plan.as_ref().map(|(plan, _)| plan);
+    let remaining_systems = reconciled_plan
+        .as_ref()
+        .map(|(_, remaining)| remaining.as_slice());
+
+    let completed_configurations = if let Some(plan) = retained_plan {
+        validate_retained_evaluation_plan_tx(&mut tx, commit_id, expected_attempt, plan).await?
+    } else {
+        Vec::new()
+    };
+    let selected_configurations = if let Some(plan) = retained_plan {
+        Some(partial_evaluation_cohort(
+            &completed_configurations,
+            plan,
+            remaining_systems.unwrap_or_default(),
+        )?)
+    } else {
+        None
+    };
+    if let Some(plan) = retained_plan {
+        error = verified_partial_failure_diagnostic(
+            &error,
+            completed_configurations.len(),
+            remaining_systems.unwrap_or_default(),
+            plan.confirmed_failures.len(),
+        );
+    }
+    let terminalized = sqlx::query(
+        "UPDATE evaluation_attempts SET status = 'failed', completed_at = NOW(),
+         error_message = $2, failure_class = $3, updated_at = NOW()
+         WHERE id = $1 AND status = 'in_progress'",
     )
+    .bind(failed.id)
+    .bind(&error)
+    .bind(class_name)
+    .execute(&mut *tx)
     .await?;
+    anyhow::ensure!(
+        terminalized.rows_affected() == 1,
+        "active attempt changed during failure finalization"
+    );
+    if let Some(plan) = retained_plan {
+        // PERSISTENCE: Only the matching current attempt can publish retained
+        // snapshots. Build jobs and derivation rows remain untouched.
+        for (name, options) in &plan.evaluation_snapshots {
+            crate::queries::evaluation_snapshots::persist_available_snapshot_deferred_tx(
+                &mut tx,
+                commit_id,
+                name,
+                options.clone(),
+            )
+            .await?;
+        }
+        for (name, reason) in &plan.snapshot_capture_failures {
+            crate::queries::evaluation_snapshots::persist_unavailable_snapshot_deferred_tx(
+                &mut tx, commit_id, name, reason,
+            )
+            .await?;
+        }
+        for name in &completed_configurations {
+            if !plan.evaluation_snapshots.contains_key(name)
+                && !plan.snapshot_capture_failures.contains_key(name)
+            {
+                crate::queries::evaluation_snapshots::persist_unavailable_snapshot_deferred_tx(
+                    &mut tx,
+                    commit_id,
+                    name,
+                    "Configuration snapshot was not captured separately",
+                )
+                .await?;
+            }
+        }
+        crate::services::composite_enforcement::fail_eval_passed_attempt_except_completed_in_tx(
+            &mut tx,
+            failed.id,
+            &error,
+            class_name,
+            &completed_configurations,
+            Some("resource_pressure"),
+            remaining_systems,
+        )
+        .await?;
+        for failure in &plan.confirmed_failures {
+            crate::services::composite_enforcement::fail_eval_passed_attempt_except_completed_in_tx(
+                &mut tx, failed.id,
+                &crate::security::snapshot_redaction::redact_evaluation_error(&failure.error),
+                "deterministic", &completed_configurations, None,
+                Some(std::slice::from_ref(&failure.system_name)),
+            ).await?;
+        }
+        let confirmed_checks = plan
+            .policy_checks
+            .iter()
+            .filter(|check| {
+                plan.confirmed_failures
+                    .iter()
+                    .any(|failure| failure.system_name == check.system_name)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        // SECURITY: Confirmed failures cannot introduce a passing authorization
+        // claim. Only retained successes can preserve Pass, after durable checks.
+        anyhow::ensure!(
+            confirmed_checks.iter().all(|check| {
+                check
+                    .assigned_results
+                    .values()
+                    .flat_map(|result| &result.composite_outcomes)
+                    .filter(|outcome| outcome.kind == "eval_passed")
+                    .all(|outcome| {
+                        matches!(
+                            outcome.outcome,
+                            crate::models::deployment_policies::EnforcementOutcome::Fail
+                                | crate::models::deployment_policies::EnforcementOutcome::Error
+                        )
+                    })
+            }),
+            "confirmed failure contains passing evaluation evidence"
+        );
+        crate::services::composite_enforcement::persist_eval_passed_terminal_checks_in_tx(
+            &mut tx,
+            commit_id,
+            expected_attempt,
+            &confirmed_checks,
+        )
+        .await?;
+    } else {
+        crate::services::composite_enforcement::fail_eval_passed_attempt_in_tx(
+            &mut tx, failed.id, &error, class_name,
+        )
+        .await?;
+    }
 
     let policy = sqlx::query_as::<_, AutomaticRetryPolicy>(
         "SELECT max_build_retries, max_evaluation_retries, backoff_seconds, transient_only FROM automatic_retry_policy WHERE id = 1",
@@ -854,15 +1091,23 @@ pub async fn mark_commit_evaluation_failed(
     .await?;
     let Some(row) = row else {
         tx.rollback().await?;
-        return Ok(EvalFailureOutcome::SupersededOrCancelled);
+        return Ok((
+            EvalFailureOutcome::SupersededOrCancelled,
+            0,
+            0,
+            String::new(),
+        ));
     };
 
     if !retry_scheduled {
         // PERSISTENCE: A terminal commit failure records an explicit lifecycle
         // for each known configuration instead of collapsing every Config read
         // into one commit-global error.
-        let configuration_names = sqlx::query_scalar::<_, String>(
-            r#"
+        let configuration_names = if let Some(selected) = selected_configurations {
+            selected
+        } else {
+            sqlx::query_scalar::<_, String>(
+                r#"
             WITH configuration_names AS (
                 SELECT DISTINCT unnest(cac.nixos_configurations) AS name
                 FROM commit_artifacts_cache cac WHERE cac.commit_id = $1
@@ -873,17 +1118,87 @@ pub async fn mark_commit_evaluation_failed(
             )
             SELECT name FROM configuration_names WHERE btrim(name) <> ''
             "#,
-        )
-        .bind(commit_id)
-        .fetch_all(&mut *tx)
-        .await?;
-        for configuration_name in configuration_names {
+            )
+            .bind(commit_id)
+            .fetch_all(&mut *tx)
+            .await?
+        };
+        for configuration_name in &configuration_names {
+            if completed_configurations.contains(configuration_name) {
+                continue;
+            }
             crate::queries::evaluation_snapshots::persist_failed_snapshot_deferred_tx(
                 &mut tx,
                 commit_id,
-                &configuration_name,
-                &error,
+                configuration_name,
+                retained_plan
+                    .and_then(|plan| {
+                        plan.confirmed_failures
+                            .iter()
+                            .find(|failure| &failure.system_name == configuration_name)
+                    })
+                    .map(|failure| failure.error.as_str())
+                    .unwrap_or(&error),
             )
+            .await?;
+        }
+        if let Some(plan) = retained_plan {
+            let checks = plan
+                .policy_checks
+                .iter()
+                .filter(|check| completed_configurations.contains(&check.system_name))
+                .collect::<Vec<_>>();
+            let passed = checks
+                .iter()
+                .filter(|check| check.meets_requirements)
+                .count();
+            let strict_failed = checks
+                .iter()
+                .filter(|check| {
+                    !check.meets_requirements
+                        && check.failed_policies.iter().any(|(_, strict)| *strict)
+                })
+                .count();
+            let non_strict_failed = checks
+                .iter()
+                .filter(|check| {
+                    !check.meets_requirements
+                        && !check.failed_policies.is_empty()
+                        && !check.failed_policies.iter().any(|(_, strict)| *strict)
+                })
+                .count();
+            // PERSISTENCE: The summary publishes alongside the guarded failure
+            // and retained snapshots. A later unguarded empty-plan write must
+            // not erase completed counts or claim a resource error is policy Fail.
+            sqlx::query(
+                r#"
+                INSERT INTO commit_metadata_cache (
+                    commit_id, total_systems, systems_passed_policy,
+                    systems_failed_policy_strict, systems_failed_policy_non_strict,
+                    systems_with_eval_error, has_nix_eval_error, has_policy_failures,
+                    all_systems_passed
+                ) VALUES ($1, $2, $3, $4, $5, $6, TRUE, $7, FALSE)
+                ON CONFLICT (commit_id) DO UPDATE SET
+                    total_systems = EXCLUDED.total_systems,
+                    systems_passed_policy = EXCLUDED.systems_passed_policy,
+                    systems_failed_policy_strict = EXCLUDED.systems_failed_policy_strict,
+                    systems_failed_policy_non_strict = EXCLUDED.systems_failed_policy_non_strict,
+                    systems_with_eval_error = EXCLUDED.systems_with_eval_error,
+                    has_nix_eval_error = TRUE,
+                    has_policy_failures = EXCLUDED.has_policy_failures,
+                    all_systems_passed = FALSE, cached_at = NOW()
+                "#,
+            )
+            .bind(commit_id)
+            .bind(i32::try_from(configuration_names.len())?)
+            .bind(i32::try_from(passed)?)
+            .bind(i32::try_from(strict_failed)?)
+            .bind(i32::try_from(non_strict_failed)?)
+            .bind(i32::try_from(
+                configuration_names.len().saturating_sub(checks.len()),
+            )?)
+            .bind(strict_failed > 0 || non_strict_failed > 0)
+            .execute(&mut *tx)
             .await?;
         }
         crate::queries::evaluation_snapshots::recompute_host_deltas_tx(&mut tx, commit_id).await?;
@@ -898,10 +1213,452 @@ pub async fn mark_commit_evaluation_failed(
     }
 
     if retry_scheduled {
-        Ok(EvalFailureOutcome::RetryScheduled)
+        Ok((EvalFailureOutcome::RetryScheduled, 0, 0, error))
     } else {
-        Ok(EvalFailureOutcome::PermanentlyFailed)
+        Ok((
+            EvalFailureOutcome::PermanentlyFailed,
+            completed_configurations.len(),
+            remaining_systems.map_or(0, |remaining| remaining.len()),
+            error,
+        ))
     }
+}
+
+// SECURITY: The leading marker is server-issued recovery evidence, not
+// evaluator-controlled prose. Ordinary diagnostics cannot mint that evidence.
+fn evaluation_failure_diagnostic(error: &str, class: RetryFailureClass) -> String {
+    let error = crate::security::snapshot_redaction::redact_evaluation_error(error);
+    if class == RetryFailureClass::ResourceFailure {
+        // COMPATIBILITY: Migration 0190 constrains failure_class. Keep the
+        // infrastructure class and record the precise cause separately.
+        // Stay below the handler's 4096-character limit with room for context.
+        format!(
+            "resource_pressure: {}",
+            error
+                .strip_prefix("resource_pressure: ")
+                .unwrap_or(&error)
+                .chars()
+                .take(3500)
+                .collect::<String>()
+        )
+    } else if error.starts_with("resource_pressure: ") {
+        format!("Evaluation failure: {error}")
+    } else {
+        error
+    }
+}
+
+fn partial_evaluation_cohort(
+    completed: &[String],
+    plan: &crate::models::evaluate_with_policies::EvaluationPlan,
+    unresolved_resources: &[String],
+) -> Result<Vec<String>> {
+    // INVARIANT: Runtime remaining_systems excludes confirmed Nix failures.
+    // Validate all three disjoint cohorts before publishing their union; a
+    // mixed deterministic/resource failure must not strand the active attempt.
+    let mut selected = completed.iter().cloned().collect::<BTreeSet<_>>();
+    for name in plan
+        .confirmed_failures
+        .iter()
+        .map(|failure| &failure.system_name)
+        .chain(unresolved_resources.iter())
+    {
+        anyhow::ensure!(
+            !name.trim().is_empty(),
+            "empty selected failure configuration"
+        );
+        anyhow::ensure!(
+            selected.insert(name.clone()),
+            "selected failure cohorts overlap or contain duplicates"
+        );
+    }
+    Ok(selected.into_iter().collect())
+}
+
+// INVARIANT: A caller's completed-system list is not evaluation authority.
+// Recheck identity, the server-written attempt marker, and checked metadata
+// while the current-attempt CAS locks prevent another evaluator from replacing
+// that evidence. No retained policy outcome is reconstructed from the plan.
+async fn validate_retained_evaluation_plan_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    commit_id: i32,
+    expected_attempt: i32,
+    plan: &crate::models::evaluate_with_policies::EvaluationPlan,
+) -> Result<Vec<String>> {
+    let mut completed = BTreeSet::new();
+    for result in &plan.successful_systems {
+        anyhow::ensure!(
+            completed.insert(result.system_name.clone()),
+            "duplicate retained configuration"
+        );
+        let mut checks = plan
+            .policy_checks
+            .iter()
+            .filter(|check| check.system_name == result.system_name);
+        let check = checks
+            .next()
+            .context("retained configuration lacks policy check")?;
+        anyhow::ensure!(checks.next().is_none(), "duplicate retained policy check");
+        anyhow::ensure!(
+            completion_committed_tx(tx, commit_id, expected_attempt, result, check,).await?,
+            "retained configuration lacks exact-attempt durable evidence"
+        );
+    }
+    for name in plan
+        .evaluation_snapshots
+        .keys()
+        .chain(plan.snapshot_capture_failures.keys())
+    {
+        anyhow::ensure!(
+            completed.contains(name),
+            "snapshot has no verified completion"
+        );
+        anyhow::ensure!(
+            !(plan.evaluation_snapshots.contains_key(name)
+                && plan.snapshot_capture_failures.contains_key(name)),
+            "retained snapshot has conflicting lifecycles"
+        );
+    }
+    anyhow::ensure!(
+        plan.confirmed_failures
+            .iter()
+            .all(|failure| !completed.contains(&failure.system_name)),
+        "retained configuration is also a confirmed failure"
+    );
+    Ok(completed.into_iter().collect())
+}
+
+// INVARIANT: Both runtime catch-up and finalization use this one proof. Absence
+// of this attempt's marker means the candidate was not committed; a marker with
+// contradictory identity, checked metadata, or eligibility is a static error.
+async fn completion_committed_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    commit_id: i32,
+    expected_attempt: i32,
+    result: &SuccessfulSystemResult,
+    check: &PolicyCheckResult,
+) -> Result<bool> {
+    #[derive(sqlx::FromRow)]
+    struct DurableCompletion {
+        derivation_target: Option<String>,
+        derivation_path: Option<String>,
+        expected_store_path: Option<String>,
+        cf_agent_enabled: Option<bool>,
+        policy_requirements_met: Option<bool>,
+        status_id: i32,
+        build_preparation_state: Option<String>,
+        has_build_job: bool,
+        has_preserved_build_history: bool,
+        has_compatible_build_history: bool,
+        policy_results: serde_json::Value,
+    }
+    let durable = sqlx::query_as::<_, DurableCompletion>(
+        "SELECT derivation_target, derivation_path, expected_store_path,
+                cf_agent_enabled, policy_requirements_met, status_id,
+                build_preparation_state, COALESCE(policy_results, '{}'::jsonb) AS policy_results,
+                EXISTS (SELECT 1 FROM build_jobs job WHERE job.derivation_id = derivations.id) AS has_build_job,
+                EXISTS (
+                    SELECT 1 FROM build_jobs history WHERE history.derivation_id = derivations.id
+                    AND ((derivations.status_id = 7 AND history.status = 'cancelled')
+                      OR (derivations.status_id = 8 AND history.status IN ('building', 'cancelling'))
+                      OR (derivations.status_id = 10 AND history.status = 'success')
+                      OR (derivations.status_id = 12 AND history.status IN ('failed', 'cancelled')))
+                ) AS has_preserved_build_history,
+                EXISTS (
+                    SELECT 1 FROM build_jobs history WHERE history.derivation_id = derivations.id
+                    AND ((derivations.status_id = 7 AND history.status IN ('queued', 'cancelled'))
+                      OR (derivations.status_id = 8 AND history.status IN ('building', 'cancelling'))
+                      OR (derivations.status_id = 10 AND history.status = 'success')
+                      OR (derivations.status_id = 12 AND history.status IN ('failed', 'cancelled')))
+                ) AS has_compatible_build_history
+         FROM derivations WHERE commit_id = $1 AND derivation_type = 'nixos'
+           AND derivation_name = $2",
+    ).bind(commit_id).bind(&result.system_name).fetch_optional(&mut **tx).await?;
+    let Some(durable) = durable else {
+        return Ok(false);
+    };
+    let Some(marker) = durable.policy_results.get("evaluation_attempt") else {
+        return Ok(false);
+    };
+    let marker = marker
+        .as_i64()
+        .filter(|number| *number > 0)
+        .context("durable completion has an invalid attempt marker")?;
+    anyhow::ensure!(
+        marker <= i64::from(expected_attempt),
+        "durable completion has a superseding attempt marker"
+    );
+    if marker != i64::from(expected_attempt) {
+        return Ok(false);
+    }
+    anyhow::ensure!(
+        result.system_name == check.system_name
+            && result.cf_agent_enabled.is_some()
+            && check.cf_agent_enabled == result.cf_agent_enabled
+            && result.drv_path.starts_with("/nix/store/")
+            && result.drv_path.ends_with(".drv"),
+        "committed completion lacks validated metadata"
+    );
+    let requirements_met = crate::models::deployment_policies::policy_requirements_met(check);
+    anyhow::ensure!(
+        durable.derivation_target.as_deref() == Some(result.derivation_target.as_str())
+            && durable.derivation_path.as_deref() == Some(result.drv_path.as_str())
+            && durable.expected_store_path == result.expected_store_path
+            && durable.cf_agent_enabled == result.cf_agent_enabled
+            && durable.policy_requirements_met == Some(requirements_met)
+            && matches!(durable.status_id, 5 | 7 | 8 | 10 | 12),
+        "committed completion identity or metadata differs"
+    );
+    // Preparation eligibility is part of the COMMIT, not a guessed runtime
+    // outcome. Scope/policy exclusion is complete without admitting a build.
+    // COMPATIBILITY: PreservedBuildState returns early on policy rejection.
+    // Its cancelled queued job or running/terminal history keeps queued state
+    // or pre-0195 NULL state. Exact compatible history proves completion, never
+    // permission to create work from NULL or admit a rejected job.
+    let build_needed = result.build_eligible && requirements_met;
+    anyhow::ensure!(
+        if build_needed {
+            matches!(
+                durable.build_preparation_state.as_deref(),
+                Some("pending" | "failed")
+            ) || (durable.build_preparation_state.as_deref() == Some("queued")
+                && durable.has_build_job)
+                || (durable.build_preparation_state.is_none()
+                    && durable.has_compatible_build_history)
+        } else {
+            durable.build_preparation_state.as_deref() == Some("not_required")
+                || (!requirements_met
+                    && matches!(
+                        durable.build_preparation_state.as_deref(),
+                        None | Some("queued")
+                    )
+                    && durable.has_preserved_build_history)
+        },
+        "committed completion preparation eligibility differs"
+    );
+    let evidence = durable.policy_results;
+    anyhow::ensure!(
+        evidence.pointer("/global/cfAgentEnabled/passed")
+            == Some(&serde_json::json!(check.cf_agent_enabled)),
+        "committed agent policy evidence differs"
+    );
+    for (version_id, outcome) in &check.assigned_results {
+        let stored = &evidence["assigned"][version_id.to_string()];
+        anyhow::ensure!(
+            stored["passed"] == serde_json::json!(outcome.passed)
+                && stored["blocking"] == serde_json::json!(outcome.blocking)
+                && stored
+                    .get("evaluation_error")
+                    .and_then(serde_json::Value::as_str)
+                    == outcome.evaluation_error.as_deref(),
+            "committed assigned policy evidence differs"
+        );
+        if !outcome.composite_outcomes.is_empty() {
+            anyhow::ensure!(
+                stored["rule_outcomes"] == serde_json::to_value(&outcome.composite_outcomes)?,
+                "committed composite policy evidence differs"
+            );
+        }
+    }
+    Ok(true)
+}
+
+/// Resolves lost COMMIT acknowledgement against the exact active attempt.
+///
+/// Returns false when no completion marker exists for this attempt, including
+/// an older attempt's unchanged row. A current marker requires exact identity,
+/// checked policy metadata, and durable preparation eligibility. This read does
+/// not create derivations, jobs, snapshots, or completion claims.
+///
+/// # Errors
+///
+/// Returns a static error for cancellation, supersession, absent active lineage,
+/// invalid markers, or contradictory committed evidence. PostgreSQL read or lock
+/// failures also return errors. Callers MUST retain the candidate on interruption
+/// and apply their original deadline; finalization can reconcile it afterward.
+pub(crate) async fn reconcile_unacknowledged_completion(
+    pool: &PgPool,
+    commit_id: i32,
+    expected_attempt: i32,
+    candidate: &UnacknowledgedCompletion,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx).await?;
+    lock_eval_queue_order_tx(&mut tx).await?;
+    let current: Option<i32> = sqlx::query_scalar(
+        "SELECT id FROM commits WHERE id = $1 AND evaluation_status = 'in_progress'
+         AND COALESCE(cancellation_requested, FALSE) = FALSE
+         AND evaluation_attempt_count = $2 FOR UPDATE",
+    )
+    .bind(commit_id)
+    .bind(expected_attempt)
+    .fetch_optional(&mut *tx)
+    .await?;
+    anyhow::ensure!(
+        current.is_some(),
+        "completion reconciliation attempt was cancelled or superseded"
+    );
+    let active: Option<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT id FROM evaluation_attempts WHERE commit_id = $1 AND attempt_number = $2
+         AND status = 'in_progress' FOR UPDATE",
+    )
+    .bind(commit_id)
+    .bind(expected_attempt)
+    .fetch_optional(&mut *tx)
+    .await?;
+    anyhow::ensure!(
+        active.is_some(),
+        "completion reconciliation lacks the matching active attempt"
+    );
+    let committed = completion_committed_tx(
+        &mut tx,
+        commit_id,
+        expected_attempt,
+        &candidate.result,
+        &candidate.policy_check,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(committed)
+}
+
+async fn merge_unacknowledged_completions_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    commit_id: i32,
+    expected_attempt: i32,
+    retained: &EvaluationPlan,
+    remaining: &[String],
+    candidates: &[UnacknowledgedCompletion],
+) -> Result<(EvaluationPlan, Vec<String>)> {
+    let mut plan = EvaluationPlan {
+        results: retained.results.clone(),
+        policy_checks: retained.policy_checks.clone(),
+        successful_systems: retained.successful_systems.clone(),
+        confirmed_failures: retained.confirmed_failures.clone(),
+        evaluation_snapshots: retained.evaluation_snapshots.clone(),
+        snapshot_capture_failures: retained.snapshot_capture_failures.clone(),
+        flake_output_snapshot: retained.flake_output_snapshot.clone(),
+        had_system_eval_errors: retained.had_system_eval_errors,
+        #[cfg(test)]
+        force_build_job_insert_failure: retained.force_build_job_insert_failure,
+    };
+    let mut proven = BTreeSet::new();
+    for candidate in candidates {
+        if !completion_committed_tx(
+            tx,
+            commit_id,
+            expected_attempt,
+            &candidate.result,
+            &candidate.policy_check,
+        )
+        .await?
+        {
+            continue;
+        }
+        let name = &candidate.result.system_name;
+        anyhow::ensure!(
+            !plan
+                .confirmed_failures
+                .iter()
+                .any(|failure| &failure.system_name == name),
+            "committed candidate conflicts with confirmed Nix failure"
+        );
+        anyhow::ensure!(
+            candidate.snapshot.is_none() || candidate.snapshot_capture_failure.is_none(),
+            "committed candidate has conflicting snapshot lifecycles"
+        );
+        proven.insert(name.clone());
+        // Acknowledged captures take precedence over an earlier checkpoint.
+        // Both identities must still pass the shared durable validator.
+        if plan
+            .successful_systems
+            .iter()
+            .any(|result| &result.system_name == name)
+        {
+            continue;
+        }
+        anyhow::ensure!(
+            remaining.contains(name),
+            "committed candidate is outside the selected resource remainder"
+        );
+        plan.successful_systems.push(candidate.result.clone());
+        plan.policy_checks
+            .retain(|check| &check.system_name != name);
+        plan.policy_checks.push(candidate.policy_check.clone());
+        plan.evaluation_snapshots.remove(name);
+        plan.snapshot_capture_failures.remove(name);
+        if let Some(snapshot) = &candidate.snapshot {
+            plan.evaluation_snapshots
+                .insert(name.clone(), snapshot.clone());
+        } else if let Some(reason) = &candidate.snapshot_capture_failure {
+            plan.snapshot_capture_failures
+                .insert(name.clone(), reason.clone());
+        }
+    }
+    Ok((
+        plan,
+        remaining
+            .iter()
+            .filter(|name| !proven.contains(*name))
+            .cloned()
+            .collect(),
+    ))
+}
+
+fn verified_partial_failure_diagnostic(
+    checkpoint: &str,
+    completed_count: usize,
+    remaining: &[String],
+    confirmed_count: usize,
+) -> String {
+    let bounded = |text: &str| {
+        crate::security::snapshot_redaction::redact_evaluation_error(text)
+            .chars()
+            .take(32)
+            .collect::<String>()
+    };
+    let names = remaining
+        .iter()
+        .map(|name| bounded(name))
+        .collect::<BTreeSet<_>>();
+    let parsed = serde_json::from_str::<serde_json::Value>(
+        checkpoint
+            .strip_prefix("resource_pressure: ")
+            .unwrap_or(checkpoint),
+    )
+    .ok();
+    let observations = parsed
+        .as_ref()
+        .and_then(|value| value["resource_failures"].as_array())
+        .into_iter()
+        .flatten()
+        .filter(|failure| {
+            failure["configuration"]
+                .as_str()
+                .is_some_and(|name| names.contains(name))
+        })
+        .take(4)
+        .map(|failure| {
+            serde_json::json!({
+                "configuration": bounded(failure["configuration"].as_str().unwrap_or_default()),
+                "diagnostic": bounded(failure["diagnostic"].as_str().unwrap_or_default()),
+            })
+        })
+        .collect::<Vec<_>>();
+    // Only transaction-proven counts and remaining names survive publication.
+    // Source checkpoint counters cannot describe a lost acknowledgement's state.
+    // COMPATIBILITY: resource_pressure is the existing recovery marker, not
+    // proof of physical OOM. Bounded recovery can also stop on an uncertain
+    // persistence acknowledgement, so guidance must cover that infrastructure.
+    let diagnostic = serde_json::json!({
+        "failure_code": "resource_pressure", "completed_count": completed_count,
+        "confirmed_failure_count": confirmed_count, "remaining_count": remaining.len(),
+        "remaining_systems": remaining.iter().take(4).map(|name| bounded(name)).collect::<Vec<_>>(),
+        "resource_failures": observations,
+        "truncated": remaining.len() > 4 || parsed.as_ref().is_some_and(|value| value["truncated"] == true),
+        "action": "Check evaluator resource diagnostics and database acknowledgement; resolve the recorded cause before manual retry.",
+    });
+    format!("resource_pressure: {diagnostic}")
 }
 
 /// Open (or observe) the evaluation-failure attention occurrence for a

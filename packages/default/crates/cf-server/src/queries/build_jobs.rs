@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{Executor, PgPool, Postgres, Transaction};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -582,6 +582,89 @@ struct RecoveryCandidate {
     commit_id: Option<i32>,
     flake_id: Option<i32>,
     evaluation_attempt_count: Option<i32>,
+    requires_resource_lease: bool,
+}
+
+// SECURITY: Only this exact resource-terminal exception admits a failed
+// commit. Aliases d/c must identify the same derivation/commit. The marker was
+// written with validated evaluation metadata, before preparation could stop.
+// Prefix equality is deliberate: LIKE would treat '_' as a wildcard.
+// Queued or pre-0195 NULL preparation admits only existing history for
+// idempotence. NULL without compatible history, scope-excluded not_required,
+// and queued-without-job state cannot mint work.
+const RESOURCE_TERMINAL_PREPARATION_PREDICATE: &str = r#"
+    c.evaluation_status = 'failed'
+    AND COALESCE(c.cancellation_requested, FALSE) = FALSE
+    AND c.source_archived = FALSE
+    AND d.derivation_type = 'nixos'
+    AND d.derivation_path IS NOT NULL
+    AND NULLIF(btrim(d.derivation_target), '') IS NOT NULL
+    AND d.status_id IN (5, 7, 8, 10, 12)
+    AND d.cf_agent_enabled IS TRUE
+    AND d.policy_requirements_met IS TRUE
+    AND d.policy_results->'evaluation_attempt' = to_jsonb(c.evaluation_attempt_count)
+    AND d.policy_results #> '{global,cfAgentEnabled,passed}' = 'true'::jsonb
+    AND (
+        d.build_preparation_state IN ('pending', 'failed')
+        OR (d.build_preparation_state = 'queued' AND EXISTS (
+            SELECT 1 FROM build_jobs prepared_job
+            WHERE prepared_job.derivation_id = d.id
+        ))
+        OR (d.build_preparation_state IS NULL AND EXISTS (
+            SELECT 1 FROM build_jobs history WHERE history.derivation_id = d.id
+            AND ((d.status_id = 7 AND history.status IN ('queued', 'cancelled'))
+              OR (d.status_id = 8 AND history.status IN ('building', 'cancelling'))
+              OR (d.status_id = 10 AND history.status = 'success')
+              OR (d.status_id = 12 AND history.status IN ('failed', 'cancelled')))
+        ))
+    )
+    AND EXISTS (
+        SELECT 1 FROM evaluation_attempts resource_attempt
+        WHERE resource_attempt.commit_id = c.id
+          AND resource_attempt.attempt_number = c.evaluation_attempt_count
+          AND resource_attempt.status = 'failed'
+          AND resource_attempt.completed_at IS NOT NULL
+          AND resource_attempt.failure_class = 'transient'
+          AND left(resource_attempt.error_message, length('resource_pressure: '))
+              = 'resource_pressure: '
+          AND NOT EXISTS (
+              SELECT 1 FROM evaluation_attempts newer_attempt
+              WHERE newer_attempt.commit_id = c.id
+                AND newer_attempt.attempt_number > resource_attempt.attempt_number
+          )
+    )
+"#;
+
+/// Returns whether exact completed evidence permits resource-terminal preparation.
+///
+/// The caller MUST hold the snapshot writer and commit row locks, then retain
+/// the normal derivation/queue admission locks through job creation. This read
+/// creates no job and does not replace the caller's required GC-root proof.
+/// A false result rejects ordinary failed, cancelled, superseded, archived,
+/// policy-rejected, scope-excluded, and unverified targets. Matching evidence
+/// remains eligible after its job exists so activation can report idempotence.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot read the exact-attempt evidence.
+pub(crate) async fn resource_terminal_build_preparation_allowed_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    commit_id: i32,
+    expected_attempt: i32,
+    derivation_id: i32,
+) -> Result<bool> {
+    let query = format!(
+        "SELECT EXISTS (SELECT 1 FROM derivations d JOIN commits c ON c.id = d.commit_id
+         WHERE c.id = $1 AND c.evaluation_attempt_count = $2 AND d.id = $3
+           AND ({RESOURCE_TERMINAL_PREPARATION_PREDICATE}))"
+    );
+    sqlx::query_scalar(&query)
+        .bind(commit_id)
+        .bind(expected_attempt)
+        .bind(derivation_id)
+        .fetch_one(&mut **tx)
+        .await
+        .context("Failed to verify resource-terminal build preparation evidence")
 }
 
 /// Set backoff state for a failed recovery attempt.
@@ -590,7 +673,7 @@ struct RecoveryCandidate {
 /// preparation generation:
 /// - `build_preparation_state IN ('pending', 'failed')`
 /// - derivation path, commit_id, and evaluation_attempt_count must match
-/// - the commit must still be complete
+/// - the commit must still be complete or have exact resource-terminal evidence
 /// - no build job must exist for this derivation
 ///
 /// If the guard fails, the update does nothing and no error is returned.
@@ -602,7 +685,7 @@ async fn record_recovery_failure(
     derivation_path: Option<&str>,
     error: &str,
 ) {
-    let result = sqlx::query(
+    let query = format!(
         r#"
         UPDATE derivations d
         SET build_preparation_state = 'failed',
@@ -621,20 +704,21 @@ async fn record_recovery_failure(
           AND d.cf_agent_enabled = TRUE
           AND d.policy_requirements_met = TRUE
           AND c.id = d.commit_id
-          AND c.evaluation_status = 'complete'
+          AND (c.evaluation_status = 'complete' OR ({RESOURCE_TERMINAL_PREPARATION_PREDICATE}))
           AND c.evaluation_attempt_count = $3
           AND NOT EXISTS (
               SELECT 1 FROM build_jobs bj WHERE bj.derivation_id = d.id
           )
         "#,
-    )
-    .bind(derivation_id)
-    .bind(commit_id)
-    .bind(expected_attempt)
-    .bind(derivation_path)
-    .bind(error)
-    .execute(pool)
-    .await;
+    );
+    let result = sqlx::query(&query)
+        .bind(derivation_id)
+        .bind(commit_id)
+        .bind(expected_attempt)
+        .bind(derivation_path)
+        .bind(error)
+        .execute(pool)
+        .await;
 
     match result {
         Ok(r) if r.rows_affected() == 0 => {
@@ -659,6 +743,9 @@ async fn record_recovery_failure(
 /// `'failed'` are eligible. `'not_required'` (scope-excluded, policy-excluded) and
 /// `NULL` (rows pre-dating this state machine) are never recovered.
 /// Failed rows are subject to exponential backoff via `next_attempt_at`.
+/// Completed configurations of a failed resource-terminal attempt also recover
+/// when their exact attempt marker and stored policy evidence remain valid.
+/// Other failed or cancelled commits never gain recovery eligibility.
 ///
 /// For each candidate:
 /// 1. Creates or verifies the derivation GC root (prevents GC of the drv).
@@ -670,37 +757,14 @@ async fn record_recovery_failure(
 /// partial active-attempt conflict target absorbs concurrent recovery races.
 ///
 /// Returns the number of build jobs successfully created.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot select candidates, create scan
+/// intents, or reconcile admitted jobs. Root and preparation failures retain
+/// guarded backoff metadata and do not create a claimable job.
 pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usize> {
-    // Find derivations that need recovery. Only those with explicit 'pending' or
-    // 'failed' state — never NULL (pre-migration rows) or 'not_required'.
-    // Failed rows are subject to exponential backoff via next_attempt_at.
-    let candidates: Vec<RecoveryCandidate> = sqlx::query_as(
-        r#"
-        SELECT
-            d.id AS derivation_id,
-            d.derivation_path,
-            d.derivation_target,
-            d.commit_id,
-            c.flake_id,
-            c.evaluation_attempt_count
-        FROM derivations d
-        LEFT JOIN commits c ON c.id = d.commit_id
-        WHERE d.build_preparation_state IN ('pending', 'failed')
-          AND d.status_id = 5                       -- DryRunComplete
-          AND d.cf_agent_enabled = TRUE
-          AND d.policy_requirements_met = TRUE
-          AND c.evaluation_status = 'complete'      -- commit fully evaluated
-          AND (d.build_preparation_next_attempt_at IS NULL
-               OR d.build_preparation_next_attempt_at <= NOW())  -- backoff gate
-          AND NOT EXISTS (
-              SELECT 1 FROM build_jobs bj WHERE bj.derivation_id = d.id
-          )
-        ORDER BY d.id
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    .context("Failed to query recovery candidates")?;
+    let candidates = build_preparation_recovery_candidates(pool).await?;
 
     if candidates.is_empty() {
         return Ok(0);
@@ -711,9 +775,53 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
         candidates.len()
     );
 
+    recover_build_preparation_candidates(pool, &candidates).await
+}
+
+async fn build_preparation_recovery_candidates<'e>(
+    executor: impl Executor<'e, Database = Postgres>,
+) -> Result<Vec<RecoveryCandidate>> {
+    // Find derivations that need recovery. Only those with explicit 'pending' or
+    // 'failed' state — never NULL (pre-migration rows) or 'not_required'.
+    // Failed rows are subject to exponential backoff via next_attempt_at.
+    let query = format!(
+        r#"
+        SELECT
+            d.id AS derivation_id,
+            d.derivation_path,
+            d.derivation_target,
+            d.commit_id,
+            c.flake_id,
+            c.evaluation_attempt_count,
+            c.evaluation_status = 'failed' AS requires_resource_lease
+        FROM derivations d
+        LEFT JOIN commits c ON c.id = d.commit_id
+        WHERE d.build_preparation_state IN ('pending', 'failed')
+          AND d.status_id = 5                       -- DryRunComplete
+          AND d.cf_agent_enabled = TRUE
+          AND d.policy_requirements_met = TRUE
+          AND (c.evaluation_status = 'complete' OR ({RESOURCE_TERMINAL_PREPARATION_PREDICATE}))
+          AND (d.build_preparation_next_attempt_at IS NULL
+               OR d.build_preparation_next_attempt_at <= NOW())  -- backoff gate
+          AND NOT EXISTS (
+              SELECT 1 FROM build_jobs bj WHERE bj.derivation_id = d.id
+          )
+        ORDER BY d.id
+        "#,
+    );
+    sqlx::query_as(&query)
+        .fetch_all(executor)
+        .await
+        .context("Failed to query recovery candidates")
+}
+
+async fn recover_build_preparation_candidates(
+    pool: &PgPool,
+    candidates: &[RecoveryCandidate],
+) -> Result<usize> {
     let mut recovered = 0usize;
 
-    for candidate in &candidates {
+    for candidate in candidates {
         let derivation_id = candidate.derivation_id;
         let commit_id = candidate.commit_id.unwrap_or(0);
         let expected_attempt = candidate.evaluation_attempt_count.unwrap_or(0);
@@ -736,7 +844,21 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
         };
 
         // Phase 1: create / verify GC root before inserting any claimable job.
-        let rooted = match crate::builder::create_drv_gc_root(&drv_path, derivation_id).await {
+        // CONCURRENCY: Resource-terminal recovery starts a new preparation
+        // lease before any Nix probe. The helper holds database/heavy permits
+        // through confirmed cleanup, including a quarantined evaluator group.
+        // Candidate state can change while waiting; Phase 2 revalidates it.
+        let preparation = crate::builder::create_drv_gc_root(&drv_path, derivation_id);
+        let root_result = if candidate.requires_resource_lease {
+            crate::models::evaluate_with_policies::run_resource_terminal_preparation(
+                pool,
+                preparation,
+            )
+            .await
+        } else {
+            preparation.await
+        };
+        let rooted = match root_result {
             Ok(r) => r,
             Err(err) => {
                 let msg =
@@ -775,7 +897,7 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
         // Phase 2: Validated lock-stage activation in correct lock order.
         //
         // Lock order (must match normal activation to prevent deadlock):
-        //   1. Commit row FOR UPDATE (verify still complete)
+        //   1. Snapshot writer lock, then commit row FOR UPDATE
         //   2. Advisory queue-position lock
         //   3. Derivation row FOR UPDATE (revalidate path/state/eligible)
         //   4. Read MAX(queue_position), insert, update state
@@ -797,24 +919,44 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
             }
         };
 
+        if let Err(err) =
+            crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx).await
+        {
+            warn!(
+                derivation_id,
+                "Recovery: snapshot writer lock failed: {err:#}"
+            );
+            let _ = tx.rollback().await;
+            continue;
+        }
+
         // Step 1: lock and validate the commit row.
-        match sqlx::query_scalar::<_, bool>(
+        let commit_query = format!(
             r#"
             SELECT TRUE FROM commits c
             WHERE c.id = $1
-              AND c.evaluation_status = 'complete'
+              AND (c.evaluation_status = 'complete' OR (
+                  c.evaluation_attempt_count = $2 AND EXISTS (
+                      SELECT 1 FROM derivations d
+                      WHERE d.id = $3 AND d.commit_id = c.id
+                        AND ({RESOURCE_TERMINAL_PREPARATION_PREDICATE})
+                  )
+              ))
             FOR UPDATE
             "#,
-        )
-        .bind(candidate.commit_id)
-        .fetch_optional(&mut *tx)
-        .await
+        );
+        match sqlx::query_scalar::<_, bool>(&commit_query)
+            .bind(candidate.commit_id)
+            .bind(expected_attempt)
+            .bind(derivation_id)
+            .fetch_optional(&mut *tx)
+            .await
         {
-            Ok(Some(_)) => {} // commit still complete, proceed
+            Ok(Some(_)) => {} // Complete or exact resource-terminal evidence.
             Ok(None) => {
                 warn!(
                     derivation_id,
-                    "Recovery: commit no longer complete (skipping)"
+                    "Recovery: commit no longer permits preparation (skipping)"
                 );
                 let _ = tx.rollback().await;
                 continue;
@@ -854,23 +996,30 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
         }
 
         // Step 3: lock and revalidate the derivation row.
-        let revalidated: Option<()> = match sqlx::query_scalar::<_, bool>(
+        let revalidation_query = format!(
             r#"
             SELECT TRUE
             FROM derivations d
+            JOIN commits c ON c.id = d.commit_id
             WHERE d.id = $1
               AND d.build_preparation_state IN ('pending', 'failed')
               AND d.derivation_path = $2
               AND d.status_id = 5
               AND d.cf_agent_enabled = TRUE
               AND d.policy_requirements_met = TRUE
+              AND (c.evaluation_status = 'complete' OR (
+                  c.evaluation_attempt_count = $3
+                  AND ({RESOURCE_TERMINAL_PREPARATION_PREDICATE})
+              ))
             FOR UPDATE OF d
             "#,
-        )
-        .bind(derivation_id)
-        .bind(&drv_path)
-        .fetch_optional(&mut *tx)
-        .await
+        );
+        let revalidated: Option<()> = match sqlx::query_scalar::<_, bool>(&revalidation_query)
+            .bind(derivation_id)
+            .bind(&drv_path)
+            .bind(expected_attempt)
+            .fetch_optional(&mut *tx)
+            .await
         {
             Ok(Some(_)) => Some(()),
             Ok(None) => None,
@@ -1128,6 +1277,277 @@ mod tests {
     use crate::queue::QueueNotifier;
     use sqlx::PgPool;
     use uuid::Uuid;
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires authoritative server-regressions sandbox PostgreSQL"]
+    async fn resource_terminal_pending_preparation_is_exact_guarded_and_activates_once(
+        pool: PgPool,
+    ) {
+        use crate::models::deployment_policies::PolicyCheckResult;
+        use crate::models::evaluate_with_policies::{
+            EvaluationPlan, SuccessfulSystemResult, SystemBuildActivationOutcome,
+            SystemPersistenceOutcome, activate_evaluated_system_build, persist_evaluated_system,
+        };
+        use crate::queries::commits::{
+            EvalFailureOutcome, EvalStartOutcome, finalize_partial_evaluation_resource_failure,
+            mark_commit_evaluation_started,
+        };
+        use serde_json::json;
+        use std::collections::HashMap;
+
+        let (commit_id, derivation_id) =
+            insert_buildable_derivation(&pool, "retained-preparation", "nixos").await;
+        let (name, drv_path): (String, String) = sqlx::query_as(
+            "SELECT derivation_name, derivation_path FROM derivations WHERE id = $1",
+        )
+        .bind(derivation_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let attempt = match mark_commit_evaluation_started(&pool, commit_id)
+            .await
+            .unwrap()
+        {
+            EvalStartOutcome::Started { attempt } => attempt,
+            _ => panic!("fixture must start"),
+        };
+        let result = SuccessfulSystemResult {
+            system_name: name.clone(),
+            derivation_target: format!(
+                "git+https://example.invalid/retained.git#nixosConfigurations.{name}"
+            ),
+            drv_path,
+            expected_store_path: Some(format!("/nix/store/{}-retained", "b".repeat(32))),
+            cf_agent_enabled: Some(true),
+            build_eligible: true,
+        };
+        let check =
+            PolicyCheckResult::from_assigned(name.clone(), &json!({"cfAgentEnabled": true}), &[])
+                .unwrap();
+        assert!(matches!(
+            persist_evaluated_system(&pool, commit_id, attempt, &result, &check, &[],)
+                .await
+                .unwrap(),
+            SystemPersistenceOutcome::NeedsBuildPreparation { .. }
+        ));
+        let plan = EvaluationPlan {
+            results: vec![],
+            policy_checks: vec![check],
+            successful_systems: vec![result],
+            confirmed_failures: vec![],
+            evaluation_snapshots: HashMap::new(),
+            snapshot_capture_failures: HashMap::from([(name, "Snapshot not captured".into())]),
+            flake_output_snapshot: None,
+            had_system_eval_errors: true,
+            force_build_job_insert_failure: false,
+        };
+        assert!(
+            super::build_preparation_recovery_candidates(&pool)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            finalize_partial_evaluation_resource_failure(
+                &pool,
+                commit_id,
+                attempt,
+                &plan,
+                &["resource-c".into()],
+                &[],
+                "resource-c: capacity exhausted",
+            )
+            .await
+            .unwrap()
+            .0,
+            EvalFailureOutcome::PermanentlyFailed
+        );
+        let preparation: (String, i64) = sqlx::query_as(
+            "SELECT d.build_preparation_state, (SELECT COUNT(*) FROM build_jobs j WHERE j.derivation_id = d.id) FROM derivations d WHERE d.id = $1",
+        ).bind(derivation_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(preparation, ("pending".into(), 0));
+        let candidates = super::build_preparation_recovery_candidates(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.derivation_id)
+                .collect::<Vec<_>>(),
+            vec![derivation_id]
+        );
+
+        let attempt_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM evaluation_attempts WHERE commit_id = $1 AND attempt_number = $2",
+        )
+        .bind(commit_id)
+        .bind(attempt)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        // Each mutation tests the same production candidate query. An ordinary
+        // transient failure, wildcard-like prefix, stale marker, rejected policy,
+        // cancellation, or archived source cannot admit completed preparation.
+        for mutation in [
+            "UPDATE evaluation_attempts SET failure_class = 'deterministic' WHERE commit_id = $1",
+            "UPDATE evaluation_attempts SET error_message = 'resourceXpressure: forged prefix' WHERE commit_id = $1",
+            "UPDATE evaluation_attempts SET error_message = 'ordinary transient infrastructure failure' WHERE commit_id = $1",
+            "UPDATE derivations SET policy_results = policy_results - 'evaluation_attempt' WHERE commit_id = $1",
+            "UPDATE derivations SET policy_results = jsonb_set(policy_results, '{evaluation_attempt}', to_jsonb(999)) WHERE commit_id = $1",
+            "UPDATE derivations SET policy_results = jsonb_set(policy_results, '{global,cfAgentEnabled,passed}', 'false'::jsonb) WHERE commit_id = $1",
+            "UPDATE derivations SET policy_requirements_met = FALSE WHERE commit_id = $1",
+            "UPDATE derivations SET build_preparation_state = 'not_required' WHERE commit_id = $1",
+            "UPDATE derivations SET build_preparation_state = 'queued' WHERE commit_id = $1",
+            "UPDATE commits SET evaluation_status = 'cancelled' WHERE id = $1",
+            "UPDATE commits SET cancellation_requested = TRUE WHERE id = $1",
+            "UPDATE commits SET source_archived = TRUE WHERE id = $1",
+        ] {
+            let mut tx = pool.begin().await.unwrap();
+            crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx)
+                .await
+                .unwrap();
+            sqlx::query("SELECT id FROM commits WHERE id = $1 FOR UPDATE")
+                .bind(commit_id)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query(mutation)
+                .bind(commit_id)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            assert!(
+                !super::resource_terminal_build_preparation_allowed_in_tx(
+                    &mut tx,
+                    commit_id,
+                    attempt,
+                    derivation_id,
+                )
+                .await
+                .unwrap(),
+                "mutation must deny preparation: {mutation}"
+            );
+            assert!(
+                super::build_preparation_recovery_candidates(&mut *tx)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "production candidate query must reject mutation: {mutation}"
+            );
+            tx.rollback().await.unwrap();
+        }
+        let mut tx = pool.begin().await.unwrap();
+        crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx)
+            .await
+            .unwrap();
+        sqlx::query("SELECT id FROM commits WHERE id = $1 FOR UPDATE")
+            .bind(commit_id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        assert!(
+            !super::resource_terminal_build_preparation_allowed_in_tx(
+                &mut tx,
+                commit_id,
+                attempt + 1,
+                derivation_id,
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            !super::resource_terminal_build_preparation_allowed_in_tx(
+                &mut tx,
+                commit_id + 1,
+                attempt,
+                derivation_id,
+            )
+            .await
+            .unwrap(),
+            "another commit cannot authorize this derivation"
+        );
+        sqlx::query("INSERT INTO evaluation_attempts (commit_id, parent_attempt_id, root_attempt_id, attempt_number) VALUES ($1, $2, $2, $3)")
+            .bind(commit_id).bind(attempt_id).bind(attempt + 1).execute(&mut *tx).await.unwrap();
+        assert!(
+            !super::resource_terminal_build_preparation_allowed_in_tx(
+                &mut tx,
+                commit_id,
+                attempt,
+                derivation_id,
+            )
+            .await
+            .unwrap(),
+            "a newer lineage row supersedes the retained attempt"
+        );
+        tx.rollback().await.unwrap();
+
+        super::record_recovery_failure(
+            &pool,
+            derivation_id,
+            commit_id,
+            attempt,
+            Some(&plan.successful_systems[0].drv_path),
+            "fixture root proof is not ready",
+        )
+        .await;
+        let backed_off: (String, bool) = sqlx::query_as(
+            "SELECT build_preparation_state, build_preparation_next_attempt_at > NOW() FROM derivations WHERE id = $1",
+        ).bind(derivation_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(backed_off, ("failed".into(), true));
+        assert!(
+            super::build_preparation_recovery_candidates(&pool)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // Exercise only the database activation phase, whose caller has already
+        // verified the GC root. This fixture neither invokes Nix nor claims a
+        // real store/root proof; the recovery worker still roots before this phase.
+        let activated = activate_evaluated_system_build(&pool, commit_id, attempt, derivation_id)
+            .await
+            .unwrap();
+        let job_id = match activated {
+            SystemBuildActivationOutcome::Queued { build_job_id } => build_job_id,
+            other => panic!("retained pending preparation must activate: {other:?}"),
+        };
+        assert!(
+            matches!(activate_evaluated_system_build(&pool, commit_id, attempt, derivation_id).await.unwrap(),
+            SystemBuildActivationOutcome::AlreadyExists { build_job_id, .. } if build_job_id == job_id)
+        );
+        assert!(
+            super::build_preparation_recovery_candidates(&pool)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let job_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM build_jobs WHERE derivation_id = $1")
+                .bind(derivation_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(job_count, 1);
+        sqlx::query("UPDATE commits SET cancellation_requested = TRUE WHERE id = $1")
+            .bind(commit_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(!matches!(
+            activate_evaluated_system_build(&pool, commit_id, attempt, derivation_id)
+                .await
+                .unwrap(),
+            SystemBuildActivationOutcome::Queued { .. }
+                | SystemBuildActivationOutcome::AlreadyExists { .. }
+        ));
+        let jobs_after_cancel: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM build_jobs WHERE derivation_id = $1")
+                .bind(derivation_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(jobs_after_cancel, 1);
+    }
 
     async fn insert_buildable_derivation(
         pool: &PgPool,

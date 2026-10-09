@@ -109,6 +109,13 @@ for runtime host/cgroup detection, the 4096 MiB reserve,
 deadlines. An absent memory override enables automatic sizing on upgrade;
 set an explicit `4096` if the previous fixed threshold is required.
 
+The working boundary includes independently detected finite `memory.high`
+and `memory.max` values across visible ancestors. `memory.high` throttles
+reclaim; it is not an OOM-kill limit. No new service limit is installed.
+See [Adaptive bulk recovery](../evaluation/bulk-evaluator-adaptive-recovery.md)
+for isolated retry caps, shared deadlines, pressure diagnostics, and retained
+current-attempt outcomes after a resource-terminal failure.
+
 ## STIG Compliance Modules
 
 Crystal Forge exports 25 NixOS-native STIG control modules and four presets (`high`, `medium`, `low`, `off`):

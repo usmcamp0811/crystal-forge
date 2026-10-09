@@ -103,13 +103,22 @@ automatic sizing. TOML has no null literal. A positive integer remains MiB
 per worker: `eval_workers = 2` and `eval_max_memory_mb = 12288` preserve the
 24576 MiB configured product.
 
-Automatic sizing uses the minimum usable physical/cgroup-v2 limit, with
+Automatic sizing uses the minimum detected physical memory and finite
+visible-ancestor cgroup-v2 `memory.high` / `memory.max` boundaries, with
 `eval_memory_reserve_mb = 4096` and `eval_memory_max_percent = 85`. It does not
 use current free memory. `eval_workers = 0` resolves available parallelism in
 Crystal Forge before spawn. The independent defaults are
 `eval_output_idle_timeout_secs = 900` and `eval_overall_timeout_secs = 3600`.
 On upgrade, absent keys select these new defaults; an explicit memory override
 continues to select fixed per-worker sizing.
+
+`memory.high` is a reclaim/throttling boundary, not an OOM-kill limit. Numeric
+zero is finite. A fixed normal override remains exact and warns if its product
+exceeds the working boundary; an isolated recovery child has a separate cap
+derived from the original capacity plan. These controls install no new static
+service limits. See [Adaptive recovery](../evaluation/bulk-evaluator-adaptive-recovery.md)
+for sustained-pressure evidence, CPU-qualified idle waivers, one shared overall
+deadline, quarantine, and failure-only retention of verified partial outcomes.
 
 ### Environment Variables
 

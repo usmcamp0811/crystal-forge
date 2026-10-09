@@ -49,6 +49,10 @@ The compatibility name `_mb` denotes MiB, not decimal megabytes. An explicit
 `eval_max_memory_mb = 12288` still passes `--max-memory-size 12288` for each
 worker. With two workers, the configured product remains 24576 MiB. Automatic
 reserve and percentage settings do not alter that explicit value.
+If the fixed configured product exceeds the detected working boundary, the
+server emits a static warning without changing the normal child threshold.
+An isolated recovery child has a separate cap derived from the original plan;
+see [Adaptive recovery](bulk-evaluator-adaptive-recovery.md).
 
 The Nix option is `nullOr` positive integer, with a `null` default. The config
 generator omits a null value from TOML. TOML has no null literal: remove the
@@ -66,39 +70,50 @@ a clear pre-spawn error. An explicit nonzero worker count remains unchanged.
 The evaluator acquires the existing heavy-Nix locks in their established
 order: PostgreSQL advisory lock, then the in-process permit. After acquiring
 both locks and before spawning, it resolves one immutable resource plan.
-The CLI worker count and memory threshold use that same plan. Timeout policy
-also remains fixed for the invocation. The running attempt does not resize
-in response to free memory or RSS changes.
+Normal children use that plan's worker count and memory threshold. Recovery
+derives its isolated cap from the same snapshot; it does not resample capacity
+or resize in response to free memory, RSS, or `memory.current` changes. One
+overall deadline remains fixed for the invocation and all replacement children.
 
 ## Automatic memory sizing
 
 Crystal Forge detects stable memory limits at runtime:
 
 1. Physical memory from Linux `MemTotal`.
-2. The minimum finite cgroup-v2 `memory.max` for the actual server process and
-   its visible ancestors, resolved using its cgroup membership and mount
-   layout. The detector selects the broadest matching visible cgroup-v2 mount
+2. The minimum finite cgroup-v2 `memory.high` and `memory.max` boundaries for
+   the actual server process and its visible ancestors, resolved independently
+   using its cgroup membership and mount layout. The detector selects the
+   broadest matching visible cgroup-v2 mount
    and walks from the process cgroup toward that mount's root. It includes the
-   root limit when present; some kernels have no `memory.max` at the hierarchy
-   root. An unlimited child `max` does not hide a finite ancestor service limit.
+   root limits when present. Some kernels have no memory-controller files at
+   the hierarchy root. An unlimited child `max` does not hide a finite
+   ancestor service limit.
    Ancestors hidden by a cgroup namespace cannot be observed.
 
-If an ancestor limit cannot be read or parsed, the detector continues toward
-the visible mount root. It retains the minimum finite limit found in the
-readable cgroups and emits one static warning for the incomplete ancestor
-snapshot. It does not discard a known finite limit in favor of a larger
-physical-memory limit. If no finite limit remains, the cgroup source is
-unavailable. Failure to read the actual process cgroup also makes that source
-unavailable. An incomplete snapshot cannot account for an unreadable stricter
-ancestor limit.
+For each boundary, an ancestor read or parse failure leaves detected finite
+limits intact and emits a static warning. Failure to read one boundary does
+not discard the other. The detector continues toward the visible mount root;
+if no finite limit remains for the failed boundary, that boundary is unknown.
+A missing controller file is allowed only at the verified hierarchy root.
+Missing non-root files are detection failures. An incomplete snapshot cannot
+account for an unreadable stricter ancestor boundary. Hierarchy resolution is
+bounded to 32 validated directories, with the actual cgroup first and root last.
 
-If both sources supply limits, the effective limit is their minimum. If only
-one supplies a limit, use that limit. Do not use `MemAvailable`, current free
-memory, process RSS, or cgroup `memory.current` as the sizing input. Those
+The effective working boundary is the minimum detected physical memory,
+finite `memory.high`, and finite `memory.max`. Unknown boundaries do not
+contribute a value. `max` means unlimited; numeric `0` is finite, not unknown.
+A zero working boundary rejects automatic evaluation before spawn.
+`memory.high` is a reclaim/throttling threshold, not an OOM-kill limit. Including
+it avoids sizing only against a larger hard limit while reclaim already stalls
+the service. `memory.max` supplies hard cgroup containment when configured.
+These settings do not install or change either controller value.
+
+Do not use `MemAvailable`, current free memory, process RSS, or cgroup
+`memory.current` as the sizing input. Those
 measure current load, not a stable resource allowance.
 
-Let `M` be effective memory in MiB, `R` the reserve, `P` the percentage, and
-`W` the resolved worker count. The plan computes:
+Let `M` be the effective working boundary in MiB, `R` the reserve, `P` the
+percentage, and `W` the resolved worker count. The plan computes:
 
 ```text
 percentage_target = floor(M * P / 100)
@@ -114,8 +129,8 @@ reason to use the fallback. Zero explicit thresholds, invalid percentages,
 and overflow are rejected. There is no fixed 32768 MiB / 32 GiB ceiling and
 no requirement to enter the host's RAM manually.
 
-Only if neither source provides a usable limit does automatic sizing fall
-back to 4096 MiB per effective worker. Detection and fallback warnings use
+Only if no capacity source provides a usable boundary does automatic sizing
+fall back to 4096 MiB per effective worker. Detection and fallback warnings use
 static, credential-safe messages; they do not include file contents or raw
 detector errors. An explicit override bypasses automatic memory sizing.
 
@@ -125,6 +140,7 @@ detector errors. An explicit override bypasses automatic memory sizing.
 | --- | --- |
 | Physical `MemTotal` | 65536 |
 | Actual process cgroup `memory.max` | 49152 |
+| Visible `memory.high` boundaries | unlimited |
 | Effective limit `M` | 49152 |
 | Reserve `R` | 4096 |
 | Percentage `P` | 85 percent |
@@ -137,6 +153,11 @@ detector errors. An explicit override bypasses automatic memory sizing.
 | Unassigned rounding remainder | 1 |
 
 The command receives `--workers 2 --max-memory-size 20889`.
+
+If the same illustrative host instead has a finite ancestor `memory.high` of
+39321 MiB, the working boundary is 39321 MiB. The percentage target is 33422
+MiB and the reserve target is 35225 MiB. Two workers receive 16711 MiB each.
+This is a calculation example, not a measured deployment result.
 
 ## Threshold policy versus hard containment
 
@@ -155,11 +176,12 @@ then requests a restart. This version does not implement aggregate-worker
 memory killing or a retry-alone policy. A single job can exceed the threshold
 before the check runs.
 
-The owner reports a recent deployed evaluator that kills workers above an
-aggregate `workers * max-memory-size` threshold and retries a job alone.
-That report is version-dependent deployment evidence, not evidence that the
-packaged v2.34.3 has those semantics. Confirm the deployed binary and source
-before using that behavior to diagnose retries or OOM events. The automatic
+Upstream [v2.35.4 scheduler source](https://github.com/NixOS/nix-eval-jobs/blob/v2.35.4/src/nix-eval-jobs.cc)
+uses an aggregate `workers * max-memory-size` budget, samples RSS at a
+200-millisecond cadence, and can kill a busy worker and retry its job alone.
+Its terminal solo diagnostic is free-form error text, not a dedicated resource
+error code. The repository still packages v2.34.3. Confirm the deployed binary
+and source before attributing v2.35.4 behavior to a deployment. The automatic
 plan supplies a derived threshold in either case; it does not turn an upstream
 threshold into hard containment. See
 [runtime packaging](../../../checks/builder-evaluator-packaging/README.md)
@@ -168,39 +190,53 @@ flake pin or the guarded netrc patch.
 
 ## Independent deadlines and cancellation
 
-The 900-second output-idle deadline and 3600-second overall deadline are
-independent and start at spawn. A complete nonblank line received on evaluator
-stdout or stderr before expiry advances the idle clock; it never extends the
-overall deadline. Blank lines do not advance activity. Late buffered output
+The defaults remain 900 seconds for output-idle assessment and 3600 seconds
+for the independent overall deadline. The overall deadline starts once before
+the initial child and covers normal evaluation, recovery, small fallback,
+build-preparation drain, and foreground cleanup. Replacement children do not
+reset that deadline. Each child's idle clock starts at its spawn.
+A complete nonblank line received on evaluator stdout or stderr before expiry
+advances the idle clock; it never extends the overall deadline. Blank lines
+do not advance activity. Late buffered output
 cannot revive an expired deadline. Server-generated progress messages and
 cancellation polls are not evaluator output and do not extend either deadline.
 The overall deadline limits elapsed execution time, not CPU time, and is not
 a security sandbox boundary.
 
-An outer monitor enforces both deadlines across every await in evaluator
-collection, including output-handler database work, log flushing, and the final
-child wait after both pipes reach EOF. A bounded Tokio watch channel shares
+An outer monitor assesses idle expiry and enforces the overall deadline across
+every await in evaluator collection, including output-handler database work,
+log flushing, and the final child wait after both pipes reach EOF. A bounded
+Tokio watch channel shares
 only the latest monotonic output timestamp with the monitor; it does not queue
 output or allocate per line. Output activity wakes the monitor even while
-collection is inside a handler await. The expired deadline takes precedence
-over a ready collection result; overall expiry takes precedence when both
-deadlines are due.
+collection is inside a handler await. Overall expiry takes precedence over a
+ready collection result. Idle expiry is assessed without extending that ceiling.
+
+Idle expiry is an assessment checkpoint. Complete, fresh samples with CPU
+progress by a direct evaluator worker and no `D`-state member can waive silence
+until the next sample. This does not manufacture output or extend the overall
+deadline. Unknown or incomplete samples cannot establish healthy work. See
+[Adaptive recovery](bulk-evaluator-adaptive-recovery.md) for the exact evidence
+requirements and bounded isolation policy. Silence alone is not OOM evidence.
 
 Cancellation polls have a two-second cooperative cadence at collection-loop
 boundaries. This is not a guarantee that a cancellation request is detected
 within two seconds. An output-handler or database await can delay the next
-cancellation query. Both outer deadline monitors remain active during those
-awaits independently of cancellation polling.
+cancellation query. Idle assessment, pressure sampling, and overall monitoring
+remain active during those awaits independently of cancellation polling.
 
-Collection does not terminate or disarm the process guard. On timeout, the
-monitor drops collection before the caller terminates the process group and
-reaps the child. Cancellation and collection errors also terminate and reap
-outside the deadline race. Evaluation timers cannot interrupt this cleanup.
-Optional timeout-log persistence follows cleanup; a blocked log write cannot
-leave the evaluator running. Successful collection disarms the guard only
-after output drain and child exit. Cleanup covers the evaluator workers as
-well as the direct child; increasing a timeout must not weaken ownership or
-cleanup.
+Collection does not terminate or disarm the process guard. On a phase stop,
+the monitor drops collection before foreground cleanup confirms direct-child
+reap and process-group absence. Cleanup runs outside the collection race but
+uses the invocation's remaining deadline. Optional timeout-log persistence
+must follow cleanup. An unconfirmed group transfers cleanup ownership and
+heavy-Nix locks to the runtime reaper; it does not authorize a replacement.
+Quarantine can retain those locks after the monotonic invocation deadline.
+That deadline bounds foreground waiting, not guaranteed exit of a pending
+`D`-state member.
+Output EOF, a signal request, or a diagnostic process scan is not cleanup
+acknowledgement. This protects inherited process groups, not processes that
+escape the group. See the recovery guide for quarantine behavior.
 
 ## Upgrade and operator examples
 
@@ -239,7 +275,8 @@ To select 12 GiB per worker, set `eval_max_memory_mb = 12288` in Nix or TOML.
 With `eval_workers = 2`, that second configuration preserves a 24576 MiB
 configured product regardless of detected RAM.
 
-For an idle timeout, inspect whether the evaluator stopped producing output.
+For an idle checkpoint, inspect whether output stopped and whether fresh
+direct-worker CPU samples justify continued collection.
 For an overall timeout, inspect elapsed evaluation duration even if output
 continued. For memory failures, distinguish a threshold-triggered upstream
 restart from a service-cgroup OOM. Avoid increasing all controls together:

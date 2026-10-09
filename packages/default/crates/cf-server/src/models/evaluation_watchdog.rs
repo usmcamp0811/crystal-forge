@@ -31,6 +31,7 @@ pub(super) async fn cancellation_ticker() -> tokio::time::Interval {
 ///
 /// # Errors
 /// Returns the expired deadline, with overall precedence when both are due.
+#[cfg(test)]
 pub(super) async fn within_deadlines<F: std::future::Future>(
     watchdog: &EvaluationWatchdog,
     collection: F,
@@ -50,7 +51,7 @@ pub(super) enum OutputStream {
 }
 
 /// Identifies the deadline that requires process-group termination.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Expiry {
     Overall,
     Idle,
@@ -59,11 +60,15 @@ pub(super) enum Expiry {
 /// Shares monotonic output activity with an independent deadline monitor.
 ///
 /// Only actual nonblank line receipt can advance activity. An expired deadline
-/// is terminal: buffered output cannot revive the evaluator. The watch channel
-/// stores one timestamp and does not retain output or allocate per line.
+/// is terminal: buffered output cannot revive the evaluator. Deadline activity
+/// and actual receipt diagnostics each store one timestamp, without retaining
+/// output or allocating per line. Diagnostic receipt never drives expiry.
 pub(super) struct EvaluationWatchdog {
     overall_deadline: Instant,
     last_output: tokio::sync::watch::Sender<Instant>,
+    // Diagnostics retain actual line receipt even after idle expiry. This
+    // timestamp MUST NOT participate in deadline or recovery decisions.
+    last_received_output: tokio::sync::watch::Sender<Instant>,
     idle_timeout: Duration,
 }
 
@@ -92,14 +97,41 @@ impl EvaluationWatchdog {
                 );
                 tokio::sync::watch::channel(spawned_at).0
             },
+            last_received_output: tokio::sync::watch::channel(spawned_at).0,
             idle_timeout: idle,
         })
+    }
+
+    /// Uses the invocation ceiling for every replacement child and cleanup.
+    ///
+    /// # Errors
+    /// Returns an error for a zero idle duration or an expired shared ceiling.
+    pub(super) fn with_deadline(
+        spawned_at: Instant,
+        idle: Duration,
+        overall_deadline: Instant,
+    ) -> anyhow::Result<Self> {
+        let remaining = overall_deadline
+            .checked_duration_since(spawned_at)
+            .filter(|duration| !duration.is_zero())
+            .ok_or_else(|| anyhow::anyhow!("evaluation invocation deadline expired"))?;
+        let mut watchdog = Self::new(spawned_at, idle, remaining)?;
+        watchdog.overall_deadline = overall_deadline;
+        Ok(watchdog)
     }
 
     /// Advances activity for a timely nonblank line, never an expired deadline.
     pub(super) fn record_output(&self, stream: OutputStream, line: &str, now: Instant) {
         match stream {
             OutputStream::Stdout | OutputStream::Stderr if !line.trim().is_empty() => {
+                self.last_received_output.send_if_modified(|last| {
+                    if now < *last {
+                        false
+                    } else {
+                        *last = now;
+                        true
+                    }
+                });
                 // CONCURRENCY: Check expiry and advance under the same watch
                 // write lock. No late or out-of-order observation can revive
                 // an expired idle deadline, even before the monitor wakes.
@@ -124,6 +156,12 @@ impl EvaluationWatchdog {
     /// Returns elapsed silence for diagnostics, in monotonic time.
     pub(super) fn idle_elapsed(&self, now: Instant) -> Duration {
         now.saturating_duration_since(*self.last_output.borrow())
+    }
+
+    /// Returns diagnostic age since the last actual nonblank received line.
+    /// Late lines update this age without reviving an expired idle deadline.
+    pub(super) fn real_output_elapsed(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(*self.last_received_output.borrow())
     }
 
     /// Returns overall expiry first, including after recent output.
@@ -171,6 +209,54 @@ impl EvaluationWatchdog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn late_real_output_updates_diagnostics_without_reviving_expired_idle() {
+        let start = Instant::now();
+        let watchdog =
+            EvaluationWatchdog::new(start, Duration::from_secs(10), Duration::from_secs(60))
+                .unwrap();
+        watchdog.record_output(
+            OutputStream::Stdout,
+            "late actual output",
+            start + Duration::from_secs(15),
+        );
+        assert_eq!(
+            watchdog.expired(start + Duration::from_secs(16)),
+            Some(Expiry::Idle)
+        );
+        assert_eq!(
+            watchdog.idle_elapsed(start + Duration::from_secs(16)),
+            Duration::from_secs(16)
+        );
+        assert_eq!(
+            watchdog.real_output_elapsed(start + Duration::from_secs(16)),
+            Duration::from_secs(1)
+        );
+        watchdog.record_output(OutputStream::Stderr, " \t", start + Duration::from_secs(17));
+        assert_eq!(
+            watchdog.real_output_elapsed(start + Duration::from_secs(18)),
+            Duration::from_secs(3)
+        );
+        assert_eq!(watchdog.overall_deadline(), start + Duration::from_secs(60));
+    }
+
+    #[test]
+    fn replacement_child_cannot_reset_shared_invocation_deadline() {
+        let first_spawn = Instant::now();
+        let deadline = first_spawn + Duration::from_secs(100);
+        let replacement = EvaluationWatchdog::with_deadline(
+            first_spawn + Duration::from_secs(90),
+            Duration::from_secs(30),
+            deadline,
+        )
+        .unwrap();
+        assert_eq!(replacement.overall_deadline(), deadline);
+        assert_eq!(replacement.expired(deadline), Some(Expiry::Overall));
+        assert!(
+            EvaluationWatchdog::with_deadline(deadline, Duration::from_secs(30), deadline).is_err()
+        );
+    }
 
     #[test]
     fn idle_301_survives_default_900_and_expires_at_threshold() {

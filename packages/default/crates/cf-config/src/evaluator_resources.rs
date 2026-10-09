@@ -1,6 +1,7 @@
 //! Resolves evaluator memory policy from one runtime capacity snapshot.
 //!
-//! Uses capacity, never free memory or RSS. Cgroup limits include all visible
+//! Uses capacity, never free memory, RSS, or memory.current. Cgroup limits include
+//! independently detected memory.high and memory.max across visible
 //! ancestors up to the cgroup2 mount root; limits hidden by a cgroup namespace
 //! cannot be observed. If an ancestor read fails, detected finite limits still
 //! bound the plan; a static warning identifies the incomplete snapshot. Plans
@@ -34,10 +35,14 @@ pub struct EvaluatorResourcePlan {
     pub effective_workers: usize,
     /// Physical MemTotal capacity, rounded down to MiB if detected.
     pub physical_memory_mb: Option<usize>,
-    /// Minimum detected finite cgroup-v2 limit, rounded down to MiB. Failed
+    /// Minimum detected finite cgroup-v2 memory.max, rounded down to MiB. Failed
     /// ancestor reads never discard a finite limit already detected.
     pub cgroup_memory_mb: Option<usize>,
-    /// Minimum detected physical and finite cgroup capacities, or sole source.
+    /// Minimum detected finite cgroup-v2 memory.high, rounded down to MiB.
+    /// Failed ancestor reads never discard a finite limit already detected.
+    pub cgroup_memory_high_mb: Option<usize>,
+    /// Working boundary: minimum detected physical capacity, finite memory.high,
+    /// and finite memory.max. Unknown sources do not contribute a boundary.
     pub effective_limit_mb: Option<usize>,
     /// Capacity reserved outside evaluation, in MiB.
     pub reserve_mb: usize,
@@ -151,14 +156,14 @@ impl EvaluatorResourcePlan {
                 None
             }
         };
-        let cgroup = match detect_cgroup() {
+        let (cgroup, high) = match detect_cgroup() {
             Ok(value) => value,
             Err(_) => {
                 tracing::warn!("Evaluator cgroup-v2 memory detection failed");
-                None
+                (None, None)
             }
         };
-        let plan = Self::from_snapshot(config, workers, physical, cgroup)?;
+        let plan = Self::from_capacity_snapshot(config, workers, physical, cgroup, high)?;
         if plan.mode == EvaluatorResourceMode::Fallback {
             tracing::warn!("Evaluator capacity unavailable; using legacy 4096 MiB per worker");
         }
@@ -167,16 +172,17 @@ impl EvaluatorResourcePlan {
                 .effective_limit_mb
                 .is_some_and(|limit| plan.total_budget_mb > limit)
         {
-            tracing::warn!("Evaluator fixed memory budget exceeds detected capacity");
+            tracing::warn!("Evaluator fixed memory budget exceeds detected working boundary");
         }
         Ok(plan)
     }
 
-    fn from_snapshot(
+    fn from_capacity_snapshot(
         config: &ServerConfig,
         workers: usize,
         physical: Option<usize>,
         cgroup: Option<usize>,
+        high: Option<usize>,
     ) -> Result<Self, String> {
         config.validate_evaluator_policy()?;
         if workers == 0 || (config.eval_workers != 0 && workers != config.eval_workers) {
@@ -185,10 +191,7 @@ impl EvaluatorResourcePlan {
                     .into(),
             );
         }
-        let limit = match (physical, cgroup) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
+        let limit = [physical, cgroup, high].into_iter().flatten().min();
         let (mode, total, per_worker) = if let Some(memory) = config.eval_max_memory_mb {
             (
                 EvaluatorResourceMode::Fixed,
@@ -196,6 +199,9 @@ impl EvaluatorResourcePlan {
                 memory,
             )
         } else if let Some(limit) = limit {
+            if limit == 0 {
+                return Err("detected evaluator working boundary is zero MiB; automatic evaluation cannot run".into());
+            }
             let remaining = limit.checked_sub(config.eval_memory_reserve_mb).ok_or(
                 "evaluator capacity is below reserve; reduce eval_memory_reserve_mb or set a fixed override",
             )?;
@@ -220,6 +226,7 @@ impl EvaluatorResourcePlan {
             effective_workers: workers,
             physical_memory_mb: physical,
             cgroup_memory_mb: cgroup,
+            cgroup_memory_high_mb: high,
             effective_limit_mb: limit,
             reserve_mb: config.eval_memory_reserve_mb,
             max_memory_percent: config.eval_memory_max_percent,
@@ -227,6 +234,90 @@ impl EvaluatorResourcePlan {
             per_worker_mb: per_worker,
             mode,
         })
+    }
+
+    #[cfg(test)]
+    fn from_snapshot(
+        config: &ServerConfig,
+        workers: usize,
+        physical: Option<usize>,
+        cgroup: Option<usize>,
+    ) -> Result<Self, String> {
+        Self::from_capacity_snapshot(config, workers, physical, cgroup, None)
+    }
+}
+
+/// Provides validated cgroup2 directories for private resource diagnostics.
+///
+/// Directories run from the actual process group to the broadest visible mount
+/// root, inclusive. Resolution caps the hierarchy at 32 directories so a single
+/// diagnostic sample has bounded work. Hidden namespace ancestors are unknown.
+/// This type intentionally does not implement `Debug`: callers must not log paths
+/// or raw procfs content. Consumers may privately read controller files from these
+/// directories; resolution itself reads no memory usage or controller values.
+pub struct CgroupMemoryHierarchy {
+    directories: Vec<PathBuf>,
+}
+
+impl CgroupMemoryHierarchy {
+    /// Resolves a bounded cgroup2 hierarchy from trusted kernel procfs paths.
+    ///
+    /// # Errors
+    /// Returns static errors for unreadable or oversized procfs sources, malformed
+    /// paths/mounts, traversal, symlinks, inaccessible directories, or more than 32
+    /// visible directories. No partial hierarchy is returned on failure.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// use cf_config::evaluator_resources::CgroupMemoryHierarchy;
+    /// let hierarchy = CgroupMemoryHierarchy::resolve()?;
+    /// let actual_group = &hierarchy.directories()[0];
+    /// // Read diagnostics privately; do not log directory paths.
+    /// # Ok::<(), String>(())
+    /// ```
+    pub fn resolve() -> Result<Self, String> {
+        let group = unified_path(&read_bounded(Path::new("/proc/self/cgroup"), 64 * 1024)?)?;
+        let (mount, path) = cgroup_mount(
+            &read_bounded(Path::new("/proc/self/mountinfo"), 1024 * 1024)?,
+            &group,
+        )?;
+        Self::from_mount(&mount, path)
+    }
+
+    /// Returns actual-group-first validated directories, including the mount root.
+    ///
+    /// The slice is nonempty and contains at most 32 paths. Callers must keep
+    /// directory paths out of diagnostics logs and must not follow symlink files.
+    pub fn directories(&self) -> &[PathBuf] {
+        &self.directories
+    }
+
+    fn from_mount(mount: &Path, mut path: PathBuf) -> Result<Self, String> {
+        if !path.starts_with(mount) {
+            return Err("cgroup path escapes mount root".into());
+        }
+        // SECURITY: Canonical equality rejects symlink components and traversal.
+        // Production paths are kernel cgroupfs, which cannot create symlinks;
+        // this interface does not authorize a mutable user-owned hierarchy.
+        let mut directories = Vec::new();
+        loop {
+            if directories.len() == 32 {
+                return Err("cgroup hierarchy exceeds 32 directories".into());
+            }
+            if std::fs::canonicalize(&path).map_err(|_| "cannot verify cgroup directory")? != path
+                || !path.is_dir()
+            {
+                return Err("cgroup directory contains symlinks or is not a directory".into());
+            }
+            directories.push(path.clone());
+            if path == mount {
+                break;
+            }
+            if !path.pop() || !path.starts_with(mount) {
+                return Err("cgroup ancestor escapes mount root".into());
+            }
+        }
+        Ok(Self { directories })
     }
 }
 
@@ -358,13 +449,28 @@ fn cgroup_mount(text: &str, group: &Path) -> Result<(PathBuf, PathBuf), String> 
         .ok_or_else(|| "no matching cgroup2 mount".into())
 }
 
-fn detect_cgroup() -> Result<Option<usize>, String> {
-    let group = unified_path(&read_bounded(Path::new("/proc/self/cgroup"), 64 * 1024)?)?;
-    let (mount, path) = cgroup_mount(
-        &read_bounded(Path::new("/proc/self/mountinfo"), 1024 * 1024)?,
-        &group,
-    )?;
-    read_cgroup_limits(&mount, path)
+fn detect_cgroup() -> Result<(Option<usize>, Option<usize>), String> {
+    let hierarchy = CgroupMemoryHierarchy::resolve()?;
+    read_cgroup_boundaries(&hierarchy)
+}
+
+fn read_cgroup_boundaries(
+    hierarchy: &CgroupMemoryHierarchy,
+) -> Result<(Option<usize>, Option<usize>), String> {
+    // Each controller boundary is independent. A failed memory.high read must
+    // never discard a finite memory.max (or the converse).
+    let max = read_cgroup_boundary(hierarchy, "memory.max");
+    let high = read_cgroup_boundary(hierarchy, "memory.high");
+    if max.is_err() && high.is_err() {
+        return Err("cgroup memory.high and memory.max detection failed".into());
+    }
+    if max.is_err() {
+        tracing::warn!("Evaluator cgroup memory.max detection failed");
+    }
+    if high.is_err() {
+        tracing::warn!("Evaluator cgroup memory.high detection failed");
+    }
+    Ok((max.unwrap_or(None), high.unwrap_or(None)))
 }
 
 fn resolve_workers(
@@ -380,36 +486,20 @@ fn resolve_workers(
     }
 }
 
-fn read_cgroup_limits(mount: &Path, mut path: PathBuf) -> Result<Option<usize>, String> {
-    if !path.starts_with(mount) {
-        return Err("cgroup path escapes mount root".into());
-    }
-    // SECURITY: Canonical equality rejects symlink components in the kernel
-    // cgroup path. Ancestors are visited only inside this verified mount root.
-    // Production sources are kernel cgroupfs, which cannot create symlinks;
-    // these checks do not authorize reads from a mutable user-owned hierarchy.
-    if std::fs::canonicalize(mount).map_err(|_| "cannot verify cgroup mount")? != mount
-        || std::fs::canonicalize(&path).map_err(|_| "cannot verify cgroup path")? != path
-    {
-        return Err("cgroup path contains symlinks".into());
-    }
+fn read_cgroup_boundary(
+    hierarchy: &CgroupMemoryHierarchy,
+    file_name: &str,
+) -> Result<Option<usize>, String> {
     let mut limit: Option<usize> = None;
     let mut ancestor_failed = false;
-    let mut actual_group = true;
-    loop {
-        match read_cgroup_limit(mount, &path) {
+    for (index, path) in hierarchy.directories().iter().enumerate() {
+        let at_root = index + 1 == hierarchy.directories().len();
+        match read_cgroup_limit(path, file_name, at_root) {
             Ok(Some(value)) => limit = Some(limit.map_or(value, |old| old.min(value))),
             Ok(None) => {}
-            Err(error) if actual_group => return Err(error),
+            Err(error) if index == 0 => return Err(error),
             Err(_) => ancestor_failed = true,
         }
-        if path == mount {
-            break;
-        }
-        if !path.pop() || !path.starts_with(mount) {
-            return Err("cgroup ancestor escapes mount root".into());
-        }
-        actual_group = false;
     }
     // INVARIANT: A partial snapshot must never discard a known finite limit
     // and substitute the larger physical capacity. Continue through failed
@@ -425,13 +515,13 @@ fn read_cgroup_limits(mount: &Path, mut path: PathBuf) -> Result<Option<usize>, 
     Ok(limit)
 }
 
-fn read_cgroup_limit(mount: &Path, path: &Path) -> Result<Option<usize>, String> {
-    let file = path.join("memory.max");
+fn read_cgroup_limit(path: &Path, file_name: &str, at_root: bool) -> Result<Option<usize>, String> {
+    let file = path.join(file_name);
     if std::fs::symlink_metadata(&file).is_ok_and(|meta| meta.file_type().is_symlink()) {
         return Err("cgroup memory limit is a symlink".into());
     }
     // The hierarchy root has no memory controller limit file on some kernels.
-    if path == mount
+    if at_root
         && !file
             .try_exists()
             .map_err(|_| "cannot inspect cgroup root")?
@@ -439,6 +529,14 @@ fn read_cgroup_limit(mount: &Path, path: &Path) -> Result<Option<usize>, String>
         return Ok(None);
     }
     parse_memory_max(&read_bounded(&file, 128)?)
+}
+
+#[cfg(test)]
+fn read_cgroup_limits(mount: &Path, path: PathBuf) -> Result<Option<usize>, String> {
+    read_cgroup_boundary(
+        &CgroupMemoryHierarchy::from_mount(mount, path)?,
+        "memory.max",
+    )
 }
 
 #[cfg(test)]
@@ -451,6 +549,190 @@ mod tests {
             eval_max_memory_mb: memory,
             ..ServerConfig::default()
         }
+    }
+
+    #[test]
+    fn high_working_boundary_sizes_below_throttling_and_preserves_fixed_override() {
+        let cfg = config(2, None);
+        // 64 GiB physical, approximately 60% high and 75% max.
+        let plan = EvaluatorResourcePlan::from_capacity_snapshot(
+            &cfg,
+            2,
+            Some(65536),
+            Some(49152),
+            Some(39321),
+        )
+        .unwrap();
+        assert_eq!(plan.physical_memory_mb, Some(65536));
+        assert_eq!(plan.cgroup_memory_mb, Some(49152));
+        assert_eq!(plan.cgroup_memory_high_mb, Some(39321));
+        assert_eq!(plan.effective_limit_mb, Some(39321));
+        assert_eq!(plan.total_budget_mb, 33422);
+        assert_eq!(plan.per_worker_mb, 16711);
+        assert!(plan.total_budget_mb < 39321);
+        let plan = EvaluatorResourcePlan::from_capacity_snapshot(
+            &cfg,
+            2,
+            Some(65536),
+            Some(49152),
+            Some(8192),
+        )
+        .unwrap();
+        assert_eq!(plan.total_budget_mb, 4096);
+        assert_eq!(plan.per_worker_mb, 2048);
+        for (physical, max, high, expected) in [
+            (None, None, Some(8192), Some(8192)),
+            (None, Some(8192), None, Some(8192)),
+            (Some(8192), Some(49152), Some(39321), Some(8192)),
+            (Some(65536), Some(8192), Some(39321), Some(8192)),
+            (None, None, None, None),
+        ] {
+            let plan = EvaluatorResourcePlan::from_capacity_snapshot(&cfg, 2, physical, max, high)
+                .unwrap();
+            assert_eq!(plan.effective_limit_mb, expected);
+            assert_eq!(
+                plan.mode,
+                if expected.is_some() {
+                    EvaluatorResourceMode::Auto
+                } else {
+                    EvaluatorResourceMode::Fallback
+                }
+            );
+        }
+        for (max, high) in [(Some(49152), Some(0)), (Some(0), Some(39321))] {
+            let error =
+                EvaluatorResourcePlan::from_capacity_snapshot(&cfg, 2, Some(65536), max, high)
+                    .unwrap_err();
+            assert!(error.contains("zero MiB"));
+        }
+        let plan = EvaluatorResourcePlan::from_capacity_snapshot(
+            &config(2, Some(12288)),
+            2,
+            Some(65536),
+            Some(49152),
+            Some(8192),
+        )
+        .unwrap();
+        assert_eq!(plan.mode, EvaluatorResourceMode::Fixed);
+        assert_eq!(plan.effective_limit_mb, Some(8192));
+        assert_eq!(plan.per_worker_mb, 12288);
+        assert_eq!(plan.total_budget_mb, 24576);
+    }
+
+    #[test]
+    fn hierarchy_is_ordered_validated_and_bounded_at_32() {
+        let root = tempfile::tempdir().unwrap();
+        let mut path = root.path().to_path_buf();
+        for _ in 0..31 {
+            path.push("level");
+        }
+        std::fs::create_dir_all(&path).unwrap();
+        let hierarchy = CgroupMemoryHierarchy::from_mount(root.path(), path.clone()).unwrap();
+        assert_eq!(hierarchy.directories().len(), 32);
+        assert_eq!(hierarchy.directories().first(), Some(&path));
+        assert_eq!(hierarchy.directories().last().unwrap(), root.path());
+        for pair in hierarchy.directories().windows(2) {
+            assert_eq!(pair[0].parent().unwrap(), pair[1]);
+        }
+        path.push("too-deep");
+        std::fs::create_dir(&path).unwrap();
+        assert!(
+            CgroupMemoryHierarchy::from_mount(root.path(), path)
+                .err()
+                .unwrap()
+                .contains("32")
+        );
+        assert!(
+            CgroupMemoryHierarchy::from_mount(root.path(), root.path().join("missing")).is_err()
+        );
+        assert!(CgroupMemoryHierarchy::from_mount(root.path(), root.path().join("..")).is_err());
+        #[cfg(unix)]
+        {
+            let link = root.path().join("link");
+            std::os::unix::fs::symlink(root.path(), &link).unwrap();
+            assert!(CgroupMemoryHierarchy::from_mount(root.path(), link).is_err());
+        }
+    }
+
+    #[test]
+    fn high_and_max_ancestors_are_independent_and_partial_failures_keep_other_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("parent");
+        let child = parent.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        let hierarchy = CgroupMemoryHierarchy::from_mount(root.path(), child.clone()).unwrap();
+        let write = |path: &Path, file: &str, mb: usize| {
+            std::fs::write(path.join(file), (mb as u128 * 1048576).to_string()).unwrap();
+        };
+        write(&child, "memory.max", 65536);
+        write(&child, "memory.high", 49152);
+        write(&parent, "memory.max", 49152);
+        write(&parent, "memory.high", 39321);
+        assert_eq!(
+            read_cgroup_boundaries(&hierarchy).unwrap(),
+            (Some(49152), Some(39321))
+        );
+        std::fs::write(child.join("memory.max"), "max").unwrap();
+        std::fs::write(child.join("memory.high"), "max").unwrap();
+        assert_eq!(
+            read_cgroup_boundaries(&hierarchy).unwrap(),
+            (Some(49152), Some(39321))
+        );
+        write(&child, "memory.max", 65536);
+        write(&child, "memory.high", 49152);
+        write(root.path(), "memory.high", 32768);
+        assert_eq!(
+            read_cgroup_boundaries(&hierarchy).unwrap(),
+            (Some(49152), Some(32768))
+        );
+        std::fs::write(parent.join("memory.high"), "malformed").unwrap();
+        assert_eq!(
+            read_cgroup_boundaries(&hierarchy).unwrap(),
+            (Some(49152), Some(32768))
+        );
+        std::fs::remove_file(parent.join("memory.max")).unwrap();
+        assert_eq!(
+            read_cgroup_boundaries(&hierarchy).unwrap(),
+            (Some(65536), Some(32768))
+        );
+        // Failure at the actual group affects only that controller boundary.
+        std::fs::write(child.join("memory.high"), "malformed").unwrap();
+        assert_eq!(
+            read_cgroup_boundaries(&hierarchy).unwrap(),
+            (Some(65536), None)
+        );
+        std::fs::write(child.join("memory.high"), "max").unwrap();
+        std::fs::remove_file(child.join("memory.max")).unwrap();
+        assert_eq!(
+            read_cgroup_boundaries(&hierarchy).unwrap(),
+            (None, Some(32768))
+        );
+        write(&child, "memory.max", 49152);
+        write(&child, "memory.high", 0);
+        assert_eq!(
+            read_cgroup_boundaries(&hierarchy).unwrap(),
+            (Some(49152), Some(0))
+        );
+        let (max, high) = read_cgroup_boundaries(&hierarchy).unwrap();
+        assert!(
+            EvaluatorResourcePlan::from_capacity_snapshot(
+                &config(2, None),
+                2,
+                Some(65536),
+                max,
+                high
+            )
+            .is_err()
+        );
+        std::fs::write(child.join("memory.max"), "malformed").unwrap();
+        std::fs::write(child.join("memory.high"), "malformed").unwrap();
+        assert!(read_cgroup_boundaries(&hierarchy).is_err());
+        for path in hierarchy.directories() {
+            for file in ["memory.max", "memory.high"] {
+                std::fs::write(path.join(file), "max").unwrap();
+            }
+        }
+        assert_eq!(read_cgroup_boundaries(&hierarchy).unwrap(), (None, None));
     }
 
     #[test]

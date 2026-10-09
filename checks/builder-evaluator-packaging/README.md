@@ -34,6 +34,15 @@ The service cgroup remains the hard memory boundary. Automatic sizing, worker
 resolution, and outer deadlines do not change evaluator Nix selection, the
 root flake pin, or the guarded netrc patch below.
 
+The working boundary now includes independently detected finite visible-ancestor
+`memory.high` and `memory.max` alongside physical memory. `memory.high` is a
+reclaim/throttling boundary, not an OOM-kill limit. Normal explicit overrides
+remain exact; the CF isolated-recovery cap is derived from the original plan.
+See [Adaptive recovery](../../docs/knowledge/evaluation/bulk-evaluator-adaptive-recovery.md)
+for pressure evidence, shared deadlines, cleanup quarantine, and partial
+resource failure. CF recovery is separate from upstream v2.35.4's aggregate
+scheduler and 200-millisecond RSS sampling; the package remains v2.34.3.
+
 The module proof defines seven valid evaluator cases: `defaults`,
 `explicitNull`, `explicit12288`, `custom`, `workersZero`, `lowerBounds`, and
 `upperPercent`. It parses generated TOML to assert null omission, automatic
@@ -43,7 +52,8 @@ cases across the six evaluator options. These cases extend the existing proxy
 and config-path checks. This description records assertions in the check
 source, not a passing result for the current worktree. A packaging pass alone
 does not prove runtime memory detection, automatic worker resolution, timeout
-cleanup, or newer upstream memory semantics.
+cleanup, adaptive pressure recovery, partial-result retention, or newer upstream
+memory semantics. Review those runtime gates separately for the exact source.
 
 ## Guarded Basic read runtime
 

@@ -1776,8 +1776,11 @@ in {
           An explicit value is passed unchanged, including 12288. Null omits
           the TOML field and selects Crystal Forge's automatic budget.
 
-          Automatic sizing uses the minimum of physical memory and finite
-          effective cgroup limits, not fluctuating MemAvailable. It divides
+          Automatic sizing uses the minimum of physical memory and independently
+          detected finite memory.high and memory.max across visible cgroup
+          ancestors, not fluctuating MemAvailable. memory.high is a reclaim and
+          throttling boundary, not an OOM-kill limit. Numeric zero is finite.
+          It divides
           min(floor(effective MiB * eval_memory_max_percent / 100),
           effective MiB - eval_memory_reserve_mb) by the resolved worker count.
           Insufficient headroom is an error rather than a silent fallback.

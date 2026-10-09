@@ -432,18 +432,32 @@ pub async fn get_drv_gc_root_path(derivation_id: i32) -> String {
     format!("{}-drv", get_gc_root_path(derivation_id).await)
 }
 
-/// Create a GC root for a server-evaluated `.drv` so API builders can download
-/// the derivation archive later even if regular Nix GC runs before the job is
-/// claimed.
+/// Creates a GC root for a valid server-evaluated derivation.
+///
+/// Returns `false` when Nix reports an invalid path. The local validity probe
+/// has a 30-second ceiling; evaluation preparation also applies its shared
+/// invocation deadline and retains cleanup ownership through child reap.
+/// Rooting preserves the derivation for later API-builder archive delivery.
+///
+/// # Errors
+/// Returns an error for probe startup, timeout, unconfirmed process-group
+/// cleanup, or GC-root filesystem failures.
 pub async fn create_drv_gc_root(drv_path: &str, derivation_id: i32) -> Result<bool> {
-    let validity = Command::new("nix-store")
-        .arg("--check-validity")
-        .arg(drv_path)
-        .output()
-        .await?;
+    let mut command = Command::new("nix-store");
+    command.args(["--check-validity", drv_path]);
+    // Local store metadata should finish promptly. The bounded runner prevents
+    // aborted preparation tasks from abandoning this child or its cleanup lease.
+    let validity = crate::models::evaluate_with_policies::run_nix_command_bounded(
+        &mut command,
+        "derivation validity probe",
+        std::time::Duration::from_secs(30),
+        4096,
+        4096,
+    )
+    .await?;
 
     if !validity.status.success() {
-        let stderr = String::from_utf8_lossy(&validity.stderr);
+        let stderr = validity.stderr.diagnostic_excerpt(500);
         warn!(
             "Cannot create GC root for invalid derivation path {} (id={}): {}",
             drv_path,

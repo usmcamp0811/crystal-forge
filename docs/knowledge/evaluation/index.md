@@ -5,6 +5,7 @@
 # Operator Guide
 
 * [Bulk evaluator memory planning and timeouts](bulk-evaluator-resource-planning.md) - Open when sizing bulk commit evaluation or upgrading its memory and timeout defaults; explains automatic limits, explicit per-worker overrides, worker resolution, and pinned upstream threshold semantics.
+* [Bulk evaluator adaptive recovery and partial resource failure](bulk-evaluator-adaptive-recovery.md) - Open when diagnosing a stalled or partially failed evaluation; explains pressure hysteresis, isolated retry bounds, cleanup quarantine, exact-attempt retention, and interrupted persistence acknowledgement.
 
 # Concept
 

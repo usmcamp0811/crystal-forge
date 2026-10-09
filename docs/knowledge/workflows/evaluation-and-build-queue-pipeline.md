@@ -55,18 +55,29 @@ When a commit arrives:
 5. After the heavy-Nix locks, the server resolves one immutable
    [bulk evaluator resource plan](../evaluation/bulk-evaluator-resource-planning.md)
    before spawning `nix-eval-jobs`. Systems evaluate in parallel using its
-   explicit worker count and per-worker memory threshold. Independent idle and
-   overall monitors bound every collection await, including output-handler
-   database work and the final child wait. Cancellation polls are eligible
-   every two seconds at loop boundaries; handler awaits can delay the actual
-   query. Timeout and error cleanup terminates the process group and reaps
-   outside the deadline race before optional timeout-log persistence.
+   explicit worker count and per-worker memory threshold. The working boundary
+   includes physical memory and finite visible-ancestor `memory.high` / `memory.max`.
+   The [adaptive recovery monitor](../evaluation/bulk-evaluator-adaptive-recovery.md)
+   samples pressure across collection awaits and can isolate only unresolved
+   configurations. Idle expiry is a CPU-evidence assessment checkpoint; one
+   overall deadline covers every child, fallback, preparation, and foreground
+   cleanup. Cancellation polling remains cooperative at two-second eligible
+   loop boundaries. A replacement requires confirmed cleanup; quarantine keeps
+   heavy-Nix lock ownership when group absence is unknown.
 6. For each system that completes:
    - The policy check runs (is Crystal Forge enabled for this system?).
    - If it **passes**, the derivation becomes `dry-run-complete` and gets a
      build job.
    - If it **fails**, the system is marked as policy failed.
 7. When all systems finish, the commit is marked `complete` (or `failed`).
+
+Bounded resource exhaustion marks the commit and attempt `failed`, never
+`complete`. The failure transaction retains only validated exact-current-attempt
+Pass/Fail, snapshot observations, and existing jobs. Unfinished selected work
+receives policy Error with resource evidence; confirmed configuration failures
+remain separate. Exact completed and eligible preparation may be reconciled
+after resource-terminal failure. Cancellation and supersession still block
+admission. Exhausted recovery does not automatically retry the whole flake.
 
 ### Database fields
 

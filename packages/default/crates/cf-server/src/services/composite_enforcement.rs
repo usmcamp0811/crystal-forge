@@ -450,6 +450,40 @@ pub(crate) async fn fail_eval_passed_attempt_in_tx(
     detail: &str,
     failure_class: &str,
 ) -> Result<()> {
+    fail_eval_passed_attempt_except_completed_in_tx(
+        tx,
+        attempt_id,
+        detail,
+        failure_class,
+        &[],
+        None,
+        None,
+    )
+    .await
+}
+
+/// Fails unfinished evaluation evidence while retaining verified completions.
+///
+/// The caller MUST validate every retained configuration against durable
+/// evidence from this exact attempt while holding the snapshot writer, commit,
+/// and attempt locks. Retention preserves both Pass and policy Fail outcomes;
+/// resource exhaustion in another configuration cannot change their meaning.
+/// Existing Fail and Error outcomes for unfinished configurations remain intact.
+/// A supplied unfinished list restricts errors to selected configurations;
+/// `None` retains the whole-attempt scope used by ordinary failure handling.
+///
+/// # Errors
+///
+/// Returns an error when evidence locks, updates, or aggregate writes fail.
+pub(crate) async fn fail_eval_passed_attempt_except_completed_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    attempt_id: Uuid,
+    detail: &str,
+    failure_class: &str,
+    completed_configurations: &[String],
+    failure_code: Option<&str>,
+    unfinished_configurations: Option<&[String]>,
+) -> Result<()> {
     lock_eval_passed_assessments_for_attempt_in_tx(tx, attempt_id).await?;
     sqlx::query(
         r#"
@@ -457,16 +491,22 @@ pub(crate) async fn fail_eval_passed_attempt_in_tx(
         SET outcome = 'error', detail = $2,
             evidence = evidence || jsonb_build_object(
                 'terminal_outcome', 'error', 'failure_class', $3
-            ),
+            ) || CASE WHEN $5::text IS NULL THEN '{}'::jsonb
+                      ELSE jsonb_build_object('failure_code', $5::text) END,
             evaluated_at = NOW()
         WHERE evaluation_attempt_id = $1
           AND outcome IN ('pass', 'not_checked')
           AND superseded_at IS NULL
+          AND NOT (configuration_name = ANY($4::text[]))
+          AND ($6::text[] IS NULL OR configuration_name = ANY($6::text[]))
         "#,
     )
     .bind(attempt_id)
     .bind(detail)
     .bind(failure_class)
+    .bind(completed_configurations)
+    .bind(failure_code)
+    .bind(unfinished_configurations)
     .execute(&mut **tx)
     .await?;
     let assessment_ids: Vec<Uuid> = sqlx::query_scalar(
@@ -477,7 +517,8 @@ pub(crate) async fn fail_eval_passed_attempt_in_tx(
                 'evaluation_attempt_id', $1,
                 'terminal_outcome', 'error',
                 'failure_class', $3
-            ),
+            ) || CASE WHEN $5::text IS NULL THEN '{}'::jsonb
+                      ELSE jsonb_build_object('failure_code', $5::text) END,
             evaluated_at = NOW()
         FROM composite_policy_assessments assessment
         JOIN derivations derivation ON derivation.id = assessment.derivation_id
@@ -486,12 +527,15 @@ pub(crate) async fn fail_eval_passed_attempt_in_tx(
           AND attempt.id = $1
           AND rule_result.kind = 'eval_passed'
           AND rule_result.outcome IN ('pass', 'not_checked')
+          AND NOT (derivation.derivation_name = ANY($4::text[]))
+          AND ($6::text[] IS NULL OR derivation.derivation_name = ANY($6::text[]))
           AND EXISTS (
               SELECT 1
               FROM composite_eval_attempt_rule_results attempt_result
               WHERE attempt_result.evaluation_attempt_id = attempt.id
                 AND attempt_result.policy_version_id = assessment.policy_version_id
                 AND attempt_result.rule_id = rule_result.rule_id
+                AND NOT (attempt_result.configuration_name = ANY($4::text[]))
           )
         RETURNING assessment.id
         "#,
@@ -499,10 +543,13 @@ pub(crate) async fn fail_eval_passed_attempt_in_tx(
     .bind(attempt_id)
     .bind(detail)
     .bind(failure_class)
+    .bind(completed_configurations)
+    .bind(failure_code)
+    .bind(unfinished_configurations)
     .fetch_all(&mut **tx)
     .await?;
-    // INVARIANT: A later infrastructure failure revokes a per-system Pass.
-    // Recompute in this transaction so deployment cannot consume stale Pass.
+    // INVARIANT: Only unfinished targets lose provisional Pass. Completed
+    // evidence and affected aggregates remain atomic with terminalization.
     recompute_aggregates(tx, &assessment_ids).await?;
     Ok(())
 }

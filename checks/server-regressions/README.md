@@ -65,12 +65,20 @@ environment-specific ignored tests that do not belong in this gate.
 
 ## TASK-470 selected library tests
 
-The following 42 ignored PostgreSQL tests run with
+The following 50 ignored PostgreSQL tests run with
 `--ignored --exact --test-threads=1`. Each invocation must report exactly one
 passed test and zero ignored tests. The tests include completed CVE publication
 provenance and malformed signing-key rejection across all Niks3 auth modes.
 
 ```text
+queries::commits::partial_resource_failure_tests::partial_resource_failure_retains_rejected_completion_with_preserved_build_history
+queries::commits::partial_resource_failure_tests::partial_resource_failure_reconciles_committed_but_unacknowledged_completion
+queries::commits::partial_resource_failure_tests::partial_resource_failure_ignores_never_committed_completion_candidate
+queries::commits::partial_resource_failure_tests::partial_resource_failure_mixed_confirmed_and_resource_cohorts_terminalize
+queries::build_jobs::tests::resource_terminal_pending_preparation_is_exact_guarded_and_activates_once
+queries::commits::partial_resource_failure_tests::partial_resource_failure_retains_completed_evidence_snapshots_and_jobs
+queries::commits::partial_resource_failure_tests::partial_resource_failure_rejects_unverified_retention_atomically
+queries::commits::partial_resource_failure_tests::partial_resource_failure_respects_supersession_and_cancellation
 handlers::api::caches::basic_read_tests::niks3_basic_get_save_test_cancel_modes_and_authority_preserve_secrets
 queries::cache_publication_reads::tests::niks3_basic_publication_withholds_old_capabilities_and_insecure_delivery
 handlers::api::caches::discovery_tests::niks3_stored_discovery_retains_replaces_clears_modes_without_persistence
@@ -114,6 +122,73 @@ builder::cve_worker::tests::materialization_completed_provenance_identity_and_el
 handlers::api::caches::tests::niks3_api_create_rejects_malformed_keys_in_all_auth_modes
 handlers::api::caches::tests::niks3_api_update_rejects_malformed_keys_in_all_auth_modes
 ```
+
+The partial resource-failure tests use migration-backed disposable SQLx databases.
+They preserve exact completed derivation, build-job, assessment, and rule rows;
+publish a captured snapshot for the completed configuration; and mark only
+unfinished configuration evidence as Error with `failure_code: resource_pressure`.
+The code is a compatibility marker for stopped bounded recovery, not proof of
+physical OOM. Persistence acknowledgement can be unavailable with an unknown
+infrastructure cause. Operator guidance therefore requires checking evaluator
+resource diagnostics and database acknowledgement, then resolving the recorded
+cause before manual retry. Cause classification does not parse diagnostic text.
+Configurations outside the selected remainder keep their prior lifecycle and
+do not contribute to the partial attempt's failure summary.
+Checked agent-policy rejection remains intact. Commit and attempt become failed,
+with no whole-flake retry even when the normal retry budget permits five children.
+Forged paths and wrong-attempt markers roll back all terminalization writes.
+Superseded and cancelled reports make no changes. These tests do not invoke Nix
+or use a host development database.
+
+The preserved-history policy-rejection regression uses two real evaluation
+attempts and production persistence. A strict policy failure in the second
+attempt cancels an older queued job and preserves an older building job.
+The same regression covers passing and policy-rejected completions with queued
+or pre-0195 `NULL` preparation state, including building and terminal history.
+Both completed evaluations retain exact current-attempt metadata, compatible
+preparation history, policy Fail assessments, and captured snapshots through
+resource terminalization. The finalizer creates no job or automatic child.
+Rejected new pending preparation is still invalid, and strict job admission
+still refuses the rejected result. Historical completion is not new-work
+eligibility. `NULL` without compatible history cannot prove completion or admit
+a rejected job. The orphan selector does not select `NULL` rows for new rooting;
+an eligible legacy row with existing history can only report that job idempotently.
+
+Resource-terminal recovery acquires a new bounded preparation lease before
+its first GC-root probe. Database and heavy-Nix permits remain owned through
+rooting and confirmed cleanup. A quarantined evaluator group prevents overlap;
+the root operation uses the runtime helper's 120-second deadline, including
+lock waits. Candidate state is revalidated after rooting. Legacy complete-commit
+recovery keeps its existing root path.
+
+The committed-but-unacknowledged regression asserts that runtime catch-up is
+read-only and uses exact current-attempt identity, output, policy evidence,
+and preparation eligibility. Terminal handoff retains the committed capture
+and Pass evidence while leaving preparation pending and creating no job
+before GC rooting. The never-committed candidate regression asserts that a
+candidate cannot create a derivation, job, or available snapshot. The pure
+diagnostic regression asserts that transaction-proven counts and unfinished
+names replace checkpoint guesses and exclude reconciled completions from
+resource-failure observations. These assertions describe gate coverage;
+the current PostgreSQL and full-gate results remain parent-owned and pending.
+
+The mixed-cohort regression keeps completed evaluation, confirmed Nix failure,
+and unresolved resource failure disjoint. It terminalizes their selected union
+without requiring confirmed failures in the unresolved-resource list. Completed
+Pass, snapshot, and build job survive; the confirmed failure keeps its Nix
+diagnostic and ConfirmedFailure evidence; only resource work receives resource
+Error. Unselected configurations remain untouched.
+
+The pending-preparation regression leaves a validated successful derivation
+pending through resource terminalization. It proves exact current-attempt
+recovery eligibility and guarded backoff, rejects ordinary failure, malformed
+resource prefixes, stale or missing markers, rejected policy, cancellation,
+scope-excluded or queued-without-job state, archived sources, wrong commit
+identity, and newer attempt lineage. It exercises
+the actual database activation phase and proves one job across repeated calls.
+The fixture assumes the activation caller's GC-root proof; it does not invoke
+Nix or claim a real store/root verification. The production recovery worker
+still requires successful rooting before transactional admission.
 
 The two legacy Attic tests insert historical columns directly, bypassing the new
 create path. Plaintext and independently constructed historical `enc:v1` rows
@@ -202,9 +277,13 @@ overall deadline, configured-authority requests without authorization headers,
 explicit null fields, and `Cache-Control: no-store`. These unit tests do not prove
 native-provider acceptance or represent real account/storage measurements.
 
-These 32 non-ignored tests run with `--exact --test-threads=1`:
+These 36 non-ignored tests run with `--exact --test-threads=1`:
 
 ```text
+queries::commits::partial_resource_failure_tests::partial_failure_diagnostic_uses_proven_counts_not_checkpoint_guesses
+queries::commits::partial_resource_failure_tests::evaluation_failure_resource_marker_is_server_owned
+queries::commits::partial_resource_failure_tests::partial_failure_cohort_keeps_confirmed_and_resource_systems_disjoint
+models::retry_policy::tests::resource_failure_never_retries_whole_flake_despite_available_budget
 models::cache_destination::tests::niks3_basic_pair_validation_redaction_modes_and_authority
 models::cache_destination::tests::niks3_probe_planes_bootstrap_without_unselected_settings
 handlers::api::caches::basic_read_tests::niks3_basic_http_projection_and_plane_scope_do_not_cross_credentials
@@ -263,7 +342,7 @@ its matching `END` identifies the active target and whether Cargo was compiling
 or executing. The library also has an explicit compilation boundary before its
 selected tests execute. Cargo's normal output reports executed test names.
 
-Each of the 42 ignored and 32 non-ignored TASK-470 tests emits its qualified name,
+Each of the 50 ignored and 36 non-ignored TASK-470 tests emits its qualified name,
 mode, start time, exit status, and elapsed time. Cargo stdout and stderr still
 pass through `tee` to the exact-test guard. `pipefail` preserves failures from
 Cargo or `tee`; success still requires the named `... ok` line and the existing

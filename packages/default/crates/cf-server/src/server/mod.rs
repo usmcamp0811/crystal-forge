@@ -212,16 +212,71 @@ async fn handle_evaluation_attempt_failure(
     error: &str,
     failure_class: crate::models::retry_policy::RetryFailureClass,
 ) -> Result<()> {
+    handle_evaluation_attempt_failure_with_retained_plan(
+        pool,
+        cf_state,
+        commit,
+        attempt,
+        error,
+        failure_class,
+        None,
+        None,
+        &[],
+    )
+    .await
+}
+
+async fn handle_evaluation_attempt_failure_with_retained_plan(
+    pool: &PgPool,
+    cf_state: &crate::handlers::agent_request::CFState,
+    commit: &Commit,
+    attempt: i32,
+    error: &str,
+    failure_class: crate::models::retry_policy::RetryFailureClass,
+    retained_plan: Option<&crate::models::evaluate_with_policies::EvaluationPlan>,
+    remaining_systems: Option<&[String]>,
+    unacknowledged_completions: &[crate::models::evaluate_with_policies::UnacknowledgedCompletion],
+) -> Result<()> {
     // SECURITY: This function logs, persists, and broadcasts the failure.
     // Redact and bound once at entry so no branch can expose untrusted source
     // diagnostics or turn an oversized Nix trace into durable API data.
     let error = bounded_redacted_evaluation_error(error);
-    error!(
-        "❌ Failed to evaluate commit {}: {}",
-        commit.git_commit_hash, error
-    );
+    let mut error =
+        if failure_class == crate::models::retry_policy::RetryFailureClass::ResourceFailure {
+            format!("resource_pressure: {error}")
+        } else {
+            error
+        };
+    if retained_plan.is_none() {
+        error!(
+            "❌ Failed to evaluate commit {}: {}",
+            commit.git_commit_hash, error
+        );
+    }
 
-    match mark_commit_evaluation_failed(pool, commit.id, &error, attempt, failure_class).await {
+    let failure_outcome = if let Some(plan) = retained_plan {
+        if let Some(remaining) = remaining_systems {
+            crate::queries::commits::finalize_partial_evaluation_resource_failure(
+                pool,
+                commit.id,
+                attempt,
+                plan,
+                remaining,
+                unacknowledged_completions,
+                &error,
+            )
+            .await
+        } else {
+            Err(anyhow::anyhow!(
+                "partial resource failure lacks selected remainder"
+            ))
+        }
+    } else {
+        mark_commit_evaluation_failed(pool, commit.id, &error, attempt, failure_class)
+            .await
+            .map(|outcome| (outcome, 0, 0, error.clone()))
+    };
+    match failure_outcome {
         Err(mark_err) => {
             crate::handlers::api::commits::cleanup_eval_channel(cf_state, commit.id).await;
             return Err(mark_err).with_context(|| {
@@ -231,7 +286,7 @@ async fn handle_evaluation_attempt_failure(
                 )
             });
         }
-        Ok(EvalFailureOutcome::SupersededOrCancelled) => {
+        Ok((EvalFailureOutcome::SupersededOrCancelled, _, _, _)) => {
             let cancel_outcome =
                 crate::queries::commits::finalize_requested_commit_evaluation_cancellation(
                     pool, commit.id, attempt,
@@ -277,7 +332,7 @@ async fn handle_evaluation_attempt_failure(
                 );
             }
         }
-        Ok(EvalFailureOutcome::RetryScheduled) => {
+        Ok((EvalFailureOutcome::RetryScheduled, _, _, _)) => {
             if let Err(cache_err) = update_commit_metadata_cache(pool, commit.id, &[], true).await {
                 error!(
                     "❌ Failed to update commit metadata cache for {}: {}",
@@ -307,8 +362,23 @@ async fn handle_evaluation_attempt_failure(
             )
             .await;
         }
-        Ok(EvalFailureOutcome::PermanentlyFailed) => {
-            if let Err(cache_err) = update_commit_metadata_cache(pool, commit.id, &[], true).await {
+        Ok((EvalFailureOutcome::PermanentlyFailed, completed, remaining, verified_diagnostic)) => {
+            if retained_plan.is_some() {
+                error = verified_diagnostic;
+                // Only the finalizer's committed proof can report counts. The
+                // source checkpoint can still describe lost COMMIT replies.
+                error!(
+                    commit_id = commit.id,
+                    completed_count = completed,
+                    unresolved_resource_count = remaining,
+                    "❌ Bounded evaluation recovery stopped: {}",
+                    error
+                );
+            }
+            if retained_plan.is_none()
+                && let Err(cache_err) =
+                    update_commit_metadata_cache(pool, commit.id, &[], true).await
+            {
                 error!(
                     "❌ Failed to update commit metadata cache for {}: {}",
                     commit.git_commit_hash, cache_err
@@ -2097,13 +2167,52 @@ async fn process_pending_commits(
                 // SECURITY: The support error can contain evaluator-controlled
                 // values and URLs. Redact before failure handling can log,
                 // persist, or broadcast the diagnostic.
-                return handle_evaluation_attempt_failure(
+                let diagnostic = if let Some(resource) = e.resource_failure() {
+                    // SECURITY: Preserve the typed cause and selected names,
+                    // never raw child output. Limits keep the complete JSON
+                    // diagnostic below the finalizer's persistence bound.
+                    // Four entries with 32-character fields also fit when JSON
+                    // must escape every character as a six-character sequence.
+                    let bounded = |text: &str| {
+                        crate::security::snapshot_redaction::redact_evaluation_error(text)
+                            .chars()
+                            .take(32)
+                            .collect::<String>()
+                    };
+                    serde_json::json!({
+                        "failure_code": "resource_pressure",
+                        "completed_count": resource.completed_systems.len(),
+                        "remaining_count": resource.remaining_systems.len(),
+                        "remaining_systems": resource.remaining_systems.iter()
+                            .take(4).map(|name| bounded(name)).collect::<Vec<_>>(),
+                        "resource_failures": resource.resource_failures.iter().take(4)
+                            .map(|failure| serde_json::json!({
+                                "configuration": bounded(&failure.system_name),
+                                "diagnostic": bounded(&failure.error),
+                            })).collect::<Vec<_>>(),
+                        "truncated": resource.remaining_systems.len() > 4
+                            || resource.resource_failures.len() > 4
+                            || resource.remaining_systems.iter().any(|name| name.chars().count() > 32)
+                            || resource.resource_failures.iter().any(|failure|
+                                failure.system_name.chars().count() > 32 || failure.error.chars().count() > 32),
+                        "action": "Check evaluator resource diagnostics and database acknowledgement; resolve the recorded cause before manual retry.",
+                    }).to_string()
+                } else {
+                    e.diagnostic_chain()
+                };
+                return handle_evaluation_attempt_failure_with_retained_plan(
                     pool,
                     &cf_state,
                     &commit,
                     attempt,
-                    &e.diagnostic_chain(),
+                    &diagnostic,
                     e.class,
+                    e.partial_plan.as_deref(),
+                    e.resource_failure()
+                        .map(|resource| resource.remaining_systems.as_slice()),
+                    e.resource_failure()
+                        .map(|resource| resource.unacknowledged_completions.as_slice())
+                        .unwrap_or_default(),
                 )
                 .await;
             }

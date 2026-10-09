@@ -99,13 +99,25 @@ identity. An explicit `12288` MiB override with two workers retains the
 v2.34.3 restart threshold from version-dependent
 aggregate kill/retry behavior reported in a deployment.
 
-Both deadlines are enforced by an outer monitor across all evaluator
-collection awaits, including output-handler database work, log flushing, and
-the final child wait. Cooperative cancellation uses a two-second polling
-cadence at loop boundaries; a pending handler await can delay the actual
-query. The cadence is not a two-second response guarantee. Timeout and error
-cleanup kills the process group and reaps outside the deadline race before
-optional timeout-log persistence, so evaluation timers cannot interrupt reap.
+The server's [adaptive recovery](../evaluation/bulk-evaluator-adaptive-recovery.md)
+reuses the same verified source, revision, policy parser, and snapshot paths.
+Only unresolved configurations enter an isolated child, at most once each.
+Normal fixed overrides remain exact; isolated thresholds use the original
+working-boundary plan, including visible-ancestor `memory.high` and `memory.max`.
+These resource phase changes do not alter source or evaluator authorization.
+
+An outer monitor assesses idle expiry and enforces one overall deadline across
+collection awaits. Fresh complete direct-worker CPU evidence can waive silence,
+not extend the overall deadline. The deadline also covers replacement children,
+small fallback, build-preparation drain, and foreground cleanup. Cancellation
+retains its cooperative two-second cadence, not a response-time guarantee.
+Replacement requires reap and group absence; unconfirmed cleanup retains
+heavy-Nix locks in quarantine. Resource exhaustion fails the commit/attempt
+while preserving only verified exact-attempt completion evidence, not globally
+successful evaluation or an automatic whole-flake retry.
+Quarantined cleanup can hold those locks beyond the monotonic deadline; a
+pending `D`-state member need not exit by that deadline. Cleanup proof covers
+controlled workers in the inherited process group, not an escaped subtree.
 
 A post-claim fingerprint mismatch remains a defense-in-depth check. The server
 releases that job to the queue without consuming retry budget or failing the
