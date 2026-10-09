@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-09 15:15'
+updated_date: '2026-10-09 19:58'
 labels: []
 dependencies: []
 references:
@@ -176,6 +176,8 @@ Owner update 2026-10-09: implement adaptive bulk evaluator sizing only in existi
 Focused evaluator configuration delegation at bab049a4: own cf-config/src/config/server.rs, new evaluator_resources.rs, lib.rs export and obsolete cf-server/src/config/server.rs only. Add optional fixed memory, static resource/watchdog policy validation, pure resource planning and bounded physical/cgroup-v2 detection with ancestor limits. Resolve zero workers explicitly; expose fallible plan-based CLI arguments. Add pure parser/arithmetic/serde/duplicate-contract tests and verify focused cf-config tests/doctests through foreground nix develop. Stage new module only; parent owns runtime logging/watchdog wiring and broader verification.
 
 Delegated adaptive evaluator/watchdog scope at bab049a4: own only packages/default/crates/cf-server/src/models/evaluate_with_policies.rs and an adjacent private watchdog module. Consume owner cf_config::evaluator_resources::EvaluatorResourcePlan::resolve after heavy-Nix locks, preserve authoritative usize args and drvPath semantics, log numeric resource summary only. Replace bulk idle/overall constants with config and spawn-anchored absolute watchdog deadlines; preserve 2s cancellation and process-group guard across streaming/wait. Verify deterministic elapsed/reset/precedence/cancellation tests, tiny bounded child deadline tests and existing guard regressions through foreground nix develop. Stage new module only; parent owns lock/lifecycle/config/API and compile initializer repairs. No services/database/Niks3 changes or commits.
+
+Owner confirmed adaptive recovery recommendations 2026-10-09: retain verified completed-system outcomes and evidence when remaining configurations have resource failures; never report unresolved required work as complete success. Replacement evaluator requires confirmed owned group cleanup; deadline/pending cleanup stops recovery and retains fail-closed heavy-Nix ownership until cleanup completes. Implement inside existing bulk invocation/attempt, same NAR-qualified source/revision/policies/parser/persistence, distinct from existing small standalone fallback. Add memory.high to effective working boundary, fixedoverride warnings, bounded30s numeric process/cgroup/events/PSI diagnostics and multisignal hysteresis. One shared absolute deadline including cleanup/fallback; atmostone return to parallel thenstickyserial, atmostone isolatedCF recovery perconfiguration, no redundantretry of upstreamterminalsoloexhaustion. FocusedRust/SQLx relevantauthoritativechecks only; no unrelatedNiks3VM, schema, generalflakeupdate or merge.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
