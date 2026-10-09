@@ -1985,7 +1985,16 @@ async fn authorize_target_at(
     now: DateTime<Utc>,
     action: AuthorizationAction<'_>,
 ) -> Result<TargetDeliveryAuthorization> {
-    authorize_target_with_read_at(pool, system_id, target, now, action, false, false).await
+    authorize_target_with_read_at(
+        pool,
+        system_id,
+        target,
+        now,
+        action,
+        false,
+        cf_protocol::agent::AgentCapabilities::default(),
+    )
+    .await
 }
 
 async fn authorize_target_with_read_at(
@@ -1995,7 +2004,7 @@ async fn authorize_target_with_read_at(
     now: DateTime<Utc>,
     action: AuthorizationAction<'_>,
     confidential: bool,
-    supports_niks3: bool,
+    capabilities: cf_protocol::agent::AgentCapabilities,
 ) -> Result<TargetDeliveryAuthorization> {
     let mut constrained_derivation_id = match &action {
         AuthorizationAction::SetDesired {
@@ -2426,7 +2435,7 @@ async fn authorize_target_with_read_at(
                 &exact_target.1,
                 current_environment,
                 confidential,
-                supports_niks3,
+                capabilities,
             )
             .await?;
             if read.is_none() {
@@ -2823,7 +2832,7 @@ pub async fn authorize_and_claim_desired_target_with_read(
         Utc::now(),
         AuthorizationAction::ClaimDelivery { expected_target },
         confidential,
-        capabilities.supports_niks3,
+        capabilities,
     )
     .await
 }

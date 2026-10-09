@@ -1,4 +1,7 @@
-//! Cache-related wire types shared between server and builder.
+//! Cache-related wire types shared between server, agents and builders.
+//!
+//! Read authentication belongs only to authorized agent delivery. Builder push
+//! configuration carries independent write authentication, never read secrets.
 
 use serde::{Deserialize, Serialize};
 
@@ -75,14 +78,27 @@ impl std::str::FromStr for CacheType {
 
 /// Supplies read-plane authentication independently of write credentials.
 ///
-/// Credential strings contain PEM contents, not filesystem paths. Transport
-/// owners must deliver mTLS credentials only over verified confidential links.
+/// Credential strings contain secrets or PEM contents, not filesystem paths.
+/// Serialization intentionally carries plaintext on the authorized signed agent
+/// channel. Transport owners must use verified confidential links and must never
+/// forward these read credentials in builder push configuration or diagnostics.
 #[derive(Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CacheReadAuth {
     /// Reads a public cache without client authentication.
     #[default]
     None,
+    /// Authenticates HTTPS reads through an origin-bound protected netrc file.
+    ///
+    /// Consumers must verify native `cf-netrc-authority` support before preparing
+    /// files or invoking Nix. Servers must require the signed Basic-read capability
+    /// because older agents cannot deserialize this mode or enforce its guard.
+    Basic {
+        /// Secret login name; never include in diagnostics or command arguments.
+        username: String,
+        /// Secret password; never include in diagnostics or command arguments.
+        password: String,
+    },
     /// Authenticates cache reads with a client certificate and private key.
     Mtls {
         /// PEM-encoded client certificate chain.
@@ -104,6 +120,10 @@ impl<'de> Deserialize<'de> for CacheReadAuth {
         #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
         enum WireAuth {
             None {},
+            Basic {
+                username: String,
+                password: String,
+            },
             Mtls {
                 client_certificate: String,
                 client_private_key: String,
@@ -113,6 +133,7 @@ impl<'de> Deserialize<'de> for CacheReadAuth {
         }
         Ok(match WireAuth::deserialize(deserializer)? {
             WireAuth::None {} => Self::None,
+            WireAuth::Basic { username, password } => Self::Basic { username, password },
             WireAuth::Mtls {
                 client_certificate,
                 client_private_key,
@@ -154,6 +175,7 @@ impl std::fmt::Debug for CacheReadAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::None => f.write_str("CacheReadAuth::None"),
+            Self::Basic { .. } => f.write_str("CacheReadAuth::Basic([REDACTED])"),
             Self::Mtls { .. } => f.write_str("CacheReadAuth::Mtls([REDACTED])"),
         }
     }
@@ -171,6 +193,43 @@ impl std::fmt::Debug for Niks3WriteAuth {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn basic_read_wire_is_strict_and_redacts_both_credentials() {
+        let auth = CacheReadAuth::Basic {
+            username: "private-login-marker".into(),
+            password: "private-password-marker".into(),
+        };
+        let value = serde_json::to_value(&auth).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "kind": "basic", "username": "private-login-marker",
+                "password": "private-password-marker"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<CacheReadAuth>(value).unwrap(),
+            auth
+        );
+        let debug = format!("{auth:?}");
+        assert!(!debug.contains("private-login-marker"));
+        assert!(!debug.contains("private-password-marker"));
+        for invalid in [
+            serde_json::json!({"kind":"basic", "username":"login"}),
+            serde_json::json!({"kind":"basic", "password":"password"}),
+            serde_json::json!({"kind":"basic", "username":null, "password":"password"}),
+            serde_json::json!({"kind":"basic", "username":"login", "password":"password", "token":"extra"}),
+            serde_json::json!({"kind":"none", "username":"login", "password":"password"}),
+            serde_json::json!({"kind":"mtls", "client_certificate":"cert", "client_private_key":"key", "username":"login"}),
+        ] {
+            assert!(serde_json::from_value::<CacheReadAuth>(invalid).is_err());
+        }
+        // Read auth cannot be reinterpreted as a builder write auth mode.
+        assert!(
+            serde_json::from_value::<Niks3WriteAuth>(serde_json::to_value(auth).unwrap()).is_err()
+        );
+    }
 
     #[test]
     fn nix_public_key_enforces_named_standard_base64_ed25519_shape() {

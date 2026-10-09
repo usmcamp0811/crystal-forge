@@ -16,6 +16,13 @@ pub struct AgentCapabilities {
     /// Supports explicit Niks3 public and mTLS read settings without write secrets.
     #[serde(default)]
     pub supports_niks3: bool,
+    /// Supports Basic reads with a runtime-verified native exact-origin guard.
+    ///
+    /// This independent signed flag defaults to false for mixed-version agents.
+    /// General Niks3 support does not establish Basic deserialization or safe
+    /// native credential handling. Servers must require both flags for Basic.
+    #[serde(default)]
+    pub supports_niks3_basic_read: bool,
 }
 
 /// Extends the legacy flat system-state JSON with signed capabilities.
@@ -28,7 +35,9 @@ pub struct AgentCapabilities {
 /// use cf_protocol::agent::{AgentCapabilities, CurrentSystemRequest};
 /// let request = CurrentSystemRequest {
 ///     state: serde_json::json!({"hostname": "host", "change_reason": "startup"}),
-///     capabilities: AgentCapabilities { supports_niks3: true },
+///     capabilities: AgentCapabilities {
+///         supports_niks3: true, ..AgentCapabilities::default()
+///     },
 /// };
 /// let json = serde_json::to_value(request).unwrap();
 /// assert_eq!(json["hostname"], "host");
@@ -176,6 +185,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn basic_read_capability_is_independent_and_defaults_false() {
+        for legacy in [
+            serde_json::json!({}),
+            serde_json::json!({"supports_niks3":true}),
+        ] {
+            let caps: AgentCapabilities = serde_json::from_value(legacy).unwrap();
+            assert!(!caps.supports_niks3_basic_read);
+        }
+        let request: CurrentSystemRequest<serde_json::Value> =
+            serde_json::from_value(serde_json::json!({"hostname":"host", "capabilities":{
+                "supports_niks3":true, "supports_niks3_basic_read":true
+            }}))
+            .unwrap();
+        assert!(request.capabilities.supports_niks3_basic_read);
+        assert!(request.capabilities.supports_niks3);
+        assert_eq!(
+            serde_json::to_value(request).unwrap()["capabilities"]["supports_niks3_basic_read"],
+            true
+        );
+    }
+
+    #[test]
     fn legacy_current_system_json_defaults_missing_capabilities_to_false() {
         let legacy = serde_json::json!({
             "hostname": "legacy-host",
@@ -255,6 +286,7 @@ mod tests {
             state: &state,
             capabilities: AgentCapabilities {
                 supports_niks3: true,
+                ..AgentCapabilities::default()
             },
         })
         .unwrap();

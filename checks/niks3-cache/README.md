@@ -27,9 +27,9 @@ runs do not establish a pass for the exact commit under review.
 
 ## Full integration gate
 
-The check uses four isolated NixOS VMs: cache, server, remote API builder, and
-agent. PostgreSQL and Garage data exist only in the VM disks. The host's
-development database is not used. Closure-only Nix store images prevent the
+The check uses five isolated NixOS VMs: legacy cache, production-shaped cache,
+server, remote API builder, and agent. PostgreSQL and Garage data exist only in
+the VM disks. The host's development database is not used. Closure-only Nix store images prevent the
 agent from seeing outputs through a host-store mount. KVM must be available to
 the Nix builder.
 
@@ -62,6 +62,115 @@ then advertises support in its signed body, claims that request, and pulls.
 | `token-private` | Static token file | Read-only mTLS proxy |
 | `mtls-private` | Write client certificate | Read-only mTLS proxy |
 | `token-public-proxy` | Static token file | Public read-only TLS proxy |
+| `mtls-split` | Mandatory issuer-C certificate at private-CA-A API frontend | Separate Basic-authenticated TLS read proxy and direct presigned HTTPS S3 uploads under CA B |
+
+## Sixth topology: separate server trust and client identity
+
+The optional `makeNiks3TestCredentials { productionPki = true; ... }` export
+`productionWritePki` provides `roots` (A+B), `serverA`, `serverB`, `clientCA` (C),
+`writeClient.{cert,key}`, and `replacementClient.{cert,key}`. The two client
+identities have different keys and certificates, but both have `CN=write` and
+issuer C. `apiServer`, `s3Server`, `readServer`, `wrongSubject`, `wrongIssuer`,
+`signingPublicKeys`, and `signingPrivateKeys` expose the other fixture roles.
+Default helper callers keep the original single-issuer topology.
+
+```mermaid
+flowchart LR
+  A[Private server CA A] --> API[push-cache.test:5754 mandatory mTLS nginx]
+  C[Client issuer C] --> Client[CF packaged remote builder CN=write]
+  Client -->|TLS server trust A+B; certificate C; no Bearer| API
+  API -->|overwrite verified subject; private UNIX socket| Bridge[Fixture bridge UID 63071]
+  Bridge -->|restricted IPv4 loopback TCP| Native[Niks3 1.6.0 native proxy-subject auth]
+  Native --> DB[Separate PostgreSQL niks3-production]
+  Native -->|backend-only static credentials| Garage[Private production-niks3 bucket]
+  Native -->|presigned upload capabilities| Client
+  Client -->|direct signed HTTPS PUT; no auth header or client certificate| S3[s3-cache.test:3901 nginx]
+  B[Separate server CA B] --> S3
+  S3 -->|preserve exact signed host and port| Garage
+  Reader[CF server and agent] -->|Basic; signature-required reads| Read[read-cache.test:5753 streaming read proxy]
+  B --> Read
+  Read --> Bridge
+  Native -->|two independent Ed25519 narinfo signing keys| Garage
+```
+
+The A+B bundle verifies server certificates. It excludes client issuer C.
+Nginx uses C separately to verify client identities. Only B is installed as an
+additional system root on CF server/builder roles; A remains private. The Basic
+read proxy also uses B, which the standalone agent trusts as a system root.
+The native server also trusts B for its own backend S3 connections.
+
+Pinned Niks3 1.6.0 has TCP listeners and documented verified-subject proxy
+authentication, but no UNIX listener. The fixture-owned `socat` bridge adapts
+the private UNIX channel to `127.0.0.1:5755`. Socket mode is `0660`, directory
+mode is `0750`, and nginx shares the dedicated proxy group. An nftables output
+rule permits native-origin TCP only for bridge UID 63071. External clients,
+root test clients, and `nobody` cannot bypass the certificate frontend.
+This adaptation is test infrastructure; Crystal Forge does not require a bridge.
+
+The frontend uses `ssl_verify_client on`, so discovery also requires a valid
+issuer-C certificate. It overwrites verification/subject headers and removes
+incoming `Authorization` before forwarding. Native Niks3 enforces `CN=write`.
+A valid issuer-C certificate with the wrong subject can obtain public metadata,
+but its protected upload request returns 401. Missing certificates, wrong
+issuers, and forged incoming verification headers fail at the frontend.
+The startup API token remains private to the native backend and is not supplied
+to pushers. No Bearer translation is used.
+
+Garage remains private. Unsigned PUT returns 403. The S3 TLS proxy does not
+request client certificates or Basic authentication. It accepts only the exact
+configured authority `s3-cache.test:3901` and forwards that same Host, preserving
+SigV4 validation. Its observer emits booleans and status only, never URI, query,
+presigned response body, Authorization contents, token, key, or PEM values.
+Native backend-authenticated S3 traffic is distinguished from direct pusher PUTs.
+
+The authoritative gate includes real CF jobs with A-only and B-only configured
+write roots. Neither may produce a completed cache-publication row. The Go CLI
+replaces system roots when `--ca-cert` is present: A-only can reach the API but
+cannot verify B's S3 server, even though B is installed in system trust. B-only
+cannot verify the private-A API. A+B must complete a real remote build and exact
+destination-ID publication, followed by CVE materialization, signature-required
+agent pull, provenance regressions, and the existing cleanup barriers.
+Client private keys are encrypted in CF rows. The mTLS dispatch has no token or
+static S3 keys. Live CLI inspection projects only booleans for protected
+`--client-cert`, `--client-key`, and `--ca-cert` files, absent token flags, absent
+AWS/token environment, and the expected root bundle.
+
+The infrastructure-only proof is available without a server-package rebuild:
+
+```sh
+sh packages/ci/public-cache-build.sh --no-link -L .#checks.x86_64-linux.niks3-cache.production-fixture --max-jobs 1 --cores 2
+```
+
+It cannot replace the full six-variant CF gate. Discovery metadata is not write
+authorization evidence. Absent native write/pins capability keeps the UI write
+authorization result **Untested**.
+
+### Basic read confinement
+
+Only the full gate opts into `basicRead = true`. Shared helper defaults and the
+original five variants retain public or mTLS reads. The sixth read frontend
+streams native NARs without redirects, verifies Basic authentication, and strips
+Authorization before forwarding to the backend. Missing or incorrect credentials
+return 403. Read credentials never authenticate the write API or S3 uploads.
+
+The packaged native Nix exposes `cf-netrc-authority`. Basic consumers probe the
+actual executable before preparing credentials, then select a mode-0600 netrc
+inside a mode-0700 owned directory and the exact HTTPS origin through child-local
+settings. The gate copies the complete closure into two fresh stores, checking
+each signing key independently with `require-sigs = true`. Actual server
+publication, CVE materialization and packaged-agent copies exercise the shared
+consumer path. A signed old-agent request with Niks3 support but no Basic support
+must withhold both cache and target and leave the request pending.
+
+The existing gate runs eight native negative operations: 301 same-authority path,
+302 cross-hostname, 303 same-host different-port, 307 HTTPS-to-HTTP downgrade,
+308 same-authority path, 304, and two narinfo absolute NAR URLs (foreign hostname
+and foreign port). Each must fail at the native guard without importing the
+output. A separate boolean-only target observer must record zero guarded target
+requests and no forwarded Authorization. An ordinary Nix operation without the
+CF guard or credentials must still follow a redirect. All temporary readers
+reap before credential removal; the original final quiescence and exact cleanup
+assertions remain authoritative.
 
 The fixture uses separate write, read, and unauthorized client subjects. Both
 signing keys must appear in published narinfo. Private reads reject anonymous
@@ -98,7 +207,7 @@ the fixture-supplied `crystal-forge` user.
 
 ## Real proxy claim regression
 
-Before the five Niks3 builds, a separate scratch environment, registered builder,
+Before the six Niks3 builds, a separate scratch environment, registered builder,
 signed session, evaluated derivation identity and one selected cache at a time
 exercise the real `next-job` and `/start` handlers. Attic, S3 and Niks3 each require
 HTTP 200 through the real HTTPS Nginx proxy, the expected decrypted write
@@ -132,7 +241,7 @@ its config-path export remain intact. They do not construct an invalid NixOS
 configuration: the module's
 fail-fast assertion prohibits a true flag with an empty CIDR list. The fixture
 restores the generated configuration, restarts and verifies it, then removes
-the scratch SQL identities before the original five builds begin.
+the scratch SQL identities before the six builds begin.
 
 ## Fixture diagnosis
 
@@ -164,7 +273,7 @@ Helper regressions cover exact path boundaries, safe JSON serialization,
 PID reuse and permission-denied unknown results. Diagnostic evidence must
 identify the remaining operation before any cleanup-wait or production fix.
 
-After the five variants, an isolated signed builder claim starts a real
+After the six variants, an isolated signed builder claim starts a real
 server-owned derivation input upload through a TLS forwarding gate. The gate
 acknowledges receipt and waits for an explicit FIFO release. The fixture drops
 the HTTP request client, captures the surviving upload child and directory,

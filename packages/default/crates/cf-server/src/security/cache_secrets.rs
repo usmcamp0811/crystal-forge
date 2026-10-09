@@ -194,6 +194,26 @@ pub fn encrypt_optional(value: Option<&str>) -> Result<Option<String>> {
     value.map(encrypt_secret).transpose()
 }
 
+/// Encrypts a plaintext Basic password without treating spaces as an empty value.
+///
+/// Basic passwords retain exact bytes, including surrounding or all-space
+/// values. Unlike the legacy helper, this always encrypts a present plaintext
+/// value, even when that value resembles an envelope. Retained stored envelopes
+/// must be preserved by callers instead of passed as plaintext.
+///
+/// # Errors
+/// Returns a static error for an empty password or key/encryption failure.
+pub(crate) fn encrypt_basic_password(value: Option<&str>) -> Result<Option<String>> {
+    value
+        .map(|value| {
+            if value.is_empty() {
+                return Err(anyhow!("Basic password cannot be empty"));
+            }
+            encrypt_with_key(value, &open_key()?)
+        })
+        .transpose()
+}
+
 /// Decrypts a present credential, preserving an absent value.
 ///
 /// # Errors
@@ -264,6 +284,30 @@ mod tests {
     }
 
     #[test]
+    fn certificate_bundle_regressions_reject_interleaved_comments_and_noncert_blocks() {
+        let multi = format!("\n{TEST_CERTIFICATE}\t\n{TEST_CERTIFICATE}\n");
+        assert!(validate_certificate_bundle(&multi).is_ok());
+        for noncert in [
+            "# certificate comment",
+            "arbitrary trailing text",
+            "-----BEGIN PRIVATE KEY-----\nAQID\n-----END PRIVATE KEY-----",
+            "-----BEGIN CERTIFICATE-----\nnot-base64!\n-----END CERTIFICATE-----",
+        ] {
+            for candidate in [
+                format!("{TEST_CERTIFICATE}\n{noncert}\n{TEST_CERTIFICATE}"),
+                format!("{noncert}\n{TEST_CERTIFICATE}"),
+                format!("{TEST_CERTIFICATE}\n{noncert}"),
+            ] {
+                let error = validate_certificate_bundle(&candidate)
+                    .unwrap_err()
+                    .to_string();
+                assert_eq!(error, "requires a certificate-only PEM bundle");
+                assert!(!error.contains("BEGIN"));
+            }
+        }
+    }
+
+    #[test]
     fn encrypt_decrypt_round_trip() {
         let key = test_key(&[7; 32]);
         let secret = "super-secret-value";
@@ -278,6 +322,17 @@ mod tests {
         let plaintext = "legacy-plaintext";
         let decrypted = decrypt_secret(plaintext).expect("decrypt legacy");
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn basic_password_envelope_preserves_spaces_and_literal_prefixes() {
+        let key = test_key(&[7; 32]);
+        for plaintext in ["  ", " leading and trailing ", "enc:v1:literal-password"] {
+            let ciphertext = encrypt_with_key(plaintext, &key).unwrap();
+            assert!(is_encrypted(&ciphertext));
+            assert!(decrypt_with_key(&ciphertext, &key).unwrap() == plaintext);
+            assert!(!ciphertext.contains(plaintext));
+        }
     }
 
     #[test]

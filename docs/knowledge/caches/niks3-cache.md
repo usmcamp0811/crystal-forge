@@ -31,11 +31,13 @@ Create or edit a destination as an administrator in **Caches**, or through
 | `niks3_auth_token` | Required for static-token writes. No write certificate, key, or custom CA is allowed in this mode. |
 | `niks3_write_client_cert`, `niks3_write_client_key` | PEM contents required for mTLS writes. No write token is allowed in this mode. |
 | `niks3_write_ca_cert` | Optional certificate-only PEM trust bundle for mTLS writes. |
-| `niks3_read_auth_mode` | `none` for public reads or `mtls` for private reads, selected explicitly. |
+| `niks3_read_auth_mode` | `none` (Public), `basic`, or `mtls`, selected independently of writes. |
+| `niks3_read_basic_username`, `niks3_read_basic_password` | Complete Basic pair; management responses omit both. Passwords are encrypted at rest. |
 | `niks3_read_client_cert`, `niks3_read_client_key` | PEM contents required for mTLS reads. Public mode rejects read credentials. |
 | `niks3_read_ca_cert` | Optional certificate-only PEM trust bundle for mTLS reads. |
 | `parallel_uploads` | Per-job upload cap, passed once as `--max-concurrent-uploads`; minimum one. Not `attic_jobs`. |
 | `environment_ids` | Destination assignments. Empty assignments mean global availability. |
+| `max_retries`, `push_timeout_seconds` | Defaults are 3 retries and 3600 seconds; retries may be zero. Parallel uploads default to 1. |
 
 Write and read URLs can use different hosts or proxies. Configure each URL for
 its own plane. URLs must not embed credentials, fragments, or caller-supplied
@@ -78,13 +80,14 @@ Niks3. Selecting a type does not replace the dialog. Name and selected environme
 remain common, while each type retains its URL, credential, signing, and compression
 draft during switches. Nothing is saved by changing type.
 
-The common header shows the destination name, type, and draft status. All types
-use the same **Destination**, **Credentials**, and **Environments** navigation rail
-and scope-aware footer. Niks3 shows read/substituter fields before write/API fields,
-with independent read and write authentication. Rail badges describe draft
-validation and scope, not verified connectivity. Credential dialogs hold local
-drafts; they do not create a reusable server-side credential inventory. Unsupported
-authentication modes are not advertised as working capabilities.
+Niks3 uses a dedicated five-section rail: **Destination**, **Write / API**,
+**Read / Pull**, **Trust**, and **Advanced**, with scope selection in Destination.
+Cards and details distinguish the two planes. Nested credential dialogs contain
+local replacement drafts or Current configured choices, not a reusable credential
+inventory. Stored secrets never seed inputs. The parent dialog is inert while a
+nested dialog owns focus; closing restores focus. Rail badges describe draft
+state, not connectivity or write authorization. Save commits configuration and
+scope together; Discovery and plane Tests do not save drafts.
 
 Discovery populates URLs and signing keys for review before saving. Editing
 fetches the destination by ID before mounting the form, then loads its existing
@@ -98,7 +101,8 @@ draft. Save sends configuration and scope together.
 ## Upgrade and confidential transport
 
 1. Apply the normal server migrations, including `0299` (destination fields),
-   `0300` (builder dispatch identity), and `0301` (local queue provenance), after
+   `0300` (builder dispatch identity), `0301` (local queue provenance), and additive
+   `0302` (Basic read fields and auth-mode constraints), after
    the rebased `dev` migrations through `0298` and before the updated server uses
    these fields.
 2. Upgrade remote builders before dispatching Niks3 jobs. The updated builder
@@ -117,6 +121,12 @@ draft. Save sends configuration and scope together.
    pending deployment remains unclaimed and retryable.
 4. Verify the HTTPS proxy boundary for both builder polling and agent heartbeats.
 
+Basic delivery additionally requires signed
+`capabilities.supports_niks3_basic_read = true`, based on a feature probe of the
+actual agent Nix executable. Old or unsupported runtimes advertise false. Without
+that capability, or without private-transport verification, cache and target are
+withheld before claim. Public and mTLS preparation retain their existing paths.
+
 The server's current confidentiality gate requires all of the following:
 
 - `server.trust_forwarded_builder_https = true`.
@@ -134,7 +144,7 @@ and `X-Forwarded-SSL: on` are not alternate assertions for this cache credential
 gate. Signed requests establish identity, not confidentiality.
 
 The gate covers existing Attic tokens and S3 access/session keys as well as Niks3
-write tokens/private keys and agent private mTLS reads. Public cache config without
+write tokens/private keys and agent private Basic or mTLS reads. Public cache config without
 credentials does not require this gate. The default flag value `false` withholds
 private material. The server listener uses HTTP and does not terminate native TLS.
 An HTTPS client URL alone is insufficient; use the controlled TLS proxy boundary.
@@ -293,12 +303,17 @@ The server encrypts Niks3 tokens and read/write private keys with AES-256-GCM
 using `CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY`, or `CRYSTAL_FORGE_SECRET_KEY` as the
 fallback. New ciphertext uses the `enc:v1:` envelope and a random nonce. Legacy
 plaintext remains readable for compatibility. Destination API responses omit
-tokens and private keys and expose `niks3_write_token_configured`,
-`niks3_write_mtls_configured`, and `niks3_read_mtls_configured` instead.
+tokens, private keys, and Basic usernames/passwords. Responses expose
+`niks3_write_token_configured`, `niks3_write_mtls_configured`,
+`niks3_read_mtls_configured`, and `niks3_read_basic_configured` instead.
 
 Updates merge and validate under a row lock. Omitted fields preserve existing
 values. Changing auth mode clears the previous credential set before applying
 replacement fields. Changing read mode to `none` clears read mTLS material.
+Read-mode changes clear inactive Basic/mTLS credentials. Basic updates require
+a complete explicit pair; omitted pairs retain credentials only at the same
+HTTPS host and effective port. An authority change requires a replacement pair
+or a non-Basic mode, rather than forwarding retained credentials.
 Explicit `clear_niks3_auth_token`, `clear_niks3_write_client_key`,
 `clear_niks3_read_client_key`, `clear_niks3_write_ca_cert`, and
 `clear_niks3_read_ca_cert` flags support clearing. Replacing and clearing the same
@@ -401,9 +416,12 @@ switch or vulnerability analysis.
 
 ## Discovery and connection testing
 
-Admin `POST /api/caches/niks3/discover` (also under `/api/v1`) accepts
-`{"server_url":"https://writes.example.org"}` and reads Niks3
-`GET /api/cache-config`. Discovery is read-only and sends no write token.
+Admin `POST /api/caches/niks3/discover` (also under `/api/v1`) accepts a URL-only
+request or an unsaved write-mTLS certificate/key/optional-CA draft and reads
+`GET /api/cache-config`. Token/public discovery sends no Bearer token. Edit uses
+`POST /api/v1/caches/:id/niks3/discover` with the unwrapped Update shape; the
+server decrypts and merges one unlocked snapshot without writes. Both forms
+return public discovery metadata only, never read credentials, keys, or PEM.
 Connection testing validates discovery and the configured read endpoint's
 `nix-cache-info`, using separate write/read mTLS identities where selected.
 The discovered read URL must match the configured URL before read credentials
@@ -414,6 +432,59 @@ Structured results contain `server_reachable`, `discovery_valid`,
 **`write_auth_valid` is always null (untested).** An `ok` result proves the tested
 discovery/read stages, not write authorization or signed closure publication.
 Confirm writes with a real job.
+
+Test accepts `probe_scope: "write" | "read" | "all"`, default `all`.
+Write scope observes metadata/API transport only. Read scope checks the configured
+read endpoint with its selected Public, Basic, or mTLS identity; all scope also
+checks discovery consistency. Optional stage fields distinguish untested work.
+Neither TLS acceptance nor metadata success proves write authorization on pinned
+Niks3 1.6.0. Errors never echo provider bodies, credentials, or PEM.
+
+### Basic read transport and CA trust
+
+Basic reads use the opt-in `cf-netrc-authority` extension in packaged evaluator
+Nix 2.34.8. Before transport, the native guard binds netrc credentials to the exact
+HTTPS origin (host and effective port) and disables all redirects. Unset behavior
+retains normal native transport. A probe of the actual selected runtime must
+establish support before Basic preparation. Credentials live in owned `0700`
+directories and `0600` netrc files; child-local Nix settings select the file and
+authority. Passwords never enter URLs or argv. Artifact copies and fresh-store
+publication verification retain signatures and independent signing-key trust.
+Redirect-based read proxies cannot be used with this Basic guard; use the native
+streaming endpoint. This does not alter existing mTLS preparation or combine
+token and mTLS write modes.
+
+Write CA bundles establish server trust for both the Niks3 API and presigned
+HTTPS storage targets, not trust in the issuer of the client certificate. A
+two-root deployment must include API root A and storage root B even when client
+identity comes from root C. Niks3's Go custom root pool replaces system roots;
+include public roots when required. The server discovery client instead adds
+custom roots to system trust. Certificate-only PEM validation remains strict.
+Garage credentials remain server-side; read access never establishes signature
+validity or write permission.
+
+### Response-only storage observations
+
+`GET /api/v1/caches/:id/metrics` returns a scoped, volatile observation with
+`Cache-Control: no-store`. Only Admin can decrypt an enabled Niks3 snapshot and
+probe its write API using selected write TLS; no Bearer or read Basic identity is
+sent. Disabled destinations and unsupported Attic/S3/Http/Nix totals do no provider
+network work or bucket enumeration. Niks3 1.8's public `GET /api/cache-stats`
+reports `objects` and `logical_bytes` from its singleton database aggregate;
+packaged 1.6 lacks this endpoint. Absence does not identify a remote version.
+
+Logical bytes sum known client-reported uncompressed sizes and omit unknown
+legacy sizes. They are not physical usage, capacity, or Nix-path totals. Counts
+are live tracked objects, including metadata, not paths or untracked bucket
+objects. `path_count` is null. Missing/error values remain null and display
+**Unavailable**, never fabricated zero. Tooltips explain the basis; `measured_at`
+is local observation time, not an upstream timestamp. DNS, TLS and body reading
+share an eight-second total deadline and a 64 KiB body bound, with pinned DNS,
+no proxies, and no redirects. No observation changes database usage or credentials.
+The UI loads at most three requests concurrently once per list load or explicit
+refresh; cards, table and details share one snapshot without timer polling or
+duplicate global totals. The native 1.8 stats fixture uses a separate database
+and bucket; production packaging remains 1.6.
 
 Probes enforce the existing SSRF policy, pin validated DNS addresses, disable
 ambient proxies and redirects, and retain TLS hostname verification. Private

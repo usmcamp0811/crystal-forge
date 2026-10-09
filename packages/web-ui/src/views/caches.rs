@@ -6,6 +6,8 @@
 //! establish write permission, so absent authorization results remain untested.
 //! Cache forms save configuration and environment scope in one API transaction. A
 //! failed save retains the draft and does not publish a transient global cache.
+//! Inventory observations load once per page-list refresh with bounded requests.
+//! All surfaces share logical-byte/object bases; provider objects are not paths.
 
 use dioxus::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -23,6 +25,9 @@ use crate::components::dialog_focus::{
 use crate::components::icon::{Icon, IconName};
 use crate::routes::Route;
 use crate::theme;
+
+mod metrics;
+mod niks3;
 
 // Override the production overlay's 32px padding so the nested popup fits
 // narrow viewports. Keep excess content scrollable without moving focus out.
@@ -141,6 +146,13 @@ struct Niks3FormState {
     read_ca: String,
     clear_write_ca: bool,
     clear_read_ca: bool,
+    basic_user: String,
+    basic_password: String,
+    enabled: bool,
+    parallel_uploads: i32,
+    max_retries: i32,
+    push_timeout_seconds: i64,
+    require_sigs: bool,
 }
 
 impl Niks3FormState {
@@ -171,6 +183,15 @@ impl Niks3FormState {
             read_ca: String::new(),
             clear_write_ca: false,
             clear_read_ca: false,
+            basic_user: String::new(),
+            basic_password: String::new(),
+            enabled: destination.is_none_or(|d| d.enabled),
+            parallel_uploads: destination.and_then(|d| d.parallel_uploads).unwrap_or(1),
+            max_retries: destination.and_then(|d| d.max_retries).unwrap_or(3),
+            push_timeout_seconds: destination
+                .and_then(|d| d.push_timeout_seconds)
+                .unwrap_or(3600),
+            require_sigs: destination.and_then(|d| d.require_sigs).unwrap_or(true),
         }
     }
 
@@ -223,8 +244,21 @@ impl Niks3FormState {
             } else {
                 None
             },
-            enabled: Some(true),
-            require_sigs: Some(true),
+            niks3_read_basic_username: if self.read_mode == "basic" {
+                (!self.basic_user.is_empty()).then(|| self.basic_user.clone())
+            } else {
+                None
+            },
+            niks3_read_basic_password: if self.read_mode == "basic" {
+                (!self.basic_password.is_empty()).then(|| self.basic_password.clone())
+            } else {
+                None
+            },
+            enabled: Some(self.enabled),
+            parallel_uploads: Some(self.parallel_uploads),
+            max_retries: Some(self.max_retries),
+            push_timeout_seconds: Some(self.push_timeout_seconds),
+            require_sigs: Some(self.require_sigs),
             ..Default::default()
         }
     }
@@ -252,6 +286,13 @@ impl Niks3FormState {
             clear_niks3_read_client_key: self.read_mode == "none",
             clear_niks3_write_ca_cert: self.clear_write_ca,
             clear_niks3_read_ca_cert: self.clear_read_ca,
+            niks3_read_basic_username: req.niks3_read_basic_username,
+            niks3_read_basic_password: req.niks3_read_basic_password,
+            enabled: req.enabled,
+            parallel_uploads: req.parallel_uploads,
+            max_retries: req.max_retries,
+            push_timeout_seconds: req.push_timeout_seconds,
+            require_sigs: req.require_sigs,
             ..Default::default()
         }
     }
@@ -288,7 +329,7 @@ impl Niks3FormState {
             || req
                 .niks3_public_keys
                 .iter()
-                .any(|k| !is_attic_public_key(k))
+                .any(|k| !niks3::valid_signing_key(k))
         {
             return Err(
                 "Enter at least one signing public key, one name:BASE64KEY per line.".into(),
@@ -353,8 +394,16 @@ impl Niks3FormState {
                 }
             }
         }
-        if !matches!(self.read_mode.as_str(), "none" | "mtls") {
-            return Err("Select public or mTLS read authentication.".into());
+        if self.read_mode == "basic" {
+            let entered = !self.basic_user.is_empty() || !self.basic_password.is_empty();
+            let configured = retained.is_some_and(|d| {
+                d.niks3_read_auth_mode.as_deref() == Some("basic") && d.niks3_read_basic_configured
+            });
+            if entered || !configured {
+                niks3::validate_basic(&self.basic_user, &self.basic_password)?;
+            }
+        } else if !matches!(self.read_mode.as_str(), "none" | "mtls") {
+            return Err("Select public, Basic or mTLS read authentication.".into());
         }
         for (plane, ca) in [("Write", &self.write_ca), ("Read", &self.read_ca)] {
             if !ca.trim().is_empty() && !ca.contains("-----BEGIN CERTIFICATE-----") {
@@ -501,7 +550,7 @@ impl CacheTypeDrafts {
             } else {
                 Some(common.read_url.trim().into())
             },
-            enabled: Some(true),
+            enabled: Some(common.enabled),
             s3_region: if kind == "s3" { value("region") } else { None },
             s3_profile: if kind == "s3" { value("profile") } else { None },
             s3_endpoint_url: if kind == "s3" {
@@ -723,9 +772,13 @@ fn validate_niks3_test_replacement(form: &Niks3FormState, existing: bool) -> Res
         return form.validate_credentials(None);
     }
     if !matches!(form.write_mode.as_str(), "token" | "mtls")
-        || !matches!(form.read_mode.as_str(), "none" | "mtls")
+        || !matches!(form.read_mode.as_str(), "none" | "basic" | "mtls")
     {
         return Err("Select supported read and write authentication modes.".into());
+    }
+    if form.read_mode == "basic" && (!form.basic_user.is_empty() || !form.basic_password.is_empty())
+    {
+        niks3::validate_basic(&form.basic_user, &form.basic_password)?;
     }
     for (plane, mode, cert, key, ca) in [
         (
@@ -866,9 +919,11 @@ fn CacheDraftField(
     } }
 }
 
-/// Renders one keyboard-contained Add and Edit shell for every cache type.
-/// Type changes retain drafts without unmounting the dialog. Scope and cache
-/// configuration commit together; stored secrets are never loaded into inputs.
+/// Routes Niks3 to its dedicated editor and renders the generic cache editor.
+/// Generic type changes retain their drafts in one keyboard-contained shell.
+/// Crossing the Niks3 boundary resets Niks3-specific drafts and preserves common
+/// name, enabled state and scope. Configuration and scope commit together;
+/// stored secrets are never loaded into inputs.
 /// Legacy Edit conversions remain explicit; Niks3 Edit keeps its type fixed.
 /// Existing snapshots come from [`CacheDestinationEditor`], never list rows.
 /// Stored-ID Test delegates retention to the server. Save retains its separate
@@ -1033,6 +1088,24 @@ fn CacheDestinationForm(
             .is_some_and(|d| d.legacy_query_credentials_configured);
     let stored_access_unknown =
         editing_id.is_some() && !current_configured && !migration_required && !url_changed;
+    if kind() == "niks3" {
+        return rsx! {
+            niks3::Niks3DestinationForm {
+                form, destination: destination.clone(), destination_ready, restore_focus,
+                environment_ids, environment_ready, environments, busy, error,
+                on_close, on_saved,
+                on_type: move |value: String| {
+                    if destination.is_some() || busy().is_some() { return; }
+                    let current = form();
+                    let mut reset = Niks3FormState::from_destination(None);
+                    reset.name = current.name; reset.enabled = current.enabled;
+                    if value != "s3" { reset.read_url = drafts().get(&value, "read"); }
+                    form.set(reset); kind.set(match value.as_str() { "attic" => "attic", "nix" => "nix", _ => "s3" });
+                    section.set("dest"); result.set(None); error.set(None); discovery_note.set(None);
+                },
+            }
+        };
+    }
     rsx! {
         div { class: "modal-backdrop", style: "padding:8px;", onclick: move |_| { if busy().is_none() { on_close.call(()); } },
             style { "{CACHE_FORM_CSS}" }
@@ -1092,9 +1165,15 @@ fn CacheDestinationForm(
                                             type_changed.set(original_type.as_ref().is_some_and(|wire| wire != &api_cache_type(value)));
                                             // Discovery may change the active read URL. Snapshot
                                             // it before switching so other type URLs stay intact.
-                                            if kind() != value {
-                                                if kind() != "s3" { drafts.write().0.insert(format!("{}.read", kind()), form().read_url); }
-                                                if value != "s3" {
+                                             if kind() != value {
+                                                 if kind() != "s3" { drafts.write().0.insert(format!("{}.read", kind()), form().read_url); }
+                                                 if value == "niks3" {
+                                                     let current = form();
+                                                     let mut reset = Niks3FormState::from_destination(None);
+                                                     reset.name = current.name; reset.enabled = current.enabled;
+                                                     reset.write_mode = "mtls".into(); reset.read_mode = "basic".into();
+                                                     form.set(reset);
+                                                 } else if value != "s3" {
                                                     let saved = drafts().0.get(&format!("{value}.read")).cloned();
                                                     if let Some(url) = saved { form.write().read_url = url; }
                                                 }
@@ -1135,7 +1214,7 @@ fn CacheDestinationForm(
                             busy.set(Some("discover")); error.set(None); discovery_note.set(None); result.set(None);
                             let url = form().server_url;
                             spawn(async move {
-                                match client::discover_niks3(&url).await {
+                                 match client::discover_niks3(&crate::api::models::Niks3DiscoverRequest { server_url: url, ..Default::default() }).await {
                                     Ok(values) => {
                                         let mut state = form.write(); state.server_url = values.server_url; state.read_url = values.substituter_url; state.keys = values.public_keys.join("\n");
                                         discovery_note.set(Some(if values.oidc_audience.is_some() { "Configuration populated. Review URLs and all keys before saving. OIDC advertised; external providers are not offered." } else { "Configuration populated. Review URLs and all keys before saving." }.into()));
@@ -1773,12 +1852,38 @@ pub fn CachesView() -> Element {
     let from_setup = use_signal(came_from_setup);
     let mut show_add_modal = use_signal(|| false);
 
-    // Load destinations for stats display
+    // One list load owns one finite observation pass. Share its map between
+    // surfaces; switching cards/table or opening details performs no new probes.
     let mut refresh_nonce = use_signal(|| 0_u32);
+    let mut metric_inputs = use_signal(|| None::<(u32, Vec<i32>)>);
     let destinations = use_resource(move || {
-        let _nonce = refresh_nonce();
-        async move { client::fetch_cache_destinations(false).await }
+        let generation = refresh_nonce();
+        async move {
+            let result = client::fetch_cache_destinations(false).await;
+            let ids = result
+                .as_ref()
+                .map(|values| values.iter().map(|value| value.id).collect())
+                .unwrap_or_default();
+            metric_inputs.set(Some((generation, ids)));
+            result
+        }
     });
+    let cache_metrics = use_resource(move || {
+        let input = metric_inputs();
+        async move {
+            match input {
+                Some((generation, ids)) => Some(metrics::load(generation, ids).await),
+                None => None,
+            }
+        }
+    });
+    let metrics_loading = metric_inputs()
+        .is_none_or(|(generation, _)| generation != refresh_nonce())
+        || cache_metrics
+            .read()
+            .as_ref()
+            .and_then(Option::as_ref)
+            .is_none_or(|value| value.generation != refresh_nonce());
 
     rsx! {
         div {
@@ -1792,10 +1897,8 @@ pub fn CachesView() -> Element {
                     h1 { class: "page-title", "Caches" }
                     p {
                         class: "page-subtitle",
-                        // Show totals: X destinations · Y enabled. "Paths cached" is not
-                        // shown here because no backend metric exists yet for it —
-                        // see the stat strip below, which renders "—" for that card
-                        // rather than a fabricated number.
+                        // Provider objects are not a unique Nix path total.
+                        // Keep page-level path inventory unknown.
                         match destinations.read().as_ref() {
                             Some(Ok(dests)) => {
                                 let total = dests.len();
@@ -1805,6 +1908,10 @@ pub fn CachesView() -> Element {
                             _ => rsx! { "Loading…" }
                         }
                     }
+                }
+                button { class: "btn btn-ghost focus-ring", disabled: metrics_loading,
+                    onclick: move |_| refresh_nonce += 1,
+                    if metrics_loading { "Loading metrics…" } else { "Refresh metrics" }
                 }
                 // + Add cache button (mockup lines 30-32)
                 button {
@@ -1858,7 +1965,7 @@ pub fn CachesView() -> Element {
                                 class: "stat",
                                 span { class: "stat-accent", style: "--stat-color: #60a5fa;" }
                                 div { class: "stat-label", "Paths cached" }
-                                div { class: "stat-value", "—" }
+                                div { class: "stat-value", title: "Unique Nix path inventory is unavailable. Provider object counts cannot be summed into this total.", "—" }
                             }
                         }
                     },
@@ -1876,6 +1983,7 @@ pub fn CachesView() -> Element {
             CacheDestinationsList {
                 show_onboarding_hint: from_setup(),
                 refresh_nonce: refresh_nonce,
+                destinations, cache_metrics,
                 show_add_modal: show_add_modal,
             }
         }
@@ -1887,13 +1995,10 @@ pub fn CachesView() -> Element {
 fn CacheDestinationsList(
     show_onboarding_hint: bool,
     refresh_nonce: Signal<u32>,
+    destinations: Resource<Result<Vec<CacheDestination>, ApiClientError>>,
+    cache_metrics: Resource<Option<metrics::Snapshot>>,
     mut show_add_modal: Signal<bool>,
 ) -> Element {
-    let destinations = use_resource(move || {
-        let _nonce = refresh_nonce();
-        async move { client::fetch_cache_destinations(false).await }
-    });
-
     let mut search_query = use_signal(String::new);
     let mut view_mode = use_signal(|| CacheViewMode::Cards);
     let mut edit_destination = use_signal(|| None::<CacheDestination>);
@@ -2028,7 +2133,9 @@ fn CacheDestinationsList(
                                     class: "cards-grid",
                                     for dest in filtered {
                                         CacheDestinationCardNew {
+                                            key: "cache-card-{dest.id}",
                                             destination: dest.clone(),
+                                            metric_display: metrics::display(dest, cache_metrics.read().as_ref().and_then(Option::as_ref), refresh_nonce()),
                                             environments: environments,
                                             on_view: move |d: CacheDestination| view_destination.set(Some(d)),
                                             on_edit: move |d: CacheDestination| edit_destination.set(Some(d)),
@@ -2047,7 +2154,7 @@ fn CacheDestinationsList(
                                                 th { "Type" }
                                                 th { "Status" }
                                                 th { "Storage" }
-                                                th { "Paths" }
+                                                th { title: "Provider object counts are labelled as objects; a Nix path count is not inferred.", "Paths / Objects" }
                                                 th { "Last push" }
                                                 th { "Environments" }
                                                 th { style: "text-align:right;", " " }
@@ -2056,7 +2163,9 @@ fn CacheDestinationsList(
                                         tbody {
                                             for dest in filtered {
                                                 CacheDestinationRow {
+                                                    key: "cache-row-{dest.id}",
                                                     destination: dest.clone(),
+                                                    metric_display: metrics::display(dest, cache_metrics.read().as_ref().and_then(Option::as_ref), refresh_nonce()),
                                                     environments: environments,
                                                     on_view: move |d: CacheDestination| view_destination.set(Some(d)),
                                                     on_edit: move |d: CacheDestination| edit_destination.set(Some(d)),
@@ -2085,6 +2194,7 @@ fn CacheDestinationsList(
 
             if let Some(destination) = view_destination() {
                 CacheDestinationPanel {
+                    metric_display: metrics::display(&destination, cache_metrics.read().as_ref().and_then(Option::as_ref), refresh_nonce()),
                     destination,
                     refresh_nonce,
                     on_close: move |_| view_destination.set(None),
@@ -2404,6 +2514,7 @@ fn CacheCredModal(
 #[component]
 fn CacheDestinationCardNew(
     destination: CacheDestination,
+    metric_display: metrics::Display,
     environments: Resource<Result<Vec<EnvironmentSummary>, ApiClientError>>,
     on_view: EventHandler<CacheDestination>,
     on_edit: EventHandler<CacheDestination>,
@@ -2455,6 +2566,11 @@ fn CacheDestinationCardNew(
                 span { class: "chip chip-unknown mono", "{destination.cache_type}" }
             }
             div { style: "padding:12px 16px 0;",
+                p { style: "font-size:11px;color:var(--cf-text-muted);",
+                    span { title: "{metric_display.storage_help}", "Storage: {metric_display.storage}" }
+                    " · "
+                    span { title: "{metric_display.objects_help}", "Paths / Objects: {metric_display.objects}" }
+                }
                 div { style: "font-size:11px; color:var(--cf-text-secondary); margin-bottom:4px;",
                     if let Some(last_used) = destination.last_used_at {
                         "Last push "
@@ -2467,7 +2583,7 @@ fn CacheDestinationCardNew(
             div { class: "env-card-foot",
                 span { style: "font-size:11px; color:var(--cf-text-muted);", "Updated {destination.updated_at.format(\"%Y-%m-%d\")}" }
                 div { style: "display:flex; gap:4px; flex-wrap:wrap; justify-content:flex-end;",
-                    {render_cache_assignment_state(env_ids, environments, "no environments")}
+                    {render_cache_assignment_state(env_ids, environments, if cache_form_kind(&destination.cache_type) == "niks3" { "Global" } else { "no environments" })}
                 }
             }
         }
@@ -2478,6 +2594,7 @@ fn CacheDestinationCardNew(
 #[component]
 fn CacheDestinationRow(
     destination: CacheDestination,
+    metric_display: metrics::Display,
     environments: Resource<Result<Vec<EnvironmentSummary>, ApiClientError>>,
     on_view: EventHandler<CacheDestination>,
     on_edit: EventHandler<CacheDestination>,
@@ -2575,19 +2692,21 @@ fn CacheDestinationRow(
                 }
             }
 
-            // Storage column — no backend metric yet; show placeholder
+            // Logical-byte evidence never implies physical usage or capacity.
             td {
                 span {
                     style: "font-size:11px; color:var(--cf-text-muted);",
-                    "—"
+                    title: "{metric_display.storage_help}",
+                    "{metric_display.storage}"
                 }
             }
 
-            // Paths column
+            // The value explicitly distinguishes objects from Nix paths.
             td {
                 class: "mono",
                 style: "font-size:12px;",
-                "—"
+                title: "{metric_display.objects_help}",
+                "{metric_display.objects}"
             }
 
             // Last push column
@@ -2727,6 +2846,7 @@ fn cache_type_icon(cache_type: &str) -> IconName {
 #[derive(Props, Clone, PartialEq)]
 struct CacheDestinationPanelProps {
     destination: CacheDestination,
+    metric_display: metrics::Display,
     refresh_nonce: Signal<u32>,
     on_close: EventHandler<()>,
     on_edit: EventHandler<CacheDestination>,
@@ -2812,6 +2932,8 @@ fn CacheDestinationPanel(props: CacheDestinationPanelProps) -> Element {
                         span { class: "chip chip-unknown mono", "{destination.cache_type}" }
                     }
                 }
+                if cache_form_kind(&destination.cache_type) == "niks3" { {niks3::details(&destination)} }
+                {metrics::details(&props.metric_display)}
                 section { class: "panel-section",
                     h3 { "Details" }
                     dl { class: "kv-grid",

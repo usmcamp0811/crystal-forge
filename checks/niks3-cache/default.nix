@@ -1,8 +1,9 @@
 {inputs, lib, pkgs, ...}: let
-  credentials = lib.crystal-forge.makeNiks3TestCredentials {inherit pkgs;};
+  credentials = lib.crystal-forge.makeNiks3TestCredentials {inherit pkgs; productionPki = true;};
+  productionWritePki = credentials.productionWritePki;
   evaluatorNix = pkgs.nix-eval-jobs.nix;
-  variants = ["token-public" "mtls-public" "token-private" "mtls-private" "token-public-proxy"];
-  targets = lib.genAttrs variants (name: builtins.derivation {
+  variants = ["token-public" "mtls-public" "token-private" "mtls-private" "token-public-proxy" "mtls-split"];
+  makeTarget = name: builtins.derivation {
     name = "niks3-${name}";
     system = pkgs.stdenv.hostPlatform.system;
     builder = "${pkgs.busybox}/bin/sh";
@@ -10,13 +11,20 @@
       ${pkgs.busybox}/bin/mkdir -p "$out/bin" "$out/sw"
       ${pkgs.busybox}/bin/printf '#!${pkgs.busybox}/bin/sh\nexit 0\n' > "$out/bin/switch-to-configuration"
       ${pkgs.busybox}/bin/chmod +x "$out/bin/switch-to-configuration"
+      ${lib.optionalString (name == "mtls-split") ''
+        # A real upload workload makes short-lived CLI argument/environment
+        # inspection practical without artificial sleeps or provider delays.
+        ${pkgs.busybox}/bin/dd if=/dev/urandom of="$out/split-pki-workload" bs=1048576 count=16 2>/dev/null
+      ''}
     ''];
-  });
+  };
+  targets = lib.genAttrs variants makeTarget;
+  negativeTargets = lib.genAttrs ["trust-a-only" "trust-b-only"] makeTarget;
   # Public, deterministic Ed25519 fixtures. The shared test-keys directory
   # contains placeholder strings, not an authentication-capable keypair.
   key = pkgs.writeText "niks3-agent.key" "+/GIbrjuyb3Hf2es5w+vWSlDUhEsAIojiyyfgskC7QA=\n";
   pub = "DpOiy7W+DqZEg3KR0fvP5Q8k4FR4K1NB+qyYQLxhnFc=";
-  common = {
+  common = {nodes, ...}: {
     imports = [inputs.self.nixosModules.crystal-forge];
     networking.firewall.enable = false;
     # A 9p host-store mount would expose outputs built as driver dependencies.
@@ -25,6 +33,8 @@
     nix.settings = {experimental-features = ["nix-command" "flakes"]; substituters = lib.mkForce [];};
     security.pki.certificateFiles = ["${credentials}/ca.crt"];
     environment.etc."niks3-fixtures".source = credentials;
+    environment.etc."niks3-production-pki".source = "${credentials}/production";
+    networking.hosts.${nodes.production.networking.primaryIPAddress} = ["push-cache.test" "s3-cache.test" "read-cache.test" "read-foreign.test"];
     environment.etc."agent.key".source = key;
     # Inspect protected responses and generated TOML inside the isolated guests.
     # Trust tests use the production loader without environment overrides.
@@ -47,9 +57,14 @@ in pkgs.testers.runNixOSTest {
       # Cleanup diagnostics run inside each guest without exporting raw /proc.
       environment.systemPackages = [pkgs.python3];
     };
+    production = {
+      imports = [(lib.crystal-forge.makeNiks3CacheNode {inherit pkgs credentials; productionPki = true; basicRead = true;})];
+      networking.hosts."127.0.0.1" = ["push-cache.test" "s3-cache.test" "read-cache.test" "read-foreign.test"];
+    };
     server = {lib, ...}: {
       imports = [common];
-      virtualisation.additionalPaths = [pkgs.busybox] ++ map (target: target.drvPath) (builtins.attrValues targets);
+      security.pki.certificateFiles = [productionWritePki.serverB];
+      virtualisation.additionalPaths = [pkgs.busybox] ++ map (target: target.drvPath) (builtins.attrValues (targets // negativeTargets));
       services.crystal-forge = {
         local-database = true;
         database = {host = "127.0.0.1"; user = "crystal_forge"; name = "crystal_forge";};
@@ -102,6 +117,7 @@ in pkgs.testers.runNixOSTest {
     };
     builder = {lib, ...}: {
       imports = [common];
+      security.pki.certificateFiles = [productionWritePki.serverB];
       # The service has its own runtime PATH. Negative CLI assertions run in
       # the driver shell and must use the same packaged CLI, not exit 127.
       environment.systemPackages = [pkgs.crystal-forge.default.niks3];
@@ -122,6 +138,8 @@ in pkgs.testers.runNixOSTest {
     };
     agent = {lib, ...}: {
       imports = [common];
+      # Basic reads use system trust under B, independently of write mTLS.
+      security.pki.certificateFiles = [productionWritePki.serverB];
       services.crystal-forge.client = {
         enable = lib.mkForce true;
         server_host = "server";
@@ -156,14 +174,18 @@ in pkgs.testers.runNixOSTest {
     cache.wait_for_unit("niks3.service")
     cache.wait_for_unit("nginx.service")
     cache.wait_for_open_port(5751)
+    production.wait_for_unit("niks3-production.service")
+    production.wait_for_unit("niks3-production-bridge.service")
+    production.wait_for_open_port(5754)
     server.wait_for_unit("crystal-forge-server.service")
     server.wait_for_open_port(8000)
     server.wait_for_unit("nginx.service")
     run_matrix(
-      {"server": server, "builder": builder, "agent": agent, "cache": cache},
+      {"server": server, "builder": builder, "agent": agent, "cache": cache, "production": production},
       ${builtins.toJSON (lib.mapAttrs (_: target: {drv = target.drvPath; out = builtins.unsafeDiscardStringContext target.outPath;}) targets)},
       "${pub}",
       "${credentials}",
+      ${builtins.toJSON (lib.mapAttrs (_: target: {drv = target.drvPath; out = builtins.unsafeDiscardStringContext target.outPath;}) negativeTargets)},
     )
   '';
 } // {
@@ -215,6 +237,36 @@ in pkgs.testers.runNixOSTest {
       for index in (2, 3):
         payload = base64.b64encode(bytes.fromhex("302e020100300506032b657004220420") + bytes([index + 1]) * 32).decode()
         assert payload not in logs, "Client private key leaked in fixture service logs"
+    '';
+  };
+  production-fixture = pkgs.testers.runNixOSTest {
+    name = "niks3-production-pki-fixture";
+    skipLint = true;
+    skipTypeCheck = true;
+    nodes = {
+      production = {
+        imports = [(lib.crystal-forge.makeNiks3CacheNode {inherit pkgs credentials; productionPki = true;})];
+        networking.hosts."127.0.0.1" = ["push-cache.test" "s3-cache.test" "read-cache.test"];
+      };
+      probe = {nodes, ...}: {
+        networking.firewall.enable = false;
+        networking.hosts.${nodes.production.networking.primaryIPAddress} = ["push-cache.test" "s3-cache.test" "read-cache.test"];
+        virtualisation = {writableStore = true; additionalPaths = [pkgs.busybox targets.mtls-split.drvPath]; memorySize = 4096; cores = 2;};
+        security.pki.certificateFiles = ["${credentials}/ca.crt" productionWritePki.serverB];
+        environment.systemPackages = [evaluatorNix pkgs.crystal-forge.default.niks3 pkgs.curl pkgs.python3];
+        environment.etc."niks3-production-pki".source = "${credentials}/production";
+        nix.settings.experimental-features = ["nix-command" "flakes"];
+      };
+    };
+    extraPythonPackages = p: [p.pytest p.psycopg2 p.pynacl p.cryptography pkgs.crystal-forge.cf-test-suite];
+    testScript = ''
+      from cf_test.tests.cache.test_niks3_cache import run_production_transport_fixture
+      start_all()
+      production.wait_for_unit("niks3-production.service")
+      production.wait_for_unit("niks3-production-bridge.service")
+      production.wait_for_open_port(5754)
+      run_production_transport_fixture(production, probe,
+        ${builtins.toJSON {drv = targets.mtls-split.drvPath; out = builtins.unsafeDiscardStringContext targets.mtls-split.outPath;}}, "${credentials}")
     '';
   };
 }

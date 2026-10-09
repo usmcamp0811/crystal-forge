@@ -14,6 +14,72 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use url::Url;
 
+/// Names the native Nix setting that binds netrc reads to one HTTPS origin.
+///
+/// The patched native implementation matches scheme, normalized host and port
+/// exactly and disables all redirects while this setting is active. Unpatched
+/// Nix may ignore unknown settings, so consumers must probe support first.
+pub const CF_NETRC_AUTHORITY_SETTING: &str = "cf-netrc-authority";
+
+/// Records nonsecret feature evidence from the selected runtime Nix executable.
+///
+/// Consumers must obtain this evidence from a successful `nix config show --json`
+/// (or equivalent `show-config --json`) invocation of the same executable used
+/// for the read. Do not infer support from a version, package name, environment
+/// variable, configured option or the agent's signed capability alone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NixReadFeatures {
+    supports_netrc_authority: bool,
+}
+
+impl NixReadFeatures {
+    /// Parses runtime settings output without creating files or spawning a child.
+    ///
+    /// A registered string-valued `cf-netrc-authority` setting establishes support.
+    /// Its current value is not used as the authorized read origin.
+    ///
+    /// # Errors
+    /// Returns a static error for malformed JSON, a non-object settings document,
+    /// or a malformed guard setting. Errors never include probe output.
+    ///
+    /// # Examples
+    /// ```
+    /// use cf_config::cache_credentials::NixReadFeatures;
+    /// let features = NixReadFeatures::from_settings_json(
+    ///     br#"{"cf-netrc-authority":{"value":""}}"#,
+    /// )?;
+    /// assert!(features.supports_netrc_authority());
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
+    pub fn from_settings_json(output: &[u8]) -> Result<Self> {
+        let settings: serde_json::Value = serde_json::from_slice(output)
+            .map_err(|_| anyhow!("invalid Nix runtime settings output"))?;
+        let settings = settings
+            .as_object()
+            .ok_or_else(|| anyhow!("invalid Nix runtime settings output"))?;
+        let supports_netrc_authority = match settings.get(CF_NETRC_AUTHORITY_SETTING) {
+            None => false,
+            Some(setting) => {
+                ensure!(
+                    setting
+                        .get("value")
+                        .is_some_and(serde_json::Value::is_string),
+                    "invalid Nix native netrc guard setting"
+                );
+                true
+            }
+        };
+        Ok(Self {
+            supports_netrc_authority,
+        })
+    }
+
+    /// Returns whether the probed runtime exposes the native netrc origin guard.
+    pub fn supports_netrc_authority(&self) -> bool {
+        self.supports_netrc_authority
+    }
+}
+
 /// Owns a Niks3 push command and the credential files consumed by that command.
 ///
 /// Arguments contain file paths, never token or private-key contents. Keep the
@@ -110,19 +176,31 @@ impl PreparedNiks3Push {
     }
 }
 
-/// Owns read-plane Nix settings and optional protected TLS credential files.
+/// Owns read-plane Nix settings and optional protected credential files.
 ///
-/// The URL references files using encoded Nix store parameters. It contains no
-/// private-key contents. Consumers must keep this owner alive until Nix exits
+/// mTLS URLs reference files through encoded Nix store parameters. Basic URLs
+/// contain no authentication; explicit Nix options select the protected netrc
+/// and native origin guard. Consumers must keep this owner alive until Nix exits
 /// and preserve signature verification when applying the public keys.
 pub struct PreparedCacheRead {
-    /// Substituter URL with generated mTLS file parameters when required.
+    /// Credential-free substituter URL with managed mTLS file parameters if used.
     pub url: String,
     /// Space-separated keys for Nix's `trusted-public-keys` option.
     pub trusted_public_keys: String,
     /// Optional trust bundle to apply through child-local `NIX_SSL_CERT_FILE`.
     /// Consumers must not replace the parent process's environment globally.
     pub ca_certificate_path: Option<PathBuf>,
+    /// Explicit child-local Nix options, containing only public values and paths.
+    ///
+    /// Includes mandatory signatures and extra signing keys, preserving the
+    /// parent's trust list. Basic additionally sets netrc-file and the exact
+    /// authorized HTTPS origin; consumers must apply every entry as argv.
+    pub nix_settings: Vec<(String, String)>,
+    /// Requires native origin/redirect protection for this prepared Basic read.
+    ///
+    /// Preparation already checked runtime feature evidence. Consumers must use
+    /// that same executable and apply all settings for every read child.
+    pub basic_guard_required: bool,
     _credentials: Option<TempDir>,
 }
 
@@ -133,7 +211,7 @@ impl std::fmt::Debug for PreparedCacheRead {
 }
 
 impl PreparedCacheRead {
-    /// Prepares public HTTP(S) reads or authenticated HTTPS reads.
+    /// Prepares public HTTP(S) reads or mTLS HTTPS reads.
     ///
     /// Existing non-credential query parameters are preserved. Keys are joined
     /// in input order; empty or whitespace-containing key entries are rejected
@@ -142,7 +220,8 @@ impl PreparedCacheRead {
     /// # Errors
     /// Returns a credential-free error for invalid URLs, insecure authenticated
     /// transport, invalid key entries, empty credentials, or temporary-file I/O.
-    /// PEM and signing-key cryptographic validity are checked by Nix.
+    /// Basic fails closed before creating files; use [`Self::new_with_nix_features`]
+    /// after probing the runtime. PEM and signing-key validity are checked by Nix.
     ///
     /// # Examples
     /// ```
@@ -156,6 +235,55 @@ impl PreparedCacheRead {
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn new(url: &str, keys: &[String], auth: &CacheReadAuth) -> Result<Self> {
+        Self::new_with_nix_features(url, keys, auth, &NixReadFeatures::default())
+    }
+
+    /// Prepares a read after checking nonsecret evidence from the runtime Nix.
+    ///
+    /// Basic requires native exact-origin/redirect protection and nonempty signing
+    /// keys. Its URL remains credential-free. The netrc contains one quoted host
+    /// record, never a default record. Keep this owner alive through child reap,
+    /// including cancellation; apply [`Self::apply_to_nix_command`] to each child.
+    /// The caller supplies the authorized URL/credential snapshot and owns DNS,
+    /// SSRF policy, runtime probe execution and executable identity.
+    ///
+    /// # Errors
+    /// Returns static errors for unavailable native protection, invalid URL or
+    /// keys, empty credentials, control characters, a colon in the login name,
+    /// or protected temporary-file I/O failure. No credentials are written when
+    /// runtime protection is absent or Basic input validation fails.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// use cf_config::cache_credentials::{NixReadFeatures, PreparedCacheRead};
+    /// use cf_protocol::cache::CacheReadAuth;
+    /// let probe = std::process::Command::new("nix")
+    ///     .args(["config", "show", "--json"]).output()?;
+    /// anyhow::ensure!(probe.status.success(), "Nix feature probe failed");
+    /// let features = NixReadFeatures::from_settings_json(&probe.stdout)?;
+    /// let read = PreparedCacheRead::new_with_nix_features(
+    ///     "https://cache.example.org", &["cache:public-key".into()],
+    ///     &CacheReadAuth::Basic { username: "login".into(), password: "secret".into() },
+    ///     &features,
+    /// )?;
+    /// let mut command = std::process::Command::new("nix");
+    /// command.args(["copy", "--from", &read.url, "/nix/store/abc-output"]);
+    /// read.apply_to_nix_command(&mut command);
+    /// let status = command.status()?;
+    /// drop(read); // All consuming children have exited.
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
+    pub fn new_with_nix_features(
+        url: &str,
+        keys: &[String],
+        auth: &CacheReadAuth,
+        features: &NixReadFeatures,
+    ) -> Result<Self> {
+        let basic_guard_required = matches!(auth, CacheReadAuth::Basic { .. });
+        ensure!(
+            !basic_guard_required || features.supports_netrc_authority(),
+            "Basic cache reads require verified native cf-netrc-authority support"
+        );
         let mut url = validated_url(url, !matches!(auth, CacheReadAuth::None))?;
         ensure!(
             keys.iter()
@@ -163,9 +291,39 @@ impl PreparedCacheRead {
                     && !key.chars().any(|c| c.is_whitespace() || c.is_control())),
             "invalid cache public key entry"
         );
+        ensure!(
+            !basic_guard_required || !keys.is_empty(),
+            "Basic cache reads require signing keys"
+        );
+        let mut nix_settings = vec![("require-sigs".into(), "true".into())];
+        if !keys.is_empty() {
+            nix_settings.push(("extra-trusted-public-keys".into(), keys.join(" ")));
+        }
         let mut ca_certificate_path = None;
         let credentials = match auth {
             CacheReadAuth::None => None,
+            CacheReadAuth::Basic { username, password } => {
+                validate_basic_credentials(username, password)?;
+                let host = match url.host() {
+                    Some(url::Host::Ipv6(host)) => host.to_string(),
+                    Some(host) => host.to_string(),
+                    None => return Err(anyhow!("cache URL requires a host")),
+                };
+                let contents = format!(
+                    "machine {} login {} password {}\n",
+                    quote_netrc(&host),
+                    quote_netrc(username),
+                    quote_netrc(password)
+                );
+                let directory = protected_directory()?;
+                let netrc = protected_file(&directory, "netrc", &contents)?;
+                nix_settings.push(("netrc-file".into(), path_string(&netrc)?));
+                nix_settings.push((
+                    CF_NETRC_AUTHORITY_SETTING.into(),
+                    url.origin().ascii_serialization(),
+                ));
+                Some(directory)
+            }
             CacheReadAuth::Mtls {
                 client_certificate,
                 client_private_key,
@@ -187,9 +345,54 @@ impl PreparedCacheRead {
             url: url.into(),
             trusted_public_keys: keys.join(" "),
             ca_certificate_path,
+            nix_settings,
+            basic_guard_required,
             _credentials: credentials,
         })
     }
+
+    /// Applies all read settings and child-local TLS trust to a native command.
+    ///
+    /// Uses argv directly, never shell text or credential contents. Extra keys
+    /// preserve parent trust and signatures are mandatory. Apply after any other
+    /// Nix options so a consumer does not override protection accidentally. For
+    /// Tokio commands, pass `command.as_std_mut()`. Keep this owner until every
+    /// consuming child is terminated and reaped; this method does not transfer
+    /// credential ownership or choose the substituter/store operation.
+    pub fn apply_to_nix_command(&self, command: &mut std::process::Command) {
+        for (name, value) in &self.nix_settings {
+            command.args(["--option", name, value]);
+        }
+        if let Some(ca) = &self.ca_certificate_path {
+            command.env("NIX_SSL_CERT_FILE", ca);
+        }
+    }
+}
+
+fn validate_basic_credentials(username: &str, password: &str) -> Result<()> {
+    ensure!(
+        !username.trim().is_empty() && !password.trim().is_empty(),
+        "Basic cache credentials must not be empty"
+    );
+    ensure!(
+        !username
+            .chars()
+            .chain(password.chars())
+            .any(char::is_control),
+        "Basic cache credentials must not contain control characters"
+    );
+    // SECURITY: HTTP Basic uses the first colon to separate login and password.
+    ensure!(
+        !username.contains(':'),
+        "Basic cache login must not contain a colon"
+    );
+    Ok(())
+}
+
+fn quote_netrc(value: &str) -> String {
+    // COMPATIBILITY: libcurl 8.21 netrc quoted tokens escape backslash and quote.
+    // Always quote tokens so spaces and netrc keywords cannot inject fields.
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 fn validated_url(value: &str, require_https: bool) -> Result<Url> {
@@ -226,6 +429,8 @@ fn validated_url(value: &str, require_https: bool) -> Result<Url> {
                     "ssl-verify"
                         | "ssl-cert-file"
                         | "ca-certificate"
+                        | "netrc-file"
+                        | CF_NETRC_AUTHORITY_SETTING
                         | "token"
                         | "auth-token"
                         | "password"
@@ -286,6 +491,225 @@ mod tests {
     const CA: &str = "unique-ca-certificate";
     const TOKEN: &str = "unique-secret-token";
     const STORE: &str = "/nix/store/abc-output";
+
+    fn guard_features() -> NixReadFeatures {
+        NixReadFeatures::from_settings_json(br#"{"cf-netrc-authority":{"value":""}}"#).unwrap()
+    }
+
+    fn basic(username: &str, password: &str) -> CacheReadAuth {
+        CacheReadAuth::Basic {
+            username: username.into(),
+            password: password.into(),
+        }
+    }
+
+    #[test]
+    fn basic_guard_probe_fails_closed_for_old_or_malformed_runtime() {
+        for output in [b"{}".as_slice(), br#"{"netrc-file":{"value":"/ambient"}}"#] {
+            let features = NixReadFeatures::from_settings_json(output).unwrap();
+            assert!(!features.supports_netrc_authority());
+            assert!(
+                PreparedCacheRead::new_with_nix_features(
+                    "https://cache.example",
+                    &["cache:key".into()],
+                    &basic("login", "password"),
+                    &features
+                )
+                .is_err()
+            );
+        }
+        for malformed in [
+            b"not-json".as_slice(),
+            b"[]",
+            br#"{"cf-netrc-authority":true}"#,
+            br#"{"cf-netrc-authority":{"value":false}}"#,
+        ] {
+            assert!(NixReadFeatures::from_settings_json(malformed).is_err());
+        }
+        assert!(
+            PreparedCacheRead::new(
+                "https://cache.example",
+                &["cache:key".into()],
+                &basic("login", "password")
+            )
+            .is_err()
+        );
+        assert!(guard_features().supports_netrc_authority());
+    }
+
+    #[test]
+    fn basic_netrc_is_quoted_protected_origin_bound_and_owned_until_drop() {
+        let username = "private login \\\" machine attacker";
+        let password = "private password \\\" default login injected:colon";
+        let read = PreparedCacheRead::new_with_nix_features(
+            "https://READ.Example:443/cache?priority=30",
+            &["one:key".into(), "two:key".into()],
+            &basic(username, password),
+            &guard_features(),
+        )
+        .unwrap();
+        assert!(read.basic_guard_required);
+        assert_eq!(read.url, "https://read.example/cache?priority=30");
+        assert_eq!(read.trusted_public_keys, "one:key two:key");
+        assert!(read.ca_certificate_path.is_none());
+        let settings: std::collections::HashMap<_, _> = read.nix_settings.iter().cloned().collect();
+        assert_eq!(settings[CF_NETRC_AUTHORITY_SETTING], "https://read.example");
+        assert_eq!(settings["require-sigs"], "true");
+        assert_eq!(settings["extra-trusted-public-keys"], "one:key two:key");
+        assert!(!settings.contains_key("trusted-public-keys"));
+        let path = PathBuf::from(&settings["netrc-file"]);
+        assert_protected(
+            &path,
+            "machine \"read.example\" login \"private login \\\\\\\" machine attacker\" password \"private password \\\\\\\" default login injected:colon\"\n",
+        );
+        let mut command = std::process::Command::new("nix");
+        read.apply_to_nix_command(&mut command);
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect();
+        for (name, value) in &read.nix_settings {
+            assert!(
+                args.windows(3)
+                    .any(|entry| entry == ["--option", name, value])
+            );
+        }
+        for secret in [username, password] {
+            assert!(!args.iter().any(|arg| arg.contains(secret)));
+            assert!(!read.url.contains(secret));
+            assert!(!format!("{read:?} {command:?}").contains(secret));
+        }
+        let root = path.parent().unwrap().to_owned();
+        drop(command);
+        assert!(path.exists()); // Command lifetime does not release the owner.
+        drop(read);
+        assert!(!path.exists());
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn basic_normalizes_https_origins_without_cross_port_or_host_scope() {
+        for (url, origin, host) in [
+            (
+                "https://READ.Example/cache",
+                "https://read.example",
+                "read.example",
+            ),
+            (
+                "https://read.example:443/other",
+                "https://read.example",
+                "read.example",
+            ),
+            (
+                "https://read.example:8443/cache",
+                "https://read.example:8443",
+                "read.example",
+            ),
+            (
+                "https://OTHER.example/cache",
+                "https://other.example",
+                "other.example",
+            ),
+            ("https://[::1]:8443/cache", "https://[::1]:8443", "::1"),
+        ] {
+            let read = PreparedCacheRead::new_with_nix_features(
+                url,
+                &["cache:key".into()],
+                &basic("login", "password"),
+                &guard_features(),
+            )
+            .unwrap();
+            let settings: std::collections::HashMap<_, _> =
+                read.nix_settings.iter().cloned().collect();
+            assert_eq!(settings[CF_NETRC_AUTHORITY_SETTING], origin);
+            assert_protected(
+                std::path::Path::new(&settings["netrc-file"]),
+                &format!("machine \"{host}\" login \"login\" password \"password\"\n"),
+            );
+        }
+    }
+
+    #[test]
+    fn basic_rejects_injection_empty_credentials_insecure_urls_and_missing_keys() {
+        for (username, password) in [
+            ("", "password"),
+            ("login", ""),
+            ("login", " \t"),
+            ("user:name", "password"),
+            ("login\n", "password"),
+            ("login", "password\n"),
+            ("login\t", "password"),
+            ("login", "password\0"),
+            ("login\r", "password"),
+            ("login", "password\u{7f}"),
+        ] {
+            let error = PreparedCacheRead::new_with_nix_features(
+                "https://cache.example",
+                &["cache:key".into()],
+                &basic(username, password),
+                &guard_features(),
+            )
+            .unwrap_err();
+            assert!(!format!("{error:?}").contains("password"));
+        }
+        for url in [
+            "http://cache.example",
+            "https://login:password@cache.example",
+            "https://cache.example/#fragment",
+            "https://cache.example/?tls-private-key=key",
+            "https://cache.example/?password=password",
+            "https://cache.example/?netrc-file=/ambient",
+            "https://cache.example/?CF-NETRC-AUTHORITY=https://other.example",
+        ] {
+            assert!(
+                PreparedCacheRead::new_with_nix_features(
+                    url,
+                    &["cache:key".into()],
+                    &basic("login", "password"),
+                    &guard_features()
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            PreparedCacheRead::new_with_nix_features(
+                "https://cache.example",
+                &[],
+                &basic("login", "password"),
+                &guard_features()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn read_command_applies_child_local_ca_without_replacing_parent_keys() {
+        let read = PreparedCacheRead::new(
+            "https://cache.example",
+            &["one:key".into()],
+            &read_mtls(true),
+        )
+        .unwrap();
+        assert!(!read.basic_guard_required);
+        let mut command = std::process::Command::new("nix");
+        read.apply_to_nix_command(&mut command);
+        assert!(command.get_envs().any(|(name, value)| {
+            name == "NIX_SSL_CERT_FILE"
+                && value
+                    == read
+                        .ca_certificate_path
+                        .as_ref()
+                        .map(|path| path.as_os_str())
+        }));
+        assert!(
+            !read
+                .nix_settings
+                .iter()
+                .any(|(name, _)| name == "netrc-file"
+                    || name == CF_NETRC_AUTHORITY_SETTING
+                    || name == "trusted-public-keys")
+        );
+    }
 
     fn write_mtls(ca: bool) -> Niks3WriteAuth {
         Niks3WriteAuth::Mtls {

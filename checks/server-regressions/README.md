@@ -65,12 +65,16 @@ environment-specific ignored tests that do not belong in this gate.
 
 ## TASK-470 selected library tests
 
-The following 38 ignored PostgreSQL tests run with
+The following 42 ignored PostgreSQL tests run with
 `--ignored --exact --test-threads=1`. Each invocation must report exactly one
 passed test and zero ignored tests. The tests include completed CVE publication
 provenance and malformed signing-key rejection across all Niks3 auth modes.
 
 ```text
+handlers::api::caches::basic_read_tests::niks3_basic_get_save_test_cancel_modes_and_authority_preserve_secrets
+queries::cache_publication_reads::tests::niks3_basic_publication_withholds_old_capabilities_and_insecure_delivery
+handlers::api::caches::discovery_tests::niks3_stored_discovery_retains_replaces_clears_modes_without_persistence
+handlers::api::caches::discovery_tests::niks3_stored_discovery_auth_invalid_json_type_tls_and_csrf_fail_without_mutation
 handlers::api::caches::retained_probe_tests::attic_named_cache_retained_replacement_results_and_policy_preserve_raw_state
 handlers::api::caches::retained_probe_tests::legacy_attic_plaintext_and_historical_ciphertext_retain_on_test_and_save
 handlers::api::caches::retained_probe_tests::legacy_attic_null_and_empty_token_refuse_before_probe_without_mutation
@@ -150,9 +154,75 @@ results, lock release, and exact raw-state preservation on policy refusal.
 The requisite-publication regression verifies that `ATTIC_SERVER_URL` uses the
 shared resolver's canonical server base for Attic.
 
-These 14 non-ignored tests run with `--exact --test-threads=1`:
+Niks3 Add discovery accepts a backwards-compatible URL-only request or explicit
+write mTLS transport. `server_url` is required; optional string fields are
+`niks3_write_auth_mode`, `niks3_write_client_cert`, `niks3_write_client_key`, and
+`niks3_write_ca_cert`. Omitted mode means the public/token metadata path with no
+TLS fields. mTLS requires a complete certificate/key pair and permits an optional
+CA bundle. Strict certificate-only PEM validation accepts multiple certificates
+and rejects empty input, private keys, comments, trailing text, and malformed
+certificates before DNS. Key parsing errors never include key or parser contents.
+The server HTTP client adds supplied CA trust to its system roots; this does not
+change the packaged CLI's separate CA semantics.
+
+`POST /api/v1/caches/:id/niks3/discover` accepts the exact unwrapped Save update
+shape. Admin authorization precedes parsing and lookup; supplied CSRF state must
+match. The handler loads and decrypts one unlocked snapshot, then uses the full
+shared effective-update validator. Tests prove retained/replacement credentials,
+CA clearing, mode transitions, lock release, safe refusals, and exact raw database
+non-mutation. Configured presentation flags cannot select retained credentials.
+No assignment, timestamp, usage, ciphertext, or job write occurs.
+
+Both discovery forms return only `server_url`, `substituter_url`, `public_keys`,
+and nullable `oidc_audience`. Write mTLS is used only for the configured metadata
+endpoint; read credentials and Bearer tokens are never sent. HTTPS/private-target
+policy, all-address DNS validation and pinning, hostname verification, no proxies,
+no redirects, eight-second timeouts, and the 64 KiB body limit remain enforced.
+The pinned Niks3 v1.6.0 `GET /api/cache-config` is public metadata, not a write
+authorization check. Discovery success leaves write authorization Untested;
+connection Test's `write_auth_valid` remains null. No alternative GC/auth probe
+or upload is attempted. Actual native TLS acceptance is covered by the separate
+owner-managed VM fixture; these regressions prove transport projection and state.
+
+Basic read regressions cover encrypted password storage, management redaction,
+configured flags, complete pair replacement, mode clears, and HTTPS authority
+binding. GET, Test, Cancel, and failed Save preserve raw state. Unrelated Save
+preserves retained ciphertext. Delivery requires the signed Basic-read capability
+and confidential transport; old or insecure agents receive neither target nor
+source and retain pending work. The publication fingerprint test includes Basic
+credential changes alongside the existing policy and canonical-set assertions.
+Independent write/read probes do not borrow the other plane's credentials.
+
+The nine metrics tests distinguish native values from unavailable measurements.
+Missing, denied, redirected, malformed, negative, and overflow responses cannot
+become zero-valued statistics. Metrics retain their reported byte/object basis
+without inventing path counts. Disabled, unsupported, non-admin, and anonymous
+requests do not probe. The tests also cover bounded bodies, cancellation at the
+overall deadline, configured-authority requests without authorization headers,
+explicit null fields, and `Cache-Control: no-store`. These unit tests do not prove
+native-provider acceptance or represent real account/storage measurements.
+
+These 32 non-ignored tests run with `--exact --test-threads=1`:
 
 ```text
+models::cache_destination::tests::niks3_basic_pair_validation_redaction_modes_and_authority
+models::cache_destination::tests::niks3_probe_planes_bootstrap_without_unselected_settings
+handlers::api::caches::basic_read_tests::niks3_basic_http_projection_and_plane_scope_do_not_cross_credentials
+security::cache_secrets::tests::basic_password_envelope_preserves_spaces_and_literal_prefixes
+queries::builders::tests::niks3_publication_fingerprint_includes_secrets_policy_and_canonical_sets
+handlers::api::caches::storage_metrics::tests::native_values_preserve_basis_without_inventing_paths
+handlers::api::caches::storage_metrics::tests::malformed_negative_missing_and_overflow_stats_never_become_zero
+handlers::api::caches::storage_metrics::tests::metadata_gates_skip_all_unsupported_disabled_and_non_admin_probes
+handlers::api::caches::storage_metrics::tests::missing_endpoint_denial_redirects_and_non_native_success_are_not_empty_stats
+handlers::api::caches::storage_metrics::tests::streamed_body_limit_rejects_overflow_without_retaining_rejected_chunk
+handlers::api::caches::storage_metrics::tests::absent_metrics_wire_shape_is_explicit_and_not_http_cached
+handlers::api::caches::storage_metrics::tests::stats_request_keeps_configured_authority_prefix_and_no_authorization
+handlers::api::caches::storage_metrics::tests::overall_deadline_cancels_pending_work_and_returns_nulls
+handlers::api::caches::storage_metrics::tests::unauthenticated_request_stops_before_database_lookup
+handlers::api::caches::discovery_tests::niks3_discovery_projects_only_write_mtls_and_public_mode
+handlers::api::caches::discovery_tests::niks3_discovery_rejects_invalid_bundles_and_queries_before_network
+handlers::api::caches::discovery_tests::niks3_discovery_admin_first_and_public_response_redact_tls_material
+security::cache_secrets::tests::certificate_bundle_regressions_reject_interleaved_comments_and_noncert_blocks
 handlers::api::builders::tests::attic_requisite_env_uses_shared_server_base
 handlers::api::caches::retained_probe_tests::attic_canonical_api_and_model_read_roots_share_named_cache
 handlers::api::caches::retained_probe_tests::attic_native_metadata_and_status_matrix_never_claims_root_or_write_success
@@ -193,7 +263,7 @@ its matching `END` identifies the active target and whether Cargo was compiling
 or executing. The library also has an explicit compilation boundary before its
 selected tests execute. Cargo's normal output reports executed test names.
 
-Each of the 38 ignored and 14 non-ignored TASK-470 tests emits its qualified name,
+Each of the 42 ignored and 32 non-ignored TASK-470 tests emits its qualified name,
 mode, start time, exit status, and elapsed time. Cargo stdout and stderr still
 pass through `tee` to the exact-test guard. `pipefail` preserves failures from
 Cargo or `tee`; success still requires the named `... ok` line and the existing

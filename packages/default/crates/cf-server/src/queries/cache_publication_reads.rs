@@ -62,11 +62,24 @@ struct ReadDestination {
     niks3_read_client_cert: Option<String>,
     niks3_read_client_key: Option<String>,
     niks3_read_ca_cert: Option<String>,
+    niks3_read_basic_username: Option<String>,
+    niks3_read_basic_password: Option<String>,
 }
 
 impl ReadDestination {
-    fn read(&self, confidential: bool, supports_niks3: bool) -> Option<PublicationRead> {
-        if !self.enabled || (self.cache_type.eq_ignore_ascii_case("Niks3") && !supports_niks3) {
+    fn read(
+        &self,
+        confidential: bool,
+        capabilities: cf_protocol::agent::AgentCapabilities,
+    ) -> Option<PublicationRead> {
+        // SECURITY: General Niks3 support predates authority-bound Basic. An
+        // absent Basic capability must withhold both source and target delivery.
+        if !self.enabled
+            || (self.cache_type.eq_ignore_ascii_case("Niks3")
+                && (!capabilities.supports_niks3
+                    || (self.niks3_read_auth_mode.as_deref() == Some("basic")
+                        && !capabilities.supports_niks3_basic_read)))
+        {
             return None;
         }
         // SECURITY: Do not load or decrypt write credentials for delivery.
@@ -85,6 +98,11 @@ impl ReadDestination {
             )
             .ok()?,
             niks3_read_ca_cert: self.niks3_read_ca_cert.clone(),
+            niks3_read_basic_username: self.niks3_read_basic_username.clone(),
+            niks3_read_basic_password: cache_secrets::decrypt_optional(
+                self.niks3_read_basic_password.as_deref(),
+            )
+            .ok()?,
             ..Default::default()
         };
         let (cache_url, cache_public_keys, read_auth) = destination.read_config().ok()?;
@@ -116,6 +134,9 @@ impl ReadDestination {
 /// to globals; other evidenced sources within the same group remain available.
 /// Publication, destination, and assignment shared locks retain this evidence
 /// through commit. SSI protects concurrent evidence or assignment changes.
+/// Basic reads additionally require authenticated `supports_niks3_basic_read`
+/// capability. General Niks3 support alone is insufficient. Every private read
+/// still requires verified confidential transport before a delivery is claimed.
 ///
 /// # Errors
 /// Returns database errors, including serialization conflicts. Callers must
@@ -127,7 +148,7 @@ impl ReadDestination {
 /// use crystal_forge::queries::cache_publication_reads::resolve_publication_read_tx;
 /// // The caller has already locked the authorized system and exact derivation.
 /// let source = resolve_publication_read_tx(
-///     tx, 42, "/nix/store/authorized-output", None, false, false,
+///     tx, 42, "/nix/store/authorized-output", None, false, cf_protocol::agent::AgentCapabilities::default(),
 /// ).await?;
 /// // Do not expose source until the caller's transaction commits.
 /// # Ok(()) }
@@ -138,7 +159,7 @@ pub async fn resolve_publication_read_tx(
     store_path: &str,
     environment_id: Option<Uuid>,
     confidential: bool,
-    supports_niks3: bool,
+    capabilities: cf_protocol::agent::AgentCapabilities,
 ) -> Result<Option<PublicationRead>> {
     let references: Vec<(Option<i32>, Option<String>, String)> = sqlx::query_as(
         "SELECT cache_destination_id, cache_destination, cache_destination_source
@@ -160,7 +181,7 @@ pub async fn resolve_publication_read_tx(
     let destinations = sqlx::query_as::<_, ReadDestination>(
         "SELECT id, name, enabled, cache_type, push_to, attic_cache_name, attic_public_key,
                 niks3_public_keys, niks3_read_auth_mode, niks3_read_client_cert,
-                niks3_read_client_key, niks3_read_ca_cert
+                niks3_read_client_key, niks3_read_ca_cert, niks3_read_basic_username, niks3_read_basic_password
          FROM cache_destinations
          WHERE id = ANY($1) OR name = ANY($2) OR push_to = ANY($2)
          ORDER BY id FOR SHARE",
@@ -222,7 +243,7 @@ pub async fn resolve_publication_read_tx(
             is_global(destination)
         };
         if eligible {
-            if let Some(read) = destination.read(confidential, supports_niks3) {
+            if let Some(read) = destination.read(confidential, capabilities) {
                 return Ok(Some(read));
             }
         }
@@ -255,10 +276,16 @@ mod tests {
             niks3_read_client_cert: Some(crate::security::cache_secrets::TEST_CERTIFICATE.into()),
             niks3_read_client_key: Some("private-read-secret".into()),
             niks3_read_ca_cert: None,
+            niks3_read_basic_username: None,
+            niks3_read_basic_password: None,
         };
-        assert!(destination.read(false, true).is_none());
-        assert!(destination.read(true, false).is_none());
-        let read = destination.read(true, true).unwrap();
+        let capable = cf_protocol::agent::AgentCapabilities {
+            supports_niks3: true,
+            ..Default::default()
+        };
+        assert!(destination.read(false, capable).is_none());
+        assert!(destination.read(true, Default::default()).is_none());
+        let read = destination.read(true, capable).unwrap();
         assert_eq!(read.destination_id, 42);
         assert!(!format!("{read:?}").contains("private-read-secret"));
         assert!(matches!(
@@ -266,7 +293,7 @@ mod tests {
             CacheReadAuth::Mtls { .. }
         ));
         destination.niks3_public_keys.clear();
-        assert!(destination.read(true, true).is_none());
+        assert!(destination.read(true, capable).is_none());
     }
 
     async fn fixture(pool: &PgPool) -> (Uuid, Uuid, i32, Uuid) {
@@ -311,6 +338,7 @@ mod tests {
             confidential,
             cf_protocol::agent::AgentCapabilities {
                 supports_niks3: capable,
+                ..Default::default()
             },
         )
         .await
@@ -320,6 +348,65 @@ mod tests {
     async fn unchanged(pool: &PgPool, pending: Uuid) {
         let row: (String, bool, Option<String>) = sqlx::query_as("SELECT status, delivered_at IS NULL, request_action FROM pending_system_deployments WHERE id = $1").bind(pending).fetch_one(pool).await.unwrap();
         assert_eq!(row, ("pending".into(), true, Some("rollback".into())));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified task PostgreSQL and ephemeral database creation"]
+    async fn niks3_basic_publication_withholds_old_capabilities_and_insecure_delivery(
+        pool: PgPool,
+    ) {
+        let (system, env, derivation, pending) = fixture(&pool).await;
+        let id = cache(&pool, "basic-publication", Some(env)).await;
+        let encrypted =
+            cache_secrets::encrypt_secret("synthetic-basic-publication-password").unwrap();
+        sqlx::query("UPDATE cache_destinations SET niks3_read_auth_mode='basic',niks3_read_basic_username='synthetic-user',niks3_read_basic_password=$2 WHERE id=$1").bind(id).bind(encrypted).execute(&pool).await.unwrap();
+        publish(&pool, derivation, id, PATH).await;
+        for (confidential, capabilities) in [
+            (true, cf_protocol::agent::AgentCapabilities::default()),
+            (
+                true,
+                cf_protocol::agent::AgentCapabilities {
+                    supports_niks3: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                false,
+                cf_protocol::agent::AgentCapabilities {
+                    supports_niks3: true,
+                    supports_niks3_basic_read: true,
+                },
+            ),
+        ] {
+            let denied = authorize_and_claim_desired_target_with_read(
+                &pool,
+                system,
+                PATH,
+                confidential,
+                capabilities,
+            )
+            .await
+            .unwrap();
+            assert!(denied.publication_read.is_none() && denied.target.is_none());
+            unchanged(&pool, pending).await;
+        }
+        let delivered = authorize_and_claim_desired_target_with_read(
+            &pool,
+            system,
+            PATH,
+            true,
+            cf_protocol::agent::AgentCapabilities {
+                supports_niks3: true,
+                supports_niks3_basic_read: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(delivered.target.is_some());
+        let read = delivered.publication_read.unwrap().into_runtime_cache();
+        assert!(matches!(&read.read_auth, CacheReadAuth::Basic { .. }));
+        assert!(!format!("{:?}", read.read_auth).contains("synthetic-user"));
+        assert!(!format!("{:?}", read.read_auth).contains("synthetic-basic-publication-password"));
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -727,6 +814,7 @@ mod tests {
                 true,
                 cf_protocol::agent::AgentCapabilities {
                     supports_niks3: true,
+                    ..Default::default()
                 },
             )
             .await

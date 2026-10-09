@@ -2737,6 +2737,47 @@ pub async fn fetch_cache_destination(id: i32) -> Result<CacheDestination, ApiCli
     fetch_json(&url).await
 }
 
+/// Fetches one request-local provider inventory observation without mutation.
+/// Callers must bound concurrent requests and must not poll indefinitely.
+/// The server owns provider authorization, retained TLS and target policy.
+/// Aborts the browser request after twelve seconds or when the owning future
+/// is cancelled. GET bypasses browser HTTP caches through the shared transport.
+///
+/// # Errors
+/// Returns an error for authentication, missing destinations, transport failures
+/// or malformed responses. Presentation must not display raw error bodies.
+pub async fn fetch_cache_storage_metrics(id: i32) -> Result<CacheStorageMetrics, ApiClientError> {
+    let url = format!("{}/caches/{id}/metrics", base_url());
+    // CONCURRENCY: Resource cancellation must abort the browser fetch, not
+    // leave an old observation pass running beside its replacement.
+    struct AbortOnDrop(web_sys::AbortController);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let controller = web_sys::AbortController::new()
+        .map_err(|_| ApiClientError::Network("Metrics request unavailable".into()))?;
+    let _owner = AbortOnDrop(controller.clone());
+    // The server observation budget is eight seconds. Four additional seconds
+    // cover API transport and response delivery without an indefinite spinner.
+    let timeout = gloo_timers::callback::Timeout::new(12_000, {
+        let controller = controller.clone();
+        move || controller.abort()
+    });
+    let response = send_request_with_signal("GET", &url, None, Some(&controller.signal())).await;
+    timeout.cancel();
+    let (status, text) = response?;
+    if !(200..300).contains(&status) {
+        return Err(ApiClientError::Status {
+            code: status,
+            body: "Metrics unavailable".into(),
+        });
+    }
+    serde_json::from_str(&text)
+        .map_err(|_| ApiClientError::Deserialize("Invalid metrics response".into()))
+}
+
 /// Create a new cache destination
 pub async fn create_cache_destination(
     data: &CreateCacheDestination,
@@ -2842,17 +2883,28 @@ fn decode_cache_probe(
 }
 
 /// Discovers public Niks3 endpoints and signing keys without saving changes.
+/// Uses only the selected write TLS transport; tokens and read identities are
+/// excluded from [`Niks3DiscoverRequest`].
 ///
 /// # Errors
 /// Returns an error for authorization, target-policy, network, or metadata failures.
-pub async fn discover_niks3(server_url: &str) -> Result<Niks3Discovery, ApiClientError> {
+pub async fn discover_niks3(data: &Niks3DiscoverRequest) -> Result<Niks3Discovery, ApiClientError> {
     let url = format!("{}/caches/niks3/discover", base_url());
-    send_json_with_csrf(
-        "POST",
-        &url,
-        Some(&serde_json::json!({ "server_url": server_url })),
-    )
-    .await
+    send_json_with_csrf("POST", &url, Some(data)).await
+}
+
+/// Discovers a stored Niks3 destination through an unwrapped write-transport patch.
+/// Omitted write identity is resolved by ID on the server. No state is persisted.
+/// The caller must project out tokens and read credentials before calling.
+///
+/// # Errors
+/// Returns an opaque authorization, validation, transport or metadata error.
+pub async fn discover_stored_niks3(
+    id: i32,
+    data: &UpdateCacheDestination,
+) -> Result<Niks3Discovery, ApiClientError> {
+    let url = format!("{}/caches/{id}/niks3/discover", base_url());
+    send_json_with_csrf("POST", &url, Some(data)).await
 }
 
 /// Updates a cache destination with replacements and explicit credential clears.

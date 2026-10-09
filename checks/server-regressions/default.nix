@@ -746,6 +746,10 @@ SQL
     }
 
     for testName in \
+      handlers::api::caches::basic_read_tests::niks3_basic_get_save_test_cancel_modes_and_authority_preserve_secrets \
+      queries::cache_publication_reads::tests::niks3_basic_publication_withholds_old_capabilities_and_insecure_delivery \
+      handlers::api::caches::discovery_tests::niks3_stored_discovery_retains_replaces_clears_modes_without_persistence \
+      handlers::api::caches::discovery_tests::niks3_stored_discovery_auth_invalid_json_type_tls_and_csrf_fail_without_mutation \
       handlers::api::caches::retained_probe_tests::attic_named_cache_retained_replacement_results_and_policy_preserve_raw_state \
       handlers::api::caches::retained_probe_tests::legacy_attic_plaintext_and_historical_ciphertext_retain_on_test_and_save \
       handlers::api::caches::retained_probe_tests::legacy_attic_null_and_empty_token_refuse_before_probe_without_mutation \
@@ -788,6 +792,24 @@ SQL
       runExactCacheRegression "$testName" --ignored
     done
     for testName in \
+      models::cache_destination::tests::niks3_basic_pair_validation_redaction_modes_and_authority \
+      models::cache_destination::tests::niks3_probe_planes_bootstrap_without_unselected_settings \
+      handlers::api::caches::basic_read_tests::niks3_basic_http_projection_and_plane_scope_do_not_cross_credentials \
+      security::cache_secrets::tests::basic_password_envelope_preserves_spaces_and_literal_prefixes \
+      queries::builders::tests::niks3_publication_fingerprint_includes_secrets_policy_and_canonical_sets \
+      handlers::api::caches::storage_metrics::tests::native_values_preserve_basis_without_inventing_paths \
+      handlers::api::caches::storage_metrics::tests::malformed_negative_missing_and_overflow_stats_never_become_zero \
+      handlers::api::caches::storage_metrics::tests::metadata_gates_skip_all_unsupported_disabled_and_non_admin_probes \
+      handlers::api::caches::storage_metrics::tests::missing_endpoint_denial_redirects_and_non_native_success_are_not_empty_stats \
+      handlers::api::caches::storage_metrics::tests::streamed_body_limit_rejects_overflow_without_retaining_rejected_chunk \
+      handlers::api::caches::storage_metrics::tests::absent_metrics_wire_shape_is_explicit_and_not_http_cached \
+      handlers::api::caches::storage_metrics::tests::stats_request_keeps_configured_authority_prefix_and_no_authorization \
+      handlers::api::caches::storage_metrics::tests::overall_deadline_cancels_pending_work_and_returns_nulls \
+      handlers::api::caches::storage_metrics::tests::unauthenticated_request_stops_before_database_lookup \
+      handlers::api::caches::discovery_tests::niks3_discovery_projects_only_write_mtls_and_public_mode \
+      handlers::api::caches::discovery_tests::niks3_discovery_rejects_invalid_bundles_and_queries_before_network \
+      handlers::api::caches::discovery_tests::niks3_discovery_admin_first_and_public_response_redact_tls_material \
+      security::cache_secrets::tests::certificate_bundle_regressions_reject_interleaved_comments_and_noncert_blocks \
       handlers::api::builders::tests::attic_requisite_env_uses_shared_server_base \
       handlers::api::caches::retained_probe_tests::attic_canonical_api_and_model_read_roots_share_named_cache \
       handlers::api::caches::retained_probe_tests::attic_native_metadata_and_status_matrix_never_claims_root_or_write_success \

@@ -17,6 +17,59 @@ component wrappers and the public builder wrapper. Runtime probes require
 same evaluator Nix. Finally, the packaged Nix version must match the version
 reported by `nix-eval-jobs` itself.
 
+## Guarded Basic read runtime
+
+The CF overlay applies `packages/default/patches/nix-cf-netrc-authority.patch`
+to the evaluator's modular Nix component scope. Both `nix-eval-jobs` and its
+native CLI link the same patched libraries. The upstream Nix version remains
+`2.34.8`; the root flake pin and unrelated `pkgs.nix` remain unchanged.
+`pkgs.crystal-forge.default.evaluatorNix` exposes that exact CLI. Server and
+builder wrappers, service PATH lists, and the Niks3 wrapper use the same CLI.
+
+The packaging check requires the registered `cf-netrc-authority` setting and
+its empty default. Basic-read owners must detect the registered setting on the
+actual executable before advertising support or preparing credentials:
+
+```sh
+nix --extra-experimental-features nix-command config show cf-netrc-authority
+```
+
+An unknown-option warning followed by success is not feature evidence. The
+JSON settings listing must contain `cf-netrc-authority`. Unpatched runtimes
+must not advertise Basic-read capability or run a Basic read.
+
+For one Basic read child, pass `--option netrc-file /protected/absolute/path`
+and `--option cf-netrc-authority https://read.example:443`. The second value is
+a nonsecret origin, not a credential URL. The setting rejects userinfo,
+non-HTTPS origins, queries, fragments, and paths other than `/`. Curl's URL
+parser normalizes host case, IDNA, IPv6, and effective ports. Explicit port 443
+and the omitted HTTPS port are equivalent. IPv6 zones remain part of identity.
+Every transfer must match that origin before network access or netrc selection,
+including absolute NAR URLs. Guarded transfers permit only GET/HEAD reads and
+reject uploads and S3 URLs. All redirects are disabled and HTTP 3xx responses,
+including 304, fail with static errors. The owner must use fresh metadata when
+conditional-cache reuse would otherwise produce 304.
+
+An empty guard preserves upstream redirects, system netrc, mTLS store
+parameters, and ordinary transfers. Set the guard only in a Basic-read child;
+never in global Nix configuration or a write/S3 subprocess. The guard does not
+change signature verification, DNS policy, trust roots, or credential lifetime.
+
+Pinned Niks3 `v1.6.0` (commit `c29f3641de064545d75f00318cd45bea2b4ea1d0`)
+selects `ReadProxyHandler` in `server/server.go` with `--enable-read-proxy`.
+`server/proxy.go` streams cache objects from S3 without redirecting clients;
+only the root landing-page path delegates to a redirect handler. The
+production-shaped fixture enables this streaming mode. Object reads are
+source-compatible with the guard; redirect-based cache topologies are not.
+This source inspection is not a passing native Basic transport test.
+
+The Basic fixture owner must extend the existing `niks3-cache` VM check with
+same-origin reads, same-origin redirect refusal, foreign-host/port and downgrade
+refusal, absolute NAR URLs, and absence of credential forwarding. Packaging
+feature checks do not establish those behavioral results. Changing the native
+Nix runtime invalidates earlier six-variant evidence for this source; rerun the
+authoritative gates after the sibling Basic helper/API/UI work is ready.
+
 The Niks3 override changes only its Nix dependency. The pinned upstream Niks3
 version remains 1.6.0.
 

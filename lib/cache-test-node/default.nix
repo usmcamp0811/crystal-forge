@@ -6,7 +6,8 @@
 }: rec {
   # These reproducible private keys are public test data, never production keys.
   # Certificates are issued at build time so isolated VMs use valid TLS dates.
-  makeNiks3TestCredentials = {pkgs, extraDnsNames ? [], strictTls ? false}: pkgs.runCommand "niks3-test-credentials" {
+  makeNiks3TestCredentials = {pkgs, extraDnsNames ? [], strictTls ? false, productionPki ? false}: let
+    generated = pkgs.runCommand "niks3-test-credentials" {
     nativeBuildInputs = [pkgs.openssl (pkgs.python3.withPackages (p: [p.pynacl]))];
   } ''
     mkdir -p "$out"
@@ -49,7 +50,91 @@
         -set_serial "$(case "$name" in server) echo 2;; write) echo 3;; read) echo 4;; wrong) echo 5;; esac)" \
         -days 3650 -extfile extensions -out "$out/$name.crt"
     done
+    ${lib.optionalString productionPki ''
+      mkdir -p "$out/production"
+      python - <<'PY'
+      import base64, os
+      from pathlib import Path
+      from nacl.signing import SigningKey
+      out = Path(os.environ['OUT']) / 'production'
+      names = ['server-ca-a','server-ca-b','client-ca-c','push-server','s3-server',
+               'write-client-1','write-client-2','wrong-subject','wrong-issuer','read-server']
+      for index, name in enumerate(names):
+          der = bytes.fromhex('302e020100300506032b657004220420') + bytes([index + 40]) * 32
+          (out / (name + '.key')).write_text('-----BEGIN PRIVATE KEY-----\n' + base64.b64encode(der).decode() + '\n-----END PRIVATE KEY-----\n')
+      for index in range(2):
+          key = SigningKey(bytes([index + 60]) * 32)
+          name = 'niks3-production-' + str(index)
+          (out / ('signing-' + str(index) + '.key')).write_text(name + ':' + base64.b64encode(bytes(key) + bytes(key.verify_key)).decode() + '\n')
+          (out / ('signing-' + str(index) + '.pub')).write_text(name + ':' + base64.b64encode(bytes(key.verify_key)).decode() + '\n')
+      PY
+      for ca in server-ca-a server-ca-b client-ca-c; do
+        openssl req -new -x509 -key "$out/production/$ca.key" -out "$out/production/$ca.crt" \
+          -subj "/CN=niks3-$ca" -days 3650 -set_serial 70 \
+          -addext 'basicConstraints=critical,CA:TRUE' \
+          -addext 'keyUsage=critical,keyCertSign,cRLSign' -addext 'subjectKeyIdentifier=hash'
+      done
+      for name in push-server s3-server write-client-1 write-client-2 wrong-subject wrong-issuer read-server; do
+        case "$name" in
+          push-server) issuer="$out/production/server-ca-a"; subject=push-cache.test; usage=serverAuth; san='DNS:push-cache.test,DNS:cache,DNS:localhost,IP:127.0.0.1';;
+          s3-server) issuer="$out/production/server-ca-b"; subject=s3-cache.test; usage=serverAuth; san='DNS:s3-cache.test';;
+          read-server) issuer="$out/production/server-ca-b"; subject=read-cache.test; usage=serverAuth; san='DNS:read-cache.test,DNS:read-foreign.test';;
+          wrong-issuer) issuer="$out/production/server-ca-b"; subject=write; usage=clientAuth; san="";;
+          wrong-subject) issuer="$out/production/client-ca-c"; subject=wrong; usage=clientAuth; san="";;
+          *) issuer="$out/production/client-ca-c"; subject=write; usage=clientAuth; san="";;
+        esac
+        openssl req -new -key "$out/production/$name.key" -out "$name.csr" -subj "/CN=$subject"
+        printf '%s\n' "extendedKeyUsage=$usage" 'basicConstraints=critical,CA:FALSE' \
+          'keyUsage=critical,digitalSignature' 'subjectKeyIdentifier=hash' 'authorityKeyIdentifier=keyid,issuer' > extensions
+        if test -n "$san"; then printf '%s\n' "subjectAltName=$san" >> extensions; fi
+        openssl x509 -req -in "$name.csr" -CA "$issuer.crt" -CAkey "$issuer.key" \
+          -set_serial "$(case "$name" in push-server) echo 81;; s3-server) echo 82;; write-client-1) echo 83;; write-client-2) echo 84;; wrong-subject) echo 85;; wrong-issuer) echo 86;; read-server) echo 87;; esac)" \
+          -days 3650 -extfile extensions -out "$out/production/$name.crt"
+      done
+      cat "$out/production/server-ca-a.crt" "$out/production/server-ca-b.crt" > "$out/production/server-roots-ab.pem"
+      # Public synthetic fixture values. Consumers pass protected file paths,
+      # never username/password arguments, to native read commands.
+      printf '%s' 'cf-basic-read-fixture-470' > "$out/production/basic-username"
+      printf '%s' 'cf-basic-read-password-fixture-470' > "$out/production/basic-password"
+      printf '%s:' 'cf-basic-read-fixture-470' > "$out/production/basic.htpasswd"
+      openssl passwd -apr1 -stdin < "$out/production/basic-password" >> "$out/production/basic.htpasswd"
+    ''}
   '';
+  in generated // lib.optionalAttrs productionPki {
+    # Shared fixture contract. CA roots verify SERVERS; clientCA verifies client
+    # identities at nginx. No production user material is stored in these paths.
+    productionWritePki = let
+      aliases = pkgs.runCommand "niks3-production-write-pki" {} ''
+        mkdir -p "$out"
+        cp ${generated}/production/* "$out/"
+        ln -s server-ca-a.crt "$out/api-ca.crt"
+        ln -s server-ca-b.crt "$out/s3-ca.crt"
+        ln -s client-ca-c.crt "$out/client-ca.crt"
+        ln -s push-server.crt "$out/api-server.crt"
+        ln -s push-server.key "$out/api-server.key"
+        ln -s write-client-1.crt "$out/write-client.crt"
+        ln -s write-client-1.key "$out/write-client.key"
+        ln -s write-client-2.crt "$out/replacement-write-client.crt"
+        ln -s write-client-2.key "$out/replacement-write-client.key"
+        ln -s server-roots-ab.pem "$out/server-ca-bundle.pem"
+      '';
+      certificate = name: {cert = "${generated}/production/${name}.crt"; key = "${generated}/production/${name}.key";};
+    in aliases // {
+      roots = "${generated}/production/server-roots-ab.pem";
+      serverA = "${generated}/production/server-ca-a.crt";
+      serverB = "${generated}/production/server-ca-b.crt";
+      clientCA = "${generated}/production/client-ca-c.crt";
+      writeClient = certificate "write-client-1";
+      replacementClient = certificate "write-client-2";
+      wrongSubject = certificate "wrong-subject";
+      wrongIssuer = certificate "wrong-issuer";
+      apiServer = certificate "push-server";
+      s3Server = certificate "s3-server";
+      readServer = certificate "read-server";
+      signingPublicKeys = map (index: "${generated}/production/signing-${toString index}.pub") [0 1];
+      signingPrivateKeys = map (index: "${generated}/production/signing-${toString index}.key") [0 1];
+    };
+  };
 
   # Owns all persistence inside one disposable NixOS VM. Garage's test-only
   # backend credentials remain on this node; clients receive only presigned
@@ -63,8 +148,10 @@
     cacheUrl ? "https://cache:${toString port}",
     tlsReadProxy ? true,
     enableFirewall ? false,
+    productionPki ? false,
+    basicRead ? false,
     ...
-  }: {
+  }: if productionPki then makeNiks3ProductionCacheNode {inherit pkgs credentials enableFirewall basicRead;} else {
     imports = [(makeS3CacheNode {
       inherit pkgs enableFirewall;
       accessKey = "GK0123456789abcdef01234567";
@@ -164,6 +251,231 @@
             proxy_ssl_trusted_certificate ${credentials}/ca.crt;
             proxy_ssl_name localhost;
           '';
+        };
+      };
+    };
+  };
+
+  # Opt-in production-shaped transport. Niks3 1.6.0 has no UNIX listener. The
+  # private socket bridge is a fixture adaptation, not a Crystal Forge dependency.
+  makeNiks3ProductionCacheNode = {pkgs, credentials, enableFirewall ? false, basicRead ? false}: let
+    pki = credentials.productionWritePki;
+    nativePort = 5755;
+    bridgeUid = 63071;
+    socket = "/run/niks3-production-api/native.sock";
+  in {
+    imports = [(makeS3CacheNode {
+      inherit pkgs enableFirewall;
+      bucketName = "production-niks3";
+      accessKey = "GK0123456789abcdef01234567";
+      importCredentials = true;
+    })];
+    virtualisation.useNixStoreImage = true;
+    environment.systemPackages = [pkgs.crystal-forge.default.niks3 pkgs.python3 pkgs.curl pkgs.jq];
+    security.pki.certificateFiles = [pki.serverB];
+    environment.etc."niks3-production-pki".source = "${credentials}/production";
+    services.garage.settings = {
+      rpc_bind_addr = lib.mkForce "127.0.0.1:3911";
+      rpc_public_addr = lib.mkForce "127.0.0.1:3911";
+      s3_api.api_bind_addr = lib.mkForce "127.0.0.1:3900";
+    };
+    # Access/query strings can carry presigned capabilities. Only the separate
+    # nginx boolean observer is an audit source; native Garage logs stay quiet.
+    systemd.services.garage.environment.RUST_LOG = lib.mkForce "error";
+    services.postgresql = {
+      enable = true;
+      ensureDatabases = ["niks3-production"];
+      ensureUsers = [{name = "niks3-production"; ensureDBOwnership = true;}];
+    };
+    users.groups = {niks3-production = {}; niks3-proxy = {};};
+    users.users = {
+      niks3-production = {isSystemUser = true; group = "niks3-production"; uid = 63070;};
+      niks3-bridge = {isSystemUser = true; group = "niks3-proxy"; uid = bridgeUid;};
+      nginx.extraGroups = ["niks3-proxy"];
+    };
+    # SECURITY: No UID except the socket bridge can connect to the native TCP
+    # origin, including root test clients. Native binds IPv4 loopback only. The
+    # UNIX socket is the only nginx ingress to the trusted-header auth channel.
+    networking.nftables = {
+      enable = true;
+      tables.niks3-origin = {
+        family = "inet";
+        content = ''
+          chain output {
+            type filter hook output priority -10; policy accept;
+            ip daddr 127.0.0.1 tcp dport ${toString nativePort} meta skuid != ${toString bridgeUid} reject with tcp reset
+          }
+        '';
+      };
+    };
+    networking.firewall.allowedTCPPorts = lib.mkIf enableFirewall [5754 5753 3901];
+    systemd.services.niks3-production-secrets = {
+      before = ["niks3-production.service"];
+      requiredBy = ["niks3-production.service"];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        User = "niks3-production";
+        Group = "niks3-production";
+        RuntimeDirectory = "niks3-production-secrets";
+        RuntimeDirectoryMode = "0700";
+      };
+      script = ''
+        umask 077
+        printf '%s' GK0123456789abcdef01234567 > /run/niks3-production-secrets/access-key
+        printf '%s' 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef > /run/niks3-production-secrets/secret-key
+        printf '%s' private-server-only-api-token-production-470 > /run/niks3-production-secrets/api-token
+        cp ${lib.escapeShellArg (builtins.elemAt pki.signingPrivateKeys 0)} /run/niks3-production-secrets/signing-0.key
+        cp ${lib.escapeShellArg (builtins.elemAt pki.signingPrivateKeys 1)} /run/niks3-production-secrets/signing-1.key
+      '';
+    };
+    systemd.services.niks3-production = {
+      wantedBy = ["multi-user.target"];
+      after = ["postgresql.service" "garage-setup.service" "nginx.service" "niks3-production-secrets.service" "nftables.service"];
+      requires = ["postgresql.service" "garage-setup.service" "nginx.service" "niks3-production-secrets.service" "nftables.service"];
+      serviceConfig = {
+        User = "niks3-production";
+        Group = "niks3-production";
+        ExecStart = lib.concatStringsSep " " [
+          "${pkgs.crystal-forge.default.niks3}/bin/niks3-server"
+          "--db 'dbname=niks3-production user=niks3-production host=/run/postgresql'"
+          "--http-addr 127.0.0.1:${toString nativePort}"
+          "--s3-endpoint s3-cache.test:3901 --s3-use-ssl=true --s3-region garage"
+          "--s3-bucket production-niks3"
+          "--s3-access-key-path /run/niks3-production-secrets/access-key"
+          "--s3-secret-key-path /run/niks3-production-secrets/secret-key"
+          "--api-token-path /run/niks3-production-secrets/api-token"
+          "--sign-key-path /run/niks3-production-secrets/signing-0.key --sign-key-path /run/niks3-production-secrets/signing-1.key"
+          "--mtls-proxy-header X-SSL-Client-Verify --mtls-subject-header X-SSL-Client-Dn --mtls-bound-subject CN=write"
+          "--enable-read-proxy --cache-url https://read-cache.test:5753"
+        ];
+      };
+    };
+    systemd.services.niks3-production-bridge = {
+      wantedBy = ["multi-user.target"];
+      after = ["niks3-production.service" "nftables.service"];
+      requires = ["niks3-production.service" "nftables.service"];
+      serviceConfig = {
+        User = "niks3-bridge";
+        Group = "niks3-proxy";
+        RuntimeDirectory = "niks3-production-api";
+        RuntimeDirectoryMode = "0750";
+        UMask = "0007";
+        ExecStart = "${pkgs.socat}/bin/socat UNIX-LISTEN:${socket},fork,mode=0660 TCP:127.0.0.1:${toString nativePort}";
+        NoNewPrivileges = true;
+      };
+    };
+    services.nginx = {
+      enable = true;
+      clientMaxBodySize = "128m";
+      commonHttpConfig = ''
+        map $http_authorization $production_authorization { "" false; default true; }
+        map $ssl_client_verify $production_certificate { SUCCESS true; default false; }
+        map $ssl_client_s_dn $production_write_subject { "CN=write" true; default false; }
+        map $request_method $production_put { PUT true; default false; }
+        map $request_method $production_post { POST true; default false; }
+        map $remote_addr $production_backend { 127.0.0.1 true; default false; }
+        map $status $production_signature { ~^2 true; default false; }
+        log_format production_observer escape=json '{"authorization":$production_authorization,"client_certificate":$production_certificate,"write_subject":$production_write_subject,"put":$production_put,"post":$production_post,"backend":$production_backend,"signature_validated":$production_signature,"status":$status}';
+      '';
+      virtualHosts = {
+        production-api = {
+          addSSL = true;
+          listen = [{addr = "0.0.0.0"; port = 5754; ssl = true;}];
+          serverName = "push-cache.test";
+          sslCertificate = pki.apiServer.cert;
+          sslCertificateKey = pki.apiServer.key;
+          extraConfig = ''
+            ssl_client_certificate ${pki.clientCA};
+            ssl_verify_client on;
+            access_log /var/log/nginx/production-api-observer.json production_observer;
+            error_log /dev/null;
+          '';
+          locations."/" = {
+            proxyPass = "http://unix:${socket}:";
+            extraConfig = ''
+              proxy_set_header X-SSL-Client-Verify $ssl_client_verify;
+              proxy_set_header X-SSL-Client-Dn $ssl_client_s_dn;
+              proxy_set_header Authorization "";
+            '';
+          };
+        };
+        production-s3 = {
+          addSSL = true;
+          listen = [{addr = "0.0.0.0"; port = 3901; ssl = true;}];
+          serverName = "s3-cache.test";
+          sslCertificate = pki.s3Server.cert;
+          sslCertificateKey = pki.s3Server.key;
+          extraConfig = ''
+            access_log /var/log/nginx/production-s3-observer.json production_observer;
+            error_log /dev/null;
+            if ($http_host != "s3-cache.test:3901") { return 400; }
+          '';
+          locations."/" = {
+            proxyPass = "http://127.0.0.1:3900";
+            # Preserve the exact configured signed authority, including port.
+            # Reject any different inbound Host rather than proxying a spoof.
+            extraConfig = ''proxy_set_header Host "s3-cache.test:3901";'';
+          };
+        };
+        production-read = {
+          addSSL = true;
+          listen = [{addr = "0.0.0.0"; port = 5753; ssl = true;}];
+          serverName = "read-cache.test";
+          sslCertificate = pki.readServer.cert;
+          sslCertificateKey = pki.readServer.key;
+          extraConfig = ''
+            access_log /var/log/nginx/production-read-observer.json production_observer;
+            error_log /dev/null;
+            ${lib.optionalString basicRead ''
+              auth_basic "Niks3 read";
+              auth_basic_user_file ${credentials}/production/basic.htpasswd;
+              error_page 401 =403 /basic-denied;
+            ''}
+          '';
+          locations = {
+            "/api/".return = "403";
+            "/" = {
+              proxyPass = "http://unix:${socket}:";
+              extraConfig = ''
+                proxy_set_header X-SSL-Client-Verify "";
+                proxy_set_header X-SSL-Client-Dn "";
+                proxy_set_header Authorization "";
+              '';
+            };
+          # Each guarded transfer must stop at the source response. Targets
+          # have a separate boolean-only observer so zero requests is provable.
+          } // lib.optionalAttrs basicRead (lib.listToAttrs (map (case: {
+            name = "/guard-${case.name}/";
+            value.return = "${toString case.status} ${case.target}";
+          }) [
+            {name = "same-path"; status = 301; target = "https://read-cache.test:5753/guard-target/";}
+            {name = "hostname"; status = 302; target = "https://read-foreign.test:5756/guard-target/";}
+            {name = "port"; status = 303; target = "https://read-cache.test:5756/guard-target/";}
+            {name = "downgrade"; status = 307; target = "http://read-cache.test:5757/guard-target/";}
+            {name = "permanent"; status = 308; target = "https://read-cache.test:5753/guard-target/";}
+            {name = "not-modified"; status = 304; target = "https://read-cache.test:5753/guard-target/";}
+          ]) // {
+            "/basic-denied" = {
+              extraConfig = ''internal; auth_basic off;'';
+              return = "403";
+            };
+            "/guard-target/" = {
+              extraConfig = ''auth_basic off; access_log /var/log/nginx/production-target-observer.json production_observer;'';
+              return = "200 'StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 40\n'";
+            };
+            "/guard-nar-host/".alias = "/run/niks3-basic-guard/host/";
+            "/guard-nar-port/".alias = "/run/niks3-basic-guard/port/";
+          });
+        };
+        production-read-target = lib.mkIf basicRead {
+          addSSL = true;
+          listen = [{addr = "0.0.0.0"; port = 5756; ssl = true;} {addr = "0.0.0.0"; port = 5757; ssl = false;}];
+          serverName = "read-foreign.test";
+          sslCertificate = pki.readServer.cert;
+          sslCertificateKey = pki.readServer.key;
+          extraConfig = ''access_log /var/log/nginx/production-target-observer.json production_observer; error_log /dev/null;'';
+          locations."/".return = "200 'StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 40\n'";
         };
       };
     };

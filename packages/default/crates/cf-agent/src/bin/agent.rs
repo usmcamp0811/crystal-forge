@@ -7,7 +7,6 @@ use cf_config::config::CrystalForgeConfig;
 use cf_protocol::agent::{LogResponse, SystemState};
 use ed25519_dalek::{Signer, SigningKey};
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
-use reqwest::blocking::Client;
 use serde_json::Value;
 use std::{ffi::OsStr, fs, path::PathBuf, process::Command, sync::Arc};
 use tokio::sync::{Mutex, watch};
@@ -154,7 +153,7 @@ fn deriver_drv_with_test_fallback(path: &OsStr) -> Result<String> {
 }
 
 /// Creates and signs a system state payload.
-fn create_signed_payload(
+async fn create_signed_payload(
     current_system: &OsStr,
     context: &str,
 ) -> Result<(SystemState, String, String)> {
@@ -174,7 +173,9 @@ fn create_signed_payload(
             .context("expected a 32-byte Ed25519 private key")?,
     );
 
-    let (payload_json, signature_b64) = sign_current_system_payload(&payload, &signing_key)?;
+    let capabilities = runtime_capabilities(OsStr::new("nix")).await;
+    let (payload_json, signature_b64) =
+        sign_current_system_payload(&payload, &signing_key, capabilities)?;
 
     Ok((payload, payload_json, signature_b64))
 }
@@ -184,26 +185,43 @@ fn create_signed_payload(
 fn sign_current_system_payload(
     payload: &SystemState,
     signing_key: &SigningKey,
+    capabilities: cf_protocol::agent::AgentCapabilities,
 ) -> Result<(String, String)> {
     let payload_json = serde_json::to_string(&cf_protocol::agent::CurrentSystemRequest {
         state: payload,
-        capabilities: cf_protocol::agent::AgentCapabilities {
-            supports_niks3: true,
-        },
+        capabilities,
     })?;
     let signature_b64 = STANDARD.encode(signing_key.sign(payload_json.as_bytes()).to_bytes());
     Ok((payload_json, signature_b64))
 }
 
-/// Posts system state changes to the server (non-heartbeat, no retry).
-pub fn post_system_state_change(current_system: &OsStr, context: &str) -> Result<()> {
+// SECURITY: Package/version labels cannot establish native Basic protection.
+// Probe errors withhold only Basic support; no runtime settings are logged.
+async fn runtime_capabilities(program: &OsStr) -> cf_protocol::agent::AgentCapabilities {
+    let supports_niks3_basic_read = cf_agent::deployment::agent::probe_nix_read_features(program)
+        .await
+        .is_ok_and(|features| features.supports_netrc_authority());
+    cf_protocol::agent::AgentCapabilities {
+        supports_niks3: true,
+        supports_niks3_basic_read,
+    }
+}
+
+/// Posts a signed system state change without retry.
+///
+/// Probes the read runtime before signing its capabilities.
+///
+/// # Errors
+/// Returns an error if configuration, state collection, signing or the POST
+/// fails. Runtime probe failure advertises absent Basic support.
+pub async fn post_system_state_change(current_system: &OsStr, context: &str) -> Result<()> {
     let cfg = CrystalForgeConfig::load()?;
     let client_cfg = &cfg.client;
 
-    let (payload, payload_json, signature_b64) = create_signed_payload(current_system, context)?;
+    let (_, payload_json, signature_b64) = create_signed_payload(current_system, context).await?;
     let hostname = hostname::get()?.to_string_lossy().into_owned();
 
-    let client = Client::new();
+    let client = reqwest::Client::new();
     let (scheme, port_suffix) = match client_cfg.server_port {
         443 => ("https", "".to_string()),
         80 => ("http", "".to_string()),
@@ -222,6 +240,7 @@ pub fn post_system_state_change(current_system: &OsStr, context: &str) -> Result
         .header("X-Key-ID", hostname)
         .body(payload_json)
         .send()
+        .await
         .context("failed to send state change POST")?;
 
     if !res.status().is_success() {
@@ -237,7 +256,7 @@ async fn post_heartbeat_with_retry(current_system: &OsStr, context: &str) -> Res
     let cfg = CrystalForgeConfig::load()?;
     let client_cfg = &cfg.client;
 
-    let (_, payload_json, signature_b64) = create_signed_payload(current_system, context)?;
+    let (_, payload_json, signature_b64) = create_signed_payload(current_system, context).await?;
     let hostname = hostname::get()?.to_string_lossy().into_owned();
 
     let client = reqwest::Client::new();
@@ -344,12 +363,12 @@ pub async fn post_system_heartbeat_with_deployment(
                 cache_url
             );
             drop(state);
-            post_system_state_change(current_system, "cf_deployment")?;
+            post_system_state_change(current_system, "cf_deployment").await?;
         }
         DeploymentResult::SuccessLocalBuild => {
             info!("✅ Deployment completed successfully with local build");
             drop(state);
-            post_system_state_change(current_system, "cf_deployment")?;
+            post_system_state_change(current_system, "cf_deployment").await?;
         }
         DeploymentResult::Started { ref unit_name } => {
             info!("🚀 Deployment started in systemd unit: {}", unit_name);
@@ -656,6 +675,29 @@ pub async fn watch_system(agent_state: Arc<Mutex<AgentState>>) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn niks3_basic_capability_requires_actual_runtime_setting() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory =
+            std::env::temp_dir().join(format!("cf-agent-capability-{}", rand::random::<u64>()));
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let program = directory.join("nix");
+        for (settings, expected) in [
+            (r#"{"require-sigs":{"value":true}}"#, false),
+            (r#"{"cf-netrc-authority":{"value":""}}"#, true),
+            (r#"{"cf-netrc-authority":{"value":false}}"#, false),
+            ("invalid-json-private-diagnostic", false),
+        ] {
+            std::fs::write(&program, format!("#!/bin/sh\nprintf '%s' '{settings}'\n")).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let capabilities = runtime_capabilities(program.as_os_str()).await;
+            assert!(capabilities.supports_niks3);
+            assert_eq!(capabilities.supports_niks3_basic_read, expected);
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn niks3_exact_agent_request_body_advertises_capability_inside_signature() {
         use ed25519_dalek::{Signature, Verifier};
@@ -665,7 +707,15 @@ mod tests {
         }))
         .unwrap();
         let key = SigningKey::from_bytes(&[7; 32]);
-        let (body, signature) = sign_current_system_payload(&payload, &key).unwrap();
+        let (body, signature) = sign_current_system_payload(
+            &payload,
+            &key,
+            cf_protocol::agent::AgentCapabilities {
+                supports_niks3: true,
+                supports_niks3_basic_read: true,
+            },
+        )
+        .unwrap();
         let decoded = STANDARD.decode(signature).unwrap();
         let signature = Signature::from_slice(&decoded).unwrap();
         key.verifying_key()
@@ -674,7 +724,7 @@ mod tests {
         let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(
             value["capabilities"],
-            serde_json::json!({"supports_niks3": true})
+            serde_json::json!({"supports_niks3": true, "supports_niks3_basic_read": true})
         );
         assert_eq!(value["hostname"], "signed-agent");
         assert!(value.get("state").is_none());
@@ -683,7 +733,7 @@ mod tests {
             serde_json::to_value(old_server).unwrap(),
             serde_json::to_value(payload).unwrap()
         );
-        value["capabilities"]["supports_niks3"] = serde_json::json!(false);
+        value["capabilities"]["supports_niks3_basic_read"] = serde_json::json!(false);
         assert!(
             key.verifying_key()
                 .verify(&serde_json::to_vec(&value).unwrap(), &signature)

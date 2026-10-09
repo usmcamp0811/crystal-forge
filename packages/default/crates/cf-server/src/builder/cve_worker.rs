@@ -1535,10 +1535,19 @@ async fn copy_path_from_cache_with_program(
         let store_path = store_path.to_owned();
         let nix_program = nix_program.to_owned();
         let success = tokio::spawn(async move {
-            let read = cf_config::cache_credentials::PreparedCacheRead::new(
+            let features = if matches!(
+                cache.niks3_read_auth,
+                cf_protocol::cache::CacheReadAuth::Basic { .. }
+            ) {
+                crate::handlers::api::builders::probe_nix_read_features(&nix_program).await?
+            } else {
+                cf_config::cache_credentials::NixReadFeatures::default()
+            };
+            let read = cf_config::cache_credentials::PreparedCacheRead::new_with_nix_features(
                 cache.push_to.as_deref().context("Missing Niks3 read URL")?,
                 &cache.niks3_public_keys,
                 &cache.niks3_read_auth,
+                &features,
             )?;
             let mut command = TokioCommand::new(nix_program);
             // SECURITY: Read subprocesses must not inherit write-plane or AWS
@@ -1561,9 +1570,7 @@ async fn copy_path_from_cache_with_program(
                 "true",
                 &store_path,
             ]);
-            if let Some(ca) = &read.ca_certificate_path {
-                command.env("NIX_SSL_CERT_FILE", ca);
-            }
+            read.apply_to_nix_command(command.as_std_mut());
             command
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
@@ -2107,6 +2114,94 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn niks3_basic_materialization_requires_guard_and_child_settings() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("nix");
+        let output = dir.path().join("output");
+        let destination = CacheDestination {
+            enabled: true,
+            cache_type: "Niks3".into(),
+            push_to: Some("https://read.example".into()),
+            niks3_public_keys: vec![nix_public_key_fixture("one")],
+            niks3_read_auth_mode: Some("basic".into()),
+            niks3_read_basic_username: Some("private-user".into()),
+            niks3_read_basic_password: Some(" private-password ".into()),
+            niks3_auth_token: Some("excluded-write-token".into()),
+            ..Default::default()
+        };
+        let config = cache_destination_to_config(&destination).unwrap();
+        assert!(config.niks3_write_auth.is_none());
+        let source = MaterializationSource {
+            label: "niks3".into(),
+            from_url: "https://read.example".into(),
+            cache_config: Some(config),
+            trusted_public_key: None,
+            nix_config_lines: vec![],
+        };
+        std::fs::write(
+            &program,
+            r#"#!/bin/sh
+set -eu
+if test "$1" = --extra-experimental-features; then
+    printf '%s' '{"cf-netrc-authority":{"value":""}}'; exit 0
+fi
+test "$1" = copy; test "$3" = https://read.example/; output=${10}; shift 10
+case "$*" in *private-user*|*private-password*|*excluded-write-token*) exit 24 ;; esac
+netrc=; authority=false; sigs=false; keys=false
+while test "$#" -gt 0; do
+    test "$1" = --option
+    case "$2" in
+    netrc-file) netrc=$3 ;;
+    cf-netrc-authority) test "$3" = https://read.example; authority=true ;;
+    require-sigs) test "$3" = true; sigs=true ;;
+    extra-trusted-public-keys) test -n "$3"; keys=true ;;
+    *) exit 11 ;;
+    esac
+    shift 3
+done
+test "$authority" = true; test "$sigs" = true; test "$keys" = true
+test -f "$netrc"; test "$(stat -c %a "$netrc")" = 600
+test "$(stat -c %a "${netrc%/*}")" = 700
+test -z "${NIX_CONFIG:-}"; test -z "${NIKS3_AUTH_TOKEN_FILE:-}"
+printf '%s' "${netrc%/*}" > "${0%/*}/credentials"
+touch "$output"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            copy_path_from_cache_with_program(
+                &source,
+                &output.to_string_lossy(),
+                std::time::Duration::from_secs(5),
+                program.as_os_str()
+            )
+            .await
+            .unwrap()
+        );
+        let credentials = std::fs::read_to_string(dir.path().join("credentials")).unwrap();
+        assert!(!std::path::Path::new(&credentials).exists());
+        std::fs::remove_file(&output).unwrap();
+        std::fs::write(
+            &program,
+            "#!/bin/sh\ntest \"$1\" = --extra-experimental-features || exit 23\nprintf '%s' '{}'\n",
+        )
+        .unwrap();
+        assert!(
+            copy_path_from_cache_with_program(
+                &source,
+                &output.to_string_lossy(),
+                std::time::Duration::from_secs(5),
+                program.as_os_str()
+            )
+            .await
+            .is_err()
+        );
+        assert!(!output.exists());
     }
 
     #[tokio::test]

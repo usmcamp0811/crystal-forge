@@ -12,8 +12,9 @@ pub struct CacheDestinationEnvironment {
 
 /// Stores a cache destination with separate Niks3 read and write credentials.
 ///
-/// Query helpers decrypt tokens and private keys and compute configured flags.
-/// Serialization omits all tokens, S3 access IDs/secrets, and private keys.
+/// Query helpers decrypt tokens, private keys, and Basic passwords and compute
+/// configured flags. Serialization omits tokens, S3 secrets, private keys, and
+/// both Basic credential fields. Basic reads use system CA trust only.
 /// Debug omits all credentials. Attic/S3 configured flags describe only the active
 /// cache type and must be refreshed from decrypted fields before redaction.
 /// Niks3 requires HTTPS URLs, nonempty signing keys, and complete selected auth.
@@ -101,7 +102,7 @@ pub struct CacheDestination {
     pub niks3_write_client_key: Option<String>,
     /// Optional PEM CA certificate for the write server.
     pub niks3_write_ca_cert: Option<String>,
-    /// Read authentication mode: `none` or `mtls`.
+    /// Read authentication mode: `none`, `basic`, or `mtls`.
     pub niks3_read_auth_mode: Option<String>,
     /// PEM client certificate for mTLS reads.
     pub niks3_read_client_cert: Option<String>,
@@ -110,6 +111,16 @@ pub struct CacheDestination {
     pub niks3_read_client_key: Option<String>,
     /// Optional PEM CA certificate for the read server.
     pub niks3_read_ca_cert: Option<String>,
+    /// Server-only Basic username; management serialization never returns it.
+    #[serde(skip_serializing)]
+    pub niks3_read_basic_username: Option<String>,
+    /// Decrypted Basic password; management serialization never returns it.
+    #[serde(skip_serializing)]
+    pub niks3_read_basic_password: Option<String>,
+    /// Indicates a complete pair for the active Niks3 Basic read mode.
+    #[sqlx(skip)]
+    #[serde(default)]
+    pub niks3_read_basic_configured: bool,
     /// Indicates a nonempty write token on the active Niks3 type.
     #[sqlx(skip)]
     #[serde(default)]
@@ -145,6 +156,8 @@ pub struct CacheDestination {
 /// are explicit; credentials from an unselected mode are rejected.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct CreateCacheDestination {
+    /// Name required by Save; independent management probes may omit it.
+    #[serde(default)]
     pub name: String,
     pub cache_type: String,
     pub push_to: Option<String>,
@@ -177,7 +190,7 @@ pub struct CreateCacheDestination {
     pub niks3_write_client_key: Option<String>,
     /// Optional PEM write server CA certificate.
     pub niks3_write_ca_cert: Option<String>,
-    /// Required read mode for Niks3: `none` or `mtls`.
+    /// Required read mode for Niks3: `none`, `basic`, or `mtls`.
     pub niks3_read_auth_mode: Option<String>,
     /// PEM client certificate for mTLS reads.
     pub niks3_read_client_cert: Option<String>,
@@ -185,6 +198,10 @@ pub struct CreateCacheDestination {
     pub niks3_read_client_key: Option<String>,
     /// Optional PEM read server CA certificate.
     pub niks3_read_ca_cert: Option<String>,
+    /// Basic username; excludes ASCII controls and `:` and is server-only.
+    pub niks3_read_basic_username: Option<String>,
+    /// Basic password; persisted using the existing authenticated encryption.
+    pub niks3_read_basic_password: Option<String>,
     pub parallel_uploads: Option<i32>,
     pub max_retries: Option<i32>,
     pub retry_delay_seconds: Option<i64>,
@@ -204,6 +221,8 @@ pub struct CreateCacheDestination {
 /// Same-type sanitized URL round trips retain server-only URI credentials.
 /// Other explicit URLs cannot borrow URI auth. Cache type changes strip URI
 /// auth from inherited URLs; explicit replacement URLs use their own auth.
+/// Basic replacements are complete pairs. Retention is bound to HTTPS hostname
+/// and effective port; another authority requires an explicit pair or mode clear.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct UpdateCacheDestination {
     pub name: Option<String>,
@@ -238,7 +257,7 @@ pub struct UpdateCacheDestination {
     pub niks3_write_client_key: Option<String>,
     /// Replaces the write CA certificate when supplied.
     pub niks3_write_ca_cert: Option<String>,
-    /// Replaces read mode; `none` clears all read mTLS material.
+    /// Replaces read mode; transitions clear all inactive mTLS and Basic fields.
     pub niks3_read_auth_mode: Option<String>,
     /// Replaces the read client certificate when supplied.
     pub niks3_read_client_cert: Option<String>,
@@ -246,6 +265,11 @@ pub struct UpdateCacheDestination {
     pub niks3_read_client_key: Option<String>,
     /// Replaces the read CA certificate when supplied.
     pub niks3_read_ca_cert: Option<String>,
+    /// Replaces the Basic username only with a simultaneous password replacement.
+    pub niks3_read_basic_username: Option<String>,
+    /// Replaces the Basic password only with a simultaneous username replacement.
+    /// Empty replacements fail; select another read mode to clear the pair.
+    pub niks3_read_basic_password: Option<String>,
     /// Clears the write token; a simultaneous replacement is rejected.
     #[serde(default)]
     pub clear_niks3_auth_token: bool,
@@ -274,6 +298,57 @@ pub struct UpdateCacheDestination {
 }
 
 impl CreateCacheDestination {
+    /// Validates only the selected Niks3 probe plane without admitting a Save.
+    ///
+    /// Write metadata needs no read URL or signing keys and cannot prove token
+    /// validity. Read metadata needs no write settings; supplied signing keys
+    /// are format-checked but metadata cannot verify artifact signatures.
+    ///
+    /// # Errors
+    /// Returns static errors for invalid selected settings. `All` retains the
+    /// complete Save validation contract, including signing keys and both modes.
+    pub(crate) fn validate_probe(&self, scope: Niks3ProbeScope) -> Result<(), String> {
+        if self.cache_type != "Niks3" || scope == Niks3ProbeScope::All {
+            return self.validate();
+        }
+        match scope {
+            Niks3ProbeScope::Write => {
+                validate_https(self.niks3_server_url.as_deref(), "niks3_server_url")?;
+                match self.niks3_write_auth_mode.as_deref().unwrap_or("token") {
+                    "token"
+                        if self.niks3_write_client_cert.is_none()
+                            && self.niks3_write_client_key.is_none()
+                            && self.niks3_write_ca_cert.is_none() =>
+                    {
+                        Ok(())
+                    }
+                    "mtls" => validate_write_auth(
+                        Some("mtls"),
+                        self.niks3_auth_token.as_deref(),
+                        self.niks3_write_client_cert.as_deref(),
+                        self.niks3_write_client_key.as_deref(),
+                        self.niks3_write_ca_cert.as_deref(),
+                    ),
+                    _ => Err("Invalid Niks3 write probe configuration".into()),
+                }
+            }
+            Niks3ProbeScope::Read => {
+                validate_https(self.push_to.as_deref(), "push_to")?;
+                for key in &self.niks3_public_keys {
+                    cf_protocol::cache::validate_nix_public_key(key).map_err(str::to_string)?;
+                }
+                validate_read_auth(
+                    self.niks3_read_auth_mode.as_deref(),
+                    self.niks3_read_client_cert.as_deref(),
+                    self.niks3_read_client_key.as_deref(),
+                    self.niks3_read_ca_cert.as_deref(),
+                    self.niks3_read_basic_username.as_deref(),
+                    self.niks3_read_basic_password.as_deref(),
+                )
+            }
+            Niks3ProbeScope::All => self.validate(),
+        }
+    }
     /// Validates required fields and authentication for the selected cache type.
     ///
     /// Niks3 requires at least one named Ed25519 public signing key accepted by
@@ -297,6 +372,12 @@ impl CreateCacheDestination {
         // Validate name is not empty
         if self.name.trim().is_empty() {
             return Err("Cache destination name cannot be empty".to_string());
+        }
+        if self.cache_type != "Niks3"
+            && (self.niks3_read_basic_username.is_some()
+                || self.niks3_read_basic_password.is_some())
+        {
+            return Err("Basic read credentials require Niks3".into());
         }
 
         // SECURITY: Check every supplied certificate field, including fields on
@@ -337,6 +418,8 @@ impl CreateCacheDestination {
                     self.niks3_read_client_cert.as_deref(),
                     self.niks3_read_client_key.as_deref(),
                     self.niks3_read_ca_cert.as_deref(),
+                    self.niks3_read_basic_username.as_deref(),
+                    self.niks3_read_basic_password.as_deref(),
                 )?;
             }
             "Attic" => {
@@ -665,18 +748,54 @@ fn validate_write_auth(
     }
 }
 
+/// Selects the independent Niks3 plane checked by a read-only management probe.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Niks3ProbeScope {
+    /// Checks both planes using complete Save validation (the legacy default).
+    #[default]
+    All,
+    /// Checks public write-API metadata and optional write mTLS transport only.
+    Write,
+    /// Checks the configured Nix metadata endpoint with selected read auth only.
+    Read,
+}
+
+fn same_https_authority(old: Option<&str>, new: Option<&str>) -> bool {
+    let authority = |raw: Option<&str>| {
+        let url = url::Url::parse(raw?).ok()?;
+        if url.scheme() != "https" {
+            return None;
+        }
+        Some((url.host_str()?.to_owned(), url.port_or_known_default()?))
+    };
+    authority(old)
+        .zip(authority(new))
+        .is_some_and(|(old, new)| old == new)
+}
+
 fn validate_read_auth(
     mode: Option<&str>,
     cert: Option<&str>,
     key: Option<&str>,
     ca: Option<&str>,
+    username: Option<&str>,
+    password: Option<&str>,
 ) -> Result<(), String> {
     validate_certificate_fields(&[("niks3_read_client_cert", cert), ("niks3_read_ca_cert", ca)])?;
     match mode {
-        Some("none") if cert.is_none() && key.is_none() && ca.is_none() => Ok(()),
-        Some("mtls") if nonempty(cert) && nonempty(key) => Ok(()),
+        Some("none") if cert.is_none() && key.is_none() && ca.is_none() && username.is_none() && password.is_none() => Ok(()),
+        Some("basic") if cert.is_none() && key.is_none() && ca.is_none() => {
+            let username = username.filter(|value| !value.is_empty()).ok_or("Basic read username is required")?;
+            let password = password.filter(|value| !value.is_empty()).ok_or("Basic read password is required")?;
+            if username.contains(':') || username.chars().any(|ch| ch.is_ascii_control()) || password.chars().any(|ch| ch.is_ascii_control()) {
+                return Err("Basic read credentials contain prohibited characters".into());
+            }
+            Ok(())
+        }
+        Some("mtls") if nonempty(cert) && nonempty(key) && username.is_none() && password.is_none() => Ok(()),
         _ => Err(
-            "niks3_read_auth_mode requires none without credentials, or mtls with cert/key".into(),
+            "niks3_read_auth_mode requires none without credentials, basic with only username/password, or mtls with cert/key".into(),
         ),
     }
 }
@@ -731,6 +850,16 @@ impl CacheDestination {
         self.niks3_read_mtls_configured = self.cache_type == "Niks3"
             && nonempty(self.niks3_read_client_cert.as_deref())
             && nonempty(self.niks3_read_client_key.as_deref());
+        self.niks3_read_basic_configured = self.cache_type == "Niks3"
+            && self.niks3_read_auth_mode.as_deref() == Some("basic")
+            && self
+                .niks3_read_basic_username
+                .as_deref()
+                .is_some_and(|v| !v.is_empty())
+            && self
+                .niks3_read_basic_password
+                .as_deref()
+                .is_some_and(|v| !v.is_empty());
     }
 
     /// Merges Niks3 updates before validation and persistence.
@@ -755,6 +884,14 @@ impl CacheDestination {
             return Err("Cannot replace and clear the same Niks3 credential field".into());
         }
         let mut merged = self.clone();
+        if update.niks3_read_basic_username.is_some() != update.niks3_read_basic_password.is_some()
+        {
+            // SECURITY: Never combine one replacement with the other retained
+            // member. Read/Save validation rejects this incomplete candidate;
+            // an independent write probe does not consume the read candidate.
+            merged.niks3_read_basic_username = None;
+            merged.niks3_read_basic_password = None;
+        }
         let leaves_niks3 = self.cache_type == "Niks3"
             && update.cache_type.as_deref().is_some_and(|ty| ty != "Niks3");
         if leaves_niks3
@@ -777,6 +914,21 @@ impl CacheDestination {
             merged.niks3_read_client_cert = None;
             merged.niks3_read_client_key = None;
             merged.niks3_read_ca_cert = None;
+            merged.niks3_read_basic_username = None;
+            merged.niks3_read_basic_password = None;
+        }
+        // SECURITY: Retained Basic credentials are bound to HTTPS authority,
+        // including effective port, not to a path or discovered metadata URL.
+        // A changed authority drops inheritance; read/Save validation then
+        // requires an explicit complete replacement or a non-Basic mode.
+        if self.niks3_read_auth_mode.as_deref() == Some("basic")
+            && update
+                .push_to
+                .as_deref()
+                .is_some_and(|new| !same_https_authority(self.push_to.as_deref(), Some(new)))
+        {
+            merged.niks3_read_basic_username = None;
+            merged.niks3_read_basic_password = None;
         }
         macro_rules! replace {
             ($($field:ident),+) => {$(
@@ -795,7 +947,9 @@ impl CacheDestination {
             niks3_read_auth_mode,
             niks3_read_client_cert,
             niks3_read_client_key,
-            niks3_read_ca_cert
+            niks3_read_ca_cert,
+            niks3_read_basic_username,
+            niks3_read_basic_password
         );
         if !update.niks3_public_keys.is_empty() {
             merged.niks3_public_keys = update.niks3_public_keys.clone();
@@ -814,6 +968,10 @@ impl CacheDestination {
         }
         if update.clear_niks3_read_ca_cert {
             merged.niks3_read_ca_cert = None;
+        }
+        if leaves_niks3 {
+            merged.niks3_read_basic_username = None;
+            merged.niks3_read_basic_password = None;
         }
         merged.refresh_niks3_configured();
         Ok(merged)
@@ -946,8 +1104,21 @@ impl CacheDestination {
             self.niks3_read_client_cert.as_deref(),
             self.niks3_read_client_key.as_deref(),
             self.niks3_read_ca_cert.as_deref(),
+            self.niks3_read_basic_username.as_deref(),
+            self.niks3_read_basic_password.as_deref(),
         )?;
-        let auth = if self.niks3_read_auth_mode.as_deref() == Some("mtls") {
+        let auth = if self.niks3_read_auth_mode.as_deref() == Some("basic") {
+            cf_protocol::cache::CacheReadAuth::Basic {
+                username: self
+                    .niks3_read_basic_username
+                    .clone()
+                    .ok_or("Missing Basic username")?,
+                password: self
+                    .niks3_read_basic_password
+                    .clone()
+                    .ok_or("Missing Basic password")?,
+            }
+        } else if self.niks3_read_auth_mode.as_deref() == Some("mtls") {
             cf_protocol::cache::CacheReadAuth::Mtls {
                 client_certificate: self
                     .niks3_read_client_cert
@@ -977,6 +1148,146 @@ pub(crate) fn nix_public_key_fixture(name: &str) -> String {
 mod tests {
     use super::*;
     use crate::security::cache_secrets::TEST_CERTIFICATE;
+
+    #[test]
+    fn niks3_basic_pair_validation_redaction_modes_and_authority() {
+        let mut create = niks3_create();
+        create.niks3_read_auth_mode = Some("basic".into());
+        create.niks3_read_basic_username = Some("synthetic üser \"quoted\"".into());
+        create.niks3_read_basic_password = Some("synthetic password ü".into());
+        create.validate().unwrap();
+        let source = CacheDestination {
+            name: create.name.clone(),
+            cache_type: "Niks3".into(),
+            push_to: create.push_to.clone(),
+            niks3_server_url: create.niks3_server_url.clone(),
+            niks3_public_keys: create.niks3_public_keys.clone(),
+            niks3_write_auth_mode: create.niks3_write_auth_mode.clone(),
+            niks3_auth_token: create.niks3_auth_token.clone(),
+            niks3_read_auth_mode: create.niks3_read_auth_mode.clone(),
+            niks3_read_basic_username: create.niks3_read_basic_username.clone(),
+            niks3_read_basic_password: create.niks3_read_basic_password.clone(),
+            ..Default::default()
+        };
+        let mut public = source.clone();
+        public.refresh_niks3_configured();
+        assert!(public.niks3_read_basic_configured);
+        let json = serde_json::to_string(&public).unwrap();
+        assert!(!json.contains("synthetic"));
+        assert!(!format!("{public:?}").contains("synthetic"));
+        assert!(matches!(
+            source.read_config().unwrap().2,
+            cf_protocol::cache::CacheReadAuth::Basic { .. }
+        ));
+        for username in ["", "user:colon", "control\nuser", "control\0user"] {
+            let mut bad = create.clone();
+            bad.niks3_read_basic_username = Some(username.into());
+            assert!(bad.validate().is_err());
+        }
+        for password in ["", "control\rpassword", "control\0password"] {
+            let mut bad = create.clone();
+            bad.niks3_read_basic_password = Some(password.into());
+            assert!(bad.validate().is_err());
+        }
+        let partial = UpdateCacheDestination {
+            niks3_read_basic_username: Some("replacement".into()),
+            ..Default::default()
+        };
+        assert!(crate::queries::cache_destinations::effective_update(&source, &partial).is_err());
+        for url in [
+            "https://read.example.com/other-path",
+            "https://read.example.com:443/cache",
+        ] {
+            let patch = UpdateCacheDestination {
+                push_to: Some(url.into()),
+                ..Default::default()
+            };
+            let retained =
+                crate::queries::cache_destinations::effective_update(&source, &patch).unwrap();
+            assert!(retained.niks3_read_basic_password == source.niks3_read_basic_password);
+        }
+        for url in [
+            "https://different.example.com/cache",
+            "https://read.example.com:8443/cache",
+            "http://read.example.com/cache",
+        ] {
+            let patch = UpdateCacheDestination {
+                push_to: Some(url.into()),
+                ..Default::default()
+            };
+            assert!(crate::queries::cache_destinations::effective_update(&source, &patch).is_err());
+        }
+        let explicit = UpdateCacheDestination {
+            push_to: Some("https://different.example.com/cache".into()),
+            niks3_read_basic_username: Some("replacement".into()),
+            niks3_read_basic_password: Some("replacement password".into()),
+            ..Default::default()
+        };
+        assert!(crate::queries::cache_destinations::effective_update(&source, &explicit).is_ok());
+        let clear = crate::queries::cache_destinations::effective_update(
+            &source,
+            &UpdateCacheDestination {
+                niks3_read_auth_mode: Some("none".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            clear.niks3_read_basic_username.is_none() && clear.niks3_read_basic_password.is_none()
+        );
+        let mtls = crate::queries::cache_destinations::effective_update(
+            &source,
+            &UpdateCacheDestination {
+                niks3_read_auth_mode: Some("mtls".into()),
+                niks3_read_client_cert: Some(TEST_CERTIFICATE.into()),
+                niks3_read_client_key: Some("synthetic-read-key".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            mtls.niks3_read_basic_username.is_none() && mtls.niks3_read_basic_password.is_none()
+        );
+        let converted = crate::queries::cache_destinations::effective_update(
+            &source,
+            &UpdateCacheDestination {
+                cache_type: Some("Http".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            converted.niks3_read_basic_username.is_none()
+                && converted.niks3_read_basic_password.is_none()
+        );
+        let mut invalid_ca = create.clone();
+        invalid_ca.niks3_read_ca_cert = Some(TEST_CERTIFICATE.into());
+        assert!(invalid_ca.validate().is_err());
+        assert!(create.validate_probe(Niks3ProbeScope::Read).is_ok());
+    }
+
+    #[test]
+    fn niks3_probe_planes_bootstrap_without_unselected_settings() {
+        let write = CreateCacheDestination {
+            cache_type: "Niks3".into(),
+            niks3_server_url: Some("https://write.example.com".into()),
+            niks3_write_auth_mode: Some("token".into()),
+            ..Default::default()
+        };
+        assert!(write.validate_probe(Niks3ProbeScope::Write).is_ok());
+        assert!(write.validate().is_err());
+        let read = CreateCacheDestination {
+            cache_type: "Niks3".into(),
+            push_to: Some("https://read.example.com/cache".into()),
+            niks3_read_auth_mode: Some("basic".into()),
+            niks3_read_basic_username: Some("synthetic user".into()),
+            niks3_read_basic_password: Some("synthetic password".into()),
+            ..Default::default()
+        };
+        assert!(read.validate_probe(Niks3ProbeScope::Read).is_ok());
+        assert!(read.validate_probe(Niks3ProbeScope::Write).is_err());
+        assert!(read.validate().is_err());
+    }
 
     fn niks3_create() -> CreateCacheDestination {
         CreateCacheDestination {

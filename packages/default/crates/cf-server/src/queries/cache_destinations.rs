@@ -74,6 +74,8 @@ fn decrypt_destination_secrets(mut destination: CacheDestination) -> Result<Cach
         cache_secrets::decrypt_optional(destination.niks3_write_client_key.as_deref())?;
     destination.niks3_read_client_key =
         cache_secrets::decrypt_optional(destination.niks3_read_client_key.as_deref())?;
+    destination.niks3_read_basic_password =
+        cache_secrets::decrypt_optional(destination.niks3_read_basic_password.as_deref())?;
     destination.refresh_niks3_configured();
     Ok(destination)
 }
@@ -100,6 +102,7 @@ pub async fn encrypt_plaintext_cache_secrets(pool: &PgPool) -> Result<u64> {
         let niks3_token = destination.niks3_auth_token.as_deref();
         let niks3_write_key = destination.niks3_write_client_key.as_deref();
         let niks3_read_key = destination.niks3_read_client_key.as_deref();
+        let niks3_basic_password = destination.niks3_read_basic_password.as_deref();
 
         let needs_update = attic.is_some_and(|v| !cache_secrets::is_encrypted(v))
             || s3_access.is_some_and(|v| !cache_secrets::is_encrypted(v))
@@ -107,7 +110,8 @@ pub async fn encrypt_plaintext_cache_secrets(pool: &PgPool) -> Result<u64> {
             || s3_session.is_some_and(|v| !cache_secrets::is_encrypted(v))
             || niks3_token.is_some_and(|v| !cache_secrets::is_encrypted(v))
             || niks3_write_key.is_some_and(|v| !cache_secrets::is_encrypted(v))
-            || niks3_read_key.is_some_and(|v| !cache_secrets::is_encrypted(v));
+            || niks3_read_key.is_some_and(|v| !cache_secrets::is_encrypted(v))
+            || niks3_basic_password.is_some_and(|v| !cache_secrets::is_encrypted(v));
 
         if !needs_update {
             continue;
@@ -126,7 +130,8 @@ pub async fn encrypt_plaintext_cache_secrets(pool: &PgPool) -> Result<u64> {
                   s3_session_token = $5,
                   niks3_auth_token = $6,
                   niks3_write_client_key = $7,
-                  niks3_read_client_key = $8
+                   niks3_read_client_key = $8,
+                   niks3_read_basic_password = $9
              WHERE id = $1",
         )
         .bind(destination.id)
@@ -137,6 +142,13 @@ pub async fn encrypt_plaintext_cache_secrets(pool: &PgPool) -> Result<u64> {
         .bind(cache_secrets::encrypt_optional(niks3_token)?)
         .bind(cache_secrets::encrypt_optional(niks3_write_key)?)
         .bind(cache_secrets::encrypt_optional(niks3_read_key)?)
+        .bind(
+            if niks3_basic_password.is_some_and(cache_secrets::is_encrypted) {
+                niks3_basic_password.map(str::to_owned)
+            } else {
+                cache_secrets::encrypt_basic_password(niks3_basic_password)?
+            },
+        )
         .execute(&mut *tx)
         .await?;
 
@@ -180,10 +192,11 @@ pub async fn create_cache_destination(
             force_repush, require_sigs,
             niks3_server_url, niks3_public_keys, niks3_write_auth_mode, niks3_auth_token,
             niks3_write_client_cert, niks3_write_client_key, niks3_write_ca_cert,
-            niks3_read_auth_mode, niks3_read_client_cert, niks3_read_client_key, niks3_read_ca_cert
+            niks3_read_auth_mode, niks3_read_client_cert, niks3_read_client_key, niks3_read_ca_cert,
+            niks3_read_basic_username, niks3_read_basic_password
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
-            $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34
+            $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36
         )
         RETURNING *
         "#,
@@ -222,6 +235,8 @@ pub async fn create_cache_destination(
     .bind(&create.niks3_read_client_cert)
     .bind(cache_secrets::encrypt_optional(create.niks3_read_client_key.as_deref())?)
     .bind(&create.niks3_read_ca_cert)
+    .bind(&create.niks3_read_basic_username)
+    .bind(cache_secrets::encrypt_basic_password(create.niks3_read_basic_password.as_deref())?)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -270,6 +285,9 @@ pub async fn update_cache_destination(
     .bind(id)
     .fetch_optional(&mut *tx)
     .await?;
+    let stored_basic_password = current
+        .as_ref()
+        .and_then(|row| row.niks3_read_basic_password.clone());
     let Some(current) = current.map(decrypt_destination_secrets).transpose()? else {
         return Ok(None);
     };
@@ -295,6 +313,8 @@ pub async fn update_cache_destination(
         || update.niks3_read_client_cert.is_some()
         || update.niks3_read_client_key.is_some()
         || update.niks3_read_ca_cert.is_some()
+        || update.niks3_read_basic_username.is_some()
+        || update.niks3_read_basic_password.is_some()
         || update.clear_niks3_auth_token
         || update.clear_niks3_write_client_key
         || update.clear_niks3_read_client_key
@@ -446,6 +466,8 @@ pub async fn update_cache_destination(
             "niks3_read_client_cert",
             "niks3_read_client_key",
             "niks3_read_ca_cert",
+            "niks3_read_basic_username",
+            "niks3_read_basic_password",
         ] {
             updates.push(format!("{column} = ${bind_count}"));
             bind_count += 1;
@@ -557,7 +579,18 @@ pub async fn update_cache_destination(
                 .bind(cache_secrets::encrypt_optional(
                     niks3.niks3_read_client_key.as_deref(),
                 )?)
-                .bind(&niks3.niks3_read_ca_cert);
+                .bind(&niks3.niks3_read_ca_cert)
+                .bind(&niks3.niks3_read_basic_username)
+                .bind(
+                    if niks3.niks3_read_basic_password == current.niks3_read_basic_password {
+                        // Preserve the authenticated envelope when Basic is retained.
+                        stored_basic_password
+                    } else {
+                        cache_secrets::encrypt_basic_password(
+                            niks3.niks3_read_basic_password.as_deref(),
+                        )?
+                    },
+                );
         }
 
         // Bind the ID for WHERE clause
@@ -627,6 +660,25 @@ pub fn effective_update(
     current: &CacheDestination,
     update: &UpdateCacheDestination,
 ) -> std::result::Result<CreateCacheDestination, String> {
+    let merged = effective_update_unvalidated(current, update)?;
+    merged.validate()?;
+    Ok(merged)
+}
+
+/// Merges the same credential transitions as Save without plane validation.
+///
+/// Scoped probes validate their selected plane after this merge. Save and all-
+/// plane Test MUST use [`effective_update`] instead. Authority binding and
+/// atomic Basic replacement are merge invariants, not optional probe checks.
+///
+/// # Errors
+/// Returns static errors for conflicting clears. Partial Basic replacements
+/// drop inheritance and remain invalid until read/all-plane validation rejects
+/// them; independent write probes never consume that read credential candidate.
+pub(crate) fn effective_update_unvalidated(
+    current: &CacheDestination,
+    update: &UpdateCacheDestination,
+) -> std::result::Result<CreateCacheDestination, String> {
     let same_type = update
         .cache_type
         .as_deref()
@@ -651,6 +703,8 @@ pub fn effective_update(
         source.niks3_read_client_cert = None;
         source.niks3_read_client_key = None;
         source.niks3_read_ca_cert = None;
+        source.niks3_read_basic_username = None;
+        source.niks3_read_basic_password = None;
     }
     let current = &source;
     let niks3 = current.merge_niks3_update(update)?;
@@ -733,9 +787,10 @@ pub fn effective_update(
         niks3_read_client_cert: niks3.niks3_read_client_cert,
         niks3_read_client_key: niks3.niks3_read_client_key,
         niks3_read_ca_cert: niks3.niks3_read_ca_cert,
+        niks3_read_basic_username: niks3.niks3_read_basic_username,
+        niks3_read_basic_password: niks3.niks3_read_basic_password,
     };
 
-    merged.validate()?;
     Ok(merged)
 }
 

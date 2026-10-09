@@ -6427,7 +6427,7 @@ pub struct CacheDestination {
     pub niks3_write_client_key: Option<String>,
     /// Optional PEM trust anchor for the write server.
     pub niks3_write_ca_cert: Option<String>,
-    /// Selected read authentication: `none` or `mtls`.
+    /// Selected read authentication: `none`, `basic` or `mtls`.
     pub niks3_read_auth_mode: Option<String>,
     /// Public PEM read client certificate.
     pub niks3_read_client_cert: Option<String>,
@@ -6444,6 +6444,9 @@ pub struct CacheDestination {
     /// Indicates an existing complete read mTLS identity.
     #[serde(default)]
     pub niks3_read_mtls_configured: bool,
+    /// Indicates an active complete Basic read identity without returning either value.
+    #[serde(default)]
+    pub niks3_read_basic_configured: bool,
     pub parallel_uploads: Option<i32>,
     pub max_retries: Option<i32>,
     pub retry_delay_seconds: Option<i64>,
@@ -6453,6 +6456,47 @@ pub struct CacheDestination {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_used_at: Option<DateTime<Utc>>,
+}
+
+/// Classifies a request-local cache inventory observation.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheMetricsStatus {
+    /// Contains provider-reported values with explicit measurement bases.
+    Available,
+    /// Indicates that the provider has no supported cheap inventory totals.
+    Unsupported,
+    /// Indicates that an observation could not be made.
+    Unavailable,
+    /// Indicates invalid configuration or invalid provider metadata.
+    Error,
+    /// Represents an unrecognized status without granting evidence to values.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Contains a credential-free observation from `GET /caches/:id/metrics`.
+/// Values are not persisted. Objects are not Nix paths; reported logical bytes
+/// are not physical storage usage or capacity. Missing values remain unknown.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct CacheStorageMetrics {
+    /// Classifies the observation; values are usable only when available.
+    pub status: CacheMetricsStatus,
+    /// Contains a reason code; presentation must map it to static explanations.
+    pub reason_code: String,
+    /// Contains the known client-reported logical byte total, including zero.
+    pub storage_bytes: Option<u64>,
+    /// Identifies the byte basis; currently only `reported_logical` is supported.
+    pub storage_bytes_basis: Option<String>,
+    /// Contains the number of live tracked objects, including metadata objects.
+    pub object_count: Option<u64>,
+    /// Identifies the count basis; currently only `live_tracked_objects` is supported.
+    pub object_count_basis: Option<String>,
+    /// Contains a Nix path count if a future provider explicitly reports one.
+    /// The current API always returns null; objects must not substitute for it.
+    pub path_count: Option<u64>,
+    /// Contains the server's UTC observation time, not an upstream measurement time.
+    pub measured_at: Option<DateTime<Utc>>,
 }
 
 /// Create cache destination request
@@ -6489,22 +6533,38 @@ pub struct CreateCacheDestination {
     pub niks3_public_keys: Vec<String>,
     /// Required Niks3 write mode: `token` or `mtls`.
     pub niks3_write_auth_mode: Option<String>,
-    /// Plaintext replacement token, sent only in mutation/probe bodies.
+    /// Plaintext replacement token, sent only in authenticated Save bodies.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_auth_token: Option<String>,
     /// PEM write client certificate.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_write_client_cert: Option<String>,
     /// PEM write private key, encrypted by the server on save.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_write_client_key: Option<String>,
     /// Optional PEM write server trust anchor.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_write_ca_cert: Option<String>,
-    /// Required Niks3 read mode: `none` or `mtls`.
+    /// Required Niks3 read mode: `none`, `basic` or `mtls`.
     pub niks3_read_auth_mode: Option<String>,
     /// PEM read client certificate.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_read_client_cert: Option<String>,
     /// PEM read private key, encrypted by the server on save.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_read_client_key: Option<String>,
     /// Optional PEM read server trust anchor.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_read_ca_cert: Option<String>,
+    /// Supplies a replacement Basic read username only with its password.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_basic_username: Option<String>,
+    /// Supplies a Basic password; allowed whitespace is preserved verbatim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_basic_password: Option<String>,
+    /// Selects a non-mutating Niks3 test plane; Save omits this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_scope: Option<Niks3ProbeScope>,
 }
 
 /// Update cache destination request
@@ -6553,20 +6613,24 @@ pub struct UpdateCacheDestination {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_auth_token: Option<String>,
     /// Replaces the write client certificate.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_write_client_cert: Option<String>,
     /// Replaces the write private key; omission preserves it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_write_client_key: Option<String>,
     /// Replaces the write trust anchor; omission preserves it.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_write_ca_cert: Option<String>,
     /// Selects read mode; `none` clears the read identity atomically.
     pub niks3_read_auth_mode: Option<String>,
     /// Replaces the read client certificate.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_read_client_cert: Option<String>,
     /// Replaces the read private key; omission preserves it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_read_client_key: Option<String>,
     /// Replaces the read trust anchor; omission preserves it.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_read_ca_cert: Option<String>,
     /// Explicitly clears the token; incompatible with a simultaneous replacement.
     #[serde(default)]
@@ -6583,6 +6647,47 @@ pub struct UpdateCacheDestination {
     /// Removes the custom read CA and restores system trust.
     #[serde(default)]
     pub clear_niks3_read_ca_cert: bool,
+    /// Replaces the Basic username as part of an atomic read-identity pair.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_basic_username: Option<String>,
+    /// Replaces the Basic password; omission retains it on the same authority.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_basic_password: Option<String>,
+    /// Selects a non-mutating Niks3 test plane; Save omits this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_scope: Option<Niks3ProbeScope>,
+}
+
+/// Selects the independently tested Niks3 plane without granting Save permission.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Niks3ProbeScope {
+    /// Tests public write metadata and selected write TLS only.
+    Write,
+    /// Tests the read endpoint and selected read identity only.
+    Read,
+    /// Tests both planes using the complete configuration.
+    All,
+}
+
+/// Supplies write-only discovery transport; tokens and read identities are excluded.
+/// Private keys are sent only in authenticated request bodies, never diagnostics.
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct Niks3DiscoverRequest {
+    /// HTTPS write API URL without userinfo, queries or fragments.
+    pub server_url: String,
+    /// Selects mTLS explicitly; omitted fields retain public URL-only discovery.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_auth_mode: Option<String>,
+    /// Contains the draft client certificate chain for mTLS.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_client_cert: Option<String>,
+    /// Contains the draft private key for mTLS; GET never supplies it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_client_key: Option<String>,
+    /// Contains an optional certificate-only server trust bundle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_ca_cert: Option<String>,
 }
 
 /// Identifies an allowlisted cache probe without preserving unknown wire text.
@@ -6671,6 +6776,24 @@ pub struct CacheCredentialTestResult {
     pub read_endpoint_reachable: Option<bool>,
     /// Whether trusted signing keys were found.
     pub signing_keys_found: Option<bool>,
+    /// Identifies the selected Niks3 probe plane; missing evidence stays untested.
+    #[serde(default)]
+    pub probe_scope: Option<Niks3ProbeScope>,
+    /// Reports a response from the write API, not upload permission.
+    #[serde(default)]
+    pub write_api_reachable: Option<bool>,
+    /// Reports only explicitly observed write-transport authentication.
+    #[serde(default)]
+    pub write_authn_valid: Option<bool>,
+    /// Reports write permission only when independently established.
+    #[serde(default)]
+    pub write_authorization_valid: Option<bool>,
+    /// Reports selected read endpoint access, not write readiness.
+    #[serde(default)]
+    pub read_access_valid: Option<bool>,
+    /// Reports signing-key metadata validity, not artifact signature verification.
+    #[serde(default)]
+    pub signing_keys_valid: Option<bool>,
 }
 
 /// Contains public Niks3 discovery metadata; discovery does not save a cache.

@@ -8,9 +8,9 @@
   tomlFormat = pkgs.formats.toml {};
   postgres_pkg = config.services.postgresql.package;
   # INVARIANT: The Nix CLI and nix-eval-jobs must use the same Nix library
-  # version. The evaluator package exposes its matching CLI through this
-  # passthru attribute.
-  evaluatorNix = pkgs.nix-eval-jobs.nix;
+  # version. The CF package exports that matching CLI with the native netrc
+  # authority guard. Agent Basic reads must use this CLI before other PATH tools.
+  evaluatorNix = pkgs.crystal-forge.default.evaluatorNix;
 
   # Recursively remove any null values so TOML generation won’t choke.
   stripNulls = v:
@@ -2973,6 +2973,7 @@ in {
       after = lib.optional cfg.server.enable "crystal-forge-server.service";
 
       path = with pkgs; [
+        evaluatorNix
         nix-eval-jobs
         nix-fast-build
         coreutils
@@ -2991,7 +2992,6 @@ in {
         gnugrep
         findutils
         vulnix
-        nix
         nixos-rebuild
         git
       ];

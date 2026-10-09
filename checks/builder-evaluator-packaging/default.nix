@@ -162,6 +162,8 @@ in
   # INVARIANT: Both colocated services and the default builder package use the
   # Nix CLI linked to nix-eval-jobs. A package wrapper must not shadow this CLI.
   assert moduleConfig.services.crystal-forge.build.package == componentBuilder;
+  assert evaluatorNix == packages.evaluatorNix;
+  assert evaluatorNix.version == "2.34.8";
   assert lib.elem evaluatorNix moduleConfig.systemd.services.crystal-forge-builder.path;
   assert lib.elem evaluatorNix moduleConfig.systemd.services.crystal-forge-server.path;
   assert builtins.head moduleConfig.systemd.services.crystal-forge-builder.path == evaluatorNix;
@@ -186,6 +188,14 @@ in
       test -x "$evaluator_bin/nix"
       test -x "$evaluator_bin/nix-store"
       test -x "$scanner_bin/vulnix"
+
+      # Feature detection must require a registered setting: upstream Nix may
+      # merely warn and continue when --option names an unknown setting.
+      "$evaluator_bin/nix" --extra-experimental-features nix-command \
+        config show --json | jq -e \
+        'has("cf-netrc-authority") and .["cf-netrc-authority"].value == ""'
+      test -z "$("$evaluator_bin/nix" --extra-experimental-features nix-command \
+        config show cf-netrc-authority)"
 
       grep -Fq "$evaluator_bin" "$component_wrapper"
       grep -Fq "$scanner_bin" "$component_wrapper"

@@ -4231,9 +4231,20 @@ async fn probe_cache_read(
     let result = tokio::spawn(async move {
         let expires = tokio::time::Instant::now() + deadline;
         let prepared = if destination.cache_type == "Niks3" {
+            // SECURITY: Establish native support before creating secret files
+            // or the verification store, using the exact read executable.
+            let features = if matches!(auth, cf_protocol::cache::CacheReadAuth::Basic { .. }) {
+                probe_nix_read_features(&program)
+                    .await
+                    .map_err(|_| StatusCode::CONFLICT)?
+            } else {
+                cf_config::cache_credentials::NixReadFeatures::default()
+            };
             Some(
-                cf_config::cache_credentials::PreparedCacheRead::new(&url, &keys, &auth)
-                    .map_err(|_| StatusCode::CONFLICT)?,
+                cf_config::cache_credentials::PreparedCacheRead::new_with_nix_features(
+                    &url, &keys, &auth, &features,
+                )
+                .map_err(|_| StatusCode::CONFLICT)?,
             )
         } else {
             None
@@ -4245,7 +4256,7 @@ async fn probe_cache_read(
                     .prefix("cf-cache-verify-")
                     .permissions(std::fs::Permissions::from_mode(0o700))
                     .tempdir()
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+                    .map_err(|error| verification_io_error("create-store", &error))?,
             )
         } else {
             None
@@ -4336,8 +4347,10 @@ async fn dispose_verification_store(root: tempfile::TempDir) -> Result<(), Statu
             }
             Ok(())
         }
-        writable_directories(root.path()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        root.close().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        writable_directories(root.path())
+            .map_err(|error| verification_io_error("prepare-store-cleanup", &error))?;
+        root.close()
+            .map_err(|error| verification_io_error("close-store", &error))
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -4390,6 +4403,76 @@ fn configure_niks3_verification_read(
     if let Some(ca) = &read.ca_certificate_path {
         command.env("NIX_SSL_CERT_FILE", ca);
     }
+    read.apply_to_nix_command(command.as_std_mut());
+}
+
+/// Probes the actual read executable without exposing runtime configuration.
+///
+/// Callers must use the same executable and PATH for the subsequent read.
+/// Captures at most 2 MiB of settings and 64 KiB of private diagnostics, with a
+/// ten-second deadline. No credential files or network reads are prepared here.
+///
+/// # Errors
+/// Returns a static error for failed, oversized, timed-out or malformed probes.
+/// Valid settings from an unpatched runtime report absent guard support.
+pub(crate) async fn probe_nix_read_features(
+    program: &std::ffi::OsStr,
+) -> anyhow::Result<cf_config::cache_credentials::NixReadFeatures> {
+    use tokio::io::AsyncReadExt;
+    const MAX_SETTINGS: u64 = 2 * 1024 * 1024;
+    let mut command = Command::new(program);
+    command.args([
+        "--extra-experimental-features",
+        "nix-command",
+        "config",
+        "show",
+        "--json",
+    ]);
+    let mut child = command
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|_| anyhow::anyhow!("Nix runtime feature probe failed"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Missing Nix probe stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Missing Nix probe stderr"))?;
+    let capture = async {
+        let mut settings = Vec::new();
+        let mut diagnostics = Vec::new();
+        let mut stdout = stdout.take(MAX_SETTINGS + 1);
+        let mut stderr = stderr.take(64 * 1024 + 1);
+        let (out, err) = tokio::join!(
+            stdout.read_to_end(&mut settings),
+            stderr.read_to_end(&mut diagnostics),
+        );
+        if out.is_err()
+            || err.is_err()
+            || settings.len() > MAX_SETTINGS as usize
+            || diagnostics.len() > 64 * 1024
+        {
+            anyhow::bail!("Nix runtime feature probe exceeded capture limits");
+        }
+        let status = child
+            .wait()
+            .await
+            .map_err(|_| anyhow::anyhow!("Nix runtime feature probe failed"))?;
+        anyhow::ensure!(status.success(), "Nix runtime feature probe failed");
+        cf_config::cache_credentials::NixReadFeatures::from_settings_json(&settings)
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(10), capture).await {
+        Ok(Ok(features)) => Ok(features),
+        _ => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            anyhow::bail!("Nix runtime feature probe failed");
+        }
+    }
 }
 
 async fn wait_cache_verification_command(
@@ -4413,13 +4496,13 @@ async fn wait_cache_verification_command(
     isolate(&mut command);
     let child = command
         .spawn()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|error| verification_io_error("spawn-read", &error))?;
     let mut child = ScannerProcessGroup::new(child, "cache publication verification")
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     tokio::select! {
         status = child.wait() => match status {
             Ok(status) => { child.disarm(); Ok(status) },
-            Err(_) => { child.terminate().await; Err(StatusCode::INTERNAL_SERVER_ERROR) },
+            Err(error) => { child.terminate().await; Err(verification_io_error("wait-read", &error)) },
         },
         _ = tokio::time::sleep_until(expires) => {
             child.terminate().await;
@@ -4430,6 +4513,20 @@ async fn wait_cache_verification_command(
             Err(StatusCode::CONFLICT)
         },
     }
+}
+
+// SECURITY: Report only the operation stage and OS error category/code. Error
+// text, commands, paths and child diagnostics can contain private configuration.
+// Infrastructure failures remain 500; read rejection/deadline remains 409.
+fn verification_io_error(stage: &'static str, error: &std::io::Error) -> StatusCode {
+    #[cfg(test)]
+    eprintln!(
+        "cache verification I/O failure: stage={stage} kind={:?} errno={:?}",
+        error.kind(),
+        error.raw_os_error()
+    );
+    tracing::warn!(stage, kind = ?error.kind(), errno = ?error.raw_os_error(), "Cache verification I/O failure");
+    StatusCode::INTERNAL_SERVER_ERROR
 }
 
 // CONCURRENCY: Do not poll a success transition until external publication
@@ -6470,6 +6567,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn niks3_basic_probe_applies_guard_to_path_info_and_copy() {
+        use crate::models::cache_destination::CacheDestination;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("nix");
+        std::fs::write(
+            &program,
+            r#"#!/bin/sh
+set -eu
+if test "$1" = --extra-experimental-features; then
+    test "$2" = nix-command; test "$3" = config; test "$4" = show; test "$5" = --json
+    printf '%s' '{"cf-netrc-authority":{"value":""}}'
+    exit 0
+fi
+operation=$1
+case "$*" in *private-user*|*private-password*) exit 24 ;; esac
+case "$operation" in
+path-info) test "$2" = --store; test "$3" = https://read.example/; shift 4 ;;
+copy)
+    test "$2" = --from; test "$3" = https://read.example/; test "$4" = --to
+    mkdir -p "$HOME/nix/store"; touch "$HOME/${6#/}"; shift 6 ;;
+*) exit 10 ;;
+esac
+authority=false; netrc=; sigs=false; keys=false
+while test "$#" -gt 0; do
+    case "$1" in
+    --refresh) shift ;;
+    --extra-experimental-features) shift 2 ;;
+    --option)
+        case "$2" in
+        cf-netrc-authority) test "$3" = https://read.example; authority=true ;;
+        netrc-file) netrc=$3 ;;
+        require-sigs) test "$3" = true; sigs=true ;;
+        trusted-public-keys) test -n "$3"; keys=true ;;
+        esac
+        shift 3 ;;
+    *) exit 11 ;;
+    esac
+done
+test "$authority" = true; test "$sigs" = true; test "$keys" = true
+test -f "$netrc"; test "$(stat -c %a "$netrc")" = 600
+test "$(stat -c %a "${netrc%/*}")" = 700
+test -z "${NIX_CONFIG:-}"; test -z "${NIKS3_AUTH_TOKEN_FILE:-}"
+printf '%s' "${netrc%/*}" > "${0%/*}/$operation-credentials"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let destination = CacheDestination {
+            cache_type: "Niks3".into(),
+            push_to: Some("https://read.example".into()),
+            niks3_public_keys: vec![crate::models::cache_destination::nix_public_key_fixture(
+                "one",
+            )],
+            niks3_read_auth_mode: Some("basic".into()),
+            niks3_read_basic_username: Some("private-user".into()),
+            niks3_read_basic_password: Some(" private-password ".into()),
+            ..Default::default()
+        };
+        assert!(
+            super::probe_cache_read(
+                destination.clone(),
+                "/nix/store/output".into(),
+                program.clone().into_os_string(),
+                std::time::Duration::from_secs(5)
+            )
+            .await
+            .unwrap()
+            .success()
+        );
+        let path_info = std::fs::read_to_string(dir.path().join("path-info-credentials")).unwrap();
+        let copy = std::fs::read_to_string(dir.path().join("copy-credentials")).unwrap();
+        assert_eq!(path_info, copy);
+        assert!(!std::path::Path::new(&copy).exists());
+        // Unsupported runtimes cannot proceed to either network read.
+        std::fs::remove_file(dir.path().join("path-info-credentials")).unwrap();
+        std::fs::remove_file(dir.path().join("copy-credentials")).unwrap();
+        std::fs::write(
+            &program,
+            "#!/bin/sh\ntest \"$1\" = --extra-experimental-features || exit 23\nprintf '%s' '{}'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            super::probe_cache_read(
+                destination,
+                "/nix/store/output".into(),
+                program.into_os_string(),
+                std::time::Duration::from_secs(5)
+            )
+            .await
+            .unwrap_err(),
+            StatusCode::CONFLICT
+        );
+        assert!(!dir.path().join("path-info-credentials").exists());
+        assert!(!dir.path().join("copy-credentials").exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_runtime_probe_rejects_private_invalid_or_oversized_output() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("nix");
+        for script in [
+            "printf '%s' '{\"cf-netrc-authority\":{\"value\":false}}'",
+            "printf 'private-settings' >&2; exit 7",
+            "printf 'private-settings'",
+            "dd if=/dev/zero bs=1048576 count=3 2>/dev/null",
+        ] {
+            std::fs::write(&program, format!("#!/bin/sh\n{script}\n")).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let error = super::probe_nix_read_features(program.as_os_str())
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(!error.contains("private-settings"));
+        }
+    }
+
+    #[tokio::test]
     async fn niks3_completion_probe_uses_independent_read_plane() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
@@ -6504,9 +6720,10 @@ while test "$#" -gt 0; do
     --extra-experimental-features) test "$2" = nix-command; shift 2 ;;
     --option)
         case "$2" in
-        trusted-public-keys) test "$3" = '{}'; keys=true ;;
+        trusted-public-keys) test "$3" = '{}'; expected_keys=$3; keys=true ;;
         require-sigs) test "$3" = true; signatures=true ;;
-        extra-trusted-public-keys|substituters) test -z "$3" ;;
+        extra-trusted-public-keys) test -z "$3" || test "$3" = "$expected_keys" ;;
+        substituters) test -z "$3" ;;
         narinfo-cache-positive-ttl|narinfo-cache-negative-ttl) test "$3" = 0 ;;
         *) exit 14 ;;
         esac

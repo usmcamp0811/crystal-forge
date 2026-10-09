@@ -11,6 +11,8 @@ let
   # INVARIANT: Verified-source builders must execute the Nix CLI linked to the
   # nix-eval-jobs evaluator. Exact evaluator fingerprints are a security
   # boundary, so an unrelated pkgs.nix must not precede this package in PATH.
+  # The CF overlay binds this evaluator and CLI to the same authority-guarded
+  # Nix libraries. The guard remains disabled outside Basic read children.
   evaluatorNix = pkgs.nix-eval-jobs.nix;
   # Niks3 shells out to Nix and its wrapper prepends that dependency to PATH.
   # Keep the pinned Niks3 version, but bind its CLI to the evaluator's Nix.
@@ -512,7 +514,7 @@ let
   };
 
 in crystal-forge // {
-  inherit niks3;
+  inherit niks3 evaluatorNix;
   inherit agent server builder cf-keygen test-agent migrate;
   # Component derivations. Internal consumers such as NixOS module services,
   # checks, and test helpers must reference these directly rather than the

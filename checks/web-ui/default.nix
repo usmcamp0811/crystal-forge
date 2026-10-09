@@ -26,6 +26,7 @@
 , runExportValidation ? true
 , updateVisualBaselines ? builtins.getEnv "CF_UI_UPDATE_BASELINES" == "1"
 , playwrightResultTimeout ? 2700
+, productionWritePki ? null
 , ...
 }:
 let
@@ -46,6 +47,27 @@ let
   };
   cacheFixturePython = pkgs.python3.withPackages (p: [p.requests p.psycopg2 p.cryptography]);
   cacheFixtureDriver = ./native-cache-fixture.py;
+  # The separate topology owner supplies role-separated fixture PKI. Do not
+  # reuse the legacy single CA: that would make the trust-boundary proof vacuous.
+  productionCredentials = lib.crystal-forge.makeNiks3TestCredentials {
+    inherit pkgs;
+    strictTls = true;
+    productionPki = true;
+  };
+  productionPki = if productionWritePki != null then productionWritePki else productionCredentials.productionWritePki;
+  # Test-only remote capability. Source/vendor hashes are from Nixpkgs commit
+  # c27cdad491a991b11ed731760aa2ef8db0cb0410; the production package stays 1.6.
+  statsNiks3 = pkgs.buildGoModule {
+    pname = "web-ui-native-niks3-stats-server";
+    version = "1.8.0";
+    src = pkgs.fetchFromGitHub {
+      owner = "Mic92"; repo = "niks3"; rev = "61501c4223ec3ad804c20625128cab1155166041";
+      hash = "sha256-86afR/fMjLRLmBEMFA6ow6SRI9T5Qe83l0em/FciW2g=";
+    };
+    vendorHash = "sha256-qkB99S/9fmSk5G9uHyQF/z+joi9JACIJWaHMrIo4ziU=";
+    subPackages = ["cmd/niks3-server"];
+    ldflags = ["-s"];
+  };
   # Publication belongs to fixture setup, never to Test. This tiny store output
   # lets the real CLI prove the private cache already supports uploads.
   atticPublicationOutput = pkgs.runCommand "web-ui-attic-publication-fixture" {} ''
@@ -55,6 +77,10 @@ let
   atticObserverShare = {
     source = "/tmp/cf-web-ui-attic-observer";
     target = "/run/cf-attic-observer";
+  };
+  niks3ObserverShare = {
+    source = "/tmp/cf-web-ui-niks3-observer";
+    target = "/run/cf-niks3-observer";
   };
   # TLS terminates on the backend's own VM. Preserve the configured host and
   # port: Garage verifies both as part of the native SigV4 signature.
@@ -113,6 +139,118 @@ let
       credentials = cacheCredentials;
       cacheUrl = "https://cache:5752";
     })];
+    virtualisation.sharedDirectories.niks3Observer = niks3ObserverShare;
+    networking.extraHosts = "127.0.0.1 read-cache.test s3-cache.test";
+    security.pki.certificateFiles = ["${productionPki}/s3-ca.crt"];
+    environment.etc."cache-fixture-production-pki".source = productionPki;
+    systemd.services.nginx.serviceConfig.ReadWritePaths = ["/run/cf-niks3-observer"];
+    # Metadata comes from the actual pinned native server. This instance shares
+    # the fixture storage/signing keys but advertises the independent public
+    # read URL. The UI check performs no upload through this write ingress.
+    systemd.services.niks3-production-discovery = {
+      wantedBy = ["multi-user.target"];
+      after = ["niks3.service" "niks3-web-ui-db-owners.service"];
+      requires = ["niks3.service" "niks3-web-ui-db-owners.service"];
+      serviceConfig = {
+        User = "niks3";
+        Group = "niks3";
+        ExecStart = lib.concatStringsSep " " [
+          "${pkgs.crystal-forge.default.niks3}/bin/niks3-server"
+          "--db 'dbname=niks3-web-ui-discovery user=niks3 host=/run/postgresql'"
+          "--http-addr 127.0.0.1:5755"
+          "--s3-endpoint cache:3900 --s3-use-ssl=false --s3-region garage --s3-bucket nix-cache"
+          "--s3-access-key-path /run/niks3/access-key --s3-secret-key-path /run/niks3/secret-key"
+          "--api-token-path /run/niks3/token"
+          "--sign-key-path /run/niks3/signing-0.key --sign-key-path /run/niks3/signing-1.key"
+          "--tls-cert ${productionPki}/api-server.crt --tls-key ${productionPki}/api-server.key"
+          "--tls-client-ca ${productionPki}/client-ca.crt --mtls-bound-subject CN=write"
+          "--enable-read-proxy --cache-url https://cache:5753"
+        ];
+      };
+    };
+    # A distinct native instance advertises the Basic read ingress. Keeping the
+    # public P0 instance separate preserves its existing discovery contract.
+    systemd.services.niks3-basic-discovery = {
+      wantedBy = ["multi-user.target"];
+      after = ["niks3.service" "niks3-web-ui-db-owners.service"];
+      requires = ["niks3.service" "niks3-web-ui-db-owners.service"];
+      serviceConfig = {
+        User = "niks3";
+        Group = "niks3";
+        ExecStart = lib.concatStringsSep " " [
+          "${pkgs.crystal-forge.default.niks3}/bin/niks3-server"
+          "--db 'dbname=niks3-web-ui-basic user=niks3 host=/run/postgresql'"
+          "--http-addr 127.0.0.1:5759"
+          "--s3-endpoint cache:3900 --s3-use-ssl=false --s3-region garage --s3-bucket nix-cache"
+          "--s3-access-key-path /run/niks3/access-key --s3-secret-key-path /run/niks3/secret-key"
+          "--api-token-path /run/niks3/token"
+          "--sign-key-path ${productionPki}/signing-0.key --sign-key-path ${productionPki}/signing-1.key"
+          "--tls-cert ${productionPki}/api-server.crt --tls-key ${productionPki}/api-server.key"
+          "--tls-client-ca ${productionPki}/client-ca.crt --mtls-bound-subject CN=write"
+          "--enable-read-proxy --cache-url https://read-cache.test:5757"
+        ];
+      };
+    };
+    services.postgresql = {
+      # Each native process owns its migrations. Sharing the helper's database
+      # races Goose's initial sequence creation during parallel VM startup.
+      ensureDatabases = ["niks3-metrics" "niks3-web-ui-discovery" "niks3-web-ui-basic"];
+      ensureUsers = [{name = "niks3-metrics"; ensureDBOwnership = true;}];
+    };
+    systemd.services.niks3-web-ui-db-owners = {
+      after = ["postgresql.service"];
+      requires = ["postgresql.service"];
+      serviceConfig = {Type = "oneshot"; RemainAfterExit = true; User = "postgres";};
+      script = ''
+        ${pkgs.postgresql}/bin/psql -v ON_ERROR_STOP=1 -d postgres -c 'ALTER DATABASE "niks3-web-ui-discovery" OWNER TO niks3'
+        ${pkgs.postgresql}/bin/psql -v ON_ERROR_STOP=1 -d postgres -c 'ALTER DATABASE "niks3-web-ui-basic" OWNER TO niks3'
+      '';
+    };
+    users.users.niks3-metrics = {isSystemUser = true; group = "niks3-metrics";};
+    users.groups.niks3-metrics = {};
+    systemd.services.niks3-metrics-secrets = {
+      before = ["niks3-metrics.service"];
+      requiredBy = ["niks3-metrics.service"];
+      serviceConfig = {Type = "oneshot"; RemainAfterExit = true; User = "niks3-metrics"; RuntimeDirectory = "niks3-metrics"; RuntimeDirectoryMode = "0700";};
+      script = ''
+        umask 077
+        printf '%s' GK0123456789abcdef01234567 > /run/niks3-metrics/access-key
+        printf '%s' 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef > /run/niks3-metrics/secret-key
+        ${cacheFixturePython}/bin/python -c 'import secrets; from pathlib import Path; Path("/run/niks3-metrics/token").write_text(secrets.token_hex(32))'
+      '';
+    };
+    systemd.services.niks3-metrics-bucket = {
+      after = ["garage-setup.service"];
+      requires = ["garage-setup.service"];
+      before = ["niks3-metrics.service"];
+      requiredBy = ["niks3-metrics.service"];
+      path = [pkgs.garage];
+      serviceConfig = {Type = "oneshot"; RemainAfterExit = true;};
+      script = ''
+        garage bucket create web-ui-metrics-private >/dev/null
+        garage bucket allow --read --write web-ui-metrics-private --key GK0123456789abcdef01234567 >/dev/null
+      '';
+    };
+    systemd.services.niks3-metrics = {
+      wantedBy = ["multi-user.target"];
+      after = ["postgresql.service" "nginx.service" "niks3-metrics-bucket.service" "niks3-metrics-secrets.service"];
+      requires = ["postgresql.service" "nginx.service" "niks3-metrics-bucket.service" "niks3-metrics-secrets.service"];
+      serviceConfig = {
+        User = "niks3-metrics";
+        ExecStart = lib.concatStringsSep " " [
+          "${statsNiks3}/bin/niks3-server"
+          "--db 'dbname=niks3-metrics user=niks3-metrics host=/run/postgresql'"
+          "--http-addr 127.0.0.1:5761"
+          "--s3-endpoint s3-cache.test:5901 --s3-use-ssl=true --s3-region garage --s3-bucket web-ui-metrics-private"
+          "--s3-access-key-path /run/niks3-metrics/access-key --s3-secret-key-path /run/niks3-metrics/secret-key"
+          "--api-token-path /run/niks3-metrics/token"
+          "--sign-key-path ${productionPki}/signing-0.key --sign-key-path ${productionPki}/signing-1.key"
+          "--tls-cert ${productionPki}/api-server.crt --tls-key ${productionPki}/api-server.key"
+          "--tls-client-ca ${productionPki}/client-ca.crt --mtls-bound-subject CN=write"
+          "--enable-read-proxy --cache-url https://cache:5753"
+        ];
+      };
+    };
     services.nginx = lib.recursiveUpdate (fixtureTls "http://127.0.0.1:3900") {
       commonHttpConfig = ''
         map $http_authorization $cf_cache_auth_present {
@@ -122,7 +260,159 @@ let
         # Never log Authorization, userinfo, or query strings. Route counters and
         # header presence are sufficient to prove non-forwarding/non-replay.
         log_format cf_cache_probe '$uri status=$status auth=$cf_cache_auth_present';
+        map $ssl_client_verify $cf_niks3_client_present { NONE absent; default present; }
+        log_format cf_niks3_discovery '$request_method $uri status=$status client=$cf_niks3_client_present auth=$cf_cache_auth_present';
       '';
+      virtualHosts.production-write-discovery = {
+        addSSL = true;
+        listen = [{addr = "0.0.0.0"; port = 5754; ssl = true;}];
+        sslCertificate = "${productionPki}/api-server.crt";
+        sslCertificateKey = "${productionPki}/api-server.key";
+        extraConfig = ''
+          ssl_client_certificate ${productionPki}/client-ca.crt;
+          ssl_verify_client on;
+          if ($ssl_client_s_dn != "CN=write") { return 403; }
+          access_log /run/cf-niks3-observer/production.log cf_niks3_discovery;
+        '';
+        locations."/api/" = {
+          proxyPass = "https://127.0.0.1:5755";
+          extraConfig = ''
+            limit_except GET { deny all; }
+            proxy_ssl_verify on;
+            proxy_ssl_trusted_certificate ${productionPki}/api-ca.crt;
+            proxy_ssl_name localhost;
+            proxy_ssl_certificate ${productionPki}/write-client.crt;
+            proxy_ssl_certificate_key ${productionPki}/write-client.key;
+            proxy_set_header X-SSL-Client-Verify "";
+          '';
+        };
+        locations."= /api/cache-stats" = {
+          proxyPass = "https://127.0.0.1:5755";
+          extraConfig = ''
+            limit_except GET { deny all; }
+            proxy_ssl_verify on;
+            proxy_ssl_trusted_certificate ${productionPki}/api-ca.crt;
+            proxy_ssl_name localhost;
+            proxy_ssl_certificate ${productionPki}/write-client.crt;
+            proxy_ssl_certificate_key ${productionPki}/write-client.key;
+            access_log /run/cf-niks3-observer/metrics-v16.log cf_niks3_discovery;
+          '';
+        };
+        locations."/".return = "403";
+      };
+      virtualHosts.native-stats-discovery = {
+        addSSL = true;
+        listen = [{addr = "0.0.0.0"; port = 5760; ssl = true;}];
+        sslCertificate = "${productionPki}/api-server.crt";
+        sslCertificateKey = "${productionPki}/api-server.key";
+        extraConfig = ''
+          ssl_client_certificate ${productionPki}/client-ca.crt;
+          ssl_verify_client on;
+          if ($ssl_client_s_dn != "CN=write") { return 403; }
+          access_log /run/cf-niks3-observer/metrics-v18.log cf_niks3_discovery;
+        '';
+        locations."/api/" = {
+          proxyPass = "https://127.0.0.1:5761";
+          extraConfig = ''
+            limit_except GET { deny all; }
+            proxy_ssl_verify on;
+            proxy_ssl_trusted_certificate ${productionPki}/api-ca.crt;
+            proxy_ssl_name localhost;
+            proxy_ssl_certificate ${productionPki}/write-client.crt;
+            proxy_ssl_certificate_key ${productionPki}/write-client.key;
+          '';
+        };
+        locations."/".return = "403";
+      };
+      virtualHosts.native-stats-storage = {
+        addSSL = true;
+        listen = [{addr = "0.0.0.0"; port = 5901; ssl = true;}];
+        serverName = "s3-cache.test";
+        sslCertificate = "${productionPki}/s3-server.crt";
+        sslCertificateKey = "${productionPki}/s3-server.key";
+        extraConfig = ''
+          access_log off;
+          if ($http_host != "s3-cache.test:5901") { return 400; }
+        '';
+        locations."/" = {
+          proxyPass = "http://127.0.0.1:3900";
+          extraConfig = ''proxy_set_header Host "s3-cache.test:5901";'';
+        };
+      };
+      virtualHosts.token-write-discovery = {
+        addSSL = true;
+        listen = [{addr = "0.0.0.0"; port = 5756; ssl = true;}];
+        sslCertificate = "${cacheCredentials}/server.crt";
+        sslCertificateKey = "${cacheCredentials}/server.key";
+        extraConfig = ''
+          ssl_client_certificate ${cacheCredentials}/ca.crt;
+          ssl_verify_client optional;
+          access_log /run/cf-niks3-observer/token.log cf_niks3_discovery;
+        '';
+        locations."/api/" = {
+          proxyPass = "https://127.0.0.1:5751";
+          extraConfig = ''
+            limit_except GET { deny all; }
+            proxy_ssl_verify on;
+            proxy_ssl_trusted_certificate ${cacheCredentials}/ca.crt;
+            proxy_ssl_name localhost;
+            proxy_set_header X-SSL-Client-Verify "";
+          '';
+        };
+        locations."/".return = "403";
+      };
+      virtualHosts.basic-write-discovery = {
+        addSSL = true;
+        listen = [{addr = "0.0.0.0"; port = 5758; ssl = true;}];
+        sslCertificate = "${productionPki}/api-server.crt";
+        sslCertificateKey = "${productionPki}/api-server.key";
+        extraConfig = ''
+          ssl_client_certificate ${productionPki}/client-ca.crt;
+          ssl_verify_client on;
+          if ($ssl_client_s_dn != "CN=write") { return 403; }
+          access_log /run/cf-niks3-observer/basic-write.log cf_niks3_discovery;
+        '';
+        locations."/api/" = {
+          proxyPass = "https://127.0.0.1:5759";
+          extraConfig = ''
+            limit_except GET { deny all; }
+            proxy_ssl_verify on;
+            proxy_ssl_trusted_certificate ${productionPki}/api-ca.crt;
+            proxy_ssl_name localhost;
+            proxy_ssl_certificate ${productionPki}/write-client.crt;
+            proxy_ssl_certificate_key ${productionPki}/write-client.key;
+            proxy_set_header X-SSL-Client-Verify "";
+          '';
+        };
+        locations."/".return = "403";
+      };
+      virtualHosts.basic-read-discovery = {
+        addSSL = true;
+        listen = [{addr = "0.0.0.0"; port = 5757; ssl = true;}];
+        serverName = "read-cache.test";
+        sslCertificate = "${productionPki}/read-server.crt";
+        sslCertificateKey = "${productionPki}/read-server.key";
+        extraConfig = ''
+          auth_basic "Native Niks3 read fixture";
+          auth_basic_user_file /run/cf-niks3-basic.htpasswd;
+          access_log /run/cf-niks3-observer/basic-read.log cf_niks3_discovery;
+        '';
+        locations."/api/".return = "403";
+        # A real redirect must be rejected by the read probe. The target shares
+        # this observer so a followed redirect is visible without header values.
+        locations."= /redirect/nix-cache-info".return = "302 https://read-cache.test:5757/redirect-target/nix-cache-info";
+        locations."/" = {
+          proxyPass = "https://127.0.0.1:5759";
+          extraConfig = ''
+            limit_except GET { deny all; }
+            proxy_ssl_verify on;
+            proxy_ssl_trusted_certificate ${productionPki}/api-ca.crt;
+            proxy_ssl_name localhost;
+            proxy_set_header Authorization "";
+            proxy_set_header X-SSL-Client-Verify "";
+          '';
+        };
+      };
       virtualHosts.http-credential-fixture = {
         addSSL = true;
         listen = [{addr = "0.0.0.0"; port = 9444; ssl = true;}];
@@ -331,6 +621,8 @@ in pkgs.testers.runNixOSTest {
     machine = {
       imports = [ inputs.self.nixosModules.crystal-forge ];
       virtualisation.sharedDirectories.atticObserver = lib.mkIf runNativeCacheFixtures atticObserverShare;
+      virtualisation.sharedDirectories.niks3Observer = lib.mkIf runNativeCacheFixtures niks3ObserverShare;
+      environment.etc."cache-fixture-production-pki".source = lib.mkIf runNativeCacheFixtures productionPki;
 
       virtualisation.memorySize = 20480; # 20GB for everything
       virtualisation.cores = 4;
@@ -378,7 +670,7 @@ in pkgs.testers.runNixOSTest {
         "server.pub".source = "${pubPath}/agent.pub";
         "cache-fixture-credentials".source = cacheCredentials;
       };
-      security.pki.certificateFiles = ["${cacheCredentials}/ca.crt"];
+      security.pki.certificateFiles = ["${cacheCredentials}/ca.crt" "${productionPki}/s3-ca.crt"];
 
       networking.firewall.allowedTCPPorts = [ CF_TEST_SERVER_PORT 5432 ];
 
@@ -528,6 +820,12 @@ in pkgs.testers.runNixOSTest {
         with open("/tmp/cf-web-ui-attic-observer/requests.log", "w"):
             pass
         os.chmod("/tmp/cf-web-ui-attic-observer/requests.log", 0o666)
+    if run_native_cache_fixtures:
+        os.makedirs("/tmp/cf-web-ui-niks3-observer", exist_ok=True)
+        for name in ("production.log", "token.log", "basic-write.log", "basic-read.log", "metrics-v16.log", "metrics-v18.log"):
+            with open("/tmp/cf-web-ui-niks3-observer/" + name, "w"):
+                pass
+            os.chmod("/tmp/cf-web-ui-niks3-observer/" + name, 0o666)
 
     machine.start()
     gitserver.start()
@@ -783,12 +1081,20 @@ in pkgs.testers.runNixOSTest {
         atticCache.wait_for_unit("nginx.service")
         atticCache.wait_for_open_port(9443)
         cache.wait_for_unit("niks3.service")
+        cache.wait_for_unit("niks3-production-discovery.service")
+        cache.wait_for_unit("niks3-basic-discovery.service")
+        cache.wait_for_unit("niks3-metrics.service")
         cache.wait_for_unit("garage-web-ui-key.service")
         cache.wait_for_unit("nginx.service")
         cache.wait_for_open_port(5751)
         cache.wait_for_open_port(5752)
         cache.wait_for_open_port(9443)
         cache.wait_for_open_port(9444)
+        cache.wait_for_open_port(5754)
+        cache.wait_for_open_port(5756)
+        cache.wait_for_open_port(5757)
+        cache.wait_for_open_port(5758)
+        cache.wait_for_open_port(5760)
         # Only file paths enter driver logs. JWTs never enter driver commands,
         # environment strings, screenshots or derivation outputs.
         atticCache.succeed("${cacheFixturePython}/bin/python ${cacheFixtureDriver} attic")
@@ -800,7 +1106,10 @@ in pkgs.testers.runNixOSTest {
             machine.copy_from_host(str(pathlib.Path(private_dir) / "cf-attic-fixture.json"), "/run/cf-attic-fixture.json")
             cache.copy_from_vm("/run/cf-http-fixture.json", private_dir)
             machine.copy_from_host(str(pathlib.Path(private_dir) / "cf-http-fixture.json"), "/run/cf-http-fixture.json")
+            cache.copy_from_vm("/run/cf-niks3-basic-read-fixture.json", private_dir)
+            machine.copy_from_host(str(pathlib.Path(private_dir) / "cf-niks3-basic-read-fixture.json"), "/run/cf-niks3-basic-read-fixture.json")
         machine.succeed("chmod 0600 /run/cf-attic-fixture.json")
+        machine.succeed("chmod 0600 /run/cf-http-fixture.json /run/cf-niks3-basic-read-fixture.json")
         machine.succeed("${cacheFixturePython}/bin/python ${cacheFixtureDriver} assemble")
         # Provider warmup is independent of row creation. The seed worker waits
         # for step25's retained-workflow marker, not merely login readiness, so
@@ -1302,9 +1611,11 @@ in pkgs.testers.runNixOSTest {
       cache = niks3FixtureNode;
       machine = {
         virtualisation.sharedDirectories.atticObserver = atticObserverShare;
+        virtualisation.sharedDirectories.niks3Observer = niks3ObserverShare;
         networking.firewall.enable = false;
-        security.pki.certificateFiles = ["${cacheCredentials}/ca.crt"];
+        security.pki.certificateFiles = ["${cacheCredentials}/ca.crt" "${productionPki}/s3-ca.crt"];
         environment.etc."cache-fixture-credentials".source = cacheCredentials;
+        environment.etc."cache-fixture-production-pki".source = productionPki;
         environment.systemPackages = [cacheFixturePython];
       };
     };
@@ -1316,17 +1627,30 @@ in pkgs.testers.runNixOSTest {
       with open("/tmp/cf-web-ui-attic-observer/requests.log", "w"):
           pass
       os.chmod("/tmp/cf-web-ui-attic-observer/requests.log", 0o666)
+      os.makedirs("/tmp/cf-web-ui-niks3-observer", exist_ok=True)
+      for name in ("production.log", "token.log", "basic-write.log", "basic-read.log", "metrics-v16.log", "metrics-v18.log"):
+          with open("/tmp/cf-web-ui-niks3-observer/" + name, "w"):
+              pass
+          os.chmod("/tmp/cf-web-ui-niks3-observer/" + name, 0o666)
       start_all()
       atticCache.wait_for_unit("attic-setup.service")
       atticCache.wait_for_unit("nginx.service")
       atticCache.wait_for_open_port(9443)
       cache.wait_for_unit("niks3.service")
+      cache.wait_for_unit("niks3-production-discovery.service")
+      cache.wait_for_unit("niks3-basic-discovery.service")
+      cache.wait_for_unit("niks3-metrics.service")
       cache.wait_for_unit("garage-web-ui-key.service")
       cache.wait_for_unit("nginx.service")
       cache.wait_for_open_port(5751)
       cache.wait_for_open_port(5752)
       cache.wait_for_open_port(9443)
       cache.wait_for_open_port(9444)
+      cache.wait_for_open_port(5754)
+      cache.wait_for_open_port(5756)
+      cache.wait_for_open_port(5757)
+      cache.wait_for_open_port(5758)
+      cache.wait_for_open_port(5760)
       atticCache.succeed("${cacheFixturePython}/bin/python ${cacheFixtureDriver} attic")
       with tempfile.TemporaryDirectory(prefix="cf-cache-private-") as private_dir:
           os.chmod(private_dir, 0o700)
@@ -1334,7 +1658,10 @@ in pkgs.testers.runNixOSTest {
           machine.copy_from_host(str(pathlib.Path(private_dir) / "cf-attic-fixture.json"), "/run/cf-attic-fixture.json")
           cache.copy_from_vm("/run/cf-http-fixture.json", private_dir)
           machine.copy_from_host(str(pathlib.Path(private_dir) / "cf-http-fixture.json"), "/run/cf-http-fixture.json")
+          cache.copy_from_vm("/run/cf-niks3-basic-read-fixture.json", private_dir)
+          machine.copy_from_host(str(pathlib.Path(private_dir) / "cf-niks3-basic-read-fixture.json"), "/run/cf-niks3-basic-read-fixture.json")
       machine.succeed("chmod 0600 /run/cf-attic-fixture.json")
+      machine.succeed("chmod 0600 /run/cf-http-fixture.json /run/cf-niks3-basic-read-fixture.json")
       machine.succeed("${cacheFixturePython}/bin/python ${cacheFixtureDriver} assemble")
       machine.succeed("test $(stat -c %a /run/cf-cache-credential-fixture.json) = 600")
       with tempfile.TemporaryDirectory(prefix="cf-cache-observer-") as observer_dir:
@@ -1342,6 +1669,9 @@ in pkgs.testers.runNixOSTest {
           machine.copy_from_host(str(pathlib.Path(observer_dir) / "cache-probe.log"), "/run/cf-cache-observer.log")
       machine.succeed("${cacheFixturePython}/bin/python ${cacheFixtureDriver} observe-native")
       machine.copy_from_vm("/run/cf-attic-public-proof.json", "native-attic-setup-proof.json")
+      machine.copy_from_vm("/run/cf-production-discovery-public-proof.json", "native-production-discovery-proof")
+      machine.copy_from_vm("/run/cf-niks3-basic-public-proof.json", "native-basic-read-proof")
+      machine.copy_from_vm("/run/cf-native-metrics-public-proof.json", "native-metrics-proof")
     '';
   };
 }

@@ -148,11 +148,11 @@ README: [checks/server-regressions/README.md](../../../checks/server-regressions
   Cargo integration test binaries and a curated list of `#[ignore]`d library
   tests (POA&M, policy, notification, composite AC3, STIG mapping, bundle
   baseline, and agent key rotation areas).
-  TASK-470 also runs 38 explicitly named ignored PostgreSQL tests and 14 named
+  TASK-470 also runs 40 explicitly named ignored PostgreSQL tests and 18 named
   non-ignored tests for cache scope, retained credentials, signed capabilities,
   direct-peer dispatch, and publication-backed reads. Each invocation uses
   `--exact --test-threads=1` and requires the named success line and exactly one
-  passed test with zero ignored tests. Only the 38 selected database tests use
+  passed test with zero ignored tests. Only the 40 selected database tests use
   `--ignored`; missing or renamed tests fail the check. The current README lists
   every qualified name. This gate does not run native Attic/S3 upload suites.
   The two added legacy Attic regressions are
@@ -192,6 +192,11 @@ README: [checks/server-regressions/README.md](../../../checks/server-regressions
   checks bounded, nonblocking coordination when readiness or a release reader
   is absent. Both tests are selected by the current runner; the coordination
   regression must fail at its deadline rather than hang Cargo.
+  Two ignored stored-discovery tests and four non-ignored discovery/certificate
+  tests cover transport projection, strict PEM, authorization/CSRF, retained and
+  replacement snapshots, mode changes, CA clearing, and non-mutation. The
+  inspected exact-name list does not select the new Basic-read or storage-metrics
+  test modules; source presence is not blocking-gate execution evidence.
 - **Why it exists.** `nix build .#server` runs only `--lib --bins` tests, and
   the `integration` check runs the Python suite, so these Rust integration
   targets would otherwise run nowhere. The list is curated on purpose and is
@@ -271,6 +276,16 @@ README: [checks/niks3-cache/README.md](../../../checks/niks3-cache/README.md).
   Matrix membership establishes neither check's pass for a particular commit.
 
 ## Web UI checks
+
+The expanded native Niks3 graph adds Basic reads and independent API/storage CA
+roots. Basic requires actual runtime `cf-netrc-authority` support and exact-origin,
+no-redirect protection. The two-root write case trusts API and presigned storage
+servers independently of the client certificate issuer. A separate native 1.8
+database/bucket tests stats; production packaging remains Niks3 1.6. Discovery
+and Test cannot prove write authorization from TLS acceptance. Earlier mTLS-only
+results do not verify this graph. The current native guard run failed its
+NAR-host expected-error assertion; final expanded native and browser verification
+remains pending owner evidence. No current-head CI pass is established here.
 
 ### `web-ui`
 

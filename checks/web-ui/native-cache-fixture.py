@@ -25,9 +25,16 @@ import requests
 
 
 CREDENTIALS = Path("/etc/cache-fixture-credentials")
+PRODUCTION_PKI = Path("/etc/cache-fixture-production-pki")
+NIKS3_OBSERVER = Path("/run/cf-niks3-observer/production.log")
+NIKS3_TOKEN_OBSERVER = Path("/run/cf-niks3-observer/token.log")
+NIKS3_BASIC_WRITE_OBSERVER = Path("/run/cf-niks3-observer/basic-write.log")
+NIKS3_BASIC_READ_OBSERVER = Path("/run/cf-niks3-observer/basic-read.log")
+METRICS_OBSERVERS = {"v16": Path("/run/cf-niks3-observer/metrics-v16.log"), "v18": Path("/run/cf-niks3-observer/metrics-v18.log")}
 FIXTURE = Path("/run/cf-cache-credential-fixture.json")
 ATTIC_FIXTURE = Path("/run/cf-attic-fixture.json")
 HTTP_FIXTURE = Path("/run/cf-http-fixture.json")
+NIKS3_BASIC_FIXTURE = Path("/run/cf-niks3-basic-read-fixture.json")
 LEGACY_TOKEN = Path("/run/cf-legacy-attic-token.json")
 SEED_REQUEST = Path("/run/cf-cache-seed-request.json")
 PHASE_REQUEST = Path("/run/cf-cache-phase-request.json")
@@ -103,6 +110,21 @@ def bootstrap_http():
     (metadata / "nix-cache-info").write_text("StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 40\n")
     protected_json(HTTP_FIXTURE, {"username": username, "password": password,
                                   "query_token": secrets.token_hex(24)})
+    # The native Niks3 read endpoint has its own runtime ACL. Both fields use
+    # legal whitespace so a successful request proves that no consumer trimmed
+    # the complete Basic pair. These values never appear in a URL or logs.
+    basic = {"username": "native reader", "password": "  native-basic-" + secrets.token_hex(24) + "  ",
+             "replacement_username": "replacement reader", "replacement_password": "  native-replacement-" + secrets.token_hex(24) + "  "}
+    descriptor = os.open("/run/cf-niks3-basic.htpasswd", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
+    with os.fdopen(descriptor, "w") as output:
+        for prefix in ("", "replacement_"):
+            digest = subprocess.run(["openssl", "passwd", "-apr1", "-stdin"],
+                                    input=basic[prefix + "password"].encode() + b"\n",
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=8, check=False)
+            assert digest.returncode == 0, "Native Basic ACL hashing failed"
+            output.write(basic[prefix + "username"] + ":" + digest.stdout.decode().strip() + "\n")
+    os.chown("/run/cf-niks3-basic.htpasswd", 0, grp.getgrnam("nginx").gr_gid)
+    protected_json(NIKS3_BASIC_FIXTURE, basic)
 
 
 def bootstrap_attic():
@@ -223,7 +245,7 @@ def assemble():
     hosts_link = Path("/etc/hosts")
     hosts_file = Path("/run/cache-fixture-hosts")
     hosts_file.write_text(hosts_link.read_text() + "\n"
-                          + socket.gethostbyname("cache") + " cache-alt\n")
+                          + socket.gethostbyname("cache") + " cache-alt read-cache.test\n")
     # NixOS installs /etc/hosts as a store symlink. Replace only the disposable
     # VM's link; never attempt to write its immutable store target.
     assert hosts_link.is_symlink(), "Expected isolated NixOS hosts symlink"
@@ -302,8 +324,12 @@ def assemble():
     assert response.status_code == 200, "Native Niks3 mTLS read failed"
     assert "StoreDir: /nix/store" in response.text, "Niks3 metadata mismatch"
     assert request(client, "GET", read_url,
-                   cert=(str(CREDENTIALS / "write.crt"), str(CREDENTIALS / "write.key"))).status_code == 403, \
+                    cert=(str(CREDENTIALS / "write.crt"), str(CREDENTIALS / "write.key"))).status_code == 403, \
         "Write subject must not authorize private reads"
+    STAGE = "native certificate-required Niks3 discovery"
+    production_mtls = production_discovery_fixture(client, niks3["public_keys"])
+    production_basic = production_basic_fixture(production_mtls)
+    metrics = native_metrics_fixture()
     nix = {"url": "https://cache:5753/nix-cache-info"}
     assert request(client, "GET", nix["url"]).status_code == 200, \
         "Public Nix HTTPS metadata must succeed without authentication"
@@ -323,6 +349,9 @@ def assemble():
     basic_public = {"url": basic_url, "authority_change_url": changed_url}
     protected_json(FIXTURE, {"version": 1, "attic": attic, "s3": s3,
                              "nix": nix, "niks3": niks3,
+                             "production_write_mtls": production_mtls,
+                             "production_basic": production_basic,
+                             "metrics": metrics,
                              "nix_basic": dict(basic_public), "http_basic": dict(basic_public),
                              "checkpoint": {"request_path": str(PHASE_REQUEST), "ack_path": str(PHASE_ACK)},
                              "seed_request_path": str(SEED_REQUEST),
@@ -332,6 +361,144 @@ def assemble():
                              }})
     ATTIC_FIXTURE.unlink()
     print("Native fixture ready: private Attic; two Garage SigV4 identities; Niks3 read mTLS; public Nix HTTPS; native HTTP Basic")
+
+
+def production_discovery_fixture(client, public_keys):
+    """Proves native ingress mTLS and separates API/S3 trust from client issuance.
+
+    This function makes GET requests only. Root B belongs in the CLI's server
+    trust bundle because uploads can use separately signed S3 hosts. Discovery
+    contacts only the API signed by root A; it cannot establish S3 or push access.
+    Root C issues client identities and is not server trust material.
+    """
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    api_ca = (PRODUCTION_PKI / "api-ca.crt").read_text()
+    s3_ca = (PRODUCTION_PKI / "s3-ca.crt").read_text()
+    client_ca = (PRODUCTION_PKI / "client-ca.crt").read_text()
+    certificates = [x509.load_pem_x509_certificate(value.encode()) for value in (api_ca, s3_ca, client_ca)]
+    roots = [cert.fingerprint(hashes.SHA256()) for cert in certificates]
+    assert len(set(roots)) == 3, "API, S3 and client issuer CAs must be distinct"
+    root_keys = [cert.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+                 for cert in certificates]
+    assert len(set(root_keys)) == 3, "Role-separated CAs must not share their signing key"
+    legacy = x509.load_pem_x509_certificate((CREDENTIALS / "ca.crt").read_bytes())
+    assert root_keys[0] != legacy.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo), \
+        "API root A must not be pretrusted through the legacy fixture CA"
+    bundle = PRODUCTION_PKI / "server-ca-bundle.pem"
+    bundle_certs = x509.load_pem_x509_certificates(bundle.read_bytes())
+    assert {cert.fingerprint(hashes.SHA256()) for cert in bundle_certs} == set(roots[:2]), \
+        "Server trust must contain API root A and S3 root B, not client issuer C"
+    server_url = "https://cache:5754"
+    url = server_url + "/api/cache-config"
+    identity = (str(PRODUCTION_PKI / "write-client.crt"), str(PRODUCTION_PKI / "write-client.key"))
+    replacement = (str(PRODUCTION_PKI / "replacement-write-client.crt"), str(PRODUCTION_PKI / "replacement-write-client.key"))
+    client_certificates = [x509.load_pem_x509_certificate(Path(cert[0]).read_bytes()) for cert in (identity, replacement)]
+    assert all(cert.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value == "write" for cert in client_certificates)
+    assert client_certificates[0].public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo) != client_certificates[1].public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo), \
+        "Replacement discovery must use a distinct client key"
+    native = session()
+    native.verify = str(bundle)
+    for cert in (identity, replacement):
+        response = request(native, "GET", url, cert=cert)
+        assert response.status_code == 200
+        body = response.json()
+        assert body["substituter_url"] == "https://cache:5753"
+        assert body["public_keys"] == public_keys
+    # Root A alone is sufficient for this GET. That success must never be
+    # described as proof that a presigned S3 server under root B is reachable.
+    native.verify = str(PRODUCTION_PKI / "api-ca.crt")
+    assert request(native, "GET", url, cert=identity).status_code == 200
+    native.verify = str(bundle)
+    failures = []
+    for cert in (None, (str(CREDENTIALS / "write.crt"), str(CREDENTIALS / "write.key"))):
+        try:
+            reply = request(native, "GET", url, **({"cert": cert} if cert else {}))
+            assert reply.status_code >= 400, "Discovery ingress must require an approved client certificate"
+            failures.append("rejected")
+        except requests.exceptions.SSLError:
+            failures.append("rejected")
+    assert failures == ["rejected", "rejected"]
+    # The pinned native server has no pins API. Do not substitute GC or an
+    # upload attempt for the deliberately untested write-authorization state.
+    pins = request(native, "GET", server_url + "/api/pins", cert=identity)
+    assert pins.status_code == 404, "Pinned Niks3 must not gain a fabricated pins API"
+    token_url = "https://cache:5756"
+    assert request(client, "GET", token_url + "/api/cache-config").status_code == 200
+    Path("/run/cf-production-discovery-public-proof.json").write_text(json.dumps({
+        "native_config_mtls": "passed", "replacement_client": "passed",
+        "missing_and_wrong_client": "rejected", "server_ca_roles": ["API_A", "S3_B"],
+        "client_issuer": "C", "api_root_alone_discovery": "passed",
+        "pins_api": "absent", "test_upload_count": 0, "write_authorization": "untested",
+        "full_s3_push": "owned_by_separate_topology_vm",
+    }))
+    return {
+        "server_url": server_url, "substituter_url": "https://cache:5753", "public_keys": public_keys,
+        "write_client_cert": (PRODUCTION_PKI / "write-client.crt").read_text(),
+        "write_client_key": (PRODUCTION_PKI / "write-client.key").read_text(),
+        "server_ca_bundle": bundle.read_text(),
+        "replacement_write_client_cert": (PRODUCTION_PKI / "replacement-write-client.crt").read_text(),
+        "replacement_write_client_key": (PRODUCTION_PKI / "replacement-write-client.key").read_text(),
+        "wrong_client_cert": (CREDENTIALS / "write.crt").read_text(),
+        "wrong_client_key": (CREDENTIALS / "write.key").read_text(),
+        "token_discovery_server_url": token_url,
+    }
+
+
+def production_basic_fixture(production_mtls):
+    """Checks native Basic reads over root-B TLS without uploading or redirecting."""
+    source = {key: value for key, value in production_mtls.items() if key not in ("id", "observer_baselines", "token_discovery_server_url")}
+    source.update(json.loads(NIKS3_BASIC_FIXTURE.read_text()))
+    source.update(server_url="https://cache:5758", substituter_url="https://read-cache.test:5757",
+                  public_keys=[(PRODUCTION_PKI / f"signing-{index}.pub").read_text().strip() for index in range(2)])
+    writer = session()
+    writer.verify = str(PRODUCTION_PKI / "server-ca-bundle.pem")
+    config = request(writer, "GET", source["server_url"] + "/api/cache-config",
+                     cert=(str(PRODUCTION_PKI / "write-client.crt"), str(PRODUCTION_PKI / "write-client.key")))
+    assert config.status_code == 200 and config.json()["substituter_url"] == source["substituter_url"]
+    assert config.json()["public_keys"] == source["public_keys"]
+    # Basic has no custom read-CA override. The browser/server VM system bundle
+    # explicitly trusts public root B, while API root A remains custom trust.
+    reader = session()
+    url = source["substituter_url"] + "/nix-cache-info"
+    for prefix in ("", "replacement_"):
+        response = request(reader, "GET", url, auth=(source[prefix + "username"], source[prefix + "password"]))
+        assert response.status_code == 200 and "StoreDir: /nix/store" in response.text
+    assert request(reader, "GET", url).status_code == 401
+    assert request(reader, "GET", url, auth=(source["username"], "incorrect-native-password")).status_code == 401
+    assert request(reader, "GET", url, auth=(source["username"], source["password"].strip())).status_code == 401, \
+        "The native ACL must discriminate trimmed Basic passwords"
+    Path("/run/cf-niks3-basic-public-proof.json").write_text(json.dumps({
+        "native_write_mtls_discovery": "passed", "native_basic_original_and_replacement": "passed",
+        "anonymous_wrong_and_trimmed_password": "rejected", "tls_server_trust": "system_root_B",
+        "url_userinfo": "absent", "setup_requests": "read_only", "upload_count": 0,
+    }))
+    return source
+
+
+def native_metrics_fixture():
+    """Checks genuine native stats capabilities without upload or enumeration."""
+    client = session()
+    client.verify = str(PRODUCTION_PKI / "server-ca-bundle.pem")
+    identity = (str(PRODUCTION_PKI / "write-client.crt"), str(PRODUCTION_PKI / "write-client.key"))
+    missing = request(client, "GET", "https://cache:5754/api/cache-stats", cert=identity)
+    assert missing.status_code == 404, "Production-pinned Niks3 1.6 must not fabricate stats"
+    available = request(client, "GET", "https://cache:5760/api/cache-stats", cert=identity)
+    assert available.status_code == 200, "Test-only native Niks3 1.8 stats endpoint must be available"
+    stats = available.json()
+    assert all(type(stats[field]) is int and stats[field] >= 0 for field in ("objects", "logical_bytes"))
+    # This isolated metrics database has no uploads. Its real empty totals are
+    # evidence from the native API, not placeholder values supplied by the test.
+    assert stats == {"objects": 0, "logical_bytes": 0}
+    Path("/run/cf-native-metrics-public-proof.json").write_text(json.dumps({
+        "production_package": "1.6.0", "native_v16_stats_status": 404,
+        "test_only_remote": "1.8.0", "native_v18_stats_status": 200,
+        "native_empty_objects": stats["objects"], "native_empty_logical_bytes": stats["logical_bytes"],
+        "uploads_or_inventory_enumeration": "not_performed",
+    }))
+    return {"v16": {"server_url": "https://cache:5754", "native_status": 404},
+            "v18": {"server_url": "https://cache:5760", "native_status": 200}}
 
 
 def snapshot_digest(raw, intentional_save=False):
@@ -677,6 +844,40 @@ def seed():
             "saved_name": "task470-retained-native-" + kind + "-roundtrip",
             "fields": field_hashes(destination_id),
         }
+    # Keep the original seven independently guarded. This extra disabled row
+    # exists only after the same late seed handshake and carries no read secret.
+    production = fixture["production_write_mtls"]
+    response = request(client, "POST", origin + "/api/v1/caches", json={
+        "name": "task470-retained-native-production-write-mtls", "cache_type": "Niks3", "enabled": False,
+        "environment_ids": scope, "push_to": production["substituter_url"],
+        "niks3_server_url": production["server_url"], "niks3_public_keys": production["public_keys"],
+        "niks3_write_auth_mode": "mtls", "niks3_write_client_cert": production["write_client_cert"],
+        "niks3_write_client_key": production["write_client_key"], "niks3_write_ca_cert": production["server_ca_bundle"],
+        "niks3_read_auth_mode": "none",
+    })
+    assert response.status_code in (200, 201), "Late native stored-mTLS discovery row creation failed"
+    production["id"] = response.json()["id"]
+    hashes[str(production["id"])] = {"row": snapshot(production["id"]).hex()}
+    # Enabled metrics rows belong to a dedicated empty environment. They can
+    # be observed by Admin without becoming destinations for seeded builds.
+    environment = request(client, "POST", origin + "/api/v1/environments", json={
+        "name": "task470-native-metrics-only", "description": "Disposable native stats observations",
+        "color_hex": "#7755aa", "is_active": True, "is_production": False,
+    })
+    assert environment.status_code in (200, 201)
+    fixture["metrics"]["environment_id"] = environment.json()["id"]
+    for version in ("v16", "v18"):
+        response = request(client, "POST", origin + "/api/v1/caches", json={
+            "name": "task470-retained-native-metrics-" + version, "cache_type": "Niks3", "enabled": True,
+            "environment_ids": [fixture["metrics"]["environment_id"]], "push_to": "https://cache:5753",
+            "niks3_server_url": fixture["metrics"][version]["server_url"], "niks3_public_keys": production["public_keys"],
+            "niks3_write_auth_mode": "mtls", "niks3_write_client_cert": production["write_client_cert"],
+            "niks3_write_client_key": production["write_client_key"], "niks3_write_ca_cert": production["server_ca_bundle"],
+            "niks3_read_auth_mode": "none",
+        })
+        assert response.status_code in (200, 201)
+        fixture["metrics"][version]["id"] = response.json()["id"]
+        hashes[str(response.json()["id"])] = {"row": snapshot(response.json()["id"]).hex()}
     # Legacy compatibility must not be manufactured by the current API writer.
     import psycopg2
     server = subprocess.run(["systemctl", "show", "crystal-forge-server.service", "-p", "MainPID", "--value"],
@@ -702,6 +903,14 @@ def seed():
     # request must be explained by an ID-scoped Test checkpoint, including
     # negative replacements. Cancel and Save must not contact the provider.
     fixture["attic"]["browser_observer_baseline"] = len(attic_requests())
+    production["observer_baselines"] = {
+        "production": len(NIKS3_OBSERVER.read_text().splitlines()),
+        "token": len(NIKS3_TOKEN_OBSERVER.read_text().splitlines()),
+    }
+    fixture["production_basic"]["observer_baselines"] = {
+        "write": len(NIKS3_BASIC_WRITE_OBSERVER.read_text().splitlines()),
+        "read": len(NIKS3_BASIC_READ_OBSERVER.read_text().splitlines()),
+    }
     fixture["seed_complete"] = True
     temporary = FIXTURE.with_suffix(".ready")
     protected_json(temporary, fixture)
@@ -725,6 +934,16 @@ def checkpoints():
     clones = {}
     attic_pending = None
     attic_probes = []
+    discovery_pending = None
+    discovery_probes = []
+    discovery_checked = False
+    basic_pending = None
+    basic_id = None
+    basic_baseline = None
+    basic_probes = []
+    basic_checked = False
+    metrics_pending = None
+    metrics_checked = False
     while time.monotonic() < deadline:
         if not PHASE_REQUEST.exists():
             time.sleep(0.1)
@@ -743,7 +962,123 @@ def checkpoints():
         fixture = json.loads(FIXTURE.read_text())
         source_ids = sorted(fixture[kind]["id"] for kind in SOURCE_KINDS)
         legacy_ids = sorted(value["id"] for value in fixture["legacy_attic"].values())
-        if phase == "attic-probe-before":
+        discovery_ids = sorted(source_ids + legacy_ids + [fixture["production_write_mtls"]["id"]])
+        if phase == "metrics-before":
+            assert metrics_pending is None and sorted(ids) == sorted(fixture["metrics"][version]["id"] for version in ("v16", "v18"))
+            metrics_pending = {value: snapshot(value) for value in ids}
+        elif phase == "metrics-after":
+            assert metrics_pending is not None and sorted(ids) == sorted(metrics_pending)
+            assert all(snapshot(value) == digest for value, digest in metrics_pending.items()), "Metrics UI changed a raw cache, usage or assignment field"
+            metrics_pending = None
+            metrics_checked = True
+        elif phase == "basic-added":
+            assert basic_id is None and len(ids) == 1 and ids[0] not in discovery_ids
+            basic_id = ids[0]
+            result = subprocess.run([
+                "sudo", "-u", "postgres", "psql", "-d", "crystal_forge", "-At", "-v", "ON_ERROR_STOP=1", "-c",
+                f"SELECT to_jsonb(cd) FROM cache_destinations cd WHERE id={basic_id}",
+            ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=8, check=False)
+            assert result.returncode == 0
+            row = json.loads(result.stdout)
+            assert row["name"].startswith("task470-native-basic-ui-") and row["cache_type"] == "Niks3"
+            assert row["niks3_read_auth_mode"] == "basic" and row["niks3_write_auth_mode"] == "mtls"
+            assert row["push_to"] == "https://read-cache.test:5757" and "@" not in row["push_to"]
+            assert all(row[field].startswith("enc:v1:") for field in ("niks3_read_basic_username", "niks3_read_basic_password", "niks3_write_client_key")), \
+                "UI Save must encrypt both Basic fields and the write private key"
+            basic_baseline = snapshot(basic_id)
+            fixture["production_basic"]["id"] = basic_id
+            protected_replace(FIXTURE, fixture)
+        elif phase == "basic-before":
+            assert basic_pending is None and ids == ([] if basic_id is None else [basic_id])
+            known = discovery_ids + ([] if basic_id is None else [basic_id])
+            basic_pending = {"rows": {value: snapshot(value) for value in known},
+                             "write": NIKS3_BASIC_WRITE_OBSERVER.read_text().splitlines(),
+                             "read": NIKS3_BASIC_READ_OBSERVER.read_text().splitlines()}
+        elif phase in ("basic-after-write", "basic-after-read", "basic-after-read-denied", "basic-after-read-redirect", "basic-after-discovery", "basic-after-cancel"):
+            assert basic_pending is not None and ids == ([] if basic_id is None else [basic_id])
+            assert all(snapshot(value) == digest for value, digest in basic_pending["rows"].items()), \
+                "Scoped Basic Test/Discover/Cancel mutated raw rows, ciphertext, timestamps or assignments"
+            deltas = {}
+            for name, log in (("write", NIKS3_BASIC_WRITE_OBSERVER), ("read", NIKS3_BASIC_READ_OBSERVER)):
+                rows = log.read_text().splitlines()
+                before = basic_pending[name]
+                assert rows[:len(before)] == before
+                deltas[name] = rows[len(before):]
+            if phase in ("basic-after-write", "basic-after-discovery"):
+                assert len(deltas["write"]) == 1 and deltas["write"][0].startswith("GET /api/cache-config status=200 ")
+                assert deltas["write"][0].endswith("auth=absent") and "client=present " in deltas["write"][0]
+                assert not deltas["read"], "Write Test or Discovery contacted the read plane"
+            elif phase in ("basic-after-read", "basic-after-read-denied"):
+                status = 401 if phase == "basic-after-read-denied" else 200
+                assert len(deltas["read"]) == 1 and deltas["read"][0].startswith(f"GET /nix-cache-info status={status} ")
+                assert deltas["read"][0].endswith("auth=present") and "client=absent " in deltas["read"][0]
+                assert not deltas["write"], "Read Test contacted the write API"
+            elif phase == "basic-after-read-redirect":
+                assert len(deltas["read"]) == 1 and deltas["read"][0].startswith("GET /redirect/nix-cache-info status=302 ")
+                assert deltas["read"][0].endswith("auth=present") and "client=absent " in deltas["read"][0]
+                assert not deltas["write"], "Read redirect contacted the write API"
+            else:
+                assert not deltas["write"] and not deltas["read"], "Cancel contacted a provider"
+            basic_probes.append({"phase": phase, "whole_raw_rows": len(basic_pending["rows"]),
+                                 "raw_immutability": "passed", "write_gets": len(deltas["write"]),
+                                 "read_gets": len(deltas["read"]), "upload_count": 0})
+            basic_pending = None
+        elif phase == "basic-complete":
+            assert basic_pending is None and not basic_checked and ids == [basic_id]
+            assert snapshot(basic_id) == basic_baseline, "Tests or replacement drafts changed the saved Basic ciphertext"
+            for required in ("basic-after-write", "basic-after-read", "basic-after-read-denied", "basic-after-read-redirect", "basic-after-discovery", "basic-after-cancel"):
+                assert any(probe["phase"] == required for probe in basic_probes)
+            basic_checked = True
+            print("Native five-rail Basic UI Save and scoped Test/Discover/Cancel proof passed: encrypted pair, isolated planes and exact raw immutability")
+        elif phase == "discovery-before":
+            assert discovery_pending is None and sorted(ids) == discovery_ids
+            discovery_pending = {
+                "rows": {value: snapshot(value) for value in ids},
+                "production": NIKS3_OBSERVER.read_text().splitlines(),
+                "token": NIKS3_TOKEN_OBSERVER.read_text().splitlines(),
+            }
+        elif phase in ("discovery-after", "discovery-token-after", "discovery-rejected", "discovery-cancel"):
+            assert discovery_pending is not None and sorted(ids) == discovery_ids
+            assert all(snapshot(value) == digest for value, digest in discovery_pending["rows"].items()), \
+                "Discovery/replacement/Cancel changed raw credentials, configuration, timestamps or assignments"
+            deltas = {}
+            for name, log in (("production", NIKS3_OBSERVER), ("token", NIKS3_TOKEN_OBSERVER)):
+                rows = log.read_text().splitlines()
+                before = discovery_pending[name]
+                assert rows[:len(before)] == before, "Native discovery observer was reset"
+                delta = rows[len(before):]
+                assert all(row.startswith("GET /api/cache-config ") and row.endswith("auth=absent") for row in delta), \
+                    "Discovery sent Authorization, uploaded, used pins or contacted another endpoint"
+                deltas[name] = delta
+            if phase == "discovery-after":
+                assert len(deltas["production"]) == 1 and "status=200 " in deltas["production"][0]
+                assert "client=present " in deltas["production"][0], "Production Discovery did not present its write identity"
+                assert not deltas["token"]
+            elif phase == "discovery-token-after":
+                assert len(deltas["token"]) == 1 and "status=200 " in deltas["token"][0]
+                assert "client=absent " in deltas["token"][0], "Token-mode Discovery borrowed a stored read client identity"
+                assert not deltas["production"]
+            elif phase == "discovery-rejected":
+                # TLS can reject before an HTTP record exists. If a GET reached
+                # nginx, it must be a failed cache-config GET with no Bearer.
+                assert len(deltas["production"]) <= 1 and not deltas["token"]
+                assert not any("status=200 " in row for row in deltas["production"])
+            else:
+                assert not deltas["production"] and not deltas["token"], "Cancel contacted native discovery"
+            discovery_probes.append({"phase": phase, "whole_raw_rows": len(ids),
+                                     "raw_immutability": "passed", "production_gets": len(deltas["production"]),
+                                     "token_gets": len(deltas["token"]), "authorization_forwarded": False, "upload_count": 0})
+            discovery_pending = None
+        elif phase == "discovery-complete":
+            assert discovery_pending is None and sorted(ids) == discovery_ids
+            assert not discovery_checked
+            assert sum(value["phase"] == "discovery-after" for value in discovery_probes) >= 4
+            assert any(value["phase"] == "discovery-token-after" for value in discovery_probes)
+            assert any(value["phase"] == "discovery-rejected" for value in discovery_probes)
+            assert any(value["phase"] == "discovery-cancel" for value in discovery_probes)
+            discovery_checked = True
+            print("Native Discovery/Cancel checkpoints passed: cert-required ingress, retained/replacement snapshots, no Bearer/uploads and exact raw rows")
+        elif phase == "attic-probe-before":
             assert attic_pending is None and len(ids) == 1
             assert ids[0] == fixture["attic"]["id"] or ids[0] in legacy_ids or clones.get(ids[0], {}).get("type") == "Attic"
             attic_pending = {"id": ids[0], "raw": snapshot(ids[0]), "requests": attic_requests()}
@@ -834,7 +1169,8 @@ def checkpoints():
                 raise AssertionError("Unexpected browser checkpoint phase")
         complete = (len(clones) == 2 and all(clone["stage"] == "retained" for clone in clones.values())
                     and legacy_checked and len(legacy_states) == 2
-                    and all(state["stage"] == "retained" for state in legacy_states.values()))
+                    and all(state["stage"] == "retained" for state in legacy_states.values())
+                    and discovery_checked and basic_checked and metrics_checked)
         if complete:
             observed = attic_requests()[fixture["attic"]["browser_observer_baseline"]:]
             assert len(observed) == sum(probe["native_get_count"] for probe in attic_probes), \
@@ -850,6 +1186,12 @@ def checkpoints():
                 "attic_server_base_probes": attic_probes,
                 "attic_test_upload_count": 0,
                 "attic_browser_uncheckpointed_requests": 0,
+                "niks3_discovery_checkpoints": discovery_probes,
+                "niks3_discovery_upload_count": 0,
+                "niks3_discovery_write_authorization": "untested",
+                "niks3_basic_ui_checkpoints": basic_probes,
+                "niks3_basic_ui_encrypted_save": "passed",
+                "native_metrics_ui_raw_immutability": "passed",
                 "replacement_clones": [{"cache_type": clone["type"],
                                         "pre_save_raw_immutability": "passed",
                                         "post_save_retained_raw_immutability": "passed"}
@@ -968,6 +1310,19 @@ def verify_api():
             deleted = request(client, "DELETE", url)
             assert deleted.status_code in (200, 204), "Native proof record cleanup failed"
     proof.extend(verify_http_api(client, origin, fixture))
+    proof.append({"cache_type": "Niks3", "write_mode": "mtls", "discovery": phase_proof["niks3_discovery_checkpoints"],
+                  "custom_server_ca_bundle": "API_A_and_S3_B", "client_issuer": "C",
+                  "read_credentials_sent_to_discovery": False, "authorization_forwarded": False,
+                  "upload_count": 0, "write_authorization": "untested"})
+    basic_id = fixture["production_basic"]["id"]
+    redacted = request(client, "GET", origin + f"/api/v1/caches/{basic_id}")
+    assert redacted.status_code == 200 and redacted.json()["niks3_read_basic_configured"] is True
+    assert not redacted.json().get("niks3_read_basic_username") and not redacted.json().get("niks3_read_basic_password")
+    assert not redacted.json().get("niks3_write_client_key")
+    proof.append({"cache_type": "Niks3", "read_mode": "basic", "five_rail_ui_save": phase_proof["niks3_basic_ui_encrypted_save"],
+                  "scoped_checkpoints": phase_proof["niks3_basic_ui_checkpoints"], "basic_pair_get_redacted": "passed",
+                  "password_whitespace": "preserved", "write_authorization": "untested", "test_upload_count": 0})
+    proof.extend(verify_metrics_api(client, origin, fixture))
     Path("/tmp/screenshots/native-cache-proof.json").write_text(json.dumps(proof, indent=2))
     for kind in ("attic", "s3", "nix", "niks3", "nix_basic", "http_basic", "legacy_query"):
         response = request(client, "DELETE", origin + f"/api/v1/caches/{fixture[kind]['id']}")
@@ -975,8 +1330,42 @@ def verify_api():
     for value in fixture["legacy_attic"].values():
         response = request(client, "DELETE", origin + f"/api/v1/caches/{value['id']}")
         assert response.status_code in (200, 204), "Direct legacy fixture cleanup failed"
+    response = request(client, "DELETE", origin + f"/api/v1/caches/{fixture['production_write_mtls']['id']}")
+    assert response.status_code in (200, 204), "Stored-mTLS discovery fixture cleanup failed"
+    for destination_id in [basic_id] + [fixture["metrics"][version]["id"] for version in ("v16", "v18")]:
+        assert request(client, "DELETE", origin + f"/api/v1/caches/{destination_id}").status_code in (200, 204)
+    assert request(client, "DELETE", origin + f"/api/v1/environments/{fixture['metrics']['environment_id']}").status_code in (200, 204)
     HTTP_FIXTURE.unlink()
     print("Native stored-ID API proof passed: Attic, S3, public Nix, Niks3 token/private and mTLS/private, Nix/Http Basic, legacy query retention")
+
+
+def verify_metrics_api(client, origin, fixture):
+    """Checks actual remote stats and whole-row non-mutation with safe totals."""
+    proof = []
+    for version in ("v16", "v18"):
+        destination_id = fixture["metrics"][version]["id"]
+        baseline = snapshot(destination_id)
+        before = METRICS_OBSERVERS[version].read_text().splitlines()
+        response = request(client, "GET", origin + f"/api/v1/caches/{destination_id}/metrics")
+        assert response.status_code == 200 and response.headers.get("Cache-Control") == "no-store"
+        metrics = response.json()
+        if version == "v16":
+            assert metrics["status"] == "unavailable" and metrics["reason_code"] == "endpoint_unavailable"
+            assert all(metrics[field] is None for field in ("storage_bytes", "object_count", "path_count", "measured_at")), \
+                "Missing stats must remain unavailable, never fabricated zeros"
+        else:
+            assert metrics["status"] == "available" and metrics["reason_code"] == "native_stats"
+            assert metrics["storage_bytes"] == 0 and metrics["object_count"] == 0
+            assert metrics["storage_bytes_basis"] == "reported_logical"
+            assert metrics["object_count_basis"] == "live_tracked_objects"
+            assert metrics["path_count"] is None and metrics["measured_at"]
+        assert snapshot(destination_id) == baseline, "Metrics changed a raw destination, usage or assignment field"
+        delta = METRICS_OBSERVERS[version].read_text().splitlines()[len(before):]
+        assert len(delta) == 1 and delta[0].startswith("GET /api/cache-stats ") and delta[0].endswith("auth=absent")
+        proof.append({"native_version": "1.6.0" if version == "v16" else "1.8.0", "status": metrics["status"],
+                      "complete_raw_immutability": "passed", "native_stats_get_count": 1,
+                      "write_authorization": "untested", "upload_count": 0})
+    return proof
 
 
 def assert_attic_result(result, stage, accessible):
@@ -1153,10 +1542,31 @@ def observe(native_only=False):
             assert correlated, "Every legacy row requires a private native request checkpoint"
             assert all(probe["native_get_count"] == (1 if value["token_expected"] else 0) for probe in correlated)
         assert phase["attic_test_upload_count"] == 0
+        discovery = phase["niks3_discovery_checkpoints"]
+        for name, log in (("production", NIKS3_OBSERVER), ("token", NIKS3_TOKEN_OBSERVER)):
+            rows = log.read_text().splitlines()[fixture["production_write_mtls"]["observer_baselines"][name]:]
+            assert len(rows) == sum(probe[name + "_gets"] for probe in discovery), \
+                "An uncheckpointed operation contacted native Discovery"
+            assert all(row.startswith("GET /api/cache-config ") and row.endswith("auth=absent") for row in rows), \
+                "Discovery uploaded, used pins or forwarded Authorization"
+        assert phase["niks3_discovery_upload_count"] == 0
+        for name, log in (("write", NIKS3_BASIC_WRITE_OBSERVER), ("read", NIKS3_BASIC_READ_OBSERVER)):
+            rows = log.read_text().splitlines()[fixture["production_basic"]["observer_baselines"][name]:]
+            probes = phase["niks3_basic_ui_checkpoints"]
+            assert len(rows) == sum(probe[name + "_gets"] for probe in probes)
+            expected = "GET /api/cache-config " if name == "write" else "GET /nix-cache-info "
+            assert all(row.startswith(expected) or name == "read" and row.startswith("GET /redirect/nix-cache-info ") for row in rows), \
+                "Scoped Basic UI probe uploaded or followed a redirect"
+        for log in METRICS_OBSERVERS.values():
+            assert all(row.startswith("GET /api/cache-stats ") and row.endswith("auth=absent") for row in log.read_text().splitlines()), \
+                "Metrics enumerated, uploaded or forwarded Authorization"
         result.update(legacy_attic_plain_native_auth="passed", legacy_attic_encrypted_native_auth="passed",
                       legacy_attic_missing_native_requests=0, attic_test_upload_count=0,
                       attic_browser_uncheckpointed_requests=0,
                       attic_probe_endpoint="_api/v1/cache-config/<cache>")
+        result.update(niks3_discovery_upload_count=0, niks3_discovery_authorization_forwarded=False,
+                      niks3_discovery_read_identity_borrowed=False, niks3_discovery_write_authorization="untested")
+        result.update(niks3_basic_ui_upload_count=0, niks3_basic_ui_plane_isolation="passed", native_metrics_read_only="passed")
         Path("/tmp/screenshots/native-http-observer-proof.json").write_text(json.dumps(result, indent=2))
     print("Native HTTP observer passed: no legacy query replay; no Basic Authorization at changed authority")
 

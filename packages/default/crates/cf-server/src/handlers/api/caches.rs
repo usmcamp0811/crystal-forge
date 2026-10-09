@@ -14,6 +14,7 @@ use url::Url;
 use crate::api::models::ApiError;
 use crate::config::ServerConfig;
 use crate::handlers::api::rbac::{authenticated_user_roles, require_admin as require_admin_user};
+use crate::models::cache_destination::Niks3ProbeScope;
 use crate::models::cache_destination::{
     CacheDestination, CreateCacheDestination, LEGACY_QUERY_CREDENTIALS_TEST_ERROR,
     UpdateCacheDestination, cache_url_has_query_credentials,
@@ -23,7 +24,14 @@ use crate::queries::{cache_destinations, cache_push};
 
 mod attic_probe;
 mod s3_probe;
+mod storage_metrics;
 
+pub use storage_metrics::get_cache_metrics;
+
+#[cfg(test)]
+mod basic_read_tests;
+#[cfg(test)]
+mod discovery_tests;
 #[cfg(test)]
 mod retained_probe_tests;
 
@@ -93,6 +101,10 @@ async fn probe_json<T: serde::de::DeserializeOwned>(
 /// sensitive Authorization header. Same-type sanitized URL round trips retain
 /// that identity; different URLs cannot borrow it. Recognized credential queries
 /// return `400 legacy_query_credentials_unsupported` before DNS or network work.
+/// Niks3 accepts `probe_scope: "write" | "read" | "all"` (default `all`). Scoped
+/// probes share Save's authority/credential merge but validate only the selected
+/// plane. They cannot persist an incomplete configuration. Write metadata never
+/// sends a token or read credential; read probes use only configured read auth.
 ///
 /// # Examples
 /// ```text
@@ -108,9 +120,20 @@ pub async fn test_stored_cache_destination_credentials(
     Path(id): Path<i32>,
     request: axum::extract::Request,
 ) -> axum::response::Response {
-    test_stored_with_probe(&pool, &headers, id, request, |effective| async move {
-        run_cache_destination_test(&effective, server_config.allow_private_cache_test_targets).await
-    })
+    test_stored_with_scoped_probe(
+        &pool,
+        &headers,
+        id,
+        request,
+        |effective, scope| async move {
+            run_cache_destination_test_scope(
+                &effective,
+                server_config.allow_private_cache_test_targets,
+                scope,
+            )
+            .await
+        },
+    )
     .await
 }
 
@@ -125,6 +148,30 @@ async fn test_stored_with_probe<F, Fut>(
 ) -> axum::response::Response
 where
     F: FnOnce(CreateCacheDestination) -> Fut,
+    Fut: std::future::Future<Output = Result<CacheCredentialTestResult, String>>,
+{
+    test_stored_with_scoped_probe(pool, headers, id, request, |effective, _| probe(effective)).await
+}
+
+#[derive(Deserialize)]
+struct ScopedProbe<T> {
+    #[serde(flatten)]
+    settings: T,
+    #[serde(default)]
+    probe_scope: Niks3ProbeScope,
+}
+
+// Save and all-plane Test keep full validation. Scoped tests share the merge
+// invariants but validate only the plane that will receive a network request.
+async fn test_stored_with_scoped_probe<F, Fut>(
+    pool: &PgPool,
+    headers: &HeaderMap,
+    id: i32,
+    request: axum::extract::Request,
+    probe: F,
+) -> axum::response::Response
+where
+    F: FnOnce(CreateCacheDestination, Niks3ProbeScope) -> Fut,
     Fut: std::future::Future<Output = Result<CacheCredentialTestResult, String>>,
 {
     if require_admin_user(pool, headers).await.is_none() {
@@ -152,10 +199,12 @@ where
             );
         }
     };
-    let update: UpdateCacheDestination = match probe_json(request).await {
-        Ok(update) => update,
+    let request: ScopedProbe<UpdateCacheDestination> = match probe_json(request).await {
+        Ok(request) => request,
         Err(response) => return response,
     };
+    let scope = request.probe_scope;
+    let update = request.settings;
     let same_type = update
         .cache_type
         .as_deref()
@@ -174,9 +223,16 @@ where
         .niks3_server_url
         .as_deref()
         .or(current.niks3_server_url.as_deref());
-    if let Err(message) =
-        reject_probe_query_credentials([push_to.as_deref(), s3_endpoint.as_deref(), niks3_server])
-    {
+    let urls = if current.cache_type == "Niks3" && scope != Niks3ProbeScope::All {
+        if scope == Niks3ProbeScope::Write {
+            [niks3_server, None, None]
+        } else {
+            [push_to.as_deref(), None, None]
+        }
+    } else {
+        [push_to.as_deref(), s3_endpoint.as_deref(), niks3_server]
+    };
+    if let Err(message) = reject_probe_query_credentials(urls) {
         if update.cache_type.as_deref().unwrap_or(&current.cache_type) == "Attic" {
             return attic_probe::policy_error_response(message);
         }
@@ -186,7 +242,11 @@ where
             message,
         );
     }
-    let effective = match cache_destinations::effective_update(&current, &update) {
+    let effective = match cache_destinations::effective_update_unvalidated(&current, &update)
+        .and_then(|candidate| {
+            candidate.validate_probe(scope)?;
+            Ok(candidate)
+        }) {
         Ok(effective) => effective,
         Err(_) => {
             return probe_error(
@@ -197,7 +257,7 @@ where
         }
     };
     let is_attic = effective.cache_type == "Attic";
-    match probe(effective).await {
+    match probe(effective, scope).await {
         Ok(mut result) => {
             // Stored-ID results describe stages, not the private snapshot.
             result.tested_url = None;
@@ -259,9 +319,20 @@ struct Niks3ConnectionTestResult {
     write_auth_valid: Option<bool>,
     read_endpoint_reachable: bool,
     signing_keys_found: bool,
+    probe_scope: Option<Niks3ProbeScope>,
+    write_api_reachable: Option<bool>,
+    write_authn_valid: Option<bool>,
+    write_authorization_valid: Option<bool>,
+    read_access_valid: Option<bool>,
+    signing_keys_valid: Option<bool>,
 }
 
-/// Specifies the Niks3 write server to discover without sending credentials.
+/// Specifies a Niks3 write server and optional mTLS discovery transport.
+///
+/// An omitted mode selects the existing public, token-mode metadata request.
+/// No Bearer token is selected or sent. mTLS requires a certificate/key pair;
+/// its optional CA bundle adds trust to the server HTTP client's system roots.
+/// The response contains only public metadata, never supplied TLS material.
 ///
 /// # Examples
 /// ```
@@ -276,6 +347,54 @@ struct Niks3ConnectionTestResult {
 pub struct Niks3DiscoverRequest {
     /// HTTPS server base URL; userinfo, queries, and fragments are rejected.
     pub server_url: String,
+    /// Optional `token` or `mtls` mode; omission preserves public discovery.
+    pub niks3_write_auth_mode: Option<String>,
+    /// Certificate-only PEM client chain, required for `mtls`.
+    pub niks3_write_client_cert: Option<String>,
+    /// PEM private key for the client chain, required for `mtls`.
+    pub niks3_write_client_key: Option<String>,
+    /// Optional certificate-only PEM trust bundle for `mtls`.
+    pub niks3_write_ca_cert: Option<String>,
+}
+
+// SECURITY: This projection has no token/read-credential fields and no Debug
+// implementation. Discovery and Test select the same write TLS identity.
+struct Niks3WriteTransport<'a> {
+    cert: Option<&'a str>,
+    key: Option<&'a str>,
+    ca: Option<&'a str>,
+}
+
+fn niks3_write_transport<'a>(
+    mode: Option<&str>,
+    cert: Option<&'a str>,
+    key: Option<&'a str>,
+    ca: Option<&'a str>,
+) -> Result<Niks3WriteTransport<'a>, String> {
+    // Strict framing is checked before identity parsing or DNS. PEM parsers can
+    // otherwise silently skip private keys, comments, and trailing text in CA
+    // or certificate fields. Valid multi-certificate bundles stay supported.
+    for value in [cert, ca].into_iter().flatten() {
+        crate::security::cache_secrets::validate_certificate_bundle(value)
+            .map_err(|_| "Niks3 discovery requires certificate-only PEM bundles")?;
+    }
+    match mode.unwrap_or("token") {
+        "token" if cert.is_none() && key.is_none() && ca.is_none() => {
+            Ok(Niks3WriteTransport { cert: None, key: None, ca: None })
+        }
+        "mtls" if cert.is_some() && key.is_some_and(|value| !value.trim().is_empty()) => {
+            let pem = format!("{}\n{}", cert.unwrap_or_default(), key.unwrap_or_default());
+            let identity = reqwest::Identity::from_pem(pem.as_bytes())
+                .map_err(|_| "Invalid Niks3 mTLS certificate or private key")?;
+            // Parse the signing key before DNS too. TLS checks compatibility
+            // when the peer requests client authentication. Public metadata
+            // success alone cannot prove client or write authorization.
+            reqwest::Client::builder().use_rustls_tls().no_proxy().identity(identity)
+                .build().map_err(|_| "Invalid Niks3 mTLS certificate or private key")?;
+            Ok(Niks3WriteTransport { cert, key, ca })
+        }
+        _ => Err("Niks3 discovery requires token mode without TLS fields, or mtls with certificate and private key".into()),
+    }
 }
 
 // COMPATIBILITY: Niks3 v1.6.0 api/types.go defines this exact wire shape for
@@ -473,16 +592,26 @@ async fn validate_niks3_discovery(
 }
 
 async fn discover_niks3(
-    server_url: &str,
+    request: &Niks3DiscoverRequest,
     allow_private_targets: bool,
 ) -> Result<Niks3Discovery, String> {
-    let server = niks3_base_url(server_url, allow_private_targets)?;
-    let client = cache_test_client(&server, allow_private_targets, None, None, None).await?;
-    let endpoint = server
-        .join("api/cache-config")
-        .map_err(|_| "Invalid Niks3 API URL")?;
-    let response = client
-        .get(endpoint)
+    reject_probe_query_credentials([Some(request.server_url.as_str())])?;
+    let server = niks3_base_url(&request.server_url, allow_private_targets)?;
+    let transport = niks3_write_transport(
+        request.niks3_write_auth_mode.as_deref(),
+        request.niks3_write_client_cert.as_deref(),
+        request.niks3_write_client_key.as_deref(),
+        request.niks3_write_ca_cert.as_deref(),
+    )?;
+    let client = cache_test_client(
+        &server,
+        allow_private_targets,
+        transport.cert,
+        transport.key,
+        transport.ca,
+    )
+    .await?;
+    let response = niks3_metadata_request(&client, &server)?
         .send()
         .await
         .map_err(|_| "Niks3 server connection failed")?;
@@ -500,10 +629,39 @@ async fn discover_niks3(
     })
 }
 
+// SECURITY: Public metadata has no Bearer authorization, including when the
+// saved write mode is token. mTLS is supplied by the write client, not headers.
+fn niks3_metadata_request(
+    client: &reqwest::Client,
+    server: &Url,
+) -> Result<reqwest::RequestBuilder, String> {
+    let endpoint = server
+        .join("api/cache-config")
+        .map_err(|_| "Invalid Niks3 API URL")?;
+    Ok(client.get(endpoint))
+}
+
 async fn run_niks3_test(
     create: &CreateCacheDestination,
     allow_private_targets: bool,
 ) -> Result<CacheCredentialTestResult, String> {
+    run_niks3_test_scope(create, allow_private_targets, Niks3ProbeScope::All).await
+}
+
+async fn run_niks3_test_scope(
+    create: &CreateCacheDestination,
+    allow_private_targets: bool,
+    scope: Niks3ProbeScope,
+) -> Result<CacheCredentialTestResult, String> {
+    if scope == Niks3ProbeScope::Read {
+        return run_niks3_read_test(
+            create,
+            allow_private_targets,
+            scope,
+            Niks3ConnectionTestResult::default(),
+        )
+        .await;
+    }
     let server = niks3_base_url(
         create
             .niks3_server_url
@@ -511,78 +669,147 @@ async fn run_niks3_test(
             .ok_or("Missing Niks3 server URL")?,
         allow_private_targets,
     )?;
-    let read = niks3_base_url(
-        create.push_to.as_deref().ok_or("Missing Niks3 read URL")?,
-        allow_private_targets,
+    let write = niks3_write_transport(
+        create.niks3_write_auth_mode.as_deref(),
+        create.niks3_write_client_cert.as_deref(),
+        create.niks3_write_client_key.as_deref(),
+        create.niks3_write_ca_cert.as_deref(),
     )?;
-    let (write_cert, write_key, write_ca) = match create.niks3_write_auth_mode.as_deref() {
-        Some("token") => (None, None, None),
-        Some("mtls") => (
-            create.niks3_write_client_cert.as_deref(),
-            create.niks3_write_client_key.as_deref(),
-            create.niks3_write_ca_cert.as_deref(),
-        ),
-        _ => return Err("Niks3 write authentication must be token or mtls".into()),
-    };
-    let (read_cert, read_key, read_ca) = match create.niks3_read_auth_mode.as_deref() {
-        Some("none") => (None, None, None),
-        Some("mtls") => (
-            create.niks3_read_client_cert.as_deref(),
-            create.niks3_read_client_key.as_deref(),
-            create.niks3_read_ca_cert.as_deref(),
-        ),
-        _ => return Err("Niks3 read authentication must be none or mtls".into()),
-    };
-    if create.niks3_write_auth_mode.as_deref() == Some("mtls")
-        && (write_cert.is_none() || write_key.is_none())
-        || create.niks3_read_auth_mode.as_deref() == Some("mtls")
-            && (read_cert.is_none() || read_key.is_none())
-    {
-        return Err("Niks3 mTLS requires certificate and private key".into());
-    }
     let client = cache_test_client(
         &server,
         allow_private_targets,
-        write_cert,
-        write_key,
-        write_ca,
+        write.cert,
+        write.key,
+        write.ca,
     )
     .await?;
-    let read_client =
-        cache_test_client(&read, allow_private_targets, read_cert, read_key, read_ca).await?;
     let mut stages = Niks3ConnectionTestResult::default();
+    stages.probe_scope = Some(scope);
+    stages.write_api_reachable = Some(false);
     let mut status_code = None;
     let result: Result<(), String> = async {
-        let endpoint = server
-            .join("api/cache-config")
-            .map_err(|_| "Invalid Niks3 API URL")?;
         // SECURITY: Do not send the write token to this public endpoint. Never
         // infer write authorization from discovery or TLS handshake success.
-        let response = client
-            .get(endpoint)
+        let response = niks3_metadata_request(&client, &server)?
             .send()
             .await
             .map_err(|_| "Niks3 server connection failed")?;
         stages.server_reachable = true;
+        stages.write_api_reachable = Some(true);
         status_code = Some(response.status().as_u16());
-        let (_, discovered) = validate_niks3_discovery(
+        let (config, discovered) = validate_niks3_discovery(
             &probe_body(response).await?,
             allow_private_targets,
             &mut stages,
         )
         .await?;
+        if scope == Niks3ProbeScope::All
+            && !config
+                .public_keys
+                .iter()
+                .any(|key| create.niks3_public_keys.contains(key))
+        {
+            return Err("Advertised signing keys do not match configured trust".into());
+        }
         // SECURITY: Discovery cannot redirect the configured read identity to
         // another origin/path and receive its client certificate. Probe only
         // the configured URL with a separately pinned read client.
-        if discovered != read {
+        if scope == Niks3ProbeScope::All
+            && discovered
+                != niks3_base_url(
+                    create.push_to.as_deref().ok_or("Missing Niks3 read URL")?,
+                    allow_private_targets,
+                )?
+        {
             return Err("Discovered substituter URL does not match the configured read URL".into());
         }
         stages.discovery_valid = true;
-        let endpoint = read
-            .join("nix-cache-info")
-            .map_err(|_| "Invalid Niks3 read URL")?;
-        let response = read_client
-            .get(endpoint)
+        Ok(())
+    }
+    .await;
+    if result.is_ok() && scope == Niks3ProbeScope::All {
+        return run_niks3_read_test(create, allow_private_targets, scope, stages).await;
+    }
+    Ok(CacheCredentialTestResult {
+        ok: result.is_ok(),
+        status_code,
+        message: result.err().unwrap_or_else(|| {
+            "Public write API metadata verified. Write authentication and authorization: Untested. Read plane: Untested.".into()
+        }),
+        tested_url: None,
+        niks3: Some(CacheProbeDetails::Niks3(stages)),
+    })
+}
+
+// SECURITY: Basic is sent only to the configured HTTPS authority. The shared
+// effective-update merge prevents borrowing a retained pair for another origin.
+// Redirects/proxies are disabled by the pinned client; write auth never enters
+// this request, and discovered read URLs are never used as its destination.
+fn niks3_read_request(
+    client: &reqwest::Client,
+    endpoint: Url,
+    create: &CreateCacheDestination,
+) -> Result<reqwest::RequestBuilder, String> {
+    let request = client.get(endpoint);
+    if create.niks3_read_auth_mode.as_deref() == Some("basic") {
+        Ok(request.basic_auth(
+            create
+                .niks3_read_basic_username
+                .as_deref()
+                .ok_or("Missing Basic username")?,
+            Some(
+                create
+                    .niks3_read_basic_password
+                    .as_deref()
+                    .ok_or("Missing Basic password")?,
+            ),
+        ))
+    } else {
+        Ok(request)
+    }
+}
+
+fn niks3_read_base_url(raw: &str, allow_private_targets: bool) -> Result<Url, String> {
+    let mut url = Url::parse(raw).map_err(|_| "Invalid Niks3 read URL")?;
+    validate_cache_test_url(&url, allow_private_targets)?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("Niks3 read URL cannot contain userinfo".into());
+    }
+    url.set_path(&format!("{}/", url.path().trim_end_matches('/')));
+    Ok(url)
+}
+
+async fn run_niks3_read_test(
+    create: &CreateCacheDestination,
+    allow_private_targets: bool,
+    scope: Niks3ProbeScope,
+    mut stages: Niks3ConnectionTestResult,
+) -> Result<CacheCredentialTestResult, String> {
+    let read = niks3_read_base_url(
+        create.push_to.as_deref().ok_or("Missing Niks3 read URL")?,
+        allow_private_targets,
+    )?;
+    let (cert, key, ca) = if create.niks3_read_auth_mode.as_deref() == Some("mtls") {
+        (
+            create.niks3_read_client_cert.as_deref(),
+            create.niks3_read_client_key.as_deref(),
+            create.niks3_read_ca_cert.as_deref(),
+        )
+    } else {
+        (None, None, None)
+    };
+    let client = cache_test_client(&read, allow_private_targets, cert, key, ca).await?;
+    stages.probe_scope = Some(scope);
+    stages.read_access_valid = Some(false);
+    let mut status_code = None;
+    let result: Result<(), String> = async {
+        let mut endpoint = read.clone();
+        endpoint
+            .path_segments_mut()
+            .map_err(|_| "Invalid Niks3 read URL")?
+            .pop_if_empty()
+            .push("nix-cache-info");
+        let response = niks3_read_request(&client, endpoint, create)?
             .send()
             .await
             .map_err(|_| "Niks3 read endpoint connection failed")?;
@@ -596,18 +823,17 @@ async fn run_niks3_test(
             return Err("Invalid nix-cache-info response: expected StoreDir: /nix/store".into());
         }
         stages.read_endpoint_reachable = true;
+        stages.read_access_valid = Some(true);
+        stages.signing_keys_valid = (!create.niks3_public_keys.is_empty()).then_some(true);
         Ok(())
     }
     .await;
-    Ok(CacheCredentialTestResult {
-        ok: result.is_ok(),
-        status_code,
-        message: result.err().unwrap_or_else(|| {
-            "Discovery and read endpoint successful; write authorization untested".into()
-        }),
-        tested_url: Some(read.to_string()),
-        niks3: Some(CacheProbeDetails::Niks3(stages)),
-    })
+    Ok(CacheCredentialTestResult { ok: result.is_ok(), status_code,
+        message: result.err().unwrap_or_else(|| if create.niks3_public_keys.is_empty() {
+            "Read access and /nix/store metadata verified. Signing keys: Unattempted. Artifact signatures and write authorization: Untested.".into()
+        } else {
+            "Read access and /nix/store metadata verified. Configured signing key format checked; artifact signatures and write authorization: Untested.".into()
+        }), tested_url: None, niks3: Some(CacheProbeDetails::Niks3(stages)) })
 }
 
 fn validate_cache_test_url(url: &Url, allow_private_targets: bool) -> Result<(), String> {
@@ -735,12 +961,29 @@ async fn run_cache_destination_test(
     create: &CreateCacheDestination,
     allow_private_targets: bool,
 ) -> Result<CacheCredentialTestResult, String> {
-    reject_probe_query_credentials([
-        create.push_to.as_deref(),
-        create.s3_endpoint_url.as_deref(),
-        create.niks3_server_url.as_deref(),
-    ])?;
-    create.validate()?;
+    run_cache_destination_test_scope(create, allow_private_targets, Niks3ProbeScope::All).await
+}
+
+async fn run_cache_destination_test_scope(
+    create: &CreateCacheDestination,
+    allow_private_targets: bool,
+    scope: Niks3ProbeScope,
+) -> Result<CacheCredentialTestResult, String> {
+    let urls = if create.cache_type == "Niks3" && scope != Niks3ProbeScope::All {
+        if scope == Niks3ProbeScope::Write {
+            [create.niks3_server_url.as_deref(), None, None]
+        } else {
+            [create.push_to.as_deref(), None, None]
+        }
+    } else {
+        [
+            create.push_to.as_deref(),
+            create.s3_endpoint_url.as_deref(),
+            create.niks3_server_url.as_deref(),
+        ]
+    };
+    reject_probe_query_credentials(urls)?;
+    create.validate_probe(scope)?;
     let cache_type = create.cache_type.trim();
     if cache_type == "Attic" {
         return attic_probe::probe(create, allow_private_targets).await;
@@ -749,7 +992,7 @@ async fn run_cache_destination_test(
         return s3_probe::probe(create, allow_private_targets).await;
     }
     if cache_type == "Niks3" {
-        return run_niks3_test(create, allow_private_targets).await;
+        return run_niks3_test_scope(create, allow_private_targets, scope).await;
     }
     if !matches!(
         cache_type,
@@ -835,6 +1078,8 @@ fn redact_cache_secrets(mut destination: CacheDestination) -> CacheDestination {
     destination.niks3_auth_token = None;
     destination.niks3_write_client_key = None;
     destination.niks3_read_client_key = None;
+    destination.niks3_read_basic_username = None;
+    destination.niks3_read_basic_password = None;
     destination.push_to = destination
         .push_to
         .as_deref()
@@ -1039,6 +1284,13 @@ pub async fn create_cache_destination(
 /// verifies the supplied token for that read; public success leaves token validity
 /// null. Write authorization is always null and remains Untested. No upstream
 /// URLs or response-body values are returned or followed.
+/// Niks3 accepts optional `probe_scope` (`write`, `read`, or default `all`). The
+/// result adds nullable `write_api_reachable`, `write_authn_valid`,
+/// `write_authorization_valid`, `read_access_valid`, and `signing_keys_valid`.
+/// Null means unattempted or unproven. Public API metadata leaves write auth
+/// unproven. Read signing-key evidence checks configured format (and metadata
+/// overlap for `all`), not an artifact signature. Basic auth uses system CA
+/// trust and a sensitive header pinned to the configured HTTPS authority.
 pub async fn test_cache_destination_credentials(
     State(pool): State<PgPool>,
     State(server_config): State<ServerConfig>,
@@ -1060,15 +1312,26 @@ pub async fn test_cache_destination_credentials(
     if let Err(response) = optional_probe_csrf(&headers) {
         return response;
     }
-    let create: CreateCacheDestination = match probe_json(request).await {
-        Ok(create) => create,
+    let request: ScopedProbe<CreateCacheDestination> = match probe_json(request).await {
+        Ok(request) => request,
         Err(response) => return response,
     };
-    if let Err(message) = reject_probe_query_credentials([
-        create.push_to.as_deref(),
-        create.s3_endpoint_url.as_deref(),
-        create.niks3_server_url.as_deref(),
-    ]) {
+    let scope = request.probe_scope;
+    let create = request.settings;
+    let urls = if create.cache_type == "Niks3" && scope != Niks3ProbeScope::All {
+        if scope == Niks3ProbeScope::Write {
+            [create.niks3_server_url.as_deref(), None, None]
+        } else {
+            [create.push_to.as_deref(), None, None]
+        }
+    } else {
+        [
+            create.push_to.as_deref(),
+            create.s3_endpoint_url.as_deref(),
+            create.niks3_server_url.as_deref(),
+        ]
+    };
+    if let Err(message) = reject_probe_query_credentials(urls) {
         if create.cache_type == "Attic" {
             return attic_probe::policy_error_response(message);
         }
@@ -1078,14 +1341,19 @@ pub async fn test_cache_destination_credentials(
             message,
         );
     }
-    if create.validate().is_err() {
+    if create.validate_probe(scope).is_err() {
         return probe_error(
             StatusCode::BAD_REQUEST,
             "invalid_cache_test_config",
             "Invalid cache configuration",
         );
     }
-    match run_cache_destination_test(&create, server_config.allow_private_cache_test_targets).await
+    match run_cache_destination_test_scope(
+        &create,
+        server_config.allow_private_cache_test_targets,
+        scope,
+    )
+    .await
     {
         Ok(result) => (StatusCode::OK, Json(result)).into_response(),
         Err(message) if create.cache_type == "Attic" => {
@@ -1108,15 +1376,16 @@ pub async fn test_cache_destination_credentials(
 /// `POST /api/caches/niks3/discover` accepts a [`Niks3DiscoverRequest`]. Returns
 /// `403` without cache-administration permission and `400` for rejected targets,
 /// redirects, connection errors, invalid JSON, or missing/invalid signing keys.
-/// Uses Niks3 v1.6.0 `GET /api/cache-config` without an issuer query or credentials.
+/// Uses Niks3 v1.6.0 `GET /api/cache-config` without an issuer query or Bearer
+/// token. Optional write mTLS protects discovery transport, not upload authority.
 /// The read URL is validated but not fetched. No destination is persisted.
 /// `oidc_audience` is returned as null when the upstream omits that field.
 pub async fn discover_niks3_cache(
     State(pool): State<PgPool>,
     State(server_config): State<ServerConfig>,
     headers: HeaderMap,
-    Json(request): Json<Niks3DiscoverRequest>,
-) -> impl IntoResponse {
+    request: axum::extract::Request,
+) -> axum::response::Response {
     if require_admin_user(&pool, &headers).await.is_none() {
         return (
             StatusCode::FORBIDDEN,
@@ -1128,12 +1397,14 @@ pub async fn discover_niks3_cache(
         )
             .into_response();
     }
-    match discover_niks3(
-        &request.server_url,
-        server_config.allow_private_cache_test_targets,
-    )
-    .await
-    {
+    if let Err(response) = optional_probe_csrf(&headers) {
+        return response;
+    }
+    let request: Niks3DiscoverRequest = match probe_json(request).await {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+    match discover_niks3(&request, server_config.allow_private_cache_test_targets).await {
         Ok(discovery) => (StatusCode::OK, Json(discovery)).into_response(),
         Err(message) => (
             StatusCode::BAD_REQUEST,
@@ -1144,6 +1415,131 @@ pub async fn discover_niks3_cache(
             }),
         )
             .into_response(),
+    }
+}
+
+/// Discovers public Niks3 metadata using a stored destination's effective update.
+///
+/// `POST /api/v1/caches/:id/niks3/discover` accepts the same unwrapped
+/// [`UpdateCacheDestination`] JSON as Save. Authorization precedes parsing and
+/// lookup; supplied CSRF state must match. Returns `403` for denied callers,
+/// `404` for absent IDs, `400` for non-Niks3 or invalid effective settings and
+/// discovery failures, and `200` with public discovery metadata on success.
+/// Stored credentials are decrypted and merged through the full shared Save
+/// validator. A single unlocked SELECT releases its connection before network
+/// work. No ciphertext, assignment, usage, timestamp, or job write occurs.
+/// Write mTLS alone is projected to the metadata request; no token or read
+/// credentials are sent. Metadata and mTLS success do not prove write access.
+///
+/// # Examples
+/// ```text
+/// POST /api/v1/caches/42/niks3/discover
+/// Content-Type: application/json
+///
+/// {}
+/// ```
+pub async fn discover_stored_niks3_cache(
+    State(pool): State<PgPool>,
+    State(server_config): State<ServerConfig>,
+    headers: HeaderMap,
+    Path(id): Path<i32>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    stored_niks3_discovery_with(&pool, &headers, id, request, |request| async move {
+        discover_niks3(&request, server_config.allow_private_cache_test_targets).await
+    })
+    .await
+}
+
+// Per-call injection is private to this module; production always uses the
+// pinned, bounded HTTPS implementation. No publication lock spans discovery.
+async fn stored_niks3_discovery_with<F, Fut>(
+    pool: &PgPool,
+    headers: &HeaderMap,
+    id: i32,
+    request: axum::extract::Request,
+    discover: F,
+) -> axum::response::Response
+where
+    F: FnOnce(Niks3DiscoverRequest) -> Fut,
+    Fut: std::future::Future<Output = Result<Niks3Discovery, String>>,
+{
+    if require_admin_user(pool, headers).await.is_none() {
+        return probe_error(StatusCode::FORBIDDEN, "forbidden", "Admin role required");
+    }
+    if let Err(response) = optional_probe_csrf(headers) {
+        return response;
+    }
+    let current = match cache_destinations::get_cache_destination(pool, id).await {
+        Ok(Some(current)) => current,
+        Ok(None) => {
+            return probe_error(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "Cache destination not found",
+            );
+        }
+        Err(_) => {
+            return probe_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Failed to load cache destination",
+            );
+        }
+    };
+    let update: UpdateCacheDestination = match probe_json(request).await {
+        Ok(update) => update,
+        Err(response) => return response,
+    };
+    if current.cache_type != "Niks3" || update.cache_type.as_deref().is_some_and(|ty| ty != "Niks3")
+    {
+        return probe_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_niks3_discovery",
+            "Stored discovery requires a Niks3 destination",
+        );
+    }
+    let effective = match cache_destinations::effective_update(&current, &update) {
+        Ok(effective) => effective,
+        Err(_) => {
+            return probe_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_niks3_discovery",
+                "Invalid effective Niks3 configuration",
+            );
+        }
+    };
+    if reject_probe_query_credentials([
+        effective.push_to.as_deref(),
+        effective.s3_endpoint_url.as_deref(),
+        effective.niks3_server_url.as_deref(),
+    ])
+    .is_err()
+    {
+        return probe_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_niks3_discovery",
+            LEGACY_QUERY_CREDENTIALS_TEST_ERROR,
+        );
+    }
+    let request = Niks3DiscoverRequest {
+        server_url: effective.niks3_server_url.unwrap_or_default(),
+        niks3_write_auth_mode: effective.niks3_write_auth_mode,
+        niks3_write_client_cert: effective.niks3_write_client_cert,
+        niks3_write_client_key: effective.niks3_write_client_key,
+        niks3_write_ca_cert: effective.niks3_write_ca_cert,
+    };
+    if let Err(message) = niks3_write_transport(
+        request.niks3_write_auth_mode.as_deref(),
+        request.niks3_write_client_cert.as_deref(),
+        request.niks3_write_client_key.as_deref(),
+        request.niks3_write_ca_cert.as_deref(),
+    ) {
+        return probe_error(StatusCode::BAD_REQUEST, "invalid_niks3_discovery", &message);
+    }
+    match discover(request).await {
+        Ok(discovery) => (StatusCode::OK, Json(discovery)).into_response(),
+        Err(message) => probe_error(StatusCode::BAD_REQUEST, "invalid_niks3_discovery", &message),
     }
 }
 
@@ -1509,9 +1905,9 @@ mod tests {
             State(pool),
             State(ServerConfig::default()),
             HeaderMap::new(),
-            Json(Niks3DiscoverRequest {
-                server_url: "invalid".into(),
-            }),
+            axum::http::Request::builder()
+                .body(axum::body::Body::from("invalid-json"))
+                .unwrap(),
         )
         .await
         .into_response();

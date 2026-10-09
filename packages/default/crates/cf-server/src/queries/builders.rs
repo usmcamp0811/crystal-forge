@@ -1640,6 +1640,8 @@ fn publication_configuration_fingerprint(
         niks3_write_client_key: Option<&'a str>,
         niks3_write_ca_cert: Option<&'a str>,
         niks3_read_auth_mode: Option<&'a str>,
+        niks3_read_basic_username: Option<&'a str>,
+        niks3_read_basic_password: Option<&'a str>,
         niks3_read_client_cert: Option<&'a str>,
         niks3_read_client_key: Option<&'a str>,
         niks3_read_ca_cert: Option<&'a str>,
@@ -1662,7 +1664,7 @@ fn publication_configuration_fingerprint(
     ids.sort_unstable();
     ids.dedup();
     let config = Configuration {
-        schema: 1,
+        schema: 2,
         id: destination.id,
         cache_type: &destination.cache_type,
         enabled: destination.enabled,
@@ -1688,6 +1690,8 @@ fn publication_configuration_fingerprint(
         niks3_write_client_key: destination.niks3_write_client_key.as_deref(),
         niks3_write_ca_cert: destination.niks3_write_ca_cert.as_deref(),
         niks3_read_auth_mode: destination.niks3_read_auth_mode.as_deref(),
+        niks3_read_basic_username: destination.niks3_read_basic_username.as_deref(),
+        niks3_read_basic_password: destination.niks3_read_basic_password.as_deref(),
         niks3_read_client_cert: destination.niks3_read_client_cert.as_deref(),
         niks3_read_client_key: destination.niks3_read_client_key.as_deref(),
         niks3_read_ca_cert: destination.niks3_read_ca_cert.as_deref(),
@@ -3763,6 +3767,8 @@ mod tests {
             "write-url",
             "keys",
             "read-mode",
+            "basic-username",
+            "basic-password",
             "enabled",
         ] {
             let mut changed = destination.clone();
@@ -3776,10 +3782,19 @@ mod tests {
                 }
                 "keys" => changed.niks3_public_keys = vec!["different:key".into()],
                 "read-mode" => changed.niks3_read_auth_mode = Some("none".into()),
+                "basic-username" => {
+                    changed.niks3_read_basic_username = Some("rotated-reader".into())
+                }
+                "basic-password" => {
+                    changed.niks3_read_basic_password = Some("synthetic-rotated-read-secret".into())
+                }
                 "enabled" => changed.enabled = false,
                 _ => unreachable!(),
             }
-            if matches!(field, "token" | "read-key" | "write-key") {
+            if matches!(
+                field,
+                "token" | "read-key" | "write-key" | "basic-username" | "basic-password"
+            ) {
                 // Model serialization would miss these changes completely.
                 assert_eq!(
                     serde_json::to_value(&changed).unwrap(),

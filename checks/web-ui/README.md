@@ -100,6 +100,147 @@ Infrastructure-only startup/authentication proof is also available as
 `.#checks.x86_64-linux.web-ui.nativeCacheFixture`. It shares the same native
 nodes and runtime driver. It does not satisfy the authoritative browser gate.
 
+### Certificate-required Niks3 discovery
+
+The additional production-shaped write-discovery fixture requires three
+independent CA roles. Root **A** signs the API server. Root **B** signs the
+separate presigned S3 server in the topology owner's full-push VM. Root **C**
+issues write client identities. The **Server CA bundle** contains A+B; C is
+not remote server trust. Discovery never contacts S3 and never proves that an
+upload or write authorization succeeds.
+
+The shared PKI producer is an integration dependency supplied as
+`productionWritePki`. By default the check consumes
+`makeNiks3TestCredentials { productionPki = true; }.productionWritePki`.
+Its fixture file contract is:
+
+```text
+api-ca.crt, s3-ca.crt, client-ca.crt
+api-server.crt, api-server.key
+write-client.crt, write-client.key
+replacement-write-client.crt, replacement-write-client.key
+server-ca-bundle.pem                 # Exactly roots A+B
+```
+
+Both write identities use subject `CN=write`, separate keys, and client issuer
+C. The API certificate supports `cache`, `localhost` and loopback TLS names.
+The legacy single-CA fixture cannot substitute for this producer. API root A
+must not already be trusted through the legacy CA, so the custom-server-trust
+failure case remains discriminating.
+
+Endpoints:
+
+- `https://cache:5754/api/cache-config`: mandatory client mTLS at the ingress;
+  native metadata comes from the pinned Niks3 1.6.0 server on loopback 5755.
+  The proxy verifies the native TLS server and presents a valid C-issued client.
+- `https://cache:5753`: public signed read metadata for the added stored-mTLS row.
+- `https://cache:5756/api/cache-config`: observed anonymous token-mode discovery
+  into the existing native server on 5751. The original token/private-read
+  fixture keeps its 5751/5752 URLs.
+
+The ingress allows GET only. Missing and wrong client certificates must fail.
+The default, public-discovery and Basic-discovery native processes each have
+their own PostgreSQL database. Each process owns its Goose migrations; parallel
+startup cannot race initial sequence creation in another process's database.
+Correct write mTLS with roots A+B must succeed. Root A alone can also complete
+this API GET; that observation does not establish S3 trust. The native pins API
+is absent. The check does not add a pins response or a GC authorization shortcut.
+The UI must continue to report **Write authorization: Untested**.
+
+The added disabled environment-scoped row is seeded only after the existing
+late step-25 request. It is separate from the original seven and from the three
+direct-SQL legacy Attic rows. Its read mode is public and has no read credentials
+or token. Runtime synthetic write keys enter the browser only through the
+mode-0600 fixture file and the nested Write credential modal. Filled private
+keys are never captured. The production-write object and Discovery payloads
+contain no Garage/S3 credentials; the separate existing S3 workflow is preserved.
+
+Browser coverage uses real authenticated CF requests:
+
+- Unsaved Add: `POST /api/v1/caches/niks3/discover` with server URL, write mode,
+  write certificate/key and server CA bundle. Metadata populates the read URL
+  and signing keys without creating a cache.
+- Existing Edit: `POST /api/v1/caches/:id/niks3/discover` with the unwrapped
+  Save-shaped update patch. A retained selection omits the write identity.
+  False/absent configured GET hints must not prevent the server-authoritative
+  request. Replacement drafts are tested without Save, then canceled.
+- Negative calls reject missing identity, wrong client identity and wrong server
+  trust. Token-mode discovery omits both Bearer and the stored read identity.
+
+Every Discovery and Cancel has before/after private checkpoints covering all
+seven original rows, all three legacy rows and the added mTLS row. Complete raw
+ciphertext, configuration, timestamps and assignments must remain unchanged.
+Shared observer logs record only method/path/status and client/Authorization
+presence. Successful Discovery makes one native cache-config GET; Cancel makes
+none. TLS may reject before an HTTP record exists. No Discovery may upload,
+contact pins, forward Authorization or borrow a read client identity. The final
+observer must account for every request through these checkpoints.
+
+### Five-rail Niks3 Basic Add/Edit
+
+The dedicated production UI has **Destination**, **Write / API**, **Read / Pull**,
+**Trust**, and **Advanced** rails. The native workflow exercises every rail at
+desktop width and 390 px. The original capture states and provider guards remain.
+
+A separate native instance advertises `https://read-cache.test:5757`. Its write
+ingress at `https://cache:5758` requires the C-issued client identity and API root
+A. The read ingress uses a B-issued `read-cache.test` certificate and a runtime
+Basic ACL. Root B is in the VM system trust bundle. Read requests stream native
+Nix metadata through the proxy without redirects; the proxy does not forward
+the Basic header to native storage. API and presigned-server trust remains the
+explicit A+B **Server CA bundle**, independent from client issuer C.
+
+`production_basic` in the mode-0600 runtime fixture contains write identities,
+server trust, two real 32-byte signing keys, and independent Basic original and
+replacement pairs. The username includes a space and passwords have legal
+leading/trailing spaces. An untrimmed pair succeeds against the native ACL;
+trimmed or wrong passwords fail. These values never enter a URL or log.
+
+The Add workflow performs real unsaved mTLS Discovery, then checks that a second
+Discovery cannot silently replace nonempty read URL or signing-key rows. Only
+**Apply discovered metadata** changes conflicting public draft values. Basic
+credentials are entered in the nested Read credential dialog; its password is
+masked, the parent is inert, and closing restores focus. No filled private-key
+dialog is captured. Outside the nested dialog, the UI shows lifecycle state only.
+
+Trust retains multiple real native signing keys. Advanced defaults are 1 parallel
+upload, 3 retries, a 3600-second timeout and required signatures. Scoped **Test
+write API** sends no read identity and contacts only cache-config. **Test read
+endpoint** sends no write transport and contacts only native `nix-cache-info`.
+Both use real Admin API POSTs. The Add Save includes environment IDs atomically
+and persists encrypted write private key plus both Basic fields. The added cache
+is deliberately disabled during raw-state verification.
+
+Edit refreshes the saved ID. GET exposes only the Basic configured flag, never
+the username/password or private key. Retained Tests and Discovery omit secrets.
+The workflow checks nested Cancel, valid/invalid replacement read Tests, Discard,
+Use current credential, and whole-parent Cancel without Save. A real 302 read
+response must fail after exactly one authenticated source GET; the redirect
+target must receive no request. Strict checkpoints compare every raw row,
+ciphertext, timestamp and assignment. A wrong-password native 401 is read-plane
+failure, not a write result. No probe performs an upload or proves write permission.
+
+### Real remote inventory observations
+
+Production packaging remains Niks3 **1.6.0**. The web-ui fixture separately builds
+remote **1.8.0** for `GET /api/cache-stats`, using the source/vendor hashes from
+Nixpkgs commit `c27cdad491a991b11ed731760aa2ef8db0cb0410`. Its database is separate
+from the 1.6 native fixture. The enabled metrics-only destinations are scoped to
+a new empty environment so they cannot become destinations for seeded builds.
+Its server-only API token is generated at runtime as 64 hexadecimal characters,
+stored privately, and never supplied to Discovery, Test, metrics or the browser.
+
+The 1.6 native endpoint returns 404. CF must return unavailable totals rather
+than fabricated zero values or a claimed remote version. The real empty 1.8
+database returns zero live tracked objects and reported logical bytes. CF labels
+those bases explicitly; neither number is a Nix path count or physical disk usage.
+Cards and details must show the same `0.00 GiB` reported logical size and
+`0 objects` native count. The unavailable 1.6 detail must show neither zero.
+Observations use selected write TLS, no Bearer/Basic/read credential, no upload,
+no GC and no inventory enumeration. Provider logs permit only the stats GET.
+Whole-row snapshots prove that observations do not modify credentials, usage,
+scope or timestamps. All replies are `Cache-Control: no-store`.
+
 The Crystal Forge VM trusts the public fixture CA through its system trust
 store. The disposable server explicitly enables
 `allow_private_cache_test_targets` for this workflow. Host verification,
@@ -166,6 +307,21 @@ nix:
 niks3:
   id, server_url, substituter_url, public_keys[], token, ca_cert,
   write_client_cert, write_client_key, read_client_cert, read_client_key
+production_write_mtls:
+  id, server_url, substituter_url, public_keys[], server_ca_bundle,
+  write_client_cert, write_client_key,
+  replacement_write_client_cert, replacement_write_client_key,
+  wrong_client_cert, wrong_client_key, token_discovery_server_url,
+  observer_baselines
+production_basic:
+  id_after_ui_save, server_url, substituter_url, public_keys[], server_ca_bundle,
+  write_client_cert, write_client_key, replacement_write_client_cert,
+  replacement_write_client_key, username, password, replacement_username,
+  replacement_password, observer_baselines
+metrics:
+  environment_id
+  v16, v18:
+    id, server_url, native_status
 nix_basic:
   id, url, authority_change_url
 http_basic:

@@ -28,11 +28,12 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
     await expect(dialog.getByRole("button", { name, exact: true })).toHaveAttribute("aria-pressed", "true");
   };
   const identity = async (plane, action) => {
-    await dialog.getByRole("button", { name: new RegExp(`^(Add|Edit|Replace) ${plane} credential$`) }).click();
+    await section(plane === "Write" ? "Write / API" : "Read / Pull");
+    await dialog.getByRole("button", { name: /^(Add credential|Replace|Edit replacement)$/ }).click();
     const nested = page.getByRole("dialog", { name: `${plane} credential`, exact: true });
     await expect(nested).toBeVisible();
     await action(nested);
-    await nested.getByRole("button", { name: "Use credential", exact: true }).click();
+    await nested.getByRole("button", { name: "Use for this cache", exact: true }).click();
     await expect(nested).toBeHidden();
   };
   const localCredential = async action => {
@@ -370,7 +371,10 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
   };
   const shell = async () => {
     await expect(dialog).toBeVisible();
-    for (const name of ["Destination", "Credentials", "Environments"]) {
+    const names = await dialog.getByRole("button", { name: "Write / API", exact: true }).count()
+      ? ["Destination", "Write / API", "Read / Pull", "Trust", "Advanced"]
+      : ["Destination", "Credentials", "Environments"];
+    for (const name of names) {
       const button = dialog.getByRole("navigation").getByRole("button", { name, exact: true });
       await expect(button).toBeVisible();
       assert.equal(await button.locator("svg").count(), 1, `${name} has its design icon`);
@@ -479,12 +483,13 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
   const shots = async kind => {
     if (!screenshot && !captureState) return;
     const viewport = page.viewportSize();
+    const sections = kind === "niks3" ? ["Destination", "Write / API", "Read / Pull", "Trust", "Advanced"] : ["Destination", "Credentials", "Environments"];
     if (captureState) {
       // Register evidence with the authoritative harness so the VM driver
       // exports every section and 390px state after the browser exits.
-      for (const name of ["Destination", "Credentials", "Environments"]) {
+      for (const name of sections) {
         await section(name);
-        await captureState(`shared-${kind}-${name.toLowerCase()}`);
+        await captureState(`shared-${kind}-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`);
       }
       await page.setViewportSize({ width: 390, height: 844 });
       await section("Destination");
@@ -499,9 +504,9 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
     const originalTheme = await page.locator("html").getAttribute("data-theme");
     for (const theme of ["dark", "light"]) {
       await page.evaluate(theme => document.documentElement.setAttribute("data-theme", theme), theme);
-      for (const name of ["Destination", "Credentials", "Environments"]) {
+      for (const name of sections) {
         await section(name);
-        await page.screenshot({ path: screenshot.replace(/\.png$/, `-${kind}-${name.toLowerCase()}-${theme}.png`), fullPage: true, animations: "disabled" });
+        await page.screenshot({ path: screenshot.replace(/\.png$/, `-${kind}-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${theme}.png`), fullPage: true, animations: "disabled" });
       }
       await page.setViewportSize({ width: 390, height: 844 });
       await section("Destination");
@@ -549,12 +554,6 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
     await dialog.getByLabel("Attic public key", { exact: true }).fill(key);
     await section("Credentials");
     await credentialDraft("attic", "attic-retained", false);
-    await type("Niks3");
-    await dialog.getByLabel("Read / substituter URL", { exact: true }).fill("https://read.example.com");
-    await dialog.getByLabel("Write / API URL", { exact: true }).fill("https://write.example.com");
-    await dialog.getByLabel("Signing public keys", { exact: true }).fill(key);
-    await section("Credentials");
-    await identity("Write", nested => nested.getByLabel("Write token", { exact: true }).fill("fixture-niks3-token"));
     await type("S3-compatible");
     for (const [label, value] of [["Destination URL", "s3://fixture-bucket/prefix"], ["S3 region", "us-east-1"], ["S3 endpoint URL", "https://s3.example.com"]]) await dialog.getByLabel(label, { exact: true }).fill(value);
     await dialog.getByLabel("Signing key path (optional)", { exact: true }).fill("/fixture/signing-key");
@@ -563,7 +562,7 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
     await credentialDraft("s3", "s3", true);
     await localCredential(nested => nested.getByLabel("AWS session token (optional)", { exact: true }).fill("fixture-session"));
     await dialog.getByLabel("S3 profile (optional)", { exact: true }).fill("fixture-profile");
-    for (const [name, badge] of [["Attic", "Attic"], ["Niks3", "Niks3"], ["Nix HTTPS", "Nix HTTPS"], ["S3-compatible", "S3"]]) {
+    for (const [name, badge] of [["Attic", "Attic"], ["Nix HTTPS", "Nix HTTPS"], ["S3-compatible", "S3"]]) {
       await type(name);
       assert(await dialog.evaluate((current, original) => current === original, node), `same actual dialog object after ${name}`);
       await shell();
@@ -578,13 +577,6 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
         await section("Credentials");
         await localCredential(nested => expect(nested.getByLabel("Token", { exact: true })).toHaveValue("fixture-attic-token"));
         await expect(dialog.getByLabel("AWS access key ID", { exact: true })).toHaveCount(0);
-      } else if (name === "Niks3") {
-        await expect(dialog.getByLabel("Read / substituter URL", { exact: true })).toHaveValue("https://read.example.com");
-        await expect(dialog.getByLabel("Write / API URL", { exact: true })).toHaveValue("https://write.example.com");
-        await expect(dialog.getByLabel("Signing public keys", { exact: true })).toHaveValue(key);
-        await expect(dialog.getByLabel("S3 region", { exact: true })).toHaveCount(0);
-        await section("Credentials");
-        await identity("Write", nested => expect(nested.getByLabel("Write token", { exact: true })).toHaveValue("fixture-niks3-token"));
       } else if (name === "S3-compatible") {
         await expect(dialog.getByLabel("Destination URL", { exact: true })).toHaveValue("s3://fixture-bucket/prefix");
         await expect(dialog.getByLabel("S3 region", { exact: true })).toHaveValue("us-east-1");
@@ -604,32 +596,6 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
       }
       await shots(badge.toLowerCase().replace(/ /g, "-"));
     }
-    await type("Niks3");
-    await section("Credentials");
-    await dialog.getByLabel("Write authentication").selectOption("mtls");
-    await dialog.getByLabel("Read authentication").selectOption("mtls");
-    for (const plane of ["Write", "Read"]) {
-      await identity(plane, async nested => {
-        await nested.getByLabel(`${plane} client certificate`, { exact: true }).fill(`draft-${plane}-certificate`);
-        await nested.getByLabel(`${plane} private key`, { exact: true }).fill(`draft-${plane}-private-key`);
-        await nested.getByLabel(`${plane} CA certificate (optional)`, { exact: true }).fill(`draft-${plane}-CA`);
-      });
-    }
-    await type("Attic");
-    await type("Niks3");
-    assert(await dialog.evaluate((current, original) => current === original, node), "mTLS switching retains the actual dialog object");
-    await section("Credentials");
-    for (const plane of ["Write", "Read"]) {
-      await identity(plane, async nested => {
-        await expect(nested.getByLabel(`${plane} client certificate`, { exact: true })).toHaveValue(`draft-${plane}-certificate`);
-        await expect(nested.getByLabel(`${plane} private key`, { exact: true })).toHaveValue(`draft-${plane}-private-key`);
-        await expect(nested.getByLabel(`${plane} CA certificate (optional)`, { exact: true })).toHaveValue(`draft-${plane}-CA`);
-      });
-    }
-    await dialog.getByLabel("Write authentication").selectOption("token");
-    await dialog.getByLabel("Read authentication").selectOption("none");
-    await identity("Write", nested => nested.getByLabel("Write token").fill("fixture-niks3-token"));
-    await type("S3-compatible");
     await section("Destination");
     await dialog.getByLabel("Name", { exact: true }).fill("");
     const before = requests.filter(r => r.method() === "POST" && /\/caches$/.test(r.url())).length;
@@ -645,6 +611,10 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
         await page.getByRole("button", { name: "Add cache", exact: true }).click();
         await type(button);
         await dialog.getByLabel("Name", { exact: true }).fill(`${prefix}-${apiType}`);
+        if (apiType === "Niks3") {
+          await section("Read / Pull");
+          await dialog.getByRole("group", { name: "Read authentication", exact: true }).getByRole("button", { name: "Public", exact: true }).click();
+        }
         await dialog.getByLabel(apiType === "Niks3" ? "Read / substituter URL" : apiType === "Attic" ? "Attic server URL" : "URL", { exact: true }).fill("https://read.example.com");
         if (apiType === "Attic") {
           await dialog.getByLabel("Attic cache name", { exact: true }).fill("fixture-attic");
@@ -652,12 +622,15 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
           await section("Credentials");
           await credentialDraft("attic", "attic", true);
         } else if (apiType === "Niks3") {
+          await section("Write / API");
+          await dialog.getByRole("group", { name: "Write authentication", exact: true }).getByRole("button", { name: "API token", exact: true }).click();
           await dialog.getByLabel("Write / API URL", { exact: true }).fill("https://write.example.com");
-          await dialog.getByLabel("Signing public keys", { exact: true }).fill(key);
-          await section("Credentials");
-          await identity("Write", nested => nested.getByLabel("Write token", { exact: true }).fill("fixture-niks3-token"));
+          await identity("Write", nested => nested.getByLabel("API token", { exact: true }).fill("fixture-niks3-token"));
+          await section("Trust");
+          await dialog.getByLabel("Signing public key 1", { exact: true }).fill(key);
+          await shots("niks3");
         }
-        await section("Environments");
+        await section(apiType === "Niks3" ? "Destination" : "Environments");
         await dialog.getByRole("button", { name: env.name, exact: true }).click();
       }
       const responsePromise = page.waitForResponse(r => r.request().method() === "POST" && /\/api\/v1\/caches$/.test(r.url()));
@@ -680,7 +653,8 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
       assert.deepEqual(response.request().postDataJSON().environment_ids, [env.id]);
       assert.deepEqual(await api("GET", `/caches/${created.id}/environments`), [env.id]);
       console.log(`TASK-470 shared dialog real ${apiType} create passed (HTTP 201, atomic scope)`);
-      await editSmoke(created, env);
+      // Dedicated Niks3 Edit/scoped-probe coverage belongs to the Niks3 workflow.
+      if (apiType !== "Niks3") await editSmoke(created, env);
       if (apiType === "Attic") await atticProbeDiagnosticWorkflow(page, baseUrl, apiBaseUrl, created.id, captureState);
     }
     assert(!requests.some(r => r.method() === "PUT" && /\/environments$/.test(r.url())), "no second environment PUT for any type");
@@ -707,7 +681,7 @@ async function sharedCacheModalWorkflow(page, baseUrl, apiBaseUrl, screenshot, c
       if (captureState) await captureState("shared-environment-error");
       await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
     } finally { release(); await page.unroute(environmentsRoute); }
-    console.log("TASK-470 shared dialog identity, four-type draft retention, validation and 4 real creates passed");
+    console.log("TASK-470 generic dialog identity/draft retention, dedicated Niks3 sections, validation and 4 real creates passed");
   } finally {
     // Recover records even if an assertion fails immediately after creation.
     for (const cache of await api("GET", "/caches")) if (cache.name.startsWith(prefix)) await api("DELETE", `/caches/${cache.id}`);

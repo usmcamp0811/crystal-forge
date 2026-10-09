@@ -69,6 +69,12 @@ fn selected_runtime_cache(
         selected.cache_type != "Niks3" || capabilities.supports_niks3,
         "Agent does not support the selected cache type"
     );
+    anyhow::ensure!(
+        selected.cache_type != "Niks3"
+            || selected.niks3_read_auth_mode.as_deref() != Some("basic")
+            || capabilities.supports_niks3_basic_read,
+        "Agent does not support authority-bound Basic reads"
+    );
     let runtime = destination_to_runtime_cache(selected, confidential)
         .ok_or_else(|| anyhow::anyhow!("Selected cache read settings cannot be delivered"))?;
     Ok(vec![runtime])
@@ -835,6 +841,7 @@ mod tests {
     fn niks3_selected_cache_never_drops_private_or_unsupported_first_for_fallback() {
         let current = cf_protocol::agent::AgentCapabilities {
             supports_niks3: true,
+            ..Default::default()
         };
         let legacy = cf_protocol::agent::AgentCapabilities::default();
         let mut first = CacheDestination {

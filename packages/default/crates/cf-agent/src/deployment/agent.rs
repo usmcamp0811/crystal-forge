@@ -901,10 +901,19 @@ async fn copy_authenticated_cache(
         if cache.cache_type == "Niks3" && cache.cache_public_keys.is_empty() {
             anyhow::bail!("Niks3 reads require signing keys");
         }
-        let read = cf_config::cache_credentials::PreparedCacheRead::new(
+        let features = if matches!(
+            cache.read_auth,
+            cf_protocol::cache::CacheReadAuth::Basic { .. }
+        ) {
+            probe_nix_read_features(&program).await?
+        } else {
+            cf_config::cache_credentials::NixReadFeatures::default()
+        };
+        let read = cf_config::cache_credentials::PreparedCacheRead::new_with_nix_features(
             &cache.cache_url,
             &cache.cache_public_keys,
             &cache.read_auth,
+            &features,
         )?;
         let mut command = tokio::process::Command::new(program);
         // SECURITY: Only read auth is available to this child. Ambient write
@@ -930,9 +939,7 @@ async fn copy_authenticated_cache(
         if refresh {
             command.arg("--refresh");
         }
-        if let Some(ca) = &read.ca_certificate_path {
-            command.env("NIX_SSL_CERT_FILE", ca);
-        }
+        read.apply_to_nix_command(command.as_std_mut());
         let mut child = command
             .kill_on_drop(true)
             .stdout(std::process::Stdio::null())
@@ -963,6 +970,84 @@ async fn copy_authenticated_cache(
     })
     .await
     .context("Authenticated cache copy owner failed")?
+}
+
+/// Probes the read executable for native netrc authority protection.
+///
+/// Captures settings privately, with a ten-second deadline and a 2 MiB stdout
+/// limit. Callers must use the same executable and PATH for the subsequent read.
+/// Probe diagnostics are never included in errors because settings can contain
+/// unrelated credentials. No credential files are created by this operation.
+///
+/// # Errors
+/// Returns a static error on spawn, timeout, excessive output, nonzero exit,
+/// or malformed settings. A valid unpatched runtime returns absent support.
+///
+/// # Examples
+/// ```no_run
+/// # async fn example() -> anyhow::Result<()> {
+/// use cf_agent::deployment::agent::probe_nix_read_features;
+/// let program = std::ffi::OsStr::new("nix");
+/// let features = probe_nix_read_features(program).await?;
+/// if !features.supports_netrc_authority() {
+///     anyhow::bail!("Basic reads require the native authority guard");
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub async fn probe_nix_read_features(
+    program: &std::ffi::OsStr,
+) -> Result<cf_config::cache_credentials::NixReadFeatures> {
+    use tokio::io::AsyncReadExt;
+    // SECURITY: Bound both captured streams; never expose settings or stderr.
+    const MAX_SETTINGS: u64 = 2 * 1024 * 1024;
+    let mut command = tokio::process::Command::new(program);
+    command.args([
+        "--extra-experimental-features",
+        "nix-command",
+        "config",
+        "show",
+        "--json",
+    ]);
+    let mut child = command
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|_| anyhow::anyhow!("Nix runtime feature probe failed"))?;
+    let stdout = child.stdout.take().context("Missing Nix probe stdout")?;
+    let stderr = child.stderr.take().context("Missing Nix probe stderr")?;
+    let capture = async {
+        let mut settings = Vec::new();
+        let mut diagnostics = Vec::new();
+        let mut stdout = stdout.take(MAX_SETTINGS + 1);
+        let mut stderr = stderr.take(64 * 1024 + 1);
+        let (out, err) = tokio::join!(
+            stdout.read_to_end(&mut settings),
+            stderr.read_to_end(&mut diagnostics),
+        );
+        if out.is_err()
+            || err.is_err()
+            || settings.len() > MAX_SETTINGS as usize
+            || diagnostics.len() > 64 * 1024
+        {
+            anyhow::bail!("Nix runtime feature probe exceeded capture limits");
+        }
+        let status = child
+            .wait()
+            .await
+            .map_err(|_| anyhow::anyhow!("Nix runtime feature probe failed"))?;
+        anyhow::ensure!(status.success(), "Nix runtime feature probe failed");
+        cf_config::cache_credentials::NixReadFeatures::from_settings_json(&settings)
+    };
+    match tokio::time::timeout(Duration::from_secs(10), capture).await {
+        Ok(Ok(features)) => Ok(features),
+        _ => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            anyhow::bail!("Nix runtime feature probe failed");
+        }
+    }
 }
 
 fn shell_quote(s: &str) -> String {
@@ -1043,6 +1128,83 @@ test -z "${NIKS3_AUTH_TOKEN_FILE:-}"
 test -z "${ATTIC_TOKEN:-}"
 printf '%s' "$directory" > FIXTURE/credentials
 "#;
+
+    #[tokio::test]
+    async fn niks3_basic_read_applies_guard_paths_and_signatures() {
+        let fixture = Fixture::new(
+            r#"#!/bin/sh
+set -eu
+if test "$1" = --extra-experimental-features; then
+    test "$2" = nix-command; test "$3" = config; test "$4" = show; test "$5" = --json
+    printf '%s' '{"cf-netrc-authority":{"value":""}}'
+    exit 0
+fi
+test "$1" = copy; test "$3" = https://read.example/
+case "$*" in *private-user*|*private-password*) exit 24 ;; esac
+shift 10
+netrc=; authority=false; sigs=false; keys=false
+while test "$#" -gt 0; do
+    test "$1" = --option
+    case "$2" in
+    netrc-file) netrc=$3 ;;
+    cf-netrc-authority) test "$3" = https://read.example; authority=true ;;
+    require-sigs) test "$3" = true; sigs=true ;;
+    extra-trusted-public-keys) test "$3" = 'one:key two:key'; keys=true ;;
+    *) exit 11 ;;
+    esac
+    shift 3
+done
+test "$authority" = true; test "$sigs" = true; test "$keys" = true
+test -f "$netrc"; test "$(stat -c %a "$netrc")" = 600
+test "$(stat -c %a "${netrc%/*}")" = 700
+test -z "${NIX_CONFIG:-}"; test -z "${NIKS3_AUTH_TOKEN_FILE:-}"
+printf '%s' "${netrc%/*}" > FIXTURE/credentials
+"#,
+        );
+        let mut basic = cache(false);
+        basic.read_auth = CacheReadAuth::Basic {
+            username: "private-user".into(),
+            password: " private-password ".into(),
+        };
+        copy_authenticated_cache(
+            basic,
+            "/nix/store/output".into(),
+            false,
+            Duration::from_secs(5),
+            fixture.program(),
+        )
+        .await
+        .unwrap();
+        let directory = std::fs::read_to_string(fixture.0.join("credentials")).unwrap();
+        assert!(!std::path::Path::new(&directory).exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_basic_read_unpatched_runtime_never_copies() {
+        let fixture = Fixture::new(
+            r#"#!/bin/sh
+set -eu
+test "$1" = --extra-experimental-features
+printf '%s' '{"require-sigs":{"value":true}}'
+"#,
+        );
+        let mut basic = cache(false);
+        basic.read_auth = CacheReadAuth::Basic {
+            username: "private-user".into(),
+            password: "private-password".into(),
+        };
+        assert!(
+            copy_authenticated_cache(
+                basic,
+                "/nix/store/output".into(),
+                false,
+                Duration::from_secs(5),
+                fixture.program()
+            )
+            .await
+            .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn niks3_private_read_owns_files_and_ca_until_exit() {

@@ -59,15 +59,17 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     }
     await route.continue();
   });
-  const discoveryRoute = "**/api/v1/caches/niks3/discover";
-  const testRoute = "**/api/v1/caches/test-credentials";
+  const discoveryRoute = /\/api\/v1\/caches(?:\/\d+)?\/niks3\/discover$/;
+  const testRoute = /\/api\/v1\/caches(?:\/\d+)?\/test-credentials$/;
   const environmentsRoute = /\/api\/v1\/caches\/\d+\/environments$/;
   const capture = request => { if (request.url().includes("/caches")) requests.push(request); };
   page.on("request", capture);
   await page.route(discoveryRoute, async route => {
     const body = route.request().postDataJSON();
-    assert.deepEqual(Object.keys(body), ["server_url"]);
-    assert.equal(body.server_url, "https://write.example.com");
+    const stored = /\/caches\/\d+\//.test(route.request().url());
+    if (!stored) assert.deepEqual(Object.keys(body), ["server_url"], "token discovery remains URL-only");
+    assert.equal(stored ? body.niks3_server_url : body.server_url, "https://write.example.com");
+    for (const field of ["niks3_auth_token", "niks3_read_basic_username", "niks3_read_basic_password", "niks3_read_client_key"]) assert(!Object.hasOwn(body, field), `discovery omits ${field}`);
     discoveryCount++;
     if (failDiscovery) {
       failDiscovery = false;
@@ -77,9 +79,17 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     await route.fulfill({ json: { server_url: "https://write.example.com", substituter_url: "https://read.example.com", public_keys: keys, oidc_audience: "fixture-oidc-not-offered" } });
   });
   await page.route(testRoute, async route => {
+    const body = route.request().postDataJSON();
+    assert(["write", "read"].includes(body.probe_scope), "Test explicitly selects one plane");
+    assert(!Object.hasOwn(body, "niks3_auth_token"), "metadata probes never transport a bearer token");
+    if (body.probe_scope === "write") {
+      for (const field of ["niks3_read_client_key", "niks3_read_basic_username", "niks3_read_basic_password"]) assert(!Object.hasOwn(body, field), `write Test excludes ${field}`);
+    } else {
+      for (const field of ["niks3_write_client_cert", "niks3_write_client_key", "niks3_write_ca_cert"]) assert(!Object.hasOwn(body, field), `read Test excludes ${field}`);
+    }
     if (failTest) { failTest = false; return route.fulfill({ status: 502, json: { error: token } }); }
     await testGate;
-    await route.fulfill({ json: { success: true, message: "Public metadata/read checks passed", status_code: 200, tested_url: "https://read.example.com", server_reachable: true, discovery_valid: true, write_auth_valid: null, read_endpoint_reachable: true, signing_keys_found: true } });
+    await route.fulfill({ json: { success: true, message: "Public metadata/read checks passed", status_code: 200, tested_url: "https://read.example.com", write_api_reachable: body.probe_scope === "write" ? true : null, write_authn_valid: null, write_authorization_valid: null, read_access_valid: body.probe_scope === "read" ? true : null, signing_keys_valid: body.probe_scope === "read" ? true : null } });
   });
   await page.route(environmentsRoute, async route => {
     if (route.request().method() === "GET" && failEnvironmentRead
@@ -129,14 +139,22 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     await expect(dialog).toBeHidden();
   };
   const identity = async (dialog, plane, action) => {
-    await dialog.getByRole("button", { name: new RegExp(`^(Add|Edit|Replace) ${plane} credential$`) }).click();
+    await section(dialog, plane === "Write" ? "Write / API" : "Read / Pull");
+    const trigger = dialog.getByRole("button", { name: /^(Add credential|Replace|Edit replacement)$/ });
+    await trigger.click();
     const nested = page.getByRole("dialog", { name: `${plane} credential`, exact: true });
     await expect(nested).toBeVisible();
+    await expect(nested).toHaveAttribute("aria-modal", "true");
+    // The nested dialog must remain outside the inert outer shell.
+    assert.equal(await nested.evaluate(node => !!node.closest("[inert]")), false);
     await action(nested);
-    await nested.getByRole("button", { name: "Use credential", exact: true }).click();
+    await nested.getByRole("button", { name: "Use for this cache", exact: true }).click();
     await expect(nested).toBeHidden();
+    await expect(trigger).toBeFocused();
   };
-  const tokenDraft = (dialog, value) => identity(dialog, "Write", nested => nested.getByLabel("Write token").fill(value));
+  const section = (dialog, name) => dialog.getByRole("navigation").getByRole("button", { name, exact: true }).click();
+  const mode = (dialog, plane, name) => dialog.getByRole("group", { name: `${plane} authentication`, exact: true }).getByRole("button", { name, exact: true }).click();
+  const tokenDraft = (dialog, value) => identity(dialog, "Write", nested => nested.getByLabel("API token").fill(value));
   try {
     // Keep the overlay out of this form workflow without changing server-side
     // onboarding state. The harness owns this browser presentation record.
@@ -157,52 +175,103 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     let dialog = page.getByRole("dialog", { name: "Cache destination" });
     await expect(dialog).toBeVisible();
     await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue(name);
-    await expect(dialog.getByLabel("Read / substituter URL", { exact: true })).toHaveValue("https://retained-read.example.com");
     await expect(dialog.locator("header")).toContainText(name);
-    await expect(dialog.locator("header")).toContainText("Unsaved draft");
-    const destinationOrder = await dialog.locator("label").allTextContents();
-    assert(destinationOrder.indexOf("Read / substituter URL") < destinationOrder.indexOf("Write / API URL"), "Read precedes Write in Destination");
-    for (const section of ["Destination", "Credentials", "Environments"]) await expect(dialog.getByRole("button", { name: section, exact: true })).toBeVisible();
+    await expect(dialog.locator("header")).toContainText("Unsaved changes");
+    for (const name of ["Destination", "Write / API", "Read / Pull", "Trust", "Advanced"]) await expect(dialog.getByRole("navigation").getByRole("button", { name, exact: true })).toBeVisible();
+    await expect(dialog.getByRole("button", { name: selected.name, exact: true })).toHaveAttribute("aria-pressed", "true");
+    await section(dialog, "Read / Pull");
+    await expect(dialog.getByLabel("Read / substituter URL", { exact: true })).toHaveValue("");
+    await section(dialog, "Destination");
     await dialog.getByLabel("Name", { exact: true }).fill("");
     await expect(dialog.getByRole("button", { name: "Add cache", exact: true })).toBeDisabled();
     await expect(dialog.getByTestId("cache-save-blocked")).toBeVisible();
     await expect(dialog.getByTestId("cache-save-blocked")).toContainText("Enter a cache name");
     assert(!requests.some(r => r.method() === "POST" && /\/caches$/.test(r.url())), "invalid Niks3 draft makes no create request");
     await dialog.getByLabel("Name", { exact: true }).fill(name);
+    await dialog.getByRole("checkbox", { name: "Enabled", exact: true }).uncheck();
+    await section(dialog, "Write / API");
+    await expect(dialog.getByRole("group", { name: "Write authentication", exact: true }).getByRole("button", { name: "mTLS", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await mode(dialog, "Write", "API token");
+    await tokenDraft(dialog, token);
+    await section(dialog, "Read / Pull");
+    await expect(dialog.getByRole("group", { name: "Read authentication", exact: true }).getByRole("button", { name: "Basic", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await dialog.getByLabel("Read / substituter URL", { exact: true }).fill("https://discarded-read.example.com");
+    await section(dialog, "Destination");
+    await dialog.getByRole("button", { name: "Attic", exact: true }).click();
+    await expect(dialog.getByLabel("API token", { exact: true })).toHaveCount(0);
+    await dialog.getByRole("button", { name: "Niks3", exact: true }).click();
+    await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue(name);
+    await expect(dialog.getByRole("checkbox", { name: "Enabled", exact: true })).not.toBeChecked();
+    await expect(dialog.getByRole("button", { name: selected.name, exact: true })).toHaveAttribute("aria-pressed", "true");
+    await dialog.getByRole("checkbox", { name: "Enabled", exact: true }).check();
+    await section(dialog, "Read / Pull");
+    await expect(dialog.getByLabel("Read / substituter URL", { exact: true })).toHaveValue("");
+    await mode(dialog, "Read", "Public");
+    await section(dialog, "Write / API");
+    await mode(dialog, "Write", "API token");
+    await expect(dialog.getByLabel("Write / API URL", { exact: true })).toHaveValue("");
+    const credentialOpener = dialog.getByRole("button", { name: "Add credential", exact: true });
+    await credentialOpener.click();
+    const emptyCredential = page.getByRole("dialog", { name: "Write credential", exact: true });
+    await expect(emptyCredential.getByLabel("API token", { exact: true })).toHaveValue("");
+    await expect(emptyCredential.getByRole("button", { name: "Use for this cache", exact: true })).toBeDisabled();
+    await page.keyboard.press("Escape");
+    await expect(emptyCredential).toBeHidden();
+    await expect(credentialOpener).toBeFocused();
+    await section(dialog, "Write / API");
     await dialog.getByLabel("Write / API URL", { exact: true }).fill("https://write.example.com");
-    await dialog.getByRole("button", { name: "Discover configuration" }).click();
+    // Bootstrap discovery works before read URL, keys or token are entered.
+    await dialog.getByRole("button", { name: "Discover", exact: true }).click();
     await expect(dialog.getByRole("alert")).toContainText("Discovery failed");
-    await dialog.getByRole("button", { name: "Discover configuration" }).click();
+    await dialog.getByRole("button", { name: "Discover", exact: true }).click();
     await expect(dialog.getByRole("button", { name: "Discovering…", exact: true })).toBeDisabled();
     await expect(dialog.getByLabel("Write / API URL")).toBeDisabled();
-    await expect(dialog.getByRole("button", { name: "Attic", exact: true })).toBeDisabled();
-    await expect(dialog.getByRole("button", { name: "Credentials", exact: true })).toBeDisabled();
+    await expect(dialog.getByRole("button", { name: "Read / Pull", exact: true })).toBeDisabled();
     await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeDisabled();
     await expect(dialog.getByRole("button", { name: "Close", exact: true })).toBeDisabled();
     releaseDiscovery();
+    await expect(dialog.getByRole("status").filter({ hasText: "Discovery successful" })).toBeVisible();
+    await section(dialog, "Read / Pull");
     await expect(dialog.getByLabel("Read / substituter URL")).toHaveValue("https://read.example.com");
-    await expect(dialog.getByLabel("Signing public keys")).toHaveValue(keys.join("\n"));
-    await expect(dialog.getByRole("status").filter({ hasText: "Review URLs and all keys before saving" })).toBeVisible();
+    await section(dialog, "Trust");
+    for (let i = 0; i < keys.length; i++) await expect(dialog.getByLabel(`Signing public key ${i + 1}`, { exact: true })).toHaveValue(keys[i]);
     assert.equal(discoveryCount, 2);
     // Discovery must not persist anything or transport any credentials.
     assert(!requests.some(r => r.method() === "POST" && /\/caches$/.test(r.url())));
-    await dialog.getByRole("button", { name: "Credentials", exact: true }).click();
-    const credentialOrder = await dialog.locator("label").allTextContents();
-    assert(credentialOrder.indexOf("Read authentication") < credentialOrder.indexOf("Write authentication"), "Read precedes Write in Credentials");
     await tokenDraft(dialog, token);
-    await dialog.getByRole("button", { name: "Test connection" }).click();
-    await expect(dialog.getByRole("alert")).toContainText("Connection test failed");
+    await dialog.getByRole("button", { name: "Test write API", exact: true }).click();
+    await expect(dialog.getByRole("alert")).toContainText("Test failed");
     await expect(dialog.getByRole("alert")).not.toContainText(token);
-    await dialog.getByRole("button", { name: "Test connection" }).click();
+    await dialog.getByRole("button", { name: "Test write API", exact: true }).click();
     await expect(dialog.getByRole("button", { name: "Testing…", exact: true })).toBeDisabled();
-    await expect(dialog.getByRole("button", { name: "Edit Write credential", exact: true })).toBeDisabled();
+    await expect(dialog.getByRole("button", { name: "Edit replacement", exact: true })).toBeDisabled();
     releaseTest();
-    await expect(dialog.getByTestId("niks3-test-result")).toContainText("Write authorization: Untested");
-    await expect(dialog.getByTestId("niks3-test-result")).not.toContainText("Write authorization: Verified");
-    await expect(dialog.getByText("External credential providers are not offered.", { exact: false })).toBeVisible();
+    const authorization = dialog.getByText("Write authorization", { exact: true }).locator("..");
+    await expect(authorization).toContainText("Untested");
+    await expect(authorization).not.toContainText("Verified");
+    await section(dialog, "Read / Pull");
+    await dialog.getByRole("button", { name: "Test read endpoint", exact: true }).click();
+    await expect(dialog.getByText("Read access", { exact: true }).locator("..")).toContainText("Verified");
+    // Discovery preserves conflicting operator-entered public values until an
+    // explicit Apply. The token draft still must not enter the request.
+    await dialog.getByLabel("Read / substituter URL", { exact: true }).fill("https://operator-read.example.com");
+    await section(dialog, "Write / API");
+    await dialog.getByRole("button", { name: "Discover", exact: true }).click();
+    await expect(dialog.getByRole("heading", { name: "Review discovered public metadata", exact: true })).toBeVisible();
+    await section(dialog, "Read / Pull");
+    await expect(dialog.getByLabel("Read / substituter URL", { exact: true })).toHaveValue("https://operator-read.example.com");
+    await section(dialog, "Write / API");
+    await dialog.getByRole("button", { name: "Apply discovered metadata", exact: true }).click();
     if (screenshot) await page.screenshot({ path: screenshot.replace(/\.png$/, "-credentials.png"), fullPage: true, animations: "disabled" });
     if (captureState) await captureState("niks3-credentials");
-    await dialog.getByRole("button", { name: "Environments", exact: true }).click();
+    await section(dialog, "Advanced");
+    for (const [label, value] of [["Parallel uploads", "1"], ["Retry attempts", "3"], ["Push timeout", "3600"]]) await expect(dialog.getByLabel(label, { exact: true })).toHaveValue(value);
+    await expect(dialog.getByRole("checkbox", { name: "Require signatures", exact: true })).toBeChecked();
+    await dialog.getByLabel("Push timeout", { exact: true }).fill("");
+    await expect(dialog.getByRole("button", { name: "Add cache", exact: true })).toBeDisabled();
+    await expect(dialog.getByTestId("cache-save-blocked")).toContainText("Enter whole-number Advanced values");
+    await dialog.getByLabel("Push timeout", { exact: true }).fill("3600");
+    await section(dialog, "Destination");
     await expect(dialog.getByRole("button", { name: selected.name, exact: true })).toHaveAttribute("aria-pressed", "true");
     await dialog.getByRole("button", { name: "Add cache", exact: true }).click();
     await expect(dialog.getByRole("button", { name: "Saving…", exact: true })).toBeDisabled();
@@ -227,12 +296,12 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     assert.equal(cache.niks3_read_auth_mode, "none");
     assert.deepEqual(cache.niks3_public_keys, keys);
     dialog = await openEdit();
-    await dialog.getByRole("button", { name: "Credentials", exact: true }).click();
-    await expect(dialog.getByLabel("Write token")).toHaveCount(0);
-    await expect(dialog.getByLabel("Write credential")).toHaveValue("__current__");
+    await section(dialog, "Write / API");
+    await expect(dialog.getByLabel("API token")).toHaveCount(0);
+    await expect(dialog.getByTestId("niks3-write-credential-state")).toContainText("Current configured credential");
     await tokenDraft(dialog, rotatedToken);
     const beforeFailedUpdate = await getRedacted();
-    await dialog.getByRole("button", { name: "Destination", exact: true }).click();
+    await section(dialog, "Read / Pull");
     await dialog.getByLabel("Read / substituter URL", { exact: true }).fill("https://changed-read.example.com");
     const beforeUpdateCount = requests.filter(r => r.method() === "PUT").length;
     failUpdate = true;
@@ -253,25 +322,26 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     cache = await getRedacted();
     assert(cache.niks3_write_token_configured);
     dialog = await openEdit();
-    await dialog.getByRole("button", { name: "Credentials", exact: true }).click();
-    await expect(dialog.getByLabel("Write token")).toHaveCount(0);
+    await section(dialog, "Write / API");
+    await expect(dialog.getByLabel("API token")).toHaveCount(0);
     await save(dialog);
     cache = await getRedacted();
     assert(cache.niks3_write_token_configured, "blank edit retains token");
     dialog = await openEdit();
-    await dialog.getByRole("button", { name: "Credentials", exact: true }).click();
-    await dialog.getByLabel("Write authentication").selectOption("mtls");
-    await dialog.getByLabel("Read authentication").selectOption("mtls");
+    await section(dialog, "Write / API");
+    await mode(dialog, "Write", "mTLS");
+    await section(dialog, "Read / Pull");
+    await mode(dialog, "Read", "mTLS");
     const updatesBeforeInvalidIdentity = requests.filter(r => r.method() === "PUT").length;
     await expect(dialog.getByRole("button", { name: "Save changes", exact: true })).toBeDisabled();
     await expect(dialog.getByTestId("cache-save-blocked")).toBeVisible();
-    await expect(dialog.getByTestId("cache-save-blocked")).toContainText("Write mTLS requires");
+    await expect(dialog.getByTestId("cache-save-blocked")).toContainText("Enter a client certificate and private key together");
     assert.equal(requests.filter(r => r.method() === "PUT").length, updatesBeforeInvalidIdentity, "invalid mTLS edit makes no update request");
     for (const plane of ["Write", "Read"]) {
       await identity(dialog, plane, async nested => {
-        await nested.getByLabel(`${plane} client certificate`, { exact: true }).fill(cert);
-        await nested.getByLabel(`${plane} private key`, { exact: true }).fill(privateKey);
-        await nested.getByLabel(`${plane} CA certificate (optional)`, { exact: true }).fill(cert);
+        await nested.getByLabel("Client certificate", { exact: true }).fill(cert);
+        await nested.getByLabel("Private key", { exact: true }).fill(privateKey);
+        await nested.getByLabel("Server CA bundle (optional)", { exact: true }).fill(cert);
       });
     }
     await save(dialog);
@@ -280,28 +350,34 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     assert.equal(cache.niks3_write_mtls_configured, true);
     assert.equal(cache.niks3_read_mtls_configured, true);
     dialog = await openEdit();
-    await dialog.getByRole("button", { name: "Credentials", exact: true }).click();
-    await expect(dialog.getByLabel("Write private key")).toHaveCount(0);
-    await expect(dialog.getByLabel("Read private key")).toHaveCount(0);
+    await section(dialog, "Write / API");
+    await expect(dialog.getByLabel("Private key")).toHaveCount(0);
+    await section(dialog, "Read / Pull");
+    await expect(dialog.getByLabel("Private key")).toHaveCount(0);
     if (screenshot) await page.screenshot({ path: screenshot.replace(/\.png$/, "-mtls.png"), fullPage: true, animations: "disabled" });
     if (captureState) await captureState("niks3-mtls");
-    await dialog.getByRole("button", { name: "Environments", exact: true }).click();
+    await section(dialog, "Destination");
     await expect(dialog.getByRole("button", { name: selected.name, exact: true })).toHaveAttribute("aria-pressed", "true");
     await save(dialog); // Blank identity replacements retain configured mTLS.
     cache = await getRedacted();
     assert(cache.niks3_write_mtls_configured && cache.niks3_read_mtls_configured);
     dialog = await openEdit();
-    await dialog.getByRole("button", { name: "Credentials", exact: true }).click();
-    for (const plane of ["Write", "Read"]) await identity(dialog, plane, nested => nested.getByRole("checkbox", { name: `Remove ${plane} custom CA on save` }).check());
+    for (const plane of ["Write", "Read"]) await identity(dialog, plane, async nested => {
+      await expect(nested.getByLabel("Client certificate", { exact: true })).toHaveValue("");
+      await expect(nested.getByLabel("Private key", { exact: true })).toHaveValue("");
+      await expect(nested.getByLabel("Server CA bundle (optional)", { exact: true })).toHaveValue("");
+      await nested.getByRole("checkbox", { name: `Remove ${plane} server CA bundle on Save`, exact: true }).check();
+    });
     await save(dialog);
     cache = await getRedacted();
     assert.equal(cache.niks3_write_ca_cert, null);
     assert.equal(cache.niks3_read_ca_cert, null);
     dialog = await openEdit();
-    await dialog.getByRole("button", { name: "Credentials", exact: true }).click();
-    await dialog.getByLabel("Write authentication").selectOption("token");
+    await section(dialog, "Write / API");
+    await mode(dialog, "Write", "API token");
     await tokenDraft(dialog, token);
-    await dialog.getByLabel("Read authentication").selectOption("none");
+    await section(dialog, "Read / Pull");
+    await mode(dialog, "Read", "Public");
     await save(dialog);
     cache = await getRedacted();
     assert(cache.niks3_write_token_configured);
@@ -310,14 +386,69 @@ Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=
     assert.equal(cache.niks3_write_client_cert, null);
     assert.equal(cache.niks3_read_client_cert, null);
     assert.deepEqual(await (await api("GET", `/caches/${createdId}/environments`)).json(), [selected.id]);
+    // Basic is an independent read identity. Allowed whitespace survives the
+    // request; GET and Edit expose neither username nor password.
+    const basicPassword = "  fixture-read-password  ";
+    privateValues.push(basicPassword);
+    dialog = await openEdit();
+    await section(dialog, "Read / Pull");
+    await mode(dialog, "Read", "Basic");
+    await identity(dialog, "Read", async nested => {
+      const confirm = nested.getByRole("button", { name: "Use for this cache", exact: true });
+      await expect(confirm).toBeDisabled();
+      await nested.getByLabel("Username", { exact: true }).fill("fixture:user");
+      await nested.getByLabel("Password", { exact: true }).fill(basicPassword);
+      await expect(confirm).toBeDisabled();
+      await nested.getByLabel("Username", { exact: true }).fill("fixture user");
+      await expect(confirm).toBeEnabled();
+    });
+    await save(dialog);
+    const basicSave = requests.filter(r => r.method() === "PUT" && /\/caches\/\d+$/.test(r.url())).at(-1).postDataJSON();
+    assert.equal(basicSave.niks3_read_basic_username, "fixture user");
+    assert.equal(basicSave.niks3_read_basic_password, basicPassword);
+    cache = await getRedacted();
+    assert.equal(cache.niks3_read_basic_configured, true);
+    assert(!cache.niks3_read_basic_username && !cache.niks3_read_basic_password);
+    const freshRoute = `${apiBaseUrl}/api/v1/caches/${createdId}`;
+    const missingFlags = async route => {
+      if (route.request().method() !== "GET") return route.continue();
+      const response = await route.fetch();
+      const value = await response.json();
+      for (const field of ["niks3_write_token_configured", "niks3_read_basic_configured"]) delete value[field];
+      await route.fulfill({ response, json: value });
+    };
+    await page.route(freshRoute, missingFlags);
+    try {
+      dialog = await openEdit();
+      await section(dialog, "Read / Pull");
+      await expect(dialog.getByTestId("niks3-read-credential-state")).toContainText("Stored credential status unavailable");
+      const retainedProbe = page.waitForRequest(r => r.url() === `${freshRoute}/test-credentials`);
+      await dialog.getByRole("button", { name: "Test read endpoint", exact: true }).click();
+      const patch = (await retainedProbe).postDataJSON();
+      for (const field of ["niks3_read_basic_username", "niks3_read_basic_password", "niks3_auth_token"]) assert(!Object.hasOwn(patch, field), `retained read Test omits ${field}`);
+      await expect(dialog.getByText("Read access", { exact: true }).locator("..")).toContainText("Verified");
+      // A replacement is local; explicit Current restores server retention even
+      // with missing flags. Cancel never sends a mutation.
+      await identity(dialog, "Read", async nested => {
+        await expect(nested.getByLabel("Username", { exact: true })).toHaveValue("");
+        await expect(nested.getByLabel("Password", { exact: true })).toHaveValue("");
+        await nested.getByLabel("Username", { exact: true }).fill("replacement user");
+        await nested.getByLabel("Password", { exact: true }).fill("replacement password");
+      });
+      await dialog.getByRole("button", { name: "Use current credential", exact: true }).click();
+      await expect(dialog.getByRole("button", { name: "Save changes", exact: true })).toBeEnabled();
+      const mutationsBefore = requests.filter(r => r.method() === "PUT").length;
+      await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+      assert.equal(requests.filter(r => r.method() === "PUT").length, mutationsBefore);
+    } finally { await page.unroute(freshRoute, missingFlags); }
     failEnvironmentRead = true;
     dialog = await openEdit();
     await expect(dialog.getByRole("alert")).toContainText("Environment assignments could not be loaded");
     await expect(dialog.getByRole("button", { name: "Save changes", exact: true })).toBeDisabled();
     await expect(dialog.locator("footer")).toContainText("Scope not loaded");
     await expect(dialog.locator("footer")).not.toContainText("Global scope");
-    await dialog.getByRole("button", { name: "Credentials", exact: true }).click();
-    await expect(dialog.getByRole("button", { name: "Test connection", exact: true })).toBeDisabled();
+    await section(dialog, "Write / API");
+    await expect(dialog.getByRole("button", { name: "Test write API", exact: true })).toBeDisabled();
     if (captureState) await captureState("niks3-scope-load-error");
     await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
     dialog = await openEdit();
