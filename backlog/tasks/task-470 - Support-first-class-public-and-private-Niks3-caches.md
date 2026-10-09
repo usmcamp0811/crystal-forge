@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-09 14:02'
+updated_date: '2026-10-09 14:04'
 labels: []
 dependencies: []
 references:
@@ -172,6 +172,8 @@ Owner-approved Basic-read native VM scope at c82efcb2: preserve prior owner-ledg
 User-approved response-only metrics UI scope: consume the ready GET /api/v1/caches/:id/metrics contract after inspecting storage_metrics.rs. Add documented DTO/client and a small private cache metric display/loading module. Load observations once per successful page-list load or explicit Refresh with at most three concurrent requests; share the resulting map across cards/table/details. Hide prior observations immediately when refreshing or disabling a destination. Render only supported available bases: reported logical bytes in GiB and live tracked objects as objects, never physical usage/capacity or fabricated path totals. Use static allowlisted unavailable/error explanations and local observation timestamps. Keep root Paths cached unavailable and preserve existing forms/design/credential semantics. Source-first work under the explicit preview waiver; only owned web-ui API/view/module and owned shared/Niks3 workflows. Run focused unit/WASM/format checks; no backend/protocol/package/native-fixture edits or native-provider mocking.
 
 Owner update 2026-10-09: implement adaptive bulk evaluator sizing only in existing branch at bab049a4 as a separate reviewable commit. Preserve Niks3 authentication/netrc patch, evaluator semantics/drvPath, cleanup and other service resource controls. Synchronize cf-config and legacy cf-server server config: optional fixed per-worker override; auto reserve 4096 MiB /85%; idle900s/overall3600s. Resolve immutable resource plan immediately before bulk evaluator spawn from stable MemTotal and actual unified cgroup memory.max, bounded diagnostics/fallback4096MiB per effective worker, checked arithmetic/clear too-small errors. Resolve workers0 via available CPU parallelism and explicitly pass resolved nonzero workers because inspected pinned nix-eval-jobs2.34.3 does not implement zero automatic selection. Document pinned post-job restart semantics separately from newer aggregate/solo-retry scheduler behavior reported by owner. Add pure parsing/calculation/watchdog tests and evaluated generated-TOML checks. Verify focused Rust/config/module/server-regressions/OKF/packaging foreground; push separate commit and leave full matrix to exact-head CI, no merge.
+
+Focused evaluator configuration delegation at bab049a4: own cf-config/src/config/server.rs, new evaluator_resources.rs, lib.rs export and obsolete cf-server/src/config/server.rs only. Add optional fixed memory, static resource/watchdog policy validation, pure resource planning and bounded physical/cgroup-v2 detection with ancestor limits. Resolve zero workers explicitly; expose fallible plan-based CLI arguments. Add pure parser/arithmetic/serde/duplicate-contract tests and verify focused cf-config tests/doctests through foreground nix develop. Stage new module only; parent owns runtime logging/watchdog wiring and broader verification.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
