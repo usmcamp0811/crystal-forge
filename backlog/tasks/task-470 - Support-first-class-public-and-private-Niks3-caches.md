@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-10 03:32'
+updated_date: '2026-10-10 03:36'
 labels: []
 dependencies: []
 references:
@@ -665,6 +665,8 @@ Implemented the independent diagnostics portion: cf-config/src/niks3_diagnostics
 Strengthened the existing six-variant Niks3 fixture. Initial runs found and fixed an observer-runtime startup ordering problem, then a fresh-derivation dependency-context error in the test expression. Final authoritative foreground command sh packages/ci/public-cache-build.sh --no-link -L .#checks.x86_64-linux.niks3-cache --max-jobs 2 --cores 8 passed. It demonstrated synthetic same-ID CA-only Save retaining ciphertext, non-mutating metadata-only Test, dispatch of the full saved A+B+C bundle and matching pair, NAR/narinfo absence before dispatch, then 2 matching NAR PUTs and 1 matching narinfo PUT after baseline. Server publication verification, signature-required agent pull, CVE materialization and cleanup passed across all six variants. Final VM duration 124.32 seconds; raw log /home/mcamp/.local/share/opencode/tool-output/tool_123c9af7b001l749Zubm9VJiAX. This is synthetic fixture evidence, not acceptance of the production 122-certificate bundle.
 
 Focused verification passed: cf-config niks3_diagnostics 6 unit tests and 2 doctests; builder Niks3 11 tests; server diagnostics 4 tests; FIFO/input-owner 2 tests; cache-destination query 10 tests with 4 existing SQLx cases ignored. Changed-file rustfmt and staged/unstaged diff checks passed. Authoritative okf-knowledge passed 58 validation tests, 188 concepts and 216 Mermaid blocks with zero errors. Security review found no blockers in bounded capture/classification. Updated docs/knowledge/caches/niks3-cache.md and native fixture README. Remaining: actual CA structural report, safe normalization policy, equivalent replacement trust in the write probe, categorized API/UI diagnostics, final complete CA-path verification, commit/push and exact-head CI. No commit, push or merge for this slice; evaluator and flake pins unchanged.
+
+Focused frontend diagnostics partial handoff: changed only packages/web-ui/src/api/{client,models}.rs in f12b83d5 task worktree. Added default-absent diagnostic_code and fourteen exact code-to-local-static mappings. Shared draft/stored probe decoder accepts diagnostic hints only on HTTP400; unsupported/auth statuses stay generic. HTTP200 prose and tested_url are replaced/removed; scoped evidence remains unchanged, including absent write authentication and authorization. Added safe UI error/result helpers but view wiring is pending preview. Verification passed: nix develop -c cargo test --manifest-path packages/web-ui/Cargo.toml cache_probe_tests (8 passed); nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown; owned rustfmt --check and git diff --check. Preview blocked: no8081 listener; /proc confirmed8080 Dioxus PID24886 and3445 server PID6523 belongTASK326.2. Task PostgreSQL PID866390 cwd pointsTASK470/.devenv/state/postgres but no task backend/UI is running. No service/database mutations or commits. Remaining: owner supplies verified preview or explicit exception; wire niks3 Test error and failed-result guidance and relevant browser assertions/check.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
