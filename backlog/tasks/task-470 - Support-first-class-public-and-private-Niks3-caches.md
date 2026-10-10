@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-10 06:02'
+updated_date: '2026-10-10 06:47'
 labels: []
 dependencies: []
 references:
@@ -206,6 +206,8 @@ Incremental mixed-onboarding native fixture scope: retain passing six-variant/fr
 Owner confirmed standing preview waiver for focused UI diagnostics: no dev-preview startup/rebuild/polling; authoritative browser gates remain parent-owned. Expand frontend to all17 backend diagnostic codes including client_certificate_invalid/client_private_key_invalid/client_identity_mismatch. Complete safe write/read Test and Discovery error wiring without layout/style changes. Add native invalid CA/certificate/key and mismatch Test/Cancel regressions plus explicitly defensive response-spoof suppression cases in retained25 only. No commits or pushes before parent gates.
 
 User-requested test-only CA fixture correction at f12b83d5: reuse the existing TASK-470 worktree and parent-owned lock; modify only cf-agent/src/deployment/agent.rs cfg(test) fixtures. Copy the public frozen X.509 TEST_CERTIFICATE from cf-server/security/cache_secrets.rs, replace mock read CA and preserve exact canonical PEM child assertion plus all identity/ownership/timeout assertions. Run nix develop with offline cargo test -p cf-agent --lib deployment::agent; no services, VM/package gates, commits or pushes.
+
+Bounded Web UI fixture startup repair at f12b83d5: raw log tool_1247b9dde001jXzTUJwahP59dh lines19763–19783 proves niks3-web-ui-db-owners ALTER DATABASE runs before PostgreSQL setup creates role niks3. Change only checks/web-ui/default.nix and README to require/order after postgresql-setup.service. Preserve existing wait_for_unit and all native/browser/raw-state assertions. Run one foreground authoritative CF_UI_TEST_STEPS=25-caches-modal-attic build with user-specified public-cache argv; report actual exit and raw log. If browser fails, hand evidence to UI owner without changing assertions. Existing task worktree/owner lock and preview waiver apply; no commits or pushes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
