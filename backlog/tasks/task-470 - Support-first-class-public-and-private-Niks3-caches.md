@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-10 03:29'
+updated_date: '2026-10-10 03:31'
 labels: []
 dependencies: []
 references:
@@ -192,6 +192,8 @@ Focused fixture-only CA regression at f12b83d5: own checks/niks3-cache/default.n
 Narrow delegated observed-persistence fix in shared f12b83d5 worktree: capture only the four original stored Niks3 secret fields before decryption; preserve exact token/write-key/read-key bytes when effective plaintext equals current plaintext, following Basic preservation. Keep effective clears/replacements and transaction locking unchanged. Add focused nonignored query tests without test environment mutation; run offline cf-server query tests via Nix. Parent owns native/VM migration-backed proof and broader gate; no services, migrations, commits or other source edits.
 
 Owner supplied a production structural report: 8,238 lines; 122 ordinary CERTIFICATE and 172 TRUSTED CERTIFICATE records; 605 nonempty outside-PEM lines plus 293 blanks; no CRLF, framing errors or invalid X.509 objects. Implement the confirmed mixed-bundle correction now. Preserve Go's effective ordinary-certificate trust set; validate but do not promote OpenSSL trusted-only records. Accept only narrowly parsed buildcatrust metadata records verified against public generator grammar and auxiliary DER; reject keys, malformed records, unknown text and ambiguous trust annotations. A single exact-file safe counting command was supplied to classify the 605 lines, without stopping independent implementation. Share canonical CA normalization across saved/effective credentials, probes and CLI preparation; retain strict client-certificate handling and replacement-root semantics for Niks3 custom write CA. Add allowlisted probe/UI diagnostics and finish existing safe push diagnostics. Re-run the fresh saved-credential builder publication proof, relevant Rust and browser checks, security review, separate commit and exact-head CI. No evaluator, pins, schema, unrelated cache/auth behavior or merge.
+
+User-delegated shared CA compatibility at f12b83d5: own only new cf-config/src/ca_bundle.rs, focused cf-config dependencies/workspace lock, lib export preserving diagnostics, and CA normalization in push/read credential preparation plus necessary tests. Parse verified buildcatrust v0.5.1 full records with matching certificate/AUX and exact EKU annotations; retain only ordinary roots without conversion or ambient augmentation. Reject unknown bytes, unsupported PEM/private material, malformed X509/DER and ambiguous trust with static codes. Optionally expose separate strict identity-pair validator without wiring consumers. Verify foreground cf-config unit/doctests through nix develop; stage new module only, no services/commits/push. Production counts are user-supplied; exact annotation categorization remains unverified.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
