@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-10 04:23'
+updated_date: '2026-10-10 04:35'
 labels: []
 dependencies: []
 references:
@@ -681,6 +681,10 @@ Test-only public onboarding reproduction added in checks/niks3-ca-bundle/{defaul
 Canonical fixture gate passed: nix build --no-link -L --option substituters https://cache.nixos.org --option max-jobs 1 --option cores 2 .#checks.x86_64-linux.niks3-ca-bundle.fixture. Public8226lines + synthetic P256 root12 =8238; plain121+1=122, trusted172, blanks293, CR0, labels172, omissionnotes51, trustedheadings170, rejectedheadings0, OIDlines212. Annotation605=172+51+170+212. Ordinary-only unexpected4942=605+344trustedframing+3993trustedBase64. Go real pool selects122 unique Raw DER identities; all293 public ordinary/AUX X509 objects parse in Go and OpenSSL. Sandbox synthetic key is deleted immediately/EXIT cleanup and never enters outputs/logs. Latest fixture identity-set digest8e35cc5a8ce4f462c6aacab2d7eb66f5c894723cb3fd147667bf584a8e5026bd and syntheticroot8387bb13764fae69a426b6ff26827bffef0f29226d8dbec7ce7c839b2d9af7a6.
 
 BLOCKED: canonical nix build --no-link -L --option substituters https://cache.nixos.org --option max-jobs 1 --option cores 2 .#checks.x86_64-linux.niks3-ca-bundle exits1 with ca_bundle_content_unsupported; final drv /nix/store/0n3821cn2yicyv55k3gna907b70bp5wi-crystal-forge-niks3-ca-bundle.drv. Exactly one actual NSS label is Base64-decodable and existing validate_label rejects that grammar. Original fixture preserved; no label sanitization or production fix. Actual original-vs-normalized Go identity equivalence is NOT proven until CA owner resolves rejection. Nine existing CA unit tests passed in sandbox runner build; nix develop --command rustfmt --check example, pinned Go gofmt -d comparator and git diff --check/cached --check passed. No commits/pushes/services/Vault/operator file reads.
+
+Backend diagnostic-code follow-up: added client_certificate_invalid, client_private_key_invalid and client_identity_mismatch to the original14-code allowlist. Shared ClientIdentityError is retained through anyhow context/downcast; strict chain failures become its InvalidCertificate variant. Write transport preserves precise certificate/key/mismatch failures before DNS; actual rustls key parsing reports client_private_key_invalid. Ambiguous read errors and incomplete pair failures retain client_identity_invalid. Discovery exposes static write certificate/key field identifiers where known; mismatch has no single field. Existing CA-envelope and pre-DNS identity tests now exercise the complete17-code wire allowlist, typed context redaction, wrong-key mismatch, malformed key and prohibited trusted client records. No new test names:51ignored+44nonignored gate membership unchanged. Parent storage_metrics.rs:248 now verified to use niks3_write_test_client.
+
+Final follow-up checks exit0: nix develop --offline with SQLX_OFFLINE=true cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib handlers::api::caches:: -- --test-threads=2 (50passed/16ignored); cargo check same manifest/package --all-targets; changed-file rustfmt and staged/unstaged diff checks. No PostgreSQL bodies, host services, production certificate/key reads, preview, commits or pushes. Native VM ambient-trust negative remains parent-owned: use a server certificate trusted by the server guest ambient bundle with an unrelated explicit custom write CA and assert tls_verification_failed/no auth proof, alongside a matching-custom-CA positive control. The local root-policy construction test does not establish an actual TLS-handshake negative.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
