@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-10 03:31'
+updated_date: '2026-10-10 03:32'
 labels: []
 dependencies: []
 references:
@@ -194,6 +194,8 @@ Narrow delegated observed-persistence fix in shared f12b83d5 worktree: capture o
 Owner supplied a production structural report: 8,238 lines; 122 ordinary CERTIFICATE and 172 TRUSTED CERTIFICATE records; 605 nonempty outside-PEM lines plus 293 blanks; no CRLF, framing errors or invalid X.509 objects. Implement the confirmed mixed-bundle correction now. Preserve Go's effective ordinary-certificate trust set; validate but do not promote OpenSSL trusted-only records. Accept only narrowly parsed buildcatrust metadata records verified against public generator grammar and auxiliary DER; reject keys, malformed records, unknown text and ambiguous trust annotations. A single exact-file safe counting command was supplied to classify the 605 lines, without stopping independent implementation. Share canonical CA normalization across saved/effective credentials, probes and CLI preparation; retain strict client-certificate handling and replacement-root semantics for Niks3 custom write CA. Add allowlisted probe/UI diagnostics and finish existing safe push diagnostics. Re-run the fresh saved-credential builder publication proof, relevant Rust and browser checks, security review, separate commit and exact-head CI. No evaluator, pins, schema, unrelated cache/auth behavior or merge.
 
 User-delegated shared CA compatibility at f12b83d5: own only new cf-config/src/ca_bundle.rs, focused cf-config dependencies/workspace lock, lib export preserving diagnostics, and CA normalization in push/read credential preparation plus necessary tests. Parse verified buildcatrust v0.5.1 full records with matching certificate/AUX and exact EKU annotations; retain only ordinary roots without conversion or ambient augmentation. Reject unknown bytes, unsupported PEM/private material, malformed X509/DER and ambiguous trust with static codes. Optionally expose separate strict identity-pair validator without wiring consumers. Verify foreground cf-config unit/doctests through nix develop; stage new module only, no services/commits/push. Production counts are user-supplied; exact annotation categorization remains unverified.
+
+Focused frontend diagnostics at f12b83d5: own api/client.rs and models.rs plus views/caches/niks3.rs and minimal cache error plumbing and retained workflow assertions. Decode only the fourteen exact diagnostic_code values into local static messages; suppress arbitrary response prose and URL metadata for failed Niks3 200 outcomes and HTTP errors from draft/stored probes. Preserve scoped evidence and unknown authentication/write authorization. Verify targeted Rust decoder tests and WASM/browser checks. Task preview currently unavailable: 8081 has no listener and 8080/3445 belong to TASK-326.2; client/model work proceeds while view edits await owner preview or explicit exception.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
