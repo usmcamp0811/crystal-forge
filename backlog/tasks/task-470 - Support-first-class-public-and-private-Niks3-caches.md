@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-10 03:19'
+updated_date: '2026-10-10 03:29'
 labels: []
 dependencies: []
 references:
@@ -190,6 +190,8 @@ Focused diagnostics delegation at f12b83d5: own only cf-config/src/niks3_diagnos
 Focused fixture-only CA regression at f12b83d5: own checks/niks3-cache/default.nix and README.md plus test_niks3_cache.py. Preserve sibling diagnostic/runtime WIP and all six native variants. Update the same synthetic split destination through admin API with certificate-only A+B+C roots while omitting retained client cert/key; verify exact persistence, ciphertext retention, safe flags/redaction and metadata-only Untested probe. Queue a fresh nonce-content derivation for actual remote publication and privately correlate new native S3 object PUTs with read-only absence evidence. Only parse/evaluate locally; parent runs full VM after CA policy is settled. No production credential/artifact access, normalization claims, helper edits, commits or pushes.
 
 Narrow delegated observed-persistence fix in shared f12b83d5 worktree: capture only the four original stored Niks3 secret fields before decryption; preserve exact token/write-key/read-key bytes when effective plaintext equals current plaintext, following Basic preservation. Keep effective clears/replacements and transaction locking unchanged. Add focused nonignored query tests without test environment mutation; run offline cf-server query tests via Nix. Parent owns native/VM migration-backed proof and broader gate; no services, migrations, commits or other source edits.
+
+Owner supplied a production structural report: 8,238 lines; 122 ordinary CERTIFICATE and 172 TRUSTED CERTIFICATE records; 605 nonempty outside-PEM lines plus 293 blanks; no CRLF, framing errors or invalid X.509 objects. Implement the confirmed mixed-bundle correction now. Preserve Go's effective ordinary-certificate trust set; validate but do not promote OpenSSL trusted-only records. Accept only narrowly parsed buildcatrust metadata records verified against public generator grammar and auxiliary DER; reject keys, malformed records, unknown text and ambiguous trust annotations. A single exact-file safe counting command was supplied to classify the 605 lines, without stopping independent implementation. Share canonical CA normalization across saved/effective credentials, probes and CLI preparation; retain strict client-certificate handling and replacement-root semantics for Niks3 custom write CA. Add allowlisted probe/UI diagnostics and finish existing safe push diagnostics. Re-run the fresh saved-credential builder publication proof, relevant Rust and browser checks, security review, separate commit and exact-head CI. No evaluator, pins, schema, unrelated cache/auth behavior or merge.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
