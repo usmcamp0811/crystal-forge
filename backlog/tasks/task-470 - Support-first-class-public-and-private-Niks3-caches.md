@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-10 01:52'
+updated_date: '2026-10-10 01:53'
 labels: []
 dependencies: []
 references:
@@ -184,6 +184,8 @@ Owner-confirmed pressure-module delegation at f36c6085: implement only new priva
 Confirmed partial resource-failure lifecycle delegation at f36c6085: own server/mod.rs, queries/commits.rs, services/composite_enforcement.rs, retry_policy.rs and focused tests/server-regressions membership. Add ResourceFailure mapped to existing database transient class with explicit resource_pressure diagnostic/evidence; suppress whole-flake automatic retry after exhausted same-attempt recovery. Partial finalizer validates retained EvaluationPlan against exact derivation identity, metadata, policy outcomes and runtime-owned policy_results.evaluation_attempt integer before publishing snapshots and preserving completed evidence under existing CAS locks. Fail only unresolved configurations; preserve cancellation/supersession and job identity. Runtime owner supplies typed partial failure and retained plan. Verify focused non-DB Rust checks through Nix; ignored migration-backed tests run only in authoritative parent-owned server-regressions sandbox. No services, host DB, commits or pushes.
 
 Owner-requested focused CA compatibility and cache-push diagnostics fix on existing f12b83d5 branch. Production CA path is /home/mcamp/niks3-push-crystal-forge/ca-bundle.pem on reckless; the agent environment is sledge and an exact-file read failed. Do not list or search the owner's home or credential directory. Never open client.key. A bounded exact-file structural-report command was supplied for reckless. Proceed with independent bounded CLI diagnostics while waiting for the report; do not invent the bundle's format or accept arbitrary outside-PEM data. Then implement only a confirmed safe CA normalization policy shared by validation, probes, retained loading, dispatch and protected CLI preparation. Preserve complete API/S3 trust, strict client identity and hostname verification. Add allowlisted probe/UI categories, fresh saved-credential dispatch and uncached NAR/narinfo publication proof through the existing split-PKI fixture. No evaluator changes, schema, flake update, unrelated cache behavior or merge. Commit the verified fix separately and report exact-head CI.
+
+Focused diagnostics delegation at f12b83d5: own only cf-config/src/niks3_diagnostics.rs and lib.rs export. Private bounded prefix/suffix per-stream retention and generic Tokio AsyncRead draining without new dependencies; safe static hint categories from terminal fatal stderr only, verified upstream stage grammar, body/URL spoof suppression and explicit caller timeout. Add bound/drain/redaction/classifier tests and rustdoc; foreground targeted Nix verification, stage only new module for flake membership. No credential parser policy, private path inspection, call-site edits, services, commits or pushes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
