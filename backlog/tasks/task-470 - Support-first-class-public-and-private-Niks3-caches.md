@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-10 04:05'
+updated_date: '2026-10-10 04:09'
 labels: []
 dependencies: []
 references:
@@ -198,6 +198,8 @@ User-delegated shared CA compatibility at f12b83d5: own only new cf-config/src/c
 Focused frontend diagnostics at f12b83d5: own api/client.rs and models.rs plus views/caches/niks3.rs and minimal cache error plumbing and retained workflow assertions. Decode only the fourteen exact diagnostic_code values into local static messages; suppress arbitrary response prose and URL metadata for failed Niks3 200 outcomes and HTTP errors from draft/stored probes. Preserve scoped evidence and unknown authentication/write authorization. Verify targeted Rust decoder tests and WASM/browser checks. Task preview currently unavailable: 8081 has no listener and 8080/3445 belong to TASK-326.2; client/model work proceeds while view edits await owner preview or explicit exception.
 
 Backend CA remediation delegation at f12b83d5: resume the parent-owned TASK-470 lock/worktree. Own security/cache_secrets.rs, models/cache_destination.rs, queries/cache_destinations.rs, handlers/api/caches.rs and discovery/CA tests plus exact server-regressions membership/README. Consume owner-provided cf-config CA normalization and client-identity validation without duplicating their implementation. Separate strict client certificate chains from CA normalization; normalize create/effective update and loaded CA fields in memory before validation; persist canonical CA on Save while preserving parent unchanged-ciphertext helper. Niks3 write custom CA probes replace all built-in/ambient roots; other transports retain existing root policy. Validate matching write client identity before DNS. Add allowlisted static diagnostics and focused non-mutating/load/persistence/trust tests; verify through Nix with SQLX_OFFLINE and no host DB/services. Parent owns UI/shared-helper/VM verification; no commits or pushes.
+
+User-requested test-only onboarding CA reproduction at f12b83d5: preserve existing CA/diagnostic WIP and runtime versions. Add independently buildable checks/niks3-ca-bundle with tiny cf-config example runner, public locked dotfiles root nixpkgs/unstable cacert datasets and sandbox-only ephemeral synthetic CA. Compare actual normalize_ca_bundle output against Go AppendCertsFromPEM eligible parsed Raw SHA256 identities; report line-category counts and digests only. No private owner paths, Vault, services, commits or pushes. Public script receives caller pkgs, so lock resolution alone does not attest deployed caller selection.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
