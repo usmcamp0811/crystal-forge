@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-10 04:52'
+updated_date: '2026-10-10 04:54'
 labels: []
 dependencies: []
 references:
@@ -204,6 +204,8 @@ User-requested test-only onboarding CA reproduction at f12b83d5: preserve existi
 Incremental mixed-onboarding native fixture scope: retain passing six-variant/fresh-output gate; concatenate unchanged synthetic A+B+C certificates with repository pkgs.cacert NSS3.126 raw ca-bundle.crt in fixture-only Nix output. Submit raw mixed bundle through same-ID CA-only Save. Independently select and validate ordinary DER identities with strict Base64/X.509 fixture oracle, expecting exact canonical124 ordinary roots and no promotion of172 trusted blocks; preserve605 annotation input lines. Compare GET/raw row/prepared builder hash and retained ciphertext/scope. Invalid synthetic-key injection/incomplete framing must fail Test and Save before provider contact without mutation. Only owned three files; parse/evaluate now and wait for parent explicit go before full VM after sibling normalizer stabilization.
 
 Owner confirmed standing preview waiver for focused UI diagnostics: no dev-preview startup/rebuild/polling; authoritative browser gates remain parent-owned. Expand frontend to all17 backend diagnostic codes including client_certificate_invalid/client_private_key_invalid/client_identity_mismatch. Complete safe write/read Test and Discovery error wiring without layout/style changes. Add native invalid CA/certificate/key and mismatch Test/Cancel regressions plus explicitly defensive response-spoof suppression cases in retained25 only. No commits or pushes before parent gates.
+
+User-requested test-only CA fixture correction at f12b83d5: reuse the existing TASK-470 worktree and parent-owned lock; modify only cf-agent/src/deployment/agent.rs cfg(test) fixtures. Copy the public frozen X.509 TEST_CERTIFICATE from cf-server/security/cache_secrets.rs, replace mock read CA and preserve exact canonical PEM child assertion plus all identity/ownership/timeout assertions. Run nix develop with offline cargo test -p cf-agent --lib deployment::agent; no services, VM/package gates, commits or pushes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
