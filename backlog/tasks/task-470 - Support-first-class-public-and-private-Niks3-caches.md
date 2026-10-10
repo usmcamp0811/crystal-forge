@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-10 05:59'
+updated_date: '2026-10-10 06:02'
 labels: []
 dependencies: []
 references:
@@ -717,6 +717,10 @@ AUTHORITATIVE EXPANDED NATIVE PASS: parent-authorized foreground sh packages/ci/
 Exact owned hashes identicalbeforeafter authoritativepass: checks/niks3-cache/default.nix3124738862bf54a2edb199654a5156e2b86693ab6ddf50056558ae4d318d720e; READMEaa1c97d3379331574e5d04e2ada137e93a20ced22c5e1c7db0ec91f87bcdaae4; Python5d4de2b0c84248d2d80d8af0df4b36738a3e9b743a9e873b276a5ed62d6d3dfd. Final scopedgitdiffcheck passed. PubliconboardingnormalizerGo/CF122root separategate ownerreportedpass; thisnativefixtureaddsA+B+C to121publicroots and independentlyproves124root saved/prepared realTLSpublication. No claimabout inaccessible deployedprivateCA validity.
 
 Focused P2 frontend raw-CA delimiter correction implemented: views/caches.rs adds nonempty_ca_bundle that uses trim only for emptiness and clones nonblank raw bytes for both CA fields. Shared request/update builders cover Add/Save/Test and dedicated/stored Discovery projections without changing URL, client-certificate/key or Basic contracts. API clients only serialize DTOs; no CA trimming found there. DTO CA docs now require preserving delimiter columns until backend validation. Added two Rust tests for leading spaces/tabs, CRLF/trailing whitespace across create/save/scoped draft and stored Test/discovery JSON, plus blank omission/inactive modes/no stored-CA prefill/unchanged clear flags. Retained workflow CA comparisons and direct wrong-trust POST now use raw values; new real stored-ID leading-indent case asserts exact posted CA bytes and static framing failure with no Save and existing raw/no-network checkpoint. Final exit0: cache Rust tests51passed; WASM check; JS syntax; owned rustfmt check; diffcheck. Logs /tmp/opencode/task470-frontend-raw-ca-{unit,wasm}.log. Authoritative step25 and screenshots remain parent-owned/pending; preview waiver retained; no services/DB/commit/push.
+
+CA raw-byte/P2 audit: security::cache_secrets::normalize_ca_bundle forwards original &str directly; model certificate validation and normalize_ca_fields use as_deref without trimming; queries clone/merge CA strings and normalize before binding; write transport and pinned-client CA parsing receive original CA text before canonicalization. nonempty() only tests trim-based emptiness and does not transform values. No runtime server trim defect found. Added explicit raw-column contract documentation to security wrapper/model and expanded existing CA/identity tests for leading space/tab first delimiters plus clean-first/indented-later delimiters across create/update/stored/effective projections and valid-pair pre-DNS discovery. Existing ignored SQLx test now includes CA replacement Save/Test400 field diagnostics/no callback/raw-row preservation and indented legacy load/Test fail-closed/no rewrite. No new member names:51ignored+44nonignored unchanged.
+
+Verification exit0 through nix develop --offline SQLX_OFFLINE=true: cf-server handler tests50passed/16ignored; cache_destination model/query tests26passed/4ignored; owned rustfmt and staged/unstaged diff checks. Expanded SQLx body compiled but was not executed here. Frontend parent notification: packages/web-ui/src/views/caches.rs:199 value helper trims all values and is used for write/read CA at227/242; preserve raw CA text for nonempty drafts, with trim only for empty detection. This frontend path can erase first-line indentation before backend receipt; no UI edit made by backend delegate. No host DB/services, production credential reads, commits or pushes.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
