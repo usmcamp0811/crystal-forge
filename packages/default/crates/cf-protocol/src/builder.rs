@@ -268,6 +268,13 @@ pub struct BuilderCachePushConfig {
     /// Server-selected destination identity for publication verification.
     #[serde(default)]
     pub cache_destination_id: Option<i32>,
+    /// Untrusted public label for human publication logs only.
+    ///
+    /// Consumers must sanitize this label at the log boundary. It grants no
+    /// authority for selection, authentication, verification, or completion.
+    /// Missing labels from older servers use the literal `cache` in logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_destination_name: Option<String>,
     /// Niks3 write API URL, separate from the read/substituter URL.
     #[serde(default)]
     pub niks3_server_url: Option<String>,
@@ -321,6 +328,7 @@ impl BuilderCachePushConfig {
     pub fn disabled() -> Self {
         Self {
             cache_destination_id: None,
+            cache_destination_name: None,
             niks3_server_url: None,
             niks3_write_auth: None,
             parallel_uploads: None,
@@ -1173,6 +1181,38 @@ pub struct CveScanFailResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_display_metadata_is_optional_and_rolling_upgrade_compatible() {
+        let legacy: BuilderCachePushConfig = serde_json::from_str("{}").unwrap();
+        assert!(legacy.cache_destination_name.is_none());
+        let disabled = BuilderCachePushConfig::disabled();
+        assert!(disabled.cache_destination_name.is_none());
+        assert!(
+            serde_json::to_value(disabled)
+                .unwrap()
+                .get("cache_destination_name")
+                .is_none()
+        );
+        let current: BuilderCachePushConfig = serde_json::from_value(serde_json::json!({
+            "cache_destination_id": 42, "cache_destination_name": "niks3"
+        }))
+        .unwrap();
+        let wire = serde_json::to_value(current).unwrap();
+        let roundtrip: BuilderCachePushConfig = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(roundtrip.cache_destination_name.as_deref(), Some("niks3"));
+        assert_eq!(roundtrip.cache_destination_id, Some(42));
+
+        // COMPATIBILITY: Serde consumers without the additive field ignore it.
+        #[derive(Deserialize)]
+        struct LegacyPush {
+            cache_destination_id: Option<i32>,
+        }
+        let old_builder: LegacyPush = serde_json::from_value(wire).unwrap();
+        assert_eq!(old_builder.cache_destination_id, Some(42));
+        let completion = serde_json::to_value(CompleteJobRequest::default()).unwrap();
+        assert!(completion.get("cache_destination_name").is_none());
+    }
 
     #[test]
     fn niks3_capabilities_default_false_and_roundtrip_independently_of_cve() {

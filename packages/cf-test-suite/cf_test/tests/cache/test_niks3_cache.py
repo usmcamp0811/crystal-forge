@@ -1249,24 +1249,47 @@ except Exception:
     return json.loads(production.succeed("python3 -c " + shlex.quote(source)))
 
 
-def publication_stage_projection(logs, cache_id):
-    """Selects bounded exact-ID availability events without returning raw logs."""
+def publication_stage_projection(logs, cache_id, expected_name):
+    """Selects bounded availability display events without returning raw logs.
+
+    The expected name comes from the configured fixture. Display text does not
+    prove destination identity. The cache_id field is caller context only;
+    persisted dispatch/publication rows and exact-job callbacks prove identity
+    separately. Only terminal events enter the existing evidence shape.
+    """
     import re
 
     assert isinstance(logs, str) and len(logs.encode()) <= 32 * 1024 * 1024
+    assert re.fullmatch(r"[A-Za-z0-9_-]+", expected_name), "invalid fixture display name"
+    name = re.escape(expected_name)
+    start = f"🔎 Checking output availability in {expected_name}..."
+    success = rf"✅ Output confirmed in {name} \(([0-9]+) ms\)"
+    failure = rf"⚠️ Cache availability check failed for {name} \(Niks3\): rate limited \(([0-9]+) ms\)"
     events = []
-    for line in logs.splitlines():
-        if not line.startswith("cache_publication "):
+    checking = False
+    # Split only on the record delimiter so CR/VT and other injected controls
+    # cannot disappear through splitlines normalization.
+    for line in logs.split("\n"):
+        if not any(marker in line for marker in ("Checking output availability",
+                   "Output confirmed", "Cache availability check failed", "cache_publication")):
             continue
-        match = re.fullmatch(r"cache_publication cache_id=(\d+) cache_type=Niks3 "
-                             r"stage=availability_path_info elapsed_ms=(\d+) "
-                             r"outcome=(success|cache_rate_limited) publication_status=(pending|confirmed)", line)
+        if line == start:
+            assert not checking, "duplicate completion stage start"
+            checking = True
+            continue
+        match = re.fullmatch(success, line)
+        outcome, status = "success", "confirmed"
+        if match is None:
+            match = re.fullmatch(failure, line)
+            outcome, status = "cache_rate_limited", "pending"
         assert match is not None, "invalid completion stage projection"
-        identity, elapsed, outcome, status = match.groups()
-        assert int(identity) == cache_id and int(elapsed) <= 90000
-        assert status == ("confirmed" if outcome == "success" else "pending")
+        assert checking, "completion stage start missing"
+        elapsed = match.group(1)
+        assert int(elapsed) <= 90000, "completion stage duration exceeded"
+        checking = False
         events.append({"cache_id": cache_id, "cache_type": "Niks3", "stage": "availability_path_info",
                        "elapsed_ms": int(elapsed), "outcome": outcome, "publication_status": status})
+    assert not checking, "completion stage result missing"
     assert events and len(events) <= 7, "completion stage evidence missing or retry bound exceeded"
     return events
 
@@ -1300,18 +1323,41 @@ def test_completion_guest_scripts_compile():
 
 
 def test_publication_stage_projection_rejects_untrusted_fields():
-    """Rejects unrelated IDs, unsafe fields and contradictory persisted stages."""
-    prefix = "cache_publication cache_id=470 cache_type=Niks3 stage=availability_path_info elapsed_ms=12 "
-    pending = prefix + "outcome=cache_rate_limited publication_status=pending"
-    confirmed = prefix + "outcome=success publication_status=confirmed"
-    events = publication_stage_projection("PRIVATE unrelated log\n" + pending + "\n" + confirmed, 470)
-    assert [event["publication_status"] for event in events] == ["pending", "confirmed"]
+    """Rejects wrong names, unsafe display fields, durations and retry overflow."""
+    name = "z-published-mtls-split"
+    start = f"🔎 Checking output availability in {name}...\n"
+    pending = f"⚠️ Cache availability check failed for {name} (Niks3): rate limited (12 ms)\n"
+    confirmed = f"✅ Output confirmed in {name} (0 ms)\n"
+    logs = "PRIVATE unrelated log\n" + start + pending + start + confirmed
+    events = publication_stage_projection(logs, 470, name)
+    assert events == [
+        {"cache_id": 470, "cache_type": "Niks3", "stage": "availability_path_info",
+         "elapsed_ms": 12, "outcome": "cache_rate_limited", "publication_status": "pending"},
+        {"cache_id": 470, "cache_type": "Niks3", "stage": "availability_path_info",
+         "elapsed_ms": 0, "outcome": "success", "publication_status": "confirmed"}]
     assert "PRIVATE" not in json.dumps(events)
-    for invalid in (pending.replace("470", "471"), pending + " url=PRIVATE",
-                    pending.replace("pending", "confirmed"), pending.replace("=12", "=90001"),
-                    "\n".join([pending] * 8), "PRIVATE"):
+    assert len(publication_stage_projection((start + pending) * 7, 470, name)) == 7
+    assert publication_stage_projection(start + confirmed.replace("0 ms", "90000 ms"), 470, name)[0]["elapsed_ms"] == 90000
+    for invalid in (logs.replace(name, "unexpected-cache"),
+                    logs.replace(name, "https://user:PRIVATE@cache.invalid"),
+                    start + pending.rstrip("\n") + " url=PRIVATE\n",
+                    start + confirmed.replace(name, name + " (Niks3)"),
+                    start + pending.replace("rate limited", "PRIVATE provider error"),
+                    start + pending.replace("(Niks3)", "(Attic)"),
+                    start + pending.replace("12 ms", "90001 ms"),
+                    start + pending.replace("12 ms", "-1 ms"),
+                    start + pending.replace("12 ms", "1.2 ms"),
+                    start + pending.replace("12 ms", "١٢ ms"),
+                    start + pending.replace("12 ms", "12ms"),
+                    start + pending.replace(name, name + "\x1b[0m"),
+                    start + pending.replace("\n", "\r\n"),
+                    start + pending.replace(name, name + "\x00"),
+                    start + pending.replace(name, name + "\v"),
+                    pending, start, start + start + pending, start + pending + confirmed,
+                    (start + pending) * 8, "PRIVATE",
+                    "cache_publication cache_id=470 cache_type=Niks3 PRIVATE"):
         try:
-            publication_stage_projection(invalid, 470)
+            publication_stage_projection(invalid, 470, name)
         except AssertionError as error:
             assert "PRIVATE" not in str(error)
         else:
@@ -1934,11 +1980,11 @@ assert (pki / 'client-ca-c.crt').read_bytes().strip() not in system
             assert all(record["status"] == 202 for record in automatic[:-1]), "completion recovery returned a conflict or false confirmation"
             assert automatic[-1]["end"] - automatic[0]["end"] + automatic[0]["duration"] <= 600
             traffic = completion_metadata_boundary(production, target, callbacks)
-            stages = publication_stage_projection(sql("SELECT logs FROM build_jobs WHERE id=%s", (job_id,))[0][0], cache_id)
+            stages = publication_stage_projection(sql("SELECT logs FROM build_jobs WHERE id=%s", (job_id,))[0][0], cache_id, published_name)
             assert stages[0]["outcome"] == "cache_rate_limited" and stages[-1]["outcome"] == "success"
             assert len(stages) == len(callbacks), "completion stage/callback evidence mismatch"
             print("Niks3 mtls-split: completion-only native metadata traffic " + json.dumps(traffic, sort_keys=True))
-            print("Niks3 mtls-split: exact-job availability stages " + json.dumps(stages, sort_keys=True))
+            print("Niks3 mtls-split: availability display stages (identity from DB/callbacks) " + json.dumps(stages, sort_keys=True))
             server.fail(f"test -e {shlex.quote(target['out'])}")
         wait_row("SELECT status,builder_id FROM build_jobs WHERE id=%s", (job_id,),
                  lambda rows: rows and rows[0][0] in ("success", "failed"), f"{variant} remote completion")
@@ -1947,6 +1993,14 @@ assert (pki / 'client-ca-c.crt').read_bytes().strip() not in system
         assert dispatch[0] == cache_id and dispatch[1] is not None, f"{variant}: dispatch identity was not bound"
         publication = sql("SELECT status,cache_destination,cache_destination_id,cache_destination_source FROM cache_push_jobs WHERE derivation_id=%s", (derivation_id,))
         assert publication and all(row == ("completed", published_name, cache_id, "database") for row in publication), f"{variant}: server did not verify selected destination"
+        # Human-readable publishing lines attest presentation only. The rows
+        # above and exact-job callbacks independently bind destination identity.
+        job_logs = sql("SELECT logs FROM build_jobs WHERE id=%s", (job_id,))[0][0]
+        log_lines = job_logs.split("\n")
+        publish_start = f"📤 Publishing build output to {published_name} (Niks3)..."
+        publish_success = f"✅ Build output published to {published_name}"
+        assert log_lines.count(publish_start) == log_lines.count(publish_success) == 1, f"{variant}: publishing display missing or duplicated"
+        assert log_lines.index(publish_start) < log_lines.index(publish_success), f"{variant}: publishing display order invalid"
         assert dispatch[0] != global_id
         if split:
             stored = sql("SELECT niks3_auth_token,niks3_write_client_key,s3_access_key_id,s3_secret_access_key,s3_session_token FROM cache_destinations WHERE id=%s", (cache_id,))[0]

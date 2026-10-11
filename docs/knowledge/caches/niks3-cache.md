@@ -456,10 +456,29 @@ The recovery GC root and build-log channel remain available.
 Retryable responses include `retry_after_secs: 2`. Classification is a safe hint,
 not a root-cause or authorization claim. The process drains stdout and stderr
 privately with a 64 KiB limit per stream; raw output, URLs, response bodies, and
-signed queries never enter logs or receipts. Build-log diagnostics use cache ID,
-an allowlisted cache type, the `availability_path_info` stage, elapsed time, and
-static outcome/status fields. Protected read credentials and isolated metadata
-cache ownership last through cancellation, kill, and reap.
+signed queries never enter logs or receipts. Persisted and live build logs use
+the bounded, sanitized configured destination name, an allowlisted cache type,
+readable milliseconds, and fixed failure descriptions. Missing or unsafe names
+use `cache`; IDs and endpoints are never display-name fallbacks. The optional
+builder payload field `cache_destination_name` is display metadata only. Older
+payloads remain valid without the field. Structured tracing retains cache ID,
+the `availability_path_info` stage, elapsed time, and static outcome/status
+fields separately. Protected read credentials and isolated metadata cache
+ownership last through cancellation, kill, and reap.
+
+For a destination named `niks3`, operator messages are:
+
+```text
+📤 Publishing build output to niks3 (Niks3)...
+✅ Build output published to niks3
+🔎 Checking output availability in niks3...
+✅ Output confirmed in niks3 (44 ms)
+```
+
+An availability failure uses a fixed description, for example
+`⚠️ Cache availability check failed for niks3 (Niks3): rate limited (44 ms)`.
+Confirmation means the exact output is advertised by the configured read store.
+It does not prove full-closure integrity or download the closure.
 
 An acknowledged pending receipt proves durable build success even if later
 reporting fails. Network failure without an acknowledgement leaves server state

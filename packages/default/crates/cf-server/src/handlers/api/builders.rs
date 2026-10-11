@@ -298,6 +298,9 @@ fn builder_cache_push_config_from_destination(
             .map_err(|_| StatusCode::CONFLICT)?;
         return Ok(BuilderCachePushConfig {
             cache_destination_id: Some(destination.id),
+            cache_destination_name: Some(cf_protocol::cache::cache_log_display_name(Some(
+                &destination.name,
+            ))),
             cache_type,
             push_to: Some(url),
             push_after_build: true,
@@ -318,6 +321,9 @@ fn builder_cache_push_config_from_destination(
     }
     Ok(BuilderCachePushConfig {
         cache_destination_id: Some(destination.id),
+        cache_destination_name: Some(cf_protocol::cache::cache_log_display_name(Some(
+            &destination.name,
+        ))),
         parallel_uploads: Some(destination.parallel_uploads.unwrap_or(1).max(1) as u32),
         niks3_server_url: None,
         niks3_write_auth: None,
@@ -4500,8 +4506,40 @@ enum CacheProbeFailure {
     Process,
 }
 
-// SECURITY: Only public row identity and allowlisted type/stage/outcome enter
-// persisted or streamed logs. Destination names, URLs and process output do not.
+// SECURITY: Operator logs use bounded sanitized names and fixed failure text.
+// IDs remain structured telemetry; endpoints and process output never enter logs.
+fn publication_probe_message(
+    name: &str,
+    cache_type: &str,
+    elapsed: std::time::Duration,
+    failure: Option<CacheProbeFailure>,
+) -> String {
+    let name = cf_protocol::cache::cache_log_display_name(Some(name));
+    let cache_type = publication_log_cache_type(cache_type);
+    match failure {
+        Some(failure) => format!(
+            "⚠️ Cache availability check failed for {name} ({cache_type}): {} ({} ms)\n",
+            failure.description(),
+            elapsed.as_millis(),
+        ),
+        None => format!(
+            "✅ Output confirmed in {name} ({} ms)\n",
+            elapsed.as_millis()
+        ),
+    }
+}
+
+fn publication_log_cache_type(cache_type: &str) -> &str {
+    match cache_type {
+        "Niks3" => "Niks3",
+        "Attic" => "Attic",
+        "S3" => "S3",
+        "Nix" => "Nix",
+        "Http" => "Http",
+        _ => "unsupported",
+    }
+}
+
 async fn append_publication_probe_log(
     state: &CFState,
     job_id: Uuid,
@@ -4509,26 +4547,25 @@ async fn append_publication_probe_log(
     elapsed: std::time::Duration,
     failure: Option<CacheProbeFailure>,
 ) {
-    let cache_type = match destination.cache_type.as_str() {
-        "Niks3" => "Niks3",
-        "Attic" => "Attic",
-        "S3" => "S3",
-        "Nix" => "Nix",
-        "Http" => "Http",
-        _ => "unsupported",
-    };
-    let message = format!(
-        "cache_publication cache_id={} cache_type={} stage=availability_path_info elapsed_ms={} outcome={} publication_status={}\n",
-        destination.id,
-        cache_type,
-        elapsed.as_millis(),
-        failure.map_or("success", CacheProbeFailure::code),
-        if failure.is_some() {
+    tracing::info!(
+        cache_id = destination.id,
+        cache_type = publication_log_cache_type(&destination.cache_type),
+        stage = "availability_path_info",
+        elapsed_ms = elapsed.as_millis() as u64,
+        outcome = failure.map_or("success", CacheProbeFailure::code),
+        publication_status = if failure.is_some() {
             "pending"
         } else {
             "confirmed"
         },
+        "cache_publication",
     );
+    let message =
+        publication_probe_message(&destination.name, &destination.cache_type, elapsed, failure);
+    append_publication_log_message(state, job_id, message).await;
+}
+
+async fn append_publication_log_message(state: &CFState, job_id: Uuid, message: String) {
     let max_chunk = state
         .server_config
         .max_build_log_chunk_mb
@@ -4553,6 +4590,18 @@ async fn append_publication_probe_log(
 }
 
 impl CacheProbeFailure {
+    fn description(self) -> &'static str {
+        match self {
+            Self::MissingPath => "output not yet available",
+            Self::AuthenticationFailed => "authentication failed",
+            Self::RateLimited => "rate limited",
+            Self::Network => "network error",
+            Self::Timeout => "timed out",
+            Self::Configuration => "invalid read configuration",
+            Self::Process => "probe failed",
+        }
+    }
+
     fn code(self) -> &'static str {
         match self {
             Self::MissingPath => "cache_path_missing",
@@ -4796,6 +4845,15 @@ pub async fn complete_job(
     } else {
         None
     };
+    if let Some(destination) = reported_cache_destination.as_ref() {
+        let name = cf_protocol::cache::cache_log_display_name(Some(&destination.name));
+        append_publication_log_message(
+            &state,
+            job_id,
+            format!("🔎 Checking output availability in {name}...\n"),
+        )
+        .await;
+    }
     let probe_started = std::time::Instant::now();
     let probe_failure = if let Some(destination) = reported_cache_destination.as_ref() {
         verify_store_path_available_from_cache(
@@ -6652,6 +6710,63 @@ mod tests {
     }
 
     #[test]
+    fn publication_probe_operator_messages_are_bounded_and_readable() {
+        use super::{CacheProbeFailure, publication_probe_message};
+        let elapsed = std::time::Duration::from_millis(44);
+        assert_eq!(
+            publication_probe_message("niks3", "Niks3", elapsed, None),
+            "✅ Output confirmed in niks3 (44 ms)\n",
+        );
+        assert_eq!(
+            publication_probe_message(
+                "niks3",
+                "Niks3",
+                elapsed,
+                Some(CacheProbeFailure::RateLimited)
+            ),
+            "⚠️ Cache availability check failed for niks3 (Niks3): rate limited (44 ms)\n",
+        );
+        for name in [
+            "bad\n✅ Forged",
+            "https://secret@example.test",
+            "token=secret",
+        ] {
+            assert_eq!(
+                publication_probe_message(name, "Niks3", elapsed, None),
+                "✅ Output confirmed in cache (44 ms)\n",
+            );
+        }
+        let message = publication_probe_message(
+            "niks3",
+            "bad\nvalue",
+            elapsed,
+            Some(CacheProbeFailure::Process),
+        );
+        assert_eq!(
+            message,
+            "⚠️ Cache availability check failed for niks3 (unsupported): probe failed (44 ms)\n"
+        );
+    }
+
+    #[test]
+    fn builder_display_name_is_metadata_for_all_destination_types() {
+        for cache_type in ["Attic", "S3", "Nix", "Http"] {
+            let mut destination = crate::models::cache_destination::CacheDestination {
+                id: 42,
+                name: "my cache".into(),
+                cache_type: cache_type.into(),
+                ..Default::default()
+            };
+            let config = super::builder_cache_push_config_from_destination(&destination).unwrap();
+            assert_eq!(config.cache_destination_name.as_deref(), Some("my cache"));
+            destination.name = "https://user:secret@example.test".into();
+            let config = super::builder_cache_push_config_from_destination(&destination).unwrap();
+            assert_eq!(config.cache_destination_name.as_deref(), Some("cache"));
+            assert_eq!(config.cache_destination_id, Some(42));
+        }
+    }
+
+    #[test]
     fn niks3_builder_config_excludes_read_and_aws_credentials_and_requires_identity() {
         use crate::models::cache_destination::CacheDestination;
         let mut destination = CacheDestination {
@@ -6678,6 +6793,7 @@ mod tests {
         };
         let config = super::builder_cache_push_config_from_destination(&destination).unwrap();
         assert_eq!(config.cache_destination_id, Some(42));
+        assert_eq!(config.cache_destination_name.as_deref(), Some("niks3"));
         assert_eq!(config.parallel_uploads, Some(7));
         assert_ne!(config.attic_jobs, 91);
         assert!(super::cache_push_config_contains_credentials(&config));

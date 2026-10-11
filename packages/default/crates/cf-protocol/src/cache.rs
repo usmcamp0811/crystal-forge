@@ -5,6 +5,54 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Returns a bounded public cache label for a human log line.
+///
+/// Missing, empty, or rejected input returns the literal `cache`. Input must be
+/// at most 1024 bytes and contain only Unicode alphanumeric characters, ASCII
+/// spaces, dots, underscores, hyphens, or parentheses. The entire input is
+/// checked before trimming ASCII outer spaces and limiting output to 64 Unicode
+/// characters. Controls, format characters, URLs, and pure IP addresses fail
+/// closed. Known JWT, Vault, AWS key, and long single-token alphanumeric shapes
+/// are rejected. These checks are not general-purpose secret detection; callers
+/// must supply public display metadata, never credentials or endpoint fallbacks.
+/// The result carries no destination identity or authorization authority.
+///
+/// # Examples
+/// ```
+/// use cf_protocol::cache::cache_log_display_name;
+/// assert_eq!(cache_log_display_name(Some("  build-cache  ")), "build-cache");
+/// assert_eq!(cache_log_display_name(Some("https://cache.example")), "cache");
+/// ```
+pub fn cache_log_display_name(name: Option<&str>) -> String {
+    let Some(name) = name else {
+        return "cache".into();
+    };
+    // SECURITY: Inspect every character before truncation so a safe prefix
+    // cannot hide a forbidden suffix. The byte cap bounds this inspection.
+    if name.len() > 1024
+        || !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, ' ' | '.' | '_' | '-' | '(' | ')'))
+    {
+        return "cache".into();
+    }
+    let name = name.trim_matches(' ');
+    if name.is_empty()
+        || name.parse::<std::net::IpAddr>().is_ok()
+        || name.split(' ').any(|token| {
+            token.starts_with("eyJ")
+                || ["hvs.", "hvb.", "hvr."]
+                    .iter()
+                    .any(|prefix| token.starts_with(prefix))
+                || (token.len() >= 16 && (token.starts_with("AKIA") || token.starts_with("ASIA")))
+                || (token.chars().count() >= 32 && token.chars().all(char::is_alphanumeric))
+        })
+    {
+        return "cache".into();
+    }
+    name.chars().take(64).collect()
+}
+
 /// Validates a named Nix Ed25519 public signing key.
 ///
 /// Accepts `name:encoded-key` with a nonempty name, no whitespace, and a
@@ -193,6 +241,74 @@ impl std::fmt::Debug for Niks3WriteAuth {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_log_display_name_accepts_public_labels_and_bounds_unicode() {
+        for label in ["niks3", "Build cache (EU)_1.2", "缓存-Équipe", "file"] {
+            assert_eq!(cache_log_display_name(Some(label)), label);
+        }
+        assert_eq!(
+            cache_log_display_name(Some("  build cache  ")),
+            "build cache"
+        );
+        let long = "缓存-".repeat(30);
+        let display = cache_log_display_name(Some(&long));
+        assert_eq!(display.chars().count(), 64);
+        assert!(long.starts_with(&display));
+        assert_eq!(
+            cache_log_display_name(Some(&"x-".repeat(512)))
+                .chars()
+                .count(),
+            64
+        );
+        assert_eq!(cache_log_display_name(Some(&"x-".repeat(513))), "cache");
+    }
+
+    #[test]
+    fn cache_log_display_name_rejects_injection_locators_and_credential_shapes() {
+        assert_eq!(cache_log_display_name(None), "cache");
+        for label in [
+            "",
+            "   ",
+            "\tcache",
+            "cache\n",
+            "cache\r\nforged",
+            "cache\u{1b}[31m",
+            "cache\u{202e}name",
+            "cache\u{200d}name",
+            "cache\u{200b}",
+            "cache\u{a0}name",
+            "https://cache.example",
+            "user@host",
+            "token=value",
+            "password=value",
+            "cache?key",
+            "a&b",
+            "a#b",
+            "a%b",
+            "a\\b",
+            "<cache>",
+            "'cache'",
+            "\"cache\"",
+            "127.0.0.1",
+            "::1",
+            "eyJheader.payload.signature",
+            "hvs.marker",
+            "hvb.marker",
+            "hvr.marker",
+        ] {
+            assert_eq!(cache_log_display_name(Some(label)), "cache", "{label:?}");
+        }
+        for prefix in ["AKIA", "ASIA"] {
+            let shaped = format!("{prefix}{}", "X".repeat(16));
+            assert_eq!(cache_log_display_name(Some(&shaped)), "cache");
+        }
+        assert_eq!(cache_log_display_name(Some(&"a".repeat(32))), "cache");
+        for suffix in ["\n", "@host", "\u{202e}", " eyJmarker.payload"] {
+            let hidden = format!("{}{suffix}", "safe-".repeat(20));
+            assert_eq!(cache_log_display_name(Some(&hidden)), "cache");
+        }
+    }
 
     #[test]
     fn basic_read_wire_is_strict_and_redacts_both_credentials() {

@@ -1689,6 +1689,10 @@ async fn execute_build_job(
         .cache_push
         .as_ref()
         .and_then(|push| push.cache_destination_id);
+    let cache_destination_name = derivation_payload
+        .cache_push
+        .as_ref()
+        .and_then(|push| push.cache_destination_name.clone());
     let cache_config = derivation_payload
         .cache_push
         .as_ref()
@@ -2114,7 +2118,14 @@ async fn execute_build_job(
                 };
 
                 let _ = client
-                    .append_logs(job_id, "📤 Pushing build output to cache...\n")
+                    .append_logs(
+                        job_id,
+                        &cache_publication_log(
+                            cache_destination_name.as_deref(),
+                            &cache_config.cache_type,
+                            false,
+                        ),
+                    )
                     .await;
 
                 let cache_push =
@@ -2146,7 +2157,14 @@ async fn execute_build_job(
                 match cache_push_result {
                     Ok(()) => {
                         let _ = client
-                            .append_logs(job_id, "✅ Build output pushed to cache\n")
+                            .append_logs(
+                                job_id,
+                                &cache_publication_log(
+                                    cache_destination_name.as_deref(),
+                                    &cache_config.cache_type,
+                                    true,
+                                ),
+                            )
                             .await;
                     }
                     Err(e) => {
@@ -2770,8 +2788,56 @@ fn is_local_db_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
+// Display metadata is untrusted even when it came from a signed server DTO.
+// Keep the type on the start line only and preserve the existing log transport.
+fn cache_publication_log(name: Option<&str>, cache_type: &CacheType, success: bool) -> String {
+    let name = cf_protocol::cache::cache_log_display_name(name);
+    if success {
+        format!("✅ Build output published to {name}\n")
+    } else {
+        format!("📤 Publishing build output to {name} ({cache_type:?})...\n")
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cache_publication_logs_use_only_safe_display_metadata() {
+        use cf_config::config::CacheType;
+        assert_eq!(
+            super::cache_publication_log(Some("niks3"), &CacheType::Niks3, false),
+            "📤 Publishing build output to niks3 (Niks3)...\n"
+        );
+        assert_eq!(
+            super::cache_publication_log(Some("niks3"), &CacheType::Niks3, true),
+            "✅ Build output published to niks3\n"
+        );
+        for kind in [
+            CacheType::Attic,
+            CacheType::S3,
+            CacheType::Http,
+            CacheType::Nix,
+        ] {
+            assert_eq!(
+                super::cache_publication_log(None, &kind, false),
+                format!("📤 Publishing build output to cache ({kind:?})...\n")
+            );
+            assert_eq!(
+                super::cache_publication_log(None, &kind, true),
+                "✅ Build output published to cache\n"
+            );
+        }
+        for name in [
+            "https://user:secret@cache.example",
+            "cache\nforged",
+            "token=value",
+        ] {
+            assert_eq!(
+                super::cache_publication_log(Some(name), &CacheType::Niks3, true),
+                "✅ Build output published to cache\n"
+            );
+        }
+    }
     #[tokio::test]
     async fn niks3_runtime_advertisement_is_independent_of_disabled_cve() {
         let capabilities = super::runtime_capabilities(false).await;
