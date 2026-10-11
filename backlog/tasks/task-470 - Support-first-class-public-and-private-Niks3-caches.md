@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-11 18:43'
+updated_date: '2026-10-11 21:56'
 labels: []
 dependencies: []
 references:
@@ -216,6 +216,8 @@ Focused server-only completion revision at 4232dd42: replace Niks3 closure impor
 Builder-only completion reporting delegation at 4232dd42: modify cf-builder api_client completion reporting/tests and builder post-push completion/cancellation boundary only. Preserve exact job/output/dispatched cache reference+ID and current session; fresh signing per attempt; max five requests, ten-minute outer deadline, 90-second attempts, minimum two-second backoff. Parse HTTP202 durable-success/pending receipts with explicit safe verification codes and retryable allowlist; permanent/exhausted pending remains successful durable build receipt. Preserve legacy HTTP200 empty acknowledgement. Gate immediate post-build scanner claim on confirmed receipt or no publication request. Verify focused mock HTTP/signature/retry/redaction tests and builder all-target compilation through repository Nix environment. No build/sign-store/push repetition or persistent restart recovery; parent owns server pipeline and task lifecycle.
 
 Native completion coverage delegation: own only checks/niks3-cache/default.nix and packages/cf-test-suite/cf_test/tests/cache/test_niks3_cache.py. Preserve all six variants, 124 ordinary onboarding roots, Basic guard fixtures and independent signature-required fresh copies. Add private source/path read-gateway observation around exact completion metadata checks and VM-only selected-root 429 injection held until exact job success plus pending publication, then restore and prove same-job promotion and bounded POST-only recovery. Inspect current safe handler stage logs and verify generated Python plus focused Nix parse/evaluation only; parent owns README and full gate after source freeze. No production/helper-default edits or commits.
+
+Owner-requested log-only improvement at f284dda3. Add an optional default-absent cache_destination_name to BuilderCachePushConfig; propagate the configured destination name for display only, never into completion authority/cache selection. Read it directly in the builder job logger rather than expanding local CacheConfig. Use a small shared bounded display-name helper at server and builder log boundaries; reject controls/newlines, URL/credential-shaped input and unsafe punctuation, with a generic cache fallback for legacy payloads. Emit human-readable publishing and exact-output availability start/success/failure messages with readable elapsed time. Keep static machine telemetry in tracing separately and preserve persisted/live routing. Add focused formatter/name-sanitization/legacy DTO tests, run scoped Nix/Rust checks, separately commit/push and inspect exact-head CI. Do not alter verification, authentication, publication or completion semantics; no merge.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
