@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-11 17:23'
+updated_date: '2026-10-11 17:31'
 labels: []
 dependencies: []
 references:
@@ -759,6 +759,8 @@ Native completion coverage ready for parent source-freeze review in checks/niks3
 Focused verification: nix-instantiate --parse checks/niks3-cache/default.nix exit 0; nix eval --raw .#checks.x86_64-linux.niks3-cache.drvPath exit 0 (latest evaluated yprpfwrbgc46ylq8mpph0bzygn7lf3a8). Evaluated node options confirm production-read retains auth_basic/basic.htpasswd, both private observer directories mode0700, variable proxy origin and loopback-only 429 sink. Nix develop with repository run-scenario Python environment executed pytest --noconftest -p no:cacheprovider packages/cf-test-suite/cf_test/tests/cache/test_niks3_cache.py -q: 8 passed, including seven generated guest-script compilations and stage-parser privacy/failure cases. Owned git diff --check exit 0. Initial default shell Python collection failed due missing psycopg2; corrected by using the already-built repository Python environment. Two alternate impure mkShell expression attempts timed out at 120/240s; these did not provide verification.
 
 Coverage limits / parent handoff: native six-variant execution deferred as requested. Gateway evidence proves no server NAR or reference-metadata reads during the larger completion observation window; it does not attest exact CLI argv, recursive flag absence or fresh retry signature bytes, which remain server/builder command-contract unit responsibilities. Current inspected configure_niks3_verification_read does not pass download-attempts=1. Parent server owner should confirm bounded 429 classification before the full gate; native test intentionally requires cache_rate_limited, not cache_probe_timeout or 409. Completion-only assertions do not claim NAR integrity or scanner success.
+
+Independent P2 review correction: removed newly introduced completion_reference_is_safe helper, pre-POST rejection guard and restrictive rejection test. Completion cache references are opaque authorized payloads; exact bytes are preserved in signed JSON with existing selection/session semantics. Updated complete_job rustdoc/#Errors accordingly. Replaced restrictive unit test with real signed TCP opaque-reference forwarding/static-error regression and added ssh://nix@cache-host regression with cache_pushed=true, no destination ID, matched builder/session, valid signature and HTTP200 confirmed receipt. Private mock assertions do not format cache references or raw body bytes on equality failure. Nix-environment focused completion tests now11 passed; doctest1 passed; owned rustfmt and git diff --check exit0. No commits/pushes; no further production edits outside api_client.rs in this correction. Prior package-build evidence predates this correction; parent owns final current-source package gate.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
