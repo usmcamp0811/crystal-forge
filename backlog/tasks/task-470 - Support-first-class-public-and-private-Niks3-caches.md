@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-11 04:05'
+updated_date: '2026-10-11 16:04'
 labels: []
 dependencies: []
 references:
@@ -208,6 +208,8 @@ Owner confirmed standing preview waiver for focused UI diagnostics: no dev-previ
 User-requested test-only CA fixture correction at f12b83d5: reuse the existing TASK-470 worktree and parent-owned lock; modify only cf-agent/src/deployment/agent.rs cfg(test) fixtures. Copy the public frozen X.509 TEST_CERTIFICATE from cf-server/security/cache_secrets.rs, replace mock read CA and preserve exact canonical PEM child assertion plus all identity/ownership/timeout assertions. Run nix develop with offline cargo test -p cf-agent --lib deployment::agent; no services, VM/package gates, commits or pushes.
 
 Bounded Web UI fixture startup repair at f12b83d5: raw log tool_1247b9dde001jXzTUJwahP59dh lines19763–19783 proves niks3-web-ui-db-owners ALTER DATABASE runs before PostgreSQL setup creates role niks3. Change only checks/web-ui/default.nix and README to require/order after postgresql-setup.service. Preserve existing wait_for_unit and all native/browser/raw-state assertions. Run one foreground authoritative CF_UI_TEST_STEPS=25-caches-modal-attic build with user-specified public-cache argv; report actual exit and raw log. If browser fails, hand evidence to UI owner without changing assertions. Existing task worktree/owner lock and preview waiver apply; no commits or pushes.
+
+Owner-approved completion-only availability change at 4232dd42: remove Niks3 full-closure copy, isolated local verification store and materialization checks. Retain authenticated protected read preparation and isolated configuration/cache directory, explicit selected remote --store, exact authoritative output, --refresh, native Basic guard and CA/key settings. Add bounded private Nix-output classification plus safe selected-destination/stage/elapsed build logs. The builder currently sends completion once; use the existing atomic no-confirmed-publication/pending-queue path for built work whose metadata probe fails, preserving destination/session/output/configuration rechecks and never recording confirmed publication on failure. Retry only completion reporting with bounded backoff and fresh signatures; do not repeat build/sign/push or introduce a new recovery engine/schema. Update path-info/copy-phase tests and documentation to advertised-availability semantics. Keep signature/NAR verification in real substitution/deployment/CVE paths. Run focused Rust, PostgreSQL publication regressions and relevant Nix/native integration gates, commit/push separately, inspect exact-head CI, no merge.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
