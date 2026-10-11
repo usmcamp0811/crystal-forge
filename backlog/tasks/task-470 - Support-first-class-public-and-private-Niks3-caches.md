@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-11 23:31'
+updated_date: '2026-10-11 23:52'
 labels: []
 dependencies: []
 references:
@@ -226,6 +226,8 @@ Queued after the current log-only slice: user-authorized Attic cache metrics enh
 Approved Attic metrics implementation contract: pinned fixtures first, PostgreSQL atticd; no automatic production deployment. Add a small optional provider-side adapter with loopback default, separately provisioned cache-scoped bearer credentials, restricted read-only SELECT privileges only on cache identity/deletion, object cache/NAR IDs, and NAR size/state. Bounded GET /v1/caches/<encoded-name>/inventory returns schema_version=1, exact cache name, cached_path_count and logical_nar_bytes; no path rows, physical estimates, credentials or raw errors. Aggregate valid NAR registrations once per path, preserve dedup semantics, active-cache existence distinct from zero, transaction/statement/request limits and bounded concurrency. CF optional server configuration binds destination ID to explicit HTTPS adapter base and protected token file; existing admin-only metrics policy and target pinning/no-proxy/no-redirect/deadline/body bounds retained. Missing integration stays unsupported; Niks3 untouched. Extend response basis for cached_nix_paths/uncompressed_nar_bytes and shared Cards/Table formatting. Package/document opt-in adapter and restricted-role/operator TLS deployment contract. Verify native pinned PostgreSQL inventory populated/empty/multiple caches/shared NARs/auth/invalid data, CF metadata authorization and UI format/refresh consistency, relevant native/browser gates. Prior live-preview waiver remains in force; do not start other task's stack. No production deployment, migration rewrite or publication/signing/completion modifications.
 
 Approved optional provider adapter delegation at a33c1d0c: own only new packages/attic-metrics/{default.nix,attic_metrics.py,test_attic_metrics.py,README.md} and modules/nixos/attic-metrics/default.nix in existing task worktree. Implement bounded loopback HTTP inventory with exact per-cache operator Bearer tokens and restricted read-only PostgreSQL aggregate against verified upstream12cbeca schema. Verify fake-connection/security/concurrency tests and targeted Nix package/module evaluation/build; no host DB or service changes; parent owns lifecycle/lock and CF backend/UI integration.
+
+Authorized Attic metrics backend delegation at a33c1d0c: own cf-config config/server.rs, caches/storage_metrics.rs and optional private helper plus optional server-only Nix bindings. Add default-empty explicit destination-ID adapter mappings; per-request fail-closed validation, admin-before-secret/network gates, canonical active Attic name, protected bounded runtime token loading, pinned HTTPS inventory request under total 8s/64KiB limits and typed schema-v1 u64 results. Preserve Niks3 requests/parsing and unsupported unconfigured Attic; run focused config/server metrics tests and owned formatting through nix develop. No migrations/publication/provider package edits/services/commits/pushes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
