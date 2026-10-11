@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-11 16:23'
+updated_date: '2026-10-11 16:34'
 labels: []
 dependencies: []
 references:
@@ -743,6 +743,8 @@ Final local checks passed: cf-config 89 unit tests and 11 doctests; handler/mode
 Authoritative focused browser command CF_UI_TEST_STEPS=25-caches-modal-attic nix build --impure --no-link -L .#checks.x86_64-linux.web-ui --option substituters https://cache.nixos.org --option extra-substituters "" --fallback --max-jobs 2 --cores 8 passed. The selected cache workflow results record ok=true, error=null, 1/1 passed. Inspected safe CA-framing and identity-mismatch screenshots from /nix/store/h9j7pzzya74v7lhqcv8v9r8lcglg7jdh-vm-test-run-crystal-forge-web-ui-mega-integration/screenshots and attached them to MR !331. No full-suite visual-baseline or ancillary export coverage claim is made. Preview remains blocked and waived; no other task's instance was reused.
 
 The CA framing defect is fixed and test-verified. The original reckless builder CLI exit-status-1 cause remains unproven; deployment replay must use the newly saved full bundle and report the fixed diagnostic category if publication still fails. Raw CLI output remains private and bounded at 64 KiB per stream, with fixed hints only. No production private keys were read, no home-directory scans were performed, and no evaluator recovery, flake pins, netrc patch, signing/provenance, Attic/S3 authorization or assignment contracts changed.
+
+Builder-only completion delegation implemented and locally verified in TASK-470 worktree (base4232dd42). Owned edits: packages/default/crates/cf-builder/src/builder/api_client.rs and src/bin/builder.rs only. complete_job now returns typed confirmed/not-required/legacy/pending receipt; report loop retains exact job/output/cacheID/reference/current session, fresh sign_request headers each attempt, max5 requests, outer600s/attempt90s/min2s delay. HTTP202 retries require allowlisted transient code plus retryable=true; auth/read-config/probe-failed never retry. Pending durable acknowledgement survives later rejection/transport/deadline failure. Transport/408/429/5xx reporting retries are bounded; bodies capped16KiB, errors omit server text/URLs, credential-bearing URI references rejected before request. Post-push caller logs safe pending code/attempts and scans only explicit confirmed publication or absent cache_reference; reporting failure preserves normal metrics/worktree cleanup and never invokes build failure or upload again. Cancellation diagnostics omit raw API errors. No persistent restart mechanism added. Verification exit0: nix develop -c cargo test --offline --manifest-path packages/default/Cargo.toml -p cf-builder completion -- --test-threads=4 (10 passed); cargo check same manifest/package --all-targets; cargo doc --no-deps; cargo test --doc (1 passed); owned rustfmt and git diff --check. Final nix build --no-link -L .#default.cf-builder-drv succeeded and executed all98 library +33 binary +1 doctest tests. Final drv36jz68jgzw8vcsbry54yi5pflbbwylhq; full retained command output tool_12bd05a770018VOeb0HkNzPJkP. Documentation contracts and owned diff reviewed. Existing server-owner concurrent edits preserved. No commits/pushes/services/task lifecycle changes.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
