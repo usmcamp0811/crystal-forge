@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-11 23:30'
+updated_date: '2026-10-11 23:31'
 labels: []
 dependencies: []
 references:
@@ -224,6 +224,8 @@ Focused display delegation at f284dda3: edit only cf-protocol/src/{builder,cache
 Queued after the current log-only slice: user-authorized Attic cache metrics enhancement for MR !331. Inspect installed Attic version/upstream API and data model first. Prefer a supported native metrics API; otherwise investigate an optional read-only provider-side adapter with bounded aggregate queries against Attic's own database, not unrestricted CF database access. Report per-named-cache cached Nix path count and uncompressed logical NAR bytes; physical usage only with separate reliable scope/basis. Preserve Niks3 metrics, admin-only collection/per-cache authorization, explicit refresh/loading/error/unsupported behavior, timeouts and disabled-cache behavior. Update metrics API and Cards/Table labels/tooltips. Test populated/empty, isolation, deduplicated NARs, malformed/missing/auth-failed observations and presentation consistency. No publication/signing/completion changes. Run backend/UI/integration gates, commit/push normally and inspect exact-head CI; no merge.
 
 Approved Attic metrics implementation contract: pinned fixtures first, PostgreSQL atticd; no automatic production deployment. Add a small optional provider-side adapter with loopback default, separately provisioned cache-scoped bearer credentials, restricted read-only SELECT privileges only on cache identity/deletion, object cache/NAR IDs, and NAR size/state. Bounded GET /v1/caches/<encoded-name>/inventory returns schema_version=1, exact cache name, cached_path_count and logical_nar_bytes; no path rows, physical estimates, credentials or raw errors. Aggregate valid NAR registrations once per path, preserve dedup semantics, active-cache existence distinct from zero, transaction/statement/request limits and bounded concurrency. CF optional server configuration binds destination ID to explicit HTTPS adapter base and protected token file; existing admin-only metrics policy and target pinning/no-proxy/no-redirect/deadline/body bounds retained. Missing integration stays unsupported; Niks3 untouched. Extend response basis for cached_nix_paths/uncompressed_nar_bytes and shared Cards/Table formatting. Package/document opt-in adapter and restricted-role/operator TLS deployment contract. Verify native pinned PostgreSQL inventory populated/empty/multiple caches/shared NARs/auth/invalid data, CF metadata authorization and UI format/refresh consistency, relevant native/browser gates. Prior live-preview waiver remains in force; do not start other task's stack. No production deployment, migration rewrite or publication/signing/completion modifications.
+
+Approved optional provider adapter delegation at a33c1d0c: own only new packages/attic-metrics/{default.nix,attic_metrics.py,test_attic_metrics.py,README.md} and modules/nixos/attic-metrics/default.nix in existing task worktree. Implement bounded loopback HTTP inventory with exact per-cache operator Bearer tokens and restricted read-only PostgreSQL aggregate against verified upstream12cbeca schema. Verify fake-connection/security/concurrency tests and targeted Nix package/module evaluation/build; no host DB or service changes; parent owns lifecycle/lock and CF backend/UI integration.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
